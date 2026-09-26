@@ -44,11 +44,12 @@ struct SnowCanvasRuntime::Impl {
     std::function<void()> documentChanged;
     quint64 observedRevision = 0;
     void observeDocument() {
+        if (!documentChanged)
+            return;
         const auto revision = snow_runtime_document_revision(handle());
         if (revision != observedRevision) {
             observedRevision = revision;
-            if (documentChanged)
-                documentChanged();
+            documentChanged();
         }
     }
 
@@ -330,7 +331,8 @@ quint64 SnowCanvasRuntime::documentRevision() const {
 }
 void SnowCanvasRuntime::setDocumentChangedHandler(std::function<void()> handler) {
     if (isOwnerThread()) {
-        m_impl->observedRevision = documentRevision();
+        if (handler)
+            m_impl->observedRevision = documentRevision();
         m_impl->documentChanged = std::move(handler);
     }
 }

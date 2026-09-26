@@ -336,7 +336,7 @@ struct ScreenRecordingController::Impl {
         }
         cancelPendingStart();
         if (uiSession != nullptr) {
-            recordingRegion = region;
+            setOption(recordingRegion, region);
             updateCaptureRegion();
             // Match the screenshot capture flow, which refreshes persisted
             // creation styles on every capture, so style edits made elsewhere
@@ -424,6 +424,15 @@ struct ScreenRecordingController::Impl {
                (areaWindow->isVisible() || toolbarWindow->isVisible());
     }
 
+    template <typename T> void setOption(T& option, const T& value) {
+        // Track mutations where they happen, including change-then-restore, without
+        // serializing automation state on the duration/preview timer.
+        if (option == value)
+            return;
+        option = value;
+        automationRevision = snow_shot::presentation::nextAutomationRevision();
+    }
+
     void connectToolbar() {
         ScreenshotToolPalette* palette =
             toolbarWindow != nullptr ? toolbarWindow->palette() : nullptr;
@@ -434,7 +443,7 @@ struct ScreenRecordingController::Impl {
         connectDrawingToolbar(*palette);
         QObject::connect(palette, &ScreenshotToolPalette::recordingKeyboardSizeChanged,
                          uiSession->connections.get(), [this](int value) {
-                             keyboardSize = value;
+                             setOption(keyboardSize, value);
                              snow_shot::storage::RecordingSettings().setKeyboardSize(value);
                              syncPreview();
                          });
@@ -445,7 +454,7 @@ struct ScreenRecordingController::Impl {
                                  sessionStatus.busy()) {
                                  return;
                              }
-                             recordingRegion = region;
+                             setOption(recordingRegion, region);
                              updateCaptureRegion();
                              syncPreview();
                              toolbarWindow->placeForRecordingRegion(region);
@@ -477,12 +486,12 @@ struct ScreenRecordingController::Impl {
                          uiSession->connections.get(), [this]() { resume(); });
         QObject::connect(palette, &ScreenshotToolPalette::recordingMicrophoneToggled,
                          uiSession->connections.get(), [this](bool enabled) {
-                             microphoneEnabled = enabled;
+                             setOption(microphoneEnabled, enabled);
                              snow_shot::storage::RecordingSettings().setMicrophoneEnabled(enabled);
                          });
         QObject::connect(palette, &ScreenshotToolPalette::recordingSystemAudioToggled,
                          uiSession->connections.get(), [this](bool enabled) {
-                             systemAudioEnabled = enabled;
+                             setOption(systemAudioEnabled, enabled);
                              snow_shot::storage::RecordingSettings().setSystemAudioEnabled(enabled);
                          });
         QObject::connect(palette, &ScreenshotToolPalette::recordingOpenFolderRequested,
@@ -493,75 +502,75 @@ struct ScreenRecordingController::Impl {
                          uiSession->connections.get(), [this]() { stop(true); });
         QObject::connect(palette, &ScreenshotToolPalette::recordingOutputFormatChanged,
                          uiSession->connections.get(), [this](const QString& format) {
-                             outputFormat = format;
+                             setOption(outputFormat, format);
                              snow_shot::storage::RecordingSettings().setOutputFormat(format);
                              syncPreview();
                          });
         QObject::connect(palette, &ScreenshotToolPalette::recordingStartDelaySecondsChanged,
                          uiSession->connections.get(), [this](int seconds) {
-                             startDelaySeconds = seconds;
+                             setOption(startDelaySeconds, seconds);
                              snow_shot::storage::RecordingSettings().setStartDelaySeconds(seconds);
                          });
         QObject::connect(palette, &ScreenshotToolPalette::recordingMouseTrailDurationMsChanged,
                          uiSession->connections.get(), [this](int value) {
-                             mouseTrailDurationMs = value;
+                             setOption(mouseTrailDurationMs, value);
                              snow_shot::storage::RecordingSettings().setMouseTrailDurationMs(value);
                              syncPreview();
                          });
         QObject::connect(palette, &ScreenshotToolPalette::recordingKeyboardBackgroundColorChanged,
                          uiSession->connections.get(), [this](const QColor& value) {
-                             keyboardBackgroundColor = value;
+                             setOption(keyboardBackgroundColor, value);
                              snow_shot::storage::RecordingSettings().setKeyboardBackgroundColor(
                                  value);
                              syncPreview();
                          });
         QObject::connect(palette, &ScreenshotToolPalette::recordingKeyboardForegroundColorChanged,
                          uiSession->connections.get(), [this](const QColor& value) {
-                             keyboardForegroundColor = value;
+                             setOption(keyboardForegroundColor, value);
                              snow_shot::storage::RecordingSettings().setKeyboardForegroundColor(
                                  value);
                              syncPreview();
                          });
         QObject::connect(palette, &ScreenshotToolPalette::recordingMouseTrailColorChanged,
                          uiSession->connections.get(), [this](const QColor& color) {
-                             mouseTrailColor = color;
+                             setOption(mouseTrailColor, color);
                              snow_shot::storage::RecordingSettings().setMouseTrailColor(color);
                              syncPreview();
                          });
         QObject::connect(palette, &ScreenshotToolPalette::recordingMouseClickColorChanged,
                          uiSession->connections.get(), [this](const QColor& color) {
-                             mouseClickColor = color;
+                             setOption(mouseClickColor, color);
                              snow_shot::storage::RecordingSettings().setMouseClickColor(color);
                              syncPreview();
                          });
         QObject::connect(palette, &ScreenshotToolPalette::recordingKeyboardVisibleChanged,
                          uiSession->connections.get(), [this](bool visible) {
-                             showKeyboard = visible;
+                             setOption(showKeyboard, visible);
                              snow_shot::storage::RecordingSettings().setShowKeyboard(visible);
                              syncUi();
                          });
         QObject::connect(palette, &ScreenshotToolPalette::recordingMouseHighlightEnabledChanged,
                          uiSession->connections.get(), [this](bool value) {
-                             mouseHighlightEnabled = value;
+                             setOption(mouseHighlightEnabled, value);
                              snow_shot::storage::RecordingSettings().setMouseHighlightEnabled(
                                  value);
                              syncPreview();
                          });
         QObject::connect(palette, &ScreenshotToolPalette::recordingRecordMouseClicksChanged,
                          uiSession->connections.get(), [this](bool value) {
-                             recordMouseClicks = value;
+                             setOption(recordMouseClicks, value);
                              snow_shot::storage::RecordingSettings().setRecordMouseClicks(value);
                              syncPreview();
                          });
         QObject::connect(palette, &ScreenshotToolPalette::recordingMouseHighlightColorChanged,
                          uiSession->connections.get(), [this](const QColor& value) {
-                             mouseHighlightColor = value;
+                             setOption(mouseHighlightColor, value);
                              snow_shot::storage::RecordingSettings().setMouseHighlightColor(value);
                              syncPreview();
                          });
         QObject::connect(palette, &ScreenshotToolPalette::recordingCursorVisibleChanged,
                          uiSession->connections.get(), [this](bool visible) {
-                             showCursor = visible;
+                             setOption(showCursor, visible);
                              snow_shot::storage::RecordingSettings().setShowCursor(visible);
                              syncPreview();
                          });
@@ -720,6 +729,7 @@ struct ScreenRecordingController::Impl {
         }
         // UI starts after an automated session use current saved preferences.
         if (automationOwned && !automationNextStart) {
+            automationRevision = snow_shot::presentation::nextAutomationRevision();
             automationOptions = {};
             automationOwned = false;
             const snow_shot::storage::RecordingSettings settings;
@@ -1148,8 +1158,8 @@ struct ScreenRecordingController::Impl {
         captureExclusion.restore();
     }
 
-    void syncPreview() {
-        const QJsonObject options{
+    QJsonObject currentAutomationOptions() const {
+        return {
             {QStringLiteral("region"),
              QJsonArray{recordingRegion.x(), recordingRegion.y(), recordingRegion.width(),
                         recordingRegion.height()}},
@@ -1168,10 +1178,9 @@ struct ScreenRecordingController::Impl {
             {QStringLiteral("mouse_highlight_color"), mouseHighlightColor.name(QColor::HexArgb)},
             {QStringLiteral("keyboard_background"), keyboardBackgroundColor.name(QColor::HexArgb)},
             {QStringLiteral("keyboard_foreground"), keyboardForegroundColor.name(QColor::HexArgb)}};
-        if (automationCurrentOptions != options) {
-            automationCurrentOptions = options;
-            automationRevision = snow_shot::presentation::nextAutomationRevision();
-        }
+    }
+
+    void syncPreview() {
         if (uiSession == nullptr) {
             return;
         }
@@ -1304,7 +1313,6 @@ struct ScreenRecordingController::Impl {
 
     PermissionCheck permissionCheck;
     QJsonObject automationOptions;
-    QJsonObject automationCurrentOptions;
     QString automationError;
     QString finalizedOutputPath;
     qint64 finalizedDurationMilliseconds = 0;
@@ -1425,8 +1433,8 @@ void ScreenRecordingController::openRecordingFolder() {
 QJsonObject ScreenRecordingController::automationState() const {
     const auto& s = *m_impl;
     auto options = s.automationOptions;
-    for (auto field = s.automationCurrentOptions.begin(); field != s.automationCurrentOptions.end();
-         ++field)
+    const auto currentOptions = s.currentAutomationOptions();
+    for (auto field = currentOptions.begin(); field != currentOptions.end(); ++field)
         options.insert(field.key(), field.value());
     const QStringList states{QStringLiteral("idle"), QStringLiteral("recording"),
                              QStringLiteral("paused")};

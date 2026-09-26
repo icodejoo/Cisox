@@ -621,6 +621,15 @@ void annotationRuntime() {
                     .isEmpty() &&
                 runtime.documentRevision() == revision,
             "invalid typed input is atomic through Qt runtime");
+    runtime.setDocumentChangedHandler({});
+    require(runtime.undo() && runtime.documentRevision() != revision && changes == 3,
+            "detaching observation preserves editing and revisions without notifications");
+    runtime.setDocumentChangedHandler([&] { ++changes; });
+    require(changes == 3, "reattaching must not replay changes from the detached interval");
+    require(runtime.redo() && changes == 4,
+            "reattached observer receives the next edit exactly once");
+    runtime.setDocumentChangedHandler({});
+    require(runtime.undo() && changes == 4, "observation can be repeatedly detached");
 }
 void completeToolStyleContract() {
     struct Styles {

@@ -785,7 +785,14 @@ class CaptureHistoryRepositoryImpl final : public CaptureHistoryRepository {
         return m_snapshot;
     }
 
-    void install(Snapshot next, qint64 bytes) {
+    quint64 revision() const {
+        std::lock_guard lock(m_stateMutex);
+        return m_revision;
+    }
+
+    void install(Snapshot next, qint64 bytes, bool recordsChanged) {
+        // The serialized writer knows whether records changed. Cleanup-only commits
+        // must neither scan records for equality nor invalidate clients' revisions.
         CaptureHistoryUsage usage;
         usage.entryCount = static_cast<int>(next.records.size());
         usage.indexBytes = bytes;
@@ -796,11 +803,7 @@ class CaptureHistoryRepositoryImpl final : public CaptureHistoryRepository {
         usage.totalBytes = usage.recordBytes + usage.indexBytes + usage.pendingDeletionBytes;
         {
             std::lock_guard lock(m_stateMutex);
-            const bool changed =
-                next.records.size() != m_snapshot.records.size() ||
-                !std::equal(next.records.cbegin(), next.records.cend(), m_snapshot.records.cbegin(),
-                            [](const auto& a, const auto& b) { return a.record == b.record; });
-            if (changed)
+            if (recordsChanged)
                 ++m_revision;
             m_snapshot = std::move(next);
             m_recordIndex.clear();
@@ -818,7 +821,7 @@ class CaptureHistoryRepositoryImpl final : public CaptureHistoryRepository {
             m_options.callbacks.recordsChanged();
     }
 
-    bool commit(Snapshot next) {
+    bool commit(Snapshot next, bool recordsChanged) {
         const QByteArray bytes = indexBytes(next);
         observe(CaptureHistoryOperation::IndexWrite);
         if (!QDir().mkpath(m_root) || !containedPath(m_configurationDirectory, m_root) ||
@@ -826,7 +829,7 @@ class CaptureHistoryRepositoryImpl final : public CaptureHistoryRepository {
             fail(QStringLiteral("Unable to commit the capture-history index"));
             return false;
         }
-        install(std::move(next), bytes.size());
+        install(std::move(next), bytes.size(), recordsChanged);
         return true;
     }
 
@@ -880,7 +883,8 @@ class CaptureHistoryRepositoryImpl final : public CaptureHistoryRepository {
             next.pendingDeletions.insert(id, size);
         }
         sortRecords(next.records);
-        install(std::move(next), bytes.size());
+        const bool hasRecords = !next.records.isEmpty();
+        install(std::move(next), bytes.size(), hasRecords);
     }
 
     void indexFailed() {
@@ -940,7 +944,7 @@ class CaptureHistoryRepositoryImpl final : public CaptureHistoryRepository {
                 ++it;
             }
         }
-        if (removed && !commit(std::move(next)))
+        if (removed && !commit(std::move(next), false))
             return false;
         if (!success)
             fail(QStringLiteral("Unable to delete some capture-history payloads"));
@@ -988,7 +992,7 @@ class CaptureHistoryRepositoryImpl final : public CaptureHistoryRepository {
         next.records.append(encoded.stored);
         sortRecords(next.records);
         prune(next, true, draft.id);
-        if (!commit(std::move(next))) {
+        if (!commit(std::move(next), true)) {
             QDir(recordPath(draft.id)).removeRecursively();
             return {StorageResult::failure(lastError()), {}};
         }
@@ -1013,7 +1017,7 @@ class CaptureHistoryRepositoryImpl final : public CaptureHistoryRepository {
         if (!removed) {
             return StorageResult::ok();
         }
-        if (!commit(std::move(next)))
+        if (!commit(std::move(next), true))
             return StorageResult::failure(lastError());
         changed();
         return cleanup() ? StorageResult::ok() : StorageResult::failure(lastError());
@@ -1024,7 +1028,7 @@ class CaptureHistoryRepositoryImpl final : public CaptureHistoryRepository {
         const auto count = next.records.size();
         prune(next, false);
         if (next.records.size() != count) {
-            if (!commit(std::move(next)))
+            if (!commit(std::move(next), true))
                 return StorageResult::failure(lastError());
             changed();
         }
@@ -1041,7 +1045,7 @@ class CaptureHistoryRepositoryImpl final : public CaptureHistoryRepository {
         if (!success) {
             return fail(QStringLiteral("Unable to clear all managed capture-history data"));
         }
-        if (!commit({}))
+        if (!commit({}, !snapshot().records.isEmpty()))
             return StorageResult::failure(lastError());
         {
             std::lock_guard lock(m_stateMutex);
@@ -1150,8 +1154,7 @@ class CaptureHistoryRepositoryImpl final : public CaptureHistoryRepository {
             }
             try {
                 StorageResult result = StorageResult::ok();
-                if (command.expectedRevision &&
-                    recordsSnapshot().revision != *command.expectedRevision) {
+                if (command.expectedRevision && revision() != *command.expectedRevision) {
                     result = StorageResult::failure(QStringLiteral("stale_revision"));
                 } else
                     switch (command.kind) {

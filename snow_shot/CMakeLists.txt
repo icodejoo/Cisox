@@ -1676,7 +1676,10 @@ if(SNOW_SHOT_BUILD_TESTS)
     )
     add_test(NAME snow-shot-capture-history-repository-tests
              COMMAND snow-shot-capture-history-repository-tests)
-    set_tests_properties(snow-shot-capture-history-repository-tests PROPERTIES
+    add_test(NAME snow-shot-capture-history-revision-tests
+             COMMAND snow-shot-capture-history-repository-tests --revision-only)
+    set_tests_properties(snow-shot-capture-history-repository-tests
+        snow-shot-capture-history-revision-tests PROPERTIES
         ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>"
     )

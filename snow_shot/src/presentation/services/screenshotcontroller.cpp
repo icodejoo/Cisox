@@ -603,6 +603,7 @@ struct ScreenshotController::Impl final : public ScreenshotToolbarCommandSink,
     QPointer<QTimer> m_mcpPoll;
     ScreenshotExportJobHandle m_mcpFileJob;
     QJsonObject m_mcpOptions;
+    bool m_mcpObserving = false;
     QRectF m_mcpFocusedBounds;
     ScreenshotIntelligentSelectionModel m_intelligentSelection;
     QSet<SnowCanvasTool> m_quickSelectionDisabledTools;
@@ -624,7 +625,6 @@ ScreenshotController::Impl::Impl(ScreenshotController& controller,
       m_tableRecognition(sharedApiClient),
       m_canvasRuntime(
           SnowCanvasRuntimeConfig{snow_shot::presentation::screenshotCanvasToolStyleDefaults()}) {
-    m_canvasRuntime.setDocumentChangedHandler([this] { emit owner.mcpCanvasChanged(); });
     createPresentationInfrastructure();
     reloadUiPreferences();
     reloadDrawingPreferences();
@@ -1007,7 +1007,10 @@ void ScreenshotController::Impl::createPresentationInfrastructure() {
             m_selection,
             m_intelligentSelection,
             m_quickSelectionDisabledTools,
-            [this] { emit owner.mcpCanvasChanged(); },
+            [this] {
+                if (m_mcpObserving)
+                    emit owner.mcpCanvasChanged();
+            },
         });
     QObject::connect(&snow_shot::shortcuts::ShortcutDisplayService::instance(),
                      &snow_shot::shortcuts::ShortcutDisplayService::displayChanged, &owner,
@@ -5528,7 +5531,11 @@ bool ScreenshotController::mcpBegin(const QJsonObject& options, QString* error) 
     m_impl->m_mcpOptions = options;
     m_impl->m_mcpOptions.insert(QStringLiteral("presentation"), presentation);
     m_impl->m_mcpOptions.insert(QStringLiteral("target"), target);
+    m_impl->m_mcpObserving = true;
+    m_impl->m_canvasRuntime.setDocumentChangedHandler([this] { emit mcpCanvasChanged(); });
     if (!m_impl->beginCapture()) {
+        m_impl->m_mcpObserving = false;
+        m_impl->m_canvasRuntime.setDocumentChangedHandler({});
         m_impl->m_mcpOptions = {};
         if (error)
             *error = QStringLiteral("capture_unavailable");

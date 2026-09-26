@@ -24,6 +24,8 @@ void ScreenshotController::mcpCancelCommand() {
         s.m_autoFilterController->resetSession();
 }
 void ScreenshotController::mcpDetached() {
+    m_impl->m_mcpObserving = false;
+    m_impl->m_canvasRuntime.setDocumentChangedHandler({});
     if (m_impl->m_scrollingCaptureController)
         m_impl->m_scrollingCaptureController->setAutoScroll(false);
 }

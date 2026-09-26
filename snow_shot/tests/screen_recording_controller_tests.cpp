@@ -1671,6 +1671,70 @@ int main(int argc, char** argv) {
     QFontDatabase::setApplicationFallbackFontFamilies(QChar::Script_Han,
                                                       {QStringLiteral("Snow Recording Test Han")});
     if (app.arguments().contains(QStringLiteral("--automation-only"))) {
+        {
+            ScreenRecordingController manual(testEffectsSource);
+            const QRect region(10, 10, 320, 240);
+            manual.open(region);
+            const auto checkOption = [&](const QString& key, const QJsonValue& value,
+                                         const std::function<void(const QJsonValue&)>& change) {
+                const auto before = manual.automationState();
+                const auto original = before.value(QStringLiteral("options")).toObject().value(key);
+                require(original != value, "option fixture must change the value");
+                change(value);
+                const auto changed = manual.automationState();
+                require(changed.value(QStringLiteral("revision")).toInteger() >
+                                before.value(QStringLiteral("revision")).toInteger() &&
+                            changed.value(QStringLiteral("options")).toObject().value(key) == value,
+                        "manual options must be observable immediately without a timer tick");
+                change(value);
+                require(manual.automationState().value(QStringLiteral("revision")) ==
+                            changed.value(QStringLiteral("revision")),
+                        "repeated option values must not invalidate a revision");
+                change(original);
+                const auto restored = manual.automationState();
+                require(restored.value(QStringLiteral("revision")).toInteger() >
+                                changed.value(QStringLiteral("revision")).toInteger() &&
+                            restored.value(QStringLiteral("options")).toObject().value(key) ==
+                                original,
+                        "change then restore must invalidate stale commands between timer ticks");
+                require(manual.automationState() == restored,
+                        "reading automation state must not mutate its revision");
+            };
+            const auto options =
+                manual.automationState().value(QStringLiteral("options")).toObject();
+            checkOption(QStringLiteral("microphone"),
+                        !options.value(QStringLiteral("microphone")).toBool(),
+                        [](const QJsonValue& value) {
+                            palette()->recordingMicrophoneToggled(value.toBool());
+                        });
+            checkOption(QStringLiteral("system_audio"),
+                        !options.value(QStringLiteral("system_audio")).toBool(),
+                        [](const QJsonValue& value) {
+                            palette()->recordingSystemAudioToggled(value.toBool());
+                        });
+            checkOption(QStringLiteral("start_delay_seconds"), 7, [](const QJsonValue& value) {
+                palette()->recordingStartDelaySecondsChanged(value.toInt());
+            });
+            checkOption(QStringLiteral("keyboard_size"), 96, [](const QJsonValue& value) {
+                palette()->recordingKeyboardSizeChanged(value.toInt());
+            });
+            checkOption(QStringLiteral("mouse_trail"), QStringLiteral("#ff123456"),
+                        [](const QJsonValue& value) {
+                            palette()->recordingMouseTrailColorChanged(QColor(value.toString()));
+                        });
+            const auto beforeRegion =
+                manual.automationState().value(QStringLiteral("revision")).toInteger();
+            manual.open(region.translated(20, 20));
+            manual.open(region);
+            require(manual.automationState().value(QStringLiteral("revision")).toInteger() >
+                            beforeRegion &&
+                        manual.automationState()
+                                .value(QStringLiteral("options"))
+                                .toObject()
+                                .value(QStringLiteral("region")) == QJsonArray{10, 10, 320, 240},
+                    "reopening an existing UI tracks region changes and restoration");
+        }
+        QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
         const auto saved = ApplicationStorage::instance().configuration().snapshot();
         ScreenRecordingController controller(testEffectsSource);
         QString error;
