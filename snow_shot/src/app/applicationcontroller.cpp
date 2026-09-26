@@ -612,9 +612,7 @@ class ApplicationController::Impl {
                     return false;
                 }
 #ifdef Q_OS_MACOS
-                permissions.refresh();
-                if (!permissions.missing({presentation::AppPermission::ScreenRecording})
-                         .isEmpty()) {
+                if (!permissions.allow({presentation::AppPermission::ScreenRecording})) {
                     if (error)
                         *error = QStringLiteral("permission_required");
                     return false;
@@ -819,9 +817,7 @@ class ApplicationController::Impl {
                     if (!guard || canceled->load())
                         return;
 #ifdef Q_OS_MACOS
-                    permissions.refresh();
-                    if (!permissions.missing({presentation::AppPermission::ScreenRecording})
-                             .isEmpty()) {
+                    if (!permissions.allow({presentation::AppPermission::ScreenRecording})) {
                         done({}, {}, QStringLiteral("permission_required"));
                         return;
                     }
@@ -1165,14 +1161,12 @@ class ApplicationController::Impl {
 #ifdef Q_OS_MACOS
             screenshotController->setRecordingPermissionCheck([this](bool microphone, bool input,
                                                                      bool notify) {
-                permissions.refresh();
                 presentation::AppPermissions required{presentation::AppPermission::ScreenRecording};
                 if (microphone)
                     required.append(presentation::AppPermission::Microphone);
                 if (input)
                     required.append(presentation::AppPermission::InputMonitoring);
-                return notify ? allowPermissions(required)
-                              : permissions.missing(required).isEmpty();
+                return notify ? allowPermissions(required) : permissions.allow(required);
             });
 #else
             screenshotController->setRecordingPermissionCheck(

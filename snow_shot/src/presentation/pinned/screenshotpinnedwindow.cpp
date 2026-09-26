@@ -6871,11 +6871,11 @@ QJsonObject ScreenshotPinnedWindow::automationEdit(const QString& action,
         const QStringList kinds{QStringLiteral("text"), QStringLiteral("table"),
                                 QStringLiteral("qr"), QStringLiteral("markdown"),
                                 QStringLiteral("html")};
-        const int mode = kinds.indexOf(payload.value(QStringLiteral("kind")).toString());
+        const qsizetype mode = kinds.indexOf(payload.value(QStringLiteral("kind")).toString());
         if (mode < 0)
             return fail("invalid_parameters");
         ensureRecognitionProviders();
-        activateRecognitionMode(mode, false);
+        activateRecognitionMode(static_cast<int>(mode), false);
         m_automationRecognition = true;
     } else if (action == QStringLiteral("translate")) {
         ensureRecognitionProviders();
@@ -6926,7 +6926,8 @@ QJsonObject ScreenshotPinnedWindow::automationEdit(const QString& action,
             const QStringList orders{
                 QStringLiteral("send_to_back"), QStringLiteral("send_backward"),
                 QStringLiteral("bring_forward"), QStringLiteral("bring_to_front")};
-            const int index = orders.indexOf(payload.value(QStringLiteral("order")).toString());
+            const qsizetype index =
+                orders.indexOf(payload.value(QStringLiteral("order")).toString());
             if (index < 0)
                 return fail("invalid_parameters");
             ok = m_canvas->reorderSelected(static_cast<SnowCanvasSelectionOrder>(index));
@@ -6939,7 +6940,7 @@ QJsonObject ScreenshotPinnedWindow::automationEdit(const QString& action,
                                          QStringLiteral("bottom"),
                                          QStringLiteral("distribute_horizontally"),
                                          QStringLiteral("distribute_vertically")};
-            const int index =
+            const qsizetype index =
                 alignments.indexOf(payload.value(QStringLiteral("alignment")).toString());
             if (index < 0)
                 return fail("invalid_parameters");

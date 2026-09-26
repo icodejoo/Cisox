@@ -248,7 +248,8 @@ int serve(QApplication& application, const QString& directory) {
             if (const auto currentCpu = currentThreadCpuMilliseconds(); currentCpu && initialCpu) {
                 const auto cpu = *currentCpu - *initialCpu;
                 values.insert(QStringLiteral("cpu_ms"), cpu);
-                values.insert(QStringLiteral("cpu_utilization"), elapsed > 0 ? cpu / elapsed : 0);
+                values.insert(QStringLiteral("cpu_utilization"),
+                              elapsed > 0 ? cpu / static_cast<double>(elapsed) : 0);
             }
             metrics.write(QJsonDocument(values).toJson(QJsonDocument::Compact));
             static_cast<void>(metrics.commit());
@@ -1357,7 +1358,7 @@ int main(int argc, char** argv) {
                 .initialize({executable, temporary.path(), 60000})
                 .success,
             "isolated application storage");
-    const int serveIndex = application.arguments().indexOf(QStringLiteral("--serve"));
+    const qsizetype serveIndex = application.arguments().indexOf(QStringLiteral("--serve"));
     if (serveIndex >= 0 && application.arguments().size() > serveIndex + 1) {
         const int result = serve(application, application.arguments().at(serveIndex + 1));
         snow_shot::storage::ApplicationStorage::instance().shutdown();

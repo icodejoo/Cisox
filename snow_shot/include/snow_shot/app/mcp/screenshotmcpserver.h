@@ -12,6 +12,7 @@
 #include <optional>
 
 class QLockFile;
+class QTemporaryDir;
 
 namespace snow_shot::app::mcp {
 
@@ -85,6 +86,7 @@ class ScreenshotMcpServer final : public QObject {
 
     std::unique_ptr<QThread> m_thread;
     std::unique_ptr<QLockFile> m_lock;
+    std::unique_ptr<QTemporaryDir> m_socketDirectory;
     SocketWorker* m_worker = nullptr;
     RequestHandler m_requestHandler;
     ClientDisconnectedHandler m_clientDisconnectedHandler;

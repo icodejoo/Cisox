@@ -772,6 +772,8 @@ void McpApplicationService::Impl::handle(const ScreenshotMcpRequest& request,
         result.insert(QStringLiteral("revision"), static_cast<qint64>(configuration().revision()));
         finish(result);
     } else if (method == u"snow_shot_permissions_get") {
+        if (ports.permissions)
+            ports.permissions->refreshNow();
         finish(permissionJson(ports.permissions));
     } else if (method == u"snow_shot_permissions_request") {
         if (!ports.permissions) {
@@ -784,6 +786,7 @@ void McpApplicationService::Impl::handle(const ScreenshotMcpRequest& request,
                 params.value(QStringLiteral("permission")).toString())
                 continue;
             if (params.value(QStringLiteral("open_settings")).toBool()) {
+                ports.permissions->refreshNow();
                 if (!ports.permissions->openSettings(permission)) {
                     error(QStringLiteral("unsupported"));
                     return;

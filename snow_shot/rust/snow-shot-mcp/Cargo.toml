@@ -39,6 +39,10 @@ opt-level = "z"
 debug = 0
 strip = "symbols"
 
+# Procedural macro dylibs must stay loadable during compilation on macOS.
+[profile.release-size.build-override]
+strip = "none"
+
 [profile.release-fast]
 inherits = "release"
 opt-level = 2

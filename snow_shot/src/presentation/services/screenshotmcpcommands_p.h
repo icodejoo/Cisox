@@ -146,7 +146,8 @@ void ScreenshotController::mcpCommand(const QString& method, const QJsonObject& 
             const QStringList values{
                 QStringLiteral("send_to_back"), QStringLiteral("send_backward"),
                 QStringLiteral("bring_forward"), QStringLiteral("bring_to_front")};
-            const int value = values.indexOf(params.value(QStringLiteral("order")).toString());
+            const qsizetype value =
+                values.indexOf(params.value(QStringLiteral("order")).toString());
             ok =
                 value >= 0 && canvas->reorderSelected(static_cast<SnowCanvasSelectionOrder>(value));
         } else if (action == QStringLiteral("align")) {
@@ -158,7 +159,8 @@ void ScreenshotController::mcpCommand(const QString& method, const QJsonObject& 
                                      QStringLiteral("bottom"),
                                      QStringLiteral("distribute_horizontally"),
                                      QStringLiteral("distribute_vertically")};
-            const int value = values.indexOf(params.value(QStringLiteral("alignment")).toString());
+            const qsizetype value =
+                values.indexOf(params.value(QStringLiteral("alignment")).toString());
             ok = value >= 0 &&
                  canvas->alignSelected(static_cast<SnowCanvasSelectionAlignment>(value));
         }

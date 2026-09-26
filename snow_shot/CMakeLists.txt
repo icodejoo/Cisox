@@ -5733,7 +5733,8 @@ if(SNOW_SHOT_BUILD_TESTS)
     get_target_property(_snow_mcp_document_sources snow-shot-recognition-session-controller-tests SOURCES)
     list(REMOVE_ITEM _snow_mcp_document_sources
         tests/screenshot_recognition_session_controller_tests.cpp
-        tests/original_image_translation_tests.cpp tests/image_conversion_tests.cpp)
+        tests/original_image_translation_tests.cpp tests/image_conversion_tests.cpp
+        src/presentation/styles/buttonborder.cpp)
     get_target_property(_snow_mcp_transport_sources snow-shot-mcp-tests SOURCES)
     list(REMOVE_ITEM _snow_mcp_transport_sources tests/screenshot_mcp_tests.cpp)
     add_executable(snow-shot-mcp-screenshot-fixture

@@ -219,8 +219,8 @@ The offscreen Qt fixture exercises actual bridge/Qt document and job operations.
 
 Native desktop validation is a separate release gate: capture and mixed-DPI
 behavior, clipboard, recording encoders/audio, permission prompts, packaging and
-disconnect finalization must be exercised on Windows and macOS. Native macOS
-validation is pending on this Windows development host. Run related performance
+disconnect finalization must be exercised on supported Windows and macOS devices.
+Run related performance
 targets with `windows-msvc-performance` or the macOS performance preset only.
 The synthetic Qt fixture measures the current bridge and screenshot session code;
 it does not measure native capture behavior.
@@ -338,7 +338,13 @@ Windows or `~/Library/Application Support/SnowShot/mcp/snow-shot-mcp.json` on
 macOS. A lockfile establishes one owner. Atomic publication, a protected user
 ACL/private directory, a random 256-bit token, and generation-aware cleanup keep
 endpoint discovery scoped to the current user. Windows uses a named pipe with
-`QLocalServer::UserAccessOption`; macOS uses a Unix socket. No TCP listener exists.
+`QLocalServer::UserAccessOption`; macOS uses a Unix socket in a short, private
+`/tmp/snow-shot-mcp-<generation>-<random>` directory to stay within its Unix socket
+path limit. The server creates the directory atomically with mode 0700 and removes
+it after closing the socket, including on startup failure. A new endpoint always
+uses a fresh directory, so leftovers from crashes or other users cannot block it.
+The bridge checks the directory path, owner, permissions, and generation without
+following a directory symlink before connecting. No TCP listener exists.
 `SNOW_SHOT_MCP_DESCRIPTOR` can override the absolute descriptor path for both
 the application and bridge during diagnostics/tests.
 Never put the token in a client configuration.

@@ -43,8 +43,8 @@ QString McpJobRegistry::start(quint64 owner, const QString& kind, std::function<
     if (m_bytes + bytes > 64 * 1024 * 1024 - 65536)
         return {};
     m_bytes += bytes;
-    m_jobs.insert(id,
-                  Job{owner, std::move(metadata), std::move(cancel), bytes, m_clock() + 900000});
+    m_jobs.insert(
+        id, Job{owner, std::move(metadata), std::move(cancel), bytes, m_clock() + 900000, {}, 0});
     emit changed(owner, id);
     return id;
 }

@@ -9,6 +9,7 @@
 #include "snow_draw_engine_qt/snow_canvas_widget.h"
 #include <QElapsedTimer>
 #include <QFile>
+#include <QFileInfo>
 #include <QJsonDocument>
 #include <QLocalSocket>
 #include <QTemporaryDir>
@@ -236,6 +237,53 @@ void descriptorOverride() {
     require(QFile::exists(descriptor), "override descriptor published");
     server.stop();
     require(!QFile::exists(descriptor), "override descriptor removed");
+#ifdef Q_OS_MACOS
+    const QString longDescriptor =
+        directory.filePath(QString(120, u'x') + QStringLiteral("/descriptor.json"));
+    qputenv("SNOW_SHOT_MCP_DESCRIPTOR", longDescriptor.toUtf8());
+    ScreenshotMcpServer longPathServer;
+    require(longPathServer.start(&error), qPrintable(error));
+    require(QFile::exists(longDescriptor), "long macOS descriptor published");
+    require(longPathServer.socketName().toUtf8().size() < 104,
+            "macOS Unix socket stays within sun_path limit");
+    const QString firstSocket = longPathServer.socketName();
+    const QString firstDirectory = QFileInfo(firstSocket).absolutePath();
+    require(QFileInfo(firstDirectory).permissions() ==
+                (QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner |
+                 QFileDevice::ReadUser | QFileDevice::WriteUser | QFileDevice::ExeUser),
+            "socket directory is private from creation");
+    ScreenshotMcpServer independent(nullptr, directory.filePath(QStringLiteral("independent")));
+    require(independent.start(&error), qPrintable(error));
+    const QString independentDirectory = QFileInfo(independent.socketName()).absolutePath();
+    require(independentDirectory != firstDirectory,
+            "simultaneous endpoints in one process own distinct directories");
+    longPathServer.stop();
+    require(!QFileInfo::exists(firstDirectory), "stop removes the owned socket directory");
+    require(QFileInfo::exists(independent.socketName()), "stop preserves the other endpoint");
+    independent.stop();
+    require(!QFileInfo::exists(independentDirectory), "other endpoint releases its own directory");
+    require(longPathServer.start(&error), qPrintable(error));
+    require(longPathServer.socketName() != firstSocket, "restart owns a new socket directory");
+    const QString secondDirectory = QFileInfo(longPathServer.socketName()).absolutePath();
+    longPathServer.stop();
+    require(!QFileInfo::exists(secondDirectory), "restart directory is removed on stop");
+    QString scopedDirectory;
+    {
+        ScreenshotMcpServer scoped;
+        require(scoped.start(&error), qPrintable(error));
+        scopedDirectory = QFileInfo(scoped.socketName()).absolutePath();
+    }
+    require(!QFileInfo::exists(scopedDirectory), "destruction releases the socket directory");
+    // An existing directory cannot be replaced by the descriptor's atomic file publication.
+    const QString unpublishable = directory.filePath(QStringLiteral("failed/descriptor.json"));
+    require(QDir().mkpath(unpublishable), "create unpublishable descriptor destination");
+    qputenv("SNOW_SHOT_MCP_DESCRIPTOR", unpublishable.toUtf8());
+    ScreenshotMcpServer failedPublication;
+    require(!failedPublication.start(&error), "descriptor publication failure is reported");
+    const QString failedDirectory = QFileInfo(failedPublication.socketName()).absolutePath();
+    require(!failedPublication.socketName().isEmpty() && !QFileInfo::exists(failedDirectory),
+            "failed publication releases the listening socket and its directory");
+#endif
     qputenv("SNOW_SHOT_MCP_DESCRIPTOR", QByteArrayLiteral("relative/descriptor.json"));
     ScreenshotMcpServer relativeOverride;
     require(!relativeOverride.start(), "relative override rejected");

@@ -71,9 +71,15 @@ class LocalProvider:
 
 
 def exercise_administration(client, directory):
-    permissions = client.tool("snow_shot_permissions_request", {
-        "permission": "screen-recording", "open_settings": False})["result"]["permissions"]
-    assert any(item["id"] == "screen-recording" for item in permissions)
+    permissions = client.tool("snow_shot_permissions_get")["result"]["permissions"]
+    screen_recording = next(item for item in permissions if item["id"] == "screen-recording")
+    assert all(item["status"] != "checking" for item in permissions), permissions
+    # Requesting a missing permission can display a macOS prompt. This fixture
+    # exercises the request route only when it is already granted.
+    if screen_recording["status"] == "granted":
+        requested = client.tool("snow_shot_permissions_request", {
+            "permission": "screen-recording", "open_settings": False})["result"]["permissions"]
+        assert any(item["id"] == "screen-recording" for item in requested)
     # Cancel is a successful no-op when the updater has no active operation.
     assert client.tool("snow_shot_updates_action", {"action": "cancel"})["result"]["state"]
     target = directory / "settings-action-export.zip"
@@ -147,6 +153,47 @@ def resource(client, uri):
     result = json.loads(contents[0]["text"])
     assert result["ok"], result
     return result
+
+
+def exercise_native_capture(client, directory):
+    begun = client.tool("snow_shot_screenshot_begin", {
+        "presentation": "silent", "target": "current_monitor", "capture_cursor": False})
+    session_id = begun["result"]["session_id"]
+    state = client.tool("snow_shot_screenshot_state", {"session_id": session_id})
+    assert state["result"]["active"] and state["result"]["presentation"] == "silent", state
+    x, y, width, height = state["result"]["canvas_bounds"]
+    assert width >= 100 and height >= 100, state
+    selected = client.tool("snow_shot_screenshot_set_selection", {
+        "session_id": session_id, "expected_revision": begun["result"]["revision"],
+        "type": "rectangle", "bounds": [x + 10, y + 10, 90, 90]})
+    revision = selected["result"]["revision"]
+    rendered = client.request("tools/call", {"name": "snow_shot_screenshot_render", "arguments": {
+        "session_id": session_id, "expected_revision": revision}})
+    assert not rendered.get("isError"), rendered
+    image = next(block for block in rendered["content"] if block["type"] == "image")
+    data = base64.b64decode(image["data"], validate=True)
+    assert data.startswith(b"\x89PNG\r\n\x1a\n"), image
+    result = rendered["structuredContent"]["result"]
+    assert hashlib.sha256(data).hexdigest() == result["sha256"], result
+    revision = result.get("revision", rendered["structuredContent"].get("revision", revision))
+    target = directory / "native-screenshot.png"
+    saved = client.tool("snow_shot_screenshot_save", {
+        "session_id": session_id, "expected_revision": revision,
+        "path": str(target), "format": "png"})
+    assert target.is_file() and hashlib.sha256(target.read_bytes()).hexdigest() == \
+        saved["result"]["sha256"], saved
+    client.tool("snow_shot_screenshot_cancel", {"session_id": session_id})
+    direct = client.request("tools/call", {"name": "snow_shot_screenshot_direct_capture",
+                                          "arguments": {"target": "current_monitor", "output": "render",
+                                                        "capture_cursor": False}})
+    assert not direct.get("isError") and direct["structuredContent"]["result"]["finished"], direct
+    assert any(block["type"] == "image" for block in direct["content"]), direct
+    direct_target = directory / "native-direct.png"
+    direct_save = client.tool("snow_shot_screenshot_direct_capture", {
+        "target": "current_monitor", "output": "save", "path": str(direct_target),
+        "capture_cursor": False})
+    assert direct_target.is_file() and direct_target.stat().st_size > 32 and \
+        direct_save["result"]["finished"], direct_save
 
 
 def exercise_recording(client, directory):
@@ -500,7 +547,7 @@ def exercise(client, directory):
                         "editable_document_pin", "pin_replace", "revision_conflicts", "idempotency",
                         "settings_update_reset", "auxiliary_settings", "models_credentials",
                         "redacted_archive_roundtrip", "history", "artifacts", "storage_cleanup",
-                        "templates", "permission_request", "updater_cancel", "settings_action",
+                        "templates", "permission_status", "updater_cancel", "settings_action",
                         "local_translation_and_tasks", "provider_source_admission",
                         "quit_acknowledgement"],
             "scope": "Isolated app storage and local HTTP provider; no external providers or recording devices"}
@@ -513,11 +560,13 @@ def main():
     parser.add_argument("--platform", default="offscreen", choices=("offscreen", "windows", "cocoa"))
     parser.add_argument("--recording", action="store_true",
                         help="Also record a small native region with microphone and system audio disabled; requires a native platform")
+    parser.add_argument("--native-capture", action="store_true",
+                        help="Capture, render and save native screenshots without changing the clipboard")
     parser.add_argument("--disable-mcp", action="store_true",
                         help="Verify disabling acknowledges before private IPC teardown")
     args = parser.parse_args()
-    if args.recording and args.platform == "offscreen":
-        parser.error("--recording requires --platform windows or --platform cocoa")
+    if (args.recording or args.native_capture) and args.platform == "offscreen":
+        parser.error("native capture and recording require --platform windows or --platform cocoa")
     with LocalProvider() as provider, tempfile.TemporaryDirectory(prefix="snow-shot-mcp-app-") as temporary:
         directory = Path(temporary)
         descriptor = directory / "descriptor.json"
@@ -538,6 +587,9 @@ def main():
                 try:
                     report = exercise(client, directory)
                     exercise_modern_administration(args.bridge, descriptor)
+                    if args.native_capture:
+                        exercise_native_capture(client, directory)
+                        report["domains"].append("native_screenshot_render_save_and_direct_capture")
                     if args.recording:
                         exercise_recording(client, directory)
                         report["domains"].append("native_recording_finalized_immutable_artifact")
@@ -554,8 +606,11 @@ def main():
                         while descriptor.exists() and time.monotonic() < deadline:
                             time.sleep(.025)
                         assert not descriptor.exists() and app.poll() is None
-                        status = client.tool("snow_shot_mcp_status")
-                        assert status["reachable"] is False, status
+                        status_call = client.request("tools/call", {
+                            "name": "snow_shot_mcp_status", "arguments": {}})
+                        status = status_call["structuredContent"]
+                        assert status["reachable"] is False and \
+                            status["error"]["code"] == "unavailable", status
                         report["domains"].remove("quit_acknowledgement")
                         report["domains"].append("disable_acknowledgement_before_teardown")
                     else:

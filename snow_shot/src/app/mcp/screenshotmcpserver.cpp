@@ -18,6 +18,7 @@
 #include <QSaveFile>
 #include <QStandardPaths>
 #include <QTimer>
+#include <QTemporaryDir>
 #include <QUuid>
 #include <QtEndian>
 #include <cmath>
@@ -103,7 +104,8 @@ ScreenshotMcpResponse failure(const QString& id, const QString& code) {
 }
 QByteArray frame(const QJsonObject& o, const QByteArray& attachment) {
     const QByteArray json = QJsonDocument(o).toJson(QJsonDocument::Compact);
-    const quint64 size = 4 + static_cast<quint64>(json.size()) + attachment.size();
+    const quint64 size =
+        4 + static_cast<quint64>(json.size()) + static_cast<quint64>(attachment.size());
     if (json.size() > kMaximumResponseJsonBytes || size > kMaximumFrameBytes)
         return {};
     QByteArray bytes(static_cast<qsizetype>(size + 4), Qt::Uninitialized);
@@ -536,8 +538,23 @@ bool ScreenshotMcpServer::start(QString* error) {
 #ifdef Q_OS_WIN
     m_socketName = QStringLiteral("snow-shot-mcp-") + m_generation;
 #else
+#ifdef Q_OS_MACOS
+    // Keep sun_path below macOS's 104-byte capacity, independent of HOME/TMPDIR.
+    // QTemporaryDir atomically creates a new 0700 directory; never reuse a PID path.
+    m_socketDirectory = std::make_unique<QTemporaryDir>(QStringLiteral("/tmp/snow-shot-mcp-") +
+                                                        m_generation + QStringLiteral("-XXXXXX"));
+    if (!m_socketDirectory->isValid()) {
+        if (error)
+            *error = tr("Could not secure the MCP runtime directory.");
+        m_socketDirectory.reset();
+        m_lock.reset();
+        return false;
+    }
+    m_socketName = m_socketDirectory->filePath(QStringLiteral("socket"));
+#else
     m_socketName =
         QDir(m_runtimeDirectory).filePath(QStringLiteral("socket-")) + m_generation.left(8);
+#endif
 #endif
     m_thread = std::make_unique<QThread>();
     m_thread->setObjectName(QStringLiteral("ScreenshotMcpSocket"));
@@ -594,6 +611,8 @@ void ScreenshotMcpServer::stop() {
         m_worker = nullptr;
         m_thread.reset();
     }
+    // The listener must be closed before its containing directory is released.
+    m_socketDirectory.reset();
     m_lock.reset();
     m_token.clear();
     QCoreApplication::instance()->setProperty("snowShotMcpRunning", false);

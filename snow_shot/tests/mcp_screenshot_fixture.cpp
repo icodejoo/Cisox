@@ -26,7 +26,7 @@ int main(int argc, char** argv) {
     QApplication application(argc, argv);
     application.setQuitOnLastWindowClosed(false);
     const auto arguments = application.arguments();
-    const int serve = arguments.indexOf(QStringLiteral("--serve"));
+    const qsizetype serve = arguments.indexOf(QStringLiteral("--serve"));
     if (serve < 0 || serve + 1 >= arguments.size())
         return 2;
     const QString directory = arguments.at(serve + 1);
@@ -34,7 +34,7 @@ int main(int argc, char** argv) {
         return 2;
     SnowCanvasRuntime runtime;
     SnowCanvasWidget canvas(runtime);
-    const int sizeIndex = arguments.indexOf(QStringLiteral("--size"));
+    const qsizetype sizeIndex = arguments.indexOf(QStringLiteral("--size"));
     const auto sizeParts = sizeIndex >= 0 && sizeIndex + 1 < arguments.size()
                                ? arguments.at(sizeIndex + 1).split(QLatin1Char('x'))
                                : QStringList{QStringLiteral("800"), QStringLiteral("600")};

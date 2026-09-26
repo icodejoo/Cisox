@@ -1134,6 +1134,7 @@ GlobalMousePermissionState BuiltInSettingsBackend::globalMousePermissionState() 
 }
 void BuiltInSettingsBackend::requestGlobalMousePermission() {
     if (m_permissions) {
+        m_permissions->refreshNow();
         const auto missing =
             m_permissions->missing({AppPermission::InputMonitoring, AppPermission::Accessibility});
         if (!missing.isEmpty())
@@ -1145,6 +1146,7 @@ void BuiltInSettingsBackend::requestGlobalMousePermission() {
 }
 void BuiltInSettingsBackend::openGlobalMousePermissionSettings() {
     if (m_permissions) {
+        m_permissions->refreshNow();
         const auto missing =
             m_permissions->missing({AppPermission::InputMonitoring, AppPermission::Accessibility});
         if (!missing.isEmpty())

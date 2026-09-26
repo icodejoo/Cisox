@@ -283,9 +283,14 @@ impl AppClient {
         let descriptor: Descriptor =
             serde_json::from_slice(&bytes).map_err(|_| AppClientError::InvalidDescriptor)?;
         validate_descriptor(&descriptor)?;
-        #[cfg(not(windows))]
+        #[cfg(all(unix, not(target_os = "macos")))]
         if PathBuf::from(&descriptor.socket).parent() != self.descriptor_path.parent() {
             return Err(AppClientError::InvalidDescriptor);
+        }
+        #[cfg(target_os = "macos")]
+        {
+            use std::os::unix::fs::MetadataExt;
+            validate_socket_directory(&descriptor, metadata.uid())?;
         }
         let name = if cfg!(windows) {
             descriptor.socket.as_str().to_ns_name::<GenericNamespaced>()
@@ -507,6 +512,36 @@ fn is_control(method: &str) -> bool {
             | "snow_shot_recording_control"
     )
 }
+// The server creates this short directory atomically with mode 0700 and owns it
+// for one endpoint generation. Never follow a replacement directory symlink.
+#[cfg(target_os = "macos")]
+fn validate_socket_directory(d: &Descriptor, descriptor_owner: u32) -> Result<(), AppClientError> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let socket = PathBuf::from(&d.socket);
+    let directory = socket.parent().ok_or(AppClientError::InvalidDescriptor)?;
+    let prefix = format!("snow-shot-mcp-{}-", d.generation);
+    let suffix = directory
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_prefix(&prefix))
+        .ok_or(AppClientError::InvalidDescriptor)?;
+    if directory.parent() != Some(std::path::Path::new("/tmp"))
+        || suffix.len() != 6
+        || !suffix.bytes().all(|byte| byte.is_ascii_alphanumeric())
+        || socket.file_name().and_then(|name| name.to_str()) != Some("socket")
+    {
+        return Err(AppClientError::InvalidDescriptor);
+    }
+    let owner = fs::symlink_metadata(directory).map_err(|_| AppClientError::InvalidDescriptor)?;
+    if !owner.file_type().is_dir()
+        || owner.uid() != descriptor_owner
+        || owner.permissions().mode() & 0o777 != 0o700
+    {
+        return Err(AppClientError::InvalidDescriptor);
+    }
+    Ok(())
+}
+
 fn validate_descriptor(d: &Descriptor) -> Result<(), AppClientError> {
     if d.protocol != PROTOCOL
         || d.max_frame_bytes != MAX_FRAME_BYTES
@@ -615,13 +650,32 @@ mod tests {
         handler: impl FnOnce(Stream) + Send + 'static,
     ) -> (AppClient, std::thread::JoinHandle<()>, PathBuf) {
         let id = request_id().unwrap();
+        let generation = format!(
+            "{}-{}-{}-{}-{}",
+            &id[..8],
+            &id[8..12],
+            &id[12..16],
+            &id[16..20],
+            &id[20..]
+        );
+        #[cfg(target_os = "macos")]
+        let directory = PathBuf::from(format!("/tmp/snow-shot-mcp-{generation}-{}", &id[..6]));
+        #[cfg(not(target_os = "macos"))]
         let directory = std::env::temp_dir().join(format!("snow-shot-mcp-test-{id}"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&directory)
+                .unwrap();
+        }
+        #[cfg(not(unix))]
         fs::create_dir(&directory).unwrap();
-        let socket = if cfg!(windows) {
-            format!("snow-shot-mcp-{id}")
-        } else {
-            directory.join("socket").to_string_lossy().into_owned()
-        };
+        #[cfg(windows)]
+        let socket = format!("snow-shot-mcp-{id}");
+        #[cfg(unix)]
+        let socket = directory.join("socket").to_string_lossy().into_owned();
         let name = if cfg!(windows) {
             socket.as_str().to_ns_name::<GenericNamespaced>()
         } else {
@@ -634,7 +688,7 @@ mod tests {
             socket,
             token: "a".repeat(64),
             pid: std::process::id(),
-            generation: "11111111-1111-4111-8111-111111111111".into(),
+            generation,
             max_frame_bytes: MAX_FRAME_BYTES,
         };
         let path = directory.join("snow-shot-mcp.json");
@@ -869,6 +923,69 @@ mod tests {
         drop(client);
         fs::remove_dir_all(dir).unwrap();
     }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn socket_directory_rejects_insecure_or_mismatched_endpoints() {
+        use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt, symlink};
+        let id = request_id().unwrap();
+        let generation = format!(
+            "{}-{}-{}-{}-{}",
+            &id[..8],
+            &id[8..12],
+            &id[12..16],
+            &id[16..20],
+            &id[20..]
+        );
+        let directory = PathBuf::from(format!("/tmp/snow-shot-mcp-{generation}-ABC123"));
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&directory)
+            .unwrap();
+        let uid = fs::metadata(&directory).unwrap().uid();
+        let mut d = Descriptor {
+            protocol: PROTOCOL.into(),
+            socket: directory.join("socket").to_string_lossy().into_owned(),
+            token: "f".repeat(64),
+            pid: std::process::id(),
+            generation: generation.clone(),
+            max_frame_bytes: MAX_FRAME_BYTES,
+        };
+        assert!(validate_descriptor(&d).is_ok());
+        assert!(validate_socket_directory(&d, uid).is_ok());
+        assert!(validate_socket_directory(&d, uid.wrapping_add(1)).is_err());
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(validate_socket_directory(&d, uid).is_err());
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+        d.generation = "00000000-0000-4000-8000-000000000000".into();
+        assert!(validate_socket_directory(&d, uid).is_err());
+        d.generation = generation;
+        d.socket = directory
+            .join("wrong-socket")
+            .to_string_lossy()
+            .into_owned();
+        assert!(validate_socket_directory(&d, uid).is_err());
+        d.socket = directory.join("socket").to_string_lossy().into_owned();
+        for invalid in [
+            format!("/tmp/snow-shot-mcp-{}-ABC12/socket", d.generation),
+            format!("/tmp/snow-shot-mcp-{}-ABC12_/socket", d.generation),
+            format!("/var/tmp/snow-shot-mcp-{}-ABC123/socket", d.generation),
+        ] {
+            d.socket = invalid;
+            assert!(validate_socket_directory(&d, uid).is_err());
+        }
+        d.socket = directory.join("socket").to_string_lossy().into_owned();
+        fs::remove_dir(&directory).unwrap();
+        // A regular file and a directory symlink are both invalid endpoints.
+        fs::write(&directory, []).unwrap();
+        assert!(validate_socket_directory(&d, uid).is_err());
+        fs::remove_file(&directory).unwrap();
+        let target = std::env::temp_dir();
+        symlink(target, &directory).unwrap();
+        assert!(validate_socket_directory(&d, uid).is_err());
+        fs::remove_file(&directory).unwrap();
+        assert!(validate_socket_directory(&d, uid).is_err());
+    }
+
     #[test]
     fn descriptor_and_protocol_reject_invalid_values() {
         assert!(valid_mime("application/json"));

@@ -35,6 +35,7 @@
 #include <atomic>
 #include <array>
 #include <cmath>
+#include <cstddef>
 #include <utility>
 
 namespace snow_shot::app::mcp {
@@ -191,6 +192,9 @@ struct WorkerResult {
     ScreenshotMcpResponse response;
     QImage image;
     std::optional<McpDocumentService::Source> source;
+    WorkerResult(ScreenshotMcpResponse response, QImage image = {},
+                 std::optional<McpDocumentService::Source> source = {})
+        : response(std::move(response)), image(std::move(image)), source(std::move(source)) {}
 };
 // Admission is shared by all lanes. Only short accounting operations hold the lock;
 // decoding, document mutation, and rendering always run without it.
@@ -683,7 +687,8 @@ class DocumentWorker final : public QObject {
                 const QStringList values{
                     QStringLiteral("send_to_back"), QStringLiteral("send_backward"),
                     QStringLiteral("bring_forward"), QStringLiteral("bring_to_front")};
-                const int index = values.indexOf(params.value(QStringLiteral("order")).toString());
+                const qsizetype index =
+                    values.indexOf(params.value(QStringLiteral("order")).toString());
                 ok = index >= 0 &&
                      editor.reorderSelected(static_cast<SnowCanvasSelectionOrder>(index));
             } else if (action == QStringLiteral("align")) {
@@ -695,7 +700,7 @@ class DocumentWorker final : public QObject {
                                          QStringLiteral("bottom"),
                                          QStringLiteral("distribute_horizontally"),
                                          QStringLiteral("distribute_vertically")};
-                const int index =
+                const qsizetype index =
                     values.indexOf(params.value(QStringLiteral("alignment")).toString());
                 ok = index >= 0 &&
                      editor.alignSelected(static_cast<SnowCanvasSelectionAlignment>(index));
@@ -1002,16 +1007,16 @@ class DocumentWorker final : public QObject {
 struct McpDocumentService::Impl {
     McpDocumentService& q;
     Ports ports;
-    static constexpr int laneCount = 2;
+    static constexpr std::size_t laneCount = 2;
     std::array<QThread, laneCount> workerThreads;
     std::array<DocumentWorker*, laneCount> workers{};
     std::shared_ptr<DocumentAdmission> admission = std::make_shared<DocumentAdmission>();
     struct Affinity {
         quint64 owner;
-        int lane;
+        std::size_t lane;
     };
     QHash<QString, Affinity> documentLanes;
-    int nextLane = 0;
+    std::size_t nextLane = 0;
     QHash<quint64, std::shared_ptr<std::atomic_bool>> owners;
     struct ActiveRequest {
         ScreenshotMcpRequest request;
@@ -1089,7 +1094,7 @@ struct McpDocumentService::Impl {
     Impl(McpDocumentService& owner, Ports options) : q(owner), ports(std::move(options)) {
         if (!ports.jobs)
             ports.jobs = new McpJobRegistry(&q);
-        for (int index = 0; index < laneCount; ++index) {
+        for (std::size_t index = 0; index < laneCount; ++index) {
             auto* worker =
                 new DocumentWorker(admission, ports.beforeWorkerDecode, ports.workObserved);
             workers[index] = worker;
@@ -1107,9 +1112,12 @@ struct McpDocumentService::Impl {
     qint64 now() const {
         return ports.clock ? ports.clock() : QDateTime::currentMSecsSinceEpoch();
     }
-    int laneFor(const ScreenshotMcpRequest& request) {
-        if (request.method == QStringLiteral("snow_shot_document_open"))
-            return nextLane++ % laneCount;
+    std::size_t laneFor(const ScreenshotMcpRequest& request) {
+        if (request.method == QStringLiteral("snow_shot_document_open")) {
+            const auto lane = nextLane;
+            nextLane = (nextLane + 1) % laneCount;
+            return lane;
+        }
         return documentLanes
             .value(request.params.value(QStringLiteral("document_id")).toString(), Affinity{0, 0})
             .lane;
@@ -1247,7 +1255,7 @@ struct McpDocumentService::Impl {
         const auto requestCanceled = requestToken(request);
         QPointer<McpDocumentService> guard(&q);
         if (request.method == QStringLiteral("snow_shot_document_list")) {
-            auto remaining = std::make_shared<int>(laneCount);
+            auto remaining = std::make_shared<int>(static_cast<int>(laneCount));
             auto values = std::make_shared<QJsonArray>();
             auto completion = std::make_shared<ScreenshotMcpServer::Completion>(std::move(done));
             for (auto* worker : workers)
@@ -1277,7 +1285,7 @@ struct McpDocumentService::Impl {
                     Qt::QueuedConnection);
             return;
         }
-        const int lane = laneFor(request);
+        const std::size_t lane = laneFor(request);
         auto* worker = workers[lane];
         const auto beforeWork = ports.beforeWorkerRequest;
         QMetaObject::invokeMethod(
@@ -1565,7 +1573,7 @@ struct McpDocumentService::Impl {
         const QStringList modes{QStringLiteral("text"), QStringLiteral("table"),
                                 QStringLiteral("qr"), QStringLiteral("markdown"),
                                 QStringLiteral("html")};
-        const int index = modes.indexOf(kind);
+        const qsizetype index = modes.indexOf(kind);
         if (index < 0 || (index == 0 && !ports.recognition) ||
             (index == 2 && !ports.qrRecognition) || (index != 0 && index != 2 && !ports.api)) {
             done(failure(request,
