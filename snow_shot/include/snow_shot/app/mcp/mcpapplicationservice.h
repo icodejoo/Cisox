@@ -22,7 +22,7 @@ class UpdateService;
 namespace snow_shot::app::mcp {
 class McpJobRegistry;
 
-// Application-wide operations do not acquire the legacy screenshot editor lease.
+// Application-wide operations do not acquire the screenshot editor lease.
 class McpApplicationService final : public QObject {
     Q_OBJECT
   public:

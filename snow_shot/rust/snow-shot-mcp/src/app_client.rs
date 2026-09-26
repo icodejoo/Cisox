@@ -50,8 +50,6 @@ pub enum AppClientError {
     QueueFull,
     #[error("Snow Shot request exceeds the maximum JSON size")]
     RequestTooLarge,
-    #[error("This Snow Shot application does not support resource notifications")]
-    EventsUnavailable,
 }
 impl AppClientError {
     pub fn code(&self) -> &'static str {
@@ -64,7 +62,6 @@ impl AppClientError {
             Self::Disconnected => "disconnected",
             Self::QueueFull => "queue_full",
             Self::RequestTooLarge => "invalid_parameters",
-            Self::EventsUnavailable => "unsupported_capability",
         }
     }
 }
@@ -100,8 +97,6 @@ struct Connection {
     requests: Mutex<Requests>,
     alive: AtomicBool,
     reader: Mutex<Option<AbortHandle>>,
-    cancel_requests: bool,
-    events_supported: bool,
 }
 impl Connection {
     async fn send(&self, request: &AppRequest) -> Result<(), AppClientError> {
@@ -147,7 +142,6 @@ struct PendingGuard {
     id: String,
     session: Option<String>,
     armed: bool,
-    legacy: bool,
 }
 impl Drop for PendingGuard {
     fn drop(&mut self) {
@@ -159,9 +153,6 @@ impl Drop for PendingGuard {
         {
             requests.retire(self.id.clone());
         }
-        if !self.connection.cancel_requests && !self.legacy {
-            return;
-        }
         let Ok(id) = request_id() else { return };
         if let Ok(mut requests) = self.connection.requests.lock() {
             requests.retire(id.clone());
@@ -169,12 +160,7 @@ impl Drop for PendingGuard {
         let cancel = AppRequest {
             protocol: PROTOCOL.into(),
             request_id: id,
-            method: if self.connection.cancel_requests {
-                "snow_shot_request_cancel"
-            } else {
-                "screenshot_cancel"
-            }
-            .into(),
+            method: "snow_shot_request_cancel".into(),
             session_id: self.session.clone(),
             expected_revision: None,
             idempotency_key: String::new(),
@@ -216,11 +202,7 @@ impl AppClient {
         self.events.subscribe()
     }
     pub async fn connect_events(&self) -> Result<(), AppClientError> {
-        if self.connect_or_launch().await?.events_supported {
-            Ok(())
-        } else {
-            Err(AppClientError::EventsUnavailable)
-        }
+        self.connect_or_launch().await.map(|_| ())
     }
     async fn connect_or_launch(&self) -> Result<Arc<Connection>, AppClientError> {
         match self.connect().await {
@@ -322,7 +304,7 @@ impl AppClient {
                 session_id: None,
                 expected_revision: None,
                 idempotency_key: String::new(),
-                params: serde_json::json!({"token":descriptor.token,"client_protocol":PROTOCOL,"capabilities":["events","cancel_request"]}),
+                params: serde_json::json!({"token":descriptor.token,"client_protocol":PROTOCOL}),
             };
             write_frame_async(&mut stream, &handshake, &[])
                 .await
@@ -339,21 +321,16 @@ impl AppClient {
             {
                 return Err(AppClientError::Protocol);
             }
-            let capabilities=response.result.get("capabilities").and_then(Value::as_array);
-            let supports=|name:&str|capabilities.is_some_and(|caps|caps.iter().any(|v|v.as_str()==Some(name)));
-            Ok((stream,supports("events"),supports("cancel_request")))
+            Ok(stream)
         })
         .await
         .map_err(|_| AppClientError::Timeout)??;
-        let (stream, events_supported, cancel_requests) = stream;
         let (mut reader, writer) = stream.split();
         let connection = Arc::new(Connection {
             writer: AsyncMutex::new(writer),
             requests: Mutex::new(Requests::default()),
             alive: AtomicBool::new(true),
             reader: Mutex::new(None),
-            cancel_requests,
-            events_supported,
         });
         let events = self.events.clone();
         let weak = Arc::downgrade(&connection);
@@ -375,8 +352,7 @@ impl AppClient {
                     break;
                 };
                 if frame.value.get("kind").and_then(Value::as_str) == Some("event") {
-                    if !events_supported
-                        || !frame.attachment.is_empty()
+                    if !frame.attachment.is_empty()
                         || frame.value.get("protocol").and_then(Value::as_str) != Some(PROTOCOL)
                         || frame.value.get("event").and_then(Value::as_str)
                             != Some("resource_changed")
@@ -498,7 +474,6 @@ impl AppClient {
             id,
             session: session_id,
             armed: true,
-            legacy: method.starts_with("screenshot_") || method == "snow_shot_status",
         };
         connection.send(&request).await?;
         let reply = tokio::select! {
@@ -520,10 +495,10 @@ impl AppClient {
 fn is_control(method: &str) -> bool {
     matches!(
         method,
-        "snow_shot_status"
-            | "screenshot_state"
-            | "screenshot_cancel"
-            | "screenshot_operation"
+        "snow_shot_mcp_status"
+            | "snow_shot_screenshot_state"
+            | "snow_shot_screenshot_cancel"
+            | "snow_shot_screenshot_operation"
             | "snow_shot_app_status"
             | "snow_shot_document_state"
             | "snow_shot_job_get"
@@ -639,13 +614,6 @@ mod tests {
     fn fixture(
         handler: impl FnOnce(Stream) + Send + 'static,
     ) -> (AppClient, std::thread::JoinHandle<()>, PathBuf) {
-        fixture_with_capabilities(handler, &[])
-    }
-    fn fixture_with_capabilities(
-        handler: impl FnOnce(Stream) + Send + 'static,
-        capabilities: &[&str],
-    ) -> (AppClient, std::thread::JoinHandle<()>, PathBuf) {
-        let capabilities: Vec<String> = capabilities.iter().map(|s| (*s).to_owned()).collect();
         let id = request_id().unwrap();
         let directory = std::env::temp_dir().join(format!("snow-shot-mcp-test-{id}"));
         fs::create_dir(&directory).unwrap();
@@ -690,9 +658,7 @@ mod tests {
             let hello: AppRequest = serde_json::from_slice(&frame.json).unwrap();
             assert_eq!(hello.method, "handshake");
             assert_eq!(hello.params["token"], "a".repeat(64));
-            let mut reply = response(&hello);
-            reply.result["capabilities"] = json!(capabilities);
-            write_frame(&mut stream, &reply, &[]).unwrap();
+            write_frame(&mut stream, &response(&hello), &[]).unwrap();
             handler(stream);
         });
         (client, thread, directory)
@@ -704,10 +670,10 @@ mod tests {
     async fn persistent_connection_preserves_ids_and_does_not_replay_mutations() {
         let (client, thread, dir) = fixture(|mut stream| {
             let one = request(&mut stream);
-            assert_eq!(one.method, "screenshot_begin");
+            assert_eq!(one.method, "snow_shot_screenshot_begin");
             write_frame(&mut stream, &response(&one), &[]).unwrap();
             let two = request(&mut stream);
-            assert_eq!(two.method, "screenshot_set_selection");
+            assert_eq!(two.method, "snow_shot_screenshot_set_selection");
             assert_ne!(one.request_id, two.request_id);
             assert!(!two.idempotency_key.is_empty());
             // Close after accepting a mutation. The client must surface the ambiguous outcome.
@@ -715,7 +681,7 @@ mod tests {
         assert!(
             client
                 .request(
-                    "screenshot_begin",
+                    "snow_shot_screenshot_begin",
                     None,
                     None,
                     json!({}),
@@ -727,7 +693,7 @@ mod tests {
         assert!(matches!(
             client
                 .request(
-                    "screenshot_set_selection",
+                    "snow_shot_screenshot_set_selection",
                     Some("session".into()),
                     Some(1),
                     json!({}),
@@ -749,10 +715,10 @@ mod tests {
             let work: Vec<_> = (0..8).map(|_| request(&mut stream)).collect();
             filled_tx.send(()).unwrap();
             let status = request(&mut stream);
-            assert_eq!(status.method, "snow_shot_status");
+            assert_eq!(status.method, "snow_shot_mcp_status");
             write_frame(&mut stream, &response(&status), &[]).unwrap();
             let cancel = request(&mut stream);
-            assert_eq!(cancel.method, "screenshot_cancel");
+            assert_eq!(cancel.method, "snow_shot_screenshot_cancel");
             write_frame(&mut stream, &response(&cancel), &[]).unwrap();
             for item in work {
                 write_frame(&mut stream, &response(&item), &[]).unwrap();
@@ -765,7 +731,7 @@ mod tests {
             workers.push(tokio::spawn(async move {
                 client
                     .request(
-                        "screenshot_render",
+                        "snow_shot_screenshot_render",
                         Some("s".into()),
                         Some(1),
                         json!({}),
@@ -778,7 +744,7 @@ mod tests {
         assert!(matches!(
             client
                 .request(
-                    "screenshot_render",
+                    "snow_shot_screenshot_render",
                     Some("s".into()),
                     Some(1),
                     json!({}),
@@ -787,7 +753,7 @@ mod tests {
                 .await,
             Err(AppClientError::QueueFull)
         ));
-        for method in ["snow_shot_status", "screenshot_cancel"] {
+        for method in ["snow_shot_mcp_status", "snow_shot_screenshot_cancel"] {
             assert!(
                 client
                     .request(method, None, None, json!({}), CancellationToken::new())
@@ -823,28 +789,25 @@ mod tests {
         ));
     }
     #[tokio::test]
-    async fn negotiated_events_interleave_with_responses_and_cancel_new_domain_requests() {
-        let (client, thread, dir) = fixture_with_capabilities(
-            |mut stream| {
-                let pending = request(&mut stream);
-                assert_eq!(pending.method, "snow_shot_document_render");
-                write_frame(&mut stream,&json!({"protocol":PROTOCOL,"kind":"event","event":"resource_changed","uri":"snow-shot://documents/one","attachment_length":0}),&[]).unwrap();
-                let mut canceled = false;
-                for _ in 0..2 {
-                    let control = request(&mut stream);
-                    if control.method == "snow_shot_request_cancel" {
-                        assert_eq!(control.params["request_id"], pending.request_id);
-                        canceled = true;
-                        write_frame(&mut stream, &response(&pending), &[]).unwrap();
-                    } else {
-                        assert_eq!(control.method, "snow_shot_status");
-                    }
-                    write_frame(&mut stream, &response(&control), &[]).unwrap();
+    async fn events_interleave_with_responses_and_cancel_requests() {
+        let (client, thread, dir) = fixture(|mut stream| {
+            let pending = request(&mut stream);
+            assert_eq!(pending.method, "snow_shot_document_render");
+            write_frame(&mut stream,&json!({"protocol":PROTOCOL,"kind":"event","event":"resource_changed","uri":"snow-shot://documents/one","attachment_length":0}),&[]).unwrap();
+            let mut canceled = false;
+            for _ in 0..2 {
+                let control = request(&mut stream);
+                if control.method == "snow_shot_request_cancel" {
+                    assert_eq!(control.params["request_id"], pending.request_id);
+                    canceled = true;
+                    write_frame(&mut stream, &response(&pending), &[]).unwrap();
+                } else {
+                    assert_eq!(control.method, "snow_shot_mcp_status");
                 }
-                assert!(canceled);
-            },
-            &["events", "cancel_request"],
-        );
+                write_frame(&mut stream, &response(&control), &[]).unwrap();
+            }
+            assert!(canceled);
+        });
         let mut events = client.subscribe_events();
         assert!(matches!(
             client
@@ -865,7 +828,7 @@ mod tests {
         assert!(
             client
                 .request(
-                    "snow_shot_status",
+                    "snow_shot_mcp_status",
                     None,
                     None,
                     json!({}),
@@ -885,13 +848,13 @@ mod tests {
         let (client, thread, dir) = fixture(|mut stream| {
             let pending = request(&mut stream);
             let cancel = request(&mut stream);
-            assert_eq!(cancel.method, "screenshot_cancel");
+            assert_eq!(cancel.method, "snow_shot_request_cancel");
             assert_eq!(cancel.params["request_id"], pending.request_id);
         });
         assert!(matches!(
             client
                 .request(
-                    "screenshot_render",
+                    "snow_shot_screenshot_render",
                     Some("session".into()),
                     Some(1),
                     json!({}),

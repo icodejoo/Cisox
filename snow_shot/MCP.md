@@ -42,47 +42,47 @@ The bridge leaves application startup to you by default. Add `"--launch-app"` to
 not enable MCP integration: enable it in the application first. The bridge waits
 up to ten seconds for the authenticated endpoint and never replays a mutation.
 If the application is stopped or integration
-is disabled, `snow_shot_status` returns `reachable: false`, `mcp_enabled: null`,
+is disabled, `snow_shot_mcp_status` returns `reachable: false`, `mcp_enabled: null`,
 and the `unavailable` error. It cannot distinguish those two conditions without a
 live authenticated endpoint. A later call discovers the endpoint again.
 
 ## Tools and workflow
 
-1. Call `snow_shot_status` for protocol, application version, session ownership,
+1. Call `snow_shot_mcp_status` for protocol, application version, session ownership,
    and supported tool names.
-2. Call `screenshot_begin` with optional `presentation` (`visible`, the default,
+2. Call `snow_shot_screenshot_begin` with optional `presentation` (`visible`, the default,
    or `silent`), `target` (`all_displays`, `monitor`, `current_monitor`, or
    `focused_window`), `monitor_id`, `capture_cursor`, and `smart_selection`.
 3. Retain the returned `session_id` and `revision`. Every subsequent edit or
    output call requires both `session_id` and `expected_revision`. State and
    cancellation do not require a revision.
-4. Use `screenshot_set_selection`, `screenshot_set_tool`, `screenshot_set_selection_style`,
-   `screenshot_set_tool_style`, `screenshot_edit_elements`, `screenshot_apply_annotations`,
-   `screenshot_undo`, and `screenshot_redo`.
-5. Use `screenshot_scrolling` to start/stop scrolling, change axis, set automatic scrolling,
-   move the selection, or trim the stitched result. Use `screenshot_scroll_once` with `up`,
+4. Use `snow_shot_screenshot_set_selection`, `snow_shot_screenshot_set_tool`, `snow_shot_screenshot_set_selection_style`,
+   `snow_shot_screenshot_set_tool_style`, `snow_shot_screenshot_edit_elements`, `snow_shot_screenshot_apply_annotations`,
+   `snow_shot_screenshot_undo`, and `snow_shot_screenshot_redo`.
+5. Use `snow_shot_screenshot_scrolling` to start/stop scrolling, change axis, set automatic scrolling,
+   move the selection, or trim the stitched result. Use `snow_shot_screenshot_scroll_once` with `up`,
    `down`, `left`, or `right` for one native wheel notch. The call returns `direction` and
    `dispatch_status: "posted"` as soon as native input is posted. Capture and stitching continue
    asynchronously; this response does not guarantee changed or settled content. Query
-   `screenshot_state` for current scrolling state and use the output tools when ready to export.
-6. Use `screenshot_recognize`, `screenshot_translate`, or `screenshot_auto_filter`; each returns
-   an operation ID. Poll `screenshot_operation` and use `screenshot_edit_recognition` or
-   `screenshot_export_recognition` for results. These operations use configured providers and
+   `snow_shot_screenshot_state` for current scrolling state and use the output tools when ready to export.
+6. Use `snow_shot_screenshot_recognize`, `snow_shot_screenshot_translate`, or `snow_shot_screenshot_auto_filter`; each returns
+   an operation ID. Poll `snow_shot_screenshot_operation` and use `snow_shot_screenshot_edit_recognition` or
+   `snow_shot_screenshot_export_recognition` for results. These operations use configured providers and
    also work in silent sessions.
-7. Use `screenshot_render`, `screenshot_save`, `screenshot_copy`, or
-   `screenshot_pin`. Continue with the new revision returned by each output.
-8. Call `screenshot_finish` to close the capture and release ownership. Set
+7. Use `snow_shot_screenshot_render`, `snow_shot_screenshot_save`, `snow_shot_screenshot_copy`, or
+   `snow_shot_screenshot_pin`. Continue with the new revision returned by each output.
+8. Call `snow_shot_screenshot_finish` to close the capture and release ownership. Set
    `output` to `render` or `save` for a final output; absent/`none` closes directly.
-   `screenshot_cancel` cancels capture or editing. With `request_id`, it cancels
+   `snow_shot_screenshot_cancel` cancels capture or editing. With `request_id`, it cancels
    that pending operation and retains the editor, except an unfinished begin.
 
-`screenshot_state` reports the current capture phase, region, canvas tool,
+`snow_shot_screenshot_state` reports the current capture phase, region, canvas tool,
 undo/redo state, display mapping, revision, and pending operation. User edits in
 visible sessions increment the revision. A stale call returns `stale_revision`
 and the current state in `error.details.state`; refresh and decide what to do
 before sending another edit.
 
-`screenshot_direct_capture` takes `target: current_monitor` or `focused_window`
+`snow_shot_screenshot_direct_capture` takes `target: current_monitor` or `focused_window`
 and `output: render`, `save`, or `copy`. It uses the existing direct native
 capture path, without an editor. It accepts the applicable output options and
 `capture_cursor`, and releases its temporary session when output completes.
@@ -94,8 +94,7 @@ Silent sessions cancel on disconnect or when integration is disabled. Disabling
 integration closes all clients and removes the descriptor. Escape and normal UI
 cancellation invalidate the session and cancel any pending MCP output.
 
-The original 28 tools retain their names and request/response contracts. New tools
-use `snow_shot_<domain>_<verb>` names. `tools/list` supplies typed input schemas,
+Tools use `snow_shot_<domain>_<verb>` names. `tools/list` supplies typed input schemas,
 response-envelope schemas and annotations. The checked
 [`mcp-capabilities.json`](mcp-capabilities.json) records exact application dispatch
 coverage. Use the advertised schemas rather than guessing optional fields.
@@ -194,9 +193,8 @@ static catalogs advertise a five-minute lifetime. No arbitrary file URI reads
 are supported. Prompts provide screenshot, background-image, and recording
 workflows, with completion for background-image output formats.
 
-The stdio bridge supports legacy initialize negotiation and MCP 2026-07-28
-per-request discovery. Both legacy resource subscriptions and modern
-`subscriptions/listen` receive coalesced URI invalidations for subscribed
+The stdio bridge supports MCP 2026-07-28 per-request discovery.
+`subscriptions/listen` receives coalesced URI invalidations for subscribed
 resources; notifications do not contain image pixels, recognition text, or
 credentials. Subscribe to a job URI to reduce polling, then read it for state.
 The current Tasks extension is offered for negotiated document opening, background recognition,
@@ -208,14 +206,14 @@ MCP request cancellation maps to the owned application request through negotiate
 private IPC capabilities. Control requests retain capacity when ordinary work
 is saturated. Cancellation is cooperative: a file write already committed may
 return `outcome_may_have_completed`; inspect the destination before retrying.
-The private local IPC protocol remains `snow-shot-mcp/1`, with optional negotiated
-events/cancellation capabilities for compatibility with older applications.
+The private local IPC protocol is `snow-shot-mcp/1`. The bridge and application
+support resource events and request cancellation on every authenticated connection.
 
 ## Validation and platform gates
 
-Focused Rust tests and stdio protocol tests run on Windows, including five
-protocol versions, bounded payloads, saturation, cancellation, discovery and
-schema/dispatch agreement. All 28 legacy requests have checked input fixtures;
+Focused Rust tests and stdio protocol tests run on Windows for MCP 2026-07-28,
+including bounded payloads, saturation, cancellation, discovery and
+schema/dispatch agreement. All 28 screenshot requests have checked input fixtures;
 these verify contracts and are not a claim of native end-to-end feature coverage.
 The offscreen Qt fixture exercises actual bridge/Qt document and job operations.
 
@@ -224,8 +222,8 @@ behavior, clipboard, recording encoders/audio, permission prompts, packaging and
 disconnect finalization must be exercised on Windows and macOS. Native macOS
 validation is pending on this Windows development host. Run related performance
 targets with `windows-msvc-performance` or the macOS performance preset only.
-Bridge baseline comparisons against the same Qt fixture isolate bridge changes;
-they do not measure changes to the native capture or rendering implementation.
+The synthetic Qt fixture measures the current bridge and screenshot session code;
+it does not measure native capture behavior.
 
 ## Coordinates and selection
 
@@ -247,7 +245,7 @@ Rectangle bounds align outward to captured pixels through the existing model.
 
 ## Typed annotations
 
-Example `screenshot_apply_annotations` input:
+Example `snow_shot_screenshot_apply_annotations` input:
 
 ```json
 {
@@ -401,16 +399,14 @@ sentinel executable. It never launches the installed application and requires
 the repository's Rust toolchain.
 
 For measurements, build the Qt fixture with the performance preset. Supply
-`--benchmark --samples 100 --output <report.json>`; optionally pass
-`--baseline-bridge <original-HEAD-bridge>` built with the same Rust profile,
-target, CRT and linker flags. The report includes binary hashes, latency
+`--benchmark --samples 100 --output <report.json>`. The report includes binary hashes, latency
 percentiles, output bytes, Windows process CPU/working-set counters, 1080p/4K
 incompressible-image exports, cache checks, repeated cleanup cycles and a blocked
 stdout peer while a separate client queries status. GUI thread kernel CPU counters
 measure thread CPU usage; heartbeat lateness separately measures responsiveness.
-The optional `--legacy-fixture` and `--baseline-legacy-fixture` compare original/current
-Qt session and transport code through the same synthetic ports. Copy/pin acknowledgments
-and synthetic capture do not measure native desktop behavior. Process memory retained
+The optional `--screenshot-fixture` measures screenshot sessions through synthetic
+ports. Copy/pin acknowledgments and synthetic capture do not measure native desktop
+behavior. Process memory retained
 after cleanup can include allocator caches and alone does not establish a leak.
 
 The stdio smoke test uses an absent temporary descriptor and never captures the
@@ -421,7 +417,7 @@ macOS native validation was deferred by the user. See `MCP_VALIDATION.md` for th
 specific completed and outstanding gates.
 
 On Windows, the manual live probe starts an isolated Snow Shot instance and calls
-all 28 legacy routes through the bridge. It captures the current desktop, retains
+all 28 screenshot tools through the bridge. It captures the current desktop, retains
 and restores the clipboard, and briefly creates a pinned image. Its report separates
 successful native operations from ownership guards on provider/scrolling routes.
 It uses the test-build `--mcp-fixture` startup with isolated application storage.

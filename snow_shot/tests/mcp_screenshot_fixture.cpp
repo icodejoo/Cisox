@@ -1,5 +1,5 @@
-// Identical synthetic model/renderer ports are linked against baseline or current
-// MCP Qt transport/session sources. Native capture is deliberately outside scope.
+// Synthetic screenshot model and renderer ports for transport and session measurements.
+// Native capture is deliberately outside scope.
 #include "snow_shot/app/mcp/screenshotmcpserver.h"
 #include "snow_shot/app/mcp/screenshotmcpsession.h"
 #include "snow_draw_engine_qt/snow_canvas_runtime.h"
@@ -123,14 +123,14 @@ int main(int argc, char** argv) {
         SnowCanvasRuntimeEditor editor(runtime);
         const auto action = input.value(QStringLiteral("action")).toString();
         QJsonObject result;
-        if (method == QStringLiteral("screenshot_recognize") ||
-            method == QStringLiteral("screenshot_translate") ||
-            method == QStringLiteral("screenshot_auto_filter")) {
+        if (method == QStringLiteral("snow_shot_screenshot_recognize") ||
+            method == QStringLiteral("snow_shot_screenshot_translate") ||
+            method == QStringLiteral("snow_shot_screenshot_auto_filter")) {
             const auto generation = ++commandGeneration;
             QTimer::singleShot(20, &application, [&, generation, method, done = std::move(done)] {
                 if (generation != commandGeneration)
                     return;
-                recognizedText = method == QStringLiteral("screenshot_translate")
+                recognizedText = method == QStringLiteral("snow_shot_screenshot_translate")
                                      ? QStringLiteral("Fixture translated text")
                                      : QStringLiteral("Fixture recognized text");
                 done({{QStringLiteral("text"), recognizedText},
@@ -139,7 +139,7 @@ int main(int argc, char** argv) {
             });
             return;
         }
-        if (method == QStringLiteral("screenshot_scrolling")) {
+        if (method == QStringLiteral("snow_shot_screenshot_scrolling")) {
             if (action == QStringLiteral("start"))
                 scrolling = true;
             else if (action == QStringLiteral("stop"))
@@ -149,14 +149,14 @@ int main(int argc, char** argv) {
                 return;
             }
             result = {{QStringLiteral("scrolling"), scrolling}};
-        } else if (method == QStringLiteral("screenshot_scroll_once")) {
+        } else if (method == QStringLiteral("snow_shot_screenshot_scroll_once")) {
             if (!scrolling) {
                 done({}, QStringLiteral("action_unavailable"));
                 return;
             }
             result = {{QStringLiteral("scroll_steps"), ++scrollSteps}};
-        } else if (method == QStringLiteral("screenshot_edit_recognition") ||
-                   method == QStringLiteral("screenshot_export_recognition")) {
+        } else if (method == QStringLiteral("snow_shot_screenshot_edit_recognition") ||
+                   method == QStringLiteral("snow_shot_screenshot_export_recognition")) {
             if (recognizedText.isEmpty()) {
                 done({}, QStringLiteral("recognition_required"));
                 return;
@@ -164,7 +164,7 @@ int main(int argc, char** argv) {
             if (action == QStringLiteral("set_text"))
                 recognizedText = input.value(QStringLiteral("text")).toString();
             result = {{QStringLiteral("text"), recognizedText}};
-        } else if (method == QStringLiteral("screenshot_draw_template")) {
+        } else if (method == QStringLiteral("snow_shot_screenshot_draw_template")) {
             if (action == QStringLiteral("export"))
                 result = {{QStringLiteral("payload"),
                            QString::fromUtf8(runtime.serializeSelectedDrawTemplate())}};
@@ -174,7 +174,7 @@ int main(int argc, char** argv) {
                 done({}, QStringLiteral("action_unavailable"));
                 return;
             }
-        } else if (method == QStringLiteral("screenshot_edit_elements")) {
+        } else if (method == QStringLiteral("snow_shot_screenshot_edit_elements")) {
             bool ok = false;
             if (action == QStringLiteral("select")) {
                 const auto transaction =
@@ -193,11 +193,11 @@ int main(int argc, char** argv) {
                 done({}, QStringLiteral("action_unavailable"));
                 return;
             }
-        } else if (method == QStringLiteral("screenshot_recapture")) {
+        } else if (method == QStringLiteral("snow_shot_screenshot_recapture")) {
             static_cast<void>(runtime.clearDocumentPreservingViewports());
             phase = QStringLiteral("editing");
-        } else if (method == QStringLiteral("screenshot_set_selection_style") ||
-                   method == QStringLiteral("screenshot_set_tool_style")) {
+        } else if (method == QStringLiteral("snow_shot_screenshot_set_selection_style") ||
+                   method == QStringLiteral("snow_shot_screenshot_set_tool_style")) {
             result = {{QStringLiteral("fixture_style_acknowledged"), true}};
         } else {
             done({}, QStringLiteral("action_unavailable"));

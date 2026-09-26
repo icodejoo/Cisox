@@ -79,7 +79,7 @@ def main():
                         help="Require every tool and resource to appear in passing real-IPC driver reports")
     args = parser.parse_args()
     declarations = {
-        "legacy_screenshot": ("src/app/mcp/screenshotmcpsession.cpp", r"const QStringList tools\s*=\s*\{(.*?)\};"),
+        "screenshot": ("src/app/mcp/screenshotmcpsession.cpp", r"const QStringList tools\s*=\s*\{(.*?)\};"),
         "application": ("src/app/mcp/mcpapplicationservice.cpp", r"QStringList McpApplicationService::methods\(\).*?return\s*\{(.*?)\};"),
         "documents_jobs": ("src/app/mcp/mcpdocumentservice.cpp", r"const QStringList kTools\s*\{(.*?)\};"),
         "recording_pinned": ("src/app/mcp/mcpmediaservice.cpp", r"const QStringList methods\s*\{(.*?)\};"),
@@ -92,11 +92,11 @@ def main():
         assert qt_names == documented, f"{domain}: Qt-only={qt_names-documented}; matrix-only={documented-qt_names}"
         assert not all_qt & qt_names, f"Ambiguous dispatch ownership: {all_qt & qt_names}"
         all_qt |= qt_names
-    legacy = rust_catalog("rust/snow-shot-mcp/src/server.rs")
-    rust = legacy | rust_catalog("rust/snow-shot-mcp/src/domain_schemas.rs")
+    screenshot = rust_catalog("rust/snow-shot-mcp/src/server.rs")
+    rust = screenshot | rust_catalog("rust/snow-shot-mcp/src/domain_schemas.rs")
     assert rust == all_qt, f"Rust-only={rust-all_qt}; Qt-only={all_qt-rust}"
     fixtures = json.loads(read("tests/mcp_contract_fixtures.json"))["fixtures"]
-    assert {case["name"] for case in fixtures} == legacy and len(fixtures) == 28
+    assert {case["name"] for case in fixtures} == screenshot and len(fixtures) == 28
     check_surface_contracts(matrix)
     if args.execution_reports:
         reports = [json.loads(path.read_text(encoding="utf-8")) for path in args.execution_reports]
@@ -111,7 +111,7 @@ def main():
             pattern = "^" + "".join("[^/]+" if part.startswith("{") else re.escape(part) for part in parts) + "$"
             assert any(re.fullmatch(pattern, actual) for actual in read_uris), f"Resource missing real-IPC read: {uri}"
         print(f"MCP real-IPC execution coverage passed: {len(rust)} tools and {len(declared)} resource entries/templates.")
-    print(f"MCP capability agreement passed: {len(rust)} tools in {len(declarations)} domains, 28 legacy input contracts and {len(matrix['surface_contracts'])} reviewed UI catalogs.")
+    print(f"MCP capability agreement passed: {len(rust)} tools in {len(declarations)} domains, 28 screenshot input contracts and {len(matrix['surface_contracts'])} reviewed UI catalogs.")
 
 
 if __name__ == "__main__":

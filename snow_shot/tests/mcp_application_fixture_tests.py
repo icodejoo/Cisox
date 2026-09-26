@@ -97,7 +97,7 @@ def exercise_administration(client, directory):
 
 
 def exercise_modern_administration(bridge, descriptor):
-    client = Client(bridge, descriptor, modern=True, tasks=True)
+    client = Client(bridge, descriptor, tasks=True)
     try:
         created = client.tool("snow_shot_translation_start", {
             "texts": ["hello"], "model_id": "fixture", "source_language": "en", "target_language": "ja"})
@@ -512,10 +512,12 @@ def main():
     parser.add_argument("application", type=lambda value: Path(value).resolve(strict=True))
     parser.add_argument("--platform", default="offscreen", choices=("offscreen", "windows", "cocoa"))
     parser.add_argument("--recording", action="store_true",
-                        help="Also record a small native region with microphone and system audio disabled")
+                        help="Also record a small native region with microphone and system audio disabled; requires a native platform")
     parser.add_argument("--disable-mcp", action="store_true",
                         help="Verify disabling acknowledges before private IPC teardown")
     args = parser.parse_args()
+    if args.recording and args.platform == "offscreen":
+        parser.error("--recording requires --platform windows or --platform cocoa")
     with LocalProvider() as provider, tempfile.TemporaryDirectory(prefix="snow-shot-mcp-app-") as temporary:
         directory = Path(temporary)
         descriptor = directory / "descriptor.json"
@@ -552,7 +554,7 @@ def main():
                         while descriptor.exists() and time.monotonic() < deadline:
                             time.sleep(.025)
                         assert not descriptor.exists() and app.poll() is None
-                        status = client.tool("snow_shot_status")
+                        status = client.tool("snow_shot_mcp_status")
                         assert status["reachable"] is False, status
                         report["domains"].remove("quit_acknowledgement")
                         report["domains"].append("disable_acknowledgement_before_teardown")

@@ -807,35 +807,35 @@ fn model<T: JsonSchema + DeserializeOwned>(
 }
 pub fn schema(name: &str, input: Option<Value>) -> Result<Map<String, Value>, serde_json::Error> {
     match name {
-        "snow_shot_status" => model::<Empty>(input),
-        "screenshot_set_selection_style" => model::<Mutation<SelectionStyle>>(input),
-        "screenshot_set_tool_style" => model::<Mutation<ToolStyle>>(input),
-        "screenshot_edit_elements" => model::<Mutation<EditElements>>(input),
-        "screenshot_recapture" => model::<Mutation<Empty>>(input),
-        "screenshot_scrolling" => model::<Mutation<Scrolling>>(input),
-        "screenshot_scroll_once" => model::<Mutation<ScrollOnce>>(input),
-        "screenshot_recognize" => model::<Mutation<Recognize>>(input),
-        "screenshot_translate" => model::<Mutation<Empty>>(input),
-        "screenshot_auto_filter" => model::<Mutation<AutoFilter>>(input),
-        "screenshot_operation" => model::<Operation>(input),
-        "screenshot_edit_recognition" => model::<Mutation<EditRecognition>>(input),
-        "screenshot_export_recognition" => model::<Mutation<ExportRecognition>>(input),
-        "screenshot_draw_template" => model::<Mutation<DrawTemplate>>(input),
-        "screenshot_undo" => model::<Mutation<History>>(input),
-        "screenshot_redo" => model::<Mutation<History>>(input),
+        "snow_shot_mcp_status" => model::<Empty>(input),
+        "snow_shot_screenshot_set_selection_style" => model::<Mutation<SelectionStyle>>(input),
+        "snow_shot_screenshot_set_tool_style" => model::<Mutation<ToolStyle>>(input),
+        "snow_shot_screenshot_edit_elements" => model::<Mutation<EditElements>>(input),
+        "snow_shot_screenshot_recapture" => model::<Mutation<Empty>>(input),
+        "snow_shot_screenshot_scrolling" => model::<Mutation<Scrolling>>(input),
+        "snow_shot_screenshot_scroll_once" => model::<Mutation<ScrollOnce>>(input),
+        "snow_shot_screenshot_recognize" => model::<Mutation<Recognize>>(input),
+        "snow_shot_screenshot_translate" => model::<Mutation<Empty>>(input),
+        "snow_shot_screenshot_auto_filter" => model::<Mutation<AutoFilter>>(input),
+        "snow_shot_screenshot_operation" => model::<Operation>(input),
+        "snow_shot_screenshot_edit_recognition" => model::<Mutation<EditRecognition>>(input),
+        "snow_shot_screenshot_export_recognition" => model::<Mutation<ExportRecognition>>(input),
+        "snow_shot_screenshot_draw_template" => model::<Mutation<DrawTemplate>>(input),
+        "snow_shot_screenshot_undo" => model::<Mutation<History>>(input),
+        "snow_shot_screenshot_redo" => model::<Mutation<History>>(input),
 
-        "screenshot_begin" => model::<Begin>(input),
-        "screenshot_state" => model::<Session>(input),
-        "screenshot_set_selection" => model::<Mutation<Selection>>(input),
-        "screenshot_set_tool" => model::<Mutation<ToolInput>>(input),
-        "screenshot_apply_annotations" => model::<Mutation<Annotations>>(input),
-        "screenshot_render" | "screenshot_copy" | "screenshot_pin" => {
-            model::<Mutation<Render>>(input)
-        }
-        "screenshot_save" => model::<Mutation<Save>>(input),
-        "screenshot_finish" => model::<Mutation<Finish>>(input),
-        "screenshot_cancel" => model::<Cancel>(input),
-        "screenshot_direct_capture" => model::<Direct>(input),
+        "snow_shot_screenshot_begin" => model::<Begin>(input),
+        "snow_shot_screenshot_state" => model::<Session>(input),
+        "snow_shot_screenshot_set_selection" => model::<Mutation<Selection>>(input),
+        "snow_shot_screenshot_set_tool" => model::<Mutation<ToolInput>>(input),
+        "snow_shot_screenshot_apply_annotations" => model::<Mutation<Annotations>>(input),
+        "snow_shot_screenshot_render"
+        | "snow_shot_screenshot_copy"
+        | "snow_shot_screenshot_pin" => model::<Mutation<Render>>(input),
+        "snow_shot_screenshot_save" => model::<Mutation<Save>>(input),
+        "snow_shot_screenshot_finish" => model::<Mutation<Finish>>(input),
+        "snow_shot_screenshot_cancel" => model::<Cancel>(input),
+        "snow_shot_screenshot_direct_capture" => model::<Direct>(input),
         _ => domains::schema(name, input),
     }
 }
@@ -844,7 +844,7 @@ mod tests {
     use super::*;
     use serde_json::json;
     #[test]
-    fn every_legacy_tool_retains_its_checked_input_contract() {
+    fn every_screenshot_tool_accepts_its_checked_input_contract() {
         let fixture: Value =
             serde_json::from_str(include_str!("../../../tests/mcp_contract_fixtures.json"))
                 .unwrap();
@@ -854,7 +854,7 @@ mod tests {
             assert!(covered.insert(name), "duplicate contract: {name}");
             assert!(
                 schema(name, Some(case["arguments"].clone())).is_ok(),
-                "legacy contract rejected: {name}"
+                "screenshot contract rejected: {name}"
             );
             if case["arguments"].get("expected_revision").is_some() {
                 let mut stale = case["arguments"].clone();
@@ -875,15 +875,15 @@ mod tests {
     }
     #[test]
     fn workflow_schemas_are_typed() {
-        assert!(schema("screenshot_set_tool_style", Some(json!({"session_id":"s","expected_revision":1,"target":"arrow","style":{"arrow_shaft_type":"tapered","arrow_ratio":3}}))).is_ok());
-        assert!(schema("screenshot_set_tool_style", Some(json!({"session_id":"s","expected_revision":1,"target":"arrow","style":{"arrow_ratio":3.1}}))).is_err());
-        assert!(schema("screenshot_set_tool_style", Some(json!({"session_id":"s","expected_revision":1,"target":"text","style":{"horizontal_align":"center","vertical_align":"bottom","corner_radii":[0,1,2,3]}}))).is_ok());
-        assert!(schema("screenshot_set_tool_style", Some(json!({"session_id":"s","expected_revision":1,"target":"serial_number","style":{"serial_type":"solid_square","number":9007199254740991_u64}}))).is_ok());
-        assert!(schema("screenshot_set_tool_style", Some(json!({"session_id":"s","expected_revision":1,"target":"serial_number","style":{"number":9007199254740992_u64}}))).is_err());
+        assert!(schema("snow_shot_screenshot_set_tool_style", Some(json!({"session_id":"s","expected_revision":1,"target":"arrow","style":{"arrow_shaft_type":"tapered","arrow_ratio":3}}))).is_ok());
+        assert!(schema("snow_shot_screenshot_set_tool_style", Some(json!({"session_id":"s","expected_revision":1,"target":"arrow","style":{"arrow_ratio":3.1}}))).is_err());
+        assert!(schema("snow_shot_screenshot_set_tool_style", Some(json!({"session_id":"s","expected_revision":1,"target":"text","style":{"horizontal_align":"center","vertical_align":"bottom","corner_radii":[0,1,2,3]}}))).is_ok());
+        assert!(schema("snow_shot_screenshot_set_tool_style", Some(json!({"session_id":"s","expected_revision":1,"target":"serial_number","style":{"serial_type":"solid_square","number":9007199254740991_u64}}))).is_ok());
+        assert!(schema("snow_shot_screenshot_set_tool_style", Some(json!({"session_id":"s","expected_revision":1,"target":"serial_number","style":{"number":9007199254740992_u64}}))).is_err());
         for direction in ["up", "down", "left", "right"] {
             assert!(
                 schema(
-                    "screenshot_scroll_once",
+                    "snow_shot_screenshot_scroll_once",
                     Some(json!({"session_id":"s","expected_revision":1,"direction":direction}))
                 )
                 .is_ok()
@@ -893,26 +893,26 @@ mod tests {
             json!({"session_id":"s","expected_revision":1,"direction":"diagonal"}),
             json!({"session_id":"s","expected_revision":1,"direction":"down","count":100}),
         ] {
-            assert!(schema("screenshot_scroll_once", Some(bad)).is_err());
+            assert!(schema("snow_shot_screenshot_scroll_once", Some(bad)).is_err());
         }
         assert!(
             schema(
-                "screenshot_operation",
+                "snow_shot_screenshot_operation",
                 Some(json!({"session_id":"s","operation_id":"o"}))
             )
             .is_ok()
         );
         assert!(
             schema(
-                "screenshot_scrolling",
+                "snow_shot_screenshot_scrolling",
                 Some(json!({"session_id":"s","expected_revision":1,"action":"execute"}))
             )
             .is_err()
         );
-        assert!(schema("screenshot_edit_recognition", Some(json!({"session_id":"s","expected_revision":1,"action":"set_cell","row":0,"column":1,"text":"value"}))).is_ok());
+        assert!(schema("snow_shot_screenshot_edit_recognition", Some(json!({"session_id":"s","expected_revision":1,"action":"set_cell","row":0,"column":1,"text":"value"}))).is_ok());
         assert!(
             schema(
-                "screenshot_undo",
+                "snow_shot_screenshot_undo",
                 Some(json!({"session_id":"s","expected_revision":1,"target":"table"}))
             )
             .is_ok()
@@ -921,12 +921,12 @@ mod tests {
     }
     #[test]
     fn typed_inputs_require_revision_and_reject_unknown_operations() {
-        assert!(schema("screenshot_undo", Some(json!({"session_id":"s"}))).is_err());
-        assert!(schema("screenshot_apply_annotations",Some(json!({"session_id":"s","expected_revision":2,"operations":[{"type":"execute"}]}))).is_err());
-        assert!(schema("screenshot_set_selection",Some(json!({"session_id":"s","expected_revision":2,"type":"rectangle","bounds":[0,0,20,20]}))).is_ok());
-        assert!(schema("screenshot_apply_annotations",Some(json!({"session_id":"s","expected_revision":2,"operations":[{"type":"rectangle","bounds":[0,0,20,20],"style":{}}]}))).is_ok());
+        assert!(schema("snow_shot_screenshot_undo", Some(json!({"session_id":"s"}))).is_err());
+        assert!(schema("snow_shot_screenshot_apply_annotations",Some(json!({"session_id":"s","expected_revision":2,"operations":[{"type":"execute"}]}))).is_err());
+        assert!(schema("snow_shot_screenshot_set_selection",Some(json!({"session_id":"s","expected_revision":2,"type":"rectangle","bounds":[0,0,20,20]}))).is_ok());
+        assert!(schema("snow_shot_screenshot_apply_annotations",Some(json!({"session_id":"s","expected_revision":2,"operations":[{"type":"rectangle","bounds":[0,0,20,20],"style":{}}]}))).is_ok());
         let finish = schema(
-            "screenshot_finish",
+            "snow_shot_screenshot_finish",
             Some(json!({
                 "session_id": "s", "expected_revision": 2, "output": "render"
             })),
@@ -934,7 +934,7 @@ mod tests {
         assert!(finish.is_ok(), "{finish:?}");
         assert!(
             schema(
-                "screenshot_finish",
+                "snow_shot_screenshot_finish",
                 Some(json!({
                     "session_id": "s", "expected_revision": 2, "output": "save",
                     "path": "C:\\capture.png", "format": "png"
@@ -944,7 +944,7 @@ mod tests {
         );
         assert!(
             schema(
-                "screenshot_direct_capture",
+                "snow_shot_screenshot_direct_capture",
                 Some(json!({
                     "target": "current_monitor", "output": "render"
                 }))
@@ -953,7 +953,7 @@ mod tests {
         );
         assert!(
             schema(
-                "screenshot_direct_capture",
+                "snow_shot_screenshot_direct_capture",
                 Some(json!({
                     "target": "current_monitor", "output": "save",
                     "path": "C:\\capture.png", "format": "png"
@@ -963,7 +963,7 @@ mod tests {
         );
         assert!(
             schema(
-                "screenshot_direct_capture",
+                "snow_shot_screenshot_direct_capture",
                 Some(json!({
                     "target": "current_monitor"
                 }))

@@ -53,12 +53,12 @@ void ScreenshotController::mcpCommand(const QString& method, const QJsonObject& 
     const auto action = params.value(QStringLiteral("action")).toString();
     const bool scrolling =
         s.m_scrollingCaptureController && s.m_scrollingCaptureController->active();
-    if (scrolling && method != QStringLiteral("screenshot_scrolling") &&
-        method != QStringLiteral("screenshot_scroll_once")) {
+    if (scrolling && method != QStringLiteral("snow_shot_screenshot_scrolling") &&
+        method != QStringLiteral("snow_shot_screenshot_scroll_once")) {
         completion({}, QStringLiteral("invalid_state"));
         return;
     }
-    if (method == QStringLiteral("screenshot_set_selection_style")) {
+    if (method == QStringLiteral("snow_shot_screenshot_set_selection_style")) {
         auto candidate = s.m_selection;
         for (const auto& key : {QStringLiteral("corner_radius"), QStringLiteral("shadow_width")}) {
             if (!params.contains(key))
@@ -105,7 +105,7 @@ void ScreenshotController::mcpCommand(const QString& method, const QJsonObject& 
         success();
         return;
     }
-    if (method == QStringLiteral("screenshot_set_tool_style")) {
+    if (method == QStringLiteral("snow_shot_screenshot_set_tool_style")) {
         if (!canvas || !snow_shot::app::mcp::mcpStylePatch(s, *canvas, params)) {
             fail();
             return;
@@ -113,7 +113,7 @@ void ScreenshotController::mcpCommand(const QString& method, const QJsonObject& 
         success();
         return;
     }
-    if (method == QStringLiteral("screenshot_edit_elements")) {
+    if (method == QStringLiteral("snow_shot_screenshot_edit_elements")) {
         if (!canvas) {
             fail();
             return;
@@ -169,7 +169,7 @@ void ScreenshotController::mcpCommand(const QString& method, const QJsonObject& 
         success();
         return;
     }
-    if (method == QStringLiteral("screenshot_draw_template")) {
+    if (method == QStringLiteral("snow_shot_screenshot_draw_template")) {
         if (action == QStringLiteral("export")) {
             const auto payload = s.m_canvasRuntime.serializeSelectedDrawTemplate();
             if (payload.isEmpty()) {
@@ -188,7 +188,7 @@ void ScreenshotController::mcpCommand(const QString& method, const QJsonObject& 
         success();
         return;
     }
-    if (method == QStringLiteral("screenshot_scroll_once")) {
+    if (method == QStringLiteral("snow_shot_screenshot_scroll_once")) {
         if (!scrolling) {
             completion({}, QStringLiteral("scrolling_not_ready"));
             return;
@@ -199,7 +199,7 @@ void ScreenshotController::mcpCommand(const QString& method, const QJsonObject& 
         completion(std::move(result), std::move(error));
         return;
     }
-    if (method == QStringLiteral("screenshot_scrolling")) {
+    if (method == QStringLiteral("snow_shot_screenshot_scrolling")) {
         const auto axis = params.value(QStringLiteral("axis")).toString(QStringLiteral("vertical"));
         if ((action == QStringLiteral("start") || action == QStringLiteral("set_axis")) &&
             axis != QStringLiteral("vertical") && axis != QStringLiteral("horizontal")) {
@@ -273,13 +273,13 @@ void ScreenshotController::mcpCommand(const QString& method, const QJsonObject& 
                 return;
             }
         }
-    } else if (method == QStringLiteral("screenshot_recapture")) {
+    } else if (method == QStringLiteral("snow_shot_screenshot_recapture")) {
         if (!s.canRecapture()) {
             completion({}, QStringLiteral("action_unavailable"));
             return;
         }
         s.requestRecapture();
-    } else if (method == QStringLiteral("screenshot_recognize")) {
+    } else if (method == QStringLiteral("snow_shot_screenshot_recognize")) {
         const auto kind = params.value(QStringLiteral("kind")).toString();
         if (kind == QStringLiteral("text"))
             s.setOcrTool();
@@ -295,13 +295,13 @@ void ScreenshotController::mcpCommand(const QString& method, const QJsonObject& 
             fail();
             return;
         }
-    } else if (method == QStringLiteral("screenshot_translate")) {
+    } else if (method == QStringLiteral("snow_shot_screenshot_translate")) {
         if (!s.m_ocrController || !s.m_ocrController->hasTextResult()) {
             completion({}, QStringLiteral("recognition_required"));
             return;
         }
         s.m_ocrController->beginTextTranslation();
-    } else if (method == QStringLiteral("screenshot_auto_filter")) {
+    } else if (method == QStringLiteral("snow_shot_screenshot_auto_filter")) {
         const QStringList allowed{QStringLiteral("text"),      QStringLiteral("text_in_box"),
                                   QStringLiteral("image"),     QStringLiteral("avatar"),
                                   QStringLiteral("icon"),      QStringLiteral("message_box"),
@@ -322,21 +322,22 @@ void ScreenshotController::mcpCommand(const QString& method, const QJsonObject& 
             return;
         }
         s.m_autoFilterController->refresh();
-    } else if (method == QStringLiteral("screenshot_edit_recognition") ||
-               method == QStringLiteral("screenshot_undo") ||
-               method == QStringLiteral("screenshot_redo")) {
+    } else if (method == QStringLiteral("snow_shot_screenshot_edit_recognition") ||
+               method == QStringLiteral("snow_shot_screenshot_undo") ||
+               method == QStringLiteral("snow_shot_screenshot_redo")) {
         auto edit = params;
-        if (method != QStringLiteral("screenshot_edit_recognition"))
-            edit.insert(QStringLiteral("action"), method == QStringLiteral("screenshot_undo")
-                                                      ? QStringLiteral("undo")
-                                                      : QStringLiteral("redo"));
+        if (method != QStringLiteral("snow_shot_screenshot_edit_recognition"))
+            edit.insert(QStringLiteral("action"),
+                        method == QStringLiteral("snow_shot_screenshot_undo")
+                            ? QStringLiteral("undo")
+                            : QStringLiteral("redo"));
         if (!s.m_ocrController || !s.m_ocrController->editWorkflow(edit)) {
             completion({}, QStringLiteral("action_unavailable"));
             return;
         }
         success();
         return;
-    } else if (method == QStringLiteral("screenshot_export_recognition")) {
+    } else if (method == QStringLiteral("snow_shot_screenshot_export_recognition")) {
         if (!s.m_ocrController) {
             completion({}, QStringLiteral("recognition_required"));
             return;
@@ -417,17 +418,17 @@ void ScreenshotController::mcpCommand(const QString& method, const QJsonObject& 
         QJsonObject result;
         QString error;
         bool ready = false;
-        if (method == QStringLiteral("screenshot_recapture")) {
+        if (method == QStringLiteral("snow_shot_screenshot_recapture")) {
             ready = !s.m_recaptureBusy;
             if (ready && s.m_captureEpoch == epoch)
                 error = QStringLiteral("capture_unavailable");
-        } else if (method == QStringLiteral("screenshot_scrolling")) {
+        } else if (method == QStringLiteral("snow_shot_screenshot_scrolling")) {
             ready = s.m_scrollingCaptureController->state().value(QStringLiteral("ready")).toBool();
             if (!s.m_scrollingCaptureController->active()) {
                 ready = true;
                 error = QStringLiteral("capture_unavailable");
             }
-        } else if (method == QStringLiteral("screenshot_auto_filter")) {
+        } else if (method == QStringLiteral("snow_shot_screenshot_auto_filter")) {
             ready = !s.m_autoFilterController->detecting();
             if (ready &&
                 (!s.m_mcpOperationError.isEmpty() || !s.m_autoFilterController->available())) {

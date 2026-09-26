@@ -73,7 +73,11 @@ pub(super) fn resource_request(uri: &str) -> Result<(&'static str, Value), McpEr
             "document_id",
         ),
         ("snow-shot://jobs/", "snow_shot_job_get", "job_id"),
-        ("snow-shot://screenshots/", "screenshot_state", "session_id"),
+        (
+            "snow-shot://screenshots/",
+            "snow_shot_screenshot_state",
+            "session_id",
+        ),
         ("snow-shot://pinned/", "snow_shot_pinned_get", "id"),
         (
             "snow-shot://artifacts/",

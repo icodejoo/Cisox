@@ -25,138 +25,142 @@ mod tasks;
 
 pub(crate) const TOOLS: &[(&str, &str, bool)] = &[
     (
-        "snow_shot_status",
+        "snow_shot_mcp_status",
         "Report Snow Shot MCP availability and capabilities.",
         true,
     ),
     (
-        "screenshot_begin",
+        "snow_shot_screenshot_begin",
         "Start a Snow Shot screenshot editing session.",
         false,
     ),
     (
-        "screenshot_state",
+        "snow_shot_screenshot_state",
         "Read the current screenshot session state.",
         true,
     ),
     (
-        "screenshot_set_selection",
+        "snow_shot_screenshot_set_selection",
         "Set or modify the screenshot selection.",
         false,
     ),
     (
-        "screenshot_set_tool",
+        "snow_shot_screenshot_set_tool",
         "Select a Snow Shot annotation tool.",
         false,
     ),
     (
-        "screenshot_apply_annotations",
+        "snow_shot_screenshot_apply_annotations",
         "Apply a typed annotation transaction.",
         false,
     ),
     (
-        "screenshot_undo",
+        "snow_shot_screenshot_undo",
         "Undo the latest screenshot annotation transaction.",
         false,
     ),
     (
-        "screenshot_redo",
+        "snow_shot_screenshot_redo",
         "Redo the latest screenshot annotation transaction.",
         false,
     ),
     (
-        "screenshot_render",
+        "snow_shot_screenshot_render",
         "Render the current screenshot selection as an image.",
         true,
     ),
     (
-        "screenshot_save",
+        "snow_shot_screenshot_save",
         "Save the current screenshot selection to a file.",
         false,
     ),
     (
-        "screenshot_copy",
+        "snow_shot_screenshot_copy",
         "Copy the current screenshot selection to the clipboard.",
         false,
     ),
     (
-        "screenshot_pin",
+        "snow_shot_screenshot_pin",
         "Pin the current screenshot selection to the screen.",
         false,
     ),
     (
-        "screenshot_finish",
+        "snow_shot_screenshot_finish",
         "Finish and release a screenshot session.",
         false,
     ),
-    ("screenshot_cancel", "Cancel a screenshot session.", false),
     (
-        "screenshot_direct_capture",
+        "snow_shot_screenshot_cancel",
+        "Cancel a screenshot session.",
+        false,
+    ),
+    (
+        "snow_shot_screenshot_direct_capture",
         "Capture the current monitor or focused window directly.",
         false,
     ),
     (
-        "screenshot_set_selection_style",
+        "snow_shot_screenshot_set_selection_style",
         "Set selection decoration and aspect ratio lock.",
         false,
     ),
     (
-        "screenshot_set_tool_style",
+        "snow_shot_screenshot_set_tool_style",
         "Apply a partial toolbar style to the selected elements and drawing tool.",
         false,
     ),
     (
-        "screenshot_edit_elements",
+        "snow_shot_screenshot_edit_elements",
         "Edit selected screenshot elements using typed toolbar actions.",
         false,
     ),
     (
-        "screenshot_recapture",
+        "snow_shot_screenshot_recapture",
         "Replace the screenshot capture while retaining this session.",
         false,
     ),
     (
-        "screenshot_scrolling",
+        "snow_shot_screenshot_scrolling",
         "Control scrolling capture, axis, automatic scrolling, crop, and position.",
         false,
     ),
     (
-        "screenshot_scroll_once",
+        "snow_shot_screenshot_scroll_once",
         "Post one native wheel notch and return its dispatch status. Capture and stitching continue asynchronously.",
         false,
     ),
     (
-        "screenshot_recognize",
+        "snow_shot_screenshot_recognize",
         "Start text, table, QR, Markdown, or HTML recognition; poll the returned operation ID.",
         false,
     ),
     (
-        "screenshot_translate",
+        "snow_shot_screenshot_translate",
         "Translate recognized text with the configured provider; poll the returned operation ID.",
         false,
     ),
     (
-        "screenshot_auto_filter",
+        "snow_shot_screenshot_auto_filter",
         "Detect and filter sensitive information categories; poll the returned operation ID.",
         false,
     ),
     (
-        "screenshot_operation",
+        "snow_shot_screenshot_operation",
         "Read status and typed results for a screenshot operation.",
         true,
     ),
     (
-        "screenshot_edit_recognition",
+        "snow_shot_screenshot_edit_recognition",
         "Edit recognized text and table cells.",
         false,
     ),
     (
-        "screenshot_export_recognition",
+        "snow_shot_screenshot_export_recognition",
         "Return, copy, or save recognized content without dialogs.",
         false,
     ),
     (
-        "screenshot_draw_template",
+        "snow_shot_screenshot_draw_template",
         "Export selected drawing elements or insert a validated drawing template.",
         false,
     ),
@@ -297,7 +301,8 @@ impl SnowShotMcp {
                     _ => None,
                 };
                 let structured = json!({"reachable":reachable,"mcp_enabled":null,"error":{"code":error.code(),"message":error.to_string()}});
-                let mut result = if matches!(name, "snow_shot_status" | "snow_shot_app_status") {
+                let mut result = if matches!(name, "snow_shot_mcp_status" | "snow_shot_app_status")
+                {
                     CallToolResult::success(vec![ContentBlock::text(structured.to_string())])
                 } else {
                     CallToolResult::error(vec![ContentBlock::text(structured.to_string())])
@@ -364,10 +369,10 @@ impl Default for SnowShotMcp {
 fn destructive(name: &str) -> bool {
     !matches!(
         name,
-        "screenshot_begin"
-            | "screenshot_recognize"
-            | "screenshot_translate"
-            | "screenshot_pin"
+        "snow_shot_screenshot_begin"
+            | "snow_shot_screenshot_recognize"
+            | "snow_shot_screenshot_translate"
+            | "snow_shot_screenshot_pin"
             | "snow_shot_document_open"
             | "snow_shot_document_clone"
             | "snow_shot_document_recognize"
@@ -383,9 +388,9 @@ fn destructive(name: &str) -> bool {
 fn open_world(name: &str) -> bool {
     matches!(
         name,
-        "screenshot_recognize"
-            | "screenshot_translate"
-            | "screenshot_auto_filter"
+        "snow_shot_screenshot_recognize"
+            | "snow_shot_screenshot_translate"
+            | "snow_shot_screenshot_auto_filter"
             | "snow_shot_document_recognize"
             | "snow_shot_document_auto_filter"
             | "snow_shot_pinned_edit"
@@ -407,8 +412,12 @@ fn output_schema() -> serde_json::Map<String, Value> {
 }
 
 impl ServerHandler for SnowShotMcp {
+    fn supported_protocol_versions(&self) -> Cow<'static, [rmcp::model::ProtocolVersion]> {
+        Cow::Borrowed(&[rmcp::model::ProtocolVersion::V_2026_07_28])
+    }
+
     fn get_info(&self) -> ServerConfig {
-        ServerConfig::new(ServerCapabilities::builder().enable_tools().enable_resources().enable_resources_subscribe().enable_prompts().enable_completions().enable_tasks().build()).with_instructions(
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().enable_resources().enable_resources_subscribe().enable_prompts().enable_completions().enable_tasks().build()).with_protocol_version(rmcp::model::ProtocolVersion::V_2026_07_28).with_instructions(
             "Snow Shot provides local application, screenshot, background document, recording and pinned-image workflows. ".to_owned()
                 + "Start with snow_shot_app_status. Keep returned resource IDs and revisions; refresh after conflicts. Background documents are silent and client-owned. The application must have MCP enabled. Credentials are write-only.",
         )
@@ -496,24 +505,6 @@ impl ServerHandler for SnowShotMcp {
     }
     async fn listen(&self, context: rmcp::service::SubscriptionContext) -> Result<(), McpError> {
         self.subscriptions.listen(&self.client, context).await
-    }
-    #[allow(deprecated)]
-    async fn subscribe(
-        &self,
-        request: rmcp::model::SubscribeRequestParams,
-        context: RequestContext<RoleServer>,
-    ) -> Result<(), McpError> {
-        self.subscriptions
-            .subscribe(&self.client, request.uri, context)
-            .await
-    }
-    #[allow(deprecated)]
-    async fn unsubscribe(
-        &self,
-        request: rmcp::model::UnsubscribeRequestParams,
-        _context: RequestContext<RoleServer>,
-    ) -> Result<(), McpError> {
-        self.subscriptions.unsubscribe(&request.uri)
     }
     async fn get_task(
         &self,

@@ -43,7 +43,7 @@ fn main() {
                 try:
                     for attempt in range(2):
                         start = time.perf_counter()
-                        result = client.request("tools/call", {"name": "snow_shot_status", "arguments": {}})
+                        result = client.request("tools/call", {"name": "snow_shot_mcp_status", "arguments": {}})
                         content = result["structuredContent"]
                         assert content["reachable"] is False and content["mcp_enabled"] is None, content
                         assert content["error"]["code"] == "unavailable", content

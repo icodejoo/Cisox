@@ -256,7 +256,7 @@ int serve(QApplication& application, const QString& directory) {
     });
     heartbeat.start(10);
     server.setRequestHandler([&](const ScreenshotMcpRequest& request, auto completion) {
-        if (request.method == QStringLiteral("snow_shot_status")) {
+        if (request.method == QStringLiteral("snow_shot_mcp_status")) {
             ScreenshotMcpResponse response;
             response.ok = true;
             response.result = {{QStringLiteral("reachable"), true},
@@ -311,9 +311,9 @@ void documentReservations(const QString& directory) {
     const auto smallPath = QDir(directory).filePath(QStringLiteral("reservation-small.png"));
     const auto largePath = QDir(directory).filePath(QStringLiteral("reservation-large-header.png"));
     require(image.save(smallPath), "reservation source image");
-    QFile small(smallPath);
-    require(small.open(QIODevice::ReadOnly), "reservation source bytes");
-    auto header = small.readAll();
+    QFile sourceFile(smallPath);
+    require(sourceFile.open(QIODevice::ReadOnly), "reservation source bytes");
+    auto header = sourceFile.readAll();
     qToBigEndian<quint32>(8000, header.data() + 16);
     qToBigEndian<quint32>(8000, header.data() + 20);
     quint32 crc = 0xffffffff;

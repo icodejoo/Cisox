@@ -204,7 +204,7 @@ class ScreenshotMcpServer::SocketWorker final : public QObject {
     }
     void publishEvent(quint64 id, QJsonObject event) {
         const auto it = m_clients.find(id);
-        if (it == m_clients.end() || !it->authenticated || !it->events)
+        if (it == m_clients.end() || !it->authenticated)
             return;
         event.insert(QStringLiteral("protocol"), kProtocol);
         event.insert(QStringLiteral("kind"), QStringLiteral("event"));
@@ -227,8 +227,6 @@ class ScreenshotMcpServer::SocketWorker final : public QObject {
         QLocalSocket* socket = nullptr;
         QByteArray buffer;
         bool authenticated = false;
-        bool events = false;
-        bool requestCancellation = false;
         QString activeId;
         QSet<QString> controlIds;
         QSet<QString> backgroundIds;
@@ -381,21 +379,12 @@ class ScreenshotMcpServer::SocketWorker final : public QObject {
                     return;
                 }
                 c.authenticated = true;
-                const auto capabilities = params.value(QStringLiteral("capabilities")).toArray();
-                c.events = capabilities.contains(QStringLiteral("events"));
-                c.requestCancellation = capabilities.contains(QStringLiteral("cancel_request"));
                 publishConnectionCount();
                 ScreenshotMcpResponse reply;
                 reply.requestId = requestId;
                 reply.ok = true;
                 reply.result = {{QStringLiteral("protocol"), kProtocol},
                                 {QStringLiteral("handshake_ms"), c.connected.elapsed()}};
-                QJsonArray enabled;
-                if (c.events)
-                    enabled.append(QStringLiteral("events"));
-                if (c.requestCancellation)
-                    enabled.append(QStringLiteral("cancel_request"));
-                reply.result.insert(QStringLiteral("capabilities"), enabled);
                 write(c, reply);
                 continue;
             }
@@ -413,10 +402,6 @@ class ScreenshotMcpServer::SocketWorker final : public QObject {
                 continue;
             }
             if (method == QStringLiteral("snow_shot_request_cancel")) {
-                if (!c.requestCancellation) {
-                    write(c, failure(requestId, QStringLiteral("unsupported")));
-                    continue;
-                }
                 const auto target = request.value(QStringLiteral("params"))
                                         .toObject()
                                         .value(QStringLiteral("request_id"))
@@ -444,17 +429,17 @@ class ScreenshotMcpServer::SocketWorker final : public QObject {
                     continue;
                 }
             }
-            if ((method == QStringLiteral("screenshot_cancel") ||
+            if ((method == QStringLiteral("snow_shot_screenshot_cancel") ||
                  method == QStringLiteral("snow_shot_request_cancel") ||
-                 method == QStringLiteral("screenshot_state") ||
-                 method == QStringLiteral("screenshot_operation") ||
+                 method == QStringLiteral("snow_shot_screenshot_state") ||
+                 method == QStringLiteral("snow_shot_screenshot_operation") ||
                  method == QStringLiteral("snow_shot_job_get") ||
                  method == QStringLiteral("snow_shot_job_cancel") ||
                  method == QStringLiteral("snow_shot_document_state") ||
                  method == QStringLiteral("snow_shot_app_status") ||
                  method == QStringLiteral("snow_shot_recording_state") ||
                  method == QStringLiteral("snow_shot_recording_control") ||
-                 method == QStringLiteral("snow_shot_status")) &&
+                 method == QStringLiteral("snow_shot_mcp_status")) &&
                 (!c.activeId.isEmpty() || !c.backgroundIds.isEmpty())) {
                 // Cancellation must not sit behind the operation it cancels. The session adapter
                 // completes the active request before completing this cancellation request.

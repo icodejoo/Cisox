@@ -1371,6 +1371,7 @@ qt_add_executable(snow_shot
 )
 if(SNOW_SHOT_BUILD_TESTS)
     target_compile_definitions(snow_shot PRIVATE SNOW_SHOT_MCP_TEST_FIXTURE=1)
+    snow_shot_import_offscreen_platform(snow_shot)
 endif()
 
 if(WIN32)
@@ -5735,6 +5736,15 @@ if(SNOW_SHOT_BUILD_TESTS)
         tests/original_image_translation_tests.cpp tests/image_conversion_tests.cpp)
     get_target_property(_snow_mcp_transport_sources snow-shot-mcp-tests SOURCES)
     list(REMOVE_ITEM _snow_mcp_transport_sources tests/screenshot_mcp_tests.cpp)
+    add_executable(snow-shot-mcp-screenshot-fixture
+        ${_snow_mcp_transport_sources} tests/mcp_screenshot_fixture.cpp)
+    target_include_directories(snow-shot-mcp-screenshot-fixture PRIVATE include src/image)
+    target_link_libraries(snow-shot-mcp-screenshot-fixture PRIVATE snow_shot_diagnostics
+        snow_shot_image_codec snow_shot_storage snow_draw_engine_qt_canvas ant_design_qt Qt6::Widgets Qt6::Network)
+    if(WIN32)
+        target_link_libraries(snow-shot-mcp-screenshot-fixture PRIVATE user32 advapi32)
+    endif()
+    snow_shot_import_offscreen_platform(snow-shot-mcp-screenshot-fixture)
     list(APPEND _snow_mcp_document_sources ${_snow_mcp_transport_sources})
     list(REMOVE_DUPLICATES _snow_mcp_document_sources)
     add_executable(snow-shot-mcp-document-tests ${_snow_mcp_document_sources}
@@ -5760,7 +5770,8 @@ if(SNOW_SHOT_BUILD_TESTS)
     if(Python3_Interpreter_FOUND AND SNOW_SHOT_ENABLE_MCP)
         add_test(NAME snow-shot-mcp-fixture-tests
             COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/mcp_fixture_tests.py"
-                "$<TARGET_FILE:snow_shot_mcp>" "$<TARGET_FILE:snow-shot-mcp-document-tests>")
+                "$<TARGET_FILE:snow_shot_mcp>" "$<TARGET_FILE:snow-shot-mcp-document-tests>"
+                --screenshot-fixture "$<TARGET_FILE:snow-shot-mcp-screenshot-fixture>" --samples 1)
         set_tests_properties(snow-shot-mcp-fixture-tests PROPERTIES TIMEOUT 120 LABELS unit
             ENVIRONMENT "${_SNOW_SHOT_OFFSCREEN_QPA_ENVIRONMENT}"
             ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
@@ -5781,42 +5792,13 @@ if(SNOW_SHOT_BUILD_TESTS)
         ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
 
     if(SNOW_SHOT_BUILD_BENCHMARKS)
-        set(SNOW_SHOT_MCP_BASELINE_SOURCE_DIR "" CACHE PATH
-            "Original Snow Shot source tree for matched MCP transport benchmarks")
-        foreach(_variant IN ITEMS current baseline)
-            if(_variant STREQUAL "baseline" AND NOT SNOW_SHOT_MCP_BASELINE_SOURCE_DIR)
-                continue()
-            endif()
-            set(_sources ${_snow_mcp_transport_sources})
-            set(_include "${CMAKE_CURRENT_SOURCE_DIR}/include")
-            if(_variant STREQUAL "baseline")
-                list(REMOVE_ITEM _sources
-                    include/snow_shot/app/mcp/screenshotmcpserver.h
-                    include/snow_shot/app/mcp/screenshotmcpsession.h
-                    src/app/mcp/screenshotmcpserver.cpp src/app/mcp/screenshotmcpsession.cpp)
-                foreach(_file IN ITEMS include/snow_shot/app/mcp/screenshotmcpserver.h
-                    include/snow_shot/app/mcp/screenshotmcpsession.h
-                    src/app/mcp/screenshotmcpserver.cpp src/app/mcp/screenshotmcpsession.cpp)
-                    list(APPEND _sources "${SNOW_SHOT_MCP_BASELINE_SOURCE_DIR}/${_file}")
-                endforeach()
-                list(PREPEND _include "${SNOW_SHOT_MCP_BASELINE_SOURCE_DIR}/include")
-            endif()
-            add_executable(snow-shot-mcp-${_variant}-benchmark ${_sources} tests/mcp_legacy_fixture.cpp)
-            target_include_directories(snow-shot-mcp-${_variant}-benchmark PRIVATE ${_include} src/image)
-            target_link_libraries(snow-shot-mcp-${_variant}-benchmark PRIVATE snow_shot_diagnostics
-                snow_shot_image_codec snow_shot_storage snow_draw_engine_qt_canvas ant_design_qt Qt6::Widgets Qt6::Network)
-            if(WIN32)
-                target_link_libraries(snow-shot-mcp-${_variant}-benchmark PRIVATE user32 advapi32)
-            endif()
-            snow_shot_import_offscreen_platform(snow-shot-mcp-${_variant}-benchmark)
-        endforeach()
         if(SNOW_SHOT_ENABLE_MCP AND Python3_Interpreter_FOUND)
             add_custom_target(snow-shot-mcp-performance-benchmark
                 COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/mcp_fixture_tests.py"
                     "$<TARGET_FILE:snow_shot_mcp>" "$<TARGET_FILE:snow-shot-mcp-document-tests>"
-                    --benchmark --samples 50 --legacy-fixture "$<TARGET_FILE:snow-shot-mcp-current-benchmark>"
+                    --benchmark --samples 50 --screenshot-fixture "$<TARGET_FILE:snow-shot-mcp-screenshot-fixture>"
                     --output "${CMAKE_CURRENT_BINARY_DIR}/mcp-performance.json"
-                DEPENDS snow_shot_mcp snow-shot-mcp-document-tests snow-shot-mcp-current-benchmark
+                DEPENDS snow_shot_mcp snow-shot-mcp-document-tests snow-shot-mcp-screenshot-fixture
                 USES_TERMINAL)
         endif()
     endif()

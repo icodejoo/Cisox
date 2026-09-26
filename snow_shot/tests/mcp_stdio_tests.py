@@ -9,19 +9,20 @@ import tempfile
 import threading
 
 
-LEGACY_TOOLS = {
-    "snow_shot_status", "screenshot_begin", "screenshot_state", "screenshot_set_selection",
-    "screenshot_set_tool", "screenshot_apply_annotations", "screenshot_undo", "screenshot_redo",
-    "screenshot_render", "screenshot_save", "screenshot_copy", "screenshot_pin", "screenshot_finish",
-    "screenshot_cancel", "screenshot_direct_capture", "screenshot_set_selection_style",
-    "screenshot_set_tool_style", "screenshot_edit_elements", "screenshot_recapture",
-    "screenshot_scrolling", "screenshot_scroll_once", "screenshot_recognize", "screenshot_translate",
-    "screenshot_auto_filter", "screenshot_operation", "screenshot_edit_recognition",
-    "screenshot_export_recognition", "screenshot_draw_template",
+SCREENSHOT_TOOLS = {
+    "snow_shot_mcp_status", "snow_shot_screenshot_begin", "snow_shot_screenshot_state", "snow_shot_screenshot_set_selection",
+    "snow_shot_screenshot_set_tool", "snow_shot_screenshot_apply_annotations", "snow_shot_screenshot_undo", "snow_shot_screenshot_redo",
+    "snow_shot_screenshot_render", "snow_shot_screenshot_save", "snow_shot_screenshot_copy", "snow_shot_screenshot_pin", "snow_shot_screenshot_finish",
+    "snow_shot_screenshot_cancel", "snow_shot_screenshot_direct_capture", "snow_shot_screenshot_set_selection_style",
+    "snow_shot_screenshot_set_tool_style", "snow_shot_screenshot_edit_elements", "snow_shot_screenshot_recapture",
+    "snow_shot_screenshot_scrolling", "snow_shot_screenshot_scroll_once", "snow_shot_screenshot_recognize", "snow_shot_screenshot_translate",
+    "snow_shot_screenshot_auto_filter", "snow_shot_screenshot_operation", "snow_shot_screenshot_edit_recognition",
+    "snow_shot_screenshot_export_recognition", "snow_shot_screenshot_draw_template",
 }
 
 
-def exercise(executable, version):
+def exercise(executable):
+    version = "2026-07-28"
     with tempfile.TemporaryDirectory(prefix="snow-shot-mcp-smoke-") as directory:
         environment = dict(os.environ)
         environment["SNOW_SHOT_MCP_DESCRIPTOR"] = str(Path(directory) / "absent.json")
@@ -58,34 +59,25 @@ def exercise(executable, version):
                     assert ("error" in message) == expect_error, message
                     return message["error"] if expect_error else message["result"]
         try:
-            if version == "2026-07-28":
-                send({"jsonrpc":"2.0","id":1,"method":"server/discover","params":{}})
-                discovery = response(1)
-                assert version in discovery["supportedVersions"], discovery
-                assert discovery["ttlMs"] >= 0, discovery
-            else:
-                send({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
-                    "protocolVersion":version,"capabilities":{},
-                    "clientInfo":{"name":"snow-shot-package-smoke","version":"1"}}})
-                discovery = response(1)
-                assert discovery["protocolVersion"] == version, discovery
-                send({"jsonrpc":"2.0","method":"notifications/initialized"})
+            send({"jsonrpc":"2.0","id":1,"method":"server/discover","params":{}})
+            discovery = response(1)
+            assert discovery["supportedVersions"] == [version], discovery
+            assert discovery["ttlMs"] >= 0, discovery
             for capability in ["tools", "resources", "prompts", "completions"]:
                 assert capability in discovery["capabilities"], discovery
             send({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}})
             listed = response(2)
             tools = listed["tools"]
             names = {tool["name"] for tool in tools}
-            assert LEGACY_TOOLS <= names and len(names) == len(tools), names
+            assert SCREENSHOT_TOOLS <= names and len(names) == len(tools), names
             assert {"snow_shot_document_open", "snow_shot_recording_start", "snow_shot_settings_update"} <= names
-            if version == "2026-07-28":
-                assert listed["ttlMs"] == 300000 and listed["cacheScope"] == "public", listed
+            assert listed["ttlMs"] == 300000 and listed["cacheScope"] == "public", listed
             assert all("outputSchema" in tool for tool in tools)
             schemas = {tool["name"]:tool["inputSchema"] for tool in tools}
-            assert "expected_revision" in schemas["screenshot_apply_annotations"]["required"]
-            assert "operations" in schemas["screenshot_apply_annotations"]["required"]
+            assert "expected_revision" in schemas["snow_shot_screenshot_apply_annotations"]["required"]
+            assert "operations" in schemas["snow_shot_screenshot_apply_annotations"]["required"]
             send({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{
-                "name":"snow_shot_status","arguments":{}}})
+                "name":"snow_shot_mcp_status","arguments":{}}})
             status = response(3)
             assert not status.get("isError", False), status
             assert status["structuredContent"]["reachable"] is False, status
@@ -116,7 +108,7 @@ def exercise(executable, version):
             assert response(12)["isError"] is True
             invalid_secret = "fixture-invalid-secret-never-in-diagnostics-91374"
             send({"jsonrpc":"2.0","id":13,"method":"tools/call","params":{
-                "name":"screenshot_set_tool","arguments":{
+                "name":"snow_shot_screenshot_set_tool","arguments":{
                     "session_id":"s","expected_revision":1,"tool":invalid_secret}}})
             assert response(13, True)["code"] == -32602
             for identifier, prompt, expected in ((14, "screenshot_workflow", "session_id"),
@@ -128,7 +120,7 @@ def exercise(executable, version):
             assert process.wait(timeout=10) == 0, diagnostics
             assert secret not in "".join(diagnostics), "SDK logs exposed credential contents"
             assert invalid_secret not in "".join(diagnostics), "SDK error logs exposed invalid argument contents"
-            print(f"MCP {version}: discovery, preserved legacy contracts, schemas, resources, prompts, completion, errors and clean exit passed.")
+            print(f"MCP {version}: discovery, screenshot contracts, schemas, resources, prompts, completion, errors and clean exit passed.")
         finally:
             if process.poll() is None:
                 process.kill()
@@ -148,8 +140,16 @@ def main():
                                       capture_output=True, timeout=5)
     assert premature_result.returncode != 0
     assert startup_secret.encode() not in premature_result.stderr, "Initialization errors exposed a rejected request"
-    for version in ("2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25", "2026-07-28"):
-        exercise(executable, version)
+    exercise(executable)
+    obsolete_initialize = {"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+        "protocolVersion":"2025-11-25","capabilities":{},
+        "clientInfo":{"name":"obsolete-client","version":"1"}}}
+    obsolete_result = subprocess.run([str(executable)],
+                                    input=(json.dumps(obsolete_initialize) + "\n").encode(),
+                                    capture_output=True, timeout=5)
+    rejection = json.loads(obsolete_result.stdout)
+    assert rejection["error"]["code"] == -32022, rejection
+    assert rejection["error"]["data"]["supported"] == ["2026-07-28"], rejection
     # Large SDK input lines must be bounded before JSON parsing or local dispatch.
     process = subprocess.Popen([str(executable)], stdin=subprocess.PIPE,
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -160,11 +160,13 @@ def main():
     process = subprocess.Popen([str(executable)], stdin=subprocess.PIPE,
                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     try:
-        requests = [{"jsonrpc":"2.0","id":1,"method":"initialize","params":{
-            "protocolVersion":"2025-06-18","capabilities":{},
-            "clientInfo":{"name":"slow-reader","version":"1"}}},
-            {"jsonrpc":"2.0","method":"notifications/initialized"}]
-        requests.extend({"jsonrpc":"2.0","id":index,"method":"tools/list","params":{}}
+        metadata = {"_meta": {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientInfo": {"name":"slow-reader","version":"1"},
+            "io.modelcontextprotocol/clientCapabilities": {},
+        }}
+        requests = [{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{}}]
+        requests.extend({"jsonrpc":"2.0","id":index,"method":"tools/list","params":metadata}
                         for index in range(2, 28))
         process.stdin.write(b"".join(json.dumps(message).encode() + b"\n" for message in requests))
         process.stdin.flush()

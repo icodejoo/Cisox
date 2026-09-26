@@ -1038,7 +1038,7 @@ mod tests {
         assert!(schema("snow_shot_document_save", Some(json!({"document_id":"d","expected_revision":1,"path":"C:/output.pdf","format":"pdf","quality":90,"compression_level":"medium","pdf_page_size":"a4_landscape","pdf_title":"Fixture"}))).is_ok());
         assert!(schema("snow_shot_document_edit_elements", Some(json!({"document_id":"d","expected_revision":1,"action":"erase_path","points":[[1,2],[3,4]]}))).is_ok());
         assert!(schema("snow_shot_document_edit_elements", Some(json!({"document_id":"d","expected_revision":1,"action":"erase_path","points":[]}))).is_err());
-        assert!(super::super::schema("screenshot_edit_elements", Some(json!({"session_id":"s","expected_revision":1,"action":"erase_path","points":[[1,2]]}))).is_err());
+        assert!(super::super::schema("snow_shot_screenshot_edit_elements", Some(json!({"session_id":"s","expected_revision":1,"action":"erase_path","points":[[1,2]]}))).is_err());
         assert!(schema("snow_shot_pinned_edit", Some(json!({"id":"p","expected_revision":1,"action":"tool_style","payload":{"target":"arrow","style":{"arrow_ratio":2}}}))).is_ok());
         assert!(
             schema(

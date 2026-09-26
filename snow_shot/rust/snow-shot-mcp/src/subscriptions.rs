@@ -1,36 +1,16 @@
 use super::{McpError, discovery};
 use crate::app_client::{AppClient, AppEvent};
-use rmcp::{
-    RoleServer,
-    model::*,
-    service::{RequestContext, SubscriptionContext},
-};
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Mutex,
-    time::Duration,
-};
+use rmcp::{model::*, service::SubscriptionContext};
+use std::{collections::HashSet, time::Duration};
 use tokio::sync::{Semaphore, broadcast};
-use tokio::task::AbortHandle;
 
 pub(super) struct Subscriptions {
-    legacy: Mutex<HashMap<String, AbortHandle>>,
     modern: Semaphore,
 }
 impl Default for Subscriptions {
     fn default() -> Self {
         Self {
-            legacy: Mutex::new(HashMap::new()),
             modern: Semaphore::new(8),
-        }
-    }
-}
-impl Drop for Subscriptions {
-    fn drop(&mut self) {
-        if let Ok(subscriptions) = self.legacy.get_mut() {
-            for (_, handle) in subscriptions.drain() {
-                handle.abort();
-            }
         }
     }
 }
@@ -116,65 +96,6 @@ impl Subscriptions {
                 }
             }
         }
-    }
-    pub(super) async fn subscribe(
-        &self,
-        client: &AppClient,
-        uri: String,
-        context: RequestContext<RoleServer>,
-    ) -> Result<(), McpError> {
-        if !valid_uri(&uri) {
-            return Err(McpError::invalid_params(
-                "Invalid resource subscription URI",
-                None,
-            ));
-        }
-        let mut receiver = client.subscribe_events();
-        client
-            .connect_events()
-            .await
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        let mut registered = self
-            .legacy
-            .lock()
-            .map_err(|_| McpError::internal_error("Subscription registry unavailable", None))?;
-        if registered.contains_key(&uri) {
-            return Ok(());
-        }
-        if registered.len() >= 64 {
-            return Err(McpError::invalid_params(
-                "Too many resource subscriptions",
-                None,
-            ));
-        }
-        let key = uri.clone();
-        let task = tokio::spawn(async move {
-            let accepted = vec![uri.clone()];
-            while let Some(changed) = batch(&mut receiver, &accepted).await {
-                if changed.contains(&uri)
-                    && context
-                        .peer
-                        .notify_resource_updated(ResourceUpdatedNotificationParam::new(uri.clone()))
-                        .await
-                        .is_err()
-                {
-                    break;
-                }
-            }
-        });
-        registered.insert(key, task.abort_handle());
-        Ok(())
-    }
-    pub(super) fn unsubscribe(&self, uri: &str) -> Result<(), McpError> {
-        if let Some(handle) = self
-            .legacy
-            .lock()
-            .map_err(|_| McpError::internal_error("Subscription registry unavailable", None))?
-            .remove(uri)
-        {
-            handle.abort();
-        }
-        Ok(())
     }
 }
 

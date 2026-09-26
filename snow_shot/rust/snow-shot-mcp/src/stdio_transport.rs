@@ -18,7 +18,7 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 // Larger than the application's 1 MiB + 4096-byte request envelope, leaving
-// space for JSON-RPC and modern metadata without shrinking any legacy input.
+// space for JSON-RPC metadata without shrinking the application request limit.
 const MAX_INPUT_LINE: usize = 1024 * 1024 + 65536;
 // A 64 MiB IPC frame may expand to base64 plus duplicated structured/text JSON.
 const MAX_QUEUED_OUTPUT: usize = 128 * 1024 * 1024;

@@ -104,7 +104,7 @@ class RecognitionProvider:
 class Client:
     executed_tools = set()
     read_resources = set()
-    def __init__(self, executable, descriptor, modern=False, tasks=False, launch=False):
+    def __init__(self, executable, descriptor, tasks=False, launch=False):
         environment = dict(os.environ, SNOW_SHOT_MCP_DESCRIPTOR=str(descriptor))
         self.process = subprocess.Popen([str(executable)] + (["--launch-app"] if launch else []), stdin=subprocess.PIPE,
                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -112,7 +112,6 @@ class Client:
         self.messages = queue.Queue()
         self.notifications = []
         self.diagnostics = []
-        self.modern = modern
         self.capabilities = {"extensions": {"io.modelcontextprotocol/tasks": {}}} if tasks else {}
         self.sequence = 0
         self.bytes_received = 0
@@ -128,15 +127,10 @@ class Client:
             self.diagnostics.extend(self.process.stderr)
         threading.Thread(target=read_stdout, daemon=True).start()
         threading.Thread(target=read_stderr, daemon=True).start()
-        if modern:
-            self.request("server/discover")
-        else:
-            self.request("initialize", {"protocolVersion": "2025-06-18", "capabilities": {},
-                         "clientInfo": {"name": "snow-shot-fixture", "version": "1"}})
-            self.send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+        self.request("server/discover")
 
     def send(self, message):
-        if self.modern and "id" in message:
+        if "id" in message:
             message.setdefault("params", {}).setdefault("_meta", {}).update({
                 "io.modelcontextprotocol/protocolVersion": "2026-07-28",
                 "io.modelcontextprotocol/clientInfo": {"name": "snow-shot-fixture", "version": "1"},
@@ -265,7 +259,7 @@ def document_workflow(client, directory, samples):
     assert duplicate["result"]["document_id"] == identifier
     arguments = {"document_id": identifier, "expected_revision": revision}
     uri = "snow-shot://documents/" + identifier
-    client.request("resources/subscribe", {"uri": uri})
+    subscription = client.listen(uri)
     changed = client.tool("snow_shot_document_apply_annotations", dict(arguments,
                           operations=[{"type": "rectangle", "bounds": [10, 10, 20, 20]}]))
     revision = changed["revision"]
@@ -281,7 +275,7 @@ def document_workflow(client, directory, samples):
     assert (directory / "output.png").is_file(), saved
     job = client.tool("snow_shot_document_recognize", dict(arguments, kind="text"))["result"]
     job_uri = "snow-shot://jobs/" + job["job_id"]
-    client.request("resources/subscribe", {"uri": job_uri})
+    job_subscription = client.listen(job_uri)
     deadline = time.monotonic() + 10
     while job["status"] == "running" and time.monotonic() < deadline:
         time.sleep(.25)
@@ -296,17 +290,20 @@ def document_workflow(client, directory, samples):
     # A synchronous read after a short coalescing interval drains preceding notifications.
     time.sleep(.2)
     client.tool("snow_shot_document_state", {"document_id": identifier})
-    updated = {notice.get("params", {}).get("uri") for notice in client.notifications
+    updated = {(notice.get("params", {}).get("uri"),
+                notice.get("params", {}).get("_meta", {}).get("io.modelcontextprotocol/subscriptionId"))
+               for notice in client.notifications
                if notice.get("method") == "notifications/resources/updated"}
-    assert uri in updated and job_uri in updated, client.notifications
-    client.request("resources/unsubscribe", {"uri": uri})
-    client.request("resources/unsubscribe", {"uri": job_uri})
+    assert (uri, subscription) in updated and (job_uri, job_subscription) in updated, client.notifications
+    for subscription_id in (subscription, job_subscription):
+        client.send({"jsonrpc": "2.0", "method": "notifications/cancelled",
+                     "params": {"requestId": subscription_id}})
     client.tool("snow_shot_document_close", arguments)
     return identifier
 
 
 def modern_task_workflow(executable, descriptor, directory):
-    client = Client(executable, descriptor, modern=True, tasks=True)
+    client = Client(executable, descriptor, tasks=True)
     try:
         opened = client.tool("snow_shot_document_open", {"path": str(directory / "source.png")})
         if opened.get("resultType") == "task":
@@ -626,7 +623,13 @@ def slow_reader_controls(executable, descriptor, directory):
                                stderr=subprocess.DEVNULL, text=True, encoding="utf-8", env=environment)
     observer = Client(executable, descriptor)
     def send(identifier, method, params):
-        process.stdin.write(json.dumps({"jsonrpc": "2.0", "id": identifier, "method": method, "params": params}) + "\n")
+        params = dict(params, _meta={
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientInfo": {"name": "slow-reader-fixture", "version": "1"},
+            "io.modelcontextprotocol/clientCapabilities": {},
+        })
+        process.stdin.write(json.dumps({"jsonrpc": "2.0", "id": identifier,
+                                        "method": method, "params": params}) + "\n")
         process.stdin.flush()
     def response(identifier):
         while True:
@@ -635,11 +638,8 @@ def slow_reader_controls(executable, descriptor, directory):
                 assert "error" not in value, value
                 return value["result"]
     try:
-        send(1, "initialize", {"protocolVersion": "2025-06-18", "capabilities": {},
-                              "clientInfo": {"name": "slow-reader-fixture", "version": "1"}})
+        send(1, "server/discover", {})
         response(1)
-        process.stdin.write('{"jsonrpc":"2.0","method":"notifications/initialized"}\n')
-        process.stdin.flush()
         send(2, "tools/call", {"name": "snow_shot_document_open", "arguments": {"path": str(directory / "4k.png")}})
         opened = response(2)["structuredContent"]
         args = {"document_id": opened["result"]["document_id"], "expected_revision": opened["revision"]}
@@ -652,7 +652,7 @@ def slow_reader_controls(executable, descriptor, directory):
             if metrics:
                 peaks.append(metrics)
             instant = time.perf_counter()
-            observer.tool("snow_shot_status")
+            observer.tool("snow_shot_mcp_status")
             control_ms.append((time.perf_counter() - instant) * 1000)
             time.sleep(.1)
         assert process.poll() is not None, "Non-reading peer did not retire within 18 seconds"
@@ -723,40 +723,39 @@ def concurrent_clients(executable, descriptor, directory):
         return list(executor.map(exercise, range(4)))
 
 
-def legacy_workflow(client, directory, samples, current, size=(800, 600)):
+def screenshot_workflow(client, directory, samples, size=(800, 600)):
     for index in range(samples):
         started = time.perf_counter()
-        state = client.tool("screenshot_begin", {"presentation": "silent", "target": "all_displays"}, label="legacy_begin")
+        state = client.tool("snow_shot_screenshot_begin", {"presentation": "silent", "target": "all_displays"}, label="screenshot_begin")
         arguments = {"session_id": state["session_id"], "expected_revision": state["revision"]}
         def mutate(name, extra=None, label=None):
             result = client.tool(name, dict(arguments, **(extra or {})), label=label)
             if "revision" in result:
                 arguments["expected_revision"] = result["revision"]
             return result
-        mutate("screenshot_set_selection", {"type": "rectangle", "bounds": [0, 0, *size]})
-        mutate("screenshot_set_tool", {"tool": "rectangle"})
-        mutate("screenshot_apply_annotations", {"version": 1, "operations": [
+        mutate("snow_shot_screenshot_set_selection", {"type": "rectangle", "bounds": [0, 0, *size]})
+        mutate("snow_shot_screenshot_set_tool", {"tool": "rectangle"})
+        mutate("snow_shot_screenshot_apply_annotations", {"version": 1, "operations": [
             {"type": "rectangle", "bounds": [10, 10, 50, 40],
-             "style": {"stroke": [255, 0, 0, 255], "stroke_width": 2}}]}, label="legacy_annotations")
-        mutate("screenshot_undo")
-        mutate("screenshot_redo")
-        first = mutate("screenshot_render", label="legacy_render_cold")
-        cached = mutate("screenshot_render", label="legacy_render_cached")
+             "style": {"stroke": [255, 0, 0, 255], "stroke_width": 2}}]}, label="screenshot_annotations")
+        mutate("snow_shot_screenshot_undo")
+        mutate("snow_shot_screenshot_redo")
+        first = mutate("snow_shot_screenshot_render", label="screenshot_render_cold")
+        cached = mutate("snow_shot_screenshot_render", label="screenshot_render_cached")
         assert first["result"]["sha256"] == cached["result"]["sha256"], cached
-        if current:
-            assert cached["result"]["timings_ms"].get("cache_hit"), cached
-            assert "encode" not in cached["result"]["timings_ms"], cached
-        mutate("screenshot_save", {"path": str(directory / f"legacy-{index}.png"), "format": "png"}, label="legacy_save")
-        mutate("screenshot_copy")  # Fixture acknowledgments; not native clipboard coverage.
-        mutate("screenshot_pin")   # Fixture acknowledgments; not native pinned-window coverage.
-        mutate("screenshot_finish", {"output": "none"})
-        client.samples.setdefault("legacy_complete_workflow", []).append((time.perf_counter() - started) * 1000)
+        assert cached["result"]["timings_ms"].get("cache_hit"), cached
+        assert "encode" not in cached["result"]["timings_ms"], cached
+        mutate("snow_shot_screenshot_save", {"path": str(directory / f"screenshot-{index}.png"), "format": "png"}, label="screenshot_save")
+        mutate("snow_shot_screenshot_copy")  # Fixture acknowledgments; not native clipboard coverage.
+        mutate("snow_shot_screenshot_pin")   # Fixture acknowledgments; not native pinned-window coverage.
+        mutate("snow_shot_screenshot_finish", {"output": "none"})
+        client.samples.setdefault("screenshot_complete_workflow", []).append((time.perf_counter() - started) * 1000)
 
 
-def legacy_wait_operation(client, session, operation):
+def screenshot_wait_operation(client, session, operation):
     deadline = time.monotonic() + 10
     while True:
-        result = client.tool("screenshot_operation", {"session_id": session, "operation_id": operation})
+        result = client.tool("snow_shot_screenshot_operation", {"session_id": session, "operation_id": operation})
         if result["result"]["status"] != "running" or time.monotonic() >= deadline:
             break
         time.sleep(.025)
@@ -764,38 +763,38 @@ def legacy_wait_operation(client, session, operation):
     return result
 
 
-def legacy_contract_outcomes(client, directory, resources=False):
+def screenshot_contract_outcomes(client, directory, resources=False):
     fixtures = json.loads(Path(__file__).with_name("mcp_contract_fixtures.json").read_text(encoding="utf-8"))["fixtures"]
     outcomes = {}
     for case in fixtures:
-        client.tool("screenshot_cancel")
+        client.tool("snow_shot_screenshot_cancel")
         name = case["name"]
         arguments = dict(case["arguments"])
-        if name not in ("snow_shot_status", "screenshot_begin", "screenshot_direct_capture"):
-            opened = client.tool("screenshot_begin", {"presentation": "silent", "target": "all_displays"})
+        if name not in ("snow_shot_mcp_status", "snow_shot_screenshot_begin", "snow_shot_screenshot_direct_capture"):
+            opened = client.tool("snow_shot_screenshot_begin", {"presentation": "silent", "target": "all_displays"})
             if "session_id" in arguments:
                 arguments["session_id"] = opened["session_id"]
             if "expected_revision" in arguments:
                 arguments["expected_revision"] = opened["revision"]
             setup = {"session_id": opened["session_id"], "expected_revision": opened["revision"]}
-            if name == "screenshot_cancel":
+            if name == "snow_shot_screenshot_cancel":
                 client.tool(name, dict(arguments), error="request_not_found")
                 arguments.pop("request_id")
-            if name in ("screenshot_edit_recognition", "screenshot_export_recognition", "screenshot_operation"):
-                operation = client.tool("screenshot_recognize", dict(setup, kind="text"))
-                completed = legacy_wait_operation(client, opened["session_id"], operation["result"]["operation_id"])
-                if name == "screenshot_operation":
+            if name in ("snow_shot_screenshot_edit_recognition", "snow_shot_screenshot_export_recognition", "snow_shot_screenshot_operation"):
+                operation = client.tool("snow_shot_screenshot_recognize", dict(setup, kind="text"))
+                completed = screenshot_wait_operation(client, opened["session_id"], operation["result"]["operation_id"])
+                if name == "snow_shot_screenshot_operation":
                     arguments["operation_id"] = operation["result"]["operation_id"]
                 else:
                     arguments["expected_revision"] = completed["revision"]
-            if name == "screenshot_scroll_once":
-                scrolling = client.tool("screenshot_scrolling", dict(setup, action="start", axis="vertical"))
+            if name == "snow_shot_screenshot_scroll_once":
+                scrolling = client.tool("snow_shot_screenshot_scrolling", dict(setup, action="start", axis="vertical"))
                 arguments["expected_revision"] = scrolling["revision"]
-            if name in ("screenshot_edit_elements", "screenshot_draw_template"):
-                drawn = client.tool("screenshot_apply_annotations", dict(setup, version=1, operations=[
+            if name in ("snow_shot_screenshot_edit_elements", "snow_shot_screenshot_draw_template"):
+                drawn = client.tool("snow_shot_screenshot_apply_annotations", dict(setup, version=1, operations=[
                     {"type": "rectangle", "bounds": [10, 10, 20, 20]}]))
                 setup["expected_revision"] = drawn["revision"]
-                selected = client.tool("screenshot_edit_elements", dict(setup, action="select",
+                selected = client.tool("snow_shot_screenshot_edit_elements", dict(setup, action="select",
                     id=drawn["result"]["transaction"]["created_element_ids"][0]))
                 arguments["expected_revision"] = selected["revision"]
         if "path" in arguments:
@@ -805,20 +804,20 @@ def legacy_contract_outcomes(client, directory, resources=False):
         assert {"protocol", "request_id", "ok", "result", "attachment_length"} <= envelope.keys(), envelope
         assert result.get("isError", False) == (not envelope["ok"]), result
         assert envelope["ok"], (name, envelope)
-        if resources and name == "screenshot_state":
+        if resources and name == "snow_shot_screenshot_state":
             resource = client.request("resources/read", {"uri": "snow-shot://screenshots/" + arguments["session_id"]})
             assert json.loads(resource["contents"][0]["text"])["session_id"] == arguments["session_id"]
-        if name in ("screenshot_recognize", "screenshot_translate", "screenshot_auto_filter"):
-            completed = legacy_wait_operation(client, envelope["session_id"], envelope["result"]["operation_id"])
+        if name in ("snow_shot_screenshot_recognize", "snow_shot_screenshot_translate", "snow_shot_screenshot_auto_filter"):
+            completed = screenshot_wait_operation(client, envelope["session_id"], envelope["result"]["operation_id"])
             assert completed["result"]["result"]["fixture_provider"] is True
-        if name == "screenshot_draw_template":
+        if name == "snow_shot_screenshot_draw_template":
             template = json.loads(envelope["result"]["payload"])
             assert template["schemaVersion"] == 1 and len(template["elements"]) == 1
-        if name == "screenshot_scroll_once":
+        if name == "snow_shot_screenshot_scroll_once":
             assert envelope["result"]["scroll_steps"] == 1
-        if name == "screenshot_edit_recognition":
+        if name == "snow_shot_screenshot_edit_recognition":
             assert envelope["result"]["text"] == "Fixture text"
-        if name == "screenshot_export_recognition":
+        if name == "snow_shot_screenshot_export_recognition":
             assert envelope["result"]["text"] == "Fixture recognized text"
         outcomes[name] = {"ok": envelope["ok"], "error": envelope.get("error", {}).get("code"),
                           "envelope_keys": sorted(envelope.keys()),
@@ -828,29 +827,23 @@ def legacy_contract_outcomes(client, directory, resources=False):
                                              for key in ("width", "height", "format", "byte_count", "sha256")
                                              if key in envelope["result"]},
                           "content_types": [block["type"] for block in result["content"]]}
-    client.tool("screenshot_cancel")
+    client.tool("snow_shot_screenshot_cancel")
     assert len(outcomes) == 28
     return outcomes
 
 
-def legacy_comparison(args):
-    comparisons = {}
-    versions = [
-        ("baseline", args.baseline_bridge, args.baseline_legacy_fixture),
-        ("current", args.bridge, args.legacy_fixture),
-    ]
-    for label, executable, fixture_path, size in [
-        (label, executable, fixture_path, size)
-        for size in [(800, 600), (1920, 1080), (3840, 2160)]
-        for label, executable, fixture_path in versions
-    ]:
-        if not executable or not fixture_path:
-            continue
-        with tempfile.TemporaryDirectory(prefix="snow-shot-mcp-legacy-") as temporary:
+def screenshot_fixture_measurement(args):
+    if not args.screenshot_fixture:
+        return None
+    measurements = {}
+    sizes = [(800, 600), (1920, 1080), (3840, 2160)] if args.benchmark else [(800, 600)]
+    for size in sizes:
+        with tempfile.TemporaryDirectory(prefix="snow-shot-mcp-screenshot-") as temporary:
             directory = Path(temporary)
             descriptor = directory / "snow-shot-mcp.json"
             with (directory / "fixture.log").open("w", encoding="utf-8") as log:
-                fixture = subprocess.Popen([str(fixture_path), "-platform", "offscreen", "--serve", str(directory),
+                fixture = subprocess.Popen([str(args.screenshot_fixture), "-platform", "offscreen",
+                                            "--serve", str(directory),
                                             "--size", f"{size[0]}x{size[1]}"],
                                            stdout=log, stderr=log)
                 client = None
@@ -860,31 +853,23 @@ def legacy_comparison(args):
                         time.sleep(.05)
                     assert descriptor.is_file(), (directory / "fixture.log").read_text(encoding="utf-8")
                     fixture_before = process_metrics(fixture)
-                    client = Client(executable, descriptor)
+                    client = Client(args.bridge, descriptor)
                     before = process_metrics(client.process)
-                    contracts = legacy_contract_outcomes(client, directory, label == "current") if size == (800, 600) else None
-                    legacy_workflow(client, directory, args.samples, label == "current", size)
-                    entry = summarize(client, before, process_metrics(client.process))
-                    comparisons.setdefault(label, {})[f"{size[0]}x{size[1]}"] = entry
-                    entry["legacy_contract_outcomes"] = contracts
-                    entry["fixture_before"] = fixture_before
-                    entry["fixture_after"] = process_metrics(fixture)
-                    entry["fixture_sha256"] = hashlib.sha256(fixture_path.read_bytes()).hexdigest()
-                    metrics = directory / "metrics.json"
-                    entry["gui_thread"] = json.loads(metrics.read_text()) if metrics.is_file() else None
+                    contracts = screenshot_contract_outcomes(client, directory, True) if size == (800, 600) else None
+                    screenshot_workflow(client, directory, args.samples, size)
+                    measurements[f"{size[0]}x{size[1]}"] = {
+                        **summarize(client, before, process_metrics(client.process)),
+                        "screenshot_contract_outcomes": contracts,
+                        "fixture_before": fixture_before,
+                        "fixture_after": process_metrics(fixture),
+                        "fixture_sha256": hashlib.sha256(args.screenshot_fixture.read_bytes()).hexdigest(),
+                    }
                 finally:
                     if client:
                         client.close()
                     fixture.terminate()
                     fixture.wait(timeout=10)
-    if "baseline" in comparisons and "current" in comparisons:
-        for name, original in comparisons["baseline"]["800x600"]["legacy_contract_outcomes"].items():
-            current = comparisons["current"]["800x600"]["legacy_contract_outcomes"][name]
-            for key in ("ok", "error", "content_types", "image_contract"):
-                assert original[key] == current[key], (name, key, original, current)
-            for key in ("envelope_keys", "result_keys"):
-                assert set(original[key]) <= set(current[key]), (name, key, original, current)
-    return comparisons
+    return measurements
 
 
 def run(args, provider):
@@ -898,7 +883,6 @@ def run(args, provider):
             report = {"fixture": str(args.fixture), "bridge": str(args.bridge),
                       "measured_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                       "scope": "Synthetic Qt ports in offscreen-capable tests; this Windows kit may select its Windows QPA fallback; not native capture/provider/encoder coverage",
-                      "baseline_scope": "Same Qt fixture, different bridge binaries only",
                       "environment": {"platform": platform.platform(), "machine": platform.machine(),
                                       "processor": platform.processor(),
                                       "logical_cpus": os.cpu_count(), "python": platform.python_version()},
@@ -906,40 +890,34 @@ def run(args, provider):
                       "samples": args.samples,
                       "binaries": {label: {"path": str(path), "bytes": path.stat().st_size,
                                            "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
-                                   for label, path in [("fixture", args.fixture), ("current_bridge", args.bridge),
-                                                       ("baseline_bridge", args.baseline_bridge)] if path}}
+                                   for label, path in [("fixture", args.fixture), ("bridge", args.bridge)]}}
             try:
                 deadline = time.monotonic() + 20
                 while not descriptor.is_file() and fixture.poll() is None and time.monotonic() < deadline:
                     time.sleep(.05)
                 assert descriptor.is_file(), (directory / "fixture.log").read_text(encoding="utf-8")
                 fixture_before = process_metrics(fixture)
-                for label, executable in [("baseline", args.baseline_bridge), ("current", args.bridge)]:
-                    if not executable:
-                        continue
-                    client = Client(executable, descriptor)
-                    try:
-                        before = process_metrics(client.process)
-                        client.request("tools/list")  # Warm schema and transport state.
-                        client.tool("snow_shot_status")
-                        if label == "current":
-                            for uri in ("snow-shot://capabilities", "snow-shot://application/status", "snow-shot://settings"):
-                                resource = client.request("resources/read", {"uri": uri})
-                                assert isinstance(json.loads(resource["contents"][0]["text"]), dict)
-                        for _ in range(args.samples):
-                            client.request("tools/list", label="tools_list_warm")
-                            client.tool("snow_shot_status", label="legacy_status_warm")
-                        if label == "current":
-                            document_workflow(client, directory, args.samples)
-                            complete_document_surface(client, directory)
-                            report["recognition"] = recognition_workflows(client, directory)
-                            report["cache_work"] = cache_work_counters(client, directory)
-                            if args.benchmark:
-                                large_exports(client, directory, args.samples)
-                                report["cleanup_cycles"] = cleanup_cycles(client, fixture, directory)
-                        report[label] = summarize(client, before, process_metrics(client.process))
-                    finally:
-                        client.close()
+                client = Client(args.bridge, descriptor)
+                try:
+                    before = process_metrics(client.process)
+                    client.request("tools/list")
+                    client.tool("snow_shot_mcp_status")
+                    for uri in ("snow-shot://capabilities", "snow-shot://application/status", "snow-shot://settings"):
+                        resource = client.request("resources/read", {"uri": uri})
+                        assert isinstance(json.loads(resource["contents"][0]["text"]), dict)
+                    for _ in range(args.samples):
+                        client.request("tools/list", label="tools_list_warm")
+                        client.tool("snow_shot_mcp_status", label="mcp_status_warm")
+                    document_workflow(client, directory, args.samples)
+                    complete_document_surface(client, directory)
+                    report["recognition"] = recognition_workflows(client, directory)
+                    report["cache_work"] = cache_work_counters(client, directory)
+                    if args.benchmark:
+                        large_exports(client, directory, args.samples)
+                        report["cleanup_cycles"] = cleanup_cycles(client, fixture, directory)
+                    report["bridge"] = summarize(client, before, process_metrics(client.process))
+                finally:
+                    client.close()
                 modern_task_workflow(args.bridge, descriptor, directory)
                 report["artifacts"] = artifact_workflow(args.bridge, descriptor, directory)
                 report["concurrent_clients"] = concurrent_clients(args.bridge, descriptor, directory)
@@ -955,8 +933,8 @@ def run(args, provider):
             finally:
                 fixture.terminate()
                 fixture.wait(timeout=10)
-            report["legacy_comparison"] = legacy_comparison(args)
-            report["legacy_scope"] = "Original/current Qt server+session and bridge with identical synthetic capture/copy/pin ports and common renderer; not native capture performance"
+            if args.screenshot_fixture:
+                report["screenshot_fixture"] = screenshot_fixture_measurement(args)
             report["executed_tools"] = sorted(Client.executed_tools)
             report["read_resources"] = sorted(Client.read_resources)
             if args.output:
@@ -968,17 +946,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("bridge", type=lambda value: Path(value).resolve(strict=True))
     parser.add_argument("fixture", type=lambda value: Path(value).resolve(strict=True))
-    parser.add_argument("--baseline-bridge", type=lambda value: Path(value).resolve(strict=True))
-    parser.add_argument("--legacy-fixture", type=lambda value: Path(value).resolve(strict=True))
-    parser.add_argument("--baseline-legacy-fixture", type=lambda value: Path(value).resolve(strict=True))
+    parser.add_argument("--screenshot-fixture", type=lambda value: Path(value).resolve(strict=True))
     parser.add_argument("--samples", type=int, default=5)
     parser.add_argument("--benchmark", action="store_true", help="Requires Release performance-preset binaries")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     if args.samples < 1 or args.samples > 10000:
         parser.error("samples must be between 1 and 10000")
-    if args.baseline_bridge and not args.benchmark:
-        parser.error("baseline comparisons require --benchmark and performance-preset Release binaries")
     with RecognitionProvider() as provider:
         if os.name == "nt":
             from mcp_live_tests import ClipboardGuard
