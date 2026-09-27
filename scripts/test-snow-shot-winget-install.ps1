@@ -67,7 +67,16 @@ function Invoke-WingetBounded([string[]]$Arguments) {
     while (-not $process.WaitForExit(1000)) {
         $process.Refresh()
         if ($process.MainWindowTitle -eq 'Window Dialog') {
+            if ($process.WaitForExit(2000)) { break }
             Write-Host ([WinGetWindowDiagnostics]::Read($process.MainWindowHandle))
+            Add-Type -AssemblyName System.Windows.Forms
+            $bounds = [Windows.Forms.Screen]::PrimaryScreen.Bounds
+            $bitmap = [Drawing.Bitmap]::new($bounds.Width, $bounds.Height)
+            $graphics = [Drawing.Graphics]::FromImage($bitmap)
+            try {
+                $graphics.CopyFromScreen($bounds.Location, [Drawing.Point]::Empty, $bounds.Size)
+                $bitmap.Save((Join-Path $output 'blocking-dialog.png'), [Drawing.Imaging.ImageFormat]::Png)
+            } finally { $graphics.Dispose(); $bitmap.Dispose() }
             $dialog = $true
             break
         }
