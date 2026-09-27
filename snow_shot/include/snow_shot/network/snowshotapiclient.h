@@ -36,18 +36,12 @@ struct SnowShotLatexResult {
     }
 };
 
-enum class SnowShotModelOrigin { BuiltIn, Custom };
-
 struct SnowShotChatModel {
     QString id;
     QString name;
     bool supportsReasoning = false;
     QString translationMode = QStringLiteral("default");
     bool supportsVision = false;
-    SnowShotModelOrigin origin = SnowShotModelOrigin::BuiltIn;
-    [[nodiscard]] bool supportsTranslation() const {
-        return origin == SnowShotModelOrigin::Custom || !supportsVision;
-    }
 };
 
 struct SnowShotChatModelsResult {
