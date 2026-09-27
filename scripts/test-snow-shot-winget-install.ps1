@@ -88,11 +88,11 @@ function Invoke-WingetBounded([string[]]$Arguments) {
             $Arguments[0] -in @('install', 'upgrade')) {
             $manifestIndex = [Array]::IndexOf($Arguments, '--manifest')
             if ($manifestIndex -lt 0) { throw 'Installer consent requires a validated local manifest.' }
-            $manifest = Get-Content -LiteralPath (Join-Path $Arguments[$manifestIndex + 1] 'SnowApps.SnowShot.installer.yaml') -Raw
+            $manifest = Get-Content -LiteralPath (Join-Path $Arguments[$manifestIndex + 1] 'mg-chao.snow-shot.installer.yaml') -Raw
             $packageVersion = [regex]::Match($manifest, "(?m)^PackageVersion: '([^']+)'$").Groups[1].Value
             $expectedHash = [regex]::Match($manifest, '(?m)^    InstallerSha256: ([A-Fa-f0-9]{64})$').Groups[1].Value
             $fileName = "snow-shot-$packageVersion-windows-x64-offline.exe"
-            $cachedInstaller = Join-Path $env:TEMP "WinGet/SnowApps.SnowShot.$packageVersion/$fileName"
+            $cachedInstaller = Join-Path $env:TEMP "WinGet/mg-chao.snow-shot.$packageVersion/$fileName"
             if ((Get-FileHash -LiteralPath $cachedInstaller -Algorithm SHA256).Hash -ine $expectedHash) {
                 throw 'Refusing consent: the cached installer hash does not match the manifest.'
             }
@@ -196,7 +196,24 @@ try {
     if (-not (Test-Path -LiteralPath $executable)) { throw 'Upgrade did not preserve the custom directory.' }
     if ([IO.File]::ReadAllText($sentinel) -cne $sentinelValue) { throw 'Upgrade changed user data.' }
     if (Get-Process snow_shot -ErrorAction SilentlyContinue) { throw 'Silent upgrade launched Snow Shot.' }
-    Invoke-WingetChecked @('uninstall', '--name', 'Snow Shot', '--exact', '--silent')
+    $registration = @($registryPaths | Where-Object { Test-Path -LiteralPath $_ } |
+        ForEach-Object { Get-ItemProperty -LiteralPath $_ })[0]
+    if ($version -eq '1.1.5-beta' -and -not $registration.PSObject.Properties['QuietUninstallString']) {
+        # This immutable historical release predates the quiet registration fix.
+        # Validate its supported NSIS removal directly; a separate CPack integration
+        # test verifies that newly built installers register WinGet's quiet command.
+        Write-Host 'Legacy 1.1.5-beta has no QuietUninstallString; verifying its NSIS /S removal directly.'
+        $uninstaller = $registration.UninstallString.Trim('"')
+        $removal = Start-Process -FilePath $uninstaller -ArgumentList '/S' -WindowStyle Hidden -PassThru
+        if (-not $removal.WaitForExit(30000) -or $removal.ExitCode -ne 0) { throw 'Legacy NSIS removal failed.' }
+    } else {
+        if (-not $registration.PSObject.Properties['QuietUninstallString']) { throw 'New installers must register QuietUninstallString.' }
+        Invoke-WingetChecked @('uninstall', '--id', 'mg-chao.snow-shot', '--exact', '--silent')
+    }
+    # NSIS may finish removal in a copied child after its original process exits.
+    $removalDeadline = [DateTime]::UtcNow.AddSeconds(30)
+    while (((Test-Path -LiteralPath $executable) -or @($registryPaths | Where-Object { Test-Path -LiteralPath $_ }).Count) -and
+        [DateTime]::UtcNow -lt $removalDeadline) { Start-Sleep -Milliseconds 100 }
     if ((Test-Path -LiteralPath $executable) -or
         @($registryPaths | Where-Object { Test-Path -LiteralPath $_ }).Count) {
         throw 'Uninstall left the executable or registration behind.'

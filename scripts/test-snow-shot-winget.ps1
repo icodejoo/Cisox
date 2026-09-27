@@ -35,8 +35,8 @@ function Invoke-SnowShotWingetApi([string]$Path) {
         incomplete_results = ($script:mode -eq 'incomplete')
         total_count = 1
         items = @(@{
-            title = if ($script:mode -in @('pending', 'paginated')) { 'New version: SnowApps.SnowShot version 1.1.5-beta' }
-                    else { 'New version: SnowApps.SnowShot version 1.1.5-beta.2' }
+            title = if ($script:mode -in @('pending', 'paginated')) { 'New version: mg-chao.snow-shot version 1.1.5-beta' }
+                    else { 'New version: mg-chao.snow-shot version 1.1.5-beta.2' }
             html_url = 'https://github.com/microsoft/winget-pkgs/pull/123'
         })
     }
@@ -73,7 +73,7 @@ try {
             Require ($content.Contains('ManifestVersion: 1.12.0')) 'Schema mismatch'
             Require (-not $content.Contains("`r")) 'Manifests must use LF'
         }
-        $installer = Get-Content -LiteralPath (Join-Path $directory 'SnowApps.SnowShot.installer.yaml') -Raw
+        $installer = Get-Content -LiteralPath (Join-Path $directory 'mg-chao.snow-shot.installer.yaml') -Raw
         $hash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([byte[]](1, 2, 3, 4)))
         Require ($installer.Contains("InstallerSha256: $hash")) 'Incorrect SHA-256'
         Require ($installer.Contains("/$tag/")) 'Wrong release URL'

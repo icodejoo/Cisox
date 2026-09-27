@@ -6,10 +6,14 @@ on:
     paths:
       - 'scripts/*winget*.ps1'
       - '.github/workflows/snow-shot-winget*.yml'
+      - 'cmake/SnowShotInstaller.cmake'
+      - 'snow_shot/tests/installer_packaging/**'
   pull_request:
     paths:
       - 'scripts/*winget*.ps1'
       - '.github/workflows/snow-shot-winget*.yml'
+      - 'cmake/SnowShotInstaller.cmake'
+      - 'snow_shot/tests/installer_packaging/**'
   workflow_dispatch:
     inputs:
       tag:
@@ -57,6 +61,15 @@ jobs:
         run: |
           ./scripts/test-snow-shot-winget-install.ps1 -Tag $env:RELEASE_TAG `
             -PreviousTag $env:PREVIOUS_TAG -Winget $env:WINGET_EXE -AllowUnrecognizedRelease
+      - name: Verify generated installer quiet registration through WinGet
+        if: github.event_name != 'push'
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}/NSIS/makensis.exe")) {
+            choco install nsis --yes --no-progress
+            if ($LASTEXITCODE -ne 0) { throw 'NSIS provisioning failed.' }
+          }
+          ./scripts/test-snow-shot-winget-uninstall.ps1 -Winget $env:WINGET_EXE
       - name: Preserve verification logs and manifests
         if: always()
         uses: actions/upload-artifact@v4

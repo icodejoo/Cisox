@@ -51,7 +51,7 @@ jobs:
     if: needs.resolve.outputs.eligible == 'true'
     runs-on: windows-2025
     concurrency:
-      group: winget-SnowApps.SnowShot-${{ needs.resolve.outputs.version }}
+      group: winget-mg-chao.snow-shot-${{ needs.resolve.outputs.version }}
       cancel-in-progress: false
     env:
       RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
@@ -69,7 +69,7 @@ jobs:
       - name: Preserve manifests for review and manual submission
         uses: actions/upload-artifact@v4
         with:
-          name: winget-SnowApps.SnowShot-${{ needs.resolve.outputs.version }}
+          name: winget-mg-chao.snow-shot-${{ needs.resolve.outputs.version }}
           path: build/winget/manifests
           if-no-files-found: error
       - name: Prepare WinGet validation

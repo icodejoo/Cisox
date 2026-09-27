@@ -116,9 +116,12 @@ service reports updates unavailable and does not expose a self-update channel th
 ### WinGet
 
 The independent **Snow Shot WinGet** GitHub Actions workflow submits the offline
-Windows x64 installer as `SnowApps.SnowShot` to `microsoft/winget-pkgs`. Stable and
+Windows x64 installer as `mg-chao.snow-shot` to `microsoft/winget-pkgs`. Stable and
 beta releases share this identifier; published betas are eligible even when GitHub
 does not mark them as prereleases. Draft releases are never submitted.
+
+Reuse the existing community identifier `mg-chao.snow-shot`; `1.1.5-beta` is already
+published upstream. Do not introduce a second identifier for the same application.
 
 The workflow runs on `release: published`, or manually with a published tag such as
 `v1.1.5-beta` or `v1.1.5-beta_snow-shot`. It reads automation from the default branch
@@ -165,12 +168,12 @@ token is read from the environment, never passed as a command-line argument. Gen
 manifests use schema 1.12.0, preserve the release version including beta suffixes, and
 calculate SHA-256 from the downloaded offline installer.
 
-After upstream acceptance:
+The existing community package can be installed and updated now:
 
 ```powershell
-winget install --exact --id SnowApps.SnowShot --source winget
-winget upgrade --exact --id SnowApps.SnowShot --source winget
-winget uninstall --exact --id SnowApps.SnowShot --source winget
+winget install --exact --id mg-chao.snow-shot --source winget
+winget upgrade --exact --id mg-chao.snow-shot --source winget
+winget uninstall --exact --id mg-chao.snow-shot --source winget
 ```
 
 Installation is machine-wide and requires elevation. Close Snow Shot before a silent
@@ -186,10 +189,10 @@ Focused verification:
 ./scripts/test-snow-shot-installer.ps1
 ```
 
-Before the first upstream submission, use a disposable Windows VM for the real package:
+Before submitting a new version, use a disposable Windows VM for the real package:
 enable local manifests with `winget settings --enable LocalManifestFiles`, install with
 `winget install --manifest <manifest-directory> --silent`, and confirm detection with
-`winget list --exact --id SnowApps.SnowShot`. Install an older version first to exercise
+`winget list --exact --id mg-chao.snow-shot`. Install an older version first to exercise
 an upgrade, including a custom installation directory and a user-settings sentinel.
 Confirm the version changes, directory/settings survive, the app does not launch during
 silent installation, and an upgrade while the app is running refuses without killing it.
@@ -222,6 +225,13 @@ captured in the diagnostic artifact. This consent is separate from the installer
 silent-mode checks and does not guarantee SmartScreen reputation on end-user PCs.
 The test also acknowledges Windows' standard file-launch warning only after matching
 the displayed installer filename and rechecking the cached executable's SHA-256.
+
+The immutable `1.1.5-beta` installer does not register `QuietUninstallString`, so
+`winget uninstall --silent` can still display its wizard. Use the normal interactive
+uninstall for that release. Newly built installers register the quoted `/S` command;
+the hosted CPack fixture test verifies silent removal through WinGet and preservation
+of unowned files. The historical-release lifecycle test invokes the legacy NSIS `/S`
+uninstaller directly rather than claiming its missing registration is supported.
 
 ### Publisher prerequisites
 

@@ -36,18 +36,18 @@ function New-SnowShotWingetManifest([string]$Tag, [string]$OutputDirectory) {
     } finally {
         if (Test-Path -LiteralPath $download) { Remove-Item -LiteralPath $download }
     }
-    $directory = Join-Path $OutputDirectory "manifests/s/SnowApps/SnowShot/$version"
+    $directory = Join-Path $OutputDirectory "manifests/m/mg-chao/snow-shot/$version"
     $null = New-Item -ItemType Directory -Force -Path $directory
-    $common = "PackageIdentifier: SnowApps.SnowShot`nPackageVersion: '$version'"
+    $common = "PackageIdentifier: mg-chao.snow-shot`nPackageVersion: '$version'"
     $documents = [ordered]@{
-        'SnowApps.SnowShot.yaml' = @"
+        'mg-chao.snow-shot.yaml' = @"
 # yaml-language-server: `$schema=https://aka.ms/winget-manifest.version.1.12.0.schema.json
 $common
 DefaultLocale: en-US
 ManifestType: version
 ManifestVersion: 1.12.0
 "@
-        'SnowApps.SnowShot.installer.yaml' = @"
+        'mg-chao.snow-shot.installer.yaml' = @"
 # yaml-language-server: `$schema=https://aka.ms/winget-manifest.installer.1.12.0.schema.json
 $common
 InstallerType: nullsoft
@@ -76,7 +76,7 @@ Installers:
 ManifestType: installer
 ManifestVersion: 1.12.0
 "@
-        'SnowApps.SnowShot.locale.en-US.yaml' = @"
+        'mg-chao.snow-shot.locale.en-US.yaml' = @"
 # yaml-language-server: `$schema=https://aka.ms/winget-manifest.defaultLocale.1.12.0.schema.json
 $common
 PackageLocale: en-US
@@ -106,7 +106,7 @@ ManifestVersion: 1.12.0
 }
 
 function Get-SnowShotWingetSubmission([string]$Version) {
-    $path = "manifests/s/SnowApps/SnowShot/$Version"
+    $path = "manifests/m/mg-chao/snow-shot/$Version"
     try {
         $null = Invoke-SnowShotWingetApi "repos/microsoft/winget-pkgs/contents/$path"
         return "Already merged: https://github.com/microsoft/winget-pkgs/tree/master/$path"
@@ -114,13 +114,13 @@ function Get-SnowShotWingetSubmission([string]$Version) {
         # Authentication, rate limits and server failures must not masquerade as absence.
         if (-not $_.Exception.Response -or [int]$_.Exception.Response.StatusCode -ne 404) { throw }
     }
-    $query = [uri]::EscapeDataString('repo:microsoft/winget-pkgs is:pr is:open in:title "SnowApps.SnowShot"')
+    $query = [uri]::EscapeDataString('repo:microsoft/winget-pkgs is:pr is:open in:title "mg-chao.snow-shot"')
     $page = 1
     do {
         $response = Invoke-SnowShotWingetApi "search/issues?q=$query&per_page=100&page=$page"
         if ($response.incomplete_results) { throw 'GitHub returned an incomplete submission search.' }
         foreach ($item in $response.items) {
-            if ($item.title -match ('(?i)(?<![\w.])SnowApps\.SnowShot(?![\w.]).*?(?<![\w.+-])' +
+            if ($item.title -match ('(?i)(?<![\w.])mg-chao\.snow-shot(?![\w.]).*?(?<![\w.+-])' +
                     [regex]::Escape($Version) + '(?![\w.+-])')) {
                 return "Submission already open: $($item.html_url)"
             }
@@ -139,6 +139,6 @@ function Submit-SnowShotWingetManifest([string]$Tag, [string]$ManifestDirectory,
     if (-not $env:WINGET_CREATE_GITHUB_TOKEN) {
         throw 'Set the WINGET_CREATE_GITHUB_TOKEN repository secret (classic PAT, public_repo scope). Generated manifests remain available as workflow artifacts.'
     }
-    & $WingetCreate submit --no-open --prtitle "New version: SnowApps.SnowShot version $version" $ManifestDirectory
+    & $WingetCreate submit --no-open --prtitle "New version: mg-chao.snow-shot version $version" $ManifestDirectory
     if ($LASTEXITCODE -ne 0) { throw "WinGetCreate submission failed with exit code $LASTEXITCODE." }
 }
