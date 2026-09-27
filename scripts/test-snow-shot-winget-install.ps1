@@ -27,6 +27,8 @@ $output = Join-Path $PSScriptRoot '../build/winget-install-test'
 $null = New-Item -ItemType Directory -Force -Path $output
 Start-Transcript -Path (Join-Path $output 'installation.log')
 $app = $null
+$reputationPolicy = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System'
+$savedReputationPolicy = $null
 Add-Type @'
 using System;
 using System.Text;
@@ -65,13 +67,11 @@ function Invoke-WingetBounded([string[]]$Arguments) {
     $stderr = $process.StandardError.ReadToEndAsync()
     $deadline = [DateTime]::UtcNow.AddSeconds(180)
     $dialog = $false
-    $approved = $false
     while (-not $process.WaitForExit(1000)) {
         if ([DateTime]::UtcNow -ge $deadline) { break }
         $process.Refresh()
         if ($process.MainWindowTitle -eq 'Window Dialog') {
             if ($process.WaitForExit(2000)) { break }
-            if ($approved) { continue }
             Write-Host ([WinGetWindowDiagnostics]::Read($process.MainWindowHandle))
             Add-Type -AssemblyName System.Windows.Forms
             $bounds = [Windows.Forms.Screen]::PrimaryScreen.Bounds
@@ -81,20 +81,6 @@ function Invoke-WingetBounded([string[]]$Arguments) {
                 $graphics.CopyFromScreen($bounds.Location, [Drawing.Point]::Empty, $bounds.Size)
                 $bitmap.Save((Join-Path $output 'blocking-dialog.png'), [Drawing.Imaging.ImageFormat]::Png)
             } finally { $graphics.Dispose(); $bitmap.Dispose() }
-            if ($AllowUnrecognizedRelease -and $Arguments[0] -in @('install', 'upgrade')) {
-                $manifestIndex = [Array]::IndexOf($Arguments, '--manifest')
-                if ($manifestIndex -lt 0) { throw 'Per-file approval requires a validated local manifest.' }
-                $manifest = Get-Content -LiteralPath (Join-Path $Arguments[$manifestIndex + 1] 'SnowApps.SnowShot.installer.yaml') -Raw
-                $packageVersion = [regex]::Match($manifest, "(?m)^PackageVersion: '([^']+)'$").Groups[1].Value
-                $expectedHash = [regex]::Match($manifest, '(?m)^    InstallerSha256: ([A-Fa-f0-9]{64})$').Groups[1].Value
-                $cachedInstaller = Join-Path $env:TEMP "WinGet/SnowApps.SnowShot.$packageVersion/snow-shot-$packageVersion-windows-x64-offline.exe"
-                & powershell.exe -NoProfile -NonInteractive -STA -File `
-                    (Join-Path $PSScriptRoot 'approve-snow-shot-winget-test-installer.ps1') `
-                    -WingetProcessId $process.Id -InstallerPath $cachedInstaller -InstallerSha256 $expectedHash
-                if ($LASTEXITCODE -ne 0) { throw 'Per-file installer consent failed.' }
-                $approved = $true
-                continue
-            }
             $dialog = $true
             break
         }
@@ -134,6 +120,16 @@ try {
     $previous = New-SnowShotWingetManifest $PreviousTag $output
     Invoke-WingetChecked @('validate', '--manifest', $current)
     Invoke-WingetChecked @('validate', '--manifest', $previous)
+    if ($AllowUnrecognizedRelease) {
+        # Explicit test-only consent for unsigned releases. The hosted VM is disposable;
+        # preserve/restore its reputation policy and keep hashes and antivirus enabled.
+        $existingPolicy = Get-ItemProperty -LiteralPath $reputationPolicy -ErrorAction SilentlyContinue
+        $property = if ($existingPolicy) { $existingPolicy.PSObject.Properties['EnableSmartScreen'] } else { $null }
+        $savedReputationPolicy = @{ Present = ($null -ne $property); Value = if ($property) { $property.Value } else { 0 } }
+        $null = New-Item -Path $reputationPolicy -Force
+        $null = New-ItemProperty -LiteralPath $reputationPolicy -Name EnableSmartScreen -Value 0 -PropertyType DWord -Force
+        Write-Host 'Temporarily allowing unsigned release fixtures in this disposable VM; hash verification remains enabled.'
+    }
     & $Winget settings --enable LocalManifestFiles
     if ($LASTEXITCODE -ne 0) { throw 'Could not enable local manifests in the disposable runner.' }
     $installDirectory = Join-Path $env:RUNNER_TEMP 'Snow Shot custom installation'
@@ -178,6 +174,15 @@ try {
     Write-Output 'PASS: real WinGet install, detection, running-app refusal, upgrade, uninstall, and data preservation.'
 } finally {
     if ($app -and -not $app.HasExited) { Stop-Process -Id $app.Id }
+    if ($savedReputationPolicy) {
+        if ($savedReputationPolicy.Present) {
+            $null = New-ItemProperty -LiteralPath $reputationPolicy -Name EnableSmartScreen `
+                -Value $savedReputationPolicy.Value -PropertyType DWord -Force
+        } else {
+            Remove-ItemProperty -LiteralPath $reputationPolicy -Name EnableSmartScreen -ErrorAction SilentlyContinue
+        }
+        Write-Host 'Restored the disposable VM reputation policy.'
+    }
     $logDirectory = Join-Path $env:LOCALAPPDATA 'Packages/Microsoft.DesktopAppInstaller_8wekyb3d8bbwe/LocalState/DiagOutputDir'
     if (Test-Path -LiteralPath $logDirectory) {
         Copy-Item -LiteralPath $logDirectory -Destination (Join-Path $output 'winget-logs') -Recurse -Force

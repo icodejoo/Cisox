@@ -214,10 +214,10 @@ Windows runner or when Snow Shot is already installed.
 
 The published beta installers are unsigned and may trigger a SmartScreen reputation
 prompt when testing local manifests. The verification workflow explicitly enables
-`-AllowUnrecognizedRelease`: the test verifies the cached installer's SHA-256 against
-the generated manifest, checks the filename displayed in the prompt, and grants
-per-file consent inside the disposable VM. It does not change Windows security
-settings. Without this switch, an interactive launch prompt fails the test and is
+`-AllowUnrecognizedRelease`: after validating the release manifests, the test temporarily
+disables SmartScreen reputation checks only inside its disposable VM and restores the
+prior policy in its cleanup path. WinGet's SHA-256 verification and antivirus scanning
+remain enabled. Without this switch, an interactive launch prompt fails the test and is
 captured in the diagnostic artifact. This consent is separate from the installer's
 silent-mode checks and does not guarantee SmartScreen reputation on end-user PCs.
 

@@ -126,16 +126,14 @@ try {
     $script:submitExitCode = 1
     Expect-Failure { Submit-SnowShotWingetManifest 'v1.1.5-beta' $directory 'Invoke-FixtureSubmit' } 'submission failed'
     $global:LASTEXITCODE = 0
-    # Per-file SmartScreen consent must never act on a developer PC or unrelated file.
+    # Real installer checks and reputation-policy changes must never act on a developer PC.
     $runnerEnvironment = $env:RUNNER_ENVIRONMENT
     $runnerOs = $env:RUNNER_OS
     try {
         $env:RUNNER_ENVIRONMENT = ''
         $env:RUNNER_OS = 'Windows'
-        $consent = Join-Path $PSScriptRoot 'approve-snow-shot-winget-test-installer.ps1'
-        Expect-Failure { & $consent -WingetProcessId 1 -InstallerPath (Join-Path $root 'fixture.exe') -InstallerSha256 ('0' * 64) } 'restricted to the disposable'
-        $env:RUNNER_ENVIRONMENT = 'github-hosted'
-        Expect-Failure { & $consent -WingetProcessId 1 -InstallerPath (Join-Path $root 'fixture.exe') -InstallerSha256 ('0' * 64) } 'exact hash-verified offline release'
+        $installTest = Join-Path $PSScriptRoot 'test-snow-shot-winget-install.ps1'
+        Expect-Failure { & $installTest -AllowUnrecognizedRelease } 'require a disposable GitHub-hosted Windows runner'
     } finally {
         $env:RUNNER_ENVIRONMENT = $runnerEnvironment
         $env:RUNNER_OS = $runnerOs
