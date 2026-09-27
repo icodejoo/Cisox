@@ -35,6 +35,12 @@ jobs:
       - name: Test release and submission fixtures
         shell: pwsh
         run: ./scripts/test-snow-shot-winget.ps1
+      - name: Verify submission credentials without submitting
+        if: github.event_name != 'pull_request'
+        shell: pwsh
+        env:
+          WINGET_CREATE_GITHUB_TOKEN: ${{ secrets.WINGET_CREATE_GITHUB_TOKEN }}
+        run: ./scripts/test-snow-shot-winget-credentials.ps1
       - name: Provision WinGet in disposable runner
         shell: pwsh
         run: |

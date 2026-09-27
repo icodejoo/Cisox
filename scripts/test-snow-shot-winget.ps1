@@ -126,6 +126,36 @@ try {
     $script:submitExitCode = 1
     Expect-Failure { Submit-SnowShotWingetManifest 'v1.1.5-beta' $directory 'Invoke-FixtureSubmit' } 'submission failed'
     $global:LASTEXITCODE = 0
+    # Provisioning must upgrade older clients using the requested official bundle.
+    function Get-Command { param($Name, $ErrorAction); return @{ Source = 'Invoke-FixtureWinget' } }
+    function Get-AppxPackage { param($Name); return @() }
+    function Invoke-FixtureWinget { $global:LASTEXITCODE = 0; return "v$script:fixtureWingetVersion" }
+    function Invoke-WebRequest {
+        param($Uri, $OutFile)
+        Require ($Uri.StartsWith('https://github.com/microsoft/winget-cli/releases/download/v1.29.380/')) 'Wrong client release'
+        [IO.File]::WriteAllText($OutFile, 'fixture')
+    }
+    function Expand-Archive {
+        param($LiteralPath, $DestinationPath, [switch]$Force)
+        $null = New-Item -ItemType Directory -Force -Path (Join-Path $DestinationPath 'x64')
+        [IO.File]::WriteAllText((Join-Path $DestinationPath 'x64/dependency.appx'), 'fixture')
+    }
+    function Add-AppxPackage {
+        param($Path, $DependencyPath)
+        Require ($DependencyPath.Count -gt 0) 'Client provisioning must install matching dependencies'
+        $script:repairCalls++
+        if (-not $script:repairBroken) { $script:fixtureWingetVersion = '1.29.380' }
+    }
+    $script:repairCalls = 0
+    $script:repairBroken = $false
+    $script:fixtureWingetVersion = '1.26.510'
+    $null = . (Join-Path $PSScriptRoot 'initialize-snow-shot-winget.ps1') -ToolDirectory (Join-Path $root 'client')
+    Require ($script:repairCalls -eq 1) 'Older client was not upgraded'
+    $null = . (Join-Path $PSScriptRoot 'initialize-snow-shot-winget.ps1') -ToolDirectory (Join-Path $root 'client')
+    Require ($script:repairCalls -eq 1) 'Compatible client was unnecessarily reinstalled'
+    $script:repairBroken = $true
+    $script:fixtureWingetVersion = '1.26.510'
+    Expect-Failure { . (Join-Path $PSScriptRoot 'initialize-snow-shot-winget.ps1') -ToolDirectory (Join-Path $root 'client') } 'or newer is required'
     Write-Output 'PASS: Snow Shot WinGet generation and submission fixtures.'
 } finally {
     $env:WINGET_CREATE_GITHUB_TOKEN = $originalToken
