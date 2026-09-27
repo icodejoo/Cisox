@@ -29,7 +29,11 @@ function Find-Control([string]$Name) {
     return $window.FindFirst([Windows.Automation.TreeScope]::Descendants, $condition)
 }
 $moreInfo = Find-Control 'More info'
-if (-not $moreInfo) { throw 'The dialog is not the expected SmartScreen reputation prompt.' }
+if (-not $moreInfo) {
+    $window.FindAll([Windows.Automation.TreeScope]::Subtree, [Windows.Automation.Condition]::TrueCondition) |
+        ForEach-Object { $_.Current | Select-Object Name, ClassName, AutomationId, ProcessId } | Format-List | Out-Host
+    throw 'The dialog is not the expected SmartScreen reputation prompt.'
+}
 $invoke = $moreInfo.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern)
 $invoke.Invoke()
 $deadline = [DateTime]::UtcNow.AddSeconds(10)
