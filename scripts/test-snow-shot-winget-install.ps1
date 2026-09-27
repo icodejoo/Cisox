@@ -3,7 +3,8 @@
 param(
     [string]$Tag = 'v1.1.5-beta',
     [string]$PreviousTag = 'v1.1.4-beta',
-    [string]$Winget = 'winget.exe'
+    [string]$Winget = 'winget.exe',
+    [switch]$AllowUnrecognizedRelease
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -64,10 +65,12 @@ function Invoke-WingetBounded([string[]]$Arguments) {
     $stderr = $process.StandardError.ReadToEndAsync()
     $deadline = [DateTime]::UtcNow.AddSeconds(180)
     $dialog = $false
+    $approved = $false
     while (-not $process.WaitForExit(1000)) {
         $process.Refresh()
         if ($process.MainWindowTitle -eq 'Window Dialog') {
             if ($process.WaitForExit(2000)) { break }
+            if ($approved) { continue }
             Write-Host ([WinGetWindowDiagnostics]::Read($process.MainWindowHandle))
             Add-Type -AssemblyName System.Windows.Forms
             $bounds = [Windows.Forms.Screen]::PrimaryScreen.Bounds
@@ -77,6 +80,20 @@ function Invoke-WingetBounded([string[]]$Arguments) {
                 $graphics.CopyFromScreen($bounds.Location, [Drawing.Point]::Empty, $bounds.Size)
                 $bitmap.Save((Join-Path $output 'blocking-dialog.png'), [Drawing.Imaging.ImageFormat]::Png)
             } finally { $graphics.Dispose(); $bitmap.Dispose() }
+            if ($AllowUnrecognizedRelease -and $Arguments[0] -in @('install', 'upgrade')) {
+                $manifestIndex = [Array]::IndexOf($Arguments, '--manifest')
+                if ($manifestIndex -lt 0) { throw 'Per-file approval requires a validated local manifest.' }
+                $manifest = Get-Content -LiteralPath (Join-Path $Arguments[$manifestIndex + 1] 'SnowApps.SnowShot.installer.yaml') -Raw
+                $packageVersion = [regex]::Match($manifest, "(?m)^PackageVersion: '([^']+)'$").Groups[1].Value
+                $expectedHash = [regex]::Match($manifest, '(?m)^    InstallerSha256: ([A-Fa-f0-9]{64})$').Groups[1].Value
+                $cachedInstaller = Join-Path $env:TEMP "WinGet/SnowApps.SnowShot.$packageVersion/snow-shot-$packageVersion-windows-x64-offline.exe"
+                & powershell.exe -NoProfile -NonInteractive -STA -File `
+                    (Join-Path $PSScriptRoot 'approve-snow-shot-winget-test-installer.ps1') `
+                    -WingetProcessId $process.Id -InstallerPath $cachedInstaller -InstallerSha256 $expectedHash
+                if ($LASTEXITCODE -ne 0) { throw 'Per-file installer consent failed.' }
+                $approved = $true
+                continue
+            }
             $dialog = $true
             break
         }

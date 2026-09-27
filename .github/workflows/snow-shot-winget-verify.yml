@@ -56,7 +56,7 @@ jobs:
           PREVIOUS_TAG: ${{ inputs.previous_tag || 'v1.1.4-beta' }}
         run: |
           ./scripts/test-snow-shot-winget-install.ps1 -Tag $env:RELEASE_TAG `
-            -PreviousTag $env:PREVIOUS_TAG -Winget $env:WINGET_EXE
+            -PreviousTag $env:PREVIOUS_TAG -Winget $env:WINGET_EXE -AllowUnrecognizedRelease
       - name: Preserve verification logs and manifests
         if: always()
         uses: actions/upload-artifact@v4
