@@ -220,6 +220,8 @@ prior policy in its cleanup path. WinGet's SHA-256 verification and antivirus sc
 remain enabled. Without this switch, an interactive launch prompt fails the test and is
 captured in the diagnostic artifact. This consent is separate from the installer's
 silent-mode checks and does not guarantee SmartScreen reputation on end-user PCs.
+The test also acknowledges Windows' standard file-launch warning only after matching
+the displayed installer filename and rechecking the cached executable's SHA-256.
 
 ### Publisher prerequisites
 

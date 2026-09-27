@@ -38,6 +38,7 @@ public static class WinGetWindowDiagnostics {
     private delegate bool Callback(IntPtr window, IntPtr data);
     [DllImport("user32.dll")] private static extern bool EnumChildWindows(IntPtr window, Callback callback, IntPtr data);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetWindowText(IntPtr window, StringBuilder text, int count);
+    [DllImport("user32.dll")] private static extern bool PostMessage(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
     public static string Read(IntPtr window) {
         var lines = new List<string>();
         Callback callback = (child, data) => {
@@ -49,6 +50,19 @@ public static class WinGetWindowDiagnostics {
         callback(window, IntPtr.Zero);
         EnumChildWindows(window, callback, IntPtr.Zero);
         return string.Join(Environment.NewLine, lines);
+    }
+    public static void ConfirmVerifiedFile(IntPtr window, string fileName) {
+        if (Read(window).IndexOf(fileName, StringComparison.OrdinalIgnoreCase) < 0)
+            throw new InvalidOperationException("The launch warning does not identify the verified installer.");
+        IntPtr runButton = IntPtr.Zero;
+        EnumChildWindows(window, (child, data) => {
+            var text = new StringBuilder(2048);
+            GetWindowText(child, text, text.Capacity);
+            if (text.ToString().Replace("&", "").Trim() == "Run") runButton = child;
+            return true;
+        }, IntPtr.Zero);
+        if (runButton == IntPtr.Zero || !PostMessage(runButton, 0x00F5, IntPtr.Zero, IntPtr.Zero))
+            throw new InvalidOperationException("Could not acknowledge the verified installer's Run button.");
     }
 }
 '@
@@ -70,6 +84,23 @@ function Invoke-WingetBounded([string[]]$Arguments) {
     while (-not $process.WaitForExit(1000)) {
         if ([DateTime]::UtcNow -ge $deadline) { break }
         $process.Refresh()
+        if ($AllowUnrecognizedRelease -and $process.MainWindowTitle -eq 'Open File - Security Warning' -and
+            $Arguments[0] -in @('install', 'upgrade')) {
+            $manifestIndex = [Array]::IndexOf($Arguments, '--manifest')
+            if ($manifestIndex -lt 0) { throw 'Installer consent requires a validated local manifest.' }
+            $manifest = Get-Content -LiteralPath (Join-Path $Arguments[$manifestIndex + 1] 'SnowApps.SnowShot.installer.yaml') -Raw
+            $packageVersion = [regex]::Match($manifest, "(?m)^PackageVersion: '([^']+)'$").Groups[1].Value
+            $expectedHash = [regex]::Match($manifest, '(?m)^    InstallerSha256: ([A-Fa-f0-9]{64})$').Groups[1].Value
+            $fileName = "snow-shot-$packageVersion-windows-x64-offline.exe"
+            $cachedInstaller = Join-Path $env:TEMP "WinGet/SnowApps.SnowShot.$packageVersion/$fileName"
+            if ((Get-FileHash -LiteralPath $cachedInstaller -Algorithm SHA256).Hash -ine $expectedHash) {
+                throw 'Refusing consent: the cached installer hash does not match the manifest.'
+            }
+            Write-Host ([WinGetWindowDiagnostics]::Read($process.MainWindowHandle))
+            [WinGetWindowDiagnostics]::ConfirmVerifiedFile($process.MainWindowHandle, $fileName)
+            Write-Host "Acknowledged Windows launch warning for verified $fileName."
+            continue
+        }
         if ($process.MainWindowTitle -eq 'Window Dialog') {
             if ($process.WaitForExit(2000)) { break }
             Write-Host ([WinGetWindowDiagnostics]::Read($process.MainWindowHandle))
@@ -126,7 +157,7 @@ try {
         $existingPolicy = Get-ItemProperty -LiteralPath $reputationPolicy -ErrorAction SilentlyContinue
         $property = if ($existingPolicy) { $existingPolicy.PSObject.Properties['EnableSmartScreen'] } else { $null }
         $savedReputationPolicy = @{ Present = ($null -ne $property); Value = if ($property) { $property.Value } else { 0 } }
-        $null = New-Item -Path $reputationPolicy -Force
+        if (-not (Test-Path -LiteralPath $reputationPolicy)) { $null = New-Item -Path $reputationPolicy -Force }
         $null = New-ItemProperty -LiteralPath $reputationPolicy -Name EnableSmartScreen -Value 0 -PropertyType DWord -Force
         Write-Host 'Temporarily allowing unsigned release fixtures in this disposable VM; hash verification remains enabled.'
     }
