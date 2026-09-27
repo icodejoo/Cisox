@@ -3201,6 +3201,7 @@ name = "snow-capture-c"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "objc2",
  "snow-capture",
  "snow-core",
  "snow-macos",
@@ -3286,7 +3287,7 @@ dependencies = [
 
 [[package]]
 name = "snow-ocr-process"
-version = "1.0.7"
+version = "1.0.8"
 dependencies = [
  "memmap2",
  "num_cpus",

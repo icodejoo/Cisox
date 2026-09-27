@@ -1,5 +1,6 @@
 #include "snow_shot/app/applicationcontroller.h"
 #include "snow_shot/app/applicationrestart.h"
+#include "snow_shot/app/updateconfirmationdialog.h"
 #include "snow_shot/app/featureavailability.h"
 #include "snow_shot/presentation/apppermissionservice.h"
 #ifdef Q_OS_MACOS
@@ -14,7 +15,6 @@
 #include "snow_shot/presentation/screenshotexportartifact.h"
 #include <QStandardPaths>
 #include <QCryptographicHash>
-#include <QMessageBox>
 
 #include "snow_shot/presentation/globalshortcutmanager.h"
 #include "snow_shot/presentation/globalmousemanager.h"
@@ -84,6 +84,8 @@ const QString kScreenshotDelaySecondsKey = QStringLiteral("screenshot/delay_seco
 const QString kFullscreenSuppressionKey =
     QStringLiteral("global_shortcuts/disable_on_focused_fullscreen_window");
 const QString kOcrModelTypeKey = QStringLiteral("text_recognition/model_type");
+const QString kOcrDetectorResizePolicyKey =
+    QStringLiteral("text_recognition/detector_resize_policy");
 const QString kOcrDirectMlKey = QStringLiteral("text_recognition/direct_ml_acceleration");
 const QString kMcpEnabledKey = QStringLiteral("mcp/enabled");
 
@@ -254,6 +256,8 @@ class ApplicationController::Impl {
             applicationStorage.configuration()
                 .value(QStringLiteral("text_recognition/model_type"))
                 .toString());
+        ocrOptions.detectorResizePolicy = screenshotOcrDetectorResizePolicyFromValue(
+            applicationStorage.configuration().value(kOcrDetectorResizePolicyKey).toString());
         const auto backendPreference =
             applicationStorage.configuration()
                     .value(QStringLiteral("text_recognition/direct_ml_acceleration"))
@@ -303,12 +307,7 @@ class ApplicationController::Impl {
                     "Finish capturing, recording, or exporting before updating."));
                 return;
             }
-            const auto answer = QMessageBox::question(
-                mainWindow, ApplicationController::tr("Restart and update"),
-                ApplicationController::tr(
-                    "Snow Shot will close and restart to install the update. Continue?"),
-                QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
-            if (answer != QMessageBox::Yes) {
+            if (!confirmRestartAndUpdate(mainWindow)) {
                 return;
             }
             if (!storage::ApplicationStorage::instance().flushNow().success) {
@@ -400,6 +399,8 @@ class ApplicationController::Impl {
              configuration.value(kOcrDirectMlKey).toBool()
                  ? ScreenshotOcrBackendPreference::DirectMl
                  : ScreenshotOcrBackendPreference::Cpu,
+             screenshotOcrDetectorResizePolicyFromValue(
+                 configuration.value(kOcrDetectorResizePolicyKey).toString()),
              configuration.value(QStringLiteral("text_recognition/resident_process")).toBool(),
              configuration.value(QStringLiteral("text_recognition/model_hot_start")).toBool()});
     }
@@ -1262,6 +1263,7 @@ class ApplicationController::Impl {
                 presentation::GlobalShortcutAction::ToggleDisableOnFocusedFullscreenWindow,
                 value.toBool());
         } else if (key == kOcrModelTypeKey || key == kOcrDirectMlKey ||
+                   key == kOcrDetectorResizePolicyKey ||
                    key == QStringLiteral("text_recognition/resident_process") ||
                    key == QStringLiteral("text_recognition/model_hot_start")) {
             if (started)
