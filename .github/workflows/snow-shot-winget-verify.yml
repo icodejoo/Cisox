@@ -38,10 +38,7 @@ jobs:
       - name: Provision WinGet in disposable runner
         shell: pwsh
         run: |
-          Install-Module Microsoft.WinGet.Client -Scope CurrentUser -Force -Repository PSGallery
-          Repair-WinGetPackageManager -AllUsers
-          $package = Get-AppxPackage Microsoft.DesktopAppInstaller
-          $path = Join-Path $package.InstallLocation 'winget.exe'
+          $path = ./scripts/initialize-snow-shot-winget.ps1
           "WINGET_EXE=$path" >> $env:GITHUB_ENV
       - name: Verify real installation lifecycle
         shell: pwsh

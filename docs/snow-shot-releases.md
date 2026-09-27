@@ -195,6 +195,16 @@ silent installation, and an upgrade while the app is running refuses without kil
 Finally uninstall silently and verify owned files/registration are removed and user data
 is preserved. Fixture tests and manifest validation do not substitute for this VM check.
 
+The **Snow Shot WinGet verification** workflow automates this lifecycle on a disposable
+GitHub-hosted Windows runner. It runs for WinGet changes in pull requests and on
+`codex/winget-*` preparation branches; manual runs accept `tag` and `previous_tag`.
+It needs no submission token and never opens upstream PRs. Its default fixtures are
+`v1.1.5-beta` and `v1.1.4-beta`; select newer published versions when validating later
+releases. Logs and generated manifests are retained in the
+`snow-shot-winget-verification` workflow artifact. The underlying
+`scripts/test-snow-shot-winget-install.ps1` refuses to run outside a GitHub-hosted
+Windows runner or when Snow Shot is already installed.
+
 ### Publisher prerequisites
 
 Use PowerShell 7 and the repository's documented Windows release toolchain. The tracked
