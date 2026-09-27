@@ -147,7 +147,8 @@ matching open PRs are reported and skipped; closed, unmerged submissions can be 
 GitHub lookup failures stop submission instead of treating a failed lookup as absence.
 This workflow neither publishes application releases nor changes the website feed.
 
-For local generation and validation (PowerShell 7, WinGet, and WinGetCreate 1.12.13.0):
+For local generation and validation (PowerShell 7, WinGet 1.29.380 or newer, and
+WinGetCreate 1.12.13.0):
 
 ```powershell
 $tag = 'v1.1.5-beta'
@@ -198,7 +199,12 @@ is preserved. Fixture tests and manifest validation do not substitute for this V
 The **Snow Shot WinGet verification** workflow automates this lifecycle on a disposable
 GitHub-hosted Windows runner. It runs for WinGet changes in pull requests and on
 `codex/winget-*` preparation branches; manual runs accept `tag` and `previous_tag`.
-It needs no submission token and never opens upstream PRs. Its default fixtures are
+Installation checks need no submission token and never open upstream PRs. Trusted
+preparation-branch pushes and manual runs also perform a read-only check of the
+submission token's scope and fork access; pull requests skip that credential check.
+Both workflows provision WinGet 1.29.380 from Microsoft's signed release bundle when
+the installed client is older, avoiding the incomplete preinstalled runner bundle.
+The default installation fixtures are
 `v1.1.5-beta` and `v1.1.4-beta`; select newer published versions when validating later
 releases. Logs and generated manifests are retained in the
 `snow-shot-winget-verification` workflow artifact. The underlying
