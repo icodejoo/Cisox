@@ -197,8 +197,9 @@ Finally uninstall silently and verify owned files/registration are removed and u
 is preserved. Fixture tests and manifest validation do not substitute for this VM check.
 
 The **Snow Shot WinGet verification** workflow automates this lifecycle on a disposable
-GitHub-hosted Windows runner. It runs for WinGet changes in pull requests and on
-`codex/winget-*` preparation branches; manual runs accept `tag` and `previous_tag`.
+GitHub-hosted Windows runner. It runs installation checks for WinGet changes in pull
+requests; manual runs accept `tag` and `previous_tag`. Pushes to `codex/winget-*`
+preparation branches run fixture and credential checks only, avoiding duplicate installs.
 Installation checks need no submission token and never open upstream PRs. Trusted
 preparation-branch pushes and manual runs also perform a read-only check of the
 submission token's scope and fork access; pull requests skip that credential check.

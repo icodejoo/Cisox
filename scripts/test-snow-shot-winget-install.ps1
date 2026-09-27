@@ -26,6 +26,29 @@ $output = Join-Path $PSScriptRoot '../build/winget-install-test'
 $null = New-Item -ItemType Directory -Force -Path $output
 Start-Transcript -Path (Join-Path $output 'installation.log')
 $app = $null
+Add-Type @'
+using System;
+using System.Text;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+public static class WinGetWindowDiagnostics {
+    private delegate bool Callback(IntPtr window, IntPtr data);
+    [DllImport("user32.dll")] private static extern bool EnumChildWindows(IntPtr window, Callback callback, IntPtr data);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetWindowText(IntPtr window, StringBuilder text, int count);
+    public static string Read(IntPtr window) {
+        var lines = new List<string>();
+        Callback callback = (child, data) => {
+            var text = new StringBuilder(2048);
+            GetWindowText(child, text, text.Capacity);
+            if (text.Length > 0) lines.Add(text.ToString());
+            return true;
+        };
+        callback(window, IntPtr.Zero);
+        EnumChildWindows(window, callback, IntPtr.Zero);
+        return string.Join(Environment.NewLine, lines);
+    }
+}
+'@
 function Invoke-WingetBounded([string[]]$Arguments) {
     Write-Host "WinGet: $($Arguments -join ' ')"
     $info = [Diagnostics.ProcessStartInfo]::new($Winget)
@@ -39,7 +62,18 @@ function Invoke-WingetBounded([string[]]$Arguments) {
     $process = [Diagnostics.Process]::Start($info)
     $stdout = $process.StandardOutput.ReadToEndAsync()
     $stderr = $process.StandardError.ReadToEndAsync()
-    if (-not $process.WaitForExit(180000)) {
+    $deadline = [DateTime]::UtcNow.AddSeconds(180)
+    $dialog = $false
+    while (-not $process.WaitForExit(1000)) {
+        $process.Refresh()
+        if ($process.MainWindowTitle -eq 'Window Dialog') {
+            Write-Host ([WinGetWindowDiagnostics]::Read($process.MainWindowHandle))
+            $dialog = $true
+            break
+        }
+        if ([DateTime]::UtcNow -ge $deadline) { break }
+    }
+    if (-not $process.HasExited) {
         Get-CimInstance Win32_Process | Where-Object { $_.Name -match 'winget|snow.?shot' } |
             Select-Object Name, ProcessId, ParentProcessId, CommandLine | Format-List | Out-Host
         Get-Process | Where-Object { $_.MainWindowTitle } |
@@ -48,6 +82,7 @@ function Invoke-WingetBounded([string[]]$Arguments) {
         $process.WaitForExit()
         Write-Host $stdout.GetAwaiter().GetResult()
         Write-Host $stderr.GetAwaiter().GetResult()
+        if ($dialog) { throw 'WinGet displayed an interactive dialog during unattended installation; see the captured dialog text.' }
         throw "WinGet timed out after 180 seconds: $($Arguments -join ' ')"
     }
     Write-Host $stdout.GetAwaiter().GetResult()

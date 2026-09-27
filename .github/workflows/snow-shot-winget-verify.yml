@@ -42,11 +42,13 @@ jobs:
           WINGET_CREATE_GITHUB_TOKEN: ${{ secrets.WINGET_CREATE_GITHUB_TOKEN }}
         run: ./scripts/test-snow-shot-winget-credentials.ps1
       - name: Provision WinGet in disposable runner
+        if: github.event_name != 'push'
         shell: pwsh
         run: |
           $path = ./scripts/initialize-snow-shot-winget.ps1
           "WINGET_EXE=$path" >> $env:GITHUB_ENV
       - name: Verify real installation lifecycle
+        if: github.event_name != 'push'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
