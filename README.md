@@ -18,6 +18,22 @@ This package includes published beta versions and the default OCR resources. See
 [WinGet release support](docs/snow-shot-releases.md#winget) for upgrades, removal,
 and maintainer setup. The command is unavailable until upstream acceptance.
 
+## Install Snow Shot on macOS
+
+After the first stable Homebrew release is published, Apple Silicon Macs running
+macOS 15 or later can install with:
+
+```sh
+brew update
+brew install --cask mg-chao/tap/snow-shot
+brew upgrade --cask snow-shot
+brew uninstall --cask snow-shot
+```
+
+Installation reuses Snow Shot's local signing identity and may request Keychain
+access and macOS privacy permissions. See [Homebrew installation and migration](docs-macos-build.md#homebrew-installation)
+for existing installations, custom app directories, and recovery.
+
 ## Open Source Licenses
 
 This is a multi-license repository. See [LICENSE.md](LICENSE.md) for the
