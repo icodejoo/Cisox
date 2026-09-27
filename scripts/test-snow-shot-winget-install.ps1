@@ -26,9 +26,37 @@ $output = Join-Path $PSScriptRoot '../build/winget-install-test'
 $null = New-Item -ItemType Directory -Force -Path $output
 Start-Transcript -Path (Join-Path $output 'installation.log')
 $app = $null
+function Invoke-WingetBounded([string[]]$Arguments) {
+    Write-Host "WinGet: $($Arguments -join ' ')"
+    $info = [Diagnostics.ProcessStartInfo]::new($Winget)
+    $info.UseShellExecute = $false
+    $info.CreateNoWindow = $true
+    $info.RedirectStandardOutput = $true
+    $info.RedirectStandardError = $true
+    foreach ($argument in ($Arguments + @('--disable-interactivity', '--verbose-logs'))) {
+        $info.ArgumentList.Add($argument)
+    }
+    $process = [Diagnostics.Process]::Start($info)
+    $stdout = $process.StandardOutput.ReadToEndAsync()
+    $stderr = $process.StandardError.ReadToEndAsync()
+    if (-not $process.WaitForExit(180000)) {
+        Get-CimInstance Win32_Process | Where-Object { $_.Name -match 'winget|snow.?shot' } |
+            Select-Object Name, ProcessId, ParentProcessId, CommandLine | Format-List | Out-Host
+        Get-Process | Where-Object { $_.MainWindowTitle } |
+            Select-Object ProcessName, Id, MainWindowTitle | Format-Table | Out-Host
+        $process.Kill($true)
+        $process.WaitForExit()
+        Write-Host $stdout.GetAwaiter().GetResult()
+        Write-Host $stderr.GetAwaiter().GetResult()
+        throw "WinGet timed out after 180 seconds: $($Arguments -join ' ')"
+    }
+    Write-Host $stdout.GetAwaiter().GetResult()
+    Write-Host $stderr.GetAwaiter().GetResult()
+    return $process.ExitCode
+}
 function Invoke-WingetChecked([string[]]$Arguments) {
-    & $Winget @Arguments --disable-interactivity
-    if ($LASTEXITCODE -ne 0) { throw "WinGet failed ($LASTEXITCODE): $($Arguments -join ' ')" }
+    $result = Invoke-WingetBounded $Arguments
+    if ($result -ne 0) { throw "WinGet failed ($result): $($Arguments -join ' ')" }
 }
 function Assert-InstalledVersion([string]$Expected) {
     $entries = @($registryPaths | Where-Object { Test-Path -LiteralPath $_ } |
@@ -63,9 +91,9 @@ try {
     Start-Sleep -Seconds 5
     if ($app.HasExited) { throw 'The installed app did not remain running for the refusal test.' }
     $before = (Get-FileHash -LiteralPath $executable).Hash
-    & $Winget upgrade --manifest $current --silent --accept-package-agreements `
-        --accept-source-agreements --disable-interactivity
-    if ($LASTEXITCODE -eq 0 -or $app.HasExited -or (Get-FileHash -LiteralPath $executable).Hash -cne $before) {
+    $result = Invoke-WingetBounded @('upgrade', '--manifest', $current, '--silent',
+        '--accept-package-agreements', '--accept-source-agreements')
+    if ($result -eq 0 -or $app.HasExited -or (Get-FileHash -LiteralPath $executable).Hash -cne $before) {
         throw 'Upgrade failed to preserve the running application.'
     }
     Assert-InstalledVersion $previousVersion
@@ -88,5 +116,9 @@ try {
     Write-Output 'PASS: real WinGet install, detection, running-app refusal, upgrade, uninstall, and data preservation.'
 } finally {
     if ($app -and -not $app.HasExited) { Stop-Process -Id $app.Id }
+    $logDirectory = Join-Path $env:LOCALAPPDATA 'Packages/Microsoft.DesktopAppInstaller_8wekyb3d8bbwe/LocalState/DiagOutputDir'
+    if (Test-Path -LiteralPath $logDirectory) {
+        Copy-Item -LiteralPath $logDirectory -Destination (Join-Path $output 'winget-logs') -Recurse -Force
+    }
     Stop-Transcript
 }
