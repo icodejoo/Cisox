@@ -1,0 +1,92 @@
+#Requires -Version 7.0
+[CmdletBinding()]
+param(
+    [string]$Tag = 'v1.1.5-beta',
+    [string]$PreviousTag = 'v1.1.4-beta',
+    [string]$Winget = 'winget.exe'
+)
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
+# Installs real release packages. Never run against a developer's existing installation.
+if ($env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or $env:RUNNER_OS -ne 'Windows') {
+    throw 'Real installation tests require a disposable GitHub-hosted Windows runner.'
+}
+. (Join-Path $PSScriptRoot 'snow-shot-winget.ps1')
+$version = Get-SnowShotWingetVersion $Tag
+$previousVersion = Get-SnowShotWingetVersion $PreviousTag
+if ($version -eq $previousVersion) { throw 'The upgrade fixture requires two different releases.' }
+$registryPaths = @(
+    'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\SnowShot',
+    'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\SnowShot'
+)
+if (@($registryPaths | Where-Object { Test-Path -LiteralPath $_ }).Count) {
+    throw 'Refusing to change an existing Snow Shot installation.'
+}
+$output = Join-Path $PSScriptRoot '../build/winget-install-test'
+$null = New-Item -ItemType Directory -Force -Path $output
+Start-Transcript -Path (Join-Path $output 'installation.log')
+$app = $null
+function Invoke-WingetChecked([string[]]$Arguments) {
+    & $Winget @Arguments --disable-interactivity
+    if ($LASTEXITCODE -ne 0) { throw "WinGet failed ($LASTEXITCODE): $($Arguments -join ' ')" }
+}
+function Assert-InstalledVersion([string]$Expected) {
+    $entries = @($registryPaths | Where-Object { Test-Path -LiteralPath $_ } |
+        ForEach-Object { Get-ItemProperty -LiteralPath $_ })
+    if ($entries.Count -ne 1 -or $entries[0].DisplayVersion -cne $Expected -or
+        $entries[0].DisplayName -cne 'Snow Shot' -or $entries[0].Publisher -cne 'Snow Apps') {
+        throw "Installed registration does not match Snow Shot $Expected."
+    }
+    Invoke-WingetChecked @('list', '--name', 'Snow Shot', '--exact', '--accept-source-agreements')
+}
+try {
+    $current = New-SnowShotWingetManifest $Tag $output
+    $previous = New-SnowShotWingetManifest $PreviousTag $output
+    Invoke-WingetChecked @('validate', '--manifest', $current)
+    Invoke-WingetChecked @('validate', '--manifest', $previous)
+    & $Winget settings --enable LocalManifestFiles
+    if ($LASTEXITCODE -ne 0) { throw 'Could not enable local manifests in the disposable runner.' }
+    $installDirectory = Join-Path $env:RUNNER_TEMP 'Snow Shot custom installation'
+    Invoke-WingetChecked @('install', '--manifest', $previous, '--silent', '--location',
+        $installDirectory, '--accept-package-agreements', '--accept-source-agreements')
+    Assert-InstalledVersion $previousVersion
+    $executable = Join-Path $installDirectory 'bin/snow_shot.exe'
+    if (-not (Test-Path -LiteralPath $executable)) { throw 'Custom installation directory was ignored.' }
+    if (Get-Process snow_shot -ErrorAction SilentlyContinue) { throw 'Silent installation launched Snow Shot.' }
+    $userData = Join-Path $env:APPDATA 'SnowShot/snow_shot'
+    $null = New-Item -ItemType Directory -Force -Path $userData
+    $sentinel = Join-Path $userData 'winget-preservation-test.txt'
+    $sentinelValue = [guid]::NewGuid().ToString('N')
+    [IO.File]::WriteAllText($sentinel, $sentinelValue)
+
+    $app = Start-Process -FilePath $executable -WindowStyle Hidden -PassThru
+    Start-Sleep -Seconds 5
+    if ($app.HasExited) { throw 'The installed app did not remain running for the refusal test.' }
+    $before = (Get-FileHash -LiteralPath $executable).Hash
+    & $Winget upgrade --manifest $current --silent --accept-package-agreements `
+        --accept-source-agreements --disable-interactivity
+    if ($LASTEXITCODE -eq 0 -or $app.HasExited -or (Get-FileHash -LiteralPath $executable).Hash -cne $before) {
+        throw 'Upgrade failed to preserve the running application.'
+    }
+    Assert-InstalledVersion $previousVersion
+    Stop-Process -Id $app.Id
+    $app.WaitForExit()
+    $app = $null
+
+    Invoke-WingetChecked @('upgrade', '--manifest', $current, '--silent',
+        '--accept-package-agreements', '--accept-source-agreements')
+    Assert-InstalledVersion $version
+    if (-not (Test-Path -LiteralPath $executable)) { throw 'Upgrade did not preserve the custom directory.' }
+    if ([IO.File]::ReadAllText($sentinel) -cne $sentinelValue) { throw 'Upgrade changed user data.' }
+    if (Get-Process snow_shot -ErrorAction SilentlyContinue) { throw 'Silent upgrade launched Snow Shot.' }
+    Invoke-WingetChecked @('uninstall', '--name', 'Snow Shot', '--exact', '--silent')
+    if ((Test-Path -LiteralPath $executable) -or
+        @($registryPaths | Where-Object { Test-Path -LiteralPath $_ }).Count) {
+        throw 'Uninstall left the executable or registration behind.'
+    }
+    if ([IO.File]::ReadAllText($sentinel) -cne $sentinelValue) { throw 'Uninstall changed user data.' }
+    Write-Output 'PASS: real WinGet install, detection, running-app refusal, upgrade, uninstall, and data preservation.'
+} finally {
+    if ($app -and -not $app.HasExited) { Stop-Process -Id $app.Id }
+    Stop-Transcript
+}

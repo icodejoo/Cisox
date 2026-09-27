@@ -1,0 +1,61 @@
+name: Snow Shot WinGet verification
+
+on:
+  push:
+    branches: ['codex/winget-*']
+    paths:
+      - 'scripts/*winget*.ps1'
+      - '.github/workflows/snow-shot-winget*.yml'
+  pull_request:
+    paths:
+      - 'scripts/*winget*.ps1'
+      - '.github/workflows/snow-shot-winget*.yml'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published version to verify
+        default: v1.1.5-beta
+        required: true
+        type: string
+      previous_tag:
+        description: Older published version used for upgrade verification
+        default: v1.1.4-beta
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  install:
+    runs-on: windows-2025
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test release and submission fixtures
+        shell: pwsh
+        run: ./scripts/test-snow-shot-winget.ps1
+      - name: Provision WinGet in disposable runner
+        shell: pwsh
+        run: |
+          Install-Module Microsoft.WinGet.Client -Scope CurrentUser -Force -Repository PSGallery
+          Repair-WinGetPackageManager -AllUsers
+          $package = Get-AppxPackage Microsoft.DesktopAppInstaller
+          $path = Join-Path $package.InstallLocation 'winget.exe'
+          "WINGET_EXE=$path" >> $env:GITHUB_ENV
+      - name: Verify real installation lifecycle
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag || 'v1.1.5-beta' }}
+          PREVIOUS_TAG: ${{ inputs.previous_tag || 'v1.1.4-beta' }}
+        run: |
+          ./scripts/test-snow-shot-winget-install.ps1 -Tag $env:RELEASE_TAG `
+            -PreviousTag $env:PREVIOUS_TAG -Winget $env:WINGET_EXE
+      - name: Preserve verification logs and manifests
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: snow-shot-winget-verification
+          path: build/winget-install-test
+          if-no-files-found: ignore
