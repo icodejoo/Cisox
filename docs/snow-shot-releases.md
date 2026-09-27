@@ -212,6 +212,15 @@ releases. Logs and generated manifests are retained in the
 `scripts/test-snow-shot-winget-install.ps1` refuses to run outside a GitHub-hosted
 Windows runner or when Snow Shot is already installed.
 
+The published beta installers are unsigned and may trigger a SmartScreen reputation
+prompt when testing local manifests. The verification workflow explicitly enables
+`-AllowUnrecognizedRelease`: the test verifies the cached installer's SHA-256 against
+the generated manifest, checks the filename displayed in the prompt, and grants
+per-file consent inside the disposable VM. It does not change Windows security
+settings. Without this switch, an interactive launch prompt fails the test and is
+captured in the diagnostic artifact. This consent is separate from the installer's
+silent-mode checks and does not guarantee SmartScreen reputation on end-user PCs.
+
 ### Publisher prerequisites
 
 Use PowerShell 7 and the repository's documented Windows release toolchain. The tracked

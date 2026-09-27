@@ -67,6 +67,7 @@ function Invoke-WingetBounded([string[]]$Arguments) {
     $dialog = $false
     $approved = $false
     while (-not $process.WaitForExit(1000)) {
+        if ([DateTime]::UtcNow -ge $deadline) { break }
         $process.Refresh()
         if ($process.MainWindowTitle -eq 'Window Dialog') {
             if ($process.WaitForExit(2000)) { break }
