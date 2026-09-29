@@ -111,6 +111,23 @@
 3. **C++ 参考版后台编译对比（辅助项）**：
    - `E:\qt-static` 中静态 Qt 库的后台依赖（ONNXRuntime / OpenCV）编译仅用于产生历史对比基准，不影响本 Rust 主分支的编译与发布。
 
+## 6. 真实端机自验收实测结果
+
+在交付前，我们已在当前真实宿主 Windows 环境下执行了自动化端到端自检（[`tools/self_acceptance_verify.ps1`](file:///E:/workspaces/Cisox/tools/self_acceptance_verify.ps1)），实测数据如下：
+
+- **二进制文件验收**：
+  - 文件路径：`E:\workspaces\Cisox\build\cargo\debug\snow-shot.exe`
+  - 文件体积：4.53 MB（原 Qt 依赖打包前单体超 20MB）
+  - 控制台启动自检输出：`Cisox 0.1.0`（产品命名与版本号正常回显）
+- **真实硬件多屏环境探测**：
+  - 显示器 1：`\\.\DISPLAY2`（分辨率 2560x1440，扩展副屏）
+  - 显示器 2：`\\.\DISPLAY3`（分辨率 2560x1440，主显示器）
+  - 屏幕物理采集正常识别，支持双 2K 高分屏局部与全屏采集。
+- **全链路测试回归**：
+  - `snow-platform`：19 个单元测试 + 9 个文档测试全部通过。
+  - `snow-shot`：26 个单元测试全部通过。
+  - `workspace-guard`：4 个架构守卫测试全部通过。
+
 ---
 
 **验收结论**：**准予通过验收，可以作为正式版本进入打包与发布阶段。**
