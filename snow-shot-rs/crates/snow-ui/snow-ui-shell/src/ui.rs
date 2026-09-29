@@ -25,6 +25,13 @@ pub use gpui_kit::{
     UTF16Selection, UnderlineStyle, Window, actions, component, div, hsla, point, px, rgb, rgba,
     size,
 };
+pub use gpui_kit::prelude::FluentBuilder;
+
+pub use crate::selection::{
+    DEFAULT_EDGE_TOLERANCE, DEFAULT_HANDLE_SIZE, DEFAULT_MINIMUM_SELECTION_SIZE,
+    SelectionDragMode, SelectionState, bounded_selection_rect, dragged_selection_rect,
+    handle_rects, hit_test_drag_mode, marquee_selection_rect, selection_size_label,
+};
 
 /// 已打开的窗口句柄（不暴露 gpui 类型的部分见各方法）。
 #[derive(Debug, Clone, Copy)]

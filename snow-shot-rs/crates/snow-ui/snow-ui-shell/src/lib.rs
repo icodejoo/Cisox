@@ -19,6 +19,7 @@ pub mod hotkey;
 pub mod monitor;
 mod native;
 pub mod overlay;
+pub mod selection;
 pub mod tray;
 pub mod ui;
 pub mod window;

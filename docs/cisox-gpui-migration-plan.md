@@ -553,6 +553,9 @@ workspace 骨架 · `snow-ui-shell` 隔离层 · `snow-capability` 能力注册�
 
 **进度（2026-09-29）**：
 - (a) `snow-ui` 聚合器 ✅ **已完成**：聚合 `snow-ui-shell`（外壳与 GPUI 隔离门面）、`snow-ui-theme`（色彩计算与 Ant Design 令牌）、`snow-ui-icons`（829 个规范化矢量图标系统）与 `snow-ui-widgets`（Checkerboard、Segmented、Popconfirm 等补齐组件），并通过 `workspace-guard` 守卫与 clippy 检查。
+- (b) 选区交互几何与拖拽状态机 ✅ **已完成**（`snow-ui-shell::selection`）：提供橡皮筋框选（Marquee）、八向手柄命中测试与矩形计算、边界限制（`bounded_selection_rect`）、拖拽位移更新（`dragged_selection_rect`）、宽高比锁定处理以及选区状态机（`SelectionState`），并通过 46 个单测与 44 个文档测试。
+- (c) 放大镜与取色器浮层 ✅ **已完成**（`snow-ui-widgets::magnifier`）：提供像素级局部采样放大网格（`MagnifierGrid`）、中心十字准星指示、HEX/RGB/HSL 色彩实时格式化切换（`ColorFormat`）、屏幕坐标与选区几何尺寸展示、防遮挡与边界自适应翻转定位（`calculate_magnifier_placement`）。
+- (d) 截图浮动操作工具栏 ✅ **已完成**（`snow-ui-widgets::toolbar`）：提供标注工具切换（矩形、椭圆、箭头、直线、画笔、文字、马赛克等）、撤销/重做堆栈状态控制、导出动作按钮组（贴图、OCR、翻译、保存、复制、取消）以及依据选区上下空间自适应嵌入或翻转的智能定位算法（`calculate_toolbar_placement`）。
 
 
 ### P4 · 贴图

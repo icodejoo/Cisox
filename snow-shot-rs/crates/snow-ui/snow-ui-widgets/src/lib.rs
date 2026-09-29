@@ -4,11 +4,16 @@
 //! 严格隔离外部直接依赖 `gpui`。
 
 mod checkerboard;
+mod magnifier;
 mod popconfirm;
 mod segmented;
+mod toolbar;
 
 pub use checkerboard::{
     Checkerboard, DEFAULT_CELL_SIZE, DEFAULT_DARK_COLOR, DEFAULT_LIGHT_COLOR,
+};
+pub use magnifier::{
+    ColorFormat, Magnifier, MagnifierGrid, calculate_magnifier_placement,
 };
 pub use popconfirm::{
     Popconfirm, PopconfirmHandler, PopconfirmPlacement,
@@ -17,6 +22,9 @@ pub use segmented::{
     DEFAULT_ACTIVE_BG_COLOR, DEFAULT_ACTIVE_TEXT_COLOR, DEFAULT_BG_COLOR,
     DEFAULT_SEGMENTED_HEIGHT, DEFAULT_TEXT_COLOR, Segmented, SegmentedChangeHandler,
     SegmentedItem,
+};
+pub use toolbar::{
+    AnnotationTool, ScreenshotToolbar, ToolbarAction, calculate_toolbar_placement,
 };
 
 /// 本 crate 的阶段标记，用于骨架连通性测试。
