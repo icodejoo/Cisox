@@ -6913,10 +6913,12 @@ dependencies = [
 name = "snow-shot"
 version = "0.1.0"
 dependencies = [
+ "image",
  "snow-app-core",
  "snow-capability",
  "snow-config",
  "snow-platform",
+ "snow-ui",
  "tracing",
 ]
 

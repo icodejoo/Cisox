@@ -18,12 +18,12 @@ use snow_capability::CapabilityRegistry;
 
 // ---- 精选 GPUI 子集（视图层使用）----
 pub use gpui_kit::{
-    Anchor, AnyElement, App, AppContext, Bounds, ClickEvent, Context, CursorStyle, ElementId,
-    ElementInputHandler, Entity, EntityInputHandler, FocusHandle, Focusable, FontWeight, Hsla,
-    InteractiveElement, IntoElement, MouseButton, ParentElement, Pixels, Point, Render, RenderOnce,
-    Rgba, SharedString, Size, StatefulInteractiveElement, Styled, TextAlign, TextRun,
-    UTF16Selection, UnderlineStyle, Window, actions, component, div, hsla, point, px, rgb, rgba,
-    size,
+    Anchor, AnyElement, App, AppContext, Bounds, ClickEvent, Context, CursorStyle, Element,
+    ElementId, ElementInputHandler, Entity, EntityInputHandler, FocusHandle, Focusable, FontWeight,
+    Hsla, InteractiveElement, IntoElement, MouseButton, ParentElement, Pixels, Point, Render,
+    RenderOnce, Rgba, SharedString, Size, StatefulInteractiveElement, Styled, TextAlign, TextRun,
+    UTF16Selection, UnderlineStyle, ViewElement, Window, actions, component, div, hsla, point, px,
+    rgb, rgba, size,
 };
 pub use gpui_kit::prelude::FluentBuilder;
 

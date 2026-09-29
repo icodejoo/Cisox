@@ -2,6 +2,8 @@
 //!
 //! 所属阶段：P1。当前为最小骨架，占位实现为可运行的降级态。
 
+pub mod capture;
+pub mod clipboard;
 pub mod crash;
 
 /// 本 crate 的阶段标记，用于骨架连通性测试。

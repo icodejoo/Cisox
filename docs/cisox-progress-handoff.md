@@ -97,6 +97,7 @@ P0 验证基本完成，P1 地基完成，P2/P4/P5 已开工；**参考版（C++
 - **P3 `snow-ui` 聚合器（✅ 已完成，2026-09-29）**：完成 `snow-ui` 总入口聚合（`shell`、`theme`、`icons`、`widgets` 与 `ui` 门面），验证通过单元测试、clippy 0 warning 与 `workspace-guard` 守卫检查。
 - **P3 选区几何与交互模型（✅ 已完成，2026-09-29）**：在 `snow-ui-shell::selection` 落地橡皮筋框选（Marquee）、八向手柄命中测试与外框生成、边界限制（`bounded_selection_rect`）、拖拽位移更新（`dragged_selection_rect`）、宽高比锁定处理以及选区状态机（`SelectionState`），并通过 46 个单测与 44 个文档测试。
 - **P3 放大镜与操作工具栏组件（✅ 已完成，2026-09-29）**：在 `snow-ui-widgets` 落地像素级采样放大网格与取色器 `Magnifier`（支持 HEX/RGB/HSL 循环切换与防遮挡自适应翻转定位）以及截图浮动操作工具栏 `ScreenshotToolbar`（支持标注工具切换、撤销/重做堆栈状态控制、导出动作按钮组以及智能摆放定位），单测与 doctest 全绿并通过 clippy 0 warning 检查。
+- **P3 全屏覆盖窗与屏幕采集/剪贴板主链路（✅ 已完成，2026-09-29）**：在 `snow-platform` 落地 Win32 原生 GDI 屏幕抓取（`capture_display`、内存位图与局部裁剪）与剪贴板图文直写；在 `snow-shot` 落地 `ScreenshotOverlayView` 全屏交互视图，统一承载全屏帧底图、四象限遮罩暗化、八向缩放手柄、浮动放大镜、浮动工具栏、鼠标事件交互状态机及动作分发。单元测试全过，workspace-guard 与 clippy 0 warning 保持全绿。
 - **ADR-8**：`result_style.bin` 与 `recognition_results.bin` 是 Qt `QDataStream` 私有二进制，导入器需最小读取器（P4 待办）。
 - **MCP** 共 101 个 tool，命令总线只覆盖 screenshot 域 28 个语义，其余约 70 个待建模。
 - **V2**：判据（稳态平均 ≥58fps 且稳态 P99 ≤ max(参考版 P99, 20ms)）是看到数据后修订的；前提是"安静环境重跑 + 参考版 P99"。长尾归因未定，需要 GPU 侧计时（PIX/ETW）才能区分上传还是调度。

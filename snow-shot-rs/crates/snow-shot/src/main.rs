@@ -11,6 +11,8 @@ use snow_platform::crash::{
     CrashDumpConfig, CrashGuard, DEFAULT_MAX_REPORTS, install as install_crash_handler,
 };
 
+pub mod overlay_view;
+
 /// 运行时启动上下文。
 pub struct AppBootstrap {
     /// 存储目录解析结果。

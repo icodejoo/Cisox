@@ -13,4 +13,6 @@ snow-app-core = { path = "../snow-app-core" }
 snow-capability = { path = "../snow-capability" }
 snow-config = { path = "../snow-config" }
 snow-platform = { path = "../snow-platform" }
+snow-ui = { path = "../snow-ui" }
+image = { version = "0.25", default-features = false, features = ["png"] }
 tracing = "0.1"

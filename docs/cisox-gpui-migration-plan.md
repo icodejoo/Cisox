@@ -556,6 +556,7 @@ workspace 骨架 · `snow-ui-shell` 隔离层 · `snow-capability` 能力注册�
 - (b) 选区交互几何与拖拽状态机 ✅ **已完成**（`snow-ui-shell::selection`）：提供橡皮筋框选（Marquee）、八向手柄命中测试与矩形计算、边界限制（`bounded_selection_rect`）、拖拽位移更新（`dragged_selection_rect`）、宽高比锁定处理以及选区状态机（`SelectionState`），并通过 46 个单测与 44 个文档测试。
 - (c) 放大镜与取色器浮层 ✅ **已完成**（`snow-ui-widgets::magnifier`）：提供像素级局部采样放大网格（`MagnifierGrid`）、中心十字准星指示、HEX/RGB/HSL 色彩实时格式化切换（`ColorFormat`）、屏幕坐标与选区几何尺寸展示、防遮挡与边界自适应翻转定位（`calculate_magnifier_placement`）。
 - (d) 截图浮动操作工具栏 ✅ **已完成**（`snow-ui-widgets::toolbar`）：提供标注工具切换（矩形、椭圆、箭头、直线、画笔、文字、马赛克等）、撤销/重做堆栈状态控制、导出动作按钮组（贴图、OCR、翻译、保存、复制、取消）以及依据选区上下空间自适应嵌入或翻转的智能定位算法（`calculate_toolbar_placement`）。
+- (e) 全屏覆盖窗与主链路打通 ✅ **已完成**（`snow-shot::overlay_view` & `snow-platform`）：在 `snow-platform` 实现 Win32 原生 GDI 屏幕捕获与剪贴板图文写入；在 `snow-shot` 落地 `ScreenshotOverlayView` 全屏交互视图，统一承载全屏帧绘制、选区四象限暗化遮罩、八向缩放手柄、浮动放大镜取色器、浮动工具栏、鼠标交互状态机驱动及动作分发。
 
 
 ### P4 · 贴图

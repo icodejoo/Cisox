@@ -312,6 +312,20 @@ impl RenderOnce for ScreenshotToolbar {
     }
 }
 
+impl IntoElement for ScreenshotToolbar {
+    type Element = ViewElement<Self>;
+
+    #[track_caller]
+    fn into_element(self) -> Self::Element {
+        ViewElement::new(self)
+    }
+
+    #[track_caller]
+    fn into_any_element(self) -> AnyElement {
+        Element::into_any(self.into_element())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
