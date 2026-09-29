@@ -1,0 +1,423 @@
+P #1677ff light #e6f4ff #bae0ff #91caff #69b1ff #4096ff #1677ff #0958d9 #003eb3 #002c8c #001d66
+P #1677ff dark #111a2c #112545 #15325b #15417e #1554ad #1668dc #3c89e8 #65a9f3 #8dc5f8 #b7dcfa
+P #1677ff dark000 #00091b #021636 #07244d #0a3673 #0e4da6 #1365d9 #3a87e6 #64a8f2 #8dc4f7 #b6dcfa
+P #f5222d light #fff1f0 #ffccc7 #ffa39e #ff7875 #ff4d4f #f5222d #cf1322 #a8071a #820014 #5c0011
+P #f5222d dark #2a1215 #431418 #58181c #791a1f #a61d24 #d32029 #e84749 #f37370 #f89f9a #fac8c3
+P #f5222d dark000 #190104 #340509 #4a0a0e #6e0f14 #9f161d #d01d26 #e64547 #f2726f #f79e99 #fac8c3
+P #52c41a light #f6ffed #d9f7be #b7eb8f #95de64 #73d13d #52c41a #389e0d #237804 #135200 #092b00
+P #52c41a dark #162312 #1d3712 #274916 #306317 #3c8618 #49aa19 #6abe39 #8fd460 #b2e58b #d5f2bb
+P #52c41a dark000 #051201 #0e2803 #193b08 #25580c #357f11 #46a716 #68bc37 #8ed35f #b2e48b #d5f2ba
+P #faad14 light #fffbe6 #fff1b8 #ffe58f #ffd666 #ffc53d #faad14 #d48806 #ad6800 #874d00 #613400
+P #faad14 dark #2b2111 #443111 #594214 #7c5914 #aa7714 #d89614 #e8b339 #f3cc62 #f8df8b #faedb5
+P #faad14 dark000 #1a1000 #352202 #4b3406 #714e09 #a3700d #d59311 #e6b137 #f2cb61 #f7de8b #faecb4
+P #722ed1 light #f9f0ff #efdbff #d3adf7 #b37feb #9254de #722ed1 #531dab #391085 #22075e #120338
+P #722ed1 dark #1a1325 #24163a #301c4d #3e2069 #51258f #642ab5 #854eca #ab7ae0 #cda8f0 #ebd7fa
+P #722ed1 dark000 #090214 #15072b #220e3f #33155e #4a1e88 #6127b2 #834cc8 #aa79df #cda8f0 #ead7fa
+P #13c2c2 light #e6fffb #b5f5ec #87e8de #5cdbd3 #36cfc9 #13c2c2 #08979c #006d75 #00474f #002329
+P #13c2c2 dark #112123 #113536 #144848 #146262 #138585 #13a8a8 #33bcb7 #58d1c9 #84e2d8 #b2f1e8
+P #13c2c2 dark000 #001012 #022627 #063a3a #095757 #0c7e7e #10a5a5 #31bab5 #57d0c8 #83e1d7 #b1f0e7
+P #eb2f96 light #fff0f6 #ffd6e7 #ffadd2 #ff85c0 #f759ab #eb2f96 #c41d7f #9e1068 #780650 #520339
+P #eb2f96 dark #291321 #40162f #551c3b #75204f #a02669 #cb2b83 #e0529c #f37fb7 #f8a8cc #fad2e3
+P #eb2f96 dark000 #180210 #310720 #470e2d #6a1544 #991f62 #c82880 #de509a #f27eb6 #f7a8cc #fad2e2
+P #fa8c16 light #fff7e6 #ffe7ba #ffd591 #ffc069 #ffa940 #fa8c16 #d46b08 #ad4e00 #873800 #612500
+P #fa8c16 dark #2b1d11 #442a11 #593815 #7c4a15 #aa6215 #d87a16 #e89a3c #f3b765 #f8cf8d #fae3b7
+P #fa8c16 dark000 #1a0c00 #351b02 #4b2a07 #713f0a #a35b0e #d57713 #e6983a #f2b664 #f7cf8d #fae2b6
+P #a0d911 light #fcffe6 #f4ffb8 #eaff8f #d3f261 #bae637 #a0d911 #7cb305 #5b8c00 #3f6600 #254000
+P #a0d911 dark #1f2611 #2e3c10 #3e4f13 #536d13 #6f9412 #8bbb11 #a9d134 #c9e75d #e4f88b #f0fab5
+P #a0d911 dark000 #0e1500 #1f2d01 #304105 #486208 #688d0b #88b80e #a7cf32 #c8e65c #e3f78b #effab4
+P #fa541c light #fff2e8 #ffd8bf #ffbb96 #ff9c6e #ff7a45 #fa541c #d4380d #ad2102 #871400 #610b00
+P #fa541c dark #2b1611 #441d12 #592716 #7c3118 #aa3e19 #d84a1b #e87040 #f3956a #f8b692 #fad4bc
+P #fa541c dark000 #1a0500 #350e03 #4b1908 #71260d #a33712 #d54718 #e66e3e #f29469 #f7b592 #fad4bb
+P #2f54eb light #f0f5ff #d6e4ff #adc6ff #85a5ff #597ef7 #2f54eb #1d39c4 #10239e #061178 #030852
+P #2f54eb dark #131629 #161d40 #1c2755 #203175 #263ea0 #2b4acb #5273e0 #7f9ef3 #a8c1f8 #d2e0fa
+P #2f54eb dark000 #020518 #070e31 #0e1947 #15266a #1f3799 #2847c8 #5071de #7e9df2 #a8c0f7 #d2dffa
+P #fadb14 light #feffe6 #ffffb8 #fffb8f #fff566 #ffec3d #fadb14 #d4b106 #ad8b00 #876800 #614700
+P #fadb14 dark #2b2611 #443b11 #595014 #7c6e14 #aa9514 #d8bd14 #e8d639 #f3ea62 #f8f48b #fafab5
+P #fadb14 dark000 #1a1500 #352c02 #4b4206 #716309 #a38e0d #d5ba11 #e6d437 #f2e961 #f7f38b #fafab4
+P #ff4d4f light #fff2f0 #fff1f0 #ffccc7 #ffa39e #ff7875 #ff4d4f #d9363e #b32430 #8c1523 #660e1b
+P #ff4d4f dark #2c1618 #451d1f #5b2526 #7e2e2f #ad393a #dc4446 #e86e6b #f39c97 #f8c6c2 #faedec
+P #ff4d4f dark000 #1b0507 #360e10 #4d1718 #732324 #a63233 #d94143 #e66c69 #f29b96 #f7c6c1 #faeceb
+P #000000 light #404040 #333333 #262626 #1a1a1a #0d0d0d #000000 #000000 #000000 #000000 #000000
+P #000000 dark #111111 #0f0f0f #0e0e0e #0b0b0b #070707 #030303 #0e0e0e #1a1a1a #252525 #323232
+P #000000 dark000 #000000 #000000 #000000 #000000 #000000 #000000 #0c0c0c #191919 #252525 #323232
+P #ffffff light #ffffff #ffffff #ffffff #ffffff #ffffff #ffffff #d9d9d9 #b3b3b3 #8c8c8c #666666
+P #ffffff dark #2c2c2c #454545 #5b5b5b #7e7e7e #adadad #dcdcdc #e8e8e8 #f3f3f3 #f8f8f8 #fafafa
+P #ffffff dark000 #1b1b1b #363636 #4d4d4d #737373 #a6a6a6 #d9d9d9 #e6e6e6 #f2f2f2 #f7f7f7 #fafafa
+P #808080 light #bfbfbf #b3b3b3 #a6a6a6 #999999 #8c8c8c #808080 #595959 #333333 #0d0d0d #000000
+P #808080 dark #191919 #252525 #343434 #454545 #5a5a5a #707070 #808080 #929292 #a2a2a2 #b0b0b0
+P #808080 dark000 #080808 #161616 #262626 #3a3a3a #535353 #6d6d6d #7e7e7e #919191 #a1a1a1 #afafaf
+PBAD #zzzzzz #e6f4ff #bae0ff #91caff #69b1ff #4096ff #1677ff #0958d9 #003eb3 #002c8c #001d66
+PBAD <empty> #e6f4ff #bae0ff #91caff #69b1ff #4096ff #1677ff #0958d9 #003eb3 #002c8c #001d66
+PBAD blue #e6f4ff #bae0ff #91caff #69b1ff #4096ff #1677ff #0958d9 #003eb3 #002c8c #001d66
+D #1677ff 4 #0d6df4 #3485f6
+D #1677ff 6 #0b68ec #3d8af6
+D #1677ff 15 #0955c0 #69a5f8
+D #1677ff 8 #0a64e2 #4790f7
+D #1677ff 12 #095bce #5b9cf8
+D #1677ff 19 #084cac #7db1f9
+D #1677ff 26 #063d8a #9fc5fb
+D #f5222d 4 #ee1520 #f03b44
+D #f5222d 6 #e7111c #f1454d
+D #f5222d 15 #bc0e17 #f46f76
+D #f5222d 8 #de111b #f24e56
+D #f5222d 12 #cb0f18 #f36168
+D #f5222d 19 #a90d14 #f68288
+D #f5222d 26 #880a10 #f8a3a8
+D #52c41a 4 #48bc0d #56e210
+D #52c41a 6 #44b30d #5aec11
+D #52c41a 15 #34880a #77f13a
+D #52c41a 8 #40a90c #60ef18
+D #52c41a 12 #39960b #6df02b
+D #52c41a 19 #2c7508 #84f24d
+D #52c41a 26 #205306 #9bf56e
+D #faad14 4 #f0a30a #f6b32c
+D #faad14 6 #e69c0a #f7b636
+D #faad14 15 #ba7e08 #f8c662
+D #faad14 8 #dc9609 #f7ba40
+D #faad14 12 #c88808 #f8c153
+D #faad14 19 #a67107 #f9cd76
+D #faad14 26 #845a05 #fbda98
+D #722ed1 4 #661ad1 #7a2ee5
+D #722ed1 6 #6219c8 #8037e6
+D #722ed1 15 #4e149f #9a60eb
+D #722ed1 8 #5d18bf #8640e7
+D #722ed1 12 #5415ac #9253ea
+D #722ed1 19 #45118d #a672ee
+D #722ed1 26 #350d6d #ba92f2
+D #13c2c2 4 #09b7b7 #0bdede
+D #13c2c2 6 #09adad #0ce8e8
+D #13c2c2 15 #078282 #2df4f4
+D #13c2c2 8 #08a4a4 #0cf1f1
+D #13c2c2 12 #079090 #1ff3f3
+D #13c2c2 19 #066e6e #41f5f5
+D #13c2c2 26 #044c4c #63f7f7
+D #eb2f96 4 #e61f8d #ea44a0
+D #eb2f96 6 #e21988 #eb4da4
+D #eb2f96 15 #b9156f #f077b9
+D #eb2f96 8 #d91882 #ec57a9
+D #eb2f96 12 #c71677 #ee69b2
+D #eb2f96 19 #a71364 #f289c3
+D #eb2f96 26 #860f51 #f5a9d3
+D #fa8c16 4 #f1820b #f5962f
+D #fa8c16 6 #e77c0b #f69a39
+D #fa8c16 15 #bb6509 #f8b165
+D #fa8c16 8 #dd770a #f69f42
+D #fa8c16 12 #ca6d09 #f7a956
+D #fa8c16 19 #a75a08 #f9bb78
+D #fa8c16 26 #854806 #facc9a
+D #a0d911 4 #95cd08 #b2f40a
+D #a0d911 6 #8ec308 #b5f513
+D #a0d911 15 #6e9706 #c3f73f
+D #a0d911 8 #87ba08 #b8f61d
+D #a0d911 12 #79a607 #bef731
+D #a0d911 19 #608405 #c9f853
+D #a0d911 26 #476104 #d4f975
+D #fa541c 4 #f14911 #f36637
+D #fa541c 6 #ea450e #f46e41
+D #fa541c 15 #be380b #f68f6c
+D #fa541c 8 #e0420d #f4754b
+D #fa541c 12 #cd3c0c #f5845e
+D #fa541c 19 #ab320a #f79d7f
+D #fa541c 26 #892808 #f9b7a1
+D #2f54eb 4 #1f47e6 #4465ea
+D #2f54eb 6 #1941e2 #4d6deb
+D #2f54eb 15 #1535b9 #778ff0
+D #2f54eb 8 #183fd9 #5774ec
+D #2f54eb 12 #1639c7 #6984ee
+D #2f54eb 19 #1330a7 #899ef2
+D #2f54eb 26 #0f2786 #a9b8f5
+D #fadb14 4 #f0d10a #f6db2c
+D #fadb14 6 #e6c80a #f7dd36
+D #fadb14 15 #baa208 #f8e462
+D #fadb14 8 #dcc009 #f7df40
+D #fadb14 12 #c8af08 #f8e253
+D #fadb14 19 #a69107 #f9e876
+D #fadb14 26 #847305 #fbee98
+D #ff4d4f 4 #e15759 #e7797b
+D #ff4d4f 6 #e04e50 #e98284
+D #ff4d4f 15 #d9272a #f0a9aa
+D #ff4d4f 8 #de4548 #ea8b8c
+D #ff4d4f 12 #db3437 #ed9c9d
+D #ff4d4f 19 #c82326 #f3babb
+D #ff4d4f 26 #a91e20 #f8d8d9
+D #000000 4 #000000 #0a0a0a
+D #000000 6 #000000 #0f0f0f
+D #000000 15 #000000 #262626
+D #000000 8 #000000 #141414
+D #000000 12 #000000 #1f1f1f
+D #000000 19 #000000 #303030
+D #000000 26 #000000 #424242
+D #ffffff 4 #f5f5f5 #ffffff
+D #ffffff 6 #f0f0f0 #ffffff
+D #ffffff 15 #d9d9d9 #ffffff
+D #ffffff 8 #ebebeb #ffffff
+D #ffffff 12 #e0e0e0 #ffffff
+D #ffffff 19 #cfcfcf #ffffff
+D #ffffff 26 #bdbdbd #ffffff
+D #808080 4 #767676 #8a8a8a
+D #808080 6 #717171 #8f8f8f
+D #808080 15 #5a5a5a #a6a6a6
+D #808080 8 #6c6c6c #949494
+D #808080 12 #616161 #9f9f9f
+D #808080 19 #505050 #b0b0b0
+D #808080 26 #3e3e3e #c2c2c2
+X #1677ff #141414 0 #1677ff
+X #1677ff #141414 15 #1668dc
+X #1677ff #141414 50 #15468a
+X #1677ff #141414 98 #141619
+X #1677ff #141414 100 #141414
+X #1677ff #ffffff 0 #1677ff
+X #1677ff #ffffff 15 #398bff
+X #1677ff #ffffff 50 #8bbbff
+X #1677ff #ffffff 98 #fafcff
+X #1677ff #ffffff 100 #ffffff
+X #1677ff #1677ff 0 #1677ff
+X #1677ff #1677ff 15 #1677ff
+X #1677ff #1677ff 50 #1677ff
+X #1677ff #1677ff 98 #1677ff
+X #1677ff #1677ff 100 #1677ff
+X #f5222d #141414 0 #f5222d
+X #f5222d #141414 15 #d32029
+X #f5222d #141414 50 #851b21
+X #f5222d #141414 98 #191415
+X #f5222d #141414 100 #141414
+X #f5222d #ffffff 0 #f5222d
+X #f5222d #ffffff 15 #f7434d
+X #f5222d #ffffff 50 #fa9196
+X #f5222d #ffffff 98 #fffbfb
+X #f5222d #ffffff 100 #ffffff
+X #f5222d #1677ff 0 #f5222d
+X #f5222d #1677ff 15 #d42f4d
+X #f5222d #1677ff 50 #864d96
+X #f5222d #1677ff 98 #1a75fb
+X #f5222d #1677ff 100 #1677ff
+X #52c41a #141414 0 #52c41a
+X #52c41a #141414 15 #49aa19
+X #52c41a #141414 50 #336c17
+X #52c41a #141414 98 #151814
+X #52c41a #141414 100 #141414
+X #52c41a #ffffff 0 #52c41a
+X #52c41a #ffffff 15 #6ccd3c
+X #52c41a #ffffff 50 #a9e28d
+X #52c41a #ffffff 98 #fcfefa
+X #52c41a #ffffff 100 #ffffff
+X #52c41a #1677ff 0 #52c41a
+X #52c41a #1677ff 15 #49b83c
+X #52c41a #1677ff 50 #349e8d
+X #52c41a #1677ff 98 #1779fa
+X #52c41a #1677ff 100 #1677ff
+X #faad14 #141414 0 #faad14
+X #faad14 #141414 15 #d89614
+X #faad14 #141414 50 #876114
+X #faad14 #141414 98 #191714
+X #faad14 #141414 100 #141414
+X #faad14 #ffffff 0 #faad14
+X #faad14 #ffffff 15 #fbb937
+X #faad14 #ffffff 50 #fdd68a
+X #faad14 #ffffff 98 #fffdfa
+X #faad14 #ffffff 100 #ffffff
+X #faad14 #1677ff 0 #faad14
+X #faad14 #1677ff 15 #d8a537
+X #faad14 #1677ff 50 #88928a
+X #faad14 #1677ff 98 #1b78fa
+X #faad14 #1677ff 100 #1677ff
+X #722ed1 #141414 0 #722ed1
+X #722ed1 #141414 15 #642ab5
+X #722ed1 #141414 50 #432173
+X #722ed1 #141414 98 #161518
+X #722ed1 #141414 100 #141414
+X #722ed1 #ffffff 0 #722ed1
+X #722ed1 #ffffff 15 #874dd8
+X #722ed1 #ffffff 50 #b997e8
+X #722ed1 #ffffff 98 #fcfbfe
+X #722ed1 #ffffff 100 #ffffff
+X #722ed1 #1677ff 0 #722ed1
+X #722ed1 #1677ff 15 #6439d8
+X #722ed1 #1677ff 50 #4453e8
+X #722ed1 #1677ff 98 #1876fe
+X #722ed1 #1677ff 100 #1677ff
+X #13c2c2 #141414 0 #13c2c2
+X #13c2c2 #141414 15 #13a8a8
+X #13c2c2 #141414 50 #146b6b
+X #13c2c2 #141414 98 #141717
+X #13c2c2 #141414 100 #141414
+X #13c2c2 #ffffff 0 #13c2c2
+X #13c2c2 #ffffff 15 #36cbcb
+X #13c2c2 #ffffff 50 #89e1e1
+X #13c2c2 #ffffff 98 #fafefe
+X #13c2c2 #ffffff 100 #ffffff
+X #13c2c2 #1677ff 0 #13c2c2
+X #13c2c2 #1677ff 15 #13b7cb
+X #13c2c2 #1677ff 50 #159de1
+X #13c2c2 #1677ff 98 #1679fe
+X #13c2c2 #1677ff 100 #1677ff
+X #eb2f96 #141414 0 #eb2f96
+X #eb2f96 #141414 15 #cb2b83
+X #eb2f96 #141414 50 #802255
+X #eb2f96 #141414 98 #181517
+X #eb2f96 #141414 100 #141414
+X #eb2f96 #ffffff 0 #eb2f96
+X #eb2f96 #ffffff 15 #ee4ea6
+X #eb2f96 #ffffff 50 #f597cb
+X #eb2f96 #ffffff 98 #fffbfd
+X #eb2f96 #ffffff 100 #ffffff
+X #eb2f96 #1677ff 0 #eb2f96
+X #eb2f96 #1677ff 15 #cb3aa6
+X #eb2f96 #1677ff 50 #8153cb
+X #eb2f96 #1677ff 98 #1a76fd
+X #eb2f96 #1677ff 100 #1677ff
+X #fa8c16 #141414 0 #fa8c16
+X #fa8c16 #141414 15 #d87a16
+X #fa8c16 #141414 50 #875015
+X #fa8c16 #141414 98 #191614
+X #fa8c16 #141414 100 #141414
+X #fa8c16 #ffffff 0 #fa8c16
+X #fa8c16 #ffffff 15 #fb9d39
+X #fa8c16 #ffffff 50 #fdc68b
+X #fa8c16 #ffffff 98 #fffdfa
+X #fa8c16 #ffffff 100 #ffffff
+X #fa8c16 #1677ff 0 #fa8c16
+X #fa8c16 #1677ff 15 #d88939
+X #fa8c16 #1677ff 50 #88828b
+X #fa8c16 #1677ff 98 #1b77fa
+X #fa8c16 #1677ff 100 #1677ff
+X #a0d911 #141414 0 #a0d911
+X #a0d911 #141414 15 #8bbb11
+X #a0d911 #141414 50 #5a7713
+X #a0d911 #141414 98 #171814
+X #a0d911 #141414 100 #141414
+X #a0d911 #ffffff 0 #a0d911
+X #a0d911 #ffffff 15 #aedf35
+X #a0d911 #ffffff 50 #d0ec88
+X #a0d911 #ffffff 98 #fdfefa
+X #a0d911 #ffffff 100 #ffffff
+X #a0d911 #1677ff 0 #a0d911
+X #a0d911 #1677ff 15 #8bca35
+X #a0d911 #1677ff 50 #5ba888
+X #a0d911 #1677ff 98 #1979fa
+X #a0d911 #1677ff 100 #1677ff
+X #fa541c #141414 0 #fa541c
+X #fa541c #141414 15 #d84a1b
+X #fa541c #141414 50 #873418
+X #fa541c #141414 98 #191514
+X #fa541c #141414 100 #141414
+X #fa541c #ffffff 0 #fa541c
+X #fa541c #ffffff 15 #fb6e3e
+X #fa541c #ffffff 50 #fdaa8e
+X #fa541c #ffffff 98 #fffcfa
+X #fa541c #ffffff 100 #ffffff
+X #fa541c #1677ff 0 #fa541c
+X #fa541c #1677ff 15 #d8593e
+X #fa541c #1677ff 50 #88668e
+X #fa541c #1677ff 98 #1b76fa
+X #fa541c #1677ff 100 #1677ff
+X #2f54eb #141414 0 #2f54eb
+X #2f54eb #141414 15 #2b4acb
+X #2f54eb #141414 50 #223480
+X #2f54eb #141414 98 #151518
+X #2f54eb #141414 100 #141414
+X #2f54eb #ffffff 0 #2f54eb
+X #2f54eb #ffffff 15 #4e6eee
+X #2f54eb #ffffff 50 #97aaf5
+X #2f54eb #ffffff 98 #fbfcff
+X #2f54eb #ffffff 100 #ffffff
+X #2f54eb #1677ff 0 #2f54eb
+X #2f54eb #1677ff 15 #2b59ee
+X #2f54eb #1677ff 50 #2366f5
+X #2f54eb #1677ff 98 #1776ff
+X #2f54eb #1677ff 100 #1677ff
+X #fadb14 #141414 0 #fadb14
+X #fadb14 #141414 15 #d8bd14
+X #fadb14 #141414 50 #877814
+X #fadb14 #141414 98 #191814
+X #fadb14 #141414 100 #141414
+X #fadb14 #ffffff 0 #fadb14
+X #fadb14 #ffffff 15 #fbe037
+X #fadb14 #ffffff 50 #fded8a
+X #fadb14 #ffffff 98 #fffefa
+X #fadb14 #ffffff 100 #ffffff
+X #fadb14 #1677ff 0 #fadb14
+X #fadb14 #1677ff 15 #d8cc37
+X #fadb14 #1677ff 50 #88a98a
+X #fadb14 #1677ff 98 #1b79fa
+X #fadb14 #1677ff 100 #1677ff
+X #ff4d4f #141414 0 #ff4d4f
+X #ff4d4f #141414 15 #dc4446
+X #ff4d4f #141414 50 #8a3132
+X #ff4d4f #141414 98 #191515
+X #ff4d4f #141414 100 #141414
+X #ff4d4f #ffffff 0 #ff4d4f
+X #ff4d4f #ffffff 15 #ff6869
+X #ff4d4f #ffffff 50 #ffa6a7
+X #ff4d4f #ffffff 98 #fffbfb
+X #ff4d4f #ffffff 100 #ffffff
+X #ff4d4f #1677ff 0 #ff4d4f
+X #ff4d4f #1677ff 15 #dc5369
+X #ff4d4f #1677ff 50 #8b62a7
+X #ff4d4f #1677ff 98 #1b76fb
+X #ff4d4f #1677ff 100 #1677ff
+X #000000 #141414 0 #000000
+X #000000 #141414 15 #030303
+X #000000 #141414 50 #0a0a0a
+X #000000 #141414 98 #141414
+X #000000 #141414 100 #141414
+X #000000 #ffffff 0 #000000
+X #000000 #ffffff 15 #262626
+X #000000 #ffffff 50 #808080
+X #000000 #ffffff 98 #fafafa
+X #000000 #ffffff 100 #ffffff
+X #000000 #1677ff 0 #000000
+X #000000 #1677ff 15 #031226
+X #000000 #1677ff 50 #0b3c80
+X #000000 #1677ff 98 #1675fa
+X #000000 #1677ff 100 #1677ff
+X #ffffff #141414 0 #ffffff
+X #ffffff #141414 15 #dcdcdc
+X #ffffff #141414 50 #8a8a8a
+X #ffffff #141414 98 #191919
+X #ffffff #141414 100 #141414
+X #ffffff #ffffff 0 #ffffff
+X #ffffff #ffffff 15 #ffffff
+X #ffffff #ffffff 50 #ffffff
+X #ffffff #ffffff 98 #ffffff
+X #ffffff #ffffff 100 #ffffff
+X #ffffff #1677ff 0 #ffffff
+X #ffffff #1677ff 15 #dcebff
+X #ffffff #1677ff 50 #8bbbff
+X #ffffff #1677ff 98 #1b7aff
+X #ffffff #1677ff 100 #1677ff
+X #808080 #141414 0 #808080
+X #808080 #141414 15 #707070
+X #808080 #141414 50 #4a4a4a
+X #808080 #141414 98 #161616
+X #808080 #141414 100 #141414
+X #808080 #ffffff 0 #808080
+X #808080 #ffffff 15 #939393
+X #808080 #ffffff 50 #c0c0c0
+X #808080 #ffffff 98 #fcfcfc
+X #808080 #ffffff 100 #ffffff
+X #808080 #1677ff 0 #808080
+X #808080 #1677ff 15 #707f93
+X #808080 #1677ff 50 #4b7cc0
+X #808080 #1677ff 98 #1877fc
+X #808080 #1677ff 100 #1677ff
+R [#1677ff] 1 #1677ff rgb(22,119,255)
+R [#FFF] 1 #ffffff rgb(255,255,255)
+R [#fff8] 1 #ffffff88 rgba(255,255,255,0.53)
+R [#11223344] 1 #11223344 rgba(17,34,51,0.27)
+R [#zzzzzz] 0
+R [#12] 0
+R [] 0
+R [abcdefg] 0
+R [blue] 0
+R [1677ff] 1 #1677ff rgb(22,119,255)
+R [rgb(255, 0, 0)] 1 #ff0000 rgb(255,0,0)
+R [rgba(0, 128, 255, 0.5)] 1 #0080ff80 rgba(0,128,255,0.5)
+R [rgb(100%, 0%, 50%)] 1 #ff0080 rgb(255,0,128)
+R [rgb(255,0] 0
+R [rgb(255)] 0
+R [hsl(0,100%,50%)] 0
+R [RGBA(10,20,30,50%)] 1 #0a141e80 rgba(10,20,30,0.5)
+R [rgb(300,-5,7)] 1 #ff0507 rgb(255,5,7)
+R [rgba(1,2,3,0.456)] 1 #01020374 rgba(1,2,3,0.46)
+R [rgb(1.5,2.4,3.5)] 1 #020204 rgb(2,2,4)

@@ -1,0 +1,15 @@
+[package]
+name = "snow-app-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# 跨 workspace path 依赖，仅用于连通性验证（方案 §5：共享 Rust 内核）
+snow-draw-engine-core = { path = "../../../snow_draw_engine_qt/crates/snow-draw-engine-core" }
+# 平台能力注册表（命令处理器据此判定降级）
+snow-capability = { path = "../snow-capability" }
