@@ -1,0 +1,78 @@
+# Cisox 新 workspace（与 Qt 版并行，见 docs/cisox-gpui-migration-plan.md §2.1）
+[workspace]
+members = [
+    "crates/snow-shot",
+    "crates/snow-app-core",
+    "crates/snow-capability",
+    "crates/snow-ui",
+    "crates/snow-ui/snow-ui-theme",
+    "crates/snow-ui/snow-ui-icons",
+    "crates/snow-ui/snow-ui-widgets",
+    "crates/snow-ui/snow-ui-shell",
+    "crates/snow-canvas-raster",
+    "crates/snow-canvas-filters",
+    "crates/snow-canvas-text",
+    "crates/snow-translate",
+    "crates/snow-i18n",
+    "crates/snow-config",
+    "crates/snow-history",
+    "crates/snow-net",
+    "crates/snow-update",
+    "crates/snow-mcp",
+    "crates/snow-platform",
+    "tools/workspace-guard",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-only"
+rust-version = "1.97"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+
+[profile.release]
+opt-level = 3
+codegen-units = 1
+lto = "fat"
+panic = "abort"
+debug = 0
+incremental = false
+
+# GPUI 依赖族锁定到本地 vendor（ADR-1）：升级必须走 vendor/README.md 的评审流程
+[patch.crates-io]
+gpui-base = { path = "vendor/gpui-base-0.7.0" }
+gpui-component = { path = "vendor/gpui-component-0.7.0" }
+gpui-component-macros = { path = "vendor/gpui-component-macros-0.7.0" }
+gpui-kit = { path = "vendor/gpui-kit-0.7.0" }
+gpui-kit-assets = { path = "vendor/gpui-kit-assets-0.7.0" }
+gpui-pre = { path = "vendor/gpui-pre-0.3.7" }
+gpui-pre-apple = { path = "vendor/gpui-pre-apple-0.3.7" }
+gpui-pre-collections = { path = "vendor/gpui-pre-collections-0.3.7" }
+gpui-pre-derive-refineable = { path = "vendor/gpui-pre-derive-refineable-0.3.7" }
+gpui-pre-http-client = { path = "vendor/gpui-pre-http-client-0.3.7" }
+gpui-pre-linux = { path = "vendor/gpui-pre-linux-0.3.7" }
+gpui-pre-macos = { path = "vendor/gpui-pre-macos-0.3.7" }
+gpui-pre-macros = { path = "vendor/gpui-pre-macros-0.3.7" }
+gpui-pre-perf = { path = "vendor/gpui-pre-perf-0.3.7" }
+gpui-pre-platform = { path = "vendor/gpui-pre-platform-0.3.7" }
+gpui-pre-refineable = { path = "vendor/gpui-pre-refineable-0.3.7" }
+gpui-pre-reqwest = { path = "vendor/gpui-pre-reqwest-0.12.15" }
+gpui-pre-scheduler = { path = "vendor/gpui-pre-scheduler-0.3.7" }
+gpui-pre-shared-string = { path = "vendor/gpui-pre-shared-string-0.3.7" }
+gpui-pre-sum-tree = { path = "vendor/gpui-pre-sum-tree-0.3.7" }
+gpui-pre-util = { path = "vendor/gpui-pre-util-0.3.7" }
+gpui-pre-util-macros = { path = "vendor/gpui-pre-util-macros-0.3.7" }
+gpui-pre-web = { path = "vendor/gpui-pre-web-0.3.7" }
+gpui-pre-wgpu = { path = "vendor/gpui-pre-wgpu-0.3.7" }
+gpui-pre-windows = { path = "vendor/gpui-pre-windows-0.3.7" }
+gpui-pre-zlog = { path = "vendor/gpui-pre-zlog-0.3.7" }
+gpui-pre-ztracing = { path = "vendor/gpui-pre-ztracing-0.3.7" }
+gpui-pre-ztracing-macro = { path = "vendor/gpui-pre-ztracing-macro-0.3.7" }

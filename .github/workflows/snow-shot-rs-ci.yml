@@ -1,0 +1,72 @@
+name: Snow Shot RS CI
+
+# 新 workspace（snow-shot-rs）三平台 fmt / clippy / check / test
+on:
+  push:
+    branches:
+      - main
+      - rust-gpui
+    paths:
+      - "snow-shot-rs/**"
+      - "snow-crates/**"
+      - "snow_draw_engine_qt/crates/**"
+      - ".github/workflows/snow-shot-rs-ci.yml"
+  pull_request:
+    paths:
+      - "snow-shot-rs/**"
+      - "snow-crates/**"
+      - "snow_draw_engine_qt/crates/**"
+      - ".github/workflows/snow-shot-rs-ci.yml"
+
+permissions:
+  contents: read
+
+# 同分支新运行取消旧运行
+concurrency:
+  group: snow-shot-rs-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  ci:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    defaults:
+      run:
+        shell: bash
+        working-directory: snow-shot-rs
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      # gpui 落地后此处补 Linux 系统依赖（xcb / wayland / xkbcommon 等）
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.1
+          components: rustfmt, clippy
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: snow-shot-rs
+          cache-on-failure: true
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Check workspace
+        run: cargo check --workspace
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # 含 tools/workspace-guard 守卫测试（workspace member）
+      - name: Test
+        run: cargo test --workspace
