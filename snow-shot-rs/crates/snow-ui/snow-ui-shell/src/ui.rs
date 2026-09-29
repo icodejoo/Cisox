@@ -10,18 +10,20 @@ use crate::native;
 use crate::overlay::{NativeWindowId, OverlayWindow};
 use crate::window::{ResolvedPlacement, WindowSpec};
 use gpui_kit::{
-    AnyWindowHandle, Bounds, DisplayId, TitlebarOptions, WindowBackgroundAppearance, WindowBounds,
-    WindowKind, WindowOptions, point, size,
+    AnyWindowHandle, DisplayId, TitlebarOptions, WindowBackgroundAppearance, WindowBounds,
+    WindowKind, WindowOptions,
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use snow_capability::CapabilityRegistry;
 
 // ---- 精选 GPUI 子集（视图层使用）----
 pub use gpui_kit::{
-    AnyElement, App, AppContext, ClickEvent, Context, ElementId, Entity, FontWeight, Hsla,
-    InteractiveElement, IntoElement, MouseButton, ParentElement, Pixels, Render, RenderOnce, Rgba,
-    SharedString, StatefulInteractiveElement, Styled, Window, actions, component, div, hsla, px,
-    rgb, rgba,
+    AnyElement, App, AppContext, Bounds, ClickEvent, Context, CursorStyle, ElementId,
+    ElementInputHandler, Entity, EntityInputHandler, FocusHandle, Focusable, FontWeight, Hsla,
+    InteractiveElement, IntoElement, MouseButton, ParentElement, Pixels, Point, Render, RenderOnce,
+    Rgba, SharedString, Size, StatefulInteractiveElement, Styled, TextAlign, TextRun,
+    UTF16Selection, UnderlineStyle, Window, actions, component, div, hsla, point, px, rgb, rgba,
+    size,
 };
 
 /// 已打开的窗口句柄（不暴露 gpui 类型的部分见各方法）。

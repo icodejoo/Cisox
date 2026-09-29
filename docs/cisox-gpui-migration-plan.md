@@ -541,6 +541,14 @@ workspace 骨架 · `snow-ui-shell` 隔离层 · `snow-capability` 能力注册�
 ### P2 · 画布与标注引擎 ★ 最大单块
 `snow-canvas-raster` patch 消费者 · 15 种工具的绘制对齐 · `snow-canvas-filters`（AVX2 → Rust SIMD）· `snow-canvas-text` 文本与 IME · 撤销重做接入 · 脏区与性能调优
 
+**进度（2026-09-29）**：
+- (a) `snow-canvas-text` ✅ **已完成**：标注文本布局、样式模型、光标选区、字形团导航与 IME 预编辑支持（10 个单元测试 + 7 个文档测试全绿）。包含：
+  - `TextDraft`：完备的文本编辑草稿缓冲区，支持字符与字形团（Grapheme Cluster）导航、UTF-8 字节与 UTF-16 单元双向偏移映射、多步撤销/重做堆栈、输入法预编辑组合串（Composition String）标记与显示合成；
+  - `CanvasTextStyle`：字体样式模型，提供字号上下阶梯快速步进、规范化限制、属性掩码局部合并修补（`patch`）；
+  - `TextLayoutResult`：多行排版测量引擎，支持显式断行与限制宽度自动软折行、局部坐标反向命中测试（`hit_test`）、光标矩形生成（`cursor_rect`）与跨行选区高亮矩形集计算（`selection_rects`）；
+  - `CanvasTextInput`：对接 GPUI 的 `EntityInputHandler` 与 `Focusable`，提供系统输入法与组合浮窗定位能力，完全通过 `snow-ui-shell` 门面隔离，符合 `workspace-guard` 零违规规则。
+
+
 ### P3 · 截图主链路
 覆盖窗 · 选区交互与几何 · 放大镜 / 取色器 · 智能元素选区（接 `snow-ui-selector`）· 工具栏与浮动工具面板 · 导出 / 剪贴板 / 保存 / PDF · 历史记录
 
