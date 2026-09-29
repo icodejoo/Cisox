@@ -1,0 +1,138 @@
+[      0ms T31992] 启动 mode=raw smoke=false pid=23052
+[    654ms T31992] 钩子安装 hwnd=0x201350 prev_proc=0x7FF79E8E4940 ok=true | himc=0x1B2413A5 open=0 focus_is_hwnd=true hkl=0x8040804
+[    654ms T31992] IME上下文状态变化: himc=0x1B2413A5 open=0 focus_is_hwnd=true hkl=0x8040804
+[   2278ms T31992] WM_IME_NOTIFY wParam=0x8 lParam=0x0
+[   2282ms T31992] IME上下文状态变化: himc=0x1B2413A5 open=1 focus_is_hwnd=true hkl=0x8040804
+[   3477ms T31992] WM_IME_NOTIFY wParam=0x3 lParam=0x1
+[   3478ms T31992] WM_IME_NOTIFY wParam=0x3 lParam=0x1
+[   3501ms T31992] WM_KEYDOWN VK_PROCESSKEY(0xE5) lParam=0x310001
+[   3502ms T31992] WM_IME_NOTIFY wParam=0x3 lParam=0x1
+[   4624ms T31992] WM_KEYDOWN VK_PROCESSKEY(0xE5) lParam=0xE0001
+[   5247ms T31992] WM_IME_NOTIFY wParam=0x1 lParam=0x0
+[   5249ms T31992] WM_IME_NOTIFY wParam=0x2 lParam=0x0
+[   5261ms T31992] WM_INPUTLANGCHANGE hkl=0x4090409
+[   5261ms T31992] WM_IME_NOTIFY wParam=0x8 lParam=0x0
+[   5289ms T31992] IME上下文状态变化: himc=0x1B2413A5 open=0 focus_is_hwnd=true hkl=0x4090409
+[   6455ms T31992] WM_IME_NOTIFY wParam=0x1 lParam=0x0
+[   6458ms T31992] WM_IME_NOTIFY wParam=0x2 lParam=0x0
+[   6506ms T31992] WM_INPUTLANGCHANGE hkl=0x8040804
+[   6506ms T31992] WM_IME_NOTIFY wParam=0x8 lParam=0x0
+[   6506ms T31992] IME上下文状态变化: himc=0x1B2413A5 open=1 focus_is_hwnd=true hkl=0x8040804
+[   6983ms T31992] WM_IME_NOTIFY wParam=0x1 lParam=0x0
+[   6986ms T31992] WM_IME_NOTIFY wParam=0x2 lParam=0x0
+[   7001ms T31992] WM_INPUTLANGCHANGE hkl=0x4090409
+[   7001ms T31992] WM_IME_NOTIFY wParam=0x8 lParam=0x0
+[   7041ms T31992] IME上下文状态变化: himc=0x1B2413A5 open=0 focus_is_hwnd=true hkl=0x4090409
+[   7442ms T31992] WM_IME_NOTIFY wParam=0x1 lParam=0x0
+[   7444ms T31992] WM_IME_NOTIFY wParam=0x2 lParam=0x0
+[   7482ms T31992] WM_INPUTLANGCHANGE hkl=0x8040804
+[   7482ms T31992] WM_IME_NOTIFY wParam=0x8 lParam=0x0
+[   7482ms T31992] IME上下文状态变化: himc=0x1B2413A5 open=1 focus_is_hwnd=true hkl=0x8040804
+[   7971ms T31992] WM_IME_NOTIFY wParam=0x6 lParam=0x0
+[   9376ms T31992] WM_IME_NOTIFY wParam=0x5 lParam=0x1
+[   9378ms T31992] WM_KEYDOWN VK_PROCESSKEY(0xE5) lParam=0x310001
+[   9378ms T31992] WM_IME_STARTCOMPOSITION 前 himc=0x1B2413A5 open=1 focus_is_hwnd=true hkl=0x8040804
+[   9379ms T31992] HANDLER selected_text_range() -> 0..0
+[   9379ms T31992] HANDLER bounds_for_range(0..0)
+[   9379ms T31992] WM_IME_NOTIFY wParam=0xB lParam=0x0
+[   9379ms T31992] WM_IME_NOTIFY wParam=0xF lParam=0x1B2413A5
+[   9379ms T31992] WM_IME_NOTIFY wParam=0x9 lParam=0x1
+[   9379ms T31992]   └ 原过程(gpui)返回 0
+[   9379ms T31992] WM_IME_COMPOSITION 前 lParam=0x1B8=[COMPSTR|COMPATTR|COMPCLAUSE|CURSORPOS|DELTASTART] wParam=0x6E himc_null=false COMPSTR(2B)="n" RESULTSTR(0B)=""
+[   9379ms T31992] HANDLER replace_and_mark_text_in_range(None, "n", sel=Some(1..1)) 前 content="" marked=None
+[   9380ms T31992]   └ 后 content="n" marked=Some(0..1)，已调用 cx.notify()
+[   9380ms T31992]   └ 原过程(gpui)返回 0
+[   9380ms T31992] WM_IME_NOTIFY wParam=0x10D lParam=0x0
+[  10112ms T31992] WM_IME_NOTIFY wParam=0x5 lParam=0x1
+[  10113ms T31992] WM_KEYDOWN VK_PROCESSKEY(0xE5) lParam=0x170001
+[  10113ms T31992] WM_IME_COMPOSITION 前 lParam=0x1B8=[COMPSTR|COMPATTR|COMPCLAUSE|CURSORPOS|DELTASTART] wParam=0x6E himc_null=false COMPSTR(4B)="ni" RESULTSTR(0B)=""
+[  10113ms T31992] HANDLER replace_and_mark_text_in_range(None, "ni", sel=Some(2..2)) 前 content="n" marked=Some(0..1)
+[  10113ms T31992]   └ 后 content="ni" marked=Some(0..2)，已调用 cx.notify()
+[  10113ms T31992]   └ 原过程(gpui)返回 0
+[  10486ms T31992] WM_IME_NOTIFY wParam=0x5 lParam=0x1
+[  10486ms T31992] WM_KEYDOWN VK_PROCESSKEY(0xE5) lParam=0x230001
+[  10487ms T31992] WM_IME_COMPOSITION 前 lParam=0x1B8=[COMPSTR|COMPATTR|COMPCLAUSE|CURSORPOS|DELTASTART] wParam=0x6E himc_null=false COMPSTR(8B)="ni'h" RESULTSTR(0B)=""
+[  10487ms T31992] HANDLER replace_and_mark_text_in_range(None, "ni'h", sel=Some(4..4)) 前 content="ni" marked=Some(0..2)
+[  10487ms T31992]   └ 后 content="ni'h" marked=Some(0..4)，已调用 cx.notify()
+[  10487ms T31992]   └ 原过程(gpui)返回 0
+[  10680ms T31992] WM_IME_NOTIFY wParam=0x5 lParam=0x1
+[  10680ms T31992] WM_KEYDOWN VK_PROCESSKEY(0xE5) lParam=0x1E0001
+[  10680ms T31992] WM_IME_COMPOSITION 前 lParam=0x1B8=[COMPSTR|COMPATTR|COMPCLAUSE|CURSORPOS|DELTASTART] wParam=0x6E himc_null=false COMPSTR(10B)="ni'ha" RESULTSTR(0B)=""
+[  10680ms T31992] HANDLER replace_and_mark_text_in_range(None, "ni'ha", sel=Some(5..5)) 前 content="ni'h" marked=Some(0..4)
+[  10680ms T31992]   └ 后 content="ni'ha" marked=Some(0..5)，已调用 cx.notify()
+[  10680ms T31992]   └ 原过程(gpui)返回 0
+[  10885ms T31992] WM_IME_NOTIFY wParam=0x5 lParam=0x1
+[  10886ms T31992] WM_KEYDOWN VK_PROCESSKEY(0xE5) lParam=0x180001
+[  10886ms T31992] WM_IME_COMPOSITION 前 lParam=0x1B8=[COMPSTR|COMPATTR|COMPCLAUSE|CURSORPOS|DELTASTART] wParam=0x6E himc_null=false COMPSTR(12B)="ni'hao" RESULTSTR(0B)=""
+[  10886ms T31992] HANDLER replace_and_mark_text_in_range(None, "ni'hao", sel=Some(6..6)) 前 content="ni'ha" marked=Some(0..5)
+[  10886ms T31992]   └ 后 content="ni'hao" marked=Some(0..6)，已调用 cx.notify()
+[  10886ms T31992]   └ 原过程(gpui)返回 0
+[  11673ms T31992] WM_KEYDOWN VK_PROCESSKEY(0xE5) lParam=0x390001
+[  11673ms T31992] WM_IME_COMPOSITION 前 lParam=0x1C00=[RESULTREADCLAUSE|RESULTSTR|RESULTCLAUSE] wParam=0x4F60 himc_null=false COMPSTR(0B)="" RESULTSTR(4B)="你好"
+[  11673ms T31992] HANDLER replace_text_in_range(None, "你好") 前 content="ni'hao" marked=Some(0..6)
+[  11673ms T31992]   └ 后 content="你好" marked=None，已调用 cx.notify()
+[  11674ms T31992]   └ 原过程(gpui)返回 0
+[  11674ms T31992] WM_IME_ENDCOMPOSITION 前
+[  11675ms T31992]   └ 原过程(gpui)返回 0
+[  11675ms T31992] WM_IME_NOTIFY wParam=0x10E lParam=0x0
+[  14563ms T31992] WM_IME_NOTIFY wParam=0x5 lParam=0x1
+[  14564ms T31992] WM_KEYDOWN VK_PROCESSKEY(0xE5) lParam=0x310001
+[  14565ms T31992] WM_IME_STARTCOMPOSITION 前 himc=0x1B2413A5 open=1 focus_is_hwnd=true hkl=0x8040804
+[  14565ms T31992] HANDLER selected_text_range() -> 0..0
+[  14565ms T31992] HANDLER bounds_for_range(0..0)
+[  14565ms T31992] WM_IME_NOTIFY wParam=0xB lParam=0x0
+[  14565ms T31992] WM_IME_NOTIFY wParam=0xF lParam=0x1B2413A5
+[  14565ms T31992] WM_IME_NOTIFY wParam=0x9 lParam=0x1
+[  14565ms T31992]   └ 原过程(gpui)返回 0
+[  14566ms T31992] WM_IME_COMPOSITION 前 lParam=0x1B8=[COMPSTR|COMPATTR|COMPCLAUSE|CURSORPOS|DELTASTART] wParam=0x6E himc_null=false COMPSTR(2B)="n" RESULTSTR(0B)=""
+[  14566ms T31992] HANDLER replace_and_mark_text_in_range(None, "n", sel=Some(1..1)) 前 content="" marked=None
+[  14566ms T31992]   └ 后 content="n" marked=Some(0..1)，已调用 cx.notify()
+[  14566ms T31992]   └ 原过程(gpui)返回 0
+[  14566ms T31992] WM_IME_NOTIFY wParam=0x10D lParam=0x0
+[  14859ms T31992] WM_IME_NOTIFY wParam=0x5 lParam=0x1
+[  14859ms T31992] WM_KEYDOWN VK_PROCESSKEY(0xE5) lParam=0x170001
+[  14860ms T31992] WM_IME_COMPOSITION 前 lParam=0x1B8=[COMPSTR|COMPATTR|COMPCLAUSE|CURSORPOS|DELTASTART] wParam=0x6E himc_null=false COMPSTR(4B)="ni" RESULTSTR(0B)=""
+[  14860ms T31992] HANDLER replace_and_mark_text_in_range(None, "ni", sel=Some(2..2)) 前 content="n" marked=Some(0..1)
+[  14860ms T31992]   └ 后 content="ni" marked=Some(0..2)，已调用 cx.notify()
+[  14860ms T31992]   └ 原过程(gpui)返回 0
+[  15089ms T31992] WM_IME_NOTIFY wParam=0x5 lParam=0x1
+[  15089ms T31992] WM_KEYDOWN VK_PROCESSKEY(0xE5) lParam=0x230001
+[  15089ms T31992] WM_IME_COMPOSITION 前 lParam=0x1B8=[COMPSTR|COMPATTR|COMPCLAUSE|CURSORPOS|DELTASTART] wParam=0x6E himc_null=false COMPSTR(8B)="ni'h" RESULTSTR(0B)=""
+[  15089ms T31992] HANDLER replace_and_mark_text_in_range(None, "ni'h", sel=Some(4..4)) 前 content="ni" marked=Some(0..2)
+[  15090ms T31992]   └ 后 content="ni'h" marked=Some(0..4)，已调用 cx.notify()
+[  15090ms T31992]   └ 原过程(gpui)返回 0
+[  15742ms T31992] WM_IME_NOTIFY wParam=0x5 lParam=0x1
+[  15742ms T31992] WM_KEYDOWN VK_PROCESSKEY(0xE5) lParam=0xE0001
+[  15742ms T31992] WM_IME_COMPOSITION 前 lParam=0x1B8=[COMPSTR|COMPATTR|COMPCLAUSE|CURSORPOS|DELTASTART] wParam=0x6E himc_null=false COMPSTR(4B)="ni" RESULTSTR(0B)=""
+[  15742ms T31992] HANDLER replace_and_mark_text_in_range(None, "ni", sel=Some(2..2)) 前 content="ni'h" marked=Some(0..4)
+[  15743ms T31992]   └ 后 content="ni" marked=Some(0..2)，已调用 cx.notify()
+[  15743ms T31992]   └ 原过程(gpui)返回 0
+[  15909ms T31992] WM_IME_NOTIFY wParam=0x5 lParam=0x1
+[  15910ms T31992] WM_KEYDOWN VK_PROCESSKEY(0xE5) lParam=0xE0001
+[  15910ms T31992] WM_IME_COMPOSITION 前 lParam=0x1B8=[COMPSTR|COMPATTR|COMPCLAUSE|CURSORPOS|DELTASTART] wParam=0x6E himc_null=false COMPSTR(2B)="n" RESULTSTR(0B)=""
+[  15910ms T31992] HANDLER replace_and_mark_text_in_range(None, "n", sel=Some(1..1)) 前 content="ni" marked=Some(0..2)
+[  15910ms T31992]   └ 后 content="n" marked=Some(0..1)，已调用 cx.notify()
+[  15910ms T31992]   └ 原过程(gpui)返回 0
+[  16068ms T31992] WM_KEYDOWN VK_PROCESSKEY(0xE5) lParam=0xE0001
+[  16068ms T31992] WM_IME_COMPOSITION 前 lParam=0x1BF=[COMPREADSTR|COMPREADATTR|COMPREADCLAUSE|COMPSTR|COMPATTR|COMPCLAUSE|CURSORPOS|DELTASTART] wParam=0x1B himc_null=false COMPSTR(0B)="" RESULTSTR(0B)=""
+[  16068ms T31992] HANDLER replace_and_mark_text_in_range(None, "", sel=None) 前 content="n" marked=Some(0..1)
+[  16068ms T31992]   └ 后 content="" marked=None，已调用 cx.notify()
+[  16069ms T31992]   └ 原过程(gpui)返回 0
+[  16069ms T31992] WM_IME_ENDCOMPOSITION 前
+[  16069ms T31992]   └ 原过程(gpui)返回 0
+[  16069ms T31992] WM_IME_NOTIFY wParam=0x10E lParam=0x0
+[  16599ms T31992] WM_IME_NOTIFY wParam=0x1 lParam=0x0
+[  16601ms T31992] WM_IME_NOTIFY wParam=0x2 lParam=0x0
+[  16602ms T31992] WM_INPUTLANGCHANGE hkl=0x4090409
+[  16602ms T31992] WM_IME_NOTIFY wParam=0x8 lParam=0x0
+[  16602ms T31992] WM_IME_NOTIFY wParam=0x6 lParam=0x0
+[  16641ms T31992] IME上下文状态变化: himc=0x1B2413A5 open=0 focus_is_hwnd=true hkl=0x4090409
+[  18054ms T31992] WM_IME_NOTIFY wParam=0x1 lParam=0x0
+[  18057ms T31992] WM_IME_NOTIFY wParam=0x2 lParam=0x0
+[  18061ms T31992] WM_INPUTLANGCHANGE hkl=0x8040804
+[  18061ms T31992] WM_IME_NOTIFY wParam=0x8 lParam=0x0
+[  18061ms T31992] WM_IME_NOTIFY wParam=0x6 lParam=0x0
+[  18149ms T31992] IME上下文状态变化: himc=0x1B2413A5 open=1 focus_is_hwnd=true hkl=0x8040804
+[  22930ms T31992] WM_KILLFOCUS
+[  22930ms T31992] WM_IME_SETCONTEXT active=false lParam=0xC000000F
+[  22931ms T31992] WM_IME_NOTIFY wParam=0x1 lParam=0x0
