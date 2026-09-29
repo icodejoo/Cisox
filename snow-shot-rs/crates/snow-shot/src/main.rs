@@ -12,6 +12,8 @@ use snow_platform::crash::{
 };
 
 pub mod overlay_view;
+pub mod pinned_manager;
+pub mod pinned_view;
 
 /// 运行时启动上下文。
 pub struct AppBootstrap {

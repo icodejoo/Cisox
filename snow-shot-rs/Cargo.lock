@@ -6914,9 +6914,12 @@ name = "snow-shot"
 version = "0.1.0"
 dependencies = [
  "image",
+ "serde",
+ "serde_json",
  "snow-app-core",
  "snow-capability",
  "snow-config",
+ "snow-history",
  "snow-platform",
  "snow-ui",
  "tracing",

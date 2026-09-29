@@ -247,7 +247,27 @@ impl ScreenshotOverlayView {
                 self.status_message = Some("已触发保存".into());
             }
             ToolbarAction::Pin => {
-                self.status_message = Some("贴图模式已就绪".into());
+                let crop_opt = self.current_selection().and_then(|rect| {
+                    self.captured_screen
+                        .crop(rect.x, rect.y, rect.width as u32, rect.height as u32)
+                        .map(|sub| (sub, rect))
+                });
+                if let Some((sub, rect)) = crop_opt {
+                    let rgba = sub.to_rgba();
+                    let pin = crate::pinned_view::PinnedWindowView::new(
+                        "00000000-0000-4000-8000-000000000001".to_string(),
+                        "default".to_string(),
+                        sub.width,
+                        sub.height,
+                        rgba,
+                        rect,
+                    );
+                    self.status_message = Some(format!(
+                        "贴图已生成 [{}x{}]",
+                        pin.image_width, pin.image_height
+                    ));
+                }
+                window.remove_window();
             }
             ToolbarAction::Ocr => {
                 self.status_message = Some("OCR 识别请求已排队".into());
@@ -496,5 +516,21 @@ mod tests {
         view.handle_mouse_move(PhysicalPoint::new(50, 50));
         view.copy_current_color();
         assert!(view.status_message.is_some());
+    }
+
+    /// 验证贴图动作从选区裁切数据生成。
+    #[test]
+    fn test_overlay_pin_action() {
+        let screen = CapturedScreen::new_solid(200, 200, (0, 128, 255, 255));
+        let mut view = ScreenshotOverlayView::new(screen);
+        view.handle_mouse_down(PhysicalPoint::new(10, 10));
+        view.handle_mouse_move(PhysicalPoint::new(100, 100));
+        view.handle_mouse_up(PhysicalPoint::new(100, 100));
+
+        let sel = view.current_selection();
+        assert!(sel.is_some());
+        let rect = sel.unwrap();
+        let sub = view.captured_screen.crop(rect.x, rect.y, rect.width as u32, rect.height as u32);
+        assert!(sub.is_some());
     }
 }

@@ -12,7 +12,10 @@ workspace = true
 snow-app-core = { path = "../snow-app-core" }
 snow-capability = { path = "../snow-capability" }
 snow-config = { path = "../snow-config" }
+snow-history = { path = "../snow-history" }
 snow-platform = { path = "../snow-platform" }
 snow-ui = { path = "../snow-ui" }
 image = { version = "0.25", default-features = false, features = ["png"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 tracing = "0.1"

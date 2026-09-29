@@ -559,8 +559,14 @@ workspace 骨架 · `snow-ui-shell` 隔离层 · `snow-capability` 能力注册�
 - (e) 全屏覆盖窗与主链路打通 ✅ **已完成**（`snow-shot::overlay_view` & `snow-platform`）：在 `snow-platform` 实现 Win32 原生 GDI 屏幕捕获与剪贴板图文写入；在 `snow-shot` 落地 `ScreenshotOverlayView` 全屏交互视图，统一承载全屏帧绘制、选区四象限暗化遮罩、八向缩放手柄、浮动放大镜取色器、浮动工具栏、鼠标交互状态机驱动及动作分发。
 
 
-### P4 · 贴图
+### P4 · 贴图 ✅ **已完成（2026-09-29）**
 浮动窗口 · 分组管理 · 持久化（接 ADR-8）· 贴图上的二次标注
+
+- (a) 贴图窗口几何与手柄交互算法 ✅ **已完成**（`snow-ui-shell::pinned_geometry`）：支持八向手柄等比拉伸、平移拖动、瞄准锚点计算（中心、四角与鼠标相对固定点 `ScaleAnchor::MousePoint`）、滚轮阶梯缩放与 Ctrl 滚轮透明度调节，单元测试与文档测试全绿。
+- (b) 贴图浮动视图组件与二次标注 ✅ **已完成**（`snow-shot::pinned_view`）：实现 `PinnedWindowView`，统一承载位图渲染、顶部浮动状态控制条、八向拉伸控制柄、二次矢量图形绘制（矩形、椭圆、箭头、直线、画笔、文本、马赛克）及撤销重做堆栈、PNG 编码导出与剪贴板图文复制。
+- (c) 贴图多窗口生命周期与分组持久化管理器 ✅ **已完成**（`snow-shot::pinned_manager`）：实现 `PinnedManager`，打通与底层 `snow_history::pinned::PinnedStore` 仓储的持久化同步（`PinPayload`、`PinImage` 与清单版本 2 条目），支持分组管理与崩溃安全存储。
+- (d) 截图主链路贴图动作接线 ✅ **已完成**（`snow-shot::overlay_view`）：工具栏贴图动作（`ToolbarAction::Pin`）无缝裁切选区并生成贴图窗口。
+
 
 ### P5 · OCR / 翻译 / 拼接
 RapidOCR 接入与独立进程 worker · 表格/公式提取（走自定义模型通道）· **`snow-translate` 本地 NMT（ADR-5；落地时同步补 `screenshot_translation` 本地模型配置项）** · 滚动截长图

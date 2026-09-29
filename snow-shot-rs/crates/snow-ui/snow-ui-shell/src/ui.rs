@@ -32,6 +32,11 @@ pub use crate::selection::{
     SelectionDragMode, SelectionState, bounded_selection_rect, dragged_selection_rect,
     handle_rects, hit_test_drag_mode, marquee_selection_rect, selection_size_label,
 };
+pub use crate::pinned_geometry::{
+    PinnedDragHandle, ScaleAnchor, anchored_scale_rect, handle_rects as pinned_handle_rects,
+    hit_test_handle as hit_test_pinned_handle, proportional_resize_rect, scaled_size,
+    step_opacity, step_zoom,
+};
 
 /// 已打开的窗口句柄（不暴露 gpui 类型的部分见各方法）。
 #[derive(Debug, Clone, Copy)]
