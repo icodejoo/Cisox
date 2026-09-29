@@ -1,0 +1,9 @@
+[package]
+name = "p0-v6-ime-text"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+
+[dependencies]
+gpui-kit = "0.7.0"

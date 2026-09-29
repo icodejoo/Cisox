@@ -1,0 +1,103 @@
+#pragma once
+
+#include <algorithm>
+#include <chrono>
+#include <cstdint>
+#include <cstdlib>
+#include <fstream>
+#include <string>
+#include <vector>
+
+// 帧计时探针：环境变量 CISOX_FRAME_PROBE=<日志路径> 开启，未设置时仅一次分支判断。
+namespace snow_frame_probe {
+
+// 探针状态：保存帧时间戳（微秒）与日志路径。
+struct State {
+    std::string path;
+    std::vector<std::int64_t> stampsUs;
+};
+
+// 取当前单调时钟微秒数。
+inline std::int64_t nowUs() {
+    return std::chrono::duration_cast<std::chrono::microseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
+// 按分位取值（已排序数组，p 取 0~1）。
+inline double percentile(const std::vector<double>& sorted, double p) {
+    const std::size_t idx =
+        static_cast<std::size_t>(p * static_cast<double>(sorted.size() - 1) + 0.5);
+    return sorted[idx];
+}
+
+// 退出时计算统计并写入日志文件。
+inline void writeReport(const State& s) {
+    std::ofstream f(s.path);
+    if (!f) {
+        return;
+    }
+    f << "# frame timestamps (us, steady_clock)\n";
+    for (std::int64_t t : s.stampsUs) {
+        f << t << '\n';
+    }
+    if (s.stampsUs.size() >= 2) {
+        std::vector<double> dtMs;
+        dtMs.reserve(s.stampsUs.size());
+        for (std::size_t i = 1; i < s.stampsUs.size(); ++i) {
+            dtMs.push_back(static_cast<double>(s.stampsUs[i] - s.stampsUs[i - 1]) / 1000.0);
+        }
+        std::sort(dtMs.begin(), dtMs.end());
+        const double spanS = static_cast<double>(s.stampsUs.back() - s.stampsUs.front()) / 1e6;
+        const double frames = static_cast<double>(s.stampsUs.size());
+        f << "# frames=" << s.stampsUs.size() << '\n'
+          << "# span_s=" << spanS << '\n'
+          << "# avg_fps=" << (spanS > 0 ? (frames - 1) / spanS : 0.0) << '\n'
+          << "# min_instant_fps=" << 1000.0 / dtMs.back() << '\n'
+          << "# p50_ms=" << percentile(dtMs, 0.50) << '\n'
+          << "# p99_ms=" << percentile(dtMs, 0.99) << '\n'
+          << "# max_ms=" << dtMs.back() << '\n';
+    }
+}
+
+// 读取环境变量（MSVC 下用 _dupenv_s 避免弃用警告）。
+inline std::string readEnv(const char* name) {
+#ifdef _MSC_VER
+    char* buf = nullptr;
+    std::size_t len = 0;
+    std::string out;
+    if (_dupenv_s(&buf, &len, name) == 0 && buf != nullptr) {
+        out = buf;
+        std::free(buf);
+    }
+    return out;
+#else
+    const char* v = std::getenv(name);
+    return v != nullptr ? std::string(v) : std::string();
+#endif
+}
+
+// 进程级状态；首次调用时读取环境变量并注册退出回调。
+inline State* state() {
+    static State* inst = []() -> State* {
+        const std::string p = readEnv("CISOX_FRAME_PROBE");
+        if (p.empty()) {
+            return nullptr;
+        }
+        auto* s = new State();
+        s->path = p;
+        s->stampsUs.reserve(1 << 16);
+        std::atexit([] { writeReport(*state()); });
+        return s;
+    }();
+    return inst;
+}
+
+// 记录一帧（在每次画布 paintEvent 结束时调用）。
+inline void markFrame() {
+    if (State* s = state()) {
+        s->stampsUs.push_back(nowUs());
+    }
+}
+
+}  // namespace snow_frame_probe

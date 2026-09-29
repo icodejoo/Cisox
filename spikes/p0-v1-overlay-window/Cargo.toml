@@ -1,0 +1,10 @@
+[package]
+name = "p0-v1-overlay-window"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+gpui = { package = "gpui-pre", version = "0.3.7" }
+gpui_platform = { package = "gpui-pre-platform", version = "0.3.7" }
+raw-window-handle = "0.6"
+windows = { version = "0.58", features = ["Win32_UI_WindowsAndMessaging", "Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_LibraryLoader"] }

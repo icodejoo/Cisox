@@ -1,0 +1,10 @@
+[package]
+name = "p0-v7-icon-named"
+version = "0.1.0"
+edition = "2021"
+
+# 空 workspace 表：防止被父目录的 workspace 吸收
+[workspace]
+
+[dependencies]
+gpui-kit = "0.7.0"

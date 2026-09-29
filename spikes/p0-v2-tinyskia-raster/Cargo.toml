@@ -1,0 +1,12 @@
+[package]
+name = "p0-v2-tinyskia-raster"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+gpui = { package = "gpui-pre", version = "=0.3.7" }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.7" }
+tiny-skia = "0.11.4"
+image = "0.25.1"
+snow-draw-engine = { path = "../../snow_draw_engine_qt/crates/snow-draw-engine" }
+snow-draw-engine-editor = { path = "../../snow_draw_engine_qt/crates/snow-draw-engine-editor" }

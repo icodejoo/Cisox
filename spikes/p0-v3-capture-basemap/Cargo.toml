@@ -1,0 +1,13 @@
+[workspace]
+# Empty workspace to isolate from parent
+
+[package]
+name = "p0-v3-capture-basemap"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+gpui = { package = "gpui-pre", version = "0.3.7" }
+gpui_platform = { package = "gpui-pre-platform", version = "0.3.7" }
+snow-capture = { path = "../../snow-crates/crates/snow-capture" }
+image = "0.25"

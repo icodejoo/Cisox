@@ -27,6 +27,7 @@
 #include "snow_canvas_widget_runtime_binding.h"
 #include "snow_canvas_widget_selection_hit_testing.h"
 #include "snow_canvas_widget_sync.h"
+#include "snow_frame_probe.h"
 #include "snow_canvas_widget_text_interaction.h"
 #include "snow_draw_engine_qt/snow_canvas_custom_renderer.h"
 #include "snow_draw_engine_qt/snow_canvas_runtime.h"
@@ -2239,6 +2240,7 @@ void SnowCanvasWidget::Impl::renderAfterCanvas(QPainter& painter,
 
 void SnowCanvasWidget::paintEvent(QPaintEvent* event) {
     m_impl->paintEvent(event);
+    snow_frame_probe::markFrame();
 }
 
 bool SnowCanvasWidget::event(QEvent* event) {

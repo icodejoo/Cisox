@@ -1,0 +1,25 @@
+--- normalizeIntegerRange (min:10, max:100) ---
+[Valid] Input: 50 -> Valid: true, Changed: false, Output: 50
+[InvalidType] Input: "50" -> Valid: false, Changed: false, Output: null
+[InvalidFloat] Input: 50.5 -> Valid: false, Changed: false, Output: null
+[OutOfBounds] Input: 150 -> Valid: false, Changed: false, Output: null
+
+--- normalizeTheme ---
+[Valid] Input: "dark" -> Valid: true, Changed: false, Output: "dark"
+[ValidWithSpacesAndCaps] Input: "  LiGHT " -> Valid: true, Changed: true, Output: "light"
+[InvalidType] Input: 123 -> Valid: false, Changed: false, Output: null
+[InvalidValue] Input: "blue" -> Valid: false, Changed: false, Output: null
+
+--- normalizeRgbaColor ---
+[Valid] Input: "#AABBCCDD" -> Valid: true, Changed: false, Output: "#AABBCCDD"
+[ValidWithSpacesAndLower] Input: " #aabbccdd " -> Valid: true, Changed: true, Output: "#AABBCCDD"
+[InvalidType] Input: 123 -> Valid: false, Changed: false, Output: null
+[InvalidLength] Input: "#AABBCC" -> Valid: false, Changed: false, Output: null
+[InvalidChars] Input: "#AABBCCZG" -> Valid: false, Changed: false, Output: null
+
+--- normalizeFilenameFormat ---
+[Valid] Input: "my_screenshot_%Y%m%d" -> Valid: true, Changed: false, Output: "my_screenshot_%Y%m%d"
+[ValidWithSpaces] Input: "  file  " -> Valid: true, Changed: true, Output: "file"
+[InvalidType] Input: 123 -> Valid: false, Changed: false, Output: null
+[Empty] Input: "   " -> Valid: false, Changed: false, Output: null
+[InvalidChars] Input: "file:name" -> Valid: false, Changed: false, Output: null
