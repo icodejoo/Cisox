@@ -2,11 +2,15 @@
 //!
 //! 用法：
 //! - `snow-i18n-tool convert <输出目录> <.ts 文件或目录>...`
-//! - `snow-i18n-tool check <locales 目录>`
+//! - `snow-i18n-tool check <locales 目录> [--src <源码目录>]... [--exclude <路径子串>]... [--strict-refs]`
+//! - `snow-i18n-tool extract <源码目录>... [--locales <目录>] [--exclude <路径子串>]... [--strict-refs]`
+//!
+//! `--strict-refs`：代码引用了基准语言（en-US）没有的 id 时失败；孤儿 id 只报告数量。
 
 use snow_i18n::convert::{
     ConvertStats, IssueKind, convert_catalog, ftl_message_ids, identity_catalog, missing_ids,
 };
+use snow_i18n::extract::{base_ids, compare_refs, scan};
 use snow_i18n::ts::{TsCatalog, parse_ts};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -14,6 +18,80 @@ use std::process::ExitCode;
 
 /// 合成源语言目录时使用的语言标记。
 const SOURCE_LANG: &str = "en_US";
+
+/// 引用对齐的基准语言目录名。
+const BASE_LANG: &str = "en-US";
+
+/// 默认的 locales 目录（相对 workspace 根）。
+const DEFAULT_LOCALES: &str = "crates/snow-i18n/locales";
+
+/// 命令行用法。
+const USAGE: &str = "用法：convert <输出目录> <ts...> | check <locales 目录> [--src 目录]... [--exclude 子串]... [--strict-refs] | extract <源码目录...> [--locales 目录] [--exclude 子串]... [--strict-refs]";
+
+/// 引用扫描相关选项。
+#[derive(Default)]
+struct RefOpts {
+    /// 位置参数。
+    positional: Vec<String>,
+    /// 源码目录（`--src`）。
+    src: Vec<PathBuf>,
+    /// 排除子串。
+    excludes: Vec<String>,
+    /// locales 目录（`--locales`）。
+    locales: Option<PathBuf>,
+    /// 是否严格。
+    strict: bool,
+}
+
+/// 解析选项；未知 `--` 选项报错。
+fn parse_opts(args: &[String]) -> Result<RefOpts, String> {
+    let mut o = RefOpts::default();
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        let mut value = |name: &str| it.next().cloned().ok_or(format!("{name} 缺少参数"));
+        match a.as_str() {
+            "--src" => o.src.push(PathBuf::from(value("--src")?)),
+            "--exclude" => o.excludes.push(value("--exclude")?),
+            "--locales" => o.locales = Some(PathBuf::from(value("--locales")?)),
+            "--strict-refs" => o.strict = true,
+            s if s.starts_with("--") => return Err(format!("未知选项 {s}")),
+            _ => o.positional.push(a.clone()),
+        }
+    }
+    Ok(o)
+}
+
+/// 扫描源码并与基准语言对齐；返回是否通过（非严格模式恒通过）。
+fn run_refs(
+    locales: &Path,
+    src: &[PathBuf],
+    excludes: &[String],
+    strict: bool,
+) -> Result<bool, String> {
+    let base = base_ids(locales, BASE_LANG).map_err(|e| format!("{}: {e}", locales.display()))?;
+    let refs = scan(src, excludes).map_err(|e| e.to_string())?;
+    let report = compare_refs(&refs, &base);
+    for (id, file, line) in &report.missing {
+        println!("缺失：{file}:{line} 引用了 {BASE_LANG} 中不存在的 id：{id}");
+    }
+    println!(
+        "引用 {} 处，缺失 {} 处；{BASE_LANG} 共 {} 个 id，未被引用（孤儿）{} 个",
+        report.total_refs,
+        report.missing.len(),
+        base.len(),
+        report.orphans.len()
+    );
+    let ok = report.missing.is_empty() || !strict;
+    println!(
+        "{}",
+        if ok {
+            "引用检查通过"
+        } else {
+            "引用检查失败"
+        }
+    );
+    Ok(ok)
+}
 
 /// 递归收集 `.ts` 文件。
 fn collect_ts(path: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
@@ -157,6 +235,34 @@ fn run_check(root: &Path) -> Result<bool, String> {
     Ok(ok)
 }
 
+/// check 子命令：id 对齐，带 `--src` 时再做引用检查（`--strict-refs` 使缺失失败）。
+fn run_check_cmd(args: &[String]) -> Result<bool, String> {
+    let o = parse_opts(args)?;
+    let [root] = o.positional.as_slice() else {
+        return Err(USAGE.to_string());
+    };
+    if o.strict && o.src.is_empty() {
+        return Err("--strict-refs 需要至少一个 --src".to_string());
+    }
+    let aligned = run_check(Path::new(root))?;
+    if o.src.is_empty() {
+        return Ok(aligned);
+    }
+    let refs_ok = run_refs(Path::new(root), &o.src, &o.excludes, o.strict)?;
+    Ok(aligned && refs_ok)
+}
+
+/// extract 子命令。
+fn run_extract_cmd(args: &[String]) -> Result<bool, String> {
+    let o = parse_opts(args)?;
+    if o.positional.is_empty() {
+        return Err(USAGE.to_string());
+    }
+    let src: Vec<PathBuf> = o.positional.iter().map(PathBuf::from).collect();
+    let locales = o.locales.unwrap_or_else(|| PathBuf::from(DEFAULT_LOCALES));
+    run_refs(&locales, &src, &o.excludes, o.strict)
+}
+
 /// 程序入口。
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -164,8 +270,9 @@ fn main() -> ExitCode {
         Some("convert") if args.len() >= 3 => {
             run_convert(Path::new(&args[1]), &args[2..]).map(|()| true)
         }
-        Some("check") if args.len() == 2 => run_check(Path::new(&args[1])),
-        _ => Err("用法：convert <输出目录> <ts...> | check <locales 目录>".to_string()),
+        Some("check") => run_check_cmd(&args[1..]),
+        Some("extract") => run_extract_cmd(&args[1..]),
+        _ => Err(USAGE.to_string()),
     };
     match result {
         Ok(true) => ExitCode::SUCCESS,

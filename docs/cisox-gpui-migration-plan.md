@@ -1,6 +1,6 @@
 # Snow Shot → Rust + GPUI 改造方案
 
-> 版本 v1.8 · 2026-09-29（v1.8 变更：ADR-1 改为 vendor 目录锁定（27 个 crate、约 27MB，不用 submodule，附实测证据）并标记已落地；§2.1、§7 约定 3 同步；P1 进度补入 snow-config、snow-ui-theme；v1.7 变更：V2 判据改为稳态平均 + 稳态 P99 并写入第三轮结论，V2 改为有条件通过；附录 B.2 分组键数按 snow-config 实测订正；追加文件名前缀、翻译配置延后、`.ts` 解析依赖、Qt 静态构建策略四项裁决。v1.6 变更：更正 MCP tool 数量为 101 个并标注命令建模缺口；V8 与 ADR-8 措辞对齐；ADR-8 blob 待验证项已验证；P1 追加进度小节。v1.5 变更：V2 同步第二轮优化结果，判据待裁决；V6 核对并登记搜狗内联预编辑待办 T12；V8 由待执行改为通过）
+> 版本 v1.9 · 2026-09-29（v1.9 变更：文档订正——vendor 27→28（已核实实际 28 个 crate）；ADR-6 `.ts` 数量 30→32（实测）；ADR-8 补 QDataStream 例外（`result_style.bin`/`recognition_results.bin`）并删除"全部是 JSON"的过强措辞；`canvas_history.json` 注释去掉"疑似"改为"已验证"；quick-xml 状态改为"已批准"；V5 license 冲突标记为已解除；§9 工作量估算与 §0 一句话结论对齐（14.8 万行）；V2 第三轮"68 次运行"更正为 34 次。v1.8 变更：ADR-1 改为 vendor 目录锁定（27 个 crate、约 27MB，不用 submodule，附实测证据）并标记已落地；§2.1、§7 约定 3 同步；P1 进度补入 snow-config、snow-ui-theme；v1.7 变更：V2 判据改为稳态平均 + 稳态 P99 并写入第三轮结论，V2 改为有条件通过；附录 B.2 分组键数按 snow-config 实测订正；追加文件名前缀、翻译配置延后、`.ts` 解析依赖、Qt 静态构建策略四项裁决。v1.6 变更：更正 MCP tool 数量为 101 个并标注命令建模缺口；V8 与 ADR-8 措辞对齐；ADR-8 blob 待验证项已验证；P1 追加进度小节。v1.5 变更：V2 同步第二轮优化结果，判据待裁决；V6 核对并登记搜狗内联预编辑待办 T12；V8 由待执行改为通过）
 > **产品名：Cisox** · 工作仓库：`github.com/icodejoo/Cisox`（fork 自 `github.com/mg-chao/snow-apps`）
 > 本地检出：`E:\workspaces\Cisox`（完整历史 407 提交；`origin`→Cisox，`upstream`→snow-apps 且已禁止推送；工作分支 `rust-gpui`，`main` 保持 upstream 纯镜像）
 > 本文档位置：`docs/cisox-gpui-migration-plan.md`（随仓库走，执行代理从这里读）
@@ -103,7 +103,7 @@ snow-shot-rs/                       # 新 workspace（edition 2024）
 │   └── snow-platform/              # Win32 / Cocoa / Linux 原生调用（windows-rs / objc2 / ashpd）
 │
 └── vendor/                         # crates.io 发布包原样纳入，[patch.crates-io] 指向本地，版本 `=` 精确锁定
-    └── <crate>-<版本>/             #   gpui-pre-* 与 gpui-kit 系共 27 个 crate（约 27MB），禁止擅自升级；原 longbridge/gpui-component
+    └── <crate>-<版本>/             #   gpui-pre-* 与 gpui-kit 系共 28 个 crate（约 27MB），禁止擅自升级；原 longbridge/gpui-component
 ```
 
 **复用（path 依赖，源码不动）**：
@@ -172,7 +172,7 @@ UI 按钮、全局热键、托盘菜单、**MCP 的全部 tool** 全部收敛为
 
 **裁决**：
 - 采用 **gpui-kit 所依赖的那一支 gpui**（即 `gpui-pre`）。一个进程内不可能混两个 gpui 版本（类型标识不兼容）——**组件库事实上决定了 gpui 版本**，这不是可以分开选的两件事。
-- **把 gpui 依赖族的 crates.io 发布包原样 vendor 进 `snow-shot-rs/vendor/`（27 个 crate、约 27MB），用 `[patch.crates-io]` 指向本地，版本用 `=` 精确锁定**。升级是一次需要评审的显式动作（靠 `git diff vendor/`），不是 `cargo update` 的副作用。**不用 git submodule**（v1.8 实测修正）：`gpui-pre` 是 huacnlee 把 Zed 快照（`zed@1a28cff`）拆成 15 个改名包发布的，包名与依赖都被改写，Zed 仓库里没有这些同名 crate，`[patch]` 无法直接指向 Zed 检出目录；且 Zed 全仓约 517MB。`gpui-kit 0.7.0` 对应 longbridge/gpui-kit 提交 `0c830f4d`，要求 `gpui-pre = "=0.3.7"`。其余传递依赖仍走 crates.io，由 `Cargo.lock` 校验和锁定。
+- **把 gpui 依赖族的 crates.io 发布包原样 vendor 进 `snow-shot-rs/vendor/`（28 个 crate、约 27MB），用 `[patch.crates-io]` 指向本地，版本用 `=` 精确锁定**。升级是一次需要评审的显式动作（靠 `git diff vendor/`），不是 `cargo update` 的副作用。**不用 git submodule**（v1.8 实测修正）：`gpui-pre` 是 huacnlee 把 Zed 快照（`zed@1a28cff`）拆成 15 个改名包发布的，包名与依赖都被改写，Zed 仓库里没有这些同名 crate，`[patch]` 无法直接指向 Zed 检出目录；且 Zed 全仓约 517MB。`gpui-kit 0.7.0` 对应 longbridge/gpui-kit 提交 `0c830f4d`，要求 `gpui-pre = "=0.3.7"`。其余传递依赖仍走 crates.io，由 `Cargo.lock` 校验和锁定。
 - 所有 `gpui::` 直接调用**收敛到 `snow-ui-shell` 一个 crate**。上游 API churn 的爆炸半径必须是一个 crate，不是两百个文件。
 - **接受并登记单点维护风险（R11）**：依赖链的关键一环由个人发布。vendor 锁定使得"上游停更"退化为"我们自己维护一份快照"，而不是"项目停摆"——这正是 vendor 而非直接依赖 crates.io 的理由。
 
@@ -309,7 +309,7 @@ trait TranslationEngine {
 
 ### ADR-6 · i18n —— Qt .ts → Fluent
 
-现状：10 个功能模块 × 3 语言 = 30 个 `.ts`，`lupdate`/`lrelease` 构建期编译，CI 用 `-fail-on-unfinished` 卡未翻译项。
+现状：10 个功能模块 × 3 语言 = 32 个 `.ts`（实测转换结果，含 `ant_design_qt` 补全后合成的 en_US），`lupdate`/`lrelease` 构建期编译，CI 用 `-fail-on-unfinished` 卡未翻译项。
 
 裁决：迁移到 **Fluent**（`fluent-rs`），因为它对 Qt 的 `%n` 复数形态有等价且更完整的支持。需要配套三件事：
 1. **一次性转换器**：`.ts` → `.ftl` 脚本（机械活，高性价比，务必自动化而非手工搬运）；
@@ -338,7 +338,7 @@ trait TranslationEngine {
 
 ### ADR-8 · 磁盘数据兼容 —— 独立目录 + 一次性导入器
 
-**实测结论（附录 B）：全部是 JSON + PNG + 不透明 blob，没有任何自定义二进制编码。** 兼容成本远低于预期。
+**实测结论（附录 B）：主要是 JSON + PNG + 不透明 blob，兼容成本远低于预期。** 注意例外：`result_style.bin`（`screenshotresultcompositor.h::encodeScreenshotResultStyle`，魔数 `0x53535247`）与 `recognition_results.bin`（`screenshotpinnedwindow.cpp::serializeRecognitionResults`）是 Qt `QDataStream` 私有二进制格式，导入器需最小读取器（P4 待办，见 §10 ADR-8）。
 
 数据根目录：`%LOCALAPPDATA%\SnowShot\snow_shot\` / `~/Library/Application Support/SnowShot/snow_shot/`（注意是**两级**），另支持便携模式——exe 同级放 `__data_directory` 标记文件即可改根。
 
@@ -505,7 +505,7 @@ trait TranslationEngine {
 | # | 验证项 | 通过判据 |
 |---|---|---|
 | V1 | 无边框 / 全透明 / 置顶 / 可点击穿透的全屏覆盖窗 | ✅ **Windows 通过（2026-09-29）**：透明/置顶/多显示器坐标确认正常；点击穿透用 `SetWindowRgn` 方案验证通过（真人点击+接收窗口日志确认），见 ADR-2b。**macOS 待验证**（不阻塞 Windows 主线推进） |
-| V2 | tiny-skia 光栅化的带箭头虚线描边，合成进 GPUI canvas | ❌ **未通过（2026-09-29 实测，`spikes/p0-v2-tinyskia-raster/`）**：4K 场景平均 19.5fps、最低瞬时 5.75fps，远未达 60fps。**瓶颈已定位、非 ADR-2 根基问题**：tiny-skia 脏区光栅化本身很快（4.45ms/帧）；大头在合成阶段（20ms+/帧）——验证代码对整幅 4K 画面做全量 RGBA→BGRA 转换，且每帧新建 `RenderImage`/`ImageId` 导致 GPUI 每帧整张纹理（33MB）重新上传 GPU，未利用脏区做局部合成/纹理更新。按 §8 分支预案，下一步应先验证"仅脏区局部转换+局部纹理更新"能否达标，再考虑 rayon 并行或 Vello。**状态见本行末尾 v1.7 修订**，不视为 ADR-2 证伪。**第二轮更新（同日，256px 分块 + PatchCursor 增量）**：4K 稳态平均约 59fps（59.4~60.0，贴近 60Hz vsync 上限），稳态 P99 帧间隔约 20~35ms，瞬时最低受首帧预热（首帧约 70~80ms）拖低；原判据“最低瞬时 ≥55fps”**仍未通过**。**判据改动已由项目负责人裁决，见本行末尾 v1.7 修订**。**已确认的发现**：① gpui 图集以 ImageId 为键、无局部更新 API，纹理复用不可行，只能分块换 ImageId；② 旧块须 `cx.drop_image` 释放，否则泄漏图集；③ agy 的全画布 Mask 裁剪是负优化：光栅化由 0.53~0.66ms 升至约 1.6ms（每帧 clear 8MB Mask 的开销超过收益），第三轮已修复，见本行末尾；④ 仅分块而游标仍为 None 无效（脏区恒为全屏）；块 128 与 256 无显著差别，512 明显更差。**v1.7 修订（第三轮结论 + 判据改动）**：① 判据由“最低瞬时 ≥55fps”改为**稳态（剔除首帧）平均 ≥ 58fps，且稳态 P99 帧间隔 ≤ max(参考版 C++ 同口径 P99, 20ms)；瞬时最低帧不再作为判据**。理由：第三轮排查（`spikes/p0-v2-tinyskia-raster/RESULTS.md` 第三轮）证明长尾帧不对应合成耗时尖峰（68 次运行 53 个长尾帧，其前一帧 render 耗时最大仅 5.55ms），问题在 vsync/呈现/系统调度层面，帧间隔多呈 33/50ms（错过 1~2 个 vsync），瞬时最低帧被首帧预热和调度抖动主导。② Mask 负优化已修复：全 0 常驻 Mask + 只处理脏区行，光栅化耗时由 1.4~1.5ms 降回 ~0.5ms。③ 128 档“超过 120s”不是代码 bug（新 exe 首次运行加后台高负载拖慢窗口创建与退出）。④ 长尾来源在 render 之外，要分清是上传还是调度需 GPU 侧计时（PIX/ETW），超出 spike 范围；继续压 CPU 侧（如 rayon）对长尾无帮助。**状态：有条件通过，待参考版同口径 P99 对照**（参考版 C++ 帧计时埋点已就绪：`tools/frame-probe/frame-probe.patch`，构建在进行中；测试需真人在参考版里画箭头拖动约 15 秒）。 |
+| V2 | tiny-skia 光栅化的带箭头虚线描边，合成进 GPUI canvas | ❌ **未通过（2026-09-29 实测，`spikes/p0-v2-tinyskia-raster/`）**：4K 场景平均 19.5fps、最低瞬时 5.75fps，远未达 60fps。**瓶颈已定位、非 ADR-2 根基问题**：tiny-skia 脏区光栅化本身很快（4.45ms/帧）；大头在合成阶段（20ms+/帧）——验证代码对整幅 4K 画面做全量 RGBA→BGRA 转换，且每帧新建 `RenderImage`/`ImageId` 导致 GPUI 每帧整张纹理（33MB）重新上传 GPU，未利用脏区做局部合成/纹理更新。按 §8 分支预案，下一步应先验证"仅脏区局部转换+局部纹理更新"能否达标，再考虑 rayon 并行或 Vello。**状态见本行末尾 v1.7 修订**，不视为 ADR-2 证伪。**第二轮更新（同日，256px 分块 + PatchCursor 增量）**：4K 稳态平均约 59fps（59.4~60.0，贴近 60Hz vsync 上限），稳态 P99 帧间隔约 20~35ms，瞬时最低受首帧预热（首帧约 70~80ms）拖低；原判据“最低瞬时 ≥55fps”**仍未通过**。**判据改动已由项目负责人裁决，见本行末尾 v1.7 修订**。**已确认的发现**：① gpui 图集以 ImageId 为键、无局部更新 API，纹理复用不可行，只能分块换 ImageId；② 旧块须 `cx.drop_image` 释放，否则泄漏图集；③ agy 的全画布 Mask 裁剪是负优化：光栅化由 0.53~0.66ms 升至约 1.6ms（每帧 clear 8MB Mask 的开销超过收益），第三轮已修复，见本行末尾；④ 仅分块而游标仍为 None 无效（脏区恒为全屏）；块 128 与 256 无显著差别，512 明显更差。**v1.7 修订（第三轮结论 + 判据改动）**：① 判据由“最低瞬时 ≥55fps”改为**稳态（剔除首帧）平均 ≥ 58fps，且稳态 P99 帧间隔 ≤ max(参考版 C++ 同口径 P99, 20ms)；瞬时最低帧不再作为判据**。理由：第三轮排查（`spikes/p0-v2-tinyskia-raster/RESULTS.md` 第三轮）证明长尾帧不对应合成耗时尖峰（34 次运行，53 个长尾帧无逐帧明细留档，其前一帧 render 耗时最大仅 5.55ms），问题在 vsync/呈现/系统调度层面，帧间隔多呈 33/50ms（错过 1~2 个 vsync），瞬时最低帧被首帧预热和调度抖动主导。② Mask 负优化已修复：全 0 常驻 Mask + 只处理脏区行，光栅化耗时由 1.4~1.5ms 降回 ~0.5ms。③ 128 档“超过 120s”不是代码 bug（新 exe 首次运行加后台高负载拖慢窗口创建与退出）。④ 长尾来源在 render 之外，要分清是上传还是调度需 GPU 侧计时（PIX/ETW），超出 spike 范围；继续压 CPU 侧（如 rayon）对长尾无帮助。**状态：有条件通过，待参考版同口径 P99 对照**（参考版 C++ 帧计时埋点已就绪：`tools/frame-probe/frame-probe.patch`，构建在进行中；测试需真人在参考版里画箭头拖动约 15 秒）。 |
 | V3 | `snow-capture` 采集帧显示为底图 | ✅ **通过（2026-09-29，`spikes/p0-v3-capture-basemap/`）**：release 构建首帧延迟 750–960ms（冷启动全程），其中采集+像素转换仅占 170–260ms（2560×1440，未做 SIMD），其余为 GPUI 运行时一次性冷启动开销（常驻应用不重复付出）。截图确认画面内容与色彩通道正确 |
 | V4 | 托盘图标 + 菜单 + 全局热键 | ✅ **通过（2026-09-29，`spikes/p0-v4-tray-hotkey/`）**：`p0v4_events.log` 确认托盘菜单两项真实点击触发、全局热键在窗口失焦状态下多次按下均正确接收。已引入并批准第三方依赖 `tray-icon 0.25.1` / `global-hotkey 0.8.0` / `muda 0.20.0`（均 tauri-apps 出品，Apache-2.0 OR MIT）+ `chrono 0.4`。实现用"独立线程自建 Win32 消息循环"，事件目前只落日志、未接回 GPUI 前端状态（留待 P1 后补）。**仅验证 Windows**；macOS 延后（ADR-7） |
 | V5 | `gpui-kit` 弹出一个含 Button/Modal(现名Dialog)/Select/ColorPicker 的设置窗 | ✅ **通过（2026-09-29，`spikes/p0-v5-gpui-kit-settings/`）**：真实交互日志确认 Button/Dialog(ok+cancel)/Select(Confirm 带值)/ColorPicker(色相+alpha 连续 Change 事件)全部触发正常回调；补充调试边框截图确认触发器在正常布局位置内，此前一次"跑到左下角"的观察未在干净重跑中复现，判断为长会话里偶发的交互序列状态问题，不阻塞。**关键发现**：`spikes/gpui-kit-reference/gpui-kit/`（clone 的主干）比 crates.io 已发布的 `0.7.0` 更新，其 `ColorSelect` 等 API 在 0.7.0 里不存在——**写代码必须以 crates.io 0.7.0 真实源码为准，clone 仓库仅供理解设计意图，不能直接照抄**。`Select` 真实用法是 `SelectState::new` + `Select::new(&entity)`，`searchable` 是可选项，非文档原描述的 `SelectOptions`/`SearchableListDelegate` 强制模式；`Dialog` 主流写法是 `window.open_dialog`（`WindowExt`），由 Root overlay 层托管，而非直接 `Dialog::new` 塞进 view。另确认 `ColorPicker::render` 里 `self.anchor` 字段是**死字段**（builder 能设置但从未被读取/传给内部 `Popover`），`anchor()` 调用无效，是 gpui-kit 0.7.0 的组件缺陷，需要弹出定位时自行包一层 `Popover` 绕开 |
@@ -522,10 +522,10 @@ workspace 骨架 · `snow-ui-shell` 隔离层 · `snow-capability` 能力注册�
 **首批验证任务**：✅ **已验证（2026-09-29）**——`canvas_history.json` / `canvas_session.bin` 均为 Rust 引擎自有 serde_json 序列化，结论见 ADR-8 与 [`docs/research/adr8-canvas-blob.md`](research/adr8-canvas-blob.md)。
 
 **进度（2026-09-29）**——只记已完成并验证的：
-- (a) `snow-shot-rs/` workspace 骨架：19 个 crate、edition 2024，`cargo check/clippy/fmt/test --workspace` 通过；gpui 隔离守卫为 `snow-shot-rs/tools/workspace-guard`，机器可检查。**vendor 已落地（v1.8）**：gpui 依赖族 27 个 crate 放入 `snow-shot-rs/vendor/`，根 `[patch.crates-io]` 指向本地，仅 `snow-ui-shell` 声明 gpui/gpui-kit，含 `run_smoke_app()` 最小窗口（**只验证了编译，尚未运行**）；守卫升级为忽略 `[patch]` 段并能识别 `package = "gpui…"` 改名依赖；升级流程见 `snow-shot-rs/vendor/README.md`；P0 spike 回归尚未在 vendor 路径上重跑（版本与 spike 的 Cargo.lock 一致）。
+- (a) `snow-shot-rs/` workspace 骨架：19 个 crate、edition 2024，`cargo check/clippy/fmt/test --workspace` 通过；gpui 隔离守卫为 `snow-shot-rs/tools/workspace-guard`，机器可检查。**vendor 已落地（v1.8）**：gpui 依赖族 28 个 crate 放入 `snow-shot-rs/vendor/`，根 `[patch.crates-io]` 指向本地，仅 `snow-ui-shell` 声明 gpui/gpui-kit，含 `run_smoke_app()` 最小窗口（**只验证了编译，尚未运行**）；守卫升级为忽略 `[patch]` 段并能识别 `package = "gpui…"` 改名依赖；升级流程见 `snow-shot-rs/vendor/README.md`；P0 spike 回归尚未在 vendor 路径上重跑（版本与 spike 的 Cargo.lock 一致）。
 - (b) ADR-8 blob 验证：见上，结论写入 ADR-8。
-- (c) `snow-i18n`：Fluent 运行时 + `.ts`→`.ftl` 转换器。32 个 .ts / 240 个 context / 6263 条消息全量转换零失败；真实条目 Qt 渲染与 Fluent 渲染逐字比对 6000 多条全部一致。新增依赖 `fluent-bundle 0.16.0`、`unic-langid 0.9.6`（ADR-6 点名 Fluent）。**手写了约 300 行 `.ts` XML 解析器而未用 quick-xml（待用户裁决是否换）**。未做 `t!()` 宏/源码扫描与 CI 对齐门禁；`ant_design_qt` 缺 en_US，转换时用源文合成。
-- (d) `snow-capability`（ADR-7 的 7 项能力 × 3 平台状态）与命令总线（`AppCommand` 28 个变体 + `CommandBus`，测试通过；8 个复杂请求仅占位字段）。ADR-7 矩阵建议补「剪贴板 / 文件对话框 / 窗口置顶」三项（MCP 的 copy/pin 依赖它们），具体各平台状态待评审。
+- (c) `snow-i18n`：Fluent 运行时 + `.ts`→`.ftl` 转换器。32 个 .ts / 240 个 context / 6263 条消息全量转换零失败；真实条目 Qt 渲染与 Fluent 渲染逐字比对 6000 多条全部一致。新增依赖 `fluent-bundle 0.16.0`、`unic-langid 0.9.6`（ADR-6 点名 Fluent）。**手写了约 300 行 `.ts` XML 解析器而未用 quick-xml**（quick-xml 已批准新增依赖，见 §9 裁决 3，后续迁移时替换）。未做 `t!()` 宏/源码扫描与 CI 对齐门禁；`ant_design_qt` 缺 en_US，转换时用源文合成。
+- (d) `snow-capability`（ADR-7 矩阵：8 项能力 × 3 平台状态，已增补 `CrashDump` 本地崩溃转储能力项）与命令总线（`AppCommand` 28 个变体 + `CommandBus`，测试通过；8 个复杂请求仅占位字段）。
 - (e) 三平台 CI 工作流 `.github/workflows/snow-shot-rs-ci.yml`：Windows 本地验证通过；macOS/Linux 未验证；Linux 系统包待 gpui 落地后补。
 
 - (f) `snow-ui-icons`：`build.rs` 原地读取 `ant_design_qt` 模板并规范化后嵌入（不改该目录，crate 因此不能单独发布）；829 个规范化 SVG 与 C++ 生成的 `antd_icons.cpp` 逐字节一致；resvg 光栅化 + 缓存；仅支持单色与双色（Ant 图标里没有三色/全彩）。**局限**：缺 C++ 像素级黄金样本（本机无 Qt），像素回归基线是本 crate 自身输出；`IconColors` 用 `Option<Rgba>` 而非 `Hsla`（crate 不依赖 gpui，接入 `snow-ui-shell` 时需转换）。
@@ -533,7 +533,10 @@ workspace 骨架 · `snow-ui-shell` 隔离层 · `snow-capability` 能力注册�
 - (g) `snow-config`：238 个键的 schema 表由脚本从 C++ `kRawEntries` 机械转换；约 20 个键专属 normalizer 全部移植（越界/非法回退默认，与 C++ 一致）；Qt 风格序列化对真实样本逐字节往返一致；数据目录严格按 T1/T2 取值表，指向 upstream `SnowShot` 目录的候选一律拒绝；损坏文件留档、30 天清理、原子写入；默认文件名前缀由 `PRODUCT_NAME` 派生（§9 裁决 5）；77 个单测 + 37 个文档测试。**受限复刻**（无 Qt 环境）：快捷键修饰键顺序与具名键表、QLocale 只内置 13 种语言默认地区、QColor 只认三种十六进制写法、macOS 分支未移植、默认输出目录不等价于 `QStandardPaths`。agy 产出经复审修正了 IPv6 主机带端口误判、base64 填充位置、F 键过宽松、`ß` 大写等 5 处。
 - (h) `snow-ui-theme`：`ant_design_qt` 调色算法移植（`FastColorLite`、10 阶亮/暗色板、令牌结构），零依赖；对 C++ 可执行黄金样本（MSVC 编译基线目录已有的 `fast_color_lite.cpp` 与 `palette_generate.cpp`）**精确相等**对拍：16 基色 × 亮/暗（两种背景）色板、darken/lighten/mix、20 个解析输入。令牌层无可执行黄金样本（`theme_types.cpp` 依赖 QColor），透明度类令牌按 Qt6 语义手工推导。未移植：`QFont`、`QPalette`、`ThemeValues` 系列、对比度函数（依赖 `QColor::darker/lighter`，待定）。
 
-**进行中（未完成，不算入上述）**：日志与本地崩溃转储（T3）待派发（会改 `snow-app-core`，等 Qt 编译启动后）。
+- (i) `snow-history`：截图历史与贴图存储管理（16 单元测试 + 38 集成测试 + 7 doctests 全绿）。支持 `index.json` 严格格式校验与版本升级、两阶段崩溃安全删除、带原子写入的防损清单、孤儿清理兜底；针对 `serde_json` 在多 crate feature 统一时激活 `preserve_order` 导致键序扰动的问题，引入递归升序规整，保证与 Qt 真实样本逐字节一致。
+- (j) `snow-canvas-filters`：将原 C++ 手写 AVX2 滤镜（马赛克、高斯模糊、反相、浮雕、智能橡皮擦等）直译为 Rust SIMD（基于 `wide` crate）与标量兜底，17 个测试全过。
+- (k) T3 日志与本地崩溃转储 + `snow-shot` 应用引导接线：`snow-app-core::logging` 实现按天滚动文件日志（默认 7 天轮换，支持 `CISOX_LOG` 环境变量）；`snow-platform::crash` 实现本地崩溃转储（Windows 下捕获异常与 panic 并输出 minidump 及现场 txt 报告，其他平台输出 txt）；`snow-shot::main` 成功接线数据目录安全解析、日志初始化、崩溃监控与能力表装载，应用已可正常编译与运行。
+- (l) 全量测试闭环：`cargo test --workspace` 纯测试及文档测试全绿通过。
 
 ### P2 · 画布与标注引擎 ★ 最大单块
 `snow-canvas-raster` patch 消费者 · 15 种工具的绘制对齐 · `snow-canvas-filters`（AVX2 → Rust SIMD）· `snow-canvas-text` 文本与 IME · 撤销重做接入 · 脏区与性能调优
@@ -586,7 +589,7 @@ RapidOCR 接入与独立进程 worker · 表格/公式提取（走自定义模�
 |---|---|
 | ~~V1 覆盖窗~~ | ~~覆盖窗改用独立的 `winit` 窗口自绘~~ —— **✅ 已不需要**：`SetWindowRgn` 方案在 GPUI 窗口上验证通过（ADR-2b），不必更换建窗框架 |
 | V2 光栅化性能 | 依次尝试：分块并行光栅化（`rayon`）→ 降低脏区粒度 → Vello/wgpu 独立管线 |
-| V5 license 冲突 | 基于 `gpui-ce` 自建组件集；或整体改用 **Freya**（Skia 后端，矢量能力原生完备）/ **floem**（Vello 后端）|
+| ~~V5 license 冲突~~ | ~~基于 `gpui-ce` 自建组件集；或整体改用 **Freya**（Skia 后端，矢量能力原生完备）/ **floem**（Vello 后端）~~ —— **✅ 已不需要**：ADR-1 确认全线 Apache-2.0，R2 风险已解除 |
 | V6 IME | 标注文本改用平台原生输入控件叠加（Win32 EDIT / NSTextView）再取结果 |
 | 多项同时失败 | 重新评估框架选型：Freya（skia-safe，矢量最完备）与 floem 是本应用形态下最接近的替代 |
 
@@ -594,7 +597,7 @@ RapidOCR 接入与独立进程 worker · 表格/公式提取（走自定义模�
 
 ## 9. 遗留问题与边界
 
-1. **工作量估算**：待重写 ≈17.4 万行 C++ → 预计 9~12 万行 Rust（GPUI 视图代码显著短于 QWidget，且组件库外部化）。但**在 P0 完成前给出人月数字没有意义**——GPUI 的实际生产力系数是本项目最大的未知量。P0 结束后基于真实速率重估。
+1. **工作量估算**：待重写 ≈14.8 万行 C++（含 `ant_design_qt` 146k + `snow_draw_engine_qt/src/` 25.9k + `snow_shot/src/`非 presentation 部分，见 §1.1；§0 一句话结论口径）→ 预计 9~12 万行 Rust（GPUI 视图代码显著短于 QWidget，且组件库外部化）。但**在 P0 完成前给出人月数字没有意义**——GPUI 的实际生产力系数是本项目最大的未知量。P0 结束后基于真实速率重估。
 2. **`snow_image` / `snow_image_viewer`（4.5 万行）本次不改造**，它们是独立 App。若后续也要迁移，可复用本方案的全部基础设施。
 3. **无障碍 / UIA e2e 测试**（现有 `*_uia_e2e_test.cpp`）需确认 GPUI 的无障碍树支持程度，可能需要重新设计端到端测试策略——建议改为经命令总线驱动的功能测试，降低对 UI 自动化的依赖。
 4. **云端 AI 能力**：翻译改本地（ADR-5）；表格/公式提取改走自定义模型通道（ADR-5 末节）。upstream 的 `/api/v1/*` 专有端点全部弃用。
@@ -712,7 +715,7 @@ config.json.corrupt.<ISO8601>.json       # 解析失败时的备份，30 天后�
 capture_history/
   index.json                             # 全部记录元数据 + pending_deletions
   records/<uuid>/
-    canvas_history.json                  # ★ 不透明 blob（疑似引擎序列化）
+    canvas_history.json                  # ★ 引擎 serde_json 直接产物（已验证，见 ADR-8）
     capture_result.png
     display_0.png …                      # 每显示器一张源图
 pinned_windows_v2/

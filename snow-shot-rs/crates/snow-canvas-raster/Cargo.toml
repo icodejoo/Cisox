@@ -7,3 +7,12 @@ rust-version.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+tiny-skia = "0.11.4"
+snow-draw-engine-core = { path = "../../../snow_draw_engine_qt/crates/snow-draw-engine-core" }
+snow-draw-engine-display = { path = "../../../snow_draw_engine_qt/crates/snow-draw-engine-display" }
+
+[dev-dependencies]
+snow-draw-engine = { path = "../../../snow_draw_engine_qt/crates/snow-draw-engine" }
+snow-draw-engine-editor = { path = "../../../snow_draw_engine_qt/crates/snow-draw-engine-editor" }

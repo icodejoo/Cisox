@@ -10,3 +10,7 @@ workspace = true
 
 [dependencies]
 snow-app-core = { path = "../snow-app-core" }
+snow-capability = { path = "../snow-capability" }
+snow-config = { path = "../snow-config" }
+snow-platform = { path = "../snow-platform" }
+tracing = "0.1"

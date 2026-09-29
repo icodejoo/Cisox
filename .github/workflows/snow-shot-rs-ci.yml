@@ -70,3 +70,9 @@ jobs:
       # 含 tools/workspace-guard 守卫测试（workspace member）
       - name: Test
         run: cargo test --workspace
+
+      # i18n 门禁：各语言 id 对齐 + 代码引用的 id 必须存在于 en-US
+      - name: i18n alignment gate
+        run: |
+          cargo run -q -p snow-i18n --bin snow-i18n-tool -- check crates/snow-i18n/locales
+          cargo run -q -p snow-i18n --bin snow-i18n-tool -- extract crates --exclude crates/snow-i18n --strict-refs

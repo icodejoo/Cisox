@@ -13,3 +13,7 @@ workspace = true
 snow-draw-engine-core = { path = "../../../snow_draw_engine_qt/crates/snow-draw-engine-core" }
 # 平台能力注册表（命令处理器据此判定降级）
 snow-capability = { path = "../snow-capability" }
+# 日志（方案 §10 T3）：tracing 生态；subscriber 只启用 fmt + env-filter
+tracing = "0.1"
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter"] }

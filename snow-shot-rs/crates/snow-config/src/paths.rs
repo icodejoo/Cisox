@@ -162,6 +162,7 @@ fn ensure_writable_directory(path: &Path) -> Result<(), String> {
     if path.as_os_str().is_empty() {
         return Err("The storage directory path is empty".to_string());
     }
+    // 静态检查：在目录实际存在前就能拦截明显的 SnowShot 路径
     if is_upstream_location(path) {
         return Err("The storage directory points at the upstream application's data".to_string());
     }
@@ -169,6 +170,14 @@ fn ensure_writable_directory(path: &Path) -> Result<(), String> {
         .map_err(|_| "The storage directory could not be created".to_string())?;
     if !path.is_dir() {
         return Err("The storage path is not a directory".to_string());
+    }
+    // 高优 bug #2：先 canonicalize，再二次检查，防止 junction/末尾点（SnowShot.）绕过
+    if let Ok(canonical) = fs::canonicalize(path)
+        && is_upstream_location(&canonical)
+    {
+        return Err(
+            "The storage directory points at the upstream application's data".to_string(),
+        );
     }
     let probe = path.join(WRITE_PROBE_FILE);
     fs::write(&probe, b"").map_err(|_| "The storage directory is not writable".to_string())?;

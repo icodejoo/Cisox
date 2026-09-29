@@ -4,6 +4,7 @@
 
 pub mod bus;
 pub mod command;
+pub mod logging;
 
 use snow_draw_engine_core::{EngineConfig, validate_config};
 

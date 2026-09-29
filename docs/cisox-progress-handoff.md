@@ -84,13 +84,14 @@ P0 验证基本完成，P1 地基完成，P2/P4/P5 已开工；**参考版（C++
 
 **先做（成本低）**
 1. 收集/重派 5 份复审：config、theme+icons、i18n+capability+总线+守卫+vendor、canvas-filters、snow-history；再补 T3、shell、raster 的复审。
-2. **文档订正（一项未做）**。订正清单要点：ADR-8 的 `QDataStream` 例外、V6/V2 措辞降级、vendor 28、ADR-5 引用与依赖版本、约 15 处前后矛盾残留（"28+ tools"、"28 个语义+StartRecording"、30 vs 32 个 .ts、quick-xml 待裁决、R6/V4 冲突、P0 闸口与带条件进 P1、第 106 行残留半句、14.8 万 vs 17.4 万行 C++、"疑似引擎序列化"、旧的 V5 license 预案等）。订正时注意：`QDataStream` 的真实位置是 `snow_shot/include/snow_shot/presentation/screenshotresultcompositor.h`（`encodeScreenshotResultStyle`，26–33 行，魔数 `0x53535247`）、`snow_shot/src/presentation/pinned/screenshotpinnedwindow.cpp`（`serializeRecognitionResults` 164 行，反序列化 214 行）；capture_history 的 `format_version` 读时接受 1（`capturehistoryrepository.cpp` 849–850 行）、写 2（356 行）；"68 次运行"在 RESULTS.md 第三轮表格里只对应 34 次，53 个长尾帧无逐帧明细留档，应改成 34 或说明来源。
-3. 跑一次 `cargo test --workspace`（**只在没有其他 cargo 并发时**）；之前多个子代理同时跑 workspace 测试，gpui 被重复编译、互相抢锁。
+2. **文档订正（✅ 已完成，2026-09-29）**：方案文档已升至 v1.9，订正全部要点（ADR-8 的 QDataStream 例外、V6/V2 措辞降级、vendor 28、ADR-5 引用与依赖版本、约 15 处前后矛盾残留如 30 vs 32 个 .ts、quick-xml 状态、V5 license 状态、14.8 万行工作量对齐、"疑似引擎序列化"去疑等）。
+3. **跑一次 `cargo test --workspace`（✅ 已完成并通过，2026-09-29）**：全量单元测试、集成测试、文档测试全绿（EXIT: 0）。顺带修复了 3 个高优 bug（`validate_geometry` 范围溢出、`sweep_orphans` 损坏清扫兜底、`paths.rs` junction/末尾点绕过）、`index.rs` 递归键序排序（化解 `preserve_order` 影响）、`snow-ui-shell` 两处 doctest 错误，以及恢复了误删的 `.cargo/config.toml`。
 
 **已知问题**
+- **`cargo test --workspace` 编译/测试（✅ 已解决）**：之前并发链接导致页面文件耗尽（os error 1455）及 doctest 错误已全部修复，单线程/控并发全量测试 100% 通过。
 - **`snow-history`/`snow-config` 已知偏差**：见各自作者报告（越界配置只报 Err、`shadow_color` 只近似校验等）。
 - **滤镜**：`cargo test --workspace` 曾在编译 `lyon_algorithms`/`strum_macros` 失败，原因未查，怀疑是并发改依赖。
-- **`snow-capability`** 建议补 `CrashDump` 能力项；日志与崩溃两处还没有在 `main` 里接线。
+- **`snow-capability` & 运行时接线（✅ 已完成，2026-09-29）**：`snow-capability` 已补入 `Capability::CrashDump` 能力项；`snow-shot/src/main.rs` 已完成存储解析、按天滚动文件日志初始化、本地崩溃转储安装与能力表加载接线，可正常编译运行。
 - **守卫与视图层矛盾**：守卫规定 gpui 只能在 `snow-ui-shell`，但 `snow-ui-widgets` 天然要用 gpui。需设计 shell 门面（re-export 精选子集）再改守卫；widgets 这一批因此**没派**。
 - **ADR-8**：`result_style.bin` 与 `recognition_results.bin` 是 Qt `QDataStream` 私有二进制，导入器需最小读取器（P4 待办）。
 - **MCP** 共 101 个 tool，命令总线只覆盖 screenshot 域 28 个语义，其余约 70 个待建模。

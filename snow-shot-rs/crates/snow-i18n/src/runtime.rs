@@ -101,6 +101,100 @@ impl Args {
         self.items.push((name.to_string(), ArgValue::Float(value)));
         self
     }
+
+    /// 按值的类型设置命名参数（整数与浮点保持数值类型，供复数选择；其余按字符串）。
+    ///
+    /// # 参数
+    /// - `name`：变量名，如 `n`、`arg1`。
+    /// - `value`：整数、浮点、`&str` 或 `String`。
+    ///
+    /// # 示例
+    /// ```
+    /// use snow_i18n::Args;
+    /// let args = Args::new().set("n", 3).set("arg1", "a.png");
+    /// ```
+    pub fn set(self, name: &str, value: impl IntoArg) -> Self {
+        value.apply(self, name)
+    }
+}
+
+/// 可作为消息参数的值类型（供 [`Args::set`] 与 `t!` 宏使用）。
+pub trait IntoArg {
+    /// 把自身以 `name` 写入参数集。
+    fn apply(self, args: Args, name: &str) -> Args;
+}
+
+/// 为整数类型实现 [`IntoArg`]。
+macro_rules! impl_int_arg {
+    ($($t:ty),*) => {$(
+        impl IntoArg for $t {
+            /// 以整数写入。
+            fn apply(self, mut args: Args, name: &str) -> Args {
+                args.items.push((name.to_string(), ArgValue::Int(self as i64)));
+                args
+            }
+        }
+    )*};
+}
+impl_int_arg!(i8, i16, i32, i64, isize, u8, u16, u32, usize);
+
+impl IntoArg for f64 {
+    /// 以浮点写入。
+    fn apply(self, args: Args, name: &str) -> Args {
+        args.float(name, self)
+    }
+}
+
+impl IntoArg for f32 {
+    /// 以浮点写入。
+    fn apply(self, args: Args, name: &str) -> Args {
+        args.float(name, f64::from(self))
+    }
+}
+
+impl IntoArg for &str {
+    /// 以字符串写入。
+    fn apply(self, args: Args, name: &str) -> Args {
+        args.named(name, self)
+    }
+}
+
+impl IntoArg for String {
+    /// 以字符串写入。
+    fn apply(self, args: Args, name: &str) -> Args {
+        args.named(name, self)
+    }
+}
+
+impl IntoArg for &String {
+    /// 以字符串写入。
+    fn apply(self, args: Args, name: &str) -> Args {
+        args.named(name, self.as_str())
+    }
+}
+
+/// 查询译文的宏，形态固定以便 `snow-i18n-tool extract` 识别。
+///
+/// - `t!(i18n, "id")`：无参。
+/// - `t!(i18n, "id", n = 3, arg1 = "x")`：带命名参数（`n` 为复数计数，`argN` 对应 Qt 的 `%N`）。
+///
+/// id 必须是字符串字面量；缺失时走运行时降级（`[!缺失:id]`），编译期不检查。
+///
+/// # 示例
+/// ```
+/// use snow_i18n::{t, I18n};
+/// let ftl = "hi = 你好 { $arg1 }";
+/// let i = I18n::from_resources("zh-CN", "en-US", "Cisox", &[("zh-CN", ftl)]).unwrap();
+/// assert_eq!(t!(i, "hi", arg1 = "小明"), "你好 小明");
+/// ```
+#[macro_export]
+macro_rules! t {
+    ($i18n:expr, $id:literal $(,)?) => {
+        $i18n.tr($id)
+    };
+    ($i18n:expr, $id:literal, $($name:ident = $val:expr),+ $(,)?) => {
+        $i18n.tr_with($id, &$crate::Args::new()$(.set(stringify!($name), $val))+)
+    };
 }
 
 /// 单个语言的 bundle。
@@ -345,6 +439,17 @@ mod tests {
         assert_eq!(en.tr_with("c", &Args::new().count(1)), "1 item");
         assert_eq!(en.tr_with("c", &Args::new().count(1234)), "1234 items");
         assert_eq!(make().tr_with("c", &Args::new().count(1)), "1 项");
+    }
+
+    /// 宏展开：无参、带参、复数与尾逗号。
+    #[test]
+    fn macro_expands() {
+        let i = make();
+        assert_eq!(crate::t!(i, "b"), "Cisox 已就绪");
+        assert_eq!(crate::t!(i, "a", arg1 = "X"), "你好 X");
+        assert_eq!(crate::t!(i, "a", arg1 = String::from("Y"),), "你好 Y");
+        assert_eq!(crate::t!(i, "c", n = 5), "5 项");
+        assert_eq!(crate::t!(i, "nope"), "[!缺失:nope]");
     }
 
     /// 参数缺失走 tr_checked 时应报格式化错误。

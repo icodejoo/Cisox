@@ -7,3 +7,14 @@ rust-version.workspace = true
 
 [lints]
 workspace = true
+
+# 与 gpui 使用的 windows 绑定同版本（0.62），避免重复编译
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Kernel",
+    "Win32_System_Memory",
+    "Win32_System_Threading",
+] }

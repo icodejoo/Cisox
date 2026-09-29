@@ -1,0 +1,1193 @@
+mosaic_1x1_b1_d1_o0_0_fs0 apply 1 1 107 0 1 1 0 0 1 0 0 0
+mosaic_1x1_b2_d1_o0_0_fs0 apply 1 1 114 0 1 2 0 0 1 0 0 0
+mosaic_1x1_b3_d1_o5_3_fs0 apply 1 1 121 0 1 3 0 0 1 5 3 0
+mosaic_1x1_b7_d1_o-4_9.6_fs0 apply 1 1 128 0 1 7 0 0 1 -4 9.6 0
+mosaic_1x1_b16_d1_o0_0_fs0 apply 1 1 135 0 1 16 0 0 1 0 0 0
+mosaic_1x1_b33_d1_o11_2_fs0 apply 1 1 142 0 1 33 0 0 1 11 2 0
+mosaic_1x1_b10_d1.5_o3_3_fs0 apply 1 1 149 0 1 10 0 0 1.5 3 3 0
+blur_1x1_s0_d1_fs0 apply 1 1 156 1 1 0 0 0 1 0 0 0
+blur_1x1_s0.5_d1_fs0 apply 1 1 163 1 1 0 0.5 0 1 0 0 0
+blur_1x1_s1_d1_fs0 apply 1 1 170 1 1 0 1 0 1 0 0 0
+blur_1x1_s1.9_d1_fs0 apply 1 1 177 1 1 0 1.9 0 1 0 0 0
+blur_1x1_s2_d1_fs0 apply 1 1 184 1 1 0 2 0 1 0 0 0
+blur_1x1_s3_d1_fs0 apply 1 1 191 1 1 0 3 0 1 0 0 0
+blur_1x1_s5_d1_fs0 apply 1 1 198 1 1 0 5 0 1 0 0 0
+blur_1x1_s7.9_d1_fs0 apply 1 1 205 1 1 0 7.9 0 1 0 0 0
+blur_1x1_s8_d1_fs0 apply 1 1 212 1 1 0 8 0 1 0 0 0
+blur_1x1_s15_d1_fs0 apply 1 1 219 1 1 0 15 0 1 0 0 0
+blur_1x1_s20_d1_fs0 apply 1 1 226 1 1 0 20 0 1 0 0 0
+blur_1x1_s40_d1_fs0 apply 1 1 233 1 1 0 40 0 1 0 0 0
+blur_1x1_s130_d1_fs0 apply 1 1 240 1 1 0 130 0 1 0 0 0
+blur_1x1_s200_d1_fs0 apply 1 1 247 1 1 0 200 0 1 0 0 0
+blur_1x1_s1.5_d2_fs0 apply 1 1 254 1 1 0 1.5 0 2 0 0 0
+blur_1x1_s9_d2_fs0 apply 1 1 261 1 1 0 9 0 2 0 0 0
+color2_1x1_st0_fs0 apply 1 1 268 2 0 0 0 0 1 0 0 0
+color2_1x1_st0.003_fs0 apply 1 1 275 2 0.003 0 0 0 1 0 0 0
+color2_1x1_st0.5_fs0 apply 1 1 282 2 0.5 0 0 0 1 0 0 0
+color2_1x1_st0.9_fs0 apply 1 1 289 2 0.9 0 0 0 1 0 0 0
+color2_1x1_st1_fs0 apply 1 1 296 2 1 0 0 0 1 0 0 0
+color3_1x1_st0_fs0 apply 1 1 303 3 0 0 0 0 1 0 0 0
+color3_1x1_st0.003_fs0 apply 1 1 310 3 0.003 0 0 0 1 0 0 0
+color3_1x1_st0.5_fs0 apply 1 1 317 3 0.5 0 0 0 1 0 0 0
+color3_1x1_st0.9_fs0 apply 1 1 324 3 0.9 0 0 0 1 0 0 0
+color3_1x1_st1_fs0 apply 1 1 331 3 1 0 0 0 1 0 0 0
+emboss_1x1_r0_st1_fs0 apply 1 1 338 4 1 0 0 0 1 0 0 0
+emboss_1x1_r1_st1_fs0 apply 1 1 345 4 1 0 0 1 1 0 0 0
+emboss_1x1_r1_st0.3_fs0 apply 1 1 352 4 0.3 0 0 1 1 0 0 0
+emboss_1x1_r2_st1_fs0 apply 1 1 359 4 1 0 0 2 1 0 0 0
+emboss_1x1_r3.2_st0.7_fs0 apply 1 1 366 4 0.7 0 0 3.2 1 0 0 0
+emboss_1x1_r40_st1_fs0 apply 1 1 373 4 1 0 0 40 1 0 0 0
+mosaic_1x1_b1_d1_o0_0_fs1 apply 1 1 107 0 1 1 0 0 1 0 0 1
+mosaic_1x1_b2_d1_o0_0_fs1 apply 1 1 114 0 1 2 0 0 1 0 0 1
+mosaic_1x1_b3_d1_o5_3_fs1 apply 1 1 121 0 1 3 0 0 1 5 3 1
+mosaic_1x1_b7_d1_o-4_9.6_fs1 apply 1 1 128 0 1 7 0 0 1 -4 9.6 1
+mosaic_1x1_b16_d1_o0_0_fs1 apply 1 1 135 0 1 16 0 0 1 0 0 1
+mosaic_1x1_b33_d1_o11_2_fs1 apply 1 1 142 0 1 33 0 0 1 11 2 1
+mosaic_1x1_b10_d1.5_o3_3_fs1 apply 1 1 149 0 1 10 0 0 1.5 3 3 1
+blur_1x1_s0_d1_fs1 apply 1 1 156 1 1 0 0 0 1 0 0 1
+blur_1x1_s0.5_d1_fs1 apply 1 1 163 1 1 0 0.5 0 1 0 0 1
+blur_1x1_s1_d1_fs1 apply 1 1 170 1 1 0 1 0 1 0 0 1
+blur_1x1_s1.9_d1_fs1 apply 1 1 177 1 1 0 1.9 0 1 0 0 1
+blur_1x1_s2_d1_fs1 apply 1 1 184 1 1 0 2 0 1 0 0 1
+blur_1x1_s3_d1_fs1 apply 1 1 191 1 1 0 3 0 1 0 0 1
+blur_1x1_s5_d1_fs1 apply 1 1 198 1 1 0 5 0 1 0 0 1
+blur_1x1_s7.9_d1_fs1 apply 1 1 205 1 1 0 7.9 0 1 0 0 1
+blur_1x1_s8_d1_fs1 apply 1 1 212 1 1 0 8 0 1 0 0 1
+blur_1x1_s15_d1_fs1 apply 1 1 219 1 1 0 15 0 1 0 0 1
+blur_1x1_s20_d1_fs1 apply 1 1 226 1 1 0 20 0 1 0 0 1
+blur_1x1_s40_d1_fs1 apply 1 1 233 1 1 0 40 0 1 0 0 1
+blur_1x1_s130_d1_fs1 apply 1 1 240 1 1 0 130 0 1 0 0 1
+blur_1x1_s200_d1_fs1 apply 1 1 247 1 1 0 200 0 1 0 0 1
+blur_1x1_s1.5_d2_fs1 apply 1 1 254 1 1 0 1.5 0 2 0 0 1
+blur_1x1_s9_d2_fs1 apply 1 1 261 1 1 0 9 0 2 0 0 1
+color2_1x1_st0_fs1 apply 1 1 268 2 0 0 0 0 1 0 0 1
+color2_1x1_st0.003_fs1 apply 1 1 275 2 0.003 0 0 0 1 0 0 1
+color2_1x1_st0.5_fs1 apply 1 1 282 2 0.5 0 0 0 1 0 0 1
+color2_1x1_st0.9_fs1 apply 1 1 289 2 0.9 0 0 0 1 0 0 1
+color2_1x1_st1_fs1 apply 1 1 296 2 1 0 0 0 1 0 0 1
+color3_1x1_st0_fs1 apply 1 1 303 3 0 0 0 0 1 0 0 1
+color3_1x1_st0.003_fs1 apply 1 1 310 3 0.003 0 0 0 1 0 0 1
+color3_1x1_st0.5_fs1 apply 1 1 317 3 0.5 0 0 0 1 0 0 1
+color3_1x1_st0.9_fs1 apply 1 1 324 3 0.9 0 0 0 1 0 0 1
+color3_1x1_st1_fs1 apply 1 1 331 3 1 0 0 0 1 0 0 1
+emboss_1x1_r0_st1_fs1 apply 1 1 338 4 1 0 0 0 1 0 0 1
+emboss_1x1_r1_st1_fs1 apply 1 1 345 4 1 0 0 1 1 0 0 1
+emboss_1x1_r1_st0.3_fs1 apply 1 1 352 4 0.3 0 0 1 1 0 0 1
+emboss_1x1_r2_st1_fs1 apply 1 1 359 4 1 0 0 2 1 0 0 1
+emboss_1x1_r3.2_st0.7_fs1 apply 1 1 366 4 0.7 0 0 3.2 1 0 0 1
+emboss_1x1_r40_st1_fs1 apply 1 1 373 4 1 0 0 40 1 0 0 1
+mosaic_3x2_b1_d1_o0_0_fs0 apply 3 2 380 0 1 1 0 0 1 0 0 0
+mosaic_3x2_b2_d1_o0_0_fs0 apply 3 2 387 0 1 2 0 0 1 0 0 0
+mosaic_3x2_b3_d1_o5_3_fs0 apply 3 2 394 0 1 3 0 0 1 5 3 0
+mosaic_3x2_b7_d1_o-4_9.6_fs0 apply 3 2 401 0 1 7 0 0 1 -4 9.6 0
+mosaic_3x2_b16_d1_o0_0_fs0 apply 3 2 408 0 1 16 0 0 1 0 0 0
+mosaic_3x2_b33_d1_o11_2_fs0 apply 3 2 415 0 1 33 0 0 1 11 2 0
+mosaic_3x2_b10_d1.5_o3_3_fs0 apply 3 2 422 0 1 10 0 0 1.5 3 3 0
+blur_3x2_s0_d1_fs0 apply 3 2 429 1 1 0 0 0 1 0 0 0
+blur_3x2_s0.5_d1_fs0 apply 3 2 436 1 1 0 0.5 0 1 0 0 0
+blur_3x2_s1_d1_fs0 apply 3 2 443 1 1 0 1 0 1 0 0 0
+blur_3x2_s1.9_d1_fs0 apply 3 2 450 1 1 0 1.9 0 1 0 0 0
+blur_3x2_s2_d1_fs0 apply 3 2 457 1 1 0 2 0 1 0 0 0
+blur_3x2_s3_d1_fs0 apply 3 2 464 1 1 0 3 0 1 0 0 0
+blur_3x2_s5_d1_fs0 apply 3 2 471 1 1 0 5 0 1 0 0 0
+blur_3x2_s7.9_d1_fs0 apply 3 2 478 1 1 0 7.9 0 1 0 0 0
+blur_3x2_s8_d1_fs0 apply 3 2 485 1 1 0 8 0 1 0 0 0
+blur_3x2_s15_d1_fs0 apply 3 2 492 1 1 0 15 0 1 0 0 0
+blur_3x2_s20_d1_fs0 apply 3 2 499 1 1 0 20 0 1 0 0 0
+blur_3x2_s40_d1_fs0 apply 3 2 506 1 1 0 40 0 1 0 0 0
+blur_3x2_s130_d1_fs0 apply 3 2 513 1 1 0 130 0 1 0 0 0
+blur_3x2_s200_d1_fs0 apply 3 2 520 1 1 0 200 0 1 0 0 0
+blur_3x2_s1.5_d2_fs0 apply 3 2 527 1 1 0 1.5 0 2 0 0 0
+blur_3x2_s9_d2_fs0 apply 3 2 534 1 1 0 9 0 2 0 0 0
+color2_3x2_st0_fs0 apply 3 2 541 2 0 0 0 0 1 0 0 0
+color2_3x2_st0.003_fs0 apply 3 2 548 2 0.003 0 0 0 1 0 0 0
+color2_3x2_st0.5_fs0 apply 3 2 555 2 0.5 0 0 0 1 0 0 0
+color2_3x2_st0.9_fs0 apply 3 2 562 2 0.9 0 0 0 1 0 0 0
+color2_3x2_st1_fs0 apply 3 2 569 2 1 0 0 0 1 0 0 0
+color3_3x2_st0_fs0 apply 3 2 576 3 0 0 0 0 1 0 0 0
+color3_3x2_st0.003_fs0 apply 3 2 583 3 0.003 0 0 0 1 0 0 0
+color3_3x2_st0.5_fs0 apply 3 2 590 3 0.5 0 0 0 1 0 0 0
+color3_3x2_st0.9_fs0 apply 3 2 597 3 0.9 0 0 0 1 0 0 0
+color3_3x2_st1_fs0 apply 3 2 604 3 1 0 0 0 1 0 0 0
+emboss_3x2_r0_st1_fs0 apply 3 2 611 4 1 0 0 0 1 0 0 0
+emboss_3x2_r1_st1_fs0 apply 3 2 618 4 1 0 0 1 1 0 0 0
+emboss_3x2_r1_st0.3_fs0 apply 3 2 625 4 0.3 0 0 1 1 0 0 0
+emboss_3x2_r2_st1_fs0 apply 3 2 632 4 1 0 0 2 1 0 0 0
+emboss_3x2_r3.2_st0.7_fs0 apply 3 2 639 4 0.7 0 0 3.2 1 0 0 0
+emboss_3x2_r40_st1_fs0 apply 3 2 646 4 1 0 0 40 1 0 0 0
+mosaic_3x2_b1_d1_o0_0_fs1 apply 3 2 380 0 1 1 0 0 1 0 0 1
+mosaic_3x2_b2_d1_o0_0_fs1 apply 3 2 387 0 1 2 0 0 1 0 0 1
+mosaic_3x2_b3_d1_o5_3_fs1 apply 3 2 394 0 1 3 0 0 1 5 3 1
+mosaic_3x2_b7_d1_o-4_9.6_fs1 apply 3 2 401 0 1 7 0 0 1 -4 9.6 1
+mosaic_3x2_b16_d1_o0_0_fs1 apply 3 2 408 0 1 16 0 0 1 0 0 1
+mosaic_3x2_b33_d1_o11_2_fs1 apply 3 2 415 0 1 33 0 0 1 11 2 1
+mosaic_3x2_b10_d1.5_o3_3_fs1 apply 3 2 422 0 1 10 0 0 1.5 3 3 1
+blur_3x2_s0_d1_fs1 apply 3 2 429 1 1 0 0 0 1 0 0 1
+blur_3x2_s0.5_d1_fs1 apply 3 2 436 1 1 0 0.5 0 1 0 0 1
+blur_3x2_s1_d1_fs1 apply 3 2 443 1 1 0 1 0 1 0 0 1
+blur_3x2_s1.9_d1_fs1 apply 3 2 450 1 1 0 1.9 0 1 0 0 1
+blur_3x2_s2_d1_fs1 apply 3 2 457 1 1 0 2 0 1 0 0 1
+blur_3x2_s3_d1_fs1 apply 3 2 464 1 1 0 3 0 1 0 0 1
+blur_3x2_s5_d1_fs1 apply 3 2 471 1 1 0 5 0 1 0 0 1
+blur_3x2_s7.9_d1_fs1 apply 3 2 478 1 1 0 7.9 0 1 0 0 1
+blur_3x2_s8_d1_fs1 apply 3 2 485 1 1 0 8 0 1 0 0 1
+blur_3x2_s15_d1_fs1 apply 3 2 492 1 1 0 15 0 1 0 0 1
+blur_3x2_s20_d1_fs1 apply 3 2 499 1 1 0 20 0 1 0 0 1
+blur_3x2_s40_d1_fs1 apply 3 2 506 1 1 0 40 0 1 0 0 1
+blur_3x2_s130_d1_fs1 apply 3 2 513 1 1 0 130 0 1 0 0 1
+blur_3x2_s200_d1_fs1 apply 3 2 520 1 1 0 200 0 1 0 0 1
+blur_3x2_s1.5_d2_fs1 apply 3 2 527 1 1 0 1.5 0 2 0 0 1
+blur_3x2_s9_d2_fs1 apply 3 2 534 1 1 0 9 0 2 0 0 1
+color2_3x2_st0_fs1 apply 3 2 541 2 0 0 0 0 1 0 0 1
+color2_3x2_st0.003_fs1 apply 3 2 548 2 0.003 0 0 0 1 0 0 1
+color2_3x2_st0.5_fs1 apply 3 2 555 2 0.5 0 0 0 1 0 0 1
+color2_3x2_st0.9_fs1 apply 3 2 562 2 0.9 0 0 0 1 0 0 1
+color2_3x2_st1_fs1 apply 3 2 569 2 1 0 0 0 1 0 0 1
+color3_3x2_st0_fs1 apply 3 2 576 3 0 0 0 0 1 0 0 1
+color3_3x2_st0.003_fs1 apply 3 2 583 3 0.003 0 0 0 1 0 0 1
+color3_3x2_st0.5_fs1 apply 3 2 590 3 0.5 0 0 0 1 0 0 1
+color3_3x2_st0.9_fs1 apply 3 2 597 3 0.9 0 0 0 1 0 0 1
+color3_3x2_st1_fs1 apply 3 2 604 3 1 0 0 0 1 0 0 1
+emboss_3x2_r0_st1_fs1 apply 3 2 611 4 1 0 0 0 1 0 0 1
+emboss_3x2_r1_st1_fs1 apply 3 2 618 4 1 0 0 1 1 0 0 1
+emboss_3x2_r1_st0.3_fs1 apply 3 2 625 4 0.3 0 0 1 1 0 0 1
+emboss_3x2_r2_st1_fs1 apply 3 2 632 4 1 0 0 2 1 0 0 1
+emboss_3x2_r3.2_st0.7_fs1 apply 3 2 639 4 0.7 0 0 3.2 1 0 0 1
+emboss_3x2_r40_st1_fs1 apply 3 2 646 4 1 0 0 40 1 0 0 1
+mosaic_7x5_b1_d1_o0_0_fs0 apply 7 5 653 0 1 1 0 0 1 0 0 0
+mosaic_7x5_b2_d1_o0_0_fs0 apply 7 5 660 0 1 2 0 0 1 0 0 0
+mosaic_7x5_b3_d1_o5_3_fs0 apply 7 5 667 0 1 3 0 0 1 5 3 0
+mosaic_7x5_b7_d1_o-4_9.6_fs0 apply 7 5 674 0 1 7 0 0 1 -4 9.6 0
+mosaic_7x5_b16_d1_o0_0_fs0 apply 7 5 681 0 1 16 0 0 1 0 0 0
+mosaic_7x5_b33_d1_o11_2_fs0 apply 7 5 688 0 1 33 0 0 1 11 2 0
+mosaic_7x5_b10_d1.5_o3_3_fs0 apply 7 5 695 0 1 10 0 0 1.5 3 3 0
+blur_7x5_s0_d1_fs0 apply 7 5 702 1 1 0 0 0 1 0 0 0
+blur_7x5_s0.5_d1_fs0 apply 7 5 709 1 1 0 0.5 0 1 0 0 0
+blur_7x5_s1_d1_fs0 apply 7 5 716 1 1 0 1 0 1 0 0 0
+blur_7x5_s1.9_d1_fs0 apply 7 5 723 1 1 0 1.9 0 1 0 0 0
+blur_7x5_s2_d1_fs0 apply 7 5 730 1 1 0 2 0 1 0 0 0
+blur_7x5_s3_d1_fs0 apply 7 5 737 1 1 0 3 0 1 0 0 0
+blur_7x5_s5_d1_fs0 apply 7 5 744 1 1 0 5 0 1 0 0 0
+blur_7x5_s7.9_d1_fs0 apply 7 5 751 1 1 0 7.9 0 1 0 0 0
+blur_7x5_s8_d1_fs0 apply 7 5 758 1 1 0 8 0 1 0 0 0
+blur_7x5_s15_d1_fs0 apply 7 5 765 1 1 0 15 0 1 0 0 0
+blur_7x5_s20_d1_fs0 apply 7 5 772 1 1 0 20 0 1 0 0 0
+blur_7x5_s40_d1_fs0 apply 7 5 779 1 1 0 40 0 1 0 0 0
+blur_7x5_s130_d1_fs0 apply 7 5 786 1 1 0 130 0 1 0 0 0
+blur_7x5_s200_d1_fs0 apply 7 5 793 1 1 0 200 0 1 0 0 0
+blur_7x5_s1.5_d2_fs0 apply 7 5 800 1 1 0 1.5 0 2 0 0 0
+blur_7x5_s9_d2_fs0 apply 7 5 807 1 1 0 9 0 2 0 0 0
+color2_7x5_st0_fs0 apply 7 5 814 2 0 0 0 0 1 0 0 0
+color2_7x5_st0.003_fs0 apply 7 5 821 2 0.003 0 0 0 1 0 0 0
+color2_7x5_st0.5_fs0 apply 7 5 828 2 0.5 0 0 0 1 0 0 0
+color2_7x5_st0.9_fs0 apply 7 5 835 2 0.9 0 0 0 1 0 0 0
+color2_7x5_st1_fs0 apply 7 5 842 2 1 0 0 0 1 0 0 0
+color3_7x5_st0_fs0 apply 7 5 849 3 0 0 0 0 1 0 0 0
+color3_7x5_st0.003_fs0 apply 7 5 856 3 0.003 0 0 0 1 0 0 0
+color3_7x5_st0.5_fs0 apply 7 5 863 3 0.5 0 0 0 1 0 0 0
+color3_7x5_st0.9_fs0 apply 7 5 870 3 0.9 0 0 0 1 0 0 0
+color3_7x5_st1_fs0 apply 7 5 877 3 1 0 0 0 1 0 0 0
+emboss_7x5_r0_st1_fs0 apply 7 5 884 4 1 0 0 0 1 0 0 0
+emboss_7x5_r1_st1_fs0 apply 7 5 891 4 1 0 0 1 1 0 0 0
+emboss_7x5_r1_st0.3_fs0 apply 7 5 898 4 0.3 0 0 1 1 0 0 0
+emboss_7x5_r2_st1_fs0 apply 7 5 905 4 1 0 0 2 1 0 0 0
+emboss_7x5_r3.2_st0.7_fs0 apply 7 5 912 4 0.7 0 0 3.2 1 0 0 0
+emboss_7x5_r40_st1_fs0 apply 7 5 919 4 1 0 0 40 1 0 0 0
+mosaic_7x5_b1_d1_o0_0_fs1 apply 7 5 653 0 1 1 0 0 1 0 0 1
+mosaic_7x5_b2_d1_o0_0_fs1 apply 7 5 660 0 1 2 0 0 1 0 0 1
+mosaic_7x5_b3_d1_o5_3_fs1 apply 7 5 667 0 1 3 0 0 1 5 3 1
+mosaic_7x5_b7_d1_o-4_9.6_fs1 apply 7 5 674 0 1 7 0 0 1 -4 9.6 1
+mosaic_7x5_b16_d1_o0_0_fs1 apply 7 5 681 0 1 16 0 0 1 0 0 1
+mosaic_7x5_b33_d1_o11_2_fs1 apply 7 5 688 0 1 33 0 0 1 11 2 1
+mosaic_7x5_b10_d1.5_o3_3_fs1 apply 7 5 695 0 1 10 0 0 1.5 3 3 1
+blur_7x5_s0_d1_fs1 apply 7 5 702 1 1 0 0 0 1 0 0 1
+blur_7x5_s0.5_d1_fs1 apply 7 5 709 1 1 0 0.5 0 1 0 0 1
+blur_7x5_s1_d1_fs1 apply 7 5 716 1 1 0 1 0 1 0 0 1
+blur_7x5_s1.9_d1_fs1 apply 7 5 723 1 1 0 1.9 0 1 0 0 1
+blur_7x5_s2_d1_fs1 apply 7 5 730 1 1 0 2 0 1 0 0 1
+blur_7x5_s3_d1_fs1 apply 7 5 737 1 1 0 3 0 1 0 0 1
+blur_7x5_s5_d1_fs1 apply 7 5 744 1 1 0 5 0 1 0 0 1
+blur_7x5_s7.9_d1_fs1 apply 7 5 751 1 1 0 7.9 0 1 0 0 1
+blur_7x5_s8_d1_fs1 apply 7 5 758 1 1 0 8 0 1 0 0 1
+blur_7x5_s15_d1_fs1 apply 7 5 765 1 1 0 15 0 1 0 0 1
+blur_7x5_s20_d1_fs1 apply 7 5 772 1 1 0 20 0 1 0 0 1
+blur_7x5_s40_d1_fs1 apply 7 5 779 1 1 0 40 0 1 0 0 1
+blur_7x5_s130_d1_fs1 apply 7 5 786 1 1 0 130 0 1 0 0 1
+blur_7x5_s200_d1_fs1 apply 7 5 793 1 1 0 200 0 1 0 0 1
+blur_7x5_s1.5_d2_fs1 apply 7 5 800 1 1 0 1.5 0 2 0 0 1
+blur_7x5_s9_d2_fs1 apply 7 5 807 1 1 0 9 0 2 0 0 1
+color2_7x5_st0_fs1 apply 7 5 814 2 0 0 0 0 1 0 0 1
+color2_7x5_st0.003_fs1 apply 7 5 821 2 0.003 0 0 0 1 0 0 1
+color2_7x5_st0.5_fs1 apply 7 5 828 2 0.5 0 0 0 1 0 0 1
+color2_7x5_st0.9_fs1 apply 7 5 835 2 0.9 0 0 0 1 0 0 1
+color2_7x5_st1_fs1 apply 7 5 842 2 1 0 0 0 1 0 0 1
+color3_7x5_st0_fs1 apply 7 5 849 3 0 0 0 0 1 0 0 1
+color3_7x5_st0.003_fs1 apply 7 5 856 3 0.003 0 0 0 1 0 0 1
+color3_7x5_st0.5_fs1 apply 7 5 863 3 0.5 0 0 0 1 0 0 1
+color3_7x5_st0.9_fs1 apply 7 5 870 3 0.9 0 0 0 1 0 0 1
+color3_7x5_st1_fs1 apply 7 5 877 3 1 0 0 0 1 0 0 1
+emboss_7x5_r0_st1_fs1 apply 7 5 884 4 1 0 0 0 1 0 0 1
+emboss_7x5_r1_st1_fs1 apply 7 5 891 4 1 0 0 1 1 0 0 1
+emboss_7x5_r1_st0.3_fs1 apply 7 5 898 4 0.3 0 0 1 1 0 0 1
+emboss_7x5_r2_st1_fs1 apply 7 5 905 4 1 0 0 2 1 0 0 1
+emboss_7x5_r3.2_st0.7_fs1 apply 7 5 912 4 0.7 0 0 3.2 1 0 0 1
+emboss_7x5_r40_st1_fs1 apply 7 5 919 4 1 0 0 40 1 0 0 1
+mosaic_9x9_b1_d1_o0_0_fs0 apply 9 9 926 0 1 1 0 0 1 0 0 0
+mosaic_9x9_b2_d1_o0_0_fs0 apply 9 9 933 0 1 2 0 0 1 0 0 0
+mosaic_9x9_b3_d1_o5_3_fs0 apply 9 9 940 0 1 3 0 0 1 5 3 0
+mosaic_9x9_b7_d1_o-4_9.6_fs0 apply 9 9 947 0 1 7 0 0 1 -4 9.6 0
+mosaic_9x9_b16_d1_o0_0_fs0 apply 9 9 954 0 1 16 0 0 1 0 0 0
+mosaic_9x9_b33_d1_o11_2_fs0 apply 9 9 961 0 1 33 0 0 1 11 2 0
+mosaic_9x9_b10_d1.5_o3_3_fs0 apply 9 9 968 0 1 10 0 0 1.5 3 3 0
+blur_9x9_s0_d1_fs0 apply 9 9 975 1 1 0 0 0 1 0 0 0
+blur_9x9_s0.5_d1_fs0 apply 9 9 982 1 1 0 0.5 0 1 0 0 0
+blur_9x9_s1_d1_fs0 apply 9 9 989 1 1 0 1 0 1 0 0 0
+blur_9x9_s1.9_d1_fs0 apply 9 9 996 1 1 0 1.9 0 1 0 0 0
+blur_9x9_s2_d1_fs0 apply 9 9 1003 1 1 0 2 0 1 0 0 0
+blur_9x9_s3_d1_fs0 apply 9 9 1010 1 1 0 3 0 1 0 0 0
+blur_9x9_s5_d1_fs0 apply 9 9 1017 1 1 0 5 0 1 0 0 0
+blur_9x9_s7.9_d1_fs0 apply 9 9 1024 1 1 0 7.9 0 1 0 0 0
+blur_9x9_s8_d1_fs0 apply 9 9 1031 1 1 0 8 0 1 0 0 0
+blur_9x9_s15_d1_fs0 apply 9 9 1038 1 1 0 15 0 1 0 0 0
+blur_9x9_s20_d1_fs0 apply 9 9 1045 1 1 0 20 0 1 0 0 0
+blur_9x9_s40_d1_fs0 apply 9 9 1052 1 1 0 40 0 1 0 0 0
+blur_9x9_s130_d1_fs0 apply 9 9 1059 1 1 0 130 0 1 0 0 0
+blur_9x9_s200_d1_fs0 apply 9 9 1066 1 1 0 200 0 1 0 0 0
+blur_9x9_s1.5_d2_fs0 apply 9 9 1073 1 1 0 1.5 0 2 0 0 0
+blur_9x9_s9_d2_fs0 apply 9 9 1080 1 1 0 9 0 2 0 0 0
+color2_9x9_st0_fs0 apply 9 9 1087 2 0 0 0 0 1 0 0 0
+color2_9x9_st0.003_fs0 apply 9 9 1094 2 0.003 0 0 0 1 0 0 0
+color2_9x9_st0.5_fs0 apply 9 9 1101 2 0.5 0 0 0 1 0 0 0
+color2_9x9_st0.9_fs0 apply 9 9 1108 2 0.9 0 0 0 1 0 0 0
+color2_9x9_st1_fs0 apply 9 9 1115 2 1 0 0 0 1 0 0 0
+color3_9x9_st0_fs0 apply 9 9 1122 3 0 0 0 0 1 0 0 0
+color3_9x9_st0.003_fs0 apply 9 9 1129 3 0.003 0 0 0 1 0 0 0
+color3_9x9_st0.5_fs0 apply 9 9 1136 3 0.5 0 0 0 1 0 0 0
+color3_9x9_st0.9_fs0 apply 9 9 1143 3 0.9 0 0 0 1 0 0 0
+color3_9x9_st1_fs0 apply 9 9 1150 3 1 0 0 0 1 0 0 0
+emboss_9x9_r0_st1_fs0 apply 9 9 1157 4 1 0 0 0 1 0 0 0
+emboss_9x9_r1_st1_fs0 apply 9 9 1164 4 1 0 0 1 1 0 0 0
+emboss_9x9_r1_st0.3_fs0 apply 9 9 1171 4 0.3 0 0 1 1 0 0 0
+emboss_9x9_r2_st1_fs0 apply 9 9 1178 4 1 0 0 2 1 0 0 0
+emboss_9x9_r3.2_st0.7_fs0 apply 9 9 1185 4 0.7 0 0 3.2 1 0 0 0
+emboss_9x9_r40_st1_fs0 apply 9 9 1192 4 1 0 0 40 1 0 0 0
+mosaic_9x9_b1_d1_o0_0_fs1 apply 9 9 926 0 1 1 0 0 1 0 0 1
+mosaic_9x9_b2_d1_o0_0_fs1 apply 9 9 933 0 1 2 0 0 1 0 0 1
+mosaic_9x9_b3_d1_o5_3_fs1 apply 9 9 940 0 1 3 0 0 1 5 3 1
+mosaic_9x9_b7_d1_o-4_9.6_fs1 apply 9 9 947 0 1 7 0 0 1 -4 9.6 1
+mosaic_9x9_b16_d1_o0_0_fs1 apply 9 9 954 0 1 16 0 0 1 0 0 1
+mosaic_9x9_b33_d1_o11_2_fs1 apply 9 9 961 0 1 33 0 0 1 11 2 1
+mosaic_9x9_b10_d1.5_o3_3_fs1 apply 9 9 968 0 1 10 0 0 1.5 3 3 1
+blur_9x9_s0_d1_fs1 apply 9 9 975 1 1 0 0 0 1 0 0 1
+blur_9x9_s0.5_d1_fs1 apply 9 9 982 1 1 0 0.5 0 1 0 0 1
+blur_9x9_s1_d1_fs1 apply 9 9 989 1 1 0 1 0 1 0 0 1
+blur_9x9_s1.9_d1_fs1 apply 9 9 996 1 1 0 1.9 0 1 0 0 1
+blur_9x9_s2_d1_fs1 apply 9 9 1003 1 1 0 2 0 1 0 0 1
+blur_9x9_s3_d1_fs1 apply 9 9 1010 1 1 0 3 0 1 0 0 1
+blur_9x9_s5_d1_fs1 apply 9 9 1017 1 1 0 5 0 1 0 0 1
+blur_9x9_s7.9_d1_fs1 apply 9 9 1024 1 1 0 7.9 0 1 0 0 1
+blur_9x9_s8_d1_fs1 apply 9 9 1031 1 1 0 8 0 1 0 0 1
+blur_9x9_s15_d1_fs1 apply 9 9 1038 1 1 0 15 0 1 0 0 1
+blur_9x9_s20_d1_fs1 apply 9 9 1045 1 1 0 20 0 1 0 0 1
+blur_9x9_s40_d1_fs1 apply 9 9 1052 1 1 0 40 0 1 0 0 1
+blur_9x9_s130_d1_fs1 apply 9 9 1059 1 1 0 130 0 1 0 0 1
+blur_9x9_s200_d1_fs1 apply 9 9 1066 1 1 0 200 0 1 0 0 1
+blur_9x9_s1.5_d2_fs1 apply 9 9 1073 1 1 0 1.5 0 2 0 0 1
+blur_9x9_s9_d2_fs1 apply 9 9 1080 1 1 0 9 0 2 0 0 1
+color2_9x9_st0_fs1 apply 9 9 1087 2 0 0 0 0 1 0 0 1
+color2_9x9_st0.003_fs1 apply 9 9 1094 2 0.003 0 0 0 1 0 0 1
+color2_9x9_st0.5_fs1 apply 9 9 1101 2 0.5 0 0 0 1 0 0 1
+color2_9x9_st0.9_fs1 apply 9 9 1108 2 0.9 0 0 0 1 0 0 1
+color2_9x9_st1_fs1 apply 9 9 1115 2 1 0 0 0 1 0 0 1
+color3_9x9_st0_fs1 apply 9 9 1122 3 0 0 0 0 1 0 0 1
+color3_9x9_st0.003_fs1 apply 9 9 1129 3 0.003 0 0 0 1 0 0 1
+color3_9x9_st0.5_fs1 apply 9 9 1136 3 0.5 0 0 0 1 0 0 1
+color3_9x9_st0.9_fs1 apply 9 9 1143 3 0.9 0 0 0 1 0 0 1
+color3_9x9_st1_fs1 apply 9 9 1150 3 1 0 0 0 1 0 0 1
+emboss_9x9_r0_st1_fs1 apply 9 9 1157 4 1 0 0 0 1 0 0 1
+emboss_9x9_r1_st1_fs1 apply 9 9 1164 4 1 0 0 1 1 0 0 1
+emboss_9x9_r1_st0.3_fs1 apply 9 9 1171 4 0.3 0 0 1 1 0 0 1
+emboss_9x9_r2_st1_fs1 apply 9 9 1178 4 1 0 0 2 1 0 0 1
+emboss_9x9_r3.2_st0.7_fs1 apply 9 9 1185 4 0.7 0 0 3.2 1 0 0 1
+emboss_9x9_r40_st1_fs1 apply 9 9 1192 4 1 0 0 40 1 0 0 1
+mosaic_17x13_b1_d1_o0_0_fs0 apply 17 13 1199 0 1 1 0 0 1 0 0 0
+mosaic_17x13_b2_d1_o0_0_fs0 apply 17 13 1206 0 1 2 0 0 1 0 0 0
+mosaic_17x13_b3_d1_o5_3_fs0 apply 17 13 1213 0 1 3 0 0 1 5 3 0
+mosaic_17x13_b7_d1_o-4_9.6_fs0 apply 17 13 1220 0 1 7 0 0 1 -4 9.6 0
+mosaic_17x13_b16_d1_o0_0_fs0 apply 17 13 1227 0 1 16 0 0 1 0 0 0
+mosaic_17x13_b33_d1_o11_2_fs0 apply 17 13 1234 0 1 33 0 0 1 11 2 0
+mosaic_17x13_b10_d1.5_o3_3_fs0 apply 17 13 1241 0 1 10 0 0 1.5 3 3 0
+blur_17x13_s0_d1_fs0 apply 17 13 1248 1 1 0 0 0 1 0 0 0
+blur_17x13_s0.5_d1_fs0 apply 17 13 1255 1 1 0 0.5 0 1 0 0 0
+blur_17x13_s1_d1_fs0 apply 17 13 1262 1 1 0 1 0 1 0 0 0
+blur_17x13_s1.9_d1_fs0 apply 17 13 1269 1 1 0 1.9 0 1 0 0 0
+blur_17x13_s2_d1_fs0 apply 17 13 1276 1 1 0 2 0 1 0 0 0
+blur_17x13_s3_d1_fs0 apply 17 13 1283 1 1 0 3 0 1 0 0 0
+blur_17x13_s5_d1_fs0 apply 17 13 1290 1 1 0 5 0 1 0 0 0
+blur_17x13_s7.9_d1_fs0 apply 17 13 1297 1 1 0 7.9 0 1 0 0 0
+blur_17x13_s8_d1_fs0 apply 17 13 1304 1 1 0 8 0 1 0 0 0
+blur_17x13_s15_d1_fs0 apply 17 13 1311 1 1 0 15 0 1 0 0 0
+blur_17x13_s20_d1_fs0 apply 17 13 1318 1 1 0 20 0 1 0 0 0
+blur_17x13_s40_d1_fs0 apply 17 13 1325 1 1 0 40 0 1 0 0 0
+blur_17x13_s130_d1_fs0 apply 17 13 1332 1 1 0 130 0 1 0 0 0
+blur_17x13_s200_d1_fs0 apply 17 13 1339 1 1 0 200 0 1 0 0 0
+blur_17x13_s1.5_d2_fs0 apply 17 13 1346 1 1 0 1.5 0 2 0 0 0
+blur_17x13_s9_d2_fs0 apply 17 13 1353 1 1 0 9 0 2 0 0 0
+color2_17x13_st0_fs0 apply 17 13 1360 2 0 0 0 0 1 0 0 0
+color2_17x13_st0.003_fs0 apply 17 13 1367 2 0.003 0 0 0 1 0 0 0
+color2_17x13_st0.5_fs0 apply 17 13 1374 2 0.5 0 0 0 1 0 0 0
+color2_17x13_st0.9_fs0 apply 17 13 1381 2 0.9 0 0 0 1 0 0 0
+color2_17x13_st1_fs0 apply 17 13 1388 2 1 0 0 0 1 0 0 0
+color3_17x13_st0_fs0 apply 17 13 1395 3 0 0 0 0 1 0 0 0
+color3_17x13_st0.003_fs0 apply 17 13 1402 3 0.003 0 0 0 1 0 0 0
+color3_17x13_st0.5_fs0 apply 17 13 1409 3 0.5 0 0 0 1 0 0 0
+color3_17x13_st0.9_fs0 apply 17 13 1416 3 0.9 0 0 0 1 0 0 0
+color3_17x13_st1_fs0 apply 17 13 1423 3 1 0 0 0 1 0 0 0
+emboss_17x13_r0_st1_fs0 apply 17 13 1430 4 1 0 0 0 1 0 0 0
+emboss_17x13_r1_st1_fs0 apply 17 13 1437 4 1 0 0 1 1 0 0 0
+emboss_17x13_r1_st0.3_fs0 apply 17 13 1444 4 0.3 0 0 1 1 0 0 0
+emboss_17x13_r2_st1_fs0 apply 17 13 1451 4 1 0 0 2 1 0 0 0
+emboss_17x13_r3.2_st0.7_fs0 apply 17 13 1458 4 0.7 0 0 3.2 1 0 0 0
+emboss_17x13_r40_st1_fs0 apply 17 13 1465 4 1 0 0 40 1 0 0 0
+mosaic_17x13_b1_d1_o0_0_fs1 apply 17 13 1199 0 1 1 0 0 1 0 0 1
+mosaic_17x13_b2_d1_o0_0_fs1 apply 17 13 1206 0 1 2 0 0 1 0 0 1
+mosaic_17x13_b3_d1_o5_3_fs1 apply 17 13 1213 0 1 3 0 0 1 5 3 1
+mosaic_17x13_b7_d1_o-4_9.6_fs1 apply 17 13 1220 0 1 7 0 0 1 -4 9.6 1
+mosaic_17x13_b16_d1_o0_0_fs1 apply 17 13 1227 0 1 16 0 0 1 0 0 1
+mosaic_17x13_b33_d1_o11_2_fs1 apply 17 13 1234 0 1 33 0 0 1 11 2 1
+mosaic_17x13_b10_d1.5_o3_3_fs1 apply 17 13 1241 0 1 10 0 0 1.5 3 3 1
+blur_17x13_s0_d1_fs1 apply 17 13 1248 1 1 0 0 0 1 0 0 1
+blur_17x13_s0.5_d1_fs1 apply 17 13 1255 1 1 0 0.5 0 1 0 0 1
+blur_17x13_s1_d1_fs1 apply 17 13 1262 1 1 0 1 0 1 0 0 1
+blur_17x13_s1.9_d1_fs1 apply 17 13 1269 1 1 0 1.9 0 1 0 0 1
+blur_17x13_s2_d1_fs1 apply 17 13 1276 1 1 0 2 0 1 0 0 1
+blur_17x13_s3_d1_fs1 apply 17 13 1283 1 1 0 3 0 1 0 0 1
+blur_17x13_s5_d1_fs1 apply 17 13 1290 1 1 0 5 0 1 0 0 1
+blur_17x13_s7.9_d1_fs1 apply 17 13 1297 1 1 0 7.9 0 1 0 0 1
+blur_17x13_s8_d1_fs1 apply 17 13 1304 1 1 0 8 0 1 0 0 1
+blur_17x13_s15_d1_fs1 apply 17 13 1311 1 1 0 15 0 1 0 0 1
+blur_17x13_s20_d1_fs1 apply 17 13 1318 1 1 0 20 0 1 0 0 1
+blur_17x13_s40_d1_fs1 apply 17 13 1325 1 1 0 40 0 1 0 0 1
+blur_17x13_s130_d1_fs1 apply 17 13 1332 1 1 0 130 0 1 0 0 1
+blur_17x13_s200_d1_fs1 apply 17 13 1339 1 1 0 200 0 1 0 0 1
+blur_17x13_s1.5_d2_fs1 apply 17 13 1346 1 1 0 1.5 0 2 0 0 1
+blur_17x13_s9_d2_fs1 apply 17 13 1353 1 1 0 9 0 2 0 0 1
+color2_17x13_st0_fs1 apply 17 13 1360 2 0 0 0 0 1 0 0 1
+color2_17x13_st0.003_fs1 apply 17 13 1367 2 0.003 0 0 0 1 0 0 1
+color2_17x13_st0.5_fs1 apply 17 13 1374 2 0.5 0 0 0 1 0 0 1
+color2_17x13_st0.9_fs1 apply 17 13 1381 2 0.9 0 0 0 1 0 0 1
+color2_17x13_st1_fs1 apply 17 13 1388 2 1 0 0 0 1 0 0 1
+color3_17x13_st0_fs1 apply 17 13 1395 3 0 0 0 0 1 0 0 1
+color3_17x13_st0.003_fs1 apply 17 13 1402 3 0.003 0 0 0 1 0 0 1
+color3_17x13_st0.5_fs1 apply 17 13 1409 3 0.5 0 0 0 1 0 0 1
+color3_17x13_st0.9_fs1 apply 17 13 1416 3 0.9 0 0 0 1 0 0 1
+color3_17x13_st1_fs1 apply 17 13 1423 3 1 0 0 0 1 0 0 1
+emboss_17x13_r0_st1_fs1 apply 17 13 1430 4 1 0 0 0 1 0 0 1
+emboss_17x13_r1_st1_fs1 apply 17 13 1437 4 1 0 0 1 1 0 0 1
+emboss_17x13_r1_st0.3_fs1 apply 17 13 1444 4 0.3 0 0 1 1 0 0 1
+emboss_17x13_r2_st1_fs1 apply 17 13 1451 4 1 0 0 2 1 0 0 1
+emboss_17x13_r3.2_st0.7_fs1 apply 17 13 1458 4 0.7 0 0 3.2 1 0 0 1
+emboss_17x13_r40_st1_fs1 apply 17 13 1465 4 1 0 0 40 1 0 0 1
+mosaic_33x20_b1_d1_o0_0_fs0 apply 33 20 1472 0 1 1 0 0 1 0 0 0
+mosaic_33x20_b2_d1_o0_0_fs0 apply 33 20 1479 0 1 2 0 0 1 0 0 0
+mosaic_33x20_b3_d1_o5_3_fs0 apply 33 20 1486 0 1 3 0 0 1 5 3 0
+mosaic_33x20_b7_d1_o-4_9.6_fs0 apply 33 20 1493 0 1 7 0 0 1 -4 9.6 0
+mosaic_33x20_b16_d1_o0_0_fs0 apply 33 20 1500 0 1 16 0 0 1 0 0 0
+mosaic_33x20_b33_d1_o11_2_fs0 apply 33 20 1507 0 1 33 0 0 1 11 2 0
+mosaic_33x20_b10_d1.5_o3_3_fs0 apply 33 20 1514 0 1 10 0 0 1.5 3 3 0
+blur_33x20_s0_d1_fs0 apply 33 20 1521 1 1 0 0 0 1 0 0 0
+blur_33x20_s0.5_d1_fs0 apply 33 20 1528 1 1 0 0.5 0 1 0 0 0
+blur_33x20_s1_d1_fs0 apply 33 20 1535 1 1 0 1 0 1 0 0 0
+blur_33x20_s1.9_d1_fs0 apply 33 20 1542 1 1 0 1.9 0 1 0 0 0
+blur_33x20_s2_d1_fs0 apply 33 20 1549 1 1 0 2 0 1 0 0 0
+blur_33x20_s3_d1_fs0 apply 33 20 1556 1 1 0 3 0 1 0 0 0
+blur_33x20_s5_d1_fs0 apply 33 20 1563 1 1 0 5 0 1 0 0 0
+blur_33x20_s7.9_d1_fs0 apply 33 20 1570 1 1 0 7.9 0 1 0 0 0
+blur_33x20_s8_d1_fs0 apply 33 20 1577 1 1 0 8 0 1 0 0 0
+blur_33x20_s15_d1_fs0 apply 33 20 1584 1 1 0 15 0 1 0 0 0
+blur_33x20_s20_d1_fs0 apply 33 20 1591 1 1 0 20 0 1 0 0 0
+blur_33x20_s40_d1_fs0 apply 33 20 1598 1 1 0 40 0 1 0 0 0
+blur_33x20_s130_d1_fs0 apply 33 20 1605 1 1 0 130 0 1 0 0 0
+blur_33x20_s200_d1_fs0 apply 33 20 1612 1 1 0 200 0 1 0 0 0
+blur_33x20_s1.5_d2_fs0 apply 33 20 1619 1 1 0 1.5 0 2 0 0 0
+blur_33x20_s9_d2_fs0 apply 33 20 1626 1 1 0 9 0 2 0 0 0
+color2_33x20_st0_fs0 apply 33 20 1633 2 0 0 0 0 1 0 0 0
+color2_33x20_st0.003_fs0 apply 33 20 1640 2 0.003 0 0 0 1 0 0 0
+color2_33x20_st0.5_fs0 apply 33 20 1647 2 0.5 0 0 0 1 0 0 0
+color2_33x20_st0.9_fs0 apply 33 20 1654 2 0.9 0 0 0 1 0 0 0
+color2_33x20_st1_fs0 apply 33 20 1661 2 1 0 0 0 1 0 0 0
+color3_33x20_st0_fs0 apply 33 20 1668 3 0 0 0 0 1 0 0 0
+color3_33x20_st0.003_fs0 apply 33 20 1675 3 0.003 0 0 0 1 0 0 0
+color3_33x20_st0.5_fs0 apply 33 20 1682 3 0.5 0 0 0 1 0 0 0
+color3_33x20_st0.9_fs0 apply 33 20 1689 3 0.9 0 0 0 1 0 0 0
+color3_33x20_st1_fs0 apply 33 20 1696 3 1 0 0 0 1 0 0 0
+emboss_33x20_r0_st1_fs0 apply 33 20 1703 4 1 0 0 0 1 0 0 0
+emboss_33x20_r1_st1_fs0 apply 33 20 1710 4 1 0 0 1 1 0 0 0
+emboss_33x20_r1_st0.3_fs0 apply 33 20 1717 4 0.3 0 0 1 1 0 0 0
+emboss_33x20_r2_st1_fs0 apply 33 20 1724 4 1 0 0 2 1 0 0 0
+emboss_33x20_r3.2_st0.7_fs0 apply 33 20 1731 4 0.7 0 0 3.2 1 0 0 0
+emboss_33x20_r40_st1_fs0 apply 33 20 1738 4 1 0 0 40 1 0 0 0
+mosaic_33x20_b1_d1_o0_0_fs1 apply 33 20 1472 0 1 1 0 0 1 0 0 1
+mosaic_33x20_b2_d1_o0_0_fs1 apply 33 20 1479 0 1 2 0 0 1 0 0 1
+mosaic_33x20_b3_d1_o5_3_fs1 apply 33 20 1486 0 1 3 0 0 1 5 3 1
+mosaic_33x20_b7_d1_o-4_9.6_fs1 apply 33 20 1493 0 1 7 0 0 1 -4 9.6 1
+mosaic_33x20_b16_d1_o0_0_fs1 apply 33 20 1500 0 1 16 0 0 1 0 0 1
+mosaic_33x20_b33_d1_o11_2_fs1 apply 33 20 1507 0 1 33 0 0 1 11 2 1
+mosaic_33x20_b10_d1.5_o3_3_fs1 apply 33 20 1514 0 1 10 0 0 1.5 3 3 1
+blur_33x20_s0_d1_fs1 apply 33 20 1521 1 1 0 0 0 1 0 0 1
+blur_33x20_s0.5_d1_fs1 apply 33 20 1528 1 1 0 0.5 0 1 0 0 1
+blur_33x20_s1_d1_fs1 apply 33 20 1535 1 1 0 1 0 1 0 0 1
+blur_33x20_s1.9_d1_fs1 apply 33 20 1542 1 1 0 1.9 0 1 0 0 1
+blur_33x20_s2_d1_fs1 apply 33 20 1549 1 1 0 2 0 1 0 0 1
+blur_33x20_s3_d1_fs1 apply 33 20 1556 1 1 0 3 0 1 0 0 1
+blur_33x20_s5_d1_fs1 apply 33 20 1563 1 1 0 5 0 1 0 0 1
+blur_33x20_s7.9_d1_fs1 apply 33 20 1570 1 1 0 7.9 0 1 0 0 1
+blur_33x20_s8_d1_fs1 apply 33 20 1577 1 1 0 8 0 1 0 0 1
+blur_33x20_s15_d1_fs1 apply 33 20 1584 1 1 0 15 0 1 0 0 1
+blur_33x20_s20_d1_fs1 apply 33 20 1591 1 1 0 20 0 1 0 0 1
+blur_33x20_s40_d1_fs1 apply 33 20 1598 1 1 0 40 0 1 0 0 1
+blur_33x20_s130_d1_fs1 apply 33 20 1605 1 1 0 130 0 1 0 0 1
+blur_33x20_s200_d1_fs1 apply 33 20 1612 1 1 0 200 0 1 0 0 1
+blur_33x20_s1.5_d2_fs1 apply 33 20 1619 1 1 0 1.5 0 2 0 0 1
+blur_33x20_s9_d2_fs1 apply 33 20 1626 1 1 0 9 0 2 0 0 1
+color2_33x20_st0_fs1 apply 33 20 1633 2 0 0 0 0 1 0 0 1
+color2_33x20_st0.003_fs1 apply 33 20 1640 2 0.003 0 0 0 1 0 0 1
+color2_33x20_st0.5_fs1 apply 33 20 1647 2 0.5 0 0 0 1 0 0 1
+color2_33x20_st0.9_fs1 apply 33 20 1654 2 0.9 0 0 0 1 0 0 1
+color2_33x20_st1_fs1 apply 33 20 1661 2 1 0 0 0 1 0 0 1
+color3_33x20_st0_fs1 apply 33 20 1668 3 0 0 0 0 1 0 0 1
+color3_33x20_st0.003_fs1 apply 33 20 1675 3 0.003 0 0 0 1 0 0 1
+color3_33x20_st0.5_fs1 apply 33 20 1682 3 0.5 0 0 0 1 0 0 1
+color3_33x20_st0.9_fs1 apply 33 20 1689 3 0.9 0 0 0 1 0 0 1
+color3_33x20_st1_fs1 apply 33 20 1696 3 1 0 0 0 1 0 0 1
+emboss_33x20_r0_st1_fs1 apply 33 20 1703 4 1 0 0 0 1 0 0 1
+emboss_33x20_r1_st1_fs1 apply 33 20 1710 4 1 0 0 1 1 0 0 1
+emboss_33x20_r1_st0.3_fs1 apply 33 20 1717 4 0.3 0 0 1 1 0 0 1
+emboss_33x20_r2_st1_fs1 apply 33 20 1724 4 1 0 0 2 1 0 0 1
+emboss_33x20_r3.2_st0.7_fs1 apply 33 20 1731 4 0.7 0 0 3.2 1 0 0 1
+emboss_33x20_r40_st1_fs1 apply 33 20 1738 4 1 0 0 40 1 0 0 1
+mosaic_67x53_b1_d1_o0_0_fs0 apply 67 53 1745 0 1 1 0 0 1 0 0 0
+mosaic_67x53_b2_d1_o0_0_fs0 apply 67 53 1752 0 1 2 0 0 1 0 0 0
+mosaic_67x53_b3_d1_o5_3_fs0 apply 67 53 1759 0 1 3 0 0 1 5 3 0
+mosaic_67x53_b7_d1_o-4_9.6_fs0 apply 67 53 1766 0 1 7 0 0 1 -4 9.6 0
+mosaic_67x53_b16_d1_o0_0_fs0 apply 67 53 1773 0 1 16 0 0 1 0 0 0
+mosaic_67x53_b33_d1_o11_2_fs0 apply 67 53 1780 0 1 33 0 0 1 11 2 0
+mosaic_67x53_b10_d1.5_o3_3_fs0 apply 67 53 1787 0 1 10 0 0 1.5 3 3 0
+blur_67x53_s0_d1_fs0 apply 67 53 1794 1 1 0 0 0 1 0 0 0
+blur_67x53_s0.5_d1_fs0 apply 67 53 1801 1 1 0 0.5 0 1 0 0 0
+blur_67x53_s1_d1_fs0 apply 67 53 1808 1 1 0 1 0 1 0 0 0
+blur_67x53_s1.9_d1_fs0 apply 67 53 1815 1 1 0 1.9 0 1 0 0 0
+blur_67x53_s2_d1_fs0 apply 67 53 1822 1 1 0 2 0 1 0 0 0
+blur_67x53_s3_d1_fs0 apply 67 53 1829 1 1 0 3 0 1 0 0 0
+blur_67x53_s5_d1_fs0 apply 67 53 1836 1 1 0 5 0 1 0 0 0
+blur_67x53_s7.9_d1_fs0 apply 67 53 1843 1 1 0 7.9 0 1 0 0 0
+blur_67x53_s8_d1_fs0 apply 67 53 1850 1 1 0 8 0 1 0 0 0
+blur_67x53_s15_d1_fs0 apply 67 53 1857 1 1 0 15 0 1 0 0 0
+blur_67x53_s20_d1_fs0 apply 67 53 1864 1 1 0 20 0 1 0 0 0
+blur_67x53_s40_d1_fs0 apply 67 53 1871 1 1 0 40 0 1 0 0 0
+blur_67x53_s130_d1_fs0 apply 67 53 1878 1 1 0 130 0 1 0 0 0
+blur_67x53_s200_d1_fs0 apply 67 53 1885 1 1 0 200 0 1 0 0 0
+blur_67x53_s1.5_d2_fs0 apply 67 53 1892 1 1 0 1.5 0 2 0 0 0
+blur_67x53_s9_d2_fs0 apply 67 53 1899 1 1 0 9 0 2 0 0 0
+color2_67x53_st0_fs0 apply 67 53 1906 2 0 0 0 0 1 0 0 0
+color2_67x53_st0.003_fs0 apply 67 53 1913 2 0.003 0 0 0 1 0 0 0
+color2_67x53_st0.5_fs0 apply 67 53 1920 2 0.5 0 0 0 1 0 0 0
+color2_67x53_st0.9_fs0 apply 67 53 1927 2 0.9 0 0 0 1 0 0 0
+color2_67x53_st1_fs0 apply 67 53 1934 2 1 0 0 0 1 0 0 0
+color3_67x53_st0_fs0 apply 67 53 1941 3 0 0 0 0 1 0 0 0
+color3_67x53_st0.003_fs0 apply 67 53 1948 3 0.003 0 0 0 1 0 0 0
+color3_67x53_st0.5_fs0 apply 67 53 1955 3 0.5 0 0 0 1 0 0 0
+color3_67x53_st0.9_fs0 apply 67 53 1962 3 0.9 0 0 0 1 0 0 0
+color3_67x53_st1_fs0 apply 67 53 1969 3 1 0 0 0 1 0 0 0
+emboss_67x53_r0_st1_fs0 apply 67 53 1976 4 1 0 0 0 1 0 0 0
+emboss_67x53_r1_st1_fs0 apply 67 53 1983 4 1 0 0 1 1 0 0 0
+emboss_67x53_r1_st0.3_fs0 apply 67 53 1990 4 0.3 0 0 1 1 0 0 0
+emboss_67x53_r2_st1_fs0 apply 67 53 1997 4 1 0 0 2 1 0 0 0
+emboss_67x53_r3.2_st0.7_fs0 apply 67 53 2004 4 0.7 0 0 3.2 1 0 0 0
+emboss_67x53_r40_st1_fs0 apply 67 53 2011 4 1 0 0 40 1 0 0 0
+mosaic_67x53_b1_d1_o0_0_fs1 apply 67 53 1745 0 1 1 0 0 1 0 0 1
+mosaic_67x53_b2_d1_o0_0_fs1 apply 67 53 1752 0 1 2 0 0 1 0 0 1
+mosaic_67x53_b3_d1_o5_3_fs1 apply 67 53 1759 0 1 3 0 0 1 5 3 1
+mosaic_67x53_b7_d1_o-4_9.6_fs1 apply 67 53 1766 0 1 7 0 0 1 -4 9.6 1
+mosaic_67x53_b16_d1_o0_0_fs1 apply 67 53 1773 0 1 16 0 0 1 0 0 1
+mosaic_67x53_b33_d1_o11_2_fs1 apply 67 53 1780 0 1 33 0 0 1 11 2 1
+mosaic_67x53_b10_d1.5_o3_3_fs1 apply 67 53 1787 0 1 10 0 0 1.5 3 3 1
+blur_67x53_s0_d1_fs1 apply 67 53 1794 1 1 0 0 0 1 0 0 1
+blur_67x53_s0.5_d1_fs1 apply 67 53 1801 1 1 0 0.5 0 1 0 0 1
+blur_67x53_s1_d1_fs1 apply 67 53 1808 1 1 0 1 0 1 0 0 1
+blur_67x53_s1.9_d1_fs1 apply 67 53 1815 1 1 0 1.9 0 1 0 0 1
+blur_67x53_s2_d1_fs1 apply 67 53 1822 1 1 0 2 0 1 0 0 1
+blur_67x53_s3_d1_fs1 apply 67 53 1829 1 1 0 3 0 1 0 0 1
+blur_67x53_s5_d1_fs1 apply 67 53 1836 1 1 0 5 0 1 0 0 1
+blur_67x53_s7.9_d1_fs1 apply 67 53 1843 1 1 0 7.9 0 1 0 0 1
+blur_67x53_s8_d1_fs1 apply 67 53 1850 1 1 0 8 0 1 0 0 1
+blur_67x53_s15_d1_fs1 apply 67 53 1857 1 1 0 15 0 1 0 0 1
+blur_67x53_s20_d1_fs1 apply 67 53 1864 1 1 0 20 0 1 0 0 1
+blur_67x53_s40_d1_fs1 apply 67 53 1871 1 1 0 40 0 1 0 0 1
+blur_67x53_s130_d1_fs1 apply 67 53 1878 1 1 0 130 0 1 0 0 1
+blur_67x53_s200_d1_fs1 apply 67 53 1885 1 1 0 200 0 1 0 0 1
+blur_67x53_s1.5_d2_fs1 apply 67 53 1892 1 1 0 1.5 0 2 0 0 1
+blur_67x53_s9_d2_fs1 apply 67 53 1899 1 1 0 9 0 2 0 0 1
+color2_67x53_st0_fs1 apply 67 53 1906 2 0 0 0 0 1 0 0 1
+color2_67x53_st0.003_fs1 apply 67 53 1913 2 0.003 0 0 0 1 0 0 1
+color2_67x53_st0.5_fs1 apply 67 53 1920 2 0.5 0 0 0 1 0 0 1
+color2_67x53_st0.9_fs1 apply 67 53 1927 2 0.9 0 0 0 1 0 0 1
+color2_67x53_st1_fs1 apply 67 53 1934 2 1 0 0 0 1 0 0 1
+color3_67x53_st0_fs1 apply 67 53 1941 3 0 0 0 0 1 0 0 1
+color3_67x53_st0.003_fs1 apply 67 53 1948 3 0.003 0 0 0 1 0 0 1
+color3_67x53_st0.5_fs1 apply 67 53 1955 3 0.5 0 0 0 1 0 0 1
+color3_67x53_st0.9_fs1 apply 67 53 1962 3 0.9 0 0 0 1 0 0 1
+color3_67x53_st1_fs1 apply 67 53 1969 3 1 0 0 0 1 0 0 1
+emboss_67x53_r0_st1_fs1 apply 67 53 1976 4 1 0 0 0 1 0 0 1
+emboss_67x53_r1_st1_fs1 apply 67 53 1983 4 1 0 0 1 1 0 0 1
+emboss_67x53_r1_st0.3_fs1 apply 67 53 1990 4 0.3 0 0 1 1 0 0 1
+emboss_67x53_r2_st1_fs1 apply 67 53 1997 4 1 0 0 2 1 0 0 1
+emboss_67x53_r3.2_st0.7_fs1 apply 67 53 2004 4 0.7 0 0 3.2 1 0 0 1
+emboss_67x53_r40_st1_fs1 apply 67 53 2011 4 1 0 0 40 1 0 0 1
+mosaic_130x71_b1_d1_o0_0_fs0 apply 130 71 2018 0 1 1 0 0 1 0 0 0
+mosaic_130x71_b2_d1_o0_0_fs0 apply 130 71 2025 0 1 2 0 0 1 0 0 0
+mosaic_130x71_b3_d1_o5_3_fs0 apply 130 71 2032 0 1 3 0 0 1 5 3 0
+mosaic_130x71_b7_d1_o-4_9.6_fs0 apply 130 71 2039 0 1 7 0 0 1 -4 9.6 0
+mosaic_130x71_b16_d1_o0_0_fs0 apply 130 71 2046 0 1 16 0 0 1 0 0 0
+mosaic_130x71_b33_d1_o11_2_fs0 apply 130 71 2053 0 1 33 0 0 1 11 2 0
+mosaic_130x71_b10_d1.5_o3_3_fs0 apply 130 71 2060 0 1 10 0 0 1.5 3 3 0
+blur_130x71_s0_d1_fs0 apply 130 71 2067 1 1 0 0 0 1 0 0 0
+blur_130x71_s0.5_d1_fs0 apply 130 71 2074 1 1 0 0.5 0 1 0 0 0
+blur_130x71_s1_d1_fs0 apply 130 71 2081 1 1 0 1 0 1 0 0 0
+blur_130x71_s1.9_d1_fs0 apply 130 71 2088 1 1 0 1.9 0 1 0 0 0
+blur_130x71_s2_d1_fs0 apply 130 71 2095 1 1 0 2 0 1 0 0 0
+blur_130x71_s3_d1_fs0 apply 130 71 2102 1 1 0 3 0 1 0 0 0
+blur_130x71_s5_d1_fs0 apply 130 71 2109 1 1 0 5 0 1 0 0 0
+blur_130x71_s7.9_d1_fs0 apply 130 71 2116 1 1 0 7.9 0 1 0 0 0
+blur_130x71_s8_d1_fs0 apply 130 71 2123 1 1 0 8 0 1 0 0 0
+blur_130x71_s15_d1_fs0 apply 130 71 2130 1 1 0 15 0 1 0 0 0
+blur_130x71_s20_d1_fs0 apply 130 71 2137 1 1 0 20 0 1 0 0 0
+blur_130x71_s40_d1_fs0 apply 130 71 2144 1 1 0 40 0 1 0 0 0
+blur_130x71_s130_d1_fs0 apply 130 71 2151 1 1 0 130 0 1 0 0 0
+blur_130x71_s200_d1_fs0 apply 130 71 2158 1 1 0 200 0 1 0 0 0
+blur_130x71_s1.5_d2_fs0 apply 130 71 2165 1 1 0 1.5 0 2 0 0 0
+blur_130x71_s9_d2_fs0 apply 130 71 2172 1 1 0 9 0 2 0 0 0
+color2_130x71_st0_fs0 apply 130 71 2179 2 0 0 0 0 1 0 0 0
+color2_130x71_st0.003_fs0 apply 130 71 2186 2 0.003 0 0 0 1 0 0 0
+color2_130x71_st0.5_fs0 apply 130 71 2193 2 0.5 0 0 0 1 0 0 0
+color2_130x71_st0.9_fs0 apply 130 71 2200 2 0.9 0 0 0 1 0 0 0
+color2_130x71_st1_fs0 apply 130 71 2207 2 1 0 0 0 1 0 0 0
+color3_130x71_st0_fs0 apply 130 71 2214 3 0 0 0 0 1 0 0 0
+color3_130x71_st0.003_fs0 apply 130 71 2221 3 0.003 0 0 0 1 0 0 0
+color3_130x71_st0.5_fs0 apply 130 71 2228 3 0.5 0 0 0 1 0 0 0
+color3_130x71_st0.9_fs0 apply 130 71 2235 3 0.9 0 0 0 1 0 0 0
+color3_130x71_st1_fs0 apply 130 71 2242 3 1 0 0 0 1 0 0 0
+emboss_130x71_r0_st1_fs0 apply 130 71 2249 4 1 0 0 0 1 0 0 0
+emboss_130x71_r1_st1_fs0 apply 130 71 2256 4 1 0 0 1 1 0 0 0
+emboss_130x71_r1_st0.3_fs0 apply 130 71 2263 4 0.3 0 0 1 1 0 0 0
+emboss_130x71_r2_st1_fs0 apply 130 71 2270 4 1 0 0 2 1 0 0 0
+emboss_130x71_r3.2_st0.7_fs0 apply 130 71 2277 4 0.7 0 0 3.2 1 0 0 0
+emboss_130x71_r40_st1_fs0 apply 130 71 2284 4 1 0 0 40 1 0 0 0
+mosaic_130x71_b1_d1_o0_0_fs1 apply 130 71 2018 0 1 1 0 0 1 0 0 1
+mosaic_130x71_b2_d1_o0_0_fs1 apply 130 71 2025 0 1 2 0 0 1 0 0 1
+mosaic_130x71_b3_d1_o5_3_fs1 apply 130 71 2032 0 1 3 0 0 1 5 3 1
+mosaic_130x71_b7_d1_o-4_9.6_fs1 apply 130 71 2039 0 1 7 0 0 1 -4 9.6 1
+mosaic_130x71_b16_d1_o0_0_fs1 apply 130 71 2046 0 1 16 0 0 1 0 0 1
+mosaic_130x71_b33_d1_o11_2_fs1 apply 130 71 2053 0 1 33 0 0 1 11 2 1
+mosaic_130x71_b10_d1.5_o3_3_fs1 apply 130 71 2060 0 1 10 0 0 1.5 3 3 1
+blur_130x71_s0_d1_fs1 apply 130 71 2067 1 1 0 0 0 1 0 0 1
+blur_130x71_s0.5_d1_fs1 apply 130 71 2074 1 1 0 0.5 0 1 0 0 1
+blur_130x71_s1_d1_fs1 apply 130 71 2081 1 1 0 1 0 1 0 0 1
+blur_130x71_s1.9_d1_fs1 apply 130 71 2088 1 1 0 1.9 0 1 0 0 1
+blur_130x71_s2_d1_fs1 apply 130 71 2095 1 1 0 2 0 1 0 0 1
+blur_130x71_s3_d1_fs1 apply 130 71 2102 1 1 0 3 0 1 0 0 1
+blur_130x71_s5_d1_fs1 apply 130 71 2109 1 1 0 5 0 1 0 0 1
+blur_130x71_s7.9_d1_fs1 apply 130 71 2116 1 1 0 7.9 0 1 0 0 1
+blur_130x71_s8_d1_fs1 apply 130 71 2123 1 1 0 8 0 1 0 0 1
+blur_130x71_s15_d1_fs1 apply 130 71 2130 1 1 0 15 0 1 0 0 1
+blur_130x71_s20_d1_fs1 apply 130 71 2137 1 1 0 20 0 1 0 0 1
+blur_130x71_s40_d1_fs1 apply 130 71 2144 1 1 0 40 0 1 0 0 1
+blur_130x71_s130_d1_fs1 apply 130 71 2151 1 1 0 130 0 1 0 0 1
+blur_130x71_s200_d1_fs1 apply 130 71 2158 1 1 0 200 0 1 0 0 1
+blur_130x71_s1.5_d2_fs1 apply 130 71 2165 1 1 0 1.5 0 2 0 0 1
+blur_130x71_s9_d2_fs1 apply 130 71 2172 1 1 0 9 0 2 0 0 1
+color2_130x71_st0_fs1 apply 130 71 2179 2 0 0 0 0 1 0 0 1
+color2_130x71_st0.003_fs1 apply 130 71 2186 2 0.003 0 0 0 1 0 0 1
+color2_130x71_st0.5_fs1 apply 130 71 2193 2 0.5 0 0 0 1 0 0 1
+color2_130x71_st0.9_fs1 apply 130 71 2200 2 0.9 0 0 0 1 0 0 1
+color2_130x71_st1_fs1 apply 130 71 2207 2 1 0 0 0 1 0 0 1
+color3_130x71_st0_fs1 apply 130 71 2214 3 0 0 0 0 1 0 0 1
+color3_130x71_st0.003_fs1 apply 130 71 2221 3 0.003 0 0 0 1 0 0 1
+color3_130x71_st0.5_fs1 apply 130 71 2228 3 0.5 0 0 0 1 0 0 1
+color3_130x71_st0.9_fs1 apply 130 71 2235 3 0.9 0 0 0 1 0 0 1
+color3_130x71_st1_fs1 apply 130 71 2242 3 1 0 0 0 1 0 0 1
+emboss_130x71_r0_st1_fs1 apply 130 71 2249 4 1 0 0 0 1 0 0 1
+emboss_130x71_r1_st1_fs1 apply 130 71 2256 4 1 0 0 1 1 0 0 1
+emboss_130x71_r1_st0.3_fs1 apply 130 71 2263 4 0.3 0 0 1 1 0 0 1
+emboss_130x71_r2_st1_fs1 apply 130 71 2270 4 1 0 0 2 1 0 0 1
+emboss_130x71_r3.2_st0.7_fs1 apply 130 71 2277 4 0.7 0 0 3.2 1 0 0 1
+emboss_130x71_r40_st1_fs1 apply 130 71 2284 4 1 0 0 40 1 0 0 1
+masked_9x9_r1_t0_fs0 masked 9 9 2291 2298 0 0 9 9 0 0 9 9 0 1 5 0 0 1 2 1 0
+masked_9x9_r1_t1_fs0 masked 9 9 2305 2312 0 0 9 9 0 0 9 9 1 1 0 3 0 1 0 0 0
+masked_9x9_r1_t2_fs0 masked 9 9 2319 2326 0 0 9 9 0 0 9 9 2 0.8 0 0 0 1 0 0 0
+masked_9x9_r1_t3_fs0 masked 9 9 2333 2340 0 0 9 9 0 0 9 9 3 1 0 0 0 1 0 0 0
+masked_9x9_r1_t4_fs0 masked 9 9 2347 2354 0 0 9 9 0 0 9 9 4 1 0 0 2 1 0 0 0
+masked_9x9_r1_t0_fs1 masked 9 9 2291 2298 0 0 9 9 0 0 9 9 0 1 5 0 0 1 2 1 1
+masked_9x9_r1_t1_fs1 masked 9 9 2305 2312 0 0 9 9 0 0 9 9 1 1 0 3 0 1 0 0 1
+masked_9x9_r1_t2_fs1 masked 9 9 2319 2326 0 0 9 9 0 0 9 9 2 0.8 0 0 0 1 0 0 1
+masked_9x9_r1_t3_fs1 masked 9 9 2333 2340 0 0 9 9 0 0 9 9 3 1 0 0 0 1 0 0 1
+masked_9x9_r1_t4_fs1 masked 9 9 2347 2354 0 0 9 9 0 0 9 9 4 1 0 0 2 1 0 0 1
+masked_9x9_r2_t0_fs0 masked 9 9 2361 2368 0 0 9 9 2 1 5 7 0 1 5 0 0 1 2 1 0
+masked_9x9_r2_t1_fs0 masked 9 9 2375 2382 0 0 9 9 2 1 5 7 1 1 0 3 0 1 0 0 0
+masked_9x9_r2_t2_fs0 masked 9 9 2389 2396 0 0 9 9 2 1 5 7 2 0.8 0 0 0 1 0 0 0
+masked_9x9_r2_t3_fs0 masked 9 9 2403 2410 0 0 9 9 2 1 5 7 3 1 0 0 0 1 0 0 0
+masked_9x9_r2_t4_fs0 masked 9 9 2417 2424 0 0 9 9 2 1 5 7 4 1 0 0 2 1 0 0 0
+masked_9x9_r2_t0_fs1 masked 9 9 2361 2368 0 0 9 9 2 1 5 7 0 1 5 0 0 1 2 1 1
+masked_9x9_r2_t1_fs1 masked 9 9 2375 2382 0 0 9 9 2 1 5 7 1 1 0 3 0 1 0 0 1
+masked_9x9_r2_t2_fs1 masked 9 9 2389 2396 0 0 9 9 2 1 5 7 2 0.8 0 0 0 1 0 0 1
+masked_9x9_r2_t3_fs1 masked 9 9 2403 2410 0 0 9 9 2 1 5 7 3 1 0 0 0 1 0 0 1
+masked_9x9_r2_t4_fs1 masked 9 9 2417 2424 0 0 9 9 2 1 5 7 4 1 0 0 2 1 0 0 1
+masked_9x9_r3_t0_fs0 masked 9 9 2431 2438 0 0 9 9 0 4 9 5 0 1 5 0 0 1 2 1 0
+masked_9x9_r3_t1_fs0 masked 9 9 2445 2452 0 0 9 9 0 4 9 5 1 1 0 3 0 1 0 0 0
+masked_9x9_r3_t2_fs0 masked 9 9 2459 2466 0 0 9 9 0 4 9 5 2 0.8 0 0 0 1 0 0 0
+masked_9x9_r3_t3_fs0 masked 9 9 2473 2480 0 0 9 9 0 4 9 5 3 1 0 0 0 1 0 0 0
+masked_9x9_r3_t4_fs0 masked 9 9 2487 2494 0 0 9 9 0 4 9 5 4 1 0 0 2 1 0 0 0
+masked_9x9_r3_t0_fs1 masked 9 9 2431 2438 0 0 9 9 0 4 9 5 0 1 5 0 0 1 2 1 1
+masked_9x9_r3_t1_fs1 masked 9 9 2445 2452 0 0 9 9 0 4 9 5 1 1 0 3 0 1 0 0 1
+masked_9x9_r3_t2_fs1 masked 9 9 2459 2466 0 0 9 9 0 4 9 5 2 0.8 0 0 0 1 0 0 1
+masked_9x9_r3_t3_fs1 masked 9 9 2473 2480 0 0 9 9 0 4 9 5 3 1 0 0 0 1 0 0 1
+masked_9x9_r3_t4_fs1 masked 9 9 2487 2494 0 0 9 9 0 4 9 5 4 1 0 0 2 1 0 0 1
+masked_9x9_r4_t0_fs0 masked 9 9 2501 2508 0 0 9 9 -3 -2 15 13 0 1 5 0 0 1 2 1 0
+masked_9x9_r4_t1_fs0 masked 9 9 2515 2522 0 0 9 9 -3 -2 15 13 1 1 0 3 0 1 0 0 0
+masked_9x9_r4_t2_fs0 masked 9 9 2529 2536 0 0 9 9 -3 -2 15 13 2 0.8 0 0 0 1 0 0 0
+masked_9x9_r4_t3_fs0 masked 9 9 2543 2550 0 0 9 9 -3 -2 15 13 3 1 0 0 0 1 0 0 0
+masked_9x9_r4_t4_fs0 masked 9 9 2557 2564 0 0 9 9 -3 -2 15 13 4 1 0 0 2 1 0 0 0
+masked_9x9_r4_t0_fs1 masked 9 9 2501 2508 0 0 9 9 -3 -2 15 13 0 1 5 0 0 1 2 1 1
+masked_9x9_r4_t1_fs1 masked 9 9 2515 2522 0 0 9 9 -3 -2 15 13 1 1 0 3 0 1 0 0 1
+masked_9x9_r4_t2_fs1 masked 9 9 2529 2536 0 0 9 9 -3 -2 15 13 2 0.8 0 0 0 1 0 0 1
+masked_9x9_r4_t3_fs1 masked 9 9 2543 2550 0 0 9 9 -3 -2 15 13 3 1 0 0 0 1 0 0 1
+masked_9x9_r4_t4_fs1 masked 9 9 2557 2564 0 0 9 9 -3 -2 15 13 4 1 0 0 2 1 0 0 1
+masked_9x9_r5_t0_fs0 masked 9 9 2571 2578 0 0 9 9 1 1 1 1 0 1 5 0 0 1 2 1 0
+masked_9x9_r5_t1_fs0 masked 9 9 2585 2592 0 0 9 9 1 1 1 1 1 1 0 3 0 1 0 0 0
+masked_9x9_r5_t2_fs0 masked 9 9 2599 2606 0 0 9 9 1 1 1 1 2 0.8 0 0 0 1 0 0 0
+masked_9x9_r5_t3_fs0 masked 9 9 2613 2620 0 0 9 9 1 1 1 1 3 1 0 0 0 1 0 0 0
+masked_9x9_r5_t4_fs0 masked 9 9 2627 2634 0 0 9 9 1 1 1 1 4 1 0 0 2 1 0 0 0
+masked_9x9_r5_t0_fs1 masked 9 9 2571 2578 0 0 9 9 1 1 1 1 0 1 5 0 0 1 2 1 1
+masked_9x9_r5_t1_fs1 masked 9 9 2585 2592 0 0 9 9 1 1 1 1 1 1 0 3 0 1 0 0 1
+masked_9x9_r5_t2_fs1 masked 9 9 2599 2606 0 0 9 9 1 1 1 1 2 0.8 0 0 0 1 0 0 1
+masked_9x9_r5_t3_fs1 masked 9 9 2613 2620 0 0 9 9 1 1 1 1 3 1 0 0 0 1 0 0 1
+masked_9x9_r5_t4_fs1 masked 9 9 2627 2634 0 0 9 9 1 1 1 1 4 1 0 0 2 1 0 0 1
+masked_9x9_r6_t0_fs0 masked 9 9 2641 2648 0 0 9 9 0 0 8 3 0 1 5 0 0 1 2 1 0
+masked_9x9_r6_t1_fs0 masked 9 9 2655 2662 0 0 9 9 0 0 8 3 1 1 0 3 0 1 0 0 0
+masked_9x9_r6_t2_fs0 masked 9 9 2669 2676 0 0 9 9 0 0 8 3 2 0.8 0 0 0 1 0 0 0
+masked_9x9_r6_t3_fs0 masked 9 9 2683 2690 0 0 9 9 0 0 8 3 3 1 0 0 0 1 0 0 0
+masked_9x9_r6_t4_fs0 masked 9 9 2697 2704 0 0 9 9 0 0 8 3 4 1 0 0 2 1 0 0 0
+masked_9x9_r6_t0_fs1 masked 9 9 2641 2648 0 0 9 9 0 0 8 3 0 1 5 0 0 1 2 1 1
+masked_9x9_r6_t1_fs1 masked 9 9 2655 2662 0 0 9 9 0 0 8 3 1 1 0 3 0 1 0 0 1
+masked_9x9_r6_t2_fs1 masked 9 9 2669 2676 0 0 9 9 0 0 8 3 2 0.8 0 0 0 1 0 0 1
+masked_9x9_r6_t3_fs1 masked 9 9 2683 2690 0 0 9 9 0 0 8 3 3 1 0 0 0 1 0 0 1
+masked_9x9_r6_t4_fs1 masked 9 9 2697 2704 0 0 9 9 0 0 8 3 4 1 0 0 2 1 0 0 1
+maskedoff_9x9_t0_fs0 masked 9 9 2711 2718 3 2 6 7 4 3 1 3 0 1 4 0 0 1 0 0 0
+maskedshort_9x9_t0_fs0 masked 9 9 2725 2732 3 2 3 4 0 0 9 9 0 1 4 0 0 1 0 0 0
+maskedoff_9x9_t1_fs0 masked 9 9 2739 2746 3 2 6 7 4 3 1 3 1 1 0 2 0 1 0 0 0
+maskedshort_9x9_t1_fs0 masked 9 9 2753 2760 3 2 3 4 0 0 9 9 1 1 0 2 0 1 0 0 0
+maskedoff_9x9_t2_fs0 masked 9 9 2767 2774 3 2 6 7 4 3 1 3 2 1 0 0 0 1 0 0 0
+maskedshort_9x9_t2_fs0 masked 9 9 2781 2788 3 2 3 4 0 0 9 9 2 1 0 0 0 1 0 0 0
+maskedoff_9x9_t4_fs0 masked 9 9 2795 2802 3 2 6 7 4 3 1 3 4 0.6 0 0 1 1 0 0 0
+maskedshort_9x9_t4_fs0 masked 9 9 2809 2816 3 2 3 4 0 0 9 9 4 0.6 0 0 1 1 0 0 0
+maskedoff_9x9_t0_fs1 masked 9 9 2711 2718 3 2 6 7 4 3 1 3 0 1 4 0 0 1 0 0 1
+maskedshort_9x9_t0_fs1 masked 9 9 2725 2732 3 2 3 4 0 0 9 9 0 1 4 0 0 1 0 0 1
+maskedoff_9x9_t1_fs1 masked 9 9 2739 2746 3 2 6 7 4 3 1 3 1 1 0 2 0 1 0 0 1
+maskedshort_9x9_t1_fs1 masked 9 9 2753 2760 3 2 3 4 0 0 9 9 1 1 0 2 0 1 0 0 1
+maskedoff_9x9_t2_fs1 masked 9 9 2767 2774 3 2 6 7 4 3 1 3 2 1 0 0 0 1 0 0 1
+maskedshort_9x9_t2_fs1 masked 9 9 2781 2788 3 2 3 4 0 0 9 9 2 1 0 0 0 1 0 0 1
+maskedoff_9x9_t4_fs1 masked 9 9 2795 2802 3 2 6 7 4 3 1 3 4 0.6 0 0 1 1 0 0 1
+maskedshort_9x9_t4_fs1 masked 9 9 2809 2816 3 2 3 4 0 0 9 9 4 0.6 0 0 1 1 0 0 1
+masked_17x13_r1_t0_fs0 masked 17 13 2823 2830 0 0 17 13 0 0 17 13 0 1 5 0 0 1 2 1 0
+masked_17x13_r1_t1_fs0 masked 17 13 2837 2844 0 0 17 13 0 0 17 13 1 1 0 3 0 1 0 0 0
+masked_17x13_r1_t2_fs0 masked 17 13 2851 2858 0 0 17 13 0 0 17 13 2 0.8 0 0 0 1 0 0 0
+masked_17x13_r1_t3_fs0 masked 17 13 2865 2872 0 0 17 13 0 0 17 13 3 1 0 0 0 1 0 0 0
+masked_17x13_r1_t4_fs0 masked 17 13 2879 2886 0 0 17 13 0 0 17 13 4 1 0 0 2 1 0 0 0
+masked_17x13_r1_t0_fs1 masked 17 13 2823 2830 0 0 17 13 0 0 17 13 0 1 5 0 0 1 2 1 1
+masked_17x13_r1_t1_fs1 masked 17 13 2837 2844 0 0 17 13 0 0 17 13 1 1 0 3 0 1 0 0 1
+masked_17x13_r1_t2_fs1 masked 17 13 2851 2858 0 0 17 13 0 0 17 13 2 0.8 0 0 0 1 0 0 1
+masked_17x13_r1_t3_fs1 masked 17 13 2865 2872 0 0 17 13 0 0 17 13 3 1 0 0 0 1 0 0 1
+masked_17x13_r1_t4_fs1 masked 17 13 2879 2886 0 0 17 13 0 0 17 13 4 1 0 0 2 1 0 0 1
+masked_17x13_r2_t0_fs0 masked 17 13 2893 2900 0 0 17 13 2 1 13 11 0 1 5 0 0 1 2 1 0
+masked_17x13_r2_t1_fs0 masked 17 13 2907 2914 0 0 17 13 2 1 13 11 1 1 0 3 0 1 0 0 0
+masked_17x13_r2_t2_fs0 masked 17 13 2921 2928 0 0 17 13 2 1 13 11 2 0.8 0 0 0 1 0 0 0
+masked_17x13_r2_t3_fs0 masked 17 13 2935 2942 0 0 17 13 2 1 13 11 3 1 0 0 0 1 0 0 0
+masked_17x13_r2_t4_fs0 masked 17 13 2949 2956 0 0 17 13 2 1 13 11 4 1 0 0 2 1 0 0 0
+masked_17x13_r2_t0_fs1 masked 17 13 2893 2900 0 0 17 13 2 1 13 11 0 1 5 0 0 1 2 1 1
+masked_17x13_r2_t1_fs1 masked 17 13 2907 2914 0 0 17 13 2 1 13 11 1 1 0 3 0 1 0 0 1
+masked_17x13_r2_t2_fs1 masked 17 13 2921 2928 0 0 17 13 2 1 13 11 2 0.8 0 0 0 1 0 0 1
+masked_17x13_r2_t3_fs1 masked 17 13 2935 2942 0 0 17 13 2 1 13 11 3 1 0 0 0 1 0 0 1
+masked_17x13_r2_t4_fs1 masked 17 13 2949 2956 0 0 17 13 2 1 13 11 4 1 0 0 2 1 0 0 1
+masked_17x13_r3_t0_fs0 masked 17 13 2963 2970 0 0 17 13 8 8 9 5 0 1 5 0 0 1 2 1 0
+masked_17x13_r3_t1_fs0 masked 17 13 2977 2984 0 0 17 13 8 8 9 5 1 1 0 3 0 1 0 0 0
+masked_17x13_r3_t2_fs0 masked 17 13 2991 2998 0 0 17 13 8 8 9 5 2 0.8 0 0 0 1 0 0 0
+masked_17x13_r3_t3_fs0 masked 17 13 3005 3012 0 0 17 13 8 8 9 5 3 1 0 0 0 1 0 0 0
+masked_17x13_r3_t4_fs0 masked 17 13 3019 3026 0 0 17 13 8 8 9 5 4 1 0 0 2 1 0 0 0
+masked_17x13_r3_t0_fs1 masked 17 13 2963 2970 0 0 17 13 8 8 9 5 0 1 5 0 0 1 2 1 1
+masked_17x13_r3_t1_fs1 masked 17 13 2977 2984 0 0 17 13 8 8 9 5 1 1 0 3 0 1 0 0 1
+masked_17x13_r3_t2_fs1 masked 17 13 2991 2998 0 0 17 13 8 8 9 5 2 0.8 0 0 0 1 0 0 1
+masked_17x13_r3_t3_fs1 masked 17 13 3005 3012 0 0 17 13 8 8 9 5 3 1 0 0 0 1 0 0 1
+masked_17x13_r3_t4_fs1 masked 17 13 3019 3026 0 0 17 13 8 8 9 5 4 1 0 0 2 1 0 0 1
+masked_17x13_r4_t0_fs0 masked 17 13 3033 3040 0 0 17 13 -3 -2 23 17 0 1 5 0 0 1 2 1 0
+masked_17x13_r4_t1_fs0 masked 17 13 3047 3054 0 0 17 13 -3 -2 23 17 1 1 0 3 0 1 0 0 0
+masked_17x13_r4_t2_fs0 masked 17 13 3061 3068 0 0 17 13 -3 -2 23 17 2 0.8 0 0 0 1 0 0 0
+masked_17x13_r4_t3_fs0 masked 17 13 3075 3082 0 0 17 13 -3 -2 23 17 3 1 0 0 0 1 0 0 0
+masked_17x13_r4_t4_fs0 masked 17 13 3089 3096 0 0 17 13 -3 -2 23 17 4 1 0 0 2 1 0 0 0
+masked_17x13_r4_t0_fs1 masked 17 13 3033 3040 0 0 17 13 -3 -2 23 17 0 1 5 0 0 1 2 1 1
+masked_17x13_r4_t1_fs1 masked 17 13 3047 3054 0 0 17 13 -3 -2 23 17 1 1 0 3 0 1 0 0 1
+masked_17x13_r4_t2_fs1 masked 17 13 3061 3068 0 0 17 13 -3 -2 23 17 2 0.8 0 0 0 1 0 0 1
+masked_17x13_r4_t3_fs1 masked 17 13 3075 3082 0 0 17 13 -3 -2 23 17 3 1 0 0 0 1 0 0 1
+masked_17x13_r4_t4_fs1 masked 17 13 3089 3096 0 0 17 13 -3 -2 23 17 4 1 0 0 2 1 0 0 1
+masked_17x13_r5_t0_fs0 masked 17 13 3103 3110 0 0 17 13 1 1 1 1 0 1 5 0 0 1 2 1 0
+masked_17x13_r5_t1_fs0 masked 17 13 3117 3124 0 0 17 13 1 1 1 1 1 1 0 3 0 1 0 0 0
+masked_17x13_r5_t2_fs0 masked 17 13 3131 3138 0 0 17 13 1 1 1 1 2 0.8 0 0 0 1 0 0 0
+masked_17x13_r5_t3_fs0 masked 17 13 3145 3152 0 0 17 13 1 1 1 1 3 1 0 0 0 1 0 0 0
+masked_17x13_r5_t4_fs0 masked 17 13 3159 3166 0 0 17 13 1 1 1 1 4 1 0 0 2 1 0 0 0
+masked_17x13_r5_t0_fs1 masked 17 13 3103 3110 0 0 17 13 1 1 1 1 0 1 5 0 0 1 2 1 1
+masked_17x13_r5_t1_fs1 masked 17 13 3117 3124 0 0 17 13 1 1 1 1 1 1 0 3 0 1 0 0 1
+masked_17x13_r5_t2_fs1 masked 17 13 3131 3138 0 0 17 13 1 1 1 1 2 0.8 0 0 0 1 0 0 1
+masked_17x13_r5_t3_fs1 masked 17 13 3145 3152 0 0 17 13 1 1 1 1 3 1 0 0 0 1 0 0 1
+masked_17x13_r5_t4_fs1 masked 17 13 3159 3166 0 0 17 13 1 1 1 1 4 1 0 0 2 1 0 0 1
+masked_17x13_r6_t0_fs0 masked 17 13 3173 3180 0 0 17 13 0 0 8 3 0 1 5 0 0 1 2 1 0
+masked_17x13_r6_t1_fs0 masked 17 13 3187 3194 0 0 17 13 0 0 8 3 1 1 0 3 0 1 0 0 0
+masked_17x13_r6_t2_fs0 masked 17 13 3201 3208 0 0 17 13 0 0 8 3 2 0.8 0 0 0 1 0 0 0
+masked_17x13_r6_t3_fs0 masked 17 13 3215 3222 0 0 17 13 0 0 8 3 3 1 0 0 0 1 0 0 0
+masked_17x13_r6_t4_fs0 masked 17 13 3229 3236 0 0 17 13 0 0 8 3 4 1 0 0 2 1 0 0 0
+masked_17x13_r6_t0_fs1 masked 17 13 3173 3180 0 0 17 13 0 0 8 3 0 1 5 0 0 1 2 1 1
+masked_17x13_r6_t1_fs1 masked 17 13 3187 3194 0 0 17 13 0 0 8 3 1 1 0 3 0 1 0 0 1
+masked_17x13_r6_t2_fs1 masked 17 13 3201 3208 0 0 17 13 0 0 8 3 2 0.8 0 0 0 1 0 0 1
+masked_17x13_r6_t3_fs1 masked 17 13 3215 3222 0 0 17 13 0 0 8 3 3 1 0 0 0 1 0 0 1
+masked_17x13_r6_t4_fs1 masked 17 13 3229 3236 0 0 17 13 0 0 8 3 4 1 0 0 2 1 0 0 1
+maskedoff_17x13_t0_fs0 masked 17 13 3243 3250 3 2 14 11 4 3 9 7 0 1 4 0 0 1 0 0 0
+maskedshort_17x13_t0_fs0 masked 17 13 3257 3264 3 2 11 8 0 0 17 13 0 1 4 0 0 1 0 0 0
+maskedoff_17x13_t1_fs0 masked 17 13 3271 3278 3 2 14 11 4 3 9 7 1 1 0 2 0 1 0 0 0
+maskedshort_17x13_t1_fs0 masked 17 13 3285 3292 3 2 11 8 0 0 17 13 1 1 0 2 0 1 0 0 0
+maskedoff_17x13_t2_fs0 masked 17 13 3299 3306 3 2 14 11 4 3 9 7 2 1 0 0 0 1 0 0 0
+maskedshort_17x13_t2_fs0 masked 17 13 3313 3320 3 2 11 8 0 0 17 13 2 1 0 0 0 1 0 0 0
+maskedoff_17x13_t4_fs0 masked 17 13 3327 3334 3 2 14 11 4 3 9 7 4 0.6 0 0 1 1 0 0 0
+maskedshort_17x13_t4_fs0 masked 17 13 3341 3348 3 2 11 8 0 0 17 13 4 0.6 0 0 1 1 0 0 0
+maskedoff_17x13_t0_fs1 masked 17 13 3243 3250 3 2 14 11 4 3 9 7 0 1 4 0 0 1 0 0 1
+maskedshort_17x13_t0_fs1 masked 17 13 3257 3264 3 2 11 8 0 0 17 13 0 1 4 0 0 1 0 0 1
+maskedoff_17x13_t1_fs1 masked 17 13 3271 3278 3 2 14 11 4 3 9 7 1 1 0 2 0 1 0 0 1
+maskedshort_17x13_t1_fs1 masked 17 13 3285 3292 3 2 11 8 0 0 17 13 1 1 0 2 0 1 0 0 1
+maskedoff_17x13_t2_fs1 masked 17 13 3299 3306 3 2 14 11 4 3 9 7 2 1 0 0 0 1 0 0 1
+maskedshort_17x13_t2_fs1 masked 17 13 3313 3320 3 2 11 8 0 0 17 13 2 1 0 0 0 1 0 0 1
+maskedoff_17x13_t4_fs1 masked 17 13 3327 3334 3 2 14 11 4 3 9 7 4 0.6 0 0 1 1 0 0 1
+maskedshort_17x13_t4_fs1 masked 17 13 3341 3348 3 2 11 8 0 0 17 13 4 0.6 0 0 1 1 0 0 1
+masked_33x20_r1_t0_fs0 masked 33 20 3355 3362 0 0 33 20 0 0 33 20 0 1 5 0 0 1 2 1 0
+masked_33x20_r1_t1_fs0 masked 33 20 3369 3376 0 0 33 20 0 0 33 20 1 1 0 3 0 1 0 0 0
+masked_33x20_r1_t2_fs0 masked 33 20 3383 3390 0 0 33 20 0 0 33 20 2 0.8 0 0 0 1 0 0 0
+masked_33x20_r1_t3_fs0 masked 33 20 3397 3404 0 0 33 20 0 0 33 20 3 1 0 0 0 1 0 0 0
+masked_33x20_r1_t4_fs0 masked 33 20 3411 3418 0 0 33 20 0 0 33 20 4 1 0 0 2 1 0 0 0
+masked_33x20_r1_t0_fs1 masked 33 20 3355 3362 0 0 33 20 0 0 33 20 0 1 5 0 0 1 2 1 1
+masked_33x20_r1_t1_fs1 masked 33 20 3369 3376 0 0 33 20 0 0 33 20 1 1 0 3 0 1 0 0 1
+masked_33x20_r1_t2_fs1 masked 33 20 3383 3390 0 0 33 20 0 0 33 20 2 0.8 0 0 0 1 0 0 1
+masked_33x20_r1_t3_fs1 masked 33 20 3397 3404 0 0 33 20 0 0 33 20 3 1 0 0 0 1 0 0 1
+masked_33x20_r1_t4_fs1 masked 33 20 3411 3418 0 0 33 20 0 0 33 20 4 1 0 0 2 1 0 0 1
+masked_33x20_r2_t0_fs0 masked 33 20 3425 3432 0 0 33 20 2 1 29 18 0 1 5 0 0 1 2 1 0
+masked_33x20_r2_t1_fs0 masked 33 20 3439 3446 0 0 33 20 2 1 29 18 1 1 0 3 0 1 0 0 0
+masked_33x20_r2_t2_fs0 masked 33 20 3453 3460 0 0 33 20 2 1 29 18 2 0.8 0 0 0 1 0 0 0
+masked_33x20_r2_t3_fs0 masked 33 20 3467 3474 0 0 33 20 2 1 29 18 3 1 0 0 0 1 0 0 0
+masked_33x20_r2_t4_fs0 masked 33 20 3481 3488 0 0 33 20 2 1 29 18 4 1 0 0 2 1 0 0 0
+masked_33x20_r2_t0_fs1 masked 33 20 3425 3432 0 0 33 20 2 1 29 18 0 1 5 0 0 1 2 1 1
+masked_33x20_r2_t1_fs1 masked 33 20 3439 3446 0 0 33 20 2 1 29 18 1 1 0 3 0 1 0 0 1
+masked_33x20_r2_t2_fs1 masked 33 20 3453 3460 0 0 33 20 2 1 29 18 2 0.8 0 0 0 1 0 0 1
+masked_33x20_r2_t3_fs1 masked 33 20 3467 3474 0 0 33 20 2 1 29 18 3 1 0 0 0 1 0 0 1
+masked_33x20_r2_t4_fs1 masked 33 20 3481 3488 0 0 33 20 2 1 29 18 4 1 0 0 2 1 0 0 1
+masked_33x20_r3_t0_fs0 masked 33 20 3495 3502 0 0 33 20 24 15 9 5 0 1 5 0 0 1 2 1 0
+masked_33x20_r3_t1_fs0 masked 33 20 3509 3516 0 0 33 20 24 15 9 5 1 1 0 3 0 1 0 0 0
+masked_33x20_r3_t2_fs0 masked 33 20 3523 3530 0 0 33 20 24 15 9 5 2 0.8 0 0 0 1 0 0 0
+masked_33x20_r3_t3_fs0 masked 33 20 3537 3544 0 0 33 20 24 15 9 5 3 1 0 0 0 1 0 0 0
+masked_33x20_r3_t4_fs0 masked 33 20 3551 3558 0 0 33 20 24 15 9 5 4 1 0 0 2 1 0 0 0
+masked_33x20_r3_t0_fs1 masked 33 20 3495 3502 0 0 33 20 24 15 9 5 0 1 5 0 0 1 2 1 1
+masked_33x20_r3_t1_fs1 masked 33 20 3509 3516 0 0 33 20 24 15 9 5 1 1 0 3 0 1 0 0 1
+masked_33x20_r3_t2_fs1 masked 33 20 3523 3530 0 0 33 20 24 15 9 5 2 0.8 0 0 0 1 0 0 1
+masked_33x20_r3_t3_fs1 masked 33 20 3537 3544 0 0 33 20 24 15 9 5 3 1 0 0 0 1 0 0 1
+masked_33x20_r3_t4_fs1 masked 33 20 3551 3558 0 0 33 20 24 15 9 5 4 1 0 0 2 1 0 0 1
+masked_33x20_r4_t0_fs0 masked 33 20 3565 3572 0 0 33 20 -3 -2 39 24 0 1 5 0 0 1 2 1 0
+masked_33x20_r4_t1_fs0 masked 33 20 3579 3586 0 0 33 20 -3 -2 39 24 1 1 0 3 0 1 0 0 0
+masked_33x20_r4_t2_fs0 masked 33 20 3593 3600 0 0 33 20 -3 -2 39 24 2 0.8 0 0 0 1 0 0 0
+masked_33x20_r4_t3_fs0 masked 33 20 3607 3614 0 0 33 20 -3 -2 39 24 3 1 0 0 0 1 0 0 0
+masked_33x20_r4_t4_fs0 masked 33 20 3621 3628 0 0 33 20 -3 -2 39 24 4 1 0 0 2 1 0 0 0
+masked_33x20_r4_t0_fs1 masked 33 20 3565 3572 0 0 33 20 -3 -2 39 24 0 1 5 0 0 1 2 1 1
+masked_33x20_r4_t1_fs1 masked 33 20 3579 3586 0 0 33 20 -3 -2 39 24 1 1 0 3 0 1 0 0 1
+masked_33x20_r4_t2_fs1 masked 33 20 3593 3600 0 0 33 20 -3 -2 39 24 2 0.8 0 0 0 1 0 0 1
+masked_33x20_r4_t3_fs1 masked 33 20 3607 3614 0 0 33 20 -3 -2 39 24 3 1 0 0 0 1 0 0 1
+masked_33x20_r4_t4_fs1 masked 33 20 3621 3628 0 0 33 20 -3 -2 39 24 4 1 0 0 2 1 0 0 1
+masked_33x20_r5_t0_fs0 masked 33 20 3635 3642 0 0 33 20 1 1 1 1 0 1 5 0 0 1 2 1 0
+masked_33x20_r5_t1_fs0 masked 33 20 3649 3656 0 0 33 20 1 1 1 1 1 1 0 3 0 1 0 0 0
+masked_33x20_r5_t2_fs0 masked 33 20 3663 3670 0 0 33 20 1 1 1 1 2 0.8 0 0 0 1 0 0 0
+masked_33x20_r5_t3_fs0 masked 33 20 3677 3684 0 0 33 20 1 1 1 1 3 1 0 0 0 1 0 0 0
+masked_33x20_r5_t4_fs0 masked 33 20 3691 3698 0 0 33 20 1 1 1 1 4 1 0 0 2 1 0 0 0
+masked_33x20_r5_t0_fs1 masked 33 20 3635 3642 0 0 33 20 1 1 1 1 0 1 5 0 0 1 2 1 1
+masked_33x20_r5_t1_fs1 masked 33 20 3649 3656 0 0 33 20 1 1 1 1 1 1 0 3 0 1 0 0 1
+masked_33x20_r5_t2_fs1 masked 33 20 3663 3670 0 0 33 20 1 1 1 1 2 0.8 0 0 0 1 0 0 1
+masked_33x20_r5_t3_fs1 masked 33 20 3677 3684 0 0 33 20 1 1 1 1 3 1 0 0 0 1 0 0 1
+masked_33x20_r5_t4_fs1 masked 33 20 3691 3698 0 0 33 20 1 1 1 1 4 1 0 0 2 1 0 0 1
+masked_33x20_r6_t0_fs0 masked 33 20 3705 3712 0 0 33 20 0 0 8 3 0 1 5 0 0 1 2 1 0
+masked_33x20_r6_t1_fs0 masked 33 20 3719 3726 0 0 33 20 0 0 8 3 1 1 0 3 0 1 0 0 0
+masked_33x20_r6_t2_fs0 masked 33 20 3733 3740 0 0 33 20 0 0 8 3 2 0.8 0 0 0 1 0 0 0
+masked_33x20_r6_t3_fs0 masked 33 20 3747 3754 0 0 33 20 0 0 8 3 3 1 0 0 0 1 0 0 0
+masked_33x20_r6_t4_fs0 masked 33 20 3761 3768 0 0 33 20 0 0 8 3 4 1 0 0 2 1 0 0 0
+masked_33x20_r6_t0_fs1 masked 33 20 3705 3712 0 0 33 20 0 0 8 3 0 1 5 0 0 1 2 1 1
+masked_33x20_r6_t1_fs1 masked 33 20 3719 3726 0 0 33 20 0 0 8 3 1 1 0 3 0 1 0 0 1
+masked_33x20_r6_t2_fs1 masked 33 20 3733 3740 0 0 33 20 0 0 8 3 2 0.8 0 0 0 1 0 0 1
+masked_33x20_r6_t3_fs1 masked 33 20 3747 3754 0 0 33 20 0 0 8 3 3 1 0 0 0 1 0 0 1
+masked_33x20_r6_t4_fs1 masked 33 20 3761 3768 0 0 33 20 0 0 8 3 4 1 0 0 2 1 0 0 1
+maskedoff_33x20_t0_fs0 masked 33 20 3775 3782 3 2 30 18 4 3 25 14 0 1 4 0 0 1 0 0 0
+maskedshort_33x20_t0_fs0 masked 33 20 3789 3796 3 2 27 15 0 0 33 20 0 1 4 0 0 1 0 0 0
+maskedoff_33x20_t1_fs0 masked 33 20 3803 3810 3 2 30 18 4 3 25 14 1 1 0 2 0 1 0 0 0
+maskedshort_33x20_t1_fs0 masked 33 20 3817 3824 3 2 27 15 0 0 33 20 1 1 0 2 0 1 0 0 0
+maskedoff_33x20_t2_fs0 masked 33 20 3831 3838 3 2 30 18 4 3 25 14 2 1 0 0 0 1 0 0 0
+maskedshort_33x20_t2_fs0 masked 33 20 3845 3852 3 2 27 15 0 0 33 20 2 1 0 0 0 1 0 0 0
+maskedoff_33x20_t4_fs0 masked 33 20 3859 3866 3 2 30 18 4 3 25 14 4 0.6 0 0 1 1 0 0 0
+maskedshort_33x20_t4_fs0 masked 33 20 3873 3880 3 2 27 15 0 0 33 20 4 0.6 0 0 1 1 0 0 0
+maskedoff_33x20_t0_fs1 masked 33 20 3775 3782 3 2 30 18 4 3 25 14 0 1 4 0 0 1 0 0 1
+maskedshort_33x20_t0_fs1 masked 33 20 3789 3796 3 2 27 15 0 0 33 20 0 1 4 0 0 1 0 0 1
+maskedoff_33x20_t1_fs1 masked 33 20 3803 3810 3 2 30 18 4 3 25 14 1 1 0 2 0 1 0 0 1
+maskedshort_33x20_t1_fs1 masked 33 20 3817 3824 3 2 27 15 0 0 33 20 1 1 0 2 0 1 0 0 1
+maskedoff_33x20_t2_fs1 masked 33 20 3831 3838 3 2 30 18 4 3 25 14 2 1 0 0 0 1 0 0 1
+maskedshort_33x20_t2_fs1 masked 33 20 3845 3852 3 2 27 15 0 0 33 20 2 1 0 0 0 1 0 0 1
+maskedoff_33x20_t4_fs1 masked 33 20 3859 3866 3 2 30 18 4 3 25 14 4 0.6 0 0 1 1 0 0 1
+maskedshort_33x20_t4_fs1 masked 33 20 3873 3880 3 2 27 15 0 0 33 20 4 0.6 0 0 1 1 0 0 1
+masked_67x53_r1_t0_fs0 masked 67 53 3887 3894 0 0 67 53 0 0 67 53 0 1 5 0 0 1 2 1 0
+masked_67x53_r1_t1_fs0 masked 67 53 3901 3908 0 0 67 53 0 0 67 53 1 1 0 3 0 1 0 0 0
+masked_67x53_r1_t2_fs0 masked 67 53 3915 3922 0 0 67 53 0 0 67 53 2 0.8 0 0 0 1 0 0 0
+masked_67x53_r1_t3_fs0 masked 67 53 3929 3936 0 0 67 53 0 0 67 53 3 1 0 0 0 1 0 0 0
+masked_67x53_r1_t4_fs0 masked 67 53 3943 3950 0 0 67 53 0 0 67 53 4 1 0 0 2 1 0 0 0
+masked_67x53_r1_t0_fs1 masked 67 53 3887 3894 0 0 67 53 0 0 67 53 0 1 5 0 0 1 2 1 1
+masked_67x53_r1_t1_fs1 masked 67 53 3901 3908 0 0 67 53 0 0 67 53 1 1 0 3 0 1 0 0 1
+masked_67x53_r1_t2_fs1 masked 67 53 3915 3922 0 0 67 53 0 0 67 53 2 0.8 0 0 0 1 0 0 1
+masked_67x53_r1_t3_fs1 masked 67 53 3929 3936 0 0 67 53 0 0 67 53 3 1 0 0 0 1 0 0 1
+masked_67x53_r1_t4_fs1 masked 67 53 3943 3950 0 0 67 53 0 0 67 53 4 1 0 0 2 1 0 0 1
+masked_67x53_r2_t0_fs0 masked 67 53 3957 3964 0 0 67 53 2 1 63 51 0 1 5 0 0 1 2 1 0
+masked_67x53_r2_t1_fs0 masked 67 53 3971 3978 0 0 67 53 2 1 63 51 1 1 0 3 0 1 0 0 0
+masked_67x53_r2_t2_fs0 masked 67 53 3985 3992 0 0 67 53 2 1 63 51 2 0.8 0 0 0 1 0 0 0
+masked_67x53_r2_t3_fs0 masked 67 53 3999 4006 0 0 67 53 2 1 63 51 3 1 0 0 0 1 0 0 0
+masked_67x53_r2_t4_fs0 masked 67 53 4013 4020 0 0 67 53 2 1 63 51 4 1 0 0 2 1 0 0 0
+masked_67x53_r2_t0_fs1 masked 67 53 3957 3964 0 0 67 53 2 1 63 51 0 1 5 0 0 1 2 1 1
+masked_67x53_r2_t1_fs1 masked 67 53 3971 3978 0 0 67 53 2 1 63 51 1 1 0 3 0 1 0 0 1
+masked_67x53_r2_t2_fs1 masked 67 53 3985 3992 0 0 67 53 2 1 63 51 2 0.8 0 0 0 1 0 0 1
+masked_67x53_r2_t3_fs1 masked 67 53 3999 4006 0 0 67 53 2 1 63 51 3 1 0 0 0 1 0 0 1
+masked_67x53_r2_t4_fs1 masked 67 53 4013 4020 0 0 67 53 2 1 63 51 4 1 0 0 2 1 0 0 1
+masked_67x53_r3_t0_fs0 masked 67 53 4027 4034 0 0 67 53 58 48 9 5 0 1 5 0 0 1 2 1 0
+masked_67x53_r3_t1_fs0 masked 67 53 4041 4048 0 0 67 53 58 48 9 5 1 1 0 3 0 1 0 0 0
+masked_67x53_r3_t2_fs0 masked 67 53 4055 4062 0 0 67 53 58 48 9 5 2 0.8 0 0 0 1 0 0 0
+masked_67x53_r3_t3_fs0 masked 67 53 4069 4076 0 0 67 53 58 48 9 5 3 1 0 0 0 1 0 0 0
+masked_67x53_r3_t4_fs0 masked 67 53 4083 4090 0 0 67 53 58 48 9 5 4 1 0 0 2 1 0 0 0
+masked_67x53_r3_t0_fs1 masked 67 53 4027 4034 0 0 67 53 58 48 9 5 0 1 5 0 0 1 2 1 1
+masked_67x53_r3_t1_fs1 masked 67 53 4041 4048 0 0 67 53 58 48 9 5 1 1 0 3 0 1 0 0 1
+masked_67x53_r3_t2_fs1 masked 67 53 4055 4062 0 0 67 53 58 48 9 5 2 0.8 0 0 0 1 0 0 1
+masked_67x53_r3_t3_fs1 masked 67 53 4069 4076 0 0 67 53 58 48 9 5 3 1 0 0 0 1 0 0 1
+masked_67x53_r3_t4_fs1 masked 67 53 4083 4090 0 0 67 53 58 48 9 5 4 1 0 0 2 1 0 0 1
+masked_67x53_r4_t0_fs0 masked 67 53 4097 4104 0 0 67 53 -3 -2 73 57 0 1 5 0 0 1 2 1 0
+masked_67x53_r4_t1_fs0 masked 67 53 4111 4118 0 0 67 53 -3 -2 73 57 1 1 0 3 0 1 0 0 0
+masked_67x53_r4_t2_fs0 masked 67 53 4125 4132 0 0 67 53 -3 -2 73 57 2 0.8 0 0 0 1 0 0 0
+masked_67x53_r4_t3_fs0 masked 67 53 4139 4146 0 0 67 53 -3 -2 73 57 3 1 0 0 0 1 0 0 0
+masked_67x53_r4_t4_fs0 masked 67 53 4153 4160 0 0 67 53 -3 -2 73 57 4 1 0 0 2 1 0 0 0
+masked_67x53_r4_t0_fs1 masked 67 53 4097 4104 0 0 67 53 -3 -2 73 57 0 1 5 0 0 1 2 1 1
+masked_67x53_r4_t1_fs1 masked 67 53 4111 4118 0 0 67 53 -3 -2 73 57 1 1 0 3 0 1 0 0 1
+masked_67x53_r4_t2_fs1 masked 67 53 4125 4132 0 0 67 53 -3 -2 73 57 2 0.8 0 0 0 1 0 0 1
+masked_67x53_r4_t3_fs1 masked 67 53 4139 4146 0 0 67 53 -3 -2 73 57 3 1 0 0 0 1 0 0 1
+masked_67x53_r4_t4_fs1 masked 67 53 4153 4160 0 0 67 53 -3 -2 73 57 4 1 0 0 2 1 0 0 1
+masked_67x53_r5_t0_fs0 masked 67 53 4167 4174 0 0 67 53 1 1 1 1 0 1 5 0 0 1 2 1 0
+masked_67x53_r5_t1_fs0 masked 67 53 4181 4188 0 0 67 53 1 1 1 1 1 1 0 3 0 1 0 0 0
+masked_67x53_r5_t2_fs0 masked 67 53 4195 4202 0 0 67 53 1 1 1 1 2 0.8 0 0 0 1 0 0 0
+masked_67x53_r5_t3_fs0 masked 67 53 4209 4216 0 0 67 53 1 1 1 1 3 1 0 0 0 1 0 0 0
+masked_67x53_r5_t4_fs0 masked 67 53 4223 4230 0 0 67 53 1 1 1 1 4 1 0 0 2 1 0 0 0
+masked_67x53_r5_t0_fs1 masked 67 53 4167 4174 0 0 67 53 1 1 1 1 0 1 5 0 0 1 2 1 1
+masked_67x53_r5_t1_fs1 masked 67 53 4181 4188 0 0 67 53 1 1 1 1 1 1 0 3 0 1 0 0 1
+masked_67x53_r5_t2_fs1 masked 67 53 4195 4202 0 0 67 53 1 1 1 1 2 0.8 0 0 0 1 0 0 1
+masked_67x53_r5_t3_fs1 masked 67 53 4209 4216 0 0 67 53 1 1 1 1 3 1 0 0 0 1 0 0 1
+masked_67x53_r5_t4_fs1 masked 67 53 4223 4230 0 0 67 53 1 1 1 1 4 1 0 0 2 1 0 0 1
+masked_67x53_r6_t0_fs0 masked 67 53 4237 4244 0 0 67 53 0 0 8 3 0 1 5 0 0 1 2 1 0
+masked_67x53_r6_t1_fs0 masked 67 53 4251 4258 0 0 67 53 0 0 8 3 1 1 0 3 0 1 0 0 0
+masked_67x53_r6_t2_fs0 masked 67 53 4265 4272 0 0 67 53 0 0 8 3 2 0.8 0 0 0 1 0 0 0
+masked_67x53_r6_t3_fs0 masked 67 53 4279 4286 0 0 67 53 0 0 8 3 3 1 0 0 0 1 0 0 0
+masked_67x53_r6_t4_fs0 masked 67 53 4293 4300 0 0 67 53 0 0 8 3 4 1 0 0 2 1 0 0 0
+masked_67x53_r6_t0_fs1 masked 67 53 4237 4244 0 0 67 53 0 0 8 3 0 1 5 0 0 1 2 1 1
+masked_67x53_r6_t1_fs1 masked 67 53 4251 4258 0 0 67 53 0 0 8 3 1 1 0 3 0 1 0 0 1
+masked_67x53_r6_t2_fs1 masked 67 53 4265 4272 0 0 67 53 0 0 8 3 2 0.8 0 0 0 1 0 0 1
+masked_67x53_r6_t3_fs1 masked 67 53 4279 4286 0 0 67 53 0 0 8 3 3 1 0 0 0 1 0 0 1
+masked_67x53_r6_t4_fs1 masked 67 53 4293 4300 0 0 67 53 0 0 8 3 4 1 0 0 2 1 0 0 1
+maskedoff_67x53_t0_fs0 masked 67 53 4307 4314 3 2 64 51 4 3 59 47 0 1 4 0 0 1 0 0 0
+maskedshort_67x53_t0_fs0 masked 67 53 4321 4328 3 2 61 48 0 0 67 53 0 1 4 0 0 1 0 0 0
+maskedoff_67x53_t1_fs0 masked 67 53 4335 4342 3 2 64 51 4 3 59 47 1 1 0 2 0 1 0 0 0
+maskedshort_67x53_t1_fs0 masked 67 53 4349 4356 3 2 61 48 0 0 67 53 1 1 0 2 0 1 0 0 0
+maskedoff_67x53_t2_fs0 masked 67 53 4363 4370 3 2 64 51 4 3 59 47 2 1 0 0 0 1 0 0 0
+maskedshort_67x53_t2_fs0 masked 67 53 4377 4384 3 2 61 48 0 0 67 53 2 1 0 0 0 1 0 0 0
+maskedoff_67x53_t4_fs0 masked 67 53 4391 4398 3 2 64 51 4 3 59 47 4 0.6 0 0 1 1 0 0 0
+maskedshort_67x53_t4_fs0 masked 67 53 4405 4412 3 2 61 48 0 0 67 53 4 0.6 0 0 1 1 0 0 0
+maskedoff_67x53_t0_fs1 masked 67 53 4307 4314 3 2 64 51 4 3 59 47 0 1 4 0 0 1 0 0 1
+maskedshort_67x53_t0_fs1 masked 67 53 4321 4328 3 2 61 48 0 0 67 53 0 1 4 0 0 1 0 0 1
+maskedoff_67x53_t1_fs1 masked 67 53 4335 4342 3 2 64 51 4 3 59 47 1 1 0 2 0 1 0 0 1
+maskedshort_67x53_t1_fs1 masked 67 53 4349 4356 3 2 61 48 0 0 67 53 1 1 0 2 0 1 0 0 1
+maskedoff_67x53_t2_fs1 masked 67 53 4363 4370 3 2 64 51 4 3 59 47 2 1 0 0 0 1 0 0 1
+maskedshort_67x53_t2_fs1 masked 67 53 4377 4384 3 2 61 48 0 0 67 53 2 1 0 0 0 1 0 0 1
+maskedoff_67x53_t4_fs1 masked 67 53 4391 4398 3 2 64 51 4 3 59 47 4 0.6 0 0 1 1 0 0 1
+maskedshort_67x53_t4_fs1 masked 67 53 4405 4412 3 2 61 48 0 0 67 53 4 0.6 0 0 1 1 0 0 1
+rect_9x9_op0_t1_fs0 rect 9 9 4419 2 1 6 7 0 1 1 0 4 0 1 0 0 0
+rect_9x9_op0_t2_fs0 rect 9 9 4426 2 1 6 7 0 2 0.7 0 0 0 1 0 0 0
+rect_9x9_op0_t3_fs0 rect 9 9 4433 2 1 6 7 0 3 1 0 0 0 1 0 0 0
+rect_9x9_op0_t4_fs0 rect 9 9 4440 2 1 6 7 0 4 1 0 0 1 1 0 0 0
+rect_9x9_op0.3_t1_fs0 rect 9 9 4447 2 1 6 7 0.3 1 1 0 4 0 1 0 0 0
+rect_9x9_op0.3_t2_fs0 rect 9 9 4454 2 1 6 7 0.3 2 0.7 0 0 0 1 0 0 0
+rect_9x9_op0.3_t3_fs0 rect 9 9 4461 2 1 6 7 0.3 3 1 0 0 0 1 0 0 0
+rect_9x9_op0.3_t4_fs0 rect 9 9 4468 2 1 6 7 0.3 4 1 0 0 1 1 0 0 0
+rect_9x9_op1_t1_fs0 rect 9 9 4475 2 1 6 7 1 1 1 0 4 0 1 0 0 0
+rect_9x9_op1_t2_fs0 rect 9 9 4482 2 1 6 7 1 2 0.7 0 0 0 1 0 0 0
+rect_9x9_op1_t3_fs0 rect 9 9 4489 2 1 6 7 1 3 1 0 0 0 1 0 0 0
+rect_9x9_op1_t4_fs0 rect 9 9 4496 2 1 6 7 1 4 1 0 0 1 1 0 0 0
+region_9x9_t1_fs0 region 9 9 4503 2 0 0 4 4 5 5 3 3 1 1 0 6 0 1 0 0 0
+region_9x9_t2_fs0 region 9 9 4510 2 0 0 4 4 5 5 3 3 2 1 0 0 0 1 0 0 0
+region_9x9_t3_fs0 region 9 9 4517 2 0 0 4 4 5 5 3 3 3 0.5 0 0 0 1 0 0 0
+region_9x9_t4_fs0 region 9 9 4524 2 0 0 4 4 5 5 3 3 4 1 0 0 2 1 0 0 0
+rect_9x9_op0_t1_fs1 rect 9 9 4419 2 1 6 7 0 1 1 0 4 0 1 0 0 1
+rect_9x9_op0_t2_fs1 rect 9 9 4426 2 1 6 7 0 2 0.7 0 0 0 1 0 0 1
+rect_9x9_op0_t3_fs1 rect 9 9 4433 2 1 6 7 0 3 1 0 0 0 1 0 0 1
+rect_9x9_op0_t4_fs1 rect 9 9 4440 2 1 6 7 0 4 1 0 0 1 1 0 0 1
+rect_9x9_op0.3_t1_fs1 rect 9 9 4447 2 1 6 7 0.3 1 1 0 4 0 1 0 0 1
+rect_9x9_op0.3_t2_fs1 rect 9 9 4454 2 1 6 7 0.3 2 0.7 0 0 0 1 0 0 1
+rect_9x9_op0.3_t3_fs1 rect 9 9 4461 2 1 6 7 0.3 3 1 0 0 0 1 0 0 1
+rect_9x9_op0.3_t4_fs1 rect 9 9 4468 2 1 6 7 0.3 4 1 0 0 1 1 0 0 1
+rect_9x9_op1_t1_fs1 rect 9 9 4475 2 1 6 7 1 1 1 0 4 0 1 0 0 1
+rect_9x9_op1_t2_fs1 rect 9 9 4482 2 1 6 7 1 2 0.7 0 0 0 1 0 0 1
+rect_9x9_op1_t3_fs1 rect 9 9 4489 2 1 6 7 1 3 1 0 0 0 1 0 0 1
+rect_9x9_op1_t4_fs1 rect 9 9 4496 2 1 6 7 1 4 1 0 0 1 1 0 0 1
+region_9x9_t1_fs1 region 9 9 4503 2 0 0 4 4 5 5 3 3 1 1 0 6 0 1 0 0 1
+region_9x9_t2_fs1 region 9 9 4510 2 0 0 4 4 5 5 3 3 2 1 0 0 0 1 0 0 1
+region_9x9_t3_fs1 region 9 9 4517 2 0 0 4 4 5 5 3 3 3 0.5 0 0 0 1 0 0 1
+region_9x9_t4_fs1 region 9 9 4524 2 0 0 4 4 5 5 3 3 4 1 0 0 2 1 0 0 1
+rect_17x13_op0_t1_fs0 rect 17 13 4531 2 1 14 11 0 1 1 0 4 0 1 0 0 0
+rect_17x13_op0_t2_fs0 rect 17 13 4538 2 1 14 11 0 2 0.7 0 0 0 1 0 0 0
+rect_17x13_op0_t3_fs0 rect 17 13 4545 2 1 14 11 0 3 1 0 0 0 1 0 0 0
+rect_17x13_op0_t4_fs0 rect 17 13 4552 2 1 14 11 0 4 1 0 0 1 1 0 0 0
+rect_17x13_op0.3_t1_fs0 rect 17 13 4559 2 1 14 11 0.3 1 1 0 4 0 1 0 0 0
+rect_17x13_op0.3_t2_fs0 rect 17 13 4566 2 1 14 11 0.3 2 0.7 0 0 0 1 0 0 0
+rect_17x13_op0.3_t3_fs0 rect 17 13 4573 2 1 14 11 0.3 3 1 0 0 0 1 0 0 0
+rect_17x13_op0.3_t4_fs0 rect 17 13 4580 2 1 14 11 0.3 4 1 0 0 1 1 0 0 0
+rect_17x13_op1_t1_fs0 rect 17 13 4587 2 1 14 11 1 1 1 0 4 0 1 0 0 0
+rect_17x13_op1_t2_fs0 rect 17 13 4594 2 1 14 11 1 2 0.7 0 0 0 1 0 0 0
+rect_17x13_op1_t3_fs0 rect 17 13 4601 2 1 14 11 1 3 1 0 0 0 1 0 0 0
+rect_17x13_op1_t4_fs0 rect 17 13 4608 2 1 14 11 1 4 1 0 0 1 1 0 0 0
+region_17x13_t1_fs0 region 17 13 4615 2 0 0 8 6 9 7 7 5 1 1 0 6 0 1 0 0 0
+region_17x13_t2_fs0 region 17 13 4622 2 0 0 8 6 9 7 7 5 2 1 0 0 0 1 0 0 0
+region_17x13_t3_fs0 region 17 13 4629 2 0 0 8 6 9 7 7 5 3 0.5 0 0 0 1 0 0 0
+region_17x13_t4_fs0 region 17 13 4636 2 0 0 8 6 9 7 7 5 4 1 0 0 2 1 0 0 0
+rect_17x13_op0_t1_fs1 rect 17 13 4531 2 1 14 11 0 1 1 0 4 0 1 0 0 1
+rect_17x13_op0_t2_fs1 rect 17 13 4538 2 1 14 11 0 2 0.7 0 0 0 1 0 0 1
+rect_17x13_op0_t3_fs1 rect 17 13 4545 2 1 14 11 0 3 1 0 0 0 1 0 0 1
+rect_17x13_op0_t4_fs1 rect 17 13 4552 2 1 14 11 0 4 1 0 0 1 1 0 0 1
+rect_17x13_op0.3_t1_fs1 rect 17 13 4559 2 1 14 11 0.3 1 1 0 4 0 1 0 0 1
+rect_17x13_op0.3_t2_fs1 rect 17 13 4566 2 1 14 11 0.3 2 0.7 0 0 0 1 0 0 1
+rect_17x13_op0.3_t3_fs1 rect 17 13 4573 2 1 14 11 0.3 3 1 0 0 0 1 0 0 1
+rect_17x13_op0.3_t4_fs1 rect 17 13 4580 2 1 14 11 0.3 4 1 0 0 1 1 0 0 1
+rect_17x13_op1_t1_fs1 rect 17 13 4587 2 1 14 11 1 1 1 0 4 0 1 0 0 1
+rect_17x13_op1_t2_fs1 rect 17 13 4594 2 1 14 11 1 2 0.7 0 0 0 1 0 0 1
+rect_17x13_op1_t3_fs1 rect 17 13 4601 2 1 14 11 1 3 1 0 0 0 1 0 0 1
+rect_17x13_op1_t4_fs1 rect 17 13 4608 2 1 14 11 1 4 1 0 0 1 1 0 0 1
+region_17x13_t1_fs1 region 17 13 4615 2 0 0 8 6 9 7 7 5 1 1 0 6 0 1 0 0 1
+region_17x13_t2_fs1 region 17 13 4622 2 0 0 8 6 9 7 7 5 2 1 0 0 0 1 0 0 1
+region_17x13_t3_fs1 region 17 13 4629 2 0 0 8 6 9 7 7 5 3 0.5 0 0 0 1 0 0 1
+region_17x13_t4_fs1 region 17 13 4636 2 0 0 8 6 9 7 7 5 4 1 0 0 2 1 0 0 1
+rect_33x20_op0_t1_fs0 rect 33 20 4643 2 1 30 18 0 1 1 0 4 0 1 0 0 0
+rect_33x20_op0_t2_fs0 rect 33 20 4650 2 1 30 18 0 2 0.7 0 0 0 1 0 0 0
+rect_33x20_op0_t3_fs0 rect 33 20 4657 2 1 30 18 0 3 1 0 0 0 1 0 0 0
+rect_33x20_op0_t4_fs0 rect 33 20 4664 2 1 30 18 0 4 1 0 0 1 1 0 0 0
+rect_33x20_op0.3_t1_fs0 rect 33 20 4671 2 1 30 18 0.3 1 1 0 4 0 1 0 0 0
+rect_33x20_op0.3_t2_fs0 rect 33 20 4678 2 1 30 18 0.3 2 0.7 0 0 0 1 0 0 0
+rect_33x20_op0.3_t3_fs0 rect 33 20 4685 2 1 30 18 0.3 3 1 0 0 0 1 0 0 0
+rect_33x20_op0.3_t4_fs0 rect 33 20 4692 2 1 30 18 0.3 4 1 0 0 1 1 0 0 0
+rect_33x20_op1_t1_fs0 rect 33 20 4699 2 1 30 18 1 1 1 0 4 0 1 0 0 0
+rect_33x20_op1_t2_fs0 rect 33 20 4706 2 1 30 18 1 2 0.7 0 0 0 1 0 0 0
+rect_33x20_op1_t3_fs0 rect 33 20 4713 2 1 30 18 1 3 1 0 0 0 1 0 0 0
+rect_33x20_op1_t4_fs0 rect 33 20 4720 2 1 30 18 1 4 1 0 0 1 1 0 0 0
+region_33x20_t1_fs0 region 33 20 4727 2 0 0 16 10 17 11 15 9 1 1 0 6 0 1 0 0 0
+region_33x20_t2_fs0 region 33 20 4734 2 0 0 16 10 17 11 15 9 2 1 0 0 0 1 0 0 0
+region_33x20_t3_fs0 region 33 20 4741 2 0 0 16 10 17 11 15 9 3 0.5 0 0 0 1 0 0 0
+region_33x20_t4_fs0 region 33 20 4748 2 0 0 16 10 17 11 15 9 4 1 0 0 2 1 0 0 0
+rect_33x20_op0_t1_fs1 rect 33 20 4643 2 1 30 18 0 1 1 0 4 0 1 0 0 1
+rect_33x20_op0_t2_fs1 rect 33 20 4650 2 1 30 18 0 2 0.7 0 0 0 1 0 0 1
+rect_33x20_op0_t3_fs1 rect 33 20 4657 2 1 30 18 0 3 1 0 0 0 1 0 0 1
+rect_33x20_op0_t4_fs1 rect 33 20 4664 2 1 30 18 0 4 1 0 0 1 1 0 0 1
+rect_33x20_op0.3_t1_fs1 rect 33 20 4671 2 1 30 18 0.3 1 1 0 4 0 1 0 0 1
+rect_33x20_op0.3_t2_fs1 rect 33 20 4678 2 1 30 18 0.3 2 0.7 0 0 0 1 0 0 1
+rect_33x20_op0.3_t3_fs1 rect 33 20 4685 2 1 30 18 0.3 3 1 0 0 0 1 0 0 1
+rect_33x20_op0.3_t4_fs1 rect 33 20 4692 2 1 30 18 0.3 4 1 0 0 1 1 0 0 1
+rect_33x20_op1_t1_fs1 rect 33 20 4699 2 1 30 18 1 1 1 0 4 0 1 0 0 1
+rect_33x20_op1_t2_fs1 rect 33 20 4706 2 1 30 18 1 2 0.7 0 0 0 1 0 0 1
+rect_33x20_op1_t3_fs1 rect 33 20 4713 2 1 30 18 1 3 1 0 0 0 1 0 0 1
+rect_33x20_op1_t4_fs1 rect 33 20 4720 2 1 30 18 1 4 1 0 0 1 1 0 0 1
+region_33x20_t1_fs1 region 33 20 4727 2 0 0 16 10 17 11 15 9 1 1 0 6 0 1 0 0 1
+region_33x20_t2_fs1 region 33 20 4734 2 0 0 16 10 17 11 15 9 2 1 0 0 0 1 0 0 1
+region_33x20_t3_fs1 region 33 20 4741 2 0 0 16 10 17 11 15 9 3 0.5 0 0 0 1 0 0 1
+region_33x20_t4_fs1 region 33 20 4748 2 0 0 16 10 17 11 15 9 4 1 0 0 2 1 0 0 1
+rect_67x53_op0_t1_fs0 rect 67 53 4755 2 1 64 51 0 1 1 0 4 0 1 0 0 0
+rect_67x53_op0_t2_fs0 rect 67 53 4762 2 1 64 51 0 2 0.7 0 0 0 1 0 0 0
+rect_67x53_op0_t3_fs0 rect 67 53 4769 2 1 64 51 0 3 1 0 0 0 1 0 0 0
+rect_67x53_op0_t4_fs0 rect 67 53 4776 2 1 64 51 0 4 1 0 0 1 1 0 0 0
+rect_67x53_op0.3_t1_fs0 rect 67 53 4783 2 1 64 51 0.3 1 1 0 4 0 1 0 0 0
+rect_67x53_op0.3_t2_fs0 rect 67 53 4790 2 1 64 51 0.3 2 0.7 0 0 0 1 0 0 0
+rect_67x53_op0.3_t3_fs0 rect 67 53 4797 2 1 64 51 0.3 3 1 0 0 0 1 0 0 0
+rect_67x53_op0.3_t4_fs0 rect 67 53 4804 2 1 64 51 0.3 4 1 0 0 1 1 0 0 0
+rect_67x53_op1_t1_fs0 rect 67 53 4811 2 1 64 51 1 1 1 0 4 0 1 0 0 0
+rect_67x53_op1_t2_fs0 rect 67 53 4818 2 1 64 51 1 2 0.7 0 0 0 1 0 0 0
+rect_67x53_op1_t3_fs0 rect 67 53 4825 2 1 64 51 1 3 1 0 0 0 1 0 0 0
+rect_67x53_op1_t4_fs0 rect 67 53 4832 2 1 64 51 1 4 1 0 0 1 1 0 0 0
+region_67x53_t1_fs0 region 67 53 4839 2 0 0 34 26 35 27 33 25 1 1 0 6 0 1 0 0 0
+region_67x53_t2_fs0 region 67 53 4846 2 0 0 34 26 35 27 33 25 2 1 0 0 0 1 0 0 0
+region_67x53_t3_fs0 region 67 53 4853 2 0 0 34 26 35 27 33 25 3 0.5 0 0 0 1 0 0 0
+region_67x53_t4_fs0 region 67 53 4860 2 0 0 34 26 35 27 33 25 4 1 0 0 2 1 0 0 0
+rect_67x53_op0_t1_fs1 rect 67 53 4755 2 1 64 51 0 1 1 0 4 0 1 0 0 1
+rect_67x53_op0_t2_fs1 rect 67 53 4762 2 1 64 51 0 2 0.7 0 0 0 1 0 0 1
+rect_67x53_op0_t3_fs1 rect 67 53 4769 2 1 64 51 0 3 1 0 0 0 1 0 0 1
+rect_67x53_op0_t4_fs1 rect 67 53 4776 2 1 64 51 0 4 1 0 0 1 1 0 0 1
+rect_67x53_op0.3_t1_fs1 rect 67 53 4783 2 1 64 51 0.3 1 1 0 4 0 1 0 0 1
+rect_67x53_op0.3_t2_fs1 rect 67 53 4790 2 1 64 51 0.3 2 0.7 0 0 0 1 0 0 1
+rect_67x53_op0.3_t3_fs1 rect 67 53 4797 2 1 64 51 0.3 3 1 0 0 0 1 0 0 1
+rect_67x53_op0.3_t4_fs1 rect 67 53 4804 2 1 64 51 0.3 4 1 0 0 1 1 0 0 1
+rect_67x53_op1_t1_fs1 rect 67 53 4811 2 1 64 51 1 1 1 0 4 0 1 0 0 1
+rect_67x53_op1_t2_fs1 rect 67 53 4818 2 1 64 51 1 2 0.7 0 0 0 1 0 0 1
+rect_67x53_op1_t3_fs1 rect 67 53 4825 2 1 64 51 1 3 1 0 0 0 1 0 0 1
+rect_67x53_op1_t4_fs1 rect 67 53 4832 2 1 64 51 1 4 1 0 0 1 1 0 0 1
+region_67x53_t1_fs1 region 67 53 4839 2 0 0 34 26 35 27 33 25 1 1 0 6 0 1 0 0 1
+region_67x53_t2_fs1 region 67 53 4846 2 0 0 34 26 35 27 33 25 2 1 0 0 0 1 0 0 1
+region_67x53_t3_fs1 region 67 53 4853 2 0 0 34 26 35 27 33 25 3 0.5 0 0 0 1 0 0 1
+region_67x53_t4_fs1 region 67 53 4860 2 0 0 34 26 35 27 33 25 4 1 0 0 2 1 0 0 1
+rect_mosaic_unsupported rect 17 13 5 0 0 17 13 1 0 1 4 0 0 1 0 0 0
+blend_1x1_op0 blend 1 1 4867 0
+blend_1x1_op0.25 blend 1 1 4874 0.25
+blend_1x1_op0.5 blend 1 1 4881 0.5
+blend_1x1_op0.999 blend 1 1 4888 0.999
+blend_1x1_op1 blend 1 1 4895 1
+blend_3x2_op0 blend 3 2 4902 0
+blend_3x2_op0.25 blend 3 2 4909 0.25
+blend_3x2_op0.5 blend 3 2 4916 0.5
+blend_3x2_op0.999 blend 3 2 4923 0.999
+blend_3x2_op1 blend 3 2 4930 1
+blend_7x5_op0 blend 7 5 4937 0
+blend_7x5_op0.25 blend 7 5 4944 0.25
+blend_7x5_op0.5 blend 7 5 4951 0.5
+blend_7x5_op0.999 blend 7 5 4958 0.999
+blend_7x5_op1 blend 7 5 4965 1
+blend_9x9_op0 blend 9 9 4972 0
+blend_9x9_op0.25 blend 9 9 4979 0.25
+blend_9x9_op0.5 blend 9 9 4986 0.5
+blend_9x9_op0.999 blend 9 9 4993 0.999
+blend_9x9_op1 blend 9 9 5000 1
+blend_17x13_op0 blend 17 13 5007 0
+blend_17x13_op0.25 blend 17 13 5014 0.25
+blend_17x13_op0.5 blend 17 13 5021 0.5
+blend_17x13_op0.999 blend 17 13 5028 0.999
+blend_17x13_op1 blend 17 13 5035 1
+blend_33x20_op0 blend 33 20 5042 0
+blend_33x20_op0.25 blend 33 20 5049 0.25
+blend_33x20_op0.5 blend 33 20 5056 0.5
+blend_33x20_op0.999 blend 33 20 5063 0.999
+blend_33x20_op1 blend 33 20 5070 1
+blend_67x53_op0 blend 67 53 5077 0
+blend_67x53_op0.25 blend 67 53 5084 0.25
+blend_67x53_op0.5 blend 67 53 5091 0.5
+blend_67x53_op0.999 blend 67 53 5098 0.999
+blend_67x53_op1 blend 67 53 5105 1
+plan_s0_d1 plan 0 1
+plan_s0_d1.5 plan 0 1.5
+plan_s0_d2 plan 0 2
+plan_s0.4_d1 plan 0.4 1
+plan_s0.4_d1.5 plan 0.4 1.5
+plan_s0.4_d2 plan 0.4 2
+plan_s1_d1 plan 1 1
+plan_s1_d1.5 plan 1 1.5
+plan_s1_d2 plan 1 2
+plan_s1.99_d1 plan 1.99 1
+plan_s1.99_d1.5 plan 1.99 1.5
+plan_s1.99_d2 plan 1.99 2
+plan_s2_d1 plan 2 1
+plan_s2_d1.5 plan 2 1.5
+plan_s2_d2 plan 2 2
+plan_s3.9_d1 plan 3.9 1
+plan_s3.9_d1.5 plan 3.9 1.5
+plan_s3.9_d2 plan 3.9 2
+plan_s4_d1 plan 4 1
+plan_s4_d1.5 plan 4 1.5
+plan_s4_d2 plan 4 2
+plan_s7_d1 plan 7 1
+plan_s7_d1.5 plan 7 1.5
+plan_s7_d2 plan 7 2
+plan_s8_d1 plan 8 1
+plan_s8_d1.5 plan 8 1.5
+plan_s8_d2 plan 8 2
+plan_s16_d1 plan 16 1
+plan_s16_d1.5 plan 16 1.5
+plan_s16_d2 plan 16 2
+plan_s31.9_d1 plan 31.9 1
+plan_s31.9_d1.5 plan 31.9 1.5
+plan_s31.9_d2 plan 31.9 2
+plan_s32_d1 plan 32 1
+plan_s32_d1.5 plan 32 1.5
+plan_s32_d2 plan 32 2
+plan_s100_d1 plan 100 1
+plan_s100_d1.5 plan 100 1.5
+plan_s100_d2 plan 100 2
+plan_s128_d1 plan 128 1
+plan_s128_d1.5 plan 128 1.5
+plan_s128_d2 plan 128 2
+plan_s500_d1 plan 500 1
+plan_s500_d1.5 plan 500 1.5
+plan_s500_d2 plan 500 2
+samp_t0_r0_d1 samp 0 0 0 1
+samp_t0_r0_d0.5 samp 0 0 0 0.5
+samp_t0_r0_d2 samp 0 0 0 2
+samp_t0_r0.3_d1 samp 0 0 0.3 1
+samp_t0_r0.3_d0.5 samp 0 0 0.3 0.5
+samp_t0_r0.3_d2 samp 0 0 0.3 2
+samp_t0_r1_d1 samp 0 0 1 1
+samp_t0_r1_d0.5 samp 0 0 1 0.5
+samp_t0_r1_d2 samp 0 0 1 2
+samp_t0_r2.5_d1 samp 0 0 2.5 1
+samp_t0_r2.5_d0.5 samp 0 0 2.5 0.5
+samp_t0_r2.5_d2 samp 0 0 2.5 2
+samp_t2_r0_d1 samp 2 0 0 1
+samp_t2_r0_d0.5 samp 2 0 0 0.5
+samp_t2_r0_d2 samp 2 0 0 2
+samp_t2_r0.3_d1 samp 2 0 0.3 1
+samp_t2_r0.3_d0.5 samp 2 0 0.3 0.5
+samp_t2_r0.3_d2 samp 2 0 0.3 2
+samp_t2_r1_d1 samp 2 0 1 1
+samp_t2_r1_d0.5 samp 2 0 1 0.5
+samp_t2_r1_d2 samp 2 0 1 2
+samp_t2_r2.5_d1 samp 2 0 2.5 1
+samp_t2_r2.5_d0.5 samp 2 0 2.5 0.5
+samp_t2_r2.5_d2 samp 2 0 2.5 2
+samp_t3_r0_d1 samp 3 0 0 1
+samp_t3_r0_d0.5 samp 3 0 0 0.5
+samp_t3_r0_d2 samp 3 0 0 2
+samp_t3_r0.3_d1 samp 3 0 0.3 1
+samp_t3_r0.3_d0.5 samp 3 0 0.3 0.5
+samp_t3_r0.3_d2 samp 3 0 0.3 2
+samp_t3_r1_d1 samp 3 0 1 1
+samp_t3_r1_d0.5 samp 3 0 1 0.5
+samp_t3_r1_d2 samp 3 0 1 2
+samp_t3_r2.5_d1 samp 3 0 2.5 1
+samp_t3_r2.5_d0.5 samp 3 0 2.5 0.5
+samp_t3_r2.5_d2 samp 3 0 2.5 2
+samp_t4_r0_d1 samp 4 0 0 1
+samp_t4_r0_d0.5 samp 4 0 0 0.5
+samp_t4_r0_d2 samp 4 0 0 2
+samp_t4_r0.3_d1 samp 4 0 0.3 1
+samp_t4_r0.3_d0.5 samp 4 0 0.3 0.5
+samp_t4_r0.3_d2 samp 4 0 0.3 2
+samp_t4_r1_d1 samp 4 0 1 1
+samp_t4_r1_d0.5 samp 4 0 1 0.5
+samp_t4_r1_d2 samp 4 0 1 2
+samp_t4_r2.5_d1 samp 4 0 2.5 1
+samp_t4_r2.5_d0.5 samp 4 0 2.5 0.5
+samp_t4_r2.5_d2 samp 4 0 2.5 2
+pen_1 pen 32 5112 32 0 32 0 32 4.5 4.5 26.2 20.7 3.5 0 0
+pen_2 pen 32 5119 40 3 30 2 29 10 10 10 10 2.5 0 0
+pen_3 pen 32 5126 32 0 32 0 32 16 16 16 16.4 4 5 7
+pen_4 pen 37 5133 37 1 36 1 36 2.25 30.5 33.1 3.9 6.5 100 200
+pen_5 pen 64 5140 64 0 64 0 64 -5 -5 70 70 9.5 0 0
+pen_6 pen 64 5147 68 5 61 5 61 12.5 40 50 12.5 0.5 -20 -30
+pen_7 pen 9 5154 12 0 9 0 9 1 1 8 8 2 0 0
+pen_8 pen 33 5161 33 0 33 0 33 0.123 32.987 31.5 0.01 7.25 0 0

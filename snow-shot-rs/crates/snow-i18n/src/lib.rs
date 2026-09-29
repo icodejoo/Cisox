@@ -2,16 +2,18 @@
 //!
 //! - [`ts`]：`.ts` 解析。
 //! - [`convert`]：转换规则与 id 命名。
-//! - [`I18n`]：运行时，按回退链查询译文。
+//! - [`I18n`]：运行时，按回退链查询译文；[`t!`] 宏为其固定形态入口。
+//! - [`extract`]：源码扫描，提取 id 引用并与 `.ftl` 对齐。
 //!
 //! 本 crate 不依赖 gpui。产品名不进翻译文案，运行时以变量 `product` 注入（约定 11）。
 
 pub mod convert;
 mod embedded;
+pub mod extract;
 mod runtime;
 pub mod ts;
 
-pub use runtime::{Args, I18n, I18nError};
+pub use runtime::{Args, I18n, I18nError, IntoArg};
 
 /// 本 crate 的阶段标记，用于骨架连通性测试。
 pub const PHASE: &str = "P1";

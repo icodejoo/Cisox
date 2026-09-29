@@ -1,17 +1,9 @@
-//! 截图历史与贴图仓储。
+//! 截图历史与贴图仓储的容器层（文件 I/O、路径校验、体积记账、两阶段删除）。
 //!
-//! 所属阶段：P3。当前为最小骨架，占位实现为可运行的降级态。
+//! 所属阶段：P3。序列化内容（`canvas_history.json`、`canvas_session.bin`）一律按不透明字节处理。
 
-/// 本 crate 的阶段标记，用于骨架连通性测试。
-pub const PHASE: &str = "P3";
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// 阶段标记不应为空。
-    #[test]
-    fn phase_not_empty() {
-        assert!(!PHASE.is_empty());
-    }
-}
+pub mod capture_history;
+pub mod fsutil;
+pub mod index;
+pub mod pinned;
+pub mod timeutil;

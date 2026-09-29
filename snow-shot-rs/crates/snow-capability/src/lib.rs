@@ -62,11 +62,13 @@ pub enum Capability {
     ScreenRecording,
     /// 选中文本抓取。
     SelectedTextGrab,
+    /// 本地崩溃转储（方案 §10 T3）。
+    CrashDump,
 }
 
 impl Capability {
     /// 全部能力项。
-    pub const ALL: [Capability; 7] = [
+    pub const ALL: [Capability; 8] = [
         Capability::ScreenCapture,
         Capability::OverlayClickThrough,
         Capability::GlobalHotkey,
@@ -74,6 +76,7 @@ impl Capability {
         Capability::ElementPicker,
         Capability::ScreenRecording,
         Capability::SelectedTextGrab,
+        Capability::CrashDump,
     ];
 
     /// 稳定的字符串标识，可用于日志与文案 key 派生。
@@ -94,6 +97,7 @@ impl Capability {
             Capability::ElementPicker => "ElementPicker",
             Capability::ScreenRecording => "ScreenRecording",
             Capability::SelectedTextGrab => "SelectedTextGrab",
+            Capability::CrashDump => "CrashDump",
         }
     }
 }
@@ -303,11 +307,11 @@ mod tests {
         assert_eq!(reg.query(Capability::Tray), s);
     }
 
-    /// ALL 覆盖 7 项且 id 唯一。
+    /// ALL 覆盖 8 项且 id 唯一。
     #[test]
     fn all_ids_unique() {
         let ids: HashSet<_> = Capability::ALL.iter().map(|c| c.id()).collect();
-        assert_eq!(ids.len(), 7);
+        assert_eq!(ids.len(), 8);
     }
 
     /// 当前平台的注册表可构造且全能力可查询。
