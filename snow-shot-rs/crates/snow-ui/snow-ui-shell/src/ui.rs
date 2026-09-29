@@ -18,9 +18,10 @@ use snow_capability::CapabilityRegistry;
 
 // ---- 精选 GPUI 子集（视图层使用）----
 pub use gpui_kit::{
-    AnyElement, App, AppContext, ClickEvent, Context, Entity, Hsla, InteractiveElement,
-    IntoElement, MouseButton, ParentElement, Pixels, Render, RenderOnce, Rgba, SharedString,
-    StatefulInteractiveElement, Styled, Window, actions, component, div, hsla, px, rgb, rgba,
+    AnyElement, App, AppContext, ClickEvent, Context, ElementId, Entity, FontWeight, Hsla,
+    InteractiveElement, IntoElement, MouseButton, ParentElement, Pixels, Render, RenderOnce, Rgba,
+    SharedString, StatefulInteractiveElement, Styled, Window, actions, component, div, hsla, px,
+    rgb, rgba,
 };
 
 /// 已打开的窗口句柄（不暴露 gpui 类型的部分见各方法）。

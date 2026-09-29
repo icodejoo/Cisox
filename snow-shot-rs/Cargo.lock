@@ -6951,6 +6951,9 @@ version = "0.1.0"
 [[package]]
 name = "snow-ui-widgets"
 version = "0.1.0"
+dependencies = [
+ "snow-ui-shell",
+]
 
 [[package]]
 name = "snow-update"

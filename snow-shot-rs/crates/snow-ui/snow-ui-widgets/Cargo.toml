@@ -7,3 +7,6 @@ rust-version.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+snow-ui-shell = { path = "../snow-ui-shell" }

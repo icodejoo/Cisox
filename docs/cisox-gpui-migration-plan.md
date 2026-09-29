@@ -225,8 +225,8 @@ UI 按钮、全局热键、托盘菜单、**MCP 的全部 tool** 全部收敛为
 | 缺口 | 用量 | 处置 |
 |---|---:|---|
 | Popconfirm | 32 | gpui-kit 的 `alert_dialog` 是居中模态，而 Ant 的是锚定内联气泡——用 `popover` + 确认按钮包一层薄封装保持原交互 |
-| Checkerboard | 低 | 截图工具特有的透明背景网格，纯自研 |
-| Segmented | 低 | 无专门组件，可用按钮组样式近似（待验证） |
+| Checkerboard | 低 | ✅ **已落地（2026-09-29）**：截图工具特有的透明背景网格，自研完成（进 `snow-ui-widgets`） |
+| Segmented | 低 | ✅ **已落地（2026-09-29）**：胶囊型分段控制器，自研完成（进 `snow-ui-widgets`），单测与 doctest 全过 |
 | Flow layout | 低 | 无换行流式容器，需在 gpui flex 上扩展 |
 | 弹层几何助手 | — | gpui-kit 的锚定定位逻辑散落在 `popup_menu` 内部，无独立可复用 API，需自建胶水 |
 

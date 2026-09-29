@@ -92,7 +92,7 @@ P0 验证基本完成，P1 地基完成，P2/P4/P5 已开工；**参考版（C++
 - **`snow-history`/`snow-config` 已知偏差**：见各自作者报告（越界配置只报 Err、`shadow_color` 只近似校验等）。
 - **滤镜**：`cargo test --workspace` 曾在编译 `lyon_algorithms`/`strum_macros` 失败，原因未查，怀疑是并发改依赖。
 - **`snow-capability` & 运行时接线（✅ 已完成，2026-09-29）**：`snow-capability` 已补入 `Capability::CrashDump` 能力项；`snow-shot/src/main.rs` 已完成存储解析、按天滚动文件日志初始化、本地崩溃转储安装与能力表加载接线，可正常编译运行。
-- **守卫与视图层矛盾**：守卫规定 gpui 只能在 `snow-ui-shell`，但 `snow-ui-widgets` 天然要用 gpui。需设计 shell 门面（re-export 精选子集）再改守卫；widgets 这一批因此**没派**。
+- **守卫与视图层矛盾（✅ 已解决，2026-09-29）**：`snow-ui-widgets` 统一依赖 `snow-ui-shell` 门面（`use snow_ui_shell::ui::*`）而非直接声明 `gpui` 依赖，既满足了视图层开发需求，又严格遵守了 `workspace-guard` 隔离守卫。已落地首批自研缺口组件 `Checkerboard`（透明棋盘底纹）与 `Segmented`（胶囊型分段选择器），单元测试与 doctests 全过，通过 clippy 0 warning 检查。
 - **ADR-8**：`result_style.bin` 与 `recognition_results.bin` 是 Qt `QDataStream` 私有二进制，导入器需最小读取器（P4 待办）。
 - **MCP** 共 101 个 tool，命令总线只覆盖 screenshot 域 28 个语义，其余约 70 个待建模。
 - **V2**：判据（稳态平均 ≥58fps 且稳态 P99 ≤ max(参考版 P99, 20ms)）是看到数据后修订的；前提是"安静环境重跑 + 参考版 P99"。长尾归因未定，需要 GPU 侧计时（PIX/ETW）才能区分上传还是调度。
