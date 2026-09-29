@@ -6921,6 +6921,7 @@ dependencies = [
  "snow-config",
  "snow-history",
  "snow-platform",
+ "snow-translate",
  "snow-ui",
  "tracing",
 ]
@@ -6928,6 +6929,11 @@ dependencies = [
 [[package]]
 name = "snow-translate"
 version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tracing",
+]
 
 [[package]]
 name = "snow-ui"

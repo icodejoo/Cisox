@@ -11,9 +11,11 @@ use snow_platform::crash::{
     CrashDumpConfig, CrashGuard, DEFAULT_MAX_REPORTS, install as install_crash_handler,
 };
 
+pub mod ocr_service;
 pub mod overlay_view;
 pub mod pinned_manager;
 pub mod pinned_view;
+pub mod stitch_service;
 
 /// 运行时启动上下文。
 pub struct AppBootstrap {

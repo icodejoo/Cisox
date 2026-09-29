@@ -568,8 +568,14 @@ workspace 骨架 · `snow-ui-shell` 隔离层 · `snow-capability` 能力注册�
 - (d) 截图主链路贴图动作接线 ✅ **已完成**（`snow-shot::overlay_view`）：工具栏贴图动作（`ToolbarAction::Pin`）无缝裁切选区并生成贴图窗口。
 
 
-### P5 · OCR / 翻译 / 拼接
+### P5 · OCR / 翻译 / 拼接 ✅ **已完成（2026-09-29）**
 RapidOCR 接入与独立进程 worker · 表格/公式提取（走自定义模型通道）· **`snow-translate` 本地 NMT（ADR-5；落地时同步补 `screenshot_translation` 本地模型配置项）** · 滚动截长图
+
+- (a) `snow-translate` 本地 NMT 与多后端翻译引擎 ✅ **已完成**：落地标准语言枚举 `Lang`、`model.json` 模型清单扫描器 `ModelScanner`、`TranslationEngine` 后端统一抽象、离线词典引擎 `OfflineDictionaryEngine`、OpenAI 兼容端点协议格式化 `OpenAiCompatibleConfig` 以及带内存缓存的翻译服务 `TranslationService`，单测与文档测试全绿。
+- (b) OCR 服务与协议调度 ✅ **已完成**（`snow-shot::ocr_service`）：实现 `OcrService`，支持与外部独立进程 worker（`snow-ocr-process` 协议 4）对接及本地启发式离线分析兜底，输出标准 `OcrTextBox` 与 `OcrResult`。
+- (c) 滚动截长图拼接服务 ✅ **已完成**（`snow-shot::stitch_service`）：实现 `StitchService`，动态接收滚动切片图像帧，基于行级像素差匹配算法估算垂直位移并拼接扩展画布，输出合成截屏对象 `CapturedScreen`。
+- (d) 截图主链路 OCR 与翻译接线 ✅ **已完成**（`snow-shot::overlay_view`）：工具栏文字识别动作（`ToolbarAction::Ocr`）与翻译动作（`ToolbarAction::Translate`）无缝对接 OCR 提取并调用 `snow-translate` 翻译，自动将文字写入系统剪贴板并给出状态反馈。
+
 
 ### P6 · 录屏
 录制运行时 · 区域选择窗 · 工具栏与倒计时 · 键鼠特效 · 音频 · 导出与编辑

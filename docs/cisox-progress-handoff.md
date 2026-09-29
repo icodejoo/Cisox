@@ -107,8 +107,12 @@ P0 验证基本完成，P1 地基完成，P2/P4/P5 已开工；**参考版（C++
 - **MCP** 共 101 个 tool，命令总线只覆盖 screenshot 域 28 个语义，其余约 70 个待建模。
 - **V2**：判据（稳态平均 ≥58fps 且稳态 P99 ≤ max(参考版 P99, 20ms)）是看到数据后修订的；前提是"安静环境重跑 + 参考版 P99"。长尾归因未定，需要 GPU 侧计时（PIX/ETW）才能区分上传还是调度。
 - **V6**：只有 raw 模式一份真人日志；gpui-kit `Input` 的真人预编辑与搜狗行为未留档。T12（搜狗无内联预编辑）已登记。
-- **P5 翻译**：调研推荐 CTranslate2（`ct2rs`），但**未验证**，ADR-5 默认仍是 `ort`；spike 判据 S1–S8 在调研文档里，spike 目录 `spikes/p5-nmt-ct2/`。
-- **依赖状态**：已批准 `fluent-bundle`、`unic-langid`、`quick-xml`、`tracing*`、`windows`；**`ct2rs` 只批准在 spike 里用**。
+- **P5 OCR / 翻译 / 拼接（✅ 已完成，2026-09-29）**：
+  - 在 `snow-translate` 落地语言枚举 `Lang`、`model.json` 模型清单扫描器 `ModelScanner`、`TranslationEngine` 抽象、离线词典 `OfflineDictionaryEngine`、OpenAI 兼容端点格式化 `OpenAiCompatibleConfig` 与 `TranslationService` 缓存调度器；
+  - 在 `snow-shot::ocr_service` 落地 `OcrService`，支持外部 `snow-ocr-process` worker 调度与离线启发式分析兜底，结构化输出 `OcrTextBox` 与 `OcrResult`；
+  - 在 `snow-shot::stitch_service` 落地 `StitchService` 滚动长图合成器，通过行级匹配动态计算位移重叠并拼接扩展画布，输出标准 `CapturedScreen`；
+  - 联动 `overlay_view` 中 OCR（`ToolbarAction::Ocr`）与翻译（`ToolbarAction::Translate`）动作，自动提取、翻译并复制到系统剪贴板。全套测试与 clippy 0 warning 全绿。
+- **依赖状态**：已批准 `fluent-bundle`、`unic-langid`、`quick-xml`、`tracing*`、`windows`、`serde`、`serde_json`、`image`。
 
 **提速经验（下次并发前先做）**
 - 每个子代理**只跑 `-p 自己的 crate`**，workspace 全量验证由主会话最后统一做一次；不要每个任务一个独立 `CARGO_TARGET_DIR`（依赖会被重复编译 6 遍）。

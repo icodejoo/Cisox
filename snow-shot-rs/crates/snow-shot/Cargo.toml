@@ -14,6 +14,7 @@ snow-capability = { path = "../snow-capability" }
 snow-config = { path = "../snow-config" }
 snow-history = { path = "../snow-history" }
 snow-platform = { path = "../snow-platform" }
+snow-translate = { path = "../snow-translate" }
 snow-ui = { path = "../snow-ui" }
 image = { version = "0.25", default-features = false, features = ["png"] }
 serde = { version = "1", features = ["derive"] }

@@ -270,10 +270,42 @@ impl ScreenshotOverlayView {
                 window.remove_window();
             }
             ToolbarAction::Ocr => {
-                self.status_message = Some("OCR 识别请求已排队".into());
+                let crop_opt = self.current_selection().and_then(|rect| {
+                    self.captured_screen
+                        .crop(rect.x, rect.y, rect.width as u32, rect.height as u32)
+                });
+                if let Some(sub) = crop_opt {
+                    let rgba = sub.to_rgba();
+                    let ocr = crate::ocr_service::OcrService::new(None, None);
+                    if let Ok(res) = ocr.recognize_rgba(sub.width, sub.height, &rgba) {
+                        let _ = copy_text_to_clipboard(&res.full_text);
+                        self.status_message = Some(format!("OCR 文本已复制: {}", res.full_text));
+                    }
+                }
+                window.remove_window();
             }
             ToolbarAction::Translate => {
-                self.status_message = Some("翻译请求已排队".into());
+                let crop_opt = self.current_selection().and_then(|rect| {
+                    self.captured_screen
+                        .crop(rect.x, rect.y, rect.width as u32, rect.height as u32)
+                });
+                if let Some(sub) = crop_opt {
+                    let rgba = sub.to_rgba();
+                    let ocr = crate::ocr_service::OcrService::new(None, None);
+                    if let Ok(res) = ocr.recognize_rgba(sub.width, sub.height, &rgba) {
+                        let temp_models = std::env::temp_dir().join("snow_models");
+                        let mut tr = snow_translate::TranslationService::new(&temp_models);
+                        if let Ok(translated) = tr.translate(
+                            &res.full_text,
+                            snow_translate::Lang::Auto,
+                            snow_translate::Lang::ZhHans,
+                        ) {
+                            let _ = copy_text_to_clipboard(&translated);
+                            self.status_message = Some(format!("翻译结果已复制: {}", translated));
+                        }
+                    }
+                }
+                window.remove_window();
             }
             ToolbarAction::Undo => {
                 self.status_message = Some("撤销".into());
@@ -532,5 +564,27 @@ mod tests {
         let rect = sel.unwrap();
         let sub = view.captured_screen.crop(rect.x, rect.y, rect.width as u32, rect.height as u32);
         assert!(sub.is_some());
+    }
+
+    /// 验证 OCR 与翻译动作链路数据处理。
+    #[test]
+    fn test_overlay_ocr_and_translate_action() {
+        let screen = CapturedScreen::new_solid(200, 100, (255, 255, 255, 255));
+        let mut view = ScreenshotOverlayView::new(screen);
+        view.handle_mouse_down(PhysicalPoint::new(0, 0));
+        view.handle_mouse_move(PhysicalPoint::new(100, 50));
+        view.handle_mouse_up(PhysicalPoint::new(100, 50));
+
+        let sel = view.current_selection().unwrap();
+        let sub = view.captured_screen.crop(sel.x, sel.y, sel.width as u32, sel.height as u32).unwrap();
+        let rgba = sub.to_rgba();
+        let ocr = crate::ocr_service::OcrService::new(None, None);
+        let res = ocr.recognize_rgba(sub.width, sub.height, &rgba).unwrap();
+        assert!(!res.full_text.is_empty());
+
+        let temp_dir = std::env::temp_dir().join("snow_trans_overlay_test");
+        let mut tr = snow_translate::TranslationService::new(&temp_dir);
+        let trans = tr.translate("hello", snow_translate::Lang::En, snow_translate::Lang::ZhHans).unwrap();
+        assert_eq!(trans, "你好");
     }
 }
