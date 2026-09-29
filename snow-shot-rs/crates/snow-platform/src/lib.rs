@@ -5,6 +5,8 @@
 pub mod capture;
 pub mod clipboard;
 pub mod crash;
+pub mod single_instance;
+pub mod tray;
 
 /// 本 crate 的阶段标记，用于骨架连通性测试。
 pub const PHASE: &str = "P1";

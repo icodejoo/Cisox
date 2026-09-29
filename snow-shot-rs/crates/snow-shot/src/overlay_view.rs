@@ -327,8 +327,10 @@ impl ScreenshotOverlayView {
     /// 基于当前选区创建屏幕录制区域视图。
     pub fn start_recording_from_selection(&self) -> Option<crate::recording::RecordingAreaView> {
         self.current_selection().map(|rect| {
-            let mut config = crate::recording::RecordingConfig::default();
-            config.region = rect;
+            let config = crate::recording::RecordingConfig {
+                region: rect,
+                ..Default::default()
+            };
             crate::recording::RecordingAreaView::new(config)
         })
     }

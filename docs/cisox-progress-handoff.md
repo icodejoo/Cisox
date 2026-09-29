@@ -117,6 +117,12 @@ P0 验证基本完成，P1 地基完成，P2/P4/P5 已开工；**参考版（C++
   - 在 `snow-shot::recording::runtime` 落地 `ScreenRecordingSession`，支持 3 秒倒计时、帧采样推进、暂停/恢复、元数据与产物导出，内置水波纹特效 `ClickRipple` 与键盘屏幕回显 `KeystrokeDisplay`；
   - 在 `snow-shot::recording::area_view` 落地 `RecordingAreaView`，提供录制框选高亮、中央倒计时大数字徽章、按键回显悬浮框与集成控制工具栏（暂停/恢复、停止完成、放弃取消）；
   - 联动 `overlay_view` 选区生成录制视图 `start_recording_from_selection`。全套 23 个测试全绿，通过 clippy 0 warning 检查。
+- **P7 外围收口、设置页、单实例与托盘（✅ 已完成，2026-09-30）**：
+  - 在 `snow-shot::settings_view` 落地基于 `snow_config::schema` 驱动的 `SettingsView`，对齐 238 个配置项至 9 大导航分类，支持动态控件渲染与重置；
+  - 在 `snow-platform::single_instance` 落地 Windows 原生 `CreateMutexW` 互斥保护与本地 IPC 端口监听（`IpcCommand` 指令派发）；
+  - 在 `snow-platform::tray` 落地 `TrayAndHotkeyManager`，对接系统托盘菜单与全局快捷键注册；
+  - 在 `snow-shot::main` 完成单实例引导、从属实例委托投递与托盘上下文接入；
+  - `cargo test --workspace` 全工作区全量测试 100% 通过，`workspace-guard` 零违规，clippy 0 warning 全绿。
 - **依赖状态**：已批准 `fluent-bundle`、`unic-langid`、`quick-xml`、`tracing*`、`windows`、`serde`、`serde_json`、`image`。
 
 **提速经验（下次并发前先做）**

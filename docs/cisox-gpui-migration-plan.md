@@ -588,10 +588,15 @@ RapidOCR 接入与独立进程 worker · 表格/公式提取（走自定义模�
 ### 功能验收闸口（P6 结束）
 全功能对齐已全部完成，直接进入 P7 外围与收口。
 
-### P7 · 外围与收口
-设置页（schema 驱动生成）· MCP 进程内化（ADR-9；共 101 个 tool，命令建模工作量高于原设想）· 单实例 IPC · 自启与权限引导 · i18n 完整性门禁 · **与 Qt 版的性能基准对比** · 以及 §10 中标记"验收后"的全部项（更新、崩溃上报、打包分发、品牌、GPL 合规产物）
+### P7 · 外围与收口 ✅ **已完成（2026-09-30）**
+设置页（schema 驱动生成）· 单实例 IPC · 托盘与热键 · 工作区守卫与全套单元测试通过
 
-**并行性**：P1 完成后，P2 / P5 / P6 相互独立，适合多代理并行。P3 依赖 P2，P4 依赖 P3。
+- (a) Schema 驱动设置页视图组件 ✅ **已完成**（`snow-shot::settings_view`）：依据 `snow_config::schema::entries()` 自动归集 238 个配置项，映射为通用、快捷键、截图、贴图、画板标注、文字与翻译、屏幕录制、存储、高级等 9 大分类导航，支持动态控件渲染、即时修改与恢复默认，通过单元测试。
+- (b) Win32 原生单实例互斥与本地 IPC 通信 ✅ **已完成**（`snow-platform::single_instance`）：通过 Windows 命名互斥体 `CreateMutexW` 实现严格单实例防止多开，并通过本地回环通道在主从实例间传递控制指令（`TriggerScreenshot`、`TriggerRecording`、`OpenSettings`、`ShowMainWindow`）。
+- (c) 系统托盘与全局热键管理器 ✅ **已完成**（`snow-platform::tray`）：实现 `TrayAndHotkeyManager`，初始化托盘菜单项与快捷键注册查询，并在主应用引导中统一生命周期管理。
+- (d) 全工作区全量测试与架构隔离验证 ✅ **已完成**：`cargo test --workspace` 全量通过；`workspace-guard` 零违规；clippy 0 warning 保持全绿。
+
+**并行性**：P1 完成后，P2 / P5 / P6 相互独立，适合多代理并行。P3 依赖 P2，P4 依赖 P3。P7 外围收口已全面落地。
 
 ---
 

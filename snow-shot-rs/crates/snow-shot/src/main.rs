@@ -11,11 +11,17 @@ use snow_platform::crash::{
     CrashDumpConfig, CrashGuard, DEFAULT_MAX_REPORTS, install as install_crash_handler,
 };
 
+use snow_platform::single_instance::{
+    IpcCommand, SingleInstanceGuard, SingleInstanceManager, SingleInstanceStatus,
+};
+use snow_platform::tray::TrayAndHotkeyManager;
+
 pub mod ocr_service;
 pub mod overlay_view;
 pub mod pinned_manager;
 pub mod pinned_view;
 pub mod recording;
+pub mod settings_view;
 pub mod stitch_service;
 
 /// 运行时启动上下文。
@@ -30,6 +36,10 @@ pub struct AppBootstrap {
     pub crash_guard: Option<CrashGuard>,
     /// 当前平台能力表。
     pub capabilities: CapabilityRegistry,
+    /// 单实例独占守卫。
+    pub single_instance: Option<SingleInstanceGuard>,
+    /// 托盘与快捷键管理器。
+    pub tray: TrayAndHotkeyManager,
 }
 
 /// 执行应用基础运行时引导。
@@ -79,11 +89,28 @@ pub fn bootstrap(exe_dir: Option<&Path>) -> AppBootstrap {
     let crash_guard = install_crash_handler(crash_config).ok();
     let capabilities = CapabilityRegistry::for_current_platform();
 
+    let single_instance = match SingleInstanceManager::acquire("cisox.snow_shot.single_instance") {
+        SingleInstanceStatus::Primary(guard) => {
+            let _ = SingleInstanceManager::start_listener(&guard, 49210, |cmd| {
+                tracing::info!(command = ?cmd, "received IPC command from secondary instance");
+            });
+            Some(guard)
+        }
+        SingleInstanceStatus::Secondary => {
+            tracing::warn!("secondary instance detected, delegating to primary");
+            let _ = SingleInstanceManager::send_command_to_primary(49210, &IpcCommand::ShowMainWindow);
+            None
+        }
+    };
+
+    let tray = TrayAndHotkeyManager::new();
+
     tracing::info!(
         app = PRODUCT_NAME,
         version = env!("CARGO_PKG_VERSION"),
         data_root = %data_root.display(),
         storage_mode = ?storage.mode,
+        is_primary = single_instance.is_some(),
         "runtime bootstrap completed"
     );
 
@@ -93,6 +120,8 @@ pub fn bootstrap(exe_dir: Option<&Path>) -> AppBootstrap {
         log_guard,
         crash_guard,
         capabilities,
+        single_instance,
+        tray,
     }
 }
 
