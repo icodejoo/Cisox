@@ -18,7 +18,7 @@ use snow_capability::CapabilityRegistry;
 
 // ---- 精选 GPUI 子集（视图层使用）----
 pub use gpui_kit::{
-    AnyElement, App, AppContext, Bounds, ClickEvent, Context, CursorStyle, ElementId,
+    Anchor, AnyElement, App, AppContext, Bounds, ClickEvent, Context, CursorStyle, ElementId,
     ElementInputHandler, Entity, EntityInputHandler, FocusHandle, Focusable, FontWeight, Hsla,
     InteractiveElement, IntoElement, MouseButton, ParentElement, Pixels, Point, Render, RenderOnce,
     Rgba, SharedString, Size, StatefulInteractiveElement, Styled, TextAlign, TextRun,

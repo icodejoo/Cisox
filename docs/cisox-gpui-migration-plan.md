@@ -223,8 +223,7 @@ UI 按钮、全局热键、托盘菜单、**MCP 的全部 tool** 全部收敛为
 **必须自研的缺口**（进 `snow-ui-widgets`，按使用量排序）：
 
 | 缺口 | 用量 | 处置 |
-|---|---:|---|
-| Popconfirm | 32 | gpui-kit 的 `alert_dialog` 是居中模态，而 Ant 的是锚定内联气泡——用 `popover` + 确认按钮包一层薄封装保持原交互 |
+| Popconfirm | 32 | ✅ **已落地（2026-09-29）**：锚定内联气泡确认框（基于 `popover` + 提示图标/确认/取消按钮薄封装，进 `snow-ui-widgets`），单测与 doctest 全过 |
 | Checkerboard | 低 | ✅ **已落地（2026-09-29）**：截图工具特有的透明背景网格，自研完成（进 `snow-ui-widgets`） |
 | Segmented | 低 | ✅ **已落地（2026-09-29）**：胶囊型分段控制器，自研完成（进 `snow-ui-widgets`），单测与 doctest 全过 |
 | Flow layout | 低 | 无换行流式容器，需在 gpui flex 上扩展 |
@@ -669,7 +668,7 @@ RapidOCR 接入与独立进程 worker · 表格/公式提取（走自定义模�
 | ColorPicker | 79 | `color_picker.rs` | ✅ 直接对应（原风险项解除） |
 | MessageService / Message | 36 | `notification.rs` | ⚠️ 命名陷阱：gpui-kit 的 `message.rs` 是聊天气泡，不是 toast |
 | LineEdit | 35 | `input/input.rs` | 直接对应 |
-| **Popconfirm** | **32** | `dialog/alert_dialog.rs` | ❌ **缺口**：对方是居中模态，非锚定气泡 |
+| **Popconfirm** | **32** | `snow-ui-widgets::Popconfirm` | ✅ **已自研补齐（2026-09-29）**：基于 `popover` + 提示/确认/取消按钮薄封装 |
 | Popover | 31 | `popover.rs` | 直接对应 |
 | RadioButtonGroup | 29 | `radio.rs` | 直接对应 |
 | InputNumber | 25 | `input/number_input.rs` | 直接对应 |

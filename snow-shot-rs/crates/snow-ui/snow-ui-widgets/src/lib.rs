@@ -4,10 +4,14 @@
 //! 严格隔离外部直接依赖 `gpui`。
 
 mod checkerboard;
+mod popconfirm;
 mod segmented;
 
 pub use checkerboard::{
     Checkerboard, DEFAULT_CELL_SIZE, DEFAULT_DARK_COLOR, DEFAULT_LIGHT_COLOR,
+};
+pub use popconfirm::{
+    Popconfirm, PopconfirmHandler, PopconfirmPlacement,
 };
 pub use segmented::{
     DEFAULT_ACTIVE_BG_COLOR, DEFAULT_ACTIVE_TEXT_COLOR, DEFAULT_BG_COLOR,
@@ -26,5 +30,18 @@ mod tests {
     #[test]
     fn phase_not_empty() {
         assert!(!PHASE.is_empty());
+    }
+
+    /// 测试 Popconfirm 构造与属性设置。
+    #[test]
+    fn popconfirm_builder() {
+        let p = Popconfirm::new("test-pop", "确认删除？")
+            .description("删除后无法恢复")
+            .ok_text("删吧")
+            .cancel_text("点错了")
+            .ok_danger(true)
+            .placement(PopconfirmPlacement::BottomLeft);
+
+        assert_eq!(p.title(), "确认删除？");
     }
 }
