@@ -551,6 +551,10 @@ workspace 骨架 · `snow-ui-shell` 隔离层 · `snow-capability` 能力注册�
 ### P3 · 截图主链路
 覆盖窗 · 选区交互与几何 · 放大镜 / 取色器 · 智能元素选区（接 `snow-ui-selector`）· 工具栏与浮动工具面板 · 导出 / 剪贴板 / 保存 / PDF · 历史记录
 
+**进度（2026-09-29）**：
+- (a) `snow-ui` 聚合器 ✅ **已完成**：聚合 `snow-ui-shell`（外壳与 GPUI 隔离门面）、`snow-ui-theme`（色彩计算与 Ant Design 令牌）、`snow-ui-icons`（829 个规范化矢量图标系统）与 `snow-ui-widgets`（Checkerboard、Segmented、Popconfirm 等补齐组件），并通过 `workspace-guard` 守卫与 clippy 检查。
+
+
 ### P4 · 贴图
 浮动窗口 · 分组管理 · 持久化（接 ADR-8）· 贴图上的二次标注
 

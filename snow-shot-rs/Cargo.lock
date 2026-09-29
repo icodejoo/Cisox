@@ -6927,6 +6927,12 @@ version = "0.1.0"
 [[package]]
 name = "snow-ui"
 version = "0.1.0"
+dependencies = [
+ "snow-ui-icons",
+ "snow-ui-shell",
+ "snow-ui-theme",
+ "snow-ui-widgets",
+]
 
 [[package]]
 name = "snow-ui-icons"
