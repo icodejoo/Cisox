@@ -323,6 +323,15 @@ impl ScreenshotOverlayView {
         let _ = copy_text_to_clipboard(&color_str);
         self.status_message = Some(format!("已复制色彩: {}", color_str));
     }
+
+    /// 基于当前选区创建屏幕录制区域视图。
+    pub fn start_recording_from_selection(&self) -> Option<crate::recording::RecordingAreaView> {
+        self.current_selection().map(|rect| {
+            let mut config = crate::recording::RecordingConfig::default();
+            config.region = rect;
+            crate::recording::RecordingAreaView::new(config)
+        })
+    }
 }
 
 impl Render for ScreenshotOverlayView {
@@ -586,5 +595,22 @@ mod tests {
         let mut tr = snow_translate::TranslationService::new(&temp_dir);
         let trans = tr.translate("hello", snow_translate::Lang::En, snow_translate::Lang::ZhHans).unwrap();
         assert_eq!(trans, "你好");
+    }
+
+    /// 验证从选区启动录制区域视图流程。
+    #[test]
+    fn test_overlay_start_recording() {
+        let screen = CapturedScreen::new_solid(400, 300, (0, 0, 0, 255));
+        let mut view = ScreenshotOverlayView::new(screen);
+        assert!(view.start_recording_from_selection().is_none());
+
+        view.handle_mouse_down(PhysicalPoint::new(50, 50));
+        view.handle_mouse_move(PhysicalPoint::new(250, 200));
+        view.handle_mouse_up(PhysicalPoint::new(250, 200));
+
+        let rec_view = view.start_recording_from_selection();
+        assert!(rec_view.is_some());
+        let rec = rec_view.unwrap();
+        assert_eq!(rec.bounds(), PhysicalRect::new(50, 50, 201, 151));
     }
 }

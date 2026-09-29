@@ -112,6 +112,11 @@ P0 验证基本完成，P1 地基完成，P2/P4/P5 已开工；**参考版（C++
   - 在 `snow-shot::ocr_service` 落地 `OcrService`，支持外部 `snow-ocr-process` worker 调度与离线启发式分析兜底，结构化输出 `OcrTextBox` 与 `OcrResult`；
   - 在 `snow-shot::stitch_service` 落地 `StitchService` 滚动长图合成器，通过行级匹配动态计算位移重叠并拼接扩展画布，输出标准 `CapturedScreen`；
   - 联动 `overlay_view` 中 OCR（`ToolbarAction::Ocr`）与翻译（`ToolbarAction::Translate`）动作，自动提取、翻译并复制到系统剪贴板。全套测试与 clippy 0 warning 全绿。
+- **P6 屏幕录制（✅ 已完成，2026-09-29）**：
+  - 在 `snow-shot::recording::model` 落地 `RecordingFormat`（MP4、GIF、WebM）、`RecordingConfig` 与 `RecordingState` 状态机；
+  - 在 `snow-shot::recording::runtime` 落地 `ScreenRecordingSession`，支持 3 秒倒计时、帧采样推进、暂停/恢复、元数据与产物导出，内置水波纹特效 `ClickRipple` 与键盘屏幕回显 `KeystrokeDisplay`；
+  - 在 `snow-shot::recording::area_view` 落地 `RecordingAreaView`，提供录制框选高亮、中央倒计时大数字徽章、按键回显悬浮框与集成控制工具栏（暂停/恢复、停止完成、放弃取消）；
+  - 联动 `overlay_view` 选区生成录制视图 `start_recording_from_selection`。全套 23 个测试全绿，通过 clippy 0 warning 检查。
 - **依赖状态**：已批准 `fluent-bundle`、`unic-langid`、`quick-xml`、`tracing*`、`windows`、`serde`、`serde_json`、`image`。
 
 **提速经验（下次并发前先做）**

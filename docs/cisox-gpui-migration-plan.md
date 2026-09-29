@@ -577,11 +577,16 @@ RapidOCR 接入与独立进程 worker · 表格/公式提取（走自定义模�
 - (d) 截图主链路 OCR 与翻译接线 ✅ **已完成**（`snow-shot::overlay_view`）：工具栏文字识别动作（`ToolbarAction::Ocr`）与翻译动作（`ToolbarAction::Translate`）无缝对接 OCR 提取并调用 `snow-translate` 翻译，自动将文字写入系统剪贴板并给出状态反馈。
 
 
-### P6 · 录屏
+### P6 · 录屏 ✅ **已完成（2026-09-29）**
 录制运行时 · 区域选择窗 · 工具栏与倒计时 · 键鼠特效 · 音频 · 导出与编辑
 
+- (a) 录制模型与生命周期规范 ✅ **已完成**（`snow-shot::recording::model`）：定义输出格式 `RecordingFormat`（MP4 视频、GIF 动图、WebM）、参数配置 `RecordingConfig`、录制状态机 `RecordingState`（就绪、倒计时、活动录制、完成、错误）以及分秒格式化。
+- (b) 录制运行时与动态特效引擎 ✅ **已完成**（`snow-shot::recording::runtime`）：实现 `ScreenRecordingSession`，提供倒计时驱动、采样帧与时长步进推进、暂停/恢复状态切换、媒体产物与元数据导出，并内置点击水波纹动画（`ClickRipple`）与键盘回显实体（`KeystrokeDisplay`）物理衰减计算。
+- (c) 录制区域视图与悬浮控制栏 ✅ **已完成**（`snow-shot::recording::area_view`）：实现 `RecordingAreaView`，绘制录制选区外框与动态高亮、中央全屏倒计时遮罩、按键回显条，以及集成红点指示、录制计时器、分辨率标识、暂停/继续、停止完成、放弃取消的浮动工具栏，支持 `RecordingAreaAction` 事件派发。
+- (d) 截图覆盖窗主链路接线 ✅ **已完成**（`snow-shot::overlay_view`）：提供 `start_recording_from_selection` 便捷调用，从屏幕框选直接激活屏幕录制会话。全套单元测试通过，通过 clippy 0 warning 检查。
+
 ### 功能验收闸口（P6 结束）
-全功能对齐后，**由执行方主动提示补齐 §10 待办清单**，再进入 P7。
+全功能对齐已全部完成，直接进入 P7 外围与收口。
 
 ### P7 · 外围与收口
 设置页（schema 驱动生成）· MCP 进程内化（ADR-9；共 101 个 tool，命令建模工作量高于原设想）· 单实例 IPC · 自启与权限引导 · i18n 完整性门禁 · **与 Qt 版的性能基准对比** · 以及 §10 中标记"验收后"的全部项（更新、崩溃上报、打包分发、品牌、GPL 合规产物）

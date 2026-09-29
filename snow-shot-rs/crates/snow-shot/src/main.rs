@@ -15,6 +15,7 @@ pub mod ocr_service;
 pub mod overlay_view;
 pub mod pinned_manager;
 pub mod pinned_view;
+pub mod recording;
 pub mod stitch_service;
 
 /// 运行时启动上下文。
