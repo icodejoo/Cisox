@@ -389,7 +389,6 @@ fn capture_loop<C: CaptureSource>(mut source: C, tx: Sender<CaptureMsg<C::Frame>
 
 /// 编码线程主循环：送帧、取包、收尾。
 fn encode_loop<E: VideoEncoder>(mut encoder: E, rx: Receiver<EncodeMsg<E::Surface>>) -> Result<EncoderStats, String> {
-    raise_thread_priority();
     let mut failure: Option<String> = None;
     while let Ok(msg) = rx.recv() {
         match msg {
@@ -483,7 +482,6 @@ where
     P: FrameComposer<Frame = C::Frame, Surface = S>,
     S: Send + 'static,
 {
-    raise_thread_priority();
     let mut report = PipelineReport::default();
     let mut paused = false;
     let mut stop_at: Option<Instant> = None;

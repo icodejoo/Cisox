@@ -129,6 +129,11 @@ impl CaptureSource for SyntheticCapture {
             return Ok(None);
         };
         copy_into_slot(&self.device, &self.context4, &slot, &self.content[variant], &self.crop)?;
+        {
+            let _lock = self.device.lock();
+            // SAFETY: 持有设备锁。
+            unsafe { self.device.context().Flush() };
+        }
         self.stats.frames += 1;
         let cursor = self.with_cursor.then(|| {
             // 光标按序号在画面里来回扫（含越过边缘的位置，覆盖裁剪路径）

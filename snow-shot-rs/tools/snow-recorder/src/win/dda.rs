@@ -134,6 +134,18 @@ pub(crate) fn create_slot(a: &SharedDevice, b: &SharedDevice, size: (u32, u32)) 
     Ok(SharedSlot { tex_a, tex_b, fence_a, fence_b, value: AtomicU64::new(0) })
 }
 
+/// GPU 线程优先级（-7..=7）：合成/编码设备调到最低，让 DWM 合成与桌面复制优先拿到 GPU 时间，
+/// 否则 VideoProcessor/编码占着引擎时，`AcquireNextFrame` 会被拖长十几毫秒而漏掉呈现。
+const COMPOSE_GPU_PRIORITY: i32 = -7;
+
+/// 把设备的 GPU 线程优先级设为 [`COMPOSE_GPU_PRIORITY`]；失败忽略（只是少一层保护）。
+fn lower_gpu_priority(device: &SharedDevice) {
+    if let Ok(dxgi) = device.device().cast::<windows::Win32::Graphics::Dxgi::IDXGIDevice>() {
+        // SAFETY: 只设置设备的调度优先级。
+        let _ = unsafe { dxgi.SetGPUThreadPriority(COMPOSE_GPU_PRIORITY) };
+    }
+}
+
 /// 选区是否完整落在显示器范围内。
 fn contains(monitor: (i32, i32, i32, i32), region: (i32, i32, u32, u32)) -> bool {
     let (l, t, r, b) = monitor;
@@ -224,6 +236,7 @@ impl DdaCapture {
                     compose: SharedDevice::create(&base).map_err(|e| format!("创建合成设备失败: {e:#}"))?,
                 };
                 let output1: IDXGIOutput1 = output.cast().map_err(|e| format!("显示器不支持桌面复制: {e}"))?;
+                lower_gpu_priority(&pair.compose);
                 let capture = Self::build(pair.capture, &pair.compose, output1, region, (rect.left, rect.top), anchor)?;
                 return Ok((capture, pair.compose));
             }
@@ -282,13 +295,20 @@ impl DdaCapture {
         Some(cursor)
     }
 
+    /// 把设备 A 上已记录的命令提交给 GPU。
+    fn flush(&self) {
+        let _lock = self.device.lock();
+        // SAFETY: 持有设备锁；Flush 只提交已记录的命令。
+        unsafe { self.device.context().Flush() };
+    }
+
     /// 在设备 A 上把桌面选区复制进共享槽。
     fn copy_into(&self, slot: &SharedSlot, source: &ID3D11Texture2D) -> Result<(), CaptureFault> {
         copy_into_slot(&self.device, &self.context4, slot, source, &self.crop)
     }
 }
 
-/// 在设备 A 上把 `source` 的 `crop` 区域复制进共享槽（栅栏排序：先等 B 读完上次内容，复制后 Signal 并 Flush）。
+/// 在设备 A 上把 `source` 的 `crop` 区域复制进共享槽（栅栏排序：先等 B 读完上次内容，复制后 Signal；调用方负责随后 Flush）。
 ///
 /// # 参数
 /// - `device`：采集设备 A。
@@ -313,7 +333,6 @@ pub(crate) fn copy_into_slot(
         }
         context4.CopySubresourceRegion(&slot.tex_a, 0, 0, 0, 0, source, 0, Some(crop));
         context4.Signal(&slot.fence_a, last + 1).map_err(|e| fail("栅栏 Signal 失败", e))?;
-        device.context().Flush();
     }
     slot.set_value(last + 1);
     Ok(())
@@ -374,9 +393,9 @@ impl CaptureSource for DdaCapture {
         if !want {
             return Ok(None);
         }
-        let cursor = self.sample_cursor();
         if info.LastPresentTime == 0 {
             drop(guard);
+            let cursor = self.sample_cursor();
             // 只有光标移动：沿用上一张桌面图
             return Ok(self.latest.as_ref().map(|f| Captured { cursor, captured_at, fresh: false, ..f.clone() }));
         }
@@ -398,7 +417,10 @@ impl CaptureSource for DdaCapture {
         if self.copy_ms.len() < DIAG_LIMIT {
             self.copy_ms.push(copy_started.elapsed().as_secs_f32() * 1000.0);
         }
+        // 复制一记录完就立刻释放桌面帧（持有越久，下一次呈现越容易被 DXGI 合并），光标采样与 Flush 都放到释放之后
         drop(guard);
+        self.flush();
+        let cursor = self.sample_cursor();
         let present = match self.anchor {
             Some(a) => a.to_instant(info.LastPresentTime),
             None => captured_at,

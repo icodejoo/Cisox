@@ -4,6 +4,8 @@
 pub const ENV_PREFER_HARDWARE: &str = "SNOW_RECORDER_HARDWARE";
 /// 环境变量：QSV async_depth（1..=8，仅自建硬件流水线）。
 pub const ENV_QSV_ASYNC_DEPTH: &str = "SNOW_RECORDER_QSV_ASYNC_DEPTH";
+/// 环境变量：硬编质量参数（global_quality/qp，仅自建硬件流水线）。
+pub const ENV_QSV_QUALITY: &str = "SNOW_RECORDER_QSV_QUALITY";
 /// 环境变量：QSV 预设（仅自建硬件流水线）。
 pub const ENV_QSV_PRESET: &str = "SNOW_RECORDER_QSV_PRESET";
 /// 环境变量：输出尺寸上限，形如 `1920x1080`（长边x短边，按选区方向取向）；`none` 表示不限。

@@ -184,6 +184,9 @@ fn windows_spec(request: &StartRequest, partial: &std::path::Path) -> Result<cra
     if let Some(d) = std::env::var(settings::ENV_QSV_ASYNC_DEPTH).ok().and_then(|v| v.parse::<u32>().ok()).filter(|d| (1..=8).contains(d)) {
         spec.async_depth = d;
     }
+    if let Some(q) = std::env::var(settings::ENV_QSV_QUALITY).ok().and_then(|v| v.parse::<u32>().ok()).filter(|q| (1..=51).contains(q)) {
+        spec.quality = q;
+    }
     if let Ok(p) = std::env::var(settings::ENV_QSV_PRESET) {
         spec.preset = p;
     }
