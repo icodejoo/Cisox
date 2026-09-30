@@ -31,16 +31,30 @@ snow-cursor = { path = "../../../snow-crates/crates/snow-cursor" }
 snow-d3d11 = { path = "../../../snow-crates/crates/snow-d3d11" }
 # FFmpeg 绑定：与 snow-crates 工作区同版本同特性（阶段 E2 获批直接依赖）
 ffmpeg-next = { version = "9.0.0", default-features = false, features = ["codec", "format"] }
+# windows 自带的 COM 宏（implement）要求直接依赖同版本 windows-core；它已在依赖树内，不是新 crate。
+windows-core = "0.62.2"
 windows = { version = "0.62.2", features = [
     "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_WinRT",
+    "Win32_System_WinRT_Direct3D11",
+    "Win32_System_WinRT_Graphics_Capture",
+    "Graphics_Capture",
+    "Graphics_DirectX_Direct3D11",
+    "Foundation",
     "Win32_Graphics_Direct3D",
     "Win32_Graphics_Direct3D11",
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
     "Win32_Media",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
     "Win32_Security",
+    "Win32_System_Ole",
     "Win32_System_Performance",
     "Win32_System_Threading",
+    "Win32_System_Variant",
+    "Win32_UI_HiDpi",
 ] }
 
 [features]

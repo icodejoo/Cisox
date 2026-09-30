@@ -149,6 +149,7 @@ fn exit_idle() -> ! {
 
 /// 进程入口：命令循环。
 fn main() {
+    os::enable_dpi_awareness();
     let (tx, rx) = mpsc::channel::<Option<String>>();
     std::thread::spawn(move || {
         let stdin = std::io::stdin();

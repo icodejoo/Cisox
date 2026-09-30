@@ -1,9 +1,10 @@
 ﻿# 帧率实测驱动：在非主屏上拉起夹具 -> 用行协议驱动 snow-recorder 录制 -> 分析成品。
-# 安全约束：夹具自身只在非主屏（Primary=false 且 bounds 符合预期）创建窗口；本脚本先用 --check 校验目标显示器坐标，不符即中止；
-#           录制区域必须落在该副屏内；结束后确认夹具/录制进程均已退出。
+# 安全约束：夹具默认只在非主屏创建窗口，单屏机器须显式传 -AllowPrimary 才占主屏；本脚本先用 --check 读取目标显示器真实 bounds，
+#           主屏且未传开关即中止；录制区域必须落在该显示器内；结束后确认夹具/录制进程均已退出。
 # 用法示例:
 #   scripts/run-fps-test.ps1 -Size 2560x1440 -Fps 60 -Seconds 6
 #   scripts/run-fps-test.ps1 -Size 1280x720  -Fps 30 -Seconds 6 -Format mp4
+#   scripts/run-fps-test.ps1 -Size 1920x1080 -AllowPrimary   # 单屏机器：显式允许占用主屏
 # 可用环境变量透传给录制进程: SNOW_RECORDER_CONV_THREADS / _ASYNC / _PRESET / _HARDWARE
 param(
     [string]$Size = "2560x1440",
@@ -18,6 +19,7 @@ param(
     [string]$FixtureExe = "",
     [string]$FfmpegDir = "C:\ProgramData\chocolatey\bin",
     [switch]$Diag,
+    [switch]$AllowPrimary,
     [ValidateSet(0, 1)][int]$Cursor = 1
 )
 $ErrorActionPreference = "Stop"
@@ -33,19 +35,22 @@ $logFile = "$base.frames.csv"
 $readyFile = "$base.ready"
 $fixOut = "$base.fixture.txt"
 
-# 目标显示器校验：不通过则一个窗口都不创建
-$check = & $FixtureExe --check
-if ($LASTEXITCODE -ne 0) { throw "夹具校验副屏失败，中止: $check" }
-$mon = [regex]::Match($check, "monitor=Rect \{ x: (-?\d+), y: (-?\d+), w: (\d+), h: (\d+) \}")
+# 目标显示器校验：不通过则一个窗口都不创建（默认拒绝主屏；单屏机器须显式 -AllowPrimary）
+$checkArgs = @("--check"); if ($AllowPrimary) { $checkArgs += "--allow-primary" }
+$check = & $FixtureExe @checkArgs
+if ($LASTEXITCODE -ne 0) { throw "夹具校验目标显示器失败，中止: $check" }
+$mon = [regex]::Match($check, "primary=(true|false) monitor=Rect \{ x: (-?\d+), y: (-?\d+), w: (\d+), h: (\d+) \}")
 if (-not $mon.Success) { throw "无法解析显示器矩形: $check" }
-$mx, $my, $mw, $mh = 1..4 | ForEach-Object { [int]$mon.Groups[$_].Value }
-# 二次防线：副屏必须在 (2560,0)，坐标是 (0,0) 说明落到了主屏，立刻中止
-if ($mx -ne 2560 -or $my -ne 0 -or $mw -ne 2560 -or $mh -ne 1440) { throw "目标显示器坐标不是 (2560,0,2560x1440)，实际 ($mx,$my,${mw}x${mh})，中止" }
+$isPrimary = $mon.Groups[1].Value -eq "true"
+$mx, $my, $mw, $mh = 2..5 | ForEach-Object { [int]$mon.Groups[$_].Value }
+# 二次防线：未传 -AllowPrimary 时，主屏（Primary=true 或坐标 (0,0)）立刻中止；期望值取自夹具实测 bounds，不写死分辨率
+if (-not $AllowPrimary -and ($isPrimary -or ($mx -eq 0 -and $my -eq 0))) { throw "目标显示器是主屏 ($mx,$my,${mw}x${mh})，未传 -AllowPrimary，中止" }
+if ($AllowPrimary) { Write-Warning "已传 -AllowPrimary：将占用主屏 (${mw}x${mh}) 约 10 秒/轮，期间请勿操作屏幕" }
 $w, $h = $Size.ToLower().Split("x") | ForEach-Object { [int]$_ }
-if ($w -le 0 -or $h -le 0 -or $w -gt $mw -or $h -gt $mh) { throw "尺寸 $Size 超出副屏 (${mw}x${mh})，中止" }
-# 夹具窗口贴副屏 左上角，录制区域与之重合
+if ($w -le 0 -or $h -le 0 -or $w -gt $mw -or $h -gt $mh) { throw "尺寸 $Size 超出目标显示器 (${mw}x${mh})，中止" }
+# 夹具窗口贴目标显示器左上角，录制区域与之重合
 $region = "$mx $my $w $h"
-Write-Output "副屏校验通过: monitor=($mx,$my,${mw}x${mh}) 录制/夹具区域=($mx,$my,${w}x${h}) fps=$Fps 格式=$Format 负载=$Load"
+Write-Output "显示器校验通过(主屏=$isPrimary): monitor=($mx,$my,${mw}x${mh}) 录制/夹具区域=($mx,$my,${w}x${h}) fps=$Fps 格式=$Format 负载=$Load"
 
 # 诊断（-Diag）：按线程名统计 CPU（GetThreadDescription）与 GPU 引擎占用
 if ($Diag) {
@@ -98,6 +103,7 @@ $fixSeconds = $Seconds + 2.5
 $fixture = $null; $rec = $null
 try {
     $fixArgs = @("--size", $Size, "--seconds", "$fixSeconds", "--divisor", "$divisor", "--load", $Load, "--log", $logFile, "--ready", $readyFile)
+    if ($AllowPrimary) { $fixArgs += "--allow-primary" }
     $fixture = Start-Process -FilePath $FixtureExe -ArgumentList $fixArgs -PassThru -WindowStyle Hidden -RedirectStandardOutput $fixOut
     $t0 = Get-Date
     while (-not (Test-Path $readyFile)) {

@@ -15,6 +15,8 @@ from typing import Dict, List, Optional
 
 # 各帧率档的有效帧率通过线。
 FPS_LINES = {30: 28.5, 60: 56.0}
+# 成品帧数下限 = 档位帧率 * 该秒数：防止"帧数极少但序号连续"的残缺成品被误判通过（每轮至少录 5 秒）。
+MIN_SECONDS_OF_FRAMES = 3
 # 丢帧率上限（百分比）。
 DROP_LIMIT_PCT = 1.0
 # 档位文件名：<名称>-r<轮>-<宽x高>-<fps>.txt
@@ -43,6 +45,7 @@ def parse_run(text: str) -> Optional[Dict[str, float]]:
     return {
         "fps": float(fps),
         "drop": float(grab(r"丢帧率\s*([\d.]+)%") or 0.0),
+        "frames": float(grab(r"成品帧数\s*:\s*(\d+)") or 0.0),
         "cpu": float(grab(r"cpu\(1-core-equiv\)=(\d+)%") or 0.0) / 100.0,
         "ws": float(grab(r"ws avg=(\d+)MB") or 0.0),
         "wsmax": float(grab(r"max=(\d+)MB") or 0.0),
@@ -59,7 +62,8 @@ def passed(run: Dict[str, float], fps_target: int) -> bool:
         >>> passed({"fps": 59.0, "drop": 0.3}, 60)
         True
     """
-    return run["fps"] >= FPS_LINES.get(fps_target, fps_target * 0.95) and run["drop"] < DROP_LIMIT_PCT
+    enough_frames = run.get("frames", fps_target * 1e3) >= fps_target * MIN_SECONDS_OF_FRAMES
+    return enough_frames and run["fps"] >= FPS_LINES.get(fps_target, fps_target * 0.95) and run["drop"] < DROP_LIMIT_PCT
 
 
 def main(argv: List[str]) -> int:

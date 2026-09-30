@@ -10,7 +10,7 @@
 //!
 //! 只支持单显示器内的选区、SDR（BGRA）、不旋转的输出；其余情形返回错误，由调用方回落软件路径。
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -21,12 +21,16 @@ use windows::Win32::Graphics::Direct3D11::*;
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO, DXGI_SHARED_RESOURCE_READ,
-    DXGI_SHARED_RESOURCE_WRITE, IDXGIAdapter, IDXGIFactory1, IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource, IDXGIResource1,
+    DXGI_SHARED_RESOURCE_WRITE, IDXGIAdapter, IDXGIAdapter1, IDXGIFactory1, IDXGIOutput, IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource, IDXGIResource1,
 };
 use windows::core::{Interface, PCWSTR};
 
 use crate::pipeline::{CaptureDiag, CaptureFault, CaptureSource, CaptureStats, Captured};
+use crate::settings::{AdapterInfo, EncoderPreference, rank_adapters};
+use crate::geom::Rect;
 use crate::timeline::QpcAnchor;
+use crate::win::hwenc::{HwContext, Surface};
+use crate::win::vp::{VideoBlitter, VpLayer};
 
 /// 共享纹理池容量（采集队列 + 待输出队列 + 最近帧 + 合成中都占用名额）。
 pub const POOL_SIZE: usize = 10;
@@ -76,8 +80,10 @@ impl SharedSlot {
 /// 采集帧句柄：引用计数的共享槽；所有持有者释放后，采集才会复用该槽。
 #[derive(Clone)]
 pub struct GpuFrame {
-    /// 共享槽。
+    /// 共享槽（直入模式下是占位，不含内容）。
     pub slot: Arc<SharedSlot>,
+    /// 直入模式（实验）：采集线程已把桌面选区转成 NV12 的表面（不含光标）。
+    pub direct: Option<Arc<Mutex<Surface>>>,
 }
 
 /// 采集使用的设备对：A 给采集，B 给合成与编码。
@@ -138,12 +144,34 @@ pub(crate) fn create_slot(a: &SharedDevice, b: &SharedDevice, size: (u32, u32)) 
 /// 否则 VideoProcessor/编码占着引擎时，`AcquireNextFrame` 会被拖长十几毫秒而漏掉呈现。
 const COMPOSE_GPU_PRIORITY: i32 = -7;
 
-/// 把设备的 GPU 线程优先级设为 [`COMPOSE_GPU_PRIORITY`]；失败忽略（只是少一层保护）。
-fn lower_gpu_priority(device: &SharedDevice) {
+/// 环境变量：采集设备的 GPU 线程优先级（-7..=7，实验；缺省不设置）。
+pub const ENV_CAPTURE_GPU_PRIORITY: &str = "SNOW_RECORDER_CAPTURE_GPU_PRIORITY";
+/// 环境变量：合成设备的 GPU 线程优先级（-7..=7，缺省 -7；设 0 等于不降级）。
+pub const ENV_COMPOSE_GPU_PRIORITY: &str = "SNOW_RECORDER_COMPOSE_GPU_PRIORITY";
+/// 环境变量：采集模式（实验）：`serial` = 单设备 + 采集线程直接 VideoProcessor 出 NV12，省掉 BGRA 共享槽拷贝。
+pub const ENV_CAPTURE_MODE: &str = "SNOW_RECORDER_CAPTURE_MODE";
+
+/// 读取环境变量里的 GPU 优先级（限制在 -7..=7）；未设置或非法返回 `None`。
+fn env_priority(name: &str) -> Option<i32> {
+    std::env::var(name).ok().and_then(|v| v.trim().parse::<i32>().ok()).map(|p| p.clamp(-7, 7))
+}
+
+/// 设置设备的 GPU 线程优先级；失败忽略（只是少一层保护）。
+fn set_gpu_priority(device: &SharedDevice, priority: i32) {
     if let Ok(dxgi) = device.device().cast::<windows::Win32::Graphics::Dxgi::IDXGIDevice>() {
         // SAFETY: 只设置设备的调度优先级。
-        let _ = unsafe { dxgi.SetGPUThreadPriority(COMPOSE_GPU_PRIORITY) };
+        let _ = unsafe { dxgi.SetGPUThreadPriority(priority) };
     }
+}
+
+/// 是否用 WGC 取帧（实验对照）。
+pub fn wgc_mode() -> bool {
+    std::env::var(ENV_CAPTURE_MODE).as_deref() == Ok("wgc")
+}
+
+/// 是否启用直入（串行单设备）实验模式。
+pub fn serial_mode() -> bool {
+    std::env::var(ENV_CAPTURE_MODE).as_deref() == Ok("serial")
 }
 
 /// 选区是否完整落在显示器范围内。
@@ -200,25 +228,98 @@ pub struct DdaCapture {
     slow_acquire_ms: Vec<f32>,
     /// 上一次调用 `AcquireNextFrame` 的时刻。
     last_acquire: Option<Instant>,
+    /// 直入模式（实验）：采集线程直接做 BGRA→NV12。
+    direct: Option<DirectBlit>,
+    /// WGC 取帧源（实验对照）：有值时不用 `AcquireNextFrame`。
+    wgc: Option<crate::win::wgc::WgcSource>,
+}
+
+/// 直入模式的转换资源：采集设备上的 VideoProcessor 与 NV12 表面池。
+struct DirectBlit {
+    /// 视频处理器（采集设备上）。
+    blitter: VideoBlitter,
+    /// NV12 表面池。
+    hw: Arc<HwContext>,
+    /// 输出尺寸。
+    out_size: (u32, u32),
+    /// 选区在显示器内的源矩形。
+    source: Rect,
 }
 
 impl DdaCapture {
+    /// 改用 Windows Graphics Capture 取帧（实验对照）；不可用返回原因。
+    pub fn enable_wgc(&mut self) -> Result<(), String> {
+        // SAFETY: 只读取输出描述。
+        let monitor = unsafe { self.output.GetDesc() }.map_err(|e| e.to_string())?.Monitor;
+        let dxgi: windows::Win32::Graphics::Dxgi::IDXGIDevice = self.device.device().cast().map_err(|e| e.to_string())?;
+        self.wgc = Some(crate::win::wgc::WgcSource::start(&dxgi, monitor)?);
+        Ok(())
+    }
+
+    /// WGC 路径的取帧：信箱里的最新整屏纹理复制进共享槽（与桌面复制同一条下游路径）。
+    fn next_wgc(&mut self, timeout: Duration, want: bool) -> Result<Option<Captured<GpuFrame>>, CaptureFault> {
+        let Some(wgc) = &self.wgc else { return Ok(None) };
+        let Some((source, frame, arrived)) = wgc.take(timeout) else { return Ok(None) };
+        if !want {
+            return Ok(None);
+        }
+        let Some(slot) = self.slots.iter().find(|s| Arc::strong_count(s) == 1).cloned() else {
+            self.stats.pool_drops += 1;
+            return Ok(None);
+        };
+        let copy_started = Instant::now();
+        self.copy_into(&slot, &source)?;
+        if self.copy_ms.len() < DIAG_LIMIT {
+            self.copy_ms.push(copy_started.elapsed().as_secs_f32() * 1000.0);
+        }
+        self.flush();
+        // 复制命令已提交，帧可以归还帧池（GPU 侧顺序由驱动保证）
+        drop(frame);
+        let cursor = self.sample_cursor();
+        let captured = Captured { frame: GpuFrame { slot, direct: None }, cursor, present: arrived, captured_at: Instant::now(), fresh: true };
+        self.stats.frames += 1;
+        self.latest = Some(captured.clone());
+        Ok(Some(captured))
+    }
+
+    /// 启用直入模式（实验）：采集线程直接把桌面选区 VideoProcessor 成 NV12，不再复制进 BGRA 共享槽。
+    ///
+    /// # 参数
+    /// - `hw`：NV12 表面池（必须与采集设备同一设备）。
+    /// - `out_size`：输出尺寸。
+    /// - `fps`：帧率（视频处理器内容描述用）。
+    ///
+    /// # 返回
+    /// 设备不同或视频处理器不可用时返回原因。
+    pub fn enable_direct(&mut self, hw: Arc<HwContext>, out_size: (u32, u32), fps: u32) -> Result<(), String> {
+        if !hw.device().same_device(&self.device) {
+            return Err("直入模式要求采集与编码表面池是同一设备".into());
+        }
+        let blitter = VideoBlitter::new(self.device.device(), self.device.context(), (self.region.2, self.region.3), out_size, fps)?;
+        let source = Rect { x: self.crop.left as i32, y: self.crop.top as i32, width: self.region.2, height: self.region.3 };
+        self.direct = Some(DirectBlit { blitter, hw, out_size, source });
+        Ok(())
+    }
+
     /// 打开采集：找到完整包含选区的显示器，创建设备对、共享纹理池与桌面复制。
+    ///
+    /// 显示器接在哪块 GPU 上就用哪块（桌面复制只能在输出所属适配器上做）；同一选区出现在多块适配器时，
+    /// 按编码器偏好排序后依次尝试，第一个成功的生效。
     ///
     /// # 参数
     /// - `region`：选区 `(x, y, 宽, 高)`（虚拟桌面坐标）。
     /// - `anchor`：QPC 与 `Instant` 的对应，用于换算呈现时间。
+    /// - `preference`：编码器偏好（只用于多适配器时的尝试顺序）。
     ///
     /// # 返回
     /// 采集器与合成用设备 B；选区跨显示器/显示器旋转/设备不支持栅栏与共享等返回原因。
-    pub fn open(region: (i32, i32, u32, u32), anchor: Option<QpcAnchor>) -> Result<(Self, SharedDevice), String> {
-        // SAFETY: 只调用 DXGI 枚举接口，接口对象由 windows crate 管理生命周期。
-        let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }.map_err(|e| format!("创建 DXGI 工厂失败: {e}"))?;
-        let mut index = 0;
-        // SAFETY: 同上。
-        while let Ok(adapter) = unsafe { factory.EnumAdapters1(index) } {
+    pub fn open(region: (i32, i32, u32, u32), anchor: Option<QpcAnchor>, preference: EncoderPreference) -> Result<(Self, SharedDevice), String> {
+        let mut candidates: Vec<(IDXGIAdapter1, IDXGIOutput, (i32, i32))> = Vec::new();
+        let mut infos: Vec<AdapterInfo> = Vec::new();
+        let mut errors: Vec<String> = Vec::new();
+        for (adapter, info) in list_adapters()? {
             let mut o = 0;
-            // SAFETY: 同上。
+            // SAFETY: 只调用 DXGI 枚举接口，接口对象由 windows crate 管理生命周期。
             while let Ok(output) = unsafe { adapter.EnumOutputs(o) } {
                 o += 1;
                 // SAFETY: 同上。
@@ -228,21 +329,45 @@ impl DdaCapture {
                     continue;
                 }
                 if desc.Rotation.0 > 1 {
-                    return Err("显示器被旋转，自建 GPU 采集不支持".into());
+                    errors.push("显示器被旋转，自建 GPU 采集不支持".into());
+                    continue;
                 }
-                let base: IDXGIAdapter = adapter.cast().map_err(|e| e.to_string())?;
-                let pair = DevicePair {
-                    capture: SharedDevice::create(&base).map_err(|e| format!("创建采集设备失败: {e:#}"))?,
-                    compose: SharedDevice::create(&base).map_err(|e| format!("创建合成设备失败: {e:#}"))?,
-                };
-                let output1: IDXGIOutput1 = output.cast().map_err(|e| format!("显示器不支持桌面复制: {e}"))?;
-                lower_gpu_priority(&pair.compose);
-                let capture = Self::build(pair.capture, &pair.compose, output1, region, (rect.left, rect.top), anchor)?;
-                return Ok((capture, pair.compose));
+                candidates.push((adapter.clone(), output, (rect.left, rect.top)));
+                infos.push(info.clone());
             }
-            index += 1;
         }
-        Err("选区不在单个显示器内（跨显示器选区走软件路径）".into())
+        for index in rank_adapters(&infos, preference) {
+            let (adapter, output, origin) = &candidates[index];
+            match Self::open_on(adapter, output, region, *origin, anchor) {
+                Ok(opened) => return Ok(opened),
+                Err(e) => errors.push(format!("{}: {e}", infos[index].description)),
+            }
+        }
+        Err(if errors.is_empty() { "选区不在单个显示器内（跨显示器选区走软件路径）".into() } else { errors.join("; ") })
+    }
+
+    /// 在指定适配器的输出上创建设备对并建立采集。
+    fn open_on(
+        adapter: &IDXGIAdapter1,
+        output: &IDXGIOutput,
+        region: (i32, i32, u32, u32),
+        origin: (i32, i32),
+        anchor: Option<QpcAnchor>,
+    ) -> Result<(Self, SharedDevice), String> {
+        let base: IDXGIAdapter = adapter.cast().map_err(|e| e.to_string())?;
+        let compose = SharedDevice::create(&base).map_err(|e| format!("创建合成设备失败: {e:#}"))?;
+        // 串行单设备实验：采集与合成共用一个设备
+        let pair = DevicePair {
+            capture: if serial_mode() { compose.clone() } else { SharedDevice::create(&base).map_err(|e| format!("创建采集设备失败: {e:#}"))? },
+            compose,
+        };
+        let output1: IDXGIOutput1 = output.cast().map_err(|e| format!("显示器不支持桌面复制: {e}"))?;
+        set_gpu_priority(&pair.compose, env_priority(ENV_COMPOSE_GPU_PRIORITY).unwrap_or(COMPOSE_GPU_PRIORITY));
+        if let Some(priority) = env_priority(ENV_CAPTURE_GPU_PRIORITY) {
+            set_gpu_priority(&pair.capture, priority);
+        }
+        let capture = Self::build(pair.capture, &pair.compose, output1, region, origin, anchor)?;
+        Ok((capture, pair.compose))
     }
 
     /// 建立纹理池与桌面复制。
@@ -278,6 +403,8 @@ impl DdaCapture {
             copy_ms: Vec::new(),
             slow_acquire_ms: Vec::new(),
             last_acquire: None,
+            direct: None,
+            wgc: None,
         })
     }
 
@@ -300,6 +427,16 @@ impl DdaCapture {
         let _lock = self.device.lock();
         // SAFETY: 持有设备锁；Flush 只提交已记录的命令。
         unsafe { self.device.context().Flush() };
+    }
+
+    /// 直入模式：把桌面纹理选区直接 VideoProcessor 到一张 NV12 表面（不含光标）；池耗尽返回 `None`。
+    fn blit_direct(&mut self, source: &ID3D11Texture2D) -> Result<Option<Arc<Mutex<Surface>>>, CaptureFault> {
+        let Some(direct) = self.direct.as_mut() else { return Ok(None) };
+        let Some(surface) = direct.hw.allocate().map_err(CaptureFault::Other)? else { return Ok(None) };
+        let layer = VpLayer { texture: source.clone(), source: direct.source, destination: Rect::full(direct.out_size), alpha: false };
+        let _lock = self.device.lock();
+        direct.blitter.blit(&[layer], surface.texture(), surface.slice()).map_err(CaptureFault::Other)?;
+        Ok(Some(Arc::new(Mutex::new(surface))))
     }
 
     /// 在设备 A 上把桌面选区复制进共享槽。
@@ -338,17 +475,36 @@ pub(crate) fn copy_into_slot(
     Ok(())
 }
 
+/// 枚举所有 DXGI 适配器及其描述（含软件适配器，由选择逻辑按厂商号过滤）。
+fn list_adapters() -> Result<Vec<(IDXGIAdapter1, AdapterInfo)>, String> {
+    // SAFETY: 只调用 DXGI 枚举接口。
+    let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }.map_err(|e| format!("创建 DXGI 工厂失败: {e}"))?;
+    let mut out = Vec::new();
+    let mut index = 0;
+    // SAFETY: 同上。
+    while let Ok(adapter) = unsafe { factory.EnumAdapters1(index) } {
+        index += 1;
+        // SAFETY: 同上。
+        let Ok(desc) = (unsafe { adapter.GetDesc1() }) else { continue };
+        let end = desc.Description.iter().position(|c| *c == 0).unwrap_or(desc.Description.len());
+        out.push((adapter, AdapterInfo { vendor: desc.VendorId, description: String::from_utf16_lossy(&desc.Description[..end]) }));
+    }
+    Ok(out)
+}
+
 /// 在同一适配器上创建（采集设备 A，合成设备 B）——仅测试用（真实路径在 `DdaCapture::open` 里按显示器所属适配器创建）。
-#[cfg(test)]
+///
+/// # 参数
+/// - `preference`：编码器偏好；按它排出最合适的适配器（默认 Auto 时取第一个有硬编的适配器）。
 ///
 /// # 返回
 /// 两个设备；没有适配器或创建失败返回原因。
-pub(crate) fn create_device_pair() -> Result<(SharedDevice, SharedDevice), String> {
-    // SAFETY: 只调用 DXGI 枚举接口。
-    let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }.map_err(|e| e.to_string())?;
-    // SAFETY: 同上。
-    let adapter = unsafe { factory.EnumAdapters1(0) }.map_err(|e| e.to_string())?;
-    let base: IDXGIAdapter = adapter.cast().map_err(|e| e.to_string())?;
+#[cfg(test)]
+pub(crate) fn create_device_pair(preference: EncoderPreference) -> Result<(SharedDevice, SharedDevice), String> {
+    let adapters = list_adapters()?;
+    let infos: Vec<AdapterInfo> = adapters.iter().map(|(_, info)| info.clone()).collect();
+    let index = rank_adapters(&infos, preference).into_iter().next().ok_or("没有 DXGI 适配器")?;
+    let base: IDXGIAdapter = adapters[index].0.cast().map_err(|e| e.to_string())?;
     let a = SharedDevice::create(&base).map_err(|e| format!("{e:#}"))?;
     let b = SharedDevice::create(&base).map_err(|e| format!("{e:#}"))?;
     Ok((a, b))
@@ -359,6 +515,9 @@ impl CaptureSource for DdaCapture {
 
     /// 零超时取帧 + 亚毫秒睡眠，直到有新桌面内容/光标移动或超时。
     fn next(&mut self, timeout: Duration, want: bool) -> Result<Option<Captured<GpuFrame>>, CaptureFault> {
+        if self.wgc.is_some() {
+            return self.next_wgc(timeout, want);
+        }
         let mut info = DXGI_OUTDUPL_FRAME_INFO::default();
         let mut resource: Option<IDXGIResource> = None;
         let deadline = Instant::now() + timeout;
@@ -408,24 +567,35 @@ impl CaptureSource for DdaCapture {
         if desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM {
             return Err(CaptureFault::Other(format!("桌面格式 {:?} 不是 BGRA8（HDR 走软件路径）", desc.Format)));
         }
-        let Some(slot) = self.slots.iter().find(|s| Arc::strong_count(s) == 1).cloned() else {
-            self.stats.pool_drops += 1;
-            return Ok(None);
-        };
         let copy_started = Instant::now();
-        self.copy_into(&slot, &source)?;
+        let (slot, direct) = if self.direct.is_some() {
+            match self.blit_direct(&source)? {
+                Some(surface) => (self.slots[0].clone(), Some(surface)),
+                None => {
+                    self.stats.pool_drops += 1;
+                    return Ok(None);
+                }
+            }
+        } else {
+            let Some(slot) = self.slots.iter().find(|s| Arc::strong_count(s) == 1).cloned() else {
+                self.stats.pool_drops += 1;
+                return Ok(None);
+            };
+            self.copy_into(&slot, &source)?;
+            (slot, None)
+        };
         if self.copy_ms.len() < DIAG_LIMIT {
             self.copy_ms.push(copy_started.elapsed().as_secs_f32() * 1000.0);
         }
         // 复制一记录完就立刻释放桌面帧（持有越久，下一次呈现越容易被 DXGI 合并），光标采样与 Flush 都放到释放之后
         drop(guard);
         self.flush();
-        let cursor = self.sample_cursor();
+        let cursor = if self.direct.is_some() { None } else { self.sample_cursor() };
         let present = match self.anchor {
             Some(a) => a.to_instant(info.LastPresentTime),
             None => captured_at,
         };
-        let captured = Captured { frame: GpuFrame { slot }, cursor, present: present.min(captured_at), captured_at, fresh: true };
+        let captured = Captured { frame: GpuFrame { slot, direct }, cursor, present: present.min(captured_at), captured_at, fresh: true };
         self.stats.frames += 1;
         self.latest = Some(captured.clone());
         Ok(Some(captured))
@@ -459,6 +629,7 @@ impl CaptureSource for DdaCapture {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_NV12;
 
     /// 选区必须完整落在显示器内。
     #[test]
@@ -469,6 +640,175 @@ mod tests {
         assert!(!contains(monitor, (2559, 0, 100, 100)));
         assert!(!contains(monitor, (4000, 0, 2000, 100)));
         assert!(!contains(monitor, (0, 0, 10, 10)));
+    }
+
+    /// GPU 耗时（毫秒/次）：`iterations` 次 `work` 夹在时间戳查询里，读回 disjoint 频率换算。
+    fn gpu_ms(device: &SharedDevice, iterations: u32, mut work: impl FnMut()) -> Option<f64> {
+        let dev = device.device();
+        let ctx = device.context();
+        let make = |kind| -> Option<ID3D11Query> {
+            let mut q = None;
+            // SAFETY: 描述符是局部值。
+            unsafe { dev.CreateQuery(&D3D11_QUERY_DESC { Query: kind, MiscFlags: 0 }, Some(&mut q)) }.ok()?;
+            q
+        };
+        let (disjoint, start, end) = (make(D3D11_QUERY_TIMESTAMP_DISJOINT)?, make(D3D11_QUERY_TIMESTAMP)?, make(D3D11_QUERY_TIMESTAMP)?);
+        // SAFETY: 查询都属于该设备；调用线程独占此设备。
+        unsafe {
+            ctx.Begin(&disjoint);
+            ctx.End(&start);
+            for _ in 0..iterations {
+                work();
+            }
+            ctx.End(&end);
+            ctx.End(&disjoint);
+            ctx.Flush();
+            // GetData 的 S_FALSE（未就绪）也映射成 Ok，所以用"输出被写成非零"判断就绪（输出事先清零）
+            let read = |q: &ID3D11Query, out: *mut core::ffi::c_void, size: usize, ready: &dyn Fn() -> bool| {
+                for _ in 0..2000 {
+                    if ctx.GetData(q, Some(out), size as u32, 0).is_ok() && ready() {
+                        return true;
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                false
+            };
+            let mut info = D3D11_QUERY_DATA_TIMESTAMP_DISJOINT::default();
+            let (mut t0, mut t1) = (0u64, 0u64);
+            let info_ptr: *mut D3D11_QUERY_DATA_TIMESTAMP_DISJOINT = &mut info;
+            let (t0_ptr, t1_ptr): (*mut u64, *mut u64) = (&mut t0, &mut t1);
+            // SAFETY: 三个指针指向上面的局部变量，闭包只在本函数内读取。
+            let ok = read(&disjoint, info_ptr.cast(), size_of::<D3D11_QUERY_DATA_TIMESTAMP_DISJOINT>(), &|| (*info_ptr).Frequency != 0)
+                && read(&start, t0_ptr.cast(), 8, &|| *t0_ptr != 0)
+                && read(&end, t1_ptr.cast(), 8, &|| *t1_ptr != 0);
+            if !ok || info.Disjoint.as_bool() {
+                return None;
+            }
+            Some((t1 - t0) as f64 / info.Frequency as f64 * 1000.0 / f64::from(iterations))
+        }
+    }
+
+    /// 方案 Z 探针（真机，无环境时跳过）：
+    /// 1. 设备 A 上创建可共享的 NV12 纹理，在设备 B 上打开，A 用 VideoProcessor 写入，栅栏同步后两侧回读内容必须一致；
+    /// 2. 量出 Z 能省掉的那次 BGRA 整帧拷贝（1440p）的 GPU 耗时，以及 VideoProcessor 本身的耗时作对照。
+    #[test]
+    fn scheme_z_cross_device_nv12_share_probe() {
+        let size = (2560u32, 1440u32);
+        let Ok(factory) = (unsafe { CreateDXGIFactory1::<IDXGIFactory1>() }) else { return };
+        let Ok(adapter) = (unsafe { factory.EnumAdapters1(0) }) else { return };
+        let Ok(base) = adapter.cast::<IDXGIAdapter>() else { return };
+        let (Ok(a), Ok(b)) = (SharedDevice::create(&base), SharedDevice::create(&base)) else { return };
+        // 1. 共享 NV12 纹理
+        let desc = D3D11_TEXTURE2D_DESC {
+            Width: size.0,
+            Height: size.1,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: DXGI_FORMAT_NV12,
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            Usage: D3D11_USAGE_DEFAULT,
+            BindFlags: D3D11_BIND_RENDER_TARGET.0 as u32,
+            MiscFlags: (D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE).0 as u32,
+            ..Default::default()
+        };
+        let mut nv12_a = None;
+        // SAFETY: desc 有效。
+        if let Err(e) = unsafe { a.device().CreateTexture2D(&desc, None, Some(&mut nv12_a)) } {
+            eprintln!("方案 Z 探针: 不可行——设备 A 无法创建可共享 NV12 纹理: {e}");
+            return;
+        }
+        let nv12_a = nv12_a.unwrap();
+        let resource: IDXGIResource1 = nv12_a.cast().unwrap();
+        // SAFETY: 资源带 SHARED_NTHANDLE 创建；句柄打开后立即关闭。
+        let nv12_b = unsafe {
+            let handle = match resource.CreateSharedHandle(None, DXGI_SHARED_RESOURCE_READ.0 | DXGI_SHARED_RESOURCE_WRITE.0, PCWSTR::null()) {
+                Ok(h) => h,
+                Err(e) => {
+                    eprintln!("方案 Z 探针: 不可行——NV12 纹理创建共享句柄失败: {e}");
+                    return;
+                }
+            };
+            let device1: ID3D11Device1 = b.device().cast().unwrap();
+            let opened = device1.OpenSharedResource1::<ID3D11Texture2D>(handle);
+            let _ = CloseHandle(handle);
+            match opened {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("方案 Z 探针: 不可行——设备 B 打开共享 NV12 失败: {e}");
+                    return;
+                }
+            }
+        };
+        // 栅栏（复用 BGRA 槽的创建逻辑拿一对共享栅栏）
+        let slot = create_slot(&a, &b, (64, 64)).expect("栅栏槽");
+        // A 侧：噪声 BGRA 源 -> VideoProcessor -> 共享 NV12
+        let binds = (D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET).0 as u32;
+        let source = a.texture(size.0, size.1, DXGI_FORMAT_B8G8R8A8_UNORM, binds).expect("源纹理");
+        let pixels: Vec<u8> = (0..size.0 * size.1 * 4).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8).collect();
+        {
+            let _lock = a.lock();
+            // SAFETY: 缓冲长度 = 宽*高*4。
+            unsafe { a.context().UpdateSubresource(source.raw(), 0, None, pixels.as_ptr().cast(), size.0 * 4, 0) };
+        }
+        let mut blitter = VideoBlitter::new(a.device(), a.context(), size, size, 60).expect("视频处理器");
+        let layer = VpLayer { texture: source.raw().clone(), source: Rect::full(size), destination: Rect::full(size), alpha: false };
+        let ctx_a: ID3D11DeviceContext4 = a.context().cast().unwrap();
+        let ctx_b: ID3D11DeviceContext4 = b.context().cast().unwrap();
+        {
+            let _lock = a.lock();
+            blitter.blit(std::slice::from_ref(&layer), &nv12_a, 0).expect("VP 写共享 NV12");
+            // SAFETY: 持有设备锁。
+            unsafe {
+                ctx_a.Signal(&slot.fence_a, 1).unwrap();
+                a.context().Flush();
+            }
+        }
+        // 两侧回读：A 直接读，B 等栅栏后读
+        let readback = |dev: &SharedDevice, tex: &ID3D11Texture2D| -> Vec<u8> {
+            let mut sdesc = desc;
+            sdesc.Usage = D3D11_USAGE_STAGING;
+            sdesc.BindFlags = 0;
+            sdesc.MiscFlags = 0;
+            sdesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
+            let mut staging = None;
+            let _lock = dev.lock();
+            // SAFETY: 描述符有效；Map 出的指针在 Unmap 前有效，读取长度 = 行距 * (高度 * 3/2)。
+            unsafe {
+                dev.device().CreateTexture2D(&sdesc, None, Some(&mut staging)).expect("staging");
+                let staging = staging.unwrap();
+                dev.context().CopyResource(&staging, tex);
+                let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+                dev.context().Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped)).expect("Map");
+                let len = mapped.RowPitch as usize * (size.1 as usize * 3 / 2);
+                let out = std::slice::from_raw_parts(mapped.pData.cast::<u8>(), len).to_vec();
+                dev.context().Unmap(&staging, 0);
+                out
+            }
+        };
+        let from_a = readback(&a, &nv12_a);
+        // SAFETY: B 侧等待 A 的 Signal。
+        unsafe {
+            let _lock = b.lock();
+            ctx_b.Wait(&slot.fence_b, 1).unwrap();
+        }
+        let from_b = readback(&b, &nv12_b);
+        assert!(from_a.iter().any(|&v| v != 0), "共享 NV12 内容全零，VP 没写进去");
+        let identical = from_a == from_b;
+        eprintln!("方案 Z 探针: 跨设备共享 NV12 可创建/可打开；A 写、B 栅栏后读 内容一致={identical}（{} 字节）", from_a.len());
+        assert!(identical, "跨设备读到的 NV12 与 A 侧不一致");
+
+        // 2. GPU 耗时对照
+        let copy_dst = a.texture(size.0, size.1, DXGI_FORMAT_B8G8R8A8_UNORM, binds).expect("目的纹理");
+        let copy_ms = gpu_ms(&a, 200, || {
+            let _lock = a.lock();
+            // SAFETY: 持有设备锁；同设备同尺寸整帧拷贝。
+            unsafe { a.context().CopyResource(copy_dst.raw(), source.raw()) };
+        });
+        let vp_ms = gpu_ms(&a, 200, || {
+            let _lock = a.lock();
+            let _ = blitter.blit(std::slice::from_ref(&layer), &nv12_a, 0);
+        });
+        eprintln!("方案 Z 探针: 1440p 整帧 BGRA 拷贝（Z 能省掉的）GPU 耗时 {copy_ms:?} ms/帧；BGRA->NV12 VideoProcessor GPU 耗时 {vp_ms:?} ms/帧");
     }
 
     /// 真机：能建立设备对、共享纹理与栅栏，并在两个设备间走完一次 Wait/Signal（无显示器/驱动不支持时跳过）。

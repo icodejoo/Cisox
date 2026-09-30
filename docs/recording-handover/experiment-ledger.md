@@ -1,0 +1,265 @@
+# 录屏方案实验台账
+
+优先级:高性能 > 低内存 > 高 fps > 少编译依赖 > 多用系统自带能力。
+状态:已测 / 未测 / 不可测(注明原因)。数据来源均为原机(UHD 770 + 2x1440p)历史记录,见 `e2-brief-and-data.md`。
+
+## 0. 环境检查(2026-10-01,本机)
+
+- 显卡:仅 NVIDIA GeForce RTX 4060 Laptop GPU,无 Intel 核显(QSV 不可用)。
+- 显示器:仅 1 块,`\\.\DISPLAY1` primary=true,2560x1600(`snow-fps-fixture --check` 输出"没有非主屏,中止";`--dxgi-list` 只有 adapter0/output0)。
+- 工具链:无 `.tools/vcpkg`、无静态 FFmpeg(全盘找不到 avcodec.lib);只装了 VS2022 BuildTools,`bootstrap.ps1` 要求 MSVC 14.51,直接报错。系统 ffmpeg 有 h264_nvenc/qsv/amf 编码器。`CARGO_TARGET_DIR=D:\workspaces\Cisox\build\cargo`(夹具产物在 `build\cargo\release\snow-fps-fixture.exe`)。
+- 第二轮(同日)更新:用户放宽为允许在主屏做短时测试(每轮 <= 10 秒,不用 SendInput),夹具/脚本的 `-AllowPrimary` 显式开关生效(默认仍拒绝主屏)。recorder 已编译通过(见 §4),本机 2560x1600 @150% DPI 主屏实测可用。
+
+## 1. 候选方案台账
+
+| # | 方案 | 状态 | 结果(有效 fps / 丢帧 / CPU核 / 内存峰MB) |
+|---|---|---|---|
+| 1 | 软编 `HARDWARE=0`(ffmpeg+x264) | 已测(原机) | 1440p60: 31.6 / 38.9% / 4.34 / 446;1080p30: 23.7 / 20.3% / 1.46 / 391;全部 0/3 过线 |
+| 2 | 自建硬件 `HARDWARE=1`(双设备+栅栏+VP+QSV) | 已测(原机) | 1440p60: 57.6 / 2.98% / 0.32 / 171(3/9);1080p30 8/9、1080p60 7/9、1440p30 6/9;CPU 0.2~0.4 核,内存约 150~180 |
+| 3 | upstream GPU 路径 `HARDWARE=upstream`(conv0+sync) | 已测(原机,受孤儿 find 干扰,需重测) | 1440p60: 24.7 / 54% / 0.57;1080p30: 25.4 / 15.3% / 0.47 |
+| 4 | 串行单设备(OBS/ddagrab 式,DDA 纹理直入 VP,异步编码队列) | 已测(本机,§8.2):`CAPTURE_MODE=serial` | 1440p60 0/3、丢 2.76%(设备锁争用);1440p30 3/3;内存低 3~4MB;缺光标,不采纳。queue.rs 草稿与该变量无关,未接线 |
+| 5 | 方案 Z(VP 在采集设备做,只共享 NV12;需先做跨设备 NV12 共享探针) | 探针已做(本机,§8.2) | 跨设备共享 NV12 + 栅栏可行且内容一致;能省的 BGRA 整帧拷贝仅 0.045ms/帧 GPU,不做完整管线 |
+| 6 | 早期单设备变体(v10) | 已测(原机,历史) | 四档 2 轮全过,1440p60 59.6/59.8fps、丢帧 0.62%/0.30%、CPU 0.31、内存峰 193;后续同类改动 7 轮 1440p60 0/7,说明受机器状态影响大 |
+| 7 | `SetGPUThreadPriority` 开关对照(采集设备 +3~+7) | 已测(本机,§8.2):+3、+7、合成不降级各 3 对交错 | 均在噪声内,无收益,不采纳 |
+| 8 | QSV async_depth / preset / quality 组合(`SNOW_RECORDER_QSV_*`) | 部分(quality 18 vs 30 无规律) | async_depth、preset 网格未测 |
+| 9 | ffmpeg ddagrab+hwdownload 参照 | 已测(原机) | 丢 22%~24% |
+| 10 | NVENC 分支(自建硬件) | 已测(本机,首次验证,见 §4) | 真屏 7/8 过线:1080p30 29.92/0.27%、1080p60 59.91/0.00%、1440p30 29.83/0.85%(1/2 过)、1440p60 59.75/0.41%;CPU 0.07~0.10 核,内存峰 129~130MB |
+| 11 | AMF 分支 | 不可测:无 AMD 硬件 | - |
+| 12 | WGC 采集替代 DDA | 已测(本机,§8.2):`CAPTURE_MODE=wgc` | 1440p30 3/3 持平;1440p60 0/3、丢 2.38%,内存 +5MB,不采纳(仅作对照/DDA 失败时的回落候选) |
+| 13 | 阻塞式 vs 零超时轮询 AcquireNextFrame | 已测(原机) | 3.7~5.4% vs 3.7~4.9%,无差别 |
+| 14 | 无屏合成基准(synthetic,含 QSV) | 已测(原机) | 四档合成 p50 ~0.6ms,无丢弃(1440p60 白噪声 352/360) |
+| 15 | recorder 单测 `build-snow-recorder.ps1 -Test` | 已测(本机) | 65 个全过(0 失败;先前的"57"是旧计数)。首次只缺 webp/zlib 时 apng/webp 两个 tailfix 用例失败,补特性后全过 |
+| 16 | run-matrix 软编/NVENC/upstream 四档(本机主屏,每档 2 轮,upstream 1 轮) | 已测(本机),非交错,见 §4 | 见 §4 |
+| 17 | Windows Media Foundation 硬件 H.264(`h264_mf`,系统自带 MFT,零第三方依赖) | 部分:只用系统 ffmpeg 做编码吞吐代理测试,未接入 recorder | 1080p60 10 秒源 2.2s 完成;1440p60 带噪声 10 秒源 3.4s 完成(约 175fps 编码速度),编码侧约 0.2 核(含上传);对照 libx264 ultrafast 同源 CPU 28.8 核秒。结论:NVIDIA 的 MFT 吞吐足够,已在第三轮接入为可选原型并实测(`SNOW_RECORDER_HARDWARE=mf`,见 §6.5):零拷贝 D3D11 输入可行,与 NVENC 持平且内存低约一半 |
+
+> 注:§2、§3、§5、§7 是历史记录,最新结论与默认值以 §8 为准(默认已改为 Auto:MF -> 厂商硬编 -> 软编)。
+
+## 2. 下一轮待测清单
+
+前置:环境按 §4.1 已可用(本机);有副屏的机器上仍应复测以避开占主屏;换机需重做 §4.1。
+
+按价值排序:
+1. (已完成)NVENC 无屏基准 + 主屏四档,见 §4。
+2. SetGPUThreadPriority 对采集设备 +3/+7 的交错配对(基线→变体→基线→变体,1440p60 各 3 对)。
+3. 软编 vs 自建硬件 交错配对四档,在同一时间窗复测,排除环境漂移。
+4. 串行单设备变体(接线 queue.rs)。
+5. 方案 Z(先做 NV12 跨设备共享探针)。
+6. QSV async_depth(1/2/4)x preset(veryfast/faster)x quality(18/23/30)小网格,仅 1440p60。
+7. upstream GPU 路径在干净环境重测;WGC 作为对照。
+
+## 3. 当前最优(依据历史数据 + 本机实测)
+
+【本节为第一轮的历史结论,已被 §8 取代】通用路径:自建硬件流水线 + Media Foundation 硬件编码(`DEFAULT_HARDWARE_MODE = Auto`,见 §8)。本轮当时的数据:NVENC 四档几乎全过线(CPU 0.07~0.10 核、内存峰约 130MB),Intel 机 QSV 此前 CPU 0.2~0.4 核、内存 150~180MB,均远优于软编(本机 0.84~1.73 核、437~477MB,且 0/8 过线)。
+
+## 4. 第二轮实测记录(2026-10-01,本机 RTX 4060 Laptop,主屏 2560x1600 @150% DPI)
+
+### 4.1 构建环境(已打通)
+- 不走 bootstrap(其要求 MSVC 14.51)。`.tools/vcpkg` 用固定基线 `4497409a47f1...` 浅取,VS2022 BuildTools 的 vcvars64 环境,自建 triplet `x64-windows-static`(与仓库 overlay 相同但**去掉** `VCPKG_CHAINLOAD_TOOLCHAIN_FILE` 的 14.51 工具链),overlay-ports 用仓库 `cmake/vcpkg-overlay-ports/*`。
+- 最小清单:`ffmpeg[core,avcodec,avformat,swscale,swresample,nvcodec,x264,webp,zlib]`(webp/zlib 缺了 tailfix 的 apng/webp 用例会失败;不带 qsv/amf),装到 `.tools/vcpkg/installed/static/x64-windows-static`,与 `build-snow-recorder.ps1` 默认 `FFMPEG_DIR` 一致。首装约 11 分钟,增量约 5~8 分钟。
+- 下载走 `X_VCPKG_ASSET_SOURCES=x-script,<wrapper.cmd> {url} {dst}`,wrapper 内调 aria2c(注意 `-d "%DIR%."` 避免尾部反斜杠转义引号;aria2c 要写全路径)。
+- 坑:PATH 里的 `C:\w64devkitin\patch.exe` 会让 meson 构建 pkgconf 失败,安装前需把它从 PATH 摘掉;运行 build 脚本时也摘掉以保险。`LIBCLANG_PATH=C:\Program Files\LLVMin`。
+- **NVENC 头文件版本**:仓库基线的 `ffnvcodec` 是 13.0.19.0,要求驱动 >= 570;本机驱动 566.26 只支持 NVENC API 12.2,运行时报 "Driver does not support the required nvenc API version. Required: 13.0 Found: 12.2"。本机用临时 overlay 把 `ffnvcodec` 降到 `12.2.72.0`(SHA512 dd2f1c7f...7808)后恢复正常;升级驱动到 >= 570 即可不用降级。系统 ffmpeg 同样因此无法用 NVENC。
+- 未采用 BtbN 预编译 shared 包:已完成静态版(含 x264,软编对照需要它);BtbN 的 LGPL 包不含 libx264,且要处理动态 CRT/DLL 布局。
+
+### 4.2 无屏合成基准(`SNOW_RECORDER_SYNTH_BENCH=1`,`SNOW_RECORDER_ENCODER=nvenc`,每档 6s,白噪声)
+进程整体 CPU 约 6.3 核秒/22 秒(约 0.29 核),内存峰 281MB(含噪声纹理)。
+| 档位 | 结果 |
+|---|---|
+| 1440p30 | 181/180 帧,送帧 p50 21.6ms(白噪声 qp20 下 NVENC 吞吐绑定),无丢弃 |
+| 1440p60 | 339/360 帧,表面池丢弃 22,送帧 p50 17.7ms(同上,噪声是极端负载) |
+| 1440p->1080p60 带光标 | 361/360 帧,送帧 p50 10.9ms,无丢弃 |
+| 1080p30 / 1080p60 / 1080p60 带光标(源尺寸=输出尺寸 1920x1080) | 失败:`Failed locking bitstream buffer: invalid param (8)`,首帧即失败,必现。**但真屏 1080p 四档全过**,说明只影响合成基准(源=输出且 1080 时的合成路径);原因未定位,已排除 16 对齐填充(把 NVENC 帧池对齐改为 2 无效,已还原) |
+新增两个测试辅助(仅测试代码):`SNOW_RECORDER_SYNTH_TIERS=0,3` 选档;`SNOW_RECORDER_FFLOG=1` 打开 FFmpeg Debug 日志。
+
+### 4.3 主屏四档(夹具窗口贴主屏左上角,每轮 6s,`-AllowPrimary`)
+| 路径 | 1080p30 | 1080p60 | 1440p30 | 1440p60 |
+|---|---|---|---|---|
+| 软编 `HARDWARE=0`(2 轮) | 0/2;26.93fps;丢 10.2%;0.84 核;392/437MB | 0/2;56.32;5.4%;1.73 核;404/441MB | 0/2;26.71;10.5%;0.94 核;424/472MB | 0/2;37.56;36.9%;1.52 核;434/477MB |
+| NVENC 自建 `HARDWARE=1 ENCODER=nvenc`(2 轮) | 2/2;29.92;0.27%;0.08 核;123/129MB | 2/2;59.91;0.00%;0.09 核;124/129MB | 1/2;29.83;0.85%(最大 1.71%);0.07 核;123/129MB | 2/2;59.75;0.41%;0.10 核;124/130MB |
+| upstream GPU `HARDWARE=upstream`(1 轮) | 0/1;26.61;10.8%;0.06 核;92/95MB | 0/1;51.93;13.5%;0.07 核;85/89MB | 0/1;26.80;10.2%;0.05 核;85/89MB | 0/1;50.99;15.0%;0.07 核;85/89MB |
+说明:
+- 非交错配对,三路径分别连续跑,受环境漂移影响;软编 30fps 档稳定丢约 10%(与旧机 20% 量级一致)。
+- NVENC 唯一未过线的一轮是 1440p30 丢帧 1.71%,另一轮 0%,属偶发尖峰。
+- upstream 路径内存最低(85~95MB),CPU 也极低,但稳定丢约 10~15%,原因待查(旧数据同样受孤儿进程干扰,本轮无孤儿进程,仍差)。
+
+### 4.4 本轮发现并修复的 bug
+- **recorder 进程不是 DPI 感知**:缩放显示器(本机 150%)上选区被虚拟化成逻辑尺寸(1707x1067),成品出现黑边且只录到缩小的一块,分析器读不到序号条(丢帧率假 93%)。已在 `main` 入口加 `os::enable_dpi_awareness()`(per-monitor V2,新增 windows feature `Win32_UI_HiDpi`)。**主程序 gpui 侧启动 recorder 时的选区坐标需确认是物理像素。**
+- `run-matrix.ps1` 新增 `-FixtureExe`、`-FfmpegDir` 透传(本机夹具产物在 `build\cargo
+elease`,ffprobe 在 WinGet Links)。
+
+## 5. 下一轮清单(本轮后新增,按价值排序)
+1. 定位 NVENC 合成基准在 1080p(源=输出)必现失败的原因(真屏不受影响,但合成基准对 1080p 失效);先用 `SNOW_RECORDER_SYNTH_TIERS=0` + `SNOW_RECORDER_FFLOG=1` 复现。
+2. 软编 / NVENC 交错配对(基线->变体->基线->变体)复测四档,排除环境漂移;NVENC 1440p30 的 1.71% 尖峰看是否复现。
+3. 查 upstream 路径稳定丢 10~15% 的原因(内存最低,值得救)。
+4. 决定 `DEFAULT_HARDWARE_MODE`:建议有硬编(NVENC/QSV/AMF)时默认自建硬件,软编兜底;需用户确认。
+5. 升级驱动到 >= 570 后,用仓库原版 `ffnvcodec` 13.0.19.0 复测 NVENC,确认降级头文件没有影响结果。
+6. Media Foundation 硬件 H.264 正式接入评估:D3D11 设备管理器零拷贝输入 + 延迟,对比 NVENC 自建;它对 AMD/Intel/NVIDIA 通吃、零第三方依赖,最符合"少依赖"。
+7. 确认 gpui 主程序传给 recorder 的 START 选区坐标是物理像素(recorder 现已 DPI 感知)。
+8. 原清单中 SetGPUThreadPriority、串行单设备、方案 Z、QSV 网格等保持不变。
+
+## 6. 第三轮实测记录(2026-10-01,本机)
+
+### 6.1 合成基准 1080p NVENC 必现失败:根因已定位(测试内容问题,非流水线 bug)
+- 现象:`1920x1080->1920x1080` 合成基准首帧 `Failed locking bitstream buffer: invalid param (8)`;FFLOG 无更多线索(失败前仅有 NVENC 12.2 初始化成功)。
+- 二分:只改质量参数。qp=18 必现失败;qp=24/30/40 全过(1080p30 180/180 帧、1080p60 361/360、1080p60 带光标 361/360)。
+- 根因:合成源是**白噪声**,qp18 下 1080p IDR 帧码流超出 NVENC 输出缓冲,lock bitstream 返回 invalid param;真实画面(夹具真屏 1080p 四档全过)码流小得多,不触发。1440p 用例能过是因为驱动给的缓冲随分辨率更大。与帧池对齐/裁剪/VP 输出尺寸/surface 格式无关(1440p->1080p 与 1080p->1080p 这些参数相同)。
+- 处理:合成基准默认质量改为 24(`SNOW_RECORDER_SYNTH_QUALITY` 可覆盖),加解析单测 `synth_quality_parses_with_fallback`。生产路径不变。
+
+### 6.2 软编 / NVENC / upstream 交错配对(基线->变体->基线->变体,每档每路径 3 轮,同一时间窗,主屏 -AllowPrimary,每轮 6s)
+| 路径 | 档位 | 通过 | fps 均值 | fps 最小 | 丢帧均值% | 丢帧最大% | CPU 核 | 内存均/峰 MB |
+|---|---|---|---|---|---|---|---|---|
+| 软编 | 1080p30 | 0/3 | 26.81 | 26.72 | 10.15 | 10.44 | 0.84 | 392/438 |
+| 软编 | 1080p60 | 0/3 | 51.63 | 43.28 | 13.48 | 27.47 | 1.45 | 404/442 |
+| 软编 | 1440p30 | 0/3 | 25.25 | 22.09 | 15.53 | 25.97 | 1.03 | 424/473 |
+| 软编 | 1440p60 | 0/3 | 50.69 | 39.83 | 14.90 | 33.05 | 1.74 | 434/477 |
+| NVENC 自建 | 1080p30 | 3/3 | 30.00 | 30.00 | 0.37 | 0.57 | 0.07 | 123/129 |
+| NVENC 自建 | 1080p60 | 3/3 | 60.00 | 60.00 | 0.00 | 0.00 | 0.09 | 124/129 |
+| NVENC 自建 | 1440p30 | 3/3 | 30.00 | 30.00 | 0.00 | 0.00 | 0.08 | 123/129 |
+| NVENC 自建 | 1440p60 | 3/3 | 59.95 | 59.84 | 0.00 | 0.00 | 0.12 | 124/130 |
+| upstream GPU | 1080p30 | 1/3 | 28.65 | 26.95 | 4.34 | 9.66 | 0.05 | 85/89 |
+| upstream GPU | 1080p60 | 0/3 | 51.87 | 51.53 | 13.13 | 13.88 | 0.10 | 85/89 |
+| upstream GPU | 1440p30 | 1/3 | 27.97 | 26.80 | 6.76 | 10.67 | 0.05 | 85/89 |
+| upstream GPU | 1440p60 | 0/3 | 52.28 | 50.42 | 12.78 | 16.20 | 0.08 | 86/90 |
+结论:NVENC 自建 12/12 过线,先前 1440p30 的 1.71% 尖峰在 3 对交错中**未复现**(0%),判为偶发环境抖动。软编 0/12。
+
+### 6.3 upstream 路径稳定丢帧 10~15%:结论
+- 用 `--features diag` 构建(产物 `build
+ecorder-diag`)看上游阶段耗时:`encode.gpu_send` 约 4~5ms(同步送 NVENC),`pipeline.capture_to_packet` 约 36ms 且每隔数帧出现 52/67ms 台阶;报告 `superseded_capture_frames=24, missed_output_slots=0, dropped_capture_frames=1, asynchronous=false, effective_encode_threads=1`。
+- 判断:不是 DPI(recorder 已 DPI 感知,输出尺寸正确)、不是编码吞吐(30fps 档预算 33ms,单帧仅 5ms 仍丢 4~7%)、也不是夹具(同一夹具下自建流水线 0 丢帧)。软编路径(同一上游会话)在 CPU 仅 0.84 核时 1080p30 同样丢约 10%,说明丢帧发生在上游会话的**采集->输出槽选择**:同步单线程(GPU 路径被 `resolve_tuning` 强制 0 转换线程+同步),槽时钟 60Hz 与 59Hz 夹具/采集到达抖动叠加,部分槽里有两帧(旧帧被 superseded)、相邻槽则空,序号被跳过。自建流水线用独立采集线程+槽位对齐不受影响。
+- 结论:丢帧源自上游会话的调度策略而非本仓库可调参数;若要救 upstream 只能改 snow-crates 的 direct.rs 选帧逻辑(`CaptureInbox::select`),收益仅是内存 85MB vs 自建 123MB,不值得。建议 upstream 仅留作对照。
+
+### 6.4 gpui 主程序 START 选区坐标:已确认是虚拟桌面**物理像素**,无需修正
+- 链路:覆盖窗选区(`screen_bounds = frame.bounds()`,物理像素,以显示器左上为原点)-> `with_recording` 回调加显示器 `bounds` 原点 -> `RecordingRegionChosen` -> `RecordingHost::begin` -> `build_recording_config` -> `start_immediately` 原样填 `StartRequest{x,y,width,height}`。`MonitorInfo.bounds` 来自 PER_MONITOR_AWARE_V2 进程的 `EnumDisplayMonitors`,协议文档也声明为物理像素,与 recorder(已 DPI 感知)一致。
+- 补测试:把内联换算抽成 `monitor_local_to_desktop`,加单测 `recording_region_uses_desktop_physical_coordinates`(含负原点副屏)。
+
+### 6.5 Media Foundation 硬件 H.264 后端:已做可选原型并实测(`SNOW_RECORDER_HARDWARE=mf`,默认不变)
+- 结构:沿用自建流水线的采集/VideoProcessor/D3D11 NV12 帧池(纹理对齐取 2,与编码尺寸严格一致);新增 `src/win/mfenc.rs`:`MFCreateDXGIDeviceManager` 绑定合成设备 -> SinkWriter(`MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS` + `MF_SINK_WRITER_D3D_MANAGER` + `MF_LOW_LATENCY`)-> 每帧 `MFCreateDXGISurfaceBuffer(NV12 纹理, 切片)` 包成样本,**零拷贝**,系统 MFT 编码并直接封装 MP4。只启用了 windows crate 已有特性 `Win32_Media_MediaFoundation`、`Win32_System_Com`,无新增第三方 crate。
+- 可行性结论:可行,工作量小(约 200 行,一次编译即通)。已知限制/风险:
+  1. 码率控制用平均码率(像素*帧率*0.12,1080p60 约 16Mbps),未设恒定 QP(需 ICodecAPI,会多引 DirectShow/Variant 特性);画质/体积与 NVENC qp18 不同(同夹具 6s:MF 11MB vs NVENC 44MB)。
+  2. 样本完成无回调:`implement` 宏要求直接依赖 `windows-core`(算新增依赖),所以改为编码器多持有最近 4 帧表面再归还帧池(`HOLD_DEPTH`),依赖低延迟模式下 MFT 积压不超过该深度;实测成品画面正常,但这是经验折中,非严格保证。
+  3. 仅 NVIDIA 验证;Intel/AMD 上 SinkWriter 会自己挑硬件 MFT,无硬件 MFT 时会回落微软软件 H.264 MFT(慢且可能不收 DXGI 输入),正式接入前需用 `MFTEnumEx(HARDWARE)` 探测并回落。
+  4. 端到端编码延迟未量化(MFT 异步,送帧调用 p50 约 0.02ms 不阻塞);需要示波/时间戳注入法另测。
+- 实测(主屏,交错配对 NVENC 自建 vs MF,每档 3 对,6s/轮,夹具噪声负载;默认输出上限 1080p):
+| 路径 | 档位 | 通过 | fps 均值 | fps 最小 | 丢帧均值% | 丢帧最大% | CPU 核 | 内存均/峰 MB |
+|---|---|---|---|---|---|---|---|---|
+| NVENC | 1080p30 | 3/3 | 29.89 | 29.84 | 0.19 | 0.56 | 0.07 | 124/130 |
+| NVENC | 1080p60 | 3/3 | 59.94 | 59.83 | 0.00 | 0.00 | 0.11 | 124/130 |
+| NVENC | 1440p30 | 3/3 | 29.95 | 29.84 | 0.18 | 0.55 | 0.07 | 124/130 |
+| NVENC | 1440p60 | 3/3 | 60.00 | 60.00 | 0.00 | 0.00 | 0.10 | 125/131 |
+| MF | 1080p30 | 3/3 | 30.00 | 30.00 | 0.00 | 0.00 | 0.10 | 73/77 |
+| MF | 1080p60 | 3/3 | 60.00 | 60.00 | 0.00 | 0.00 | 0.11 | 73/77 |
+| MF | 1440p30 | 2/3 | 29.88 | 29.82 | 0.59 | 1.17 | 0.11 | 73/77 |
+| MF | 1440p60 | 3/3 | 59.88 | 59.82 | 0.19 | 0.29 | 0.13 | 73/78 |
+- 原生 1440p 输出(`SNOW_RECORDER_MAX_SIZE=none`,1440p60/30 各 3 对):NVENC 60/30fps 均 3/3,内存 178/187MB,CPU 0.11/0.09;MF 均 3/3(59.94/30.00fps 对 60.00/29.88 之差在噪声内),内存 75/80MB,CPU 0.12。
+- 结论:MF 在 fps、丢帧、CPU 上与 NVENC 自建持平(0.10~0.13 核),**内存显著更低**(73~80MB 对 124~187MB,低 40%~57%),且零第三方、跨厂商。符合"低内存 > 少依赖 > 系统自带"。12 轮里 1 轮 1440p30 丢 1.17%(另一组 6 轮全 0),与 NVENC 早先的 1.71% 同类偶发。
+
+## 7. 本轮(第三轮)结论与下一轮清单
+- 当前通用路径:自建硬件流水线(DDA + VideoProcessor + D3D11 NV12 零拷贝)+ Media Foundation 硬件编码。路径本身不绑定厂商,编码器由系统 MFT 枚举选出;**数据来自 NVIDIA RTX 4060,Intel/AMD 上尚未验证(需他机)**。MF 与 FFmpeg NVENC 的 fps/丢帧/CPU 持平,MF 内存低约一半且无第三方依赖;FFmpeg 厂商硬编(NVENC/QSV/AMF)是回落层,软编与 upstream 不达标,仅作回落/对照。
+- 下一轮(未穷尽,仍有候选):
+  1. MF 正式化:`MFTEnumEx` 硬件探测+回落、恒定质量(ICodecAPI quality 模式)、表面归还改严格方案(若接受 `windows-core` 直接依赖则用 COM 释放回调,否则保留 HOLD_DEPTH 并加压测)、端到端延迟量化、Intel/AMD 机上复测。
+  2. 决定 `DEFAULT_HARDWARE_MODE`:有硬编时默认自建硬件(NVIDIA 用 NVENC 或 MF,待 MF 在 Intel/AMD 验证后再定),需用户确认。
+  3. 升级驱动 >= 570 后用原版 ffnvcodec 13.0.19.0 复测 NVENC。
+  4. 原清单中 SetGPUThreadPriority 交错配对、串行单设备(queue.rs)、方案 Z、QSV 网格(本机无 Intel,需换机)。
+  5. upstream 已定性为上游选帧调度问题,不再投入。
+
+## 8. 第四轮实测记录(2026-10-01,本机 RTX 4060 Laptop 驱动 566.26,主屏 2560x1600 @150%)
+
+构建/测试:`scripts\build-snow-recorder.ps1`(摘掉 PATH 里的 w64devkit,`LIBCLANG_PATH=C:\Program Files\LLVM\bin`)。新增的只有 `windows` 已有特性(`Win32_System_Ole`、`Win32_System_Variant`)和 `windows-core 0.62.2`(`windows` 自带、已在锁文件内,COM `implement` 宏要求直接依赖),没有新 crate。
+
+### 8.1 MF 正式化(任务 1)
+**a) 硬件探测与回落**:`MFTEnum2(MFT_ENUM_FLAG_HARDWARE)` 按采集适配器 LUID 枚举。本机枚举结果是 `["AMDh264Encoder", "NVIDIA H.264 Encoder MFT"]`:**单 NVIDIA 机器上也会列出 AMD 的 MFT(残留注册),LUID 过滤不生效**,列表第一项不可信。所以 SinkWriter 建好后再用 `IMFSinkWriterEx::GetTransformForStream` 核对实际选中的编码 MFT 带 `MFT_ENUM_HARDWARE_URL_Attribute`(本机实际为 "NVIDIA H.264 Encoder MFT");枚举为空或选中软件 MFT 即返回错误,由 `backend` 回落。单测 `software_transform_is_rejected` 用不开硬件转换的 SinkWriter 证明软件 MFT 会被拒绝(本机无法造出"无硬件 MFT"的真实环境,用这个替代)。MF 模式下不再要求 FFmpeg 编进对应编码器(帧池借用非 QSV 的 D3D11 路径)。
+**b) 画质/码率策略**:
+- NVIDIA MFT(566.26)**不接受恒定质量**:`ICodecAPI` 设 `RateControlMode=Quality/VBR`、`AVEncCommonQuality`、`AVEncVideoEncodeQP`、`Min/MaxQP` 都返回成功但读回 RC 仍是 0(CBR),成品字节数完全不变(1080p30 合成内容六组设置都是 5850320 字节);只有 `MeanBitRate`/`MF_MT_AVG_BITRATE` 起作用(设 60Mbps 得 41.6MB)。PlaceEncodingParameters、SetTargetMediaType、BeginWriting 前后三种时机都试过。结论:NVIDIA MFT 上只能平均码率(表现为 CBR)。代码保留 `SNOW_RECORDER_MF_QUALITY=1..100` 可选恒定质量,经 ICodecAPI 设置并**读回确认**,不被接受则回落平均码率;默认不开(其它厂商 MFT 未验证,质量刻度未知)。
+- **发现并修复色彩 bug**:此前 MF 输入/输出类型没标色彩,MFT 把限幅 NV12 当全幅再压一遍,画面偏灰,合成内容 PSNR 封顶 36.8dB(任何码率都一样)。补 `MF_MT_VIDEO_NOMINAL_RANGE=16_235`、`YUV_MATRIX/PRIMARIES/TRANSFER=BT.709` 后正常。(NVENC 路径不受影响。)
+- 画质对照(`SNOW_RECORDER_SYNTH_CONTENT=natural` 类桌面确定性内容,成品对参考序列用系统 ffmpeg 测 PSNR/SSIM,参考按 BT.709 限幅转换,6 秒):
+| 编码 | 1080p30 码率 / PSNR / SSIM | 1440p60 码率 / PSNR / SSIM |
+|---|---|---|
+| NVENC qp18(产品默认) | 9.56Mbps / 47.03 / 0.9904 | 29.2Mbps / 47.13 / 0.9905 |
+| NVENC qp24 | 5.10 / 45.60 / 0.9879 | 15.7 / 45.65 / 0.9877 |
+| MF 0.06 bpp | 3.88 / 39.77 / 0.9691 | 13.5 / 40.97 / 0.9733 |
+| MF 0.09 bpp | 5.78 / 43.80 / 0.9833 | 20.4 / 44.70 / 0.9856 |
+| MF 0.12 bpp(现行) | 7.80 / 45.48 / 0.9880 | 27.0 / 46.02 / 0.9890 |
+| MF 0.18 bpp | 11.52 / 46.44 / 0.9900 | 40.9 / 46.99 / 0.9905 |
+| MF 0.24 bpp | 15.56 / 47.12 / 0.9907 | - |
+  结论:MF(CBR)在同画质下码率约为 NVENC 恒定 QP 的 1.5~1.7 倍(qp24 对 0.12bpp,qp18 对 0.24bpp);0.12bpp 保持为默认,质量需求更高用 `SNOW_RECORDER_MF_BPP`(0.02~0.5)调。局限:合成内容不是真实桌面/视频,原始数据在 `build\r4\quality`。
+**c) 表面归还严格化**:每个样本挂一个持有 `Surface` 的 COM 对象(`#[implement(IMFAsyncCallback)]` 外壳,样本属性 `SetUnknown`),MFT 释放样本时才销毁并归还帧池名额,去掉 `HOLD_DEPTH`。**关键发现**:NVIDIA MFT 积压约 300ms 的输入(60fps 约 18 帧、30fps 约 9~10 帧)才成批释放,所以帧池容量必须大于积压深度,否则直接死锁(容量 12 时整段录制只进 12 帧)。MF 路径帧池容量改为 64(按需分配,不用的不占显存;实测峰值在用 10~19 张,池丢弃 0)。风险:其它厂商 MFT 的积压深度未验证(需他机);超过 64 时会退化成丢帧。
+**d) 延迟**(`SNOW_RECORDER_MF_LATENCY=1`,轮询成品文件长度 + 按封装包偏移换算每帧落盘时刻;开启时多占约 0.03 核):送帧到样本释放与到成品落盘几乎同步,p50 156~171ms、p95 302~307ms、max 330~362ms,四档一致(NVIDIA MFT 约 300ms 批处理窗口);送帧调用本身 p50 0.02ms 不阻塞。录屏场景可接受,实时预览/推流不适用。
+**其它**:色彩修复后内存仍 72~78MB、CPU 0.26~0.36 核(含延迟探针)。⚠ `summarize_runs.py` 的判定对"帧数极少但序号连续"的残缺成品会误报 PASS(死锁那次 12 帧 0.2s 判 PASS),已在本轮汇总中额外核对"编码帧数/时长"。
+
+### 8.2 对照实验(任务 2):1440p60 与 1440p30,基线(MF 自建流水线)与变体交错配对,每变体 3 对,每轮 6s,主屏 -AllowPrimary
+基线统一为 `SNOW_RECORDER_HARDWARE=mf`。"过线"= 帧率达标线(30fps>=28.5、60fps>=56)且丢帧<1%且帧数足够;"合并丢"= DXGI 合并掉的桌面更新数均值(越大说明采集越被拖)。原始输出在 `build\r4\e*`。
+| 实验 | 档位 | 组 | 过线 | fps 均/最小 | 丢帧均/最大% | CPU 核 | 内存均/峰MB | 合并丢 |
+|---|---|---|---|---|---|---|---|---|
+| 采集设备 GPU 优先级 +7 | 1440p30 | 基线 | 3/3 | 30.00/30.00 | 0.00/0.00 | 0.10 | 73/77 | 13.3 |
+| | | +7 | 2/3 | 29.89/29.66 | 0.38/1.14 | 0.09 | 73/77 | 13.3 |
+| | 1440p60 | 基线 | 3/3 | 59.82/59.82 | 0.20/0.30 | 0.14 | 73/78 | 14.0 |
+| | | +7 | 3/3 | 59.82/59.82 | 0.19/0.30 | 0.09 | 74/78 | 15.0 |
+| 采集设备 GPU 优先级 +3 | 1440p30 | 基线/+3 | 3/3 / 3/3 | 29.94 / 30.00 | 0.58 / 0.00 | 0.11 / 0.11 | 72 / 73 | 13.7 / 14.0 |
+| | 1440p60 | 基线/+3 | 3/3 / 3/3 | 59.77 / 59.83 | 0.10 / 0.10 | 0.12 / 0.14 | 73 / 73 | 13.7 / 13.7 |
+| 合成设备不降级(0,现行 -7) | 1440p30 | 基线/0 | 3/3 / 3/3 | 29.94 / 30.00 | 0.00 / 0.19 | 0.08 / 0.10 | 72 / 73 | 14.3 / 15.0 |
+| | 1440p60 | 基线/0 | 3/3 / 3/3 | 59.94 / 59.94 | 0.10 / 0.00 | 0.12 / 0.13 | 73 / 74 | 14.0 / 13.7 |
+| 串行单设备直入(采集线程直接 VP,无 BGRA 槽拷贝,不含光标) | 1440p30 | 基线 | 2/3 | 29.94/29.82 | 0.59/1.18 | 0.09 | 72/76 | 13.7 |
+| | | 串行 | 3/3 | 29.94/29.82 | 0.20/0.59 | 0.09 | 69/73 | 19.3 |
+| | 1440p60 | 基线 | 3/3 | 59.88/59.82 | 0.19/0.30 | 0.13 | 73/77 | 13.3 |
+| | | 串行 | **0/3** | 58.29/57.70 | **2.76/3.55** | 0.11 | 69/73 | **22.3** |
+结论:
+- **SetGPUThreadPriority**:采集设备 +3/+7、合成设备不降级,三项都在噪声内(1440p30 偶发 1.1% 丢帧两边都出现过),没有可测收益,**不采纳**,现行"合成设备 -7"保持(环境变量 `SNOW_RECORDER_CAPTURE_GPU_PRIORITY`/`SNOW_RECORDER_COMPOSE_GPU_PRIORITY` 留作调参口)。
+- **串行单设备**:实现为 `SNOW_RECORDER_CAPTURE_MODE=serial`(采集与合成共用一个设备、采集线程直接对 DDA 纹理做 VideoProcessor 出 NV12、合成侧只做 NV12 同设备拷贝、编码仍在独立线程,用现有 mpsc 队列而非 queue.rs 草稿——该草稿是"满时丢最旧"的策略队列,与本实验的变量无关)。内存仅低 3~4MB;**1440p60 明显变差(0/3,丢 2.76%,合并丢 22 对 13)**,原因是采集、VP、MFT 重新争同一把设备锁,正是双设备设计要避开的。该变体还缺光标(直入后光标无法在桌面帧释放后补画,光标单独移动时画面冻结),即使不差也不可直接采纳。**不采纳**。
+- **方案 Z(跨设备 NV12 共享)**:单 GPU 上有意义(线上配置本来就是同一适配器上的两个设备),做成探针单测 `scheme_z_cross_device_nv12_share_probe`:设备 A 创建 `SHARED|SHARED_NTHANDLE` 的 NV12 纹理、设备 B 打开、A 用 VideoProcessor 写入并 Signal 栅栏、B Wait 后回读,**5,529,600 字节与 A 侧回读逐字节一致**,技术上可行。但 Z 能省掉的只有那次 1440p BGRA 整帧拷贝,GPU 耗时实测 **0.045ms/帧**(约占 60fps 帧预算的 0.27%),管线里"采集复制"CPU 耗时 p50 0.05ms;而 MF 编码器无法在 GPU 侧等栅栏(得改成 CPU 等栅栏再送帧,多一次同步),又要维护跨设备 NV12 池。收益小于噪声、复杂度高,**不做完整管线**。(探针里想同时量 VideoProcessor 的 GPU 耗时,时间戳读回为 0——VP 可能不在被时间戳夹住的引擎上,此项不可靠,不采信。)
+
+**WGC 对照**(`SNOW_RECORDER_CAPTURE_MODE=wgc`,新文件 `src/win/wgc.rs`,自由线程帧池 + 信箱,取到的整屏纹理仍走同一条"复制进共享槽"下游;只用 `windows` 已有特性 `Graphics_Capture` 等):
+| 档位 | 组 | 过线 | fps 均/最小 | 丢帧均/最大% | CPU 核 | 内存均/峰MB |
+|---|---|---|---|---|---|---|
+| 1440p30 | DDA 基线 | 3/3 | 29.94/29.82 | 0.20/0.59 | 0.08 | 73/77 |
+| | WGC | 3/3 | 29.94/29.82 | 0.20/0.59 | 0.07 | 77/82 |
+| 1440p60 | DDA 基线 | 3/3 | 59.82/59.64 | 0.30/0.59 | 0.11 | 73/77 |
+| | WGC | **0/3** | 58.46/57.51 | **2.38/3.57** | 0.11 | 78/83 |
+WGC 在 60fps 下稳定丢约 2.4%(回调线程 + 帧池深度限制,帧被系统合并),内存多 5MB。**不采纳**;它也无法解决任何现存问题,只保留为 DDA 取不到时的回落候选(尚未接入自动回落)。
+
+## 8.3 默认硬件模式决策(任务 3)
+依据(四档 x 3 对交错,NVENC 自建 vs MF 自建,均为当前代码,`build\r4\e3-mf-vs-nvenc`):
+| 路径 | 档位 | 过线 | fps 均 | 丢帧均/最大% | CPU 核 | 内存均/峰MB | 采集合并丢 |
+|---|---|---|---|---|---|---|---|
+| NVENC | 1080p30 | 3/3 | 29.89 | 0.19/0.57 | 0.06 | 124/130 | 1.3 |
+| NVENC | 1080p60 | 3/3 | 60.00 | 0.00/0.00 | 0.11 | 124/130 | 1.3 |
+| NVENC | 1440p30 | 3/3 | 30.00 | 0.19/0.57 | 0.09 | 124/130 | 1.0 |
+| NVENC | 1440p60 | 3/3 | 59.94 | 0.10/0.29 | 0.10 | 124/130 | 1.3 |
+| MF | 1080p30 | 3/3 | 29.94 | 0.00/0.00 | 0.11 | 72/77 | 14.0 |
+| MF | 1080p60 | 3/3 | 60.00 | 0.00/0.00 | 0.13 | 73/77 | 13.7 |
+| MF | 1440p30 | 2/3 | 29.94 | 0.58/1.18 | 0.10 | 73/77 | 13.0 |
+| MF | 1440p60 | 3/3 | 59.94 | 0.10/0.30 | 0.11 | 73/78 | 14.0 |
+- 性能(fps/丢帧/CPU)持平(MF 1440p30 有一轮丢 2 帧=1.18%,NVENC 同档也出现过 0.57%/1.71%,同类偶发;MF 1440p30 在本轮全部基线/对照中共 18 轮里 2 轮丢 2 帧(1.18%),NVENC 1440p30 累计 11 轮里 1 轮 1.71%,频率同量级,都算偶发);内存 MF 低 41%(73 对 124MB);依赖 MF 最少(不要求 FFmpeg 编进 NVENC、不受 NVENC 头文件/驱动版本绑定,跨 NVIDIA/AMD/Intel);代价是同质量码率高 1.5~1.7 倍(CBR)与约 300ms 编码延迟(录屏可接受)。"采集合并丢"MF 恒为 13~14 不是采集变差:MF 打开(MFStartup + 枚举 + SinkWriter)约 0.22 秒,期间 DXGI 复制接口已创建,首次取帧时把这段时间的更新记为合并。
+- 按优先级(性能 > 低内存 > fps > 少依赖 > 系统自带)选 MF;**固化的选择顺序**:`Auto` = Media Foundation 硬件 MFT -> FFmpeg 厂商硬编(按采集适配器厂商:NVIDIA=NVENC、Intel=QSV、AMD=AMF)-> 软编(x264)。`settings::DEFAULT_HARDWARE_MODE` 已改为 `HardwareMode::Auto`(新增枚举值,`SNOW_RECORDER_HARDWARE=auto` 也可显式指定);`0` 强制软编、`1`/`gpu` 只用 FFmpeg 厂商硬编、`mf` 只用 MF、`upstream` 不变。MF 无硬件 MFT(枚举为空或 SinkWriter 选中软件 MFT)、`SNOW_RECORDER_MF_DISABLE` 置位或任何初始化失败都会记录原因并进入下一级;开放式风险(MF 录制中途才暴露的问题没有运行时回落)靠 `SNOW_RECORDER_MF_DISABLE` 开关和下面的他机复测兜底。
+- 回落链实测(1080p60 各 1 轮,日志在 `build\r4\chain`):默认 -> `media-foundation` PASS;`MF_DISABLE=1` -> 输出"windows-media-foundation 不可用,回落: ..."后 `h264_nvenc` PASS;`ENCODER=off` -> 两级硬件都回落,最终 `software-x264`(该环境下 40fps/丢 32%,软编本身不达标)。
+- 单测:`backend::attempt_order_follows_mode_and_format` 覆盖 Auto 的三级顺序,`settings::hardware_mode_parsing` 固定默认值为 Auto;`scripts\build-snow-recorder.ps1 -Test` 73 个全过,`-Clippy`(`-D warnings`)干净。同步更新了 `cisox-gpui-migration-plan.md`、`cisox-recording-handover.md`、`e2-brief-and-data.md` 里关于"默认软编"的表述。
+
+## 8.4 最终复测(任务 4):默认配置(不设任何录制环境变量)对照软编,四档各 3 对交错,每轮 6s,主屏 -AllowPrimary
+| 路径 | 档位 | 过线 | fps 均/最小 | 丢帧均/最大% | CPU 核 | 内存均/峰MB |
+|---|---|---|---|---|---|---|
+| 软编 `HARDWARE=0` | 1080p30 | 0/3 | 26.80/26.70 | 10.17/10.56 | 0.79 | 392/438 |
+| 默认(Auto->MF) | 1080p30 | 3/3 | 29.88/29.65 | 0.19/0.58 | 0.09 | 72/77 |
+| 软编 | 1080p60 | 0/3 | 55.93/55.41 | 6.35/7.14 | 1.70 | 404/442 |
+| 默认 | 1080p60 | 3/3 | 60.00/60.00 | 0.00/0.00 | 0.09 | 73/77 |
+| 软编 | 1440p30 | 0/3 | 26.78/26.67 | 10.06/10.23 | 1.00 | 423/474 |
+| 默认 | 1440p30 | 3/3 | 30.00/30.00 | 0.00/0.00 | 0.13 | 73/77 |
+| 软编 | 1440p60 | 0/3 | 55.83/55.23 | 5.98/6.36 | 2.11 | 436/484 |
+| 默认 | 1440p60 | 3/3 | 59.94/59.82 | 0.10/0.30 | 0.13 | 73/78 |
+默认 12/12 过线,软编 0/12。另用最终二进制(含 WGC 代码,默认路径不变)再跑了 2 对 x 四档默认对默认的确认:16/16 过线,内存 72~74/77~78MB,CPU 0.09~0.14 核。`summarize_runs.py` 已修:成品帧数不足(< 档位帧率 x 3)一律判失败,并补单测。
+
+## 8.5 candidate 穷尽情况
+**本机可测项:全部穷尽。**
+| 项 | 结论 |
+|---|---|
+| 软编 / 自建 NVENC / 自建 MF / upstream | 均已实测;默认 = MF(回落 NVENC/QSV/AMF,再软编);upstream 已定性为上游选帧调度问题,不再投入 |
+| MF 正式化(硬件探测与回落、画质、严格归还、延迟) | 已做,见 §8.1;**恒定质量在 NVIDIA MFT 上不可行**(只认平均码率),已写明并保留读回确认的可选开关 |
+| SetGPUThreadPriority(采集 +3/+7,合成不降级) | 已测,无收益 |
+| 串行单设备 | 已测,1440p60 变差,不采纳 |
+| 方案 Z | 探针已做(可行),收益 0.045ms/帧,不做完整管线 |
+| WGC | 已测,1440p60 变差,不采纳 |
+| 合成基准 1080p 失败 | 已定位(白噪声 qp18 超缓冲,§6.1) |
+**需他机硬件或系统级变更(本机不可测):**
+- QSV 整组(自建 `HARDWARE=1` 在 Intel、`async_depth`x`preset`x`quality` 网格、Intel 上的 MF):**需他机**(本机无 Intel 核显)。
+- AMF(AMD 上的 FFmpeg AMF 与 MF):**需他机**(本机无 AMD GPU;注意本机 MFT 枚举里有残留的 "AMDh264Encoder" 注册,但没有 AMD 硬件,不能当作 AMD 验证)。
+- 非 NVIDIA 厂商 MFT 的输入积压深度(决定 `MF_POOL_CAPACITY=64` 够不够)、是否接受恒定质量:**需他机**。
+- 升级驱动到 >= 570 后用仓库原版 `ffnvcodec 13.0.19.0` 复测 NVENC:本机驱动 566.26,升级显卡驱动属系统级变更,未擅自执行;**需用户升级驱动后复测**(不影响默认的 MF 路径)。
+- 有副屏的机器复测(避开占主屏对 DWM 的影响):**需他机**。

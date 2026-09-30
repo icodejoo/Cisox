@@ -4,7 +4,7 @@
 
 ## 1. 现状一句话
 
-自建硬件录制流水线(DXGI 采集 + D3D11 VideoProcessor 一次 Blt 直出 NV12 + QSV,采集与合成分设备加栅栏)已完成,单测全过。**真屏 1440p@60 在原机不稳定**(3/9 通过,丢帧率均值 2.98%,硬门 <1%);1080p@30/60、1440p@30 大多数轮次达标。原机有远程控制代理和 DWM 争用核显,**不确定是环境噪声还是代码问题**,所以要换机复测。`DEFAULT_HARDWARE_MODE` 仍是 Off(软编),达标后才改。
+自建硬件录制流水线(DXGI 采集 + D3D11 VideoProcessor 一次 Blt 直出 NV12 + QSV,采集与合成分设备加栅栏)已完成,单测全过。**真屏 1440p@60 在原机不稳定**(3/9 通过,丢帧率均值 2.98%,硬门 <1%);1080p@30/60、1440p@30 大多数轮次达标。原机有远程控制代理和 DWM 争用核显,**不确定是环境噪声还是代码问题**,所以要换机复测。`DEFAULT_HARDWARE_MODE` 已在 2026-10-01 改为 `Auto`(Media Foundation -> FFmpeg 厂商硬编 -> 软编),该路径是不绑定厂商的通用路径(编码器由系统 MFT 枚举选出),目前的实测数据来自本机 RTX 4060(见 `recording-handover/experiment-ledger.md` §8);Intel/AMD 上的 MF 仍需他机复测。
 
 ## 2. 先读哪些文件(按顺序)
 
@@ -51,7 +51,7 @@ scripts\run-matrix.ps1 -RecorderExe <recorder.exe> -Name sw -Repeats 3 -EnvPairs
 - 诊断:`SNOW_RECORDER_TRACE=1`(采集慢取帧、DXGI 合并事件、分段耗时)。
 - 暂停/取消回归:`scripts\run-pause-test.ps1 -RecorderExe <exe> -Mode pause|eof`。
 - 无屏基准(不依赖桌面):`$env:SNOW_RECORDER_SYNTH_BENCH=1; $env:RUST_TEST_NOCAPTURE=1; scripts\build-snow-recorder.ps1 -Test`。
-- 可调环境变量:`SNOW_RECORDER_HARDWARE`(0 软编/1 自建硬件/upstream 上游 GPU 路径)、`SNOW_RECORDER_QSV_ASYNC_DEPTH`、`SNOW_RECORDER_QSV_PRESET`、`SNOW_RECORDER_QSV_QUALITY`、`SNOW_RECORDER_MAX_SIZE`(默认 1920x1080,`none` 不限)。
+- 可调环境变量:`SNOW_RECORDER_HARDWARE`(缺省/auto 自动:MF -> 厂商硬编 -> 软编;0 软编;1 自建流水线 + FFmpeg 厂商硬编;mf 自建流水线 + Media Foundation;upstream 上游 GPU 路径)、`SNOW_RECORDER_MF_DISABLE`(禁用 MF)、`SNOW_RECORDER_MF_BPP`(MF 平均码率系数,缺省 0.12)、`SNOW_RECORDER_MF_QUALITY`(MF 恒定质量 1..100,MFT 读回确认才生效)、`SNOW_RECORDER_MF_LATENCY`(测端到端延迟)、`SNOW_RECORDER_QSV_ASYNC_DEPTH`、`SNOW_RECORDER_QSV_PRESET`、`SNOW_RECORDER_QSV_QUALITY`、`SNOW_RECORDER_MAX_SIZE`(默认 1920x1080,`none` 不限)。
 
 ## 5. 换机必须改的地方(重要)
 
@@ -60,7 +60,7 @@ scripts\run-matrix.ps1 -RecorderExe <recorder.exe> -Name sw -Repeats 3 -EnvPairs
 ## 6. 通过标准与记录
 
 - 四档都要统计:有效 fps 均值/最小、丢帧率均值/最大、CPU 核数、内存峰值,以及通过轮数。
-- **1440p@60 要 ≥56fps 且丢帧 <1%,且多轮稳定**(不能只看安静时段),才把 `settings::DEFAULT_HARDWARE_MODE` 改成 `Gpu`(一行常量,并跑单测)。
+- **1440p@60 要 ≥56fps 且丢帧 <1%,且多轮稳定**(不能只看安静时段),才把 `settings::DEFAULT_HARDWARE_MODE` 改成硬件模式(一行常量,并跑单测)。**本机已满足并改为 `Auto`;换机后仍按此标准复测,不达标可用 `SNOW_RECORDER_HARDWARE=0` 或改回常量。**
 - 结果填回 `docs/recording-handover/e2-brief-and-data.md` 第 0 节的表格,或另写 `docs/cisox-recording-retest-<机器>.md`。注明机器型号、显卡、驱动版本、刷新率、是否远程操作、后台高负载进程。
 
 ## 7. 如果换机后仍不过(建议排查顺序)

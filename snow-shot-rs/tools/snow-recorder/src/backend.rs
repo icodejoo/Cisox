@@ -132,26 +132,36 @@ pub fn start_first_available(attempts: Vec<Attempt>, log: &mut dyn FnMut(&str)) 
 pub fn plan_attempts(request: &StartRequest, partial: &std::path::Path, mode: HardwareMode) -> Vec<Attempt> {
     let mut attempts: Vec<Attempt> = Vec::new();
     #[cfg(windows)]
-    if mode == HardwareMode::Gpu && request.format == MediaFormat::Mp4 {
-        let (request, partial) = (request.clone(), partial.to_path_buf());
-        attempts.push((
-            "windows-hardware",
-            Box::new(move || {
-                let spec = windows_spec(&request, &partial)?;
-                let output = spec.output.clone();
-                match crate::win::assemble::start_hardware(&spec) {
-                    Ok(running) => {
-                        let name = running_name(&running);
-                        Ok(Box::new(PipelineBackend { running, output, name }) as Box<dyn RecordingBackend>)
+    if request.format == MediaFormat::Mp4 {
+        // (装配名, 是否用 Media Foundation 编码)：Auto 固化为 MF 优先，其次 FFmpeg 厂商硬编，最后才是软编
+        let hardware: &[(&'static str, bool)] = match mode {
+            HardwareMode::Gpu => &[("windows-hardware", false)],
+            HardwareMode::MediaFoundation => &[("windows-media-foundation", true)],
+            HardwareMode::Auto => &[("windows-media-foundation", true), ("windows-hardware", false)],
+            HardwareMode::Off | HardwareMode::Upstream => &[],
+        };
+        for &(name, media_foundation) in hardware {
+            let (request, partial) = (request.clone(), partial.to_path_buf());
+            attempts.push((
+                name,
+                Box::new(move || {
+                    let mut spec = windows_spec(&request, &partial)?;
+                    spec.media_foundation = media_foundation;
+                    let output = spec.output.clone();
+                    match crate::win::assemble::start_hardware(&spec) {
+                        Ok(running) => {
+                            let name = running_name(&running);
+                            Ok(Box::new(PipelineBackend { running, output, name }) as Box<dyn RecordingBackend>)
+                        }
+                        Err(e) => {
+                            // 探测阶段可能已创建输出文件，回落前清掉
+                            let _ = std::fs::remove_file(&output);
+                            Err(e)
+                        }
                     }
-                    Err(e) => {
-                        // 探测阶段可能已创建输出文件，回落前清掉
-                        let _ = std::fs::remove_file(&output);
-                        Err(e)
-                    }
-                }
-            }),
-        ));
+                }),
+            ));
+        }
     }
     let upstream_gpu = mode == HardwareMode::Upstream;
     let (request, partial) = (request.clone(), partial.to_path_buf());
@@ -189,6 +199,10 @@ fn windows_spec(request: &StartRequest, partial: &std::path::Path) -> Result<cra
     }
     if let Ok(p) = std::env::var(settings::ENV_QSV_PRESET) {
         spec.preset = p;
+    }
+    match settings::parse_encoder_preference(std::env::var(settings::ENV_ENCODER).ok().as_deref()) {
+        Ok(preference) => spec.encoder = preference,
+        Err(reason) => eprintln!("{reason}"),
     }
     Ok(spec)
 }
@@ -284,7 +298,7 @@ mod tests {
         assert!(start_first_available(Vec::new(), &mut |_| {}).is_err());
     }
 
-    /// 装配顺序：Gpu 模式（MP4）硬件在前软件在后（非 Windows 只有软件）；其余模式与格式只有软件/上游。
+    /// 装配顺序：Gpu/MF 模式（MP4）硬件在前软件在后，Auto 为 MF -> FFmpeg 厂商硬编 -> 软编（非 Windows 只有软件）；其余模式与格式只有软件/上游。
     #[test]
     fn attempt_order_follows_mode_and_format() {
         let names = |format, mode| plan_attempts(&request(format), std::path::Path::new("p.mp4"), mode).iter().map(|a| a.0).collect::<Vec<_>>();
@@ -293,6 +307,13 @@ mod tests {
         } else {
             assert_eq!(names(MediaFormat::Mp4, HardwareMode::Gpu), vec!["software-x264"]);
         }
+        if cfg!(windows) {
+            assert_eq!(names(MediaFormat::Mp4, HardwareMode::MediaFoundation), vec!["windows-media-foundation", "software-x264"]);
+            assert_eq!(names(MediaFormat::Mp4, HardwareMode::Auto), vec!["windows-media-foundation", "windows-hardware", "software-x264"]);
+        } else {
+            assert_eq!(names(MediaFormat::Mp4, HardwareMode::Auto), vec!["software-x264"]);
+        }
+        assert_eq!(names(MediaFormat::Webp, HardwareMode::Auto), vec!["software-x264"]);
         assert_eq!(names(MediaFormat::Webp, HardwareMode::Gpu), vec!["software-x264"]);
         assert_eq!(names(MediaFormat::Gif, HardwareMode::Gpu), vec!["software-x264"]);
         assert_eq!(names(MediaFormat::Apng, HardwareMode::Gpu), vec!["software-x264"]);

@@ -1093,6 +1093,7 @@ dependencies = [
  "snow-recording-runtime",
  "snow-screen-recorder",
  "windows",
+ "windows-core",
 ]
 
 [[package]]

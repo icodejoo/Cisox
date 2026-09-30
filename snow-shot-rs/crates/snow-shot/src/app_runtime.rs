@@ -1010,14 +1010,8 @@ fn open_overlay(cx: &mut ShellContext, state: &mut AppState, payload: CapturePay
         SystemOutput::new(save_dir)
             .with_recording(move |rect| {
                 // 覆盖窗坐标以显示器左上角为原点，换算成虚拟桌面坐标
-                let bounds = record_monitor.bounds;
                 record_inbox.push(UiEvent::RecordingRegionChosen {
-                    region: PhysicalRect::new(
-                        rect.x + bounds.x,
-                        rect.y + bounds.y,
-                        rect.width,
-                        rect.height,
-                    ),
+                    region: monitor_local_to_desktop(rect, record_monitor.bounds),
                     monitor: record_monitor.clone(),
                 });
             })
@@ -1513,6 +1507,24 @@ fn on_config_changed(cx: &mut ShellContext, state: &mut AppState, key: &str, pre
     }
 }
 
+/// 把显示器内坐标的选区换算成虚拟桌面坐标（均为物理像素，录制进程 START 直接使用）。
+///
+/// # 参数
+/// - `rect`：以显示器左上角为原点的选区。
+/// - `bounds`：该显示器在虚拟桌面中的范围。
+///
+/// # 返回
+/// 虚拟桌面坐标下的选区（宽高不变）。
+///
+/// # 示例
+/// ```ignore
+/// let r = monitor_local_to_desktop(PhysicalRect::new(10, 20, 300, 200), PhysicalRect::new(-1920, 0, 1920, 1080));
+/// assert_eq!((r.x, r.y), (-1910, 20));
+/// ```
+fn monitor_local_to_desktop(rect: PhysicalRect, bounds: PhysicalRect) -> PhysicalRect {
+    PhysicalRect::new(rect.x + bounds.x, rect.y + bounds.y, rect.width, rect.height)
+}
+
 /// 主线程事件分发（由 GPUI 主线程调用）。
 ///
 /// # 参数
@@ -1888,6 +1900,16 @@ mod tests {
         assert_eq!(capture_gate(true, false), CaptureGate::IgnoreInFlight);
         assert_eq!(capture_gate(false, true), CaptureGate::IgnoreOverlayOpen);
         assert_eq!(capture_gate(true, true), CaptureGate::IgnoreInFlight);
+    }
+
+    /// 录屏选区：显示器内坐标加上显示器原点（含负原点副屏），宽高不变，START 收到的是物理像素。
+    #[test]
+    fn recording_region_uses_desktop_physical_coordinates() {
+        use snow_ui::shell::geometry::PhysicalRect;
+        let r = monitor_local_to_desktop(PhysicalRect::new(10, 20, 300, 200), PhysicalRect::new(-1920, 100, 1920, 1080));
+        assert_eq!(r, PhysicalRect::new(-1910, 120, 300, 200));
+        let p = monitor_local_to_desktop(PhysicalRect::new(0, 0, 2560, 1440), PhysicalRect::new(0, 0, 2560, 1600));
+        assert_eq!(p, PhysicalRect::new(0, 0, 2560, 1440));
     }
 
     /// 光标坐标换算为显示器内坐标（含负原点副屏），未知时取中心。

@@ -9,8 +9,6 @@ use std::path::PathBuf;
 
 use content::Load;
 
-/// 占屏目标（按属性而非设备名，设备名会被系统重新编号）：非主屏，且范围必须等于此矩形。
-pub const EXPECTED_SECONDARY: Rect = Rect { x: 2560, y: 0, w: 2560, h: 1440 };
 /// 单次运行的最长秒数（占屏测试每轮 ≤10 秒，留少量余量）。
 pub const MAX_SECONDS: f64 = 12.0;
 /// 默认运行秒数。
@@ -101,6 +99,8 @@ pub struct Options {
     pub log: Option<PathBuf>,
     /// 首帧提交后写入的就绪标记文件。
     pub ready: Option<PathBuf>,
+    /// 显式允许占用主屏（默认拒绝，仅单屏机器等场景使用）。
+    pub allow_primary: bool,
 }
 
 impl Default for Options {
@@ -114,6 +114,7 @@ impl Default for Options {
             load: Load::Stripes,
             log: None,
             ready: None,
+            allow_primary: false,
         }
     }
 }
@@ -149,6 +150,7 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
             "--list" => o.mode = Mode::List,
             "--check" => o.mode = Mode::Check,
             "--dxgi-list" => o.mode = Mode::DxgiList,
+            "--allow-primary" => o.allow_primary = true,
             "--region" => {
                 let [x, y, w, h] = parse_ints::<4>(&value("--region")?).ok_or("--region 需为 x,y,w,h")?;
                 let (Ok(x), Ok(y), Ok(w), Ok(h)) =
@@ -195,37 +197,41 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
     Ok(o)
 }
 
-/// 在枚举结果中选出目标显示器：必须是非主屏，且范围等于 [`EXPECTED_SECONDARY`]。
+/// 在枚举结果中选出目标显示器（按属性，不看设备名与分辨率）。
 ///
-/// 不看设备名（系统会重新编号）；只有主屏、范围不符或找不到都拒绝。
+/// 默认只接受唯一的非主屏；`allow_primary` 为真时改为选主屏（须显式开启）。
 ///
 /// # 参数
 /// - `monitors`：枚举到的全部显示器。
+/// - `allow_primary`：是否允许占用主屏。
 ///
 /// # 返回
-/// 目标显示器；找不到或不符返回原因（调用方应中止）。
+/// 目标显示器；找不到、目标不唯一或主屏未获许可返回原因（调用方应中止）。
 ///
 /// # 示例
 /// ```
 /// use snow_fps_fixture::{pick_target, MonitorInfo, Rect};
 /// let m = |d: &str, x, p| MonitorInfo { device: d.into(), rect: Rect { x, y: 0, w: 2560, h: 1440 }, primary: p };
 /// let list = [m(r"\.\DISPLAY2", 0, true), m(r"\.\DISPLAY1", 2560, false)];
-/// assert_eq!(pick_target(&list).unwrap().rect.x, 2560);
-/// assert!(pick_target(&list[..1]).is_err());
+/// assert_eq!(pick_target(&list, false).unwrap().rect.x, 2560);
+/// assert!(pick_target(&list[..1], false).is_err());
+/// assert!(pick_target(&list[..1], true).unwrap().primary);
 /// ```
-pub fn pick_target(monitors: &[MonitorInfo]) -> Result<&MonitorInfo, String> {
+pub fn pick_target(monitors: &[MonitorInfo], allow_primary: bool) -> Result<&MonitorInfo, String> {
+    if allow_primary {
+        let mut primary = monitors.iter().filter(|m| m.primary);
+        let m = primary.next().ok_or_else(|| "枚举不到主屏，中止".to_string())?;
+        if primary.next().is_some() {
+            return Err("存在多块主屏，无法确定目标，中止".into());
+        }
+        return Ok(m);
+    }
     let mut secondary = monitors.iter().filter(|m| !m.primary);
     let m = secondary
         .next()
-        .ok_or_else(|| "没有非主屏（只有一块屏），中止".to_string())?;
+        .ok_or_else(|| "没有非主屏（只有一块屏），中止；单屏机器需显式传 --allow-primary".to_string())?;
     if secondary.next().is_some() {
         return Err("存在多块非主屏，无法确定目标，中止".into());
-    }
-    if m.rect != EXPECTED_SECONDARY {
-        return Err(format!(
-            "非主屏 {} 的范围 {:?} 与预期 {EXPECTED_SECONDARY:?} 不符，中止",
-            m.device, m.rect
-        ));
     }
     Ok(m)
 }
@@ -341,18 +347,33 @@ mod tests {
         s.split_whitespace().map(String::from).collect()
     }
 
-    /// 只按属性选非主屏且范围符合预期；只有主屏、范围不符、多块非主屏都拒绝。
+    /// 默认只选唯一非主屏（不限分辨率）；只有主屏、多块非主屏都拒绝；开关开启才选主屏。
     #[test]
     fn target_selection_rules() {
         let ok = [mon(r"\.\DISPLAY2", 0, true), mon(r"\.\DISPLAY1", 2560, false)];
-        assert_eq!(pick_target(&ok).map(|m| m.rect.x), Ok(2560));
+        assert_eq!(pick_target(&ok, false).map(|m| m.rect.x), Ok(2560));
         // 设备名重新编号后依旧可选
         let renamed = [mon(r"\.\DISPLAY7", 0, true), mon(r"\.\DISPLAY9", 2560, false)];
-        assert!(pick_target(&renamed).is_ok());
-        assert!(pick_target(&ok[..1]).is_err());
-        assert!(pick_target(&[mon(r"\.\DISPLAY2", 0, true), mon(r"\.\DISPLAY1", 1920, false)]).is_err());
-        assert!(pick_target(&[mon("a", 0, true), mon("b", 2560, false), mon("c", 5120, false)]).is_err());
-        assert!(pick_target(&[]).is_err());
+        assert!(pick_target(&renamed, false).is_ok());
+        // 非主屏坐标/分辨率不再写死
+        assert!(pick_target(&[mon(r"\.\DISPLAY2", 0, true), mon(r"\.\DISPLAY1", 1920, false)], false).is_ok());
+        assert!(pick_target(&ok[..1], false).is_err());
+        assert!(pick_target(&[mon("a", 0, true), mon("b", 2560, false), mon("c", 5120, false)], false).is_err());
+        assert!(pick_target(&[], false).is_err());
+    }
+
+    /// 主屏只有在显式允许时才可选；允许时选主屏而非副屏。
+    #[test]
+    fn primary_requires_opt_in() {
+        let single = [mon("a", 0, true)];
+        assert!(pick_target(&single, false).is_err());
+        assert!(pick_target(&single, true).unwrap().primary);
+        let dual = [mon("a", 0, true), mon("b", 2560, false)];
+        assert!(pick_target(&dual, true).unwrap().primary);
+        assert!(pick_target(&dual, false).is_ok_and(|m| !m.primary));
+        assert!(pick_target(&[mon("b", 2560, false)], true).is_err());
+        assert!(parse_args(&args("--check --allow-primary")).unwrap().allow_primary);
+        assert!(!parse_args(&args("--check")).unwrap().allow_primary);
     }
 
     /// 区域必须落在目标屏内；默认整屏；size 锚定左上角。

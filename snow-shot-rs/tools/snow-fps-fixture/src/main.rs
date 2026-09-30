@@ -2,7 +2,7 @@
 //!
 //! 在扩展副屏上创建无边框置顶窗口，由 D3D11 flip-model 交换链按 vsync 逐帧出画，
 //! 每帧把单调递增序号编码进画面顶部色块条，并记录提交时间戳供对账。
-//! 硬性约束：目标显示器必须是非主屏且范围等于 2560,0,2560x1440（按属性，不按设备名），窗口区域必须落在其内，否则不创建窗口直接退出。
+//! 硬性约束：目标显示器默认必须是唯一的非主屏（按属性，不按设备名），传 `--allow-primary` 才改占主屏；窗口区域必须落在其内，否则不创建窗口直接退出。
 
 mod gpu;
 mod win;
@@ -103,8 +103,8 @@ fn main() {
         print_monitors(&monitors);
         return;
     }
-    // 创建窗口之前的强制校验：非主屏且范围符合预期、区域落在其内
-    let target = match pick_target(&monitors) {
+    // 创建窗口之前的强制校验：默认仅非主屏（显式开关才允许主屏）、区域落在其内
+    let target = match pick_target(&monitors, options.allow_primary) {
         Ok(t) => t,
         Err(e) => {
             print_monitors(&monitors);
@@ -119,7 +119,7 @@ fn main() {
             std::process::exit(EXIT_REJECTED);
         }
     };
-    println!("target={} monitor={:?} window={:?}", target.device, target.rect, rect);
+    println!("target={} primary={} monitor={:?} window={:?}", target.device, target.primary, target.rect, rect);
     if options.mode == Mode::Check {
         return;
     }

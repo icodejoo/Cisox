@@ -126,6 +126,17 @@ impl FrameComposer for GpuComposer {
 
     /// 桌面 + 光标一次 Blt 合成到表面；栅栏保证与采集复制、采集复用之间的顺序。
     fn compose(&mut self, frame: &GpuFrame, cursor: Option<&AttachedCursorSample>, surface: &mut Surface) -> Result<(), String> {
+        if let Some(direct) = &frame.direct {
+            // 直入模式（实验）：采集线程已转成 NV12，同设备内拷到本槽的表面即可（不含光标）
+            let source = direct.lock().map_err(|_| "直入表面锁中毒".to_string())?;
+            let _lock = self.device.lock();
+            // SAFETY: 持有设备锁；两张 NV12 纹理属于同一设备，子资源号即数组切片号（无 mip）。
+            unsafe {
+                self.device.context().CopySubresourceRegion(surface.texture(), surface.slice(), 0, 0, 0, source.texture(), source.slice(), None);
+                self.device.context().Flush();
+            }
+            return Ok(());
+        }
         let mut layers = vec![VpLayer {
             texture: frame.slot.texture_b().clone(),
             source: Rect::full(self.src_size),

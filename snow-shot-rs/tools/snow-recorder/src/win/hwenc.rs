@@ -1,6 +1,7 @@
 //! 硬件编码：D3D11 NV12 帧池 + 厂商 H.264 编码器（QSV/NVENC/AMF）+ MP4 封装。
 //!
-//! 帧池与编码器共用采集设备（零拷贝）；QSV 走 D3D11VA 帧池派生的 QSV 帧上下文。
+//! 帧池与编码器共用合成设备（零拷贝，编码器必须与该设备同适配器）；QSV 走 D3D11VA 帧池派生的 QSV 帧上下文，
+//! NVENC/AMF 直接吃 D3D11 帧（编码器按适配器厂商选，见 `settings::select_encoder`）。
 //! 这里的实现参照上游 `snow-recording-export` 的 GPU 输入路径，但编码参数按实测调优
 //! （QSV `async_depth=2`、`preset=veryfast`），并把"持有上一帧算时长"改成"持有上一包算时长"，
 //! 送帧不再被时长决定拖延一帧。
@@ -21,6 +22,7 @@ use windows::core::Interface;
 pub type HwResult<T> = Result<T, String>;
 
 use crate::pipeline::{EncoderStats, VideoEncoder};
+use crate::settings::HwCodec;
 
 /// 帧池默认容量（送编中 2~3 帧 + 编码器驱动引用 + 正在合成 1 帧，再留出吸收编码耗时尖峰的余量）。
 pub const DEFAULT_POOL_CAPACITY: usize = 12;
@@ -31,7 +33,7 @@ pub const QSV_PRESET: &str = "veryfast";
 /// 关键帧间隔（秒）。
 const GOP_SECONDS: u32 = 2;
 /// NV12 纹理宽高对齐。
-const SURFACE_ALIGN: u32 = 16;
+pub const SURFACE_ALIGN: u32 = 16;
 
 /// 把 FFmpeg 返回码转成错误文本。
 fn check(code: i32, what: &str) -> HwResult<()> {
@@ -138,6 +140,8 @@ pub struct HwContext {
     outstanding: Arc<AtomicUsize>,
     /// 池容量。
     capacity: usize,
+    /// 编码器种类。
+    codec: HwCodec,
     /// 编码器名。
     codec_name: &'static str,
 }
@@ -151,15 +155,30 @@ impl HwContext {
     /// 创建硬件上下文。
     ///
     /// # 参数
-    /// - `device`：采集所在的 D3D11 设备（编码器必须与采集同适配器）。
+    /// - `device`：合成/编码所在的 D3D11 设备（编码器必须与它同适配器）。
     /// - `size`：视频尺寸（宽、高）。
     /// - `capacity`：帧池容量。
+    /// - `codec`：编码器种类（由 `settings::select_encoder` 按适配器厂商选定）。
     ///
     /// # 返回
-    /// 上下文；适配器无受支持的硬件编码器或初始化失败返回原因。
-    pub fn new(device: SharedDevice, size: (u32, u32), capacity: usize) -> HwResult<Self> {
-        let codec_name = snow_d3d11::h264_encoder(device.identity().vendor)
-            .ok_or("采集适配器没有受支持的硬件编码器")?;
+    /// 上下文；FFmpeg 没编进该编码器或初始化失败返回原因。
+    #[cfg(test)]
+    pub fn new(device: SharedDevice, size: (u32, u32), capacity: usize, codec: HwCodec) -> HwResult<Self> {
+        Self::with_align(device, size, capacity, codec, SURFACE_ALIGN, true)
+    }
+
+    /// 同 [`HwContext::new`]，但可指定纹理宽高对齐（Media Foundation 需要与编码尺寸严格一致，传 2）。
+    ///
+    /// # 参数
+    /// - `align`：纹理宽高向上对齐的倍数。
+    /// - `require_encoder`：是否要求 FFmpeg 编进了 `codec` 对应的编码器（Media Foundation 只借帧池，传 `false`）。
+    pub fn with_align(device: SharedDevice, size: (u32, u32), capacity: usize, codec: HwCodec, align: u32, require_encoder: bool) -> HwResult<Self> {
+        let codec_name = codec.ffmpeg_name();
+        ffmpeg::init().map_err(|e| e.to_string())?;
+        // 先探测编码器是否编进了 FFmpeg，缺失时不必创建设备与帧池
+        if require_encoder && ffmpeg::encoder::find_by_name(codec_name).is_none() {
+            return Err(format!("FFmpeg 没有编进 {codec_name}"));
+        }
         let device_ref = Buf::new(unsafe { av_hwdevice_ctx_alloc(AVHWDeviceType::AV_HWDEVICE_TYPE_D3D11VA) }, "hwdevice")?;
         // SAFETY: device_ref 刚分配且未初始化；字段按 FFmpeg 约定填写后再 init。
         unsafe {
@@ -181,15 +200,15 @@ impl HwContext {
             let context = (*native.0).data.cast::<AVHWFramesContext>();
             (*context).format = AVPixelFormat::AV_PIX_FMT_D3D11;
             (*context).sw_format = AVPixelFormat::AV_PIX_FMT_NV12;
-            (*context).width = i32::try_from(size.0.div_ceil(SURFACE_ALIGN) * SURFACE_ALIGN).map_err(|e| e.to_string())?;
-            (*context).height = i32::try_from(size.1.div_ceil(SURFACE_ALIGN) * SURFACE_ALIGN).map_err(|e| e.to_string())?;
+            (*context).width = i32::try_from(size.0.div_ceil(align) * align).map_err(|e| e.to_string())?;
+            (*context).height = i32::try_from(size.1.div_ceil(align) * align).map_err(|e| e.to_string())?;
             // 每帧独立纹理，避免 AMF 数组索引元数据共享。
             (*context).initial_pool_size = 0;
             let d3d = (*context).hwctx.cast::<AVD3D11VAFramesContext>();
             (*d3d).BindFlags = D3D11_BIND_RENDER_TARGET.0 as u32;
             check(av_hwframe_ctx_init(native.0), "hwframes init")?;
         }
-        let (qsv_device, mapped) = if codec_name == "h264_qsv" {
+        let (qsv_device, mapped) = if codec == HwCodec::Qsv {
             let mut qsv = ptr::null_mut();
             // SAFETY: 输出指针指向局部变量，device_ref 已初始化。
             check(
@@ -224,8 +243,14 @@ impl HwContext {
             size,
             outstanding: Arc::new(AtomicUsize::new(0)),
             capacity,
+            codec,
             codec_name,
         })
+    }
+
+    /// 合成/编码共用的 D3D11 设备。
+    pub fn device(&self) -> &SharedDevice {
+        &self._device
     }
 
     /// 编码器名（如 `h264_qsv`）。
@@ -410,38 +435,64 @@ pub struct HwEncoder {
     pub stats: HwStats,
 }
 
-/// 构造 QSV/NVENC/AMF 的编码选项。
+/// 选项开关：关闭。
+const OPT_OFF: &str = "0";
+/// 选项开关：开启。
+const OPT_ON: &str = "1";
+/// NVENC 预设：p1 最快 ~ p7 最慢，p4 是速度与画质的折中（上游 ffmpeg 文档推荐的通用起点）。
+const NVENC_PRESET: &str = "p4";
+/// NVENC 调优：ull 超低延迟（无前瞻、无重排、按帧即时输出），实时录屏的标准取值。
+const NVENC_TUNE: &str = "ull";
+/// AMF 用途：ultralowlatency 对应 AMF 的超低延迟编码用途，关闭内部缓冲。
+const AMF_USAGE: &str = "ultralowlatency";
+/// AMF 质量档：balanced 折中；speed 更快但画质差，quality 会拉长编码耗时。
+const AMF_QUALITY: &str = "balanced";
+/// AMF 取包超时（毫秒）：驱动繁忙时 QueryOutput 的等待上限，避免一直卡住编码线程。
+const AMF_QUERY_TIMEOUT_MS: &str = "100";
+
+/// 构造编码选项；所有厂商共同关闭 B 帧（送帧无需重排，包按 pts 升序）。
 ///
 /// # 参数
-/// - `codec`：编码器名。
-/// - `cfg`：配置。
-pub fn encoder_options(codec: &str, cfg: &HwConfig) -> ffmpeg::Dictionary<'static> {
+/// - `codec`：编码器种类。
+/// - `cfg`：配置（质量参数对三家都按“恒定质量”语义使用）。
+///
+/// # 返回
+/// 传给 `avcodec_open2` 的选项字典。
+pub fn encoder_options(codec: HwCodec, cfg: &HwConfig) -> ffmpeg::Dictionary<'static> {
     let q = cfg.quality.to_string();
     let mut o = ffmpeg::Dictionary::new();
-    o.set("bf", "0");
+    o.set("bf", OPT_OFF);
     match codec {
-        "h264_nvenc" => {
-            o.set("preset", "p4");
-            o.set("tune", "ull");
+        HwCodec::Nvenc => {
+            o.set("preset", NVENC_PRESET);
+            o.set("tune", NVENC_TUNE);
+            // 恒定 QP：与 QSV 的 global_quality 同为“定质量”语义；码率随内容浮动，画面质量可预期
             o.set("rc", "constqp");
             o.set("qp", &q);
-            o.set("rc-lookahead", "0");
-            o.set("delay", "0");
+            // 低延迟三件套：不前瞻、零帧输出延迟、开启 zerolatency（禁用重排缓冲）
+            o.set("rc-lookahead", OPT_OFF);
+            o.set("delay", OPT_OFF);
+            o.set("zerolatency", OPT_ON);
+            // 禁用多趟编码，每帧只走一遍
+            o.set("multipass", "disabled");
+            // 输入表面环大小与帧池容量一致，避免编码器等表面
             o.set("surfaces", &DEFAULT_POOL_CAPACITY.to_string());
         }
-        "h264_amf" => {
-            o.set("usage", "ultralowlatency");
-            o.set("quality", "balanced");
+        HwCodec::Amf => {
+            o.set("usage", AMF_USAGE);
+            o.set("quality", AMF_QUALITY);
+            // 恒定 QP：I/P 同值（无 B 帧，故不设 qp_b）
             o.set("rc", "cqp");
             o.set("qp_i", &q);
             o.set("qp_p", &q);
-            o.set("preanalysis", "0");
-            o.set("preencode", "0");
-            o.set("query_timeout", "100");
+            // 关闭预分析与预编码（都会引入额外延迟与显存占用）
+            o.set("preanalysis", OPT_OFF);
+            o.set("preencode", OPT_OFF);
+            o.set("query_timeout", AMF_QUERY_TIMEOUT_MS);
         }
-        _ => {
+        HwCodec::Qsv => {
             o.set("preset", &cfg.preset);
-            o.set("look_ahead", "0");
+            o.set("look_ahead", OPT_OFF);
             o.set("async_depth", &cfg.async_depth.to_string());
             o.set("global_quality", &q);
         }
@@ -489,7 +540,7 @@ impl HwEncoder {
             video.set_flags(ffmpeg::codec::Flags::GLOBAL_HEADER);
         }
         let encoder = video
-            .open_as_with(codec, encoder_options(ctx.codec_name(), cfg))
+            .open_as_with(codec, encoder_options(ctx.codec, cfg))
             .map_err(|e| format!("打开 {} 失败: {e}", ctx.codec_name()))?;
         let stream_index = {
             let mut stream = output.add_stream(codec).map_err(|e| format!("添加视频轨失败: {e}"))?;
@@ -646,12 +697,50 @@ mod tests {
             async_depth: 2,
             preset: "veryfast".into(),
         };
-        let o = encoder_options("h264_qsv", &cfg);
+        let o = encoder_options(HwCodec::Qsv, &cfg);
         assert_eq!(o.get("async_depth"), Some("2"));
         assert_eq!(o.get("preset"), Some("veryfast"));
         assert_eq!(o.get("look_ahead"), Some("0"));
         assert_eq!(o.get("bf"), Some("0"));
         assert_eq!(o.get("global_quality"), Some("18"));
-        assert_eq!(encoder_options("h264_nvenc", &cfg).get("rc"), Some("constqp"));
+    }
+
+    /// 构造测试配置。
+    fn config() -> HwConfig {
+        HwConfig { path: PathBuf::from("a.mp4"), width: 64, height: 64, fps: 60, quality: 20, async_depth: 2, preset: "veryfast".into() }
+    }
+
+    /// NVENC 选项：恒定 QP、超低延迟调优、无前瞻/无 B 帧，且不带 QSV/AMF 专属项。
+    #[test]
+    fn nvenc_options_are_low_latency_constqp() {
+        let o = encoder_options(HwCodec::Nvenc, &config());
+        assert_eq!(o.get("rc"), Some("constqp"));
+        assert_eq!(o.get("qp"), Some("20"));
+        assert_eq!(o.get("tune"), Some("ull"));
+        assert_eq!(o.get("preset"), Some("p4"));
+        assert_eq!(o.get("zerolatency"), Some("1"));
+        assert_eq!(o.get("rc-lookahead"), Some("0"));
+        assert_eq!(o.get("bf"), Some("0"));
+        assert!(o.get("async_depth").is_none() && o.get("usage").is_none());
+    }
+
+    /// AMF 选项：CQP、超低延迟用途、关闭预分析，质量参数同时写入 I/P。
+    #[test]
+    fn amf_options_are_low_latency_cqp() {
+        let o = encoder_options(HwCodec::Amf, &config());
+        assert_eq!(o.get("usage"), Some("ultralowlatency"));
+        assert_eq!(o.get("rc"), Some("cqp"));
+        assert_eq!((o.get("qp_i"), o.get("qp_p")), (Some("20"), Some("20")));
+        assert_eq!(o.get("preanalysis"), Some("0"));
+        assert_eq!(o.get("bf"), Some("0"));
+        assert!(o.get("tune").is_none() && o.get("global_quality").is_none());
+    }
+
+    /// 编码器种类与适配器厂商的映射和 snow-d3d11 一致。
+    #[test]
+    fn codec_mapping_matches_snow_d3d11() {
+        for codec in [HwCodec::Qsv, HwCodec::Nvenc, HwCodec::Amf] {
+            assert_eq!(snow_d3d11::h264_encoder(codec.vendor()), Some(codec.ffmpeg_name()));
+        }
     }
 }

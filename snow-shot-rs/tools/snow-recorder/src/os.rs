@@ -1,5 +1,24 @@
 //! 平台相关的小工具：计时器精度与线程优先级。非 Windows 平台是空实现。
 
+/// 把进程设为 per-monitor DPI 感知，使选区与采集坐标都是物理像素（缩放显示器上否则会被虚拟化成逻辑尺寸）。
+///
+/// 非 Windows 平台不做任何事；已设置过则忽略失败。
+///
+/// # 示例
+/// ```ignore
+/// enable_dpi_awareness();
+/// ```
+pub fn enable_dpi_awareness() {
+    #[cfg(windows)]
+    {
+        use windows::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext};
+        // SAFETY: 仅设置进程级 DPI 标志，无指针参数。
+        unsafe {
+            let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        }
+    }
+}
+
 /// 计时器精度守卫：录制期间把系统计时器精度提到指定毫秒（否则等待最多抖 15ms）。
 ///
 /// 非 Windows 平台不做任何事。

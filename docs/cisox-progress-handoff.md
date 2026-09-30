@@ -130,6 +130,50 @@ P0 验证基本完成，P1 地基完成，P2/P4/P5 已开工；**参考版（C++
 - 可考虑 `rust-lld` 链接器与 `debug = "line-tables-only"`（Windows 上 `link.exe` 链接大型 debug 二进制很慢），统一写进 `.cargo/config`，别在多个任务进行中途改。
 - **agy（antigravity）MCP 已断线**，恢复前不要派给它；此前 agy 有编造 API 的前科，必须把真实源码整段贴进 prompt，产出必须独立复审。
 
+## 5.1 2026-10-01 待办清单（录屏 / OCR·翻译 / 视频编辑；上面 §5 是 09-29 旧清单，未逐条核对）
+
+**收尾**
+- [ ] 工作区约 29 个文件未提交（录屏改动、夹具脚本、`docs/research/*`、台账）。提交前：diff 自查并做 simplify、确认范围；推送前先 `git status` 看有没有范围外的改动。
+- [ ] 根目录 `AGENTS.md` 仍是旧 Qt/C++ 版本，与本分支（纯 Rust+GPUI）不符，需改写或标注作废。
+
+**录屏（详见 `docs/recording-handover/experiment-ledger.md` §8）**
+- [x] 默认硬件模式已改为 `Auto`（MF → FFmpeg 厂商硬编 → 软编），本机四档 12/12、16/16 过线。
+- [ ] 他机验证：Intel（QSV、MF）、AMD（AMF、MF）、非 NVIDIA 的 MFT 输入积压深度（`MF_POOL_CAPACITY=64` 够不够）、有副屏的机器、干净环境。
+- [ ] 显卡驱动升到 ≥570 后，用仓库原版 `ffnvcodec` 复测 NVENC（系统级变更，需用户动手）。
+- [ ] MF 已知限制：录制中途出问题无运行时回落（只有 `SNOW_RECORDER_MF_DISABLE`）；不支持恒定质量（同画质码率高 1.5~1.7 倍）；编码延迟约 300ms；启动比 NVENC 慢约 0.22 秒。
+- [ ] 清理决定：`queue.rs` 草稿与实验口（`CAPTURE_MODE=serial|wgc`、GPU 优先级、`wgc.rs`）保留还是删除。
+- [ ] macOS / Linux 录屏各自实现与实测（迁移方案第 13 条）。
+
+**FFmpeg 构建**
+- [ ] `snow-shot-minimal` 白名单与导出、编辑共用，现状已是最小集合，本轮不改；输入限定为本软件 MP4 后，能否收紧要对照 `snow-recording-export` 再定。
+- 已决定：视频编辑走 worker 方案（并入 `snow-recorder`），**不编独立 `ffmpeg.exe`**，只留一份 FFmpeg / 一套白名单 / 一处授权文档。
+- [ ] 预编译 worker 的 CI 发布与本地按哈希下载脚本（worker 二进制不提交 git；重编者仍需 libclang 与 MSVC）。
+- [ ] worker 改名为 `snow-media-worker`：已决定暂不改，P1 完成后再评估。
+- [x] 清理已停止任务残留（2026-10-01 已完成）：回退 `cmake/vcpkg-overlay-ports/ffmpeg/portfile.cmake` 与 `vcpkg.json`（均为纯新增、非用户改动），删除 `cmake/vcpkg-overlay-ports-editor/`、`scripts/build-ffmpeg-exe.ps1`、`third_party/`（空目录）。
+- 视频编辑 MVP 已按第一原则裁决：音频直通、协议沿用行文本、抽帧仅 PNG/JPEG/无损 WebP（有损 WebP 慢一个数量级）、`Auto` 系统引擎优先、快路径自动转 FFmpeg 引擎；详见 `docs/research/video-editor-mvp-design.md` §11。
+- [ ] 本机 vcpkg 用 VS2022 绕过 `bootstrap.ps1` 的 MSVC 14.51 检查装静态 FFmpeg，步骤在台账里，是否固化进脚本待定。
+
+**OCR / 翻译可选后端（`docs/research/system-ocr-translate-backends.md`）**
+- 已决定：老用户保持 `local-model`、新用户默认 `system`；API 密钥存配置文件（设置页提示明文保存，导出与日志不带密钥）；i18n 用 `snow-i18n`（Fluent）。
+- [ ] P0 抽象与配置（`OcrEngine` trait、`backend` 键、迁移、设置页）约 3~4 人天。
+- [ ] P1 Windows 系统 OCR 约 3~5 人天；**先做与 PP-OCR 的同图对比再定默认值**。
+- [ ] P2 macOS Vision（`objc2-vision`）约 3~5 人天；P3 macOS 翻译（Swift 桥，15.x 需视图宿主）约 5~8 人天；P4 远程 OCR（可选）；P5 Windows AI OCR（仅 Copilot+，不建议）。
+- [ ] Windows 没有系统翻译 API：翻译在 Windows 默认仍用本地模型。
+- [ ] 开放问题：中英混排引擎策略、`windows` crate 的 `Media_Ocr` 特性名、macOS 各项需实机验证。
+
+**视频编辑器（`docs/research/video-editor-backends.md`）**
+- 已决定：输入只处理本软件录的 MP4（解码 h264）；系统引擎与 FFmpeg 引擎并存、用户自选；输出只做 H.264；不新增第三方依赖（抽帧：FFmpeg 引擎用 FFmpeg，系统引擎用 WIC/ImageIO）。
+- 已决定：编辑任务走 worker（`snow-recorder` + `snow-recorder-protocol` 扩展），两引擎联动取消，默认输出均 H.264。
+- [x] MVP 设计文档已写：`docs/research/video-editor-mvp-design.md`（协议扩展、引擎 trait、四功能、测试、P0~P4 计划）。
+- [ ] 实现缺口：按时间戳精确 seek 的对外 API、抽帧模块、YUV 直通（现在解码后 RGBA 中转，1080p 约 8MB/帧）。
+- [ ] 用真实录屏样片重做基准，并实测两个引擎的内存（“系统引擎内存更低”目前只有录屏场景的数据）。
+- [ ] 需要用户提供有代表性的录屏样片。
+
+**已搁置（存档，可恢复）**
+- H.265：暂不支持，原因与恢复起点见 `docs/research/windows-hevc-support.md`。恢复前要补：干净 Windows（未装 HEVC 扩展）实测、Intel/AMD 实测、法务确认授权。
+- AV1：仅作设想，未调研落地；需驱动升级后才能验证本机 `av1_nvenc`。
+- WebM 录制：见 `docs/cisox-todo-webm.md`。
+
 ## 6. 环境速查
 
 - 编译目录 `E:\cargo-targets\*`（每个任务一个，占空间大，可清理）；Qt 与 vcpkg 相关在 `E:\qt-static`；模型放 `E:\models\translate\`（仓库外）。
