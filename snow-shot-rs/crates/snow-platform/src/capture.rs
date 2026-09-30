@@ -147,13 +147,39 @@ pub fn capture_display(region: Option<(i32, i32, u32, u32)>) -> Result<CapturedS
     }
 }
 
+/// 单次采集允许的最大边长（像素）。
+#[cfg_attr(not(windows), allow(dead_code))]
+const MAX_CAPTURE_EDGE: i32 = 32768;
+/// 每像素字节数。
+#[cfg_attr(not(windows), allow(dead_code))]
+const CAPTURE_BYTES_PER_PIXEL: usize = 4;
+
+/// 校验采集尺寸并计算缓冲字节数；非正、超上限或乘法溢出时返回 `None`。
+#[cfg_attr(not(windows), allow(dead_code))]
+fn capture_byte_len(width: i32, height: i32) -> Option<usize> {
+    if width <= 0 || height <= 0 || width > MAX_CAPTURE_EDGE || height > MAX_CAPTURE_EDGE {
+        return None;
+    }
+    (width as usize)
+        .checked_mul(height as usize)?
+        .checked_mul(CAPTURE_BYTES_PER_PIXEL)
+}
+
+/// 把 BGRA/RGBA 缓冲的 alpha 通道统一置为 255。
+#[cfg_attr(not(windows), allow(dead_code))]
+fn force_opaque(data: &mut [u8]) {
+    for pixel in data.chunks_exact_mut(CAPTURE_BYTES_PER_PIXEL) {
+        pixel[3] = u8::MAX;
+    }
+}
+
 #[cfg(windows)]
 mod win32_capture {
-    use super::CapturedScreen;
+    use super::{CapturedScreen, capture_byte_len, force_opaque};
     use windows::Win32::Graphics::Gdi::{
-        BitBlt, CAPTUREBLT, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject,
-        GetDC, GetDIBits, ReleaseDC, SRCCOPY, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
-        DIB_RGB_COLORS,
+        BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CAPTUREBLT, CreateCompatibleBitmap,
+        CreateCompatibleDC, DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, GetDIBits, ReleaseDC,
+        SRCCOPY, SelectObject,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         GetSystemMetrics, SM_CXSCREEN, SM_CXVIRTUALSCREEN, SM_CYSCREEN, SM_CYVIRTUALSCREEN,
@@ -166,7 +192,10 @@ mod win32_capture {
     ) -> Result<CapturedScreen, String> {
         unsafe {
             let (x, y, width, height) = match region {
-                Some((rx, ry, rw, rh)) => (rx, ry, rw as i32, rh as i32),
+                Some((rx, ry, rw, rh)) => match (i32::try_from(rw), i32::try_from(rh)) {
+                    (Ok(w), Ok(h)) => (rx, ry, w, h),
+                    _ => return Err("屏幕捕获尺寸非法".into()),
+                },
                 None => {
                     let vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
                     let vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
@@ -175,14 +204,19 @@ mod win32_capture {
                     if vw > 0 && vh > 0 {
                         (vx, vy, vw, vh)
                     } else {
-                        (0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN))
+                        (
+                            0,
+                            0,
+                            GetSystemMetrics(SM_CXSCREEN),
+                            GetSystemMetrics(SM_CYSCREEN),
+                        )
                     }
                 }
             };
 
-            if width <= 0 || height <= 0 {
+            let Some(byte_len) = capture_byte_len(width, height) else {
                 return Err("屏幕捕获尺寸非法".into());
-            }
+            };
 
             let hdc_screen = GetDC(None);
             if hdc_screen.0.is_null() {
@@ -225,28 +259,35 @@ mod win32_capture {
                 bmiColors: [windows::Win32::Graphics::Gdi::RGBQUAD::default()],
             };
 
-            let pixel_count = (width * height) as usize;
-            let mut data = vec![0u8; pixel_count * 4];
+            let mut data = vec![0u8; byte_len];
 
-            let lines = GetDIBits(
-                hdc_mem,
-                hbitmap,
-                0,
-                height as u32,
-                Some(data.as_mut_ptr() as _),
-                &mut bmi,
-                DIB_RGB_COLORS,
-            );
+            // GetDIBits 要求位图不得选入任何 DC：先还原再读取；BitBlt 失败则不必读取
+            SelectObject(hdc_mem, old_obj);
+            let lines = if bitblt_ok.is_ok() {
+                GetDIBits(
+                    hdc_screen,
+                    hbitmap,
+                    0,
+                    height as u32,
+                    Some(data.as_mut_ptr() as _),
+                    &mut bmi,
+                    DIB_RGB_COLORS,
+                )
+            } else {
+                0
+            };
 
             // 清理 GDI 对象
-            SelectObject(hdc_mem, old_obj);
             let _ = DeleteObject(hbitmap.into());
             let _ = DeleteDC(hdc_mem);
             let _ = ReleaseDC(None, hdc_screen);
 
-            if bitblt_ok.is_err() || lines == 0 {
+            if bitblt_ok.is_err() || lines != height {
                 return Err("读取屏幕位图像素失败".into());
             }
+
+            // GDI 不维护 alpha 通道，统一置为不透明
+            force_opaque(&mut data);
 
             Ok(CapturedScreen {
                 width: width as u32,
@@ -284,5 +325,34 @@ mod tests {
         let screen = CapturedScreen::new_solid(2, 2, (1, 2, 3, 255));
         let rgba = screen.to_rgba();
         assert_eq!(&rgba[0..4], &[1, 2, 3, 255]);
+    }
+
+    /// 采集尺寸校验：非法、超限、正常。
+    #[test]
+    fn capture_byte_len_validates_size() {
+        assert_eq!(capture_byte_len(2, 3), Some(24));
+        assert_eq!(capture_byte_len(0, 3), None);
+        assert_eq!(capture_byte_len(-1, 3), None);
+        assert_eq!(capture_byte_len(MAX_CAPTURE_EDGE + 1, 1), None);
+        assert!(capture_byte_len(MAX_CAPTURE_EDGE, MAX_CAPTURE_EDGE).is_some());
+    }
+
+    /// GDI 读回的 alpha=0 会被统一修正为 255，颜色通道不变。
+    #[test]
+    fn force_opaque_sets_alpha_only() {
+        let mut data = vec![10, 20, 30, 0, 40, 50, 60, 7];
+        force_opaque(&mut data);
+        assert_eq!(data, vec![10, 20, 30, 255, 40, 50, 60, 255]);
+    }
+
+    /// 真实采集一小块区域：尺寸正确且 alpha 全为 255（无桌面会话时跳过）。
+    #[cfg(windows)]
+    #[test]
+    fn real_capture_is_opaque() {
+        let Ok(screen) = capture_display(Some((0, 0, 8, 8))) else {
+            return;
+        };
+        assert_eq!((screen.width, screen.height), (8, 8));
+        assert!(screen.data.chunks_exact(4).all(|p| p[3] == 255));
     }
 }

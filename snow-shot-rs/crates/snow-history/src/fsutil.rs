@@ -102,19 +102,81 @@ pub fn contained_path(root: &Path, path: &Path) -> bool {
     }
 }
 
-/// 文件名是否安全：非空、非 `.`/`..`、无路径分隔符与盘符冒号、非绝对路径。
+/// 仓储自身占用的文件名（小写比较），调用方给的文件名不得与之撞名。
+const RESERVED_FILE_NAMES: [&str; 7] = [
+    "canvas_session.bin",
+    "canvas_history.json",
+    "original.html",
+    "original.txt",
+    "result_style.bin",
+    "recognition_results.bin",
+    "index.json",
+];
+
+/// Windows 保留设备名（小写，不含扩展名）。
+const WINDOWS_DEVICE_NAMES: [&str; 22] = [
+    "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
+    "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+];
+
+/// 文件名是否安全：非空、非 `.`/`..`、无路径分隔符与盘符冒号、非绝对路径，
+/// 且不以点或空格结尾、不是 Windows 设备名。
 ///
 /// # 示例
 /// ```
 /// use snow_history::fsutil::safe_file_name;
 /// assert!(safe_file_name("display_0.png"));
 /// assert!(!safe_file_name("../outside.png"));
+/// assert!(!safe_file_name("nul.png"));
 /// ```
 pub fn safe_file_name(name: &str) -> bool {
+    let lowered = name.to_ascii_lowercase();
+    let stem = lowered.split('.').next().unwrap_or_default().trim_end();
     !name.is_empty()
         && name != "."
         && name != ".."
+        && !name.ends_with(['.', ' '])
         && !Path::new(name).is_absolute()
         && !name.contains(['/', '\\', ':'])
         && Path::new(name).file_name().is_some_and(|n| n == name)
+        && !WINDOWS_DEVICE_NAMES.contains(&stem)
+}
+
+/// 调用方提供的文件名是否安全：在 [`safe_file_name`] 之上再禁止与仓储保留文件重名（大小写不敏感）。
+///
+/// # 示例
+/// ```
+/// use snow_history::fsutil::safe_user_file_name;
+/// assert!(safe_user_file_name("source.png"));
+/// assert!(!safe_user_file_name("canvas_session.bin"));
+/// ```
+pub fn safe_user_file_name(name: &str) -> bool {
+    safe_file_name(name) && !RESERVED_FILE_NAMES.contains(&name.to_ascii_lowercase().as_str())
+}
+#[cfg(test)]
+mod tests {
+    use super::safe_user_file_name;
+
+    /// 撞名、末尾点/空格、设备名被拒绝；普通名放行。
+    #[test]
+    fn safe_user_file_name_rejects_collisions() {
+        for bad in [
+            "canvas_session.bin",
+            "Canvas_Session.BIN",
+            "index.json",
+            "foo.",
+            "foo ",
+            "CON",
+            "nul.png",
+            "COM1.txt",
+            "",
+            "..",
+            "a/b",
+        ] {
+            assert!(!safe_user_file_name(bad), "{bad:?}");
+        }
+        for good in ["display_0.png", "source.png", "console.png", "a b.png"] {
+            assert!(safe_user_file_name(good), "{good:?}");
+        }
+    }
 }

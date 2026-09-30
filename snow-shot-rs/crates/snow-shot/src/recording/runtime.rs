@@ -1,100 +1,74 @@
-//! 屏幕录制运行时引擎与会话管理（Recording Runtime）。
+//! 屏幕录制会话状态机（Recording Runtime）。
 //!
-//! 负责协调录制倒计时、采样帧步进、时长统计、按键回显与鼠标点击水波纹动画生命周期。
+//! 会话本身不采集、不编码：真正的录制在独立的 `snow-recorder` 进程里完成，
+//! 会话通过 [`RecorderLink`] 与它按行协议通信，并把回报的事件折算成 [`RecordingState`]。
+//! 录制进程崩溃 / 被杀 / 失联时，会话转入 `Error` 并清理，不会卡在“录制中”。
 
-use std::fs;
-use std::path::PathBuf;
-use std::time::Instant;
 use crate::recording::model::{RecordingConfig, RecordingState};
+use snow_recorder_protocol::{Command, Event, StartRequest};
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
-/// 鼠标点击水波纹动画特效实体。
-#[derive(Debug, Clone, PartialEq)]
-pub struct ClickRipple {
-    /// 触发点击物理坐标 (x, y)。
-    pub position: (i32, i32),
-    /// 当前波纹扩散半径。
-    pub radius: f32,
-    /// 最大扩散半径。
-    pub max_radius: f32,
-    /// 当前不透明度 (0.0 ..= 1.0)。
-    pub alpha: f32,
+/// 发出 `START` 后等待首个状态回报的最长时间。
+const START_TIMEOUT: Duration = Duration::from_secs(15);
+/// 发出 `STOP` 后等待文件写完的最长时间。
+const SAVE_TIMEOUT: Duration = Duration::from_secs(180);
+/// 毫秒到秒的换算。
+const MS_PER_SEC: u64 = 1000;
+
+/// 录制进程的通信通道抽象（真实实现见 `client::ProcessRecorderLink`，测试用假实现）。
+pub trait RecorderLink {
+    /// 发送一条命令；管道已断开时返回错误说明。
+    fn send(&mut self, command: &Command) -> Result<(), String>;
+
+    /// 取走目前为止收到的全部事件（非阻塞）。
+    fn poll(&mut self) -> Vec<LinkEvent>;
+
+    /// 终止通信：等待进程退出（超时则强杀）并清理中间产物。可重复调用。
+    fn shutdown(&mut self);
 }
 
-impl ClickRipple {
-    /// 创建一个新的水波纹动画。
-    pub fn new(x: i32, y: i32) -> Self {
-        Self {
-            position: (x, y),
-            radius: 4.0,
-            max_radius: 28.0,
-            alpha: 0.8,
-        }
-    }
-
-    /// 步进动画状态。若已完全消散则返回 false。
-    pub fn step(&mut self, dt_secs: f32) -> bool {
-        let speed = 48.0; // 像素/秒
-        self.radius += speed * dt_secs;
-        self.alpha -= 1.6 * dt_secs;
-        self.alpha > 0.0 && self.radius <= self.max_radius
-    }
-}
-
-/// 键盘回显按键实体。
-#[derive(Debug, Clone, PartialEq)]
-pub struct KeystrokeDisplay {
-    /// 按键组合文本（例如 "Ctrl+Shift+S"）。
-    pub text: String,
-    /// 剩余存活秒数。
-    pub ttl_secs: f32,
-    /// 显示透明度。
-    pub alpha: f32,
-}
-
-impl KeystrokeDisplay {
-    /// 创建新的按键回显。
-    pub fn new(text: impl Into<String>) -> Self {
-        Self {
-            text: text.into(),
-            ttl_secs: 2.0,
-            alpha: 1.0,
-        }
-    }
-
-    /// 步进衰减按键显示。
-    pub fn step(&mut self, dt_secs: f32) -> bool {
-        self.ttl_secs -= dt_secs;
-        if self.ttl_secs < 0.5 {
-            self.alpha = (self.ttl_secs / 0.5).clamp(0.0, 1.0);
-        }
-        self.ttl_secs > 0.0
-    }
+/// 通道上出现的事件。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LinkEvent {
+    /// 录制进程回报的协议事件。
+    Event(Event),
+    /// 录制进程已退出（`code` 为退出码，未知为 `None`）。
+    Exited {
+        /// 退出码。
+        code: Option<i32>,
+    },
 }
 
 /// 屏幕录制活动会话控制器。
-#[derive(Debug)]
 pub struct ScreenRecordingSession {
     /// 录制配置。
     config: RecordingConfig,
     /// 当前状态。
     state: RecordingState,
-    /// 活跃的点击水波纹列表。
-    ripples: Vec<ClickRipple>,
-    /// 活跃的键盘回显列表。
-    keystrokes: Vec<KeystrokeDisplay>,
-    /// 开始录制的时间戳。
-    started_at: Option<Instant>,
+    /// 与录制进程的通道（空闲或已结束时为 `None`）。
+    link: Option<Box<dyn RecorderLink>>,
+    /// 最近一次回报的有效时长（毫秒）。
+    last_elapsed_ms: u64,
+    /// 等待首个回报的起点（`START` 发出后）。
+    awaiting_first_event: Option<Instant>,
+    /// 等待文件写完的起点（`STOP` 发出后）。
+    saving_since: Option<Instant>,
 }
 
 impl ScreenRecordingSession {
-    /// 创建录制会话。
+    /// 创建录制会话（空闲状态）。
+    ///
+    /// # 参数
+    /// - `config`：录制配置。
     pub fn new(config: RecordingConfig) -> Self {
         Self {
             config,
             state: RecordingState::Idle,
-            ripples: Vec::new(),
-            keystrokes: Vec::new(),
-            started_at: None,
+            link: None,
+            last_elapsed_ms: 0,
+            awaiting_first_event: None,
+            saving_since: None,
         }
     }
 
@@ -108,18 +82,13 @@ impl ScreenRecordingSession {
         &self.state
     }
 
-    /// 获取水波纹列表。
-    pub fn ripples(&self) -> &[ClickRipple] {
-        &self.ripples
-    }
-
-    /// 获取按键回显列表。
-    pub fn keystrokes(&self) -> &[KeystrokeDisplay] {
-        &self.keystrokes
-    }
-
-    /// 启动录制流程（默认从 3 秒倒计时开始）。
-    pub fn start_with_countdown(&mut self, seconds: u32) {
+    /// 接入录制进程通道并开始倒计时（`seconds == 0` 时立即开始）。
+    ///
+    /// # 参数
+    /// - `link`：已拉起的录制进程通道。
+    /// - `seconds`：倒计时秒数。
+    pub fn begin(&mut self, link: Box<dyn RecorderLink>, seconds: u32) {
+        self.link = Some(link);
         if seconds == 0 {
             self.start_immediately();
         } else {
@@ -129,199 +98,439 @@ impl ScreenRecordingSession {
         }
     }
 
-    /// 推进倒计时一步（若倒计时结束则自动进入 Recording 录制中状态）。
+    /// 推进倒计时一步；倒计时结束时自动开始录制并返回 `true`。
     pub fn tick_countdown(&mut self) -> bool {
-        if let RecordingState::Countdown { seconds_left } = &mut self.state {
-            if *seconds_left <= 1 {
-                self.start_immediately();
-                true
-            } else {
-                *seconds_left -= 1;
-                false
-            }
+        let RecordingState::Countdown { seconds_left } = &mut self.state else {
+            return false;
+        };
+        if *seconds_left <= 1 {
+            self.start_immediately();
+            true
         } else {
+            *seconds_left -= 1;
             false
         }
     }
 
-    /// 立即开始录制。
+    /// 立即开始录制：向录制进程发送 `START`。
     pub fn start_immediately(&mut self) {
+        let request = StartRequest {
+            x: self.config.region.x,
+            y: self.config.region.y,
+            width: u32::try_from(self.config.region.width).unwrap_or(0),
+            height: u32::try_from(self.config.region.height).unwrap_or(0),
+            format: self.config.format.to_media(),
+            fps: self.config.fps,
+            show_cursor: self.config.show_cursor,
+            output: self.config.output_path.clone(),
+        };
         self.state = RecordingState::Recording {
             elapsed_secs: 0,
             is_paused: false,
             frames_captured: 0,
         };
-        self.started_at = Some(Instant::now());
+        self.last_elapsed_ms = 0;
+        self.awaiting_first_event = Some(Instant::now());
+        self.send_or_fail(&Command::Start(request));
     }
 
     /// 暂停或恢复录制。
     pub fn toggle_pause(&mut self) {
-        if let RecordingState::Recording { is_paused, .. } = &mut self.state {
-            *is_paused = !*is_paused;
+        let RecordingState::Recording { is_paused, .. } = &self.state else {
+            return;
+        };
+        let command = if *is_paused {
+            Command::Resume
+        } else {
+            Command::Pause
+        };
+        self.send_or_fail(&command);
+    }
+
+    /// 请求停止并保存：进入 `Saving`，文件写完后由 [`ScreenRecordingSession::poll`] 转为 `Finished`。
+    ///
+    /// # 返回
+    /// 当前状态不允许停止时返回错误说明。
+    pub fn finish(&mut self) -> Result<(), String> {
+        if !self.state.is_active() {
+            return Err("当前状态未处于活动录制中，无法停止".to_string());
+        }
+        self.state = RecordingState::Saving;
+        self.saving_since = Some(Instant::now());
+        self.send_or_fail(&Command::Stop);
+        Ok(())
+    }
+
+    /// 取消并放弃当前录制：通知录制进程丢弃产物并退出，回到 `Idle`。
+    pub fn cancel(&mut self) {
+        if let Some(mut link) = self.link.take() {
+            let _ = link.send(&Command::Cancel);
+            link.shutdown();
+        }
+        self.awaiting_first_event = None;
+        self.saving_since = None;
+        self.state = RecordingState::Idle;
+    }
+
+    /// 因外部原因（找不到录制进程、进程无法启动等）直接转入错误状态。
+    ///
+    /// # 参数
+    /// - `reason`：错误原因。
+    pub fn abort(&mut self, reason: String) {
+        self.fail(reason);
+    }
+
+    /// 处理通道上新到的事件并检查超时。
+    ///
+    /// # 参数
+    /// - `now`：当前时刻（便于确定性测试）。
+    ///
+    /// # 返回
+    /// 状态是否发生变化。
+    pub fn poll(&mut self, now: Instant) -> bool {
+        let before = self.state.clone();
+        let events = match self.link.as_mut() {
+            Some(link) => link.poll(),
+            None => Vec::new(),
+        };
+        for event in events {
+            self.apply(event);
+        }
+        self.check_timeouts(now);
+        self.state != before
+    }
+
+    /// 是否仍需要继续轮询（有通道且未到终态）。
+    pub fn needs_polling(&self) -> bool {
+        self.link.is_some() && !self.state.is_terminal()
+    }
+
+    /// 折算一个通道事件。
+    fn apply(&mut self, event: LinkEvent) {
+        match event {
+            LinkEvent::Event(Event::Ready) => {}
+            LinkEvent::Event(Event::Recording { elapsed_ms, frames }) => {
+                self.awaiting_first_event = None;
+                self.last_elapsed_ms = elapsed_ms;
+                if let RecordingState::Recording { is_paused, .. } = self.state {
+                    self.state = RecordingState::Recording {
+                        elapsed_secs: elapsed_ms / MS_PER_SEC,
+                        is_paused,
+                        frames_captured: frames,
+                    };
+                }
+            }
+            LinkEvent::Event(Event::Paused) => self.set_paused(true),
+            LinkEvent::Event(Event::Resumed) => self.set_paused(false),
+            LinkEvent::Event(Event::Finished { path, .. }) => self.complete(path),
+            LinkEvent::Event(Event::Error { reason }) => self.fail(reason),
+            LinkEvent::Exited { code } => {
+                if !self.state.is_terminal() && !matches!(self.state, RecordingState::Idle) {
+                    self.fail(format!("录制进程意外退出（退出码 {code:?}）"));
+                }
+            }
         }
     }
 
-    /// 推进 1 秒录制时间。
-    pub fn tick_second(&mut self) {
+    /// 更新暂停标志。
+    fn set_paused(&mut self, paused: bool) {
+        self.awaiting_first_event = None;
         if let RecordingState::Recording {
             elapsed_secs,
-            is_paused: false,
             frames_captured,
-        } = &mut self.state
+            ..
+        } = self.state
         {
-            *elapsed_secs += 1;
-            *frames_captured += self.config.fps as u64;
-        }
-    }
-
-    /// 推进帧采样并更新动画特效。
-    pub fn step_frame(&mut self, dt_secs: f32) {
-        // 更新水波纹动画
-        self.ripples.retain_mut(|r| r.step(dt_secs));
-
-        // 更新按键回显
-        self.keystrokes.retain_mut(|k| k.step(dt_secs));
-    }
-
-    /// 触发鼠标点击事件特效。
-    pub fn record_mouse_click(&mut self, x: i32, y: i32) {
-        if self.config.show_mouse_clicks && self.state.is_active() {
-            self.ripples.push(ClickRipple::new(x, y));
-        }
-    }
-
-    /// 触发按键事件回显。
-    pub fn record_keystroke(&mut self, text: impl Into<String>) {
-        if self.config.show_keystrokes && self.state.is_active() {
-            self.keystrokes.push(KeystrokeDisplay::new(text));
-        }
-    }
-
-    /// 完成录制并输出产物。
-    pub fn finish(&mut self) -> Result<PathBuf, String> {
-        match &self.state {
-            RecordingState::Recording {
+            self.state = RecordingState::Recording {
                 elapsed_secs,
+                is_paused: paused,
                 frames_captured,
-                ..
-            } => {
-                let duration = *elapsed_secs;
-                let frames = *frames_captured;
-                let target_path = self.config.output_path.clone();
-
-                if let Some(parent) = target_path.parent() {
-                    let _ = fs::create_dir_all(parent);
-                }
-
-                // 写入元数据标头模拟视频容器文件生成
-                let simulated_size = (frames * 4096).max(1024);
-                let metadata = format!(
-                    "SnowShot Recording Media File\nFormat: {:?}\nResolution: {}x{}\nDuration: {}s\nFrames: {}\n",
-                    self.config.format,
-                    self.config.region.width,
-                    self.config.region.height,
-                    duration,
-                    frames
-                );
-                fs::write(&target_path, metadata.as_bytes())
-                    .map_err(|e| format!("写入视频输出文件失败: {e}"))?;
-
-                self.state = RecordingState::Finished {
-                    file_path: target_path.clone(),
-                    duration_secs: duration,
-                    file_size_bytes: simulated_size,
-                };
-
-                Ok(target_path)
-            }
-            _ => Err("当前状态未处于活动录制中，无法停止".to_string()),
+            };
         }
     }
 
-    /// 取消并放弃当前录制。
-    pub fn cancel(&mut self) {
-        self.state = RecordingState::Idle;
-        self.ripples.clear();
-        self.keystrokes.clear();
+    /// 录制完成：读取文件大小，收尾通道。
+    fn complete(&mut self, path: PathBuf) {
+        let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        self.state = RecordingState::Finished {
+            file_path: path,
+            duration_secs: self.last_elapsed_ms / MS_PER_SEC,
+            file_size_bytes: size,
+        };
+        self.release_link();
+    }
+
+    /// 转入错误终态并清理通道（进程若仍在运行会被终止，中间产物随之清除）。
+    fn fail(&mut self, reason: String) {
+        self.state = RecordingState::Error { reason };
+        self.release_link();
+    }
+
+    /// 收尾并丢弃通道。
+    fn release_link(&mut self) {
+        self.awaiting_first_event = None;
+        self.saving_since = None;
+        if let Some(mut link) = self.link.take() {
+            link.shutdown();
+        }
+    }
+
+    /// 向进程发命令；失败（管道断开）视为录制失败。
+    fn send_or_fail(&mut self, command: &Command) {
+        let result = match self.link.as_mut() {
+            Some(link) => link.send(command),
+            None => Err("录制进程未连接".to_string()),
+        };
+        if let Err(e) = result {
+            self.fail(format!("与录制进程通信失败: {e}"));
+        }
+    }
+
+    /// 检查“开始无响应”与“保存超时”。
+    fn check_timeouts(&mut self, now: Instant) {
+        if let Some(since) = self.awaiting_first_event
+            && now.saturating_duration_since(since) > START_TIMEOUT
+        {
+            self.fail("录制进程启动后长时间没有回应".to_string());
+        }
+        if let Some(since) = self.saving_since
+            && now.saturating_duration_since(since) > SAVE_TIMEOUT
+        {
+            self.fail("保存录制文件超时".to_string());
+        }
+    }
+}
+
+impl Drop for ScreenRecordingSession {
+    /// 会话销毁时若通道仍在（窗口被强制关闭等），取消录制并清理进程。
+    fn drop(&mut self) {
+        if let Some(mut link) = self.link.take() {
+            let _ = link.send(&Command::Cancel);
+            link.shutdown();
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::recording::model::RecordingFormat;
+    use std::cell::RefCell;
+    use std::rc::Rc;
 
-    /// 验证水波纹步进与衰减消失。
-    #[test]
-    fn test_ripple_lifecycle() {
-        let mut ripple = ClickRipple::new(100, 200);
-        assert_eq!(ripple.position, (100, 200));
-        assert!(ripple.alpha > 0.0);
+    /// 假通道的共享观测数据。
+    #[derive(Default)]
+    struct Probe {
+        /// 已发送的命令。
+        sent: Vec<Command>,
+        /// 待取走的事件。
+        inbox: Vec<LinkEvent>,
+        /// `shutdown` 调用次数。
+        shutdowns: u32,
+        /// 是否让 `send` 失败（模拟管道断开）。
+        broken: bool,
+    }
 
-        // 步进若干次
-        for _ in 0..10 {
-            ripple.step(0.1);
+    /// 测试用通道。
+    struct FakeLink(Rc<RefCell<Probe>>);
+
+    impl RecorderLink for FakeLink {
+        /// 记录命令。
+        fn send(&mut self, command: &Command) -> Result<(), String> {
+            let mut p = self.0.borrow_mut();
+            if p.broken {
+                return Err("broken pipe".into());
+            }
+            p.sent.push(command.clone());
+            Ok(())
         }
-        assert!(ripple.alpha <= 0.0 || ripple.radius >= ripple.max_radius);
+
+        /// 取走事件。
+        fn poll(&mut self) -> Vec<LinkEvent> {
+            std::mem::take(&mut self.0.borrow_mut().inbox)
+        }
+
+        /// 记录关闭。
+        fn shutdown(&mut self) {
+            self.0.borrow_mut().shutdowns += 1;
+        }
     }
 
-    /// 验证按键回显生命周期。
-    #[test]
-    fn test_keystroke_lifecycle() {
-        let mut ks = KeystrokeDisplay::new("Ctrl+C");
-        assert_eq!(ks.text, "Ctrl+C");
-        assert!(ks.step(1.0));
-        assert!(ks.step(0.6));
-        // ttl 消耗完后衰减为不可见
-        assert!(!ks.step(1.0));
+    /// 构造会话与观测句柄。
+    fn session(countdown: u32) -> (ScreenRecordingSession, Rc<RefCell<Probe>>) {
+        let probe = Rc::new(RefCell::new(Probe::default()));
+        let mut s = ScreenRecordingSession::new(RecordingConfig {
+            format: RecordingFormat::Gif,
+            fps: 24,
+            ..RecordingConfig::default()
+        });
+        s.begin(Box::new(FakeLink(probe.clone())), countdown);
+        (s, probe)
     }
 
-    /// 验证录制倒计时与正常流程。
+    /// 向假通道塞事件。
+    fn push(probe: &Rc<RefCell<Probe>>, event: LinkEvent) {
+        probe.borrow_mut().inbox.push(event);
+    }
+
+    /// 倒计时结束后才发送 START，且参数与配置一致。
     #[test]
-    fn test_recording_session_flow() {
-        let mut config = RecordingConfig::default();
-        let temp_dir = std::env::temp_dir();
-        let out_file = temp_dir.join("snow_shot_test_rec.mp4");
-        config.output_path = out_file.clone();
-        config.show_mouse_clicks = true;
-        config.show_keystrokes = true;
+    fn countdown_then_start() {
+        let (mut s, probe) = session(2);
+        assert_eq!(*s.state(), RecordingState::Countdown { seconds_left: 2 });
+        assert!(probe.borrow().sent.is_empty());
+        assert!(!s.tick_countdown());
+        assert!(s.tick_countdown());
+        assert!(s.state().is_active());
+        match &probe.borrow().sent[..] {
+            [Command::Start(r)] => {
+                assert_eq!((r.width, r.height, r.fps), (1920, 1080, 24));
+                assert_eq!(r.format.as_str(), "gif");
+                assert!(r.show_cursor);
+            }
+            other => panic!("期望单条 START，实际 {other:?}"),
+        }
+    }
 
-        let mut session = ScreenRecordingSession::new(config);
-        assert_eq!(*session.state(), RecordingState::Idle);
+    /// 无倒计时立即发送 START。
+    #[test]
+    fn zero_countdown_starts_immediately() {
+        let (s, probe) = session(0);
+        assert!(s.state().is_active());
+        assert_eq!(probe.borrow().sent.len(), 1);
+    }
 
-        // 启动倒计时 3 秒
-        session.start_with_countdown(3);
+    /// 状态回报折算：时长、帧数、暂停与恢复。
+    #[test]
+    fn events_drive_state() {
+        let (mut s, probe) = session(0);
+        push(&probe, LinkEvent::Event(Event::Recording { elapsed_ms: 2500, frames: 60 }));
+        assert!(s.poll(Instant::now()));
         assert_eq!(
-            *session.state(),
-            RecordingState::Countdown { seconds_left: 3 }
+            *s.state(),
+            RecordingState::Recording { elapsed_secs: 2, is_paused: false, frames_captured: 60 }
         );
+        s.toggle_pause();
+        push(&probe, LinkEvent::Event(Event::Paused));
+        s.poll(Instant::now());
+        assert!(matches!(s.state(), RecordingState::Recording { is_paused: true, .. }));
+        s.toggle_pause();
+        assert_eq!(probe.borrow().sent[1..], [Command::Pause, Command::Resume]);
+        push(&probe, LinkEvent::Event(Event::Resumed));
+        s.poll(Instant::now());
+        assert!(matches!(s.state(), RecordingState::Recording { is_paused: false, .. }));
+    }
 
-        assert!(!session.tick_countdown()); // 剩余 2
-        assert!(!session.tick_countdown()); // 剩余 1
-        assert!(session.tick_countdown()); // 结束并自动转入 Recording
+    /// 停止 → Saving → Finished，并读取文件大小、关闭通道。
+    #[test]
+    fn stop_then_finished() {
+        let file = std::env::temp_dir().join(format!("snow-rec-rt-{}.bin", std::process::id()));
+        std::fs::write(&file, b"12345").unwrap();
+        let (mut s, probe) = session(0);
+        push(&probe, LinkEvent::Event(Event::Recording { elapsed_ms: 4200, frames: 100 }));
+        s.poll(Instant::now());
+        s.finish().unwrap();
+        assert_eq!(*s.state(), RecordingState::Saving);
+        assert_eq!(probe.borrow().sent.last(), Some(&Command::Stop));
+        push(&probe, LinkEvent::Event(Event::Finished { path: file.clone(), frames: 100, dropped: 0 }));
+        s.poll(Instant::now());
+        assert_eq!(
+            *s.state(),
+            RecordingState::Finished { file_path: file.clone(), duration_secs: 4, file_size_bytes: 5 }
+        );
+        assert_eq!(probe.borrow().shutdowns, 1);
+        assert!(!s.needs_polling());
+        let _ = std::fs::remove_file(file);
+    }
 
-        assert!(session.state().is_active());
+    /// 录制进程中途退出：转入 Error 并清理，不卡在录制中。
+    #[test]
+    fn crash_during_recording_resets() {
+        let (mut s, probe) = session(0);
+        push(&probe, LinkEvent::Exited { code: None });
+        assert!(s.poll(Instant::now()));
+        assert!(matches!(s.state(), RecordingState::Error { .. }));
+        assert_eq!(probe.borrow().shutdowns, 1);
+        assert!(!s.needs_polling());
+    }
 
-        // 触发按键与点击
-        session.record_mouse_click(50, 50);
-        session.record_keystroke("Ctrl+Alt+A");
-        assert_eq!(session.ripples().len(), 1);
-        assert_eq!(session.keystrokes().len(), 1);
+    /// 保存途中进程退出（未收到 Finished）同样视为失败。
+    #[test]
+    fn crash_while_saving_is_error() {
+        let (mut s, probe) = session(0);
+        s.finish().unwrap();
+        push(&probe, LinkEvent::Exited { code: Some(1) });
+        s.poll(Instant::now());
+        assert!(matches!(s.state(), RecordingState::Error { .. }));
+    }
 
-        // 录制 2 秒
-        session.tick_second();
-        session.tick_second();
+    /// 正常完成之后进程退出不会覆盖 Finished。
+    #[test]
+    fn exit_after_finished_is_ignored() {
+        let (mut s, probe) = session(0);
+        s.finish().unwrap();
+        push(&probe, LinkEvent::Event(Event::Finished { path: PathBuf::from("nope.mp4"), frames: 1, dropped: 0 }));
+        push(&probe, LinkEvent::Exited { code: Some(0) });
+        s.poll(Instant::now());
+        assert!(matches!(s.state(), RecordingState::Finished { .. }));
+    }
 
-        // 暂停与恢复
-        session.toggle_pause();
-        if let RecordingState::Recording { is_paused, .. } = session.state() {
-            assert!(*is_paused);
-        }
-        session.toggle_pause();
+    /// 录制进程回报 Error：转入错误状态。
+    #[test]
+    fn reported_error_is_terminal() {
+        let (mut s, probe) = session(0);
+        push(&probe, LinkEvent::Event(Event::Error { reason: "采集失败".into() }));
+        s.poll(Instant::now());
+        assert_eq!(*s.state(), RecordingState::Error { reason: "采集失败".into() });
+    }
 
-        // 完成录制
-        let res = session.finish();
-        assert!(res.is_ok());
-        assert!(out_file.exists());
-        let _ = fs::remove_file(out_file);
+    /// 取消：发送 CANCEL、关闭通道、回到 Idle。
+    #[test]
+    fn cancel_sends_cancel_and_resets() {
+        let (mut s, probe) = session(0);
+        s.cancel();
+        assert_eq!(*s.state(), RecordingState::Idle);
+        assert_eq!(probe.borrow().sent.last(), Some(&Command::Cancel));
+        assert_eq!(probe.borrow().shutdowns, 1);
+    }
+
+    /// 管道断开时发送失败即转错误。
+    #[test]
+    fn broken_pipe_fails_session() {
+        let (mut s, probe) = session(0);
+        probe.borrow_mut().broken = true;
+        s.toggle_pause();
+        assert!(matches!(s.state(), RecordingState::Error { .. }));
+    }
+
+    /// START 之后长时间无回应视为失败；保存超时同理。
+    #[test]
+    fn timeouts_fail_session() {
+        let (mut s, _probe) = session(0);
+        s.poll(Instant::now() + START_TIMEOUT + Duration::from_secs(1));
+        assert!(matches!(s.state(), RecordingState::Error { .. }));
+
+        let (mut s, probe) = session(0);
+        push(&probe, LinkEvent::Event(Event::Recording { elapsed_ms: 100, frames: 3 }));
+        s.poll(Instant::now());
+        s.finish().unwrap();
+        s.poll(Instant::now() + SAVE_TIMEOUT + Duration::from_secs(1));
+        assert!(matches!(s.state(), RecordingState::Error { .. }));
+    }
+
+    /// 非录制状态不能停止。
+    #[test]
+    fn finish_requires_recording() {
+        let (mut s, _probe) = session(3);
+        assert!(s.finish().is_err());
+    }
+
+    /// 会话被销毁时会取消并关闭仍在的通道。
+    #[test]
+    fn drop_cancels_running_session() {
+        let (s, probe) = session(0);
+        drop(s);
+        assert_eq!(probe.borrow().sent.last(), Some(&Command::Cancel));
+        assert_eq!(probe.borrow().shutdowns, 1);
     }
 }

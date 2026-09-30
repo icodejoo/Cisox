@@ -137,6 +137,24 @@ impl OverlayWindow {
     pub fn set_always_on_top(&self, on_top: bool) -> Result<(), ShellError> {
         native::set_topmost(self.id.0, on_top)
     }
+
+    /// 让窗口不出现在屏幕录制 / 截图里（录制区域窗自身不能进成片）。
+    ///
+    /// # 参数
+    /// - `excluded`：`true` 排除，`false` 恢复。
+    ///
+    /// # 返回
+    /// 成功 `Ok(())`；平台不支持或系统调用失败返回错误（调用方应记日志，窗口仍可用）。
+    ///
+    /// ```no_run
+    /// # use snow_capability::CapabilityRegistry;
+    /// # use snow_ui_shell::overlay::{NativeWindowId, OverlayWindow};
+    /// # let overlay = OverlayWindow::from_native(NativeWindowId(1), &CapabilityRegistry::for_current_platform());
+    /// overlay.set_capture_excluded(true).ok();
+    /// ```
+    pub fn set_capture_excluded(&self, excluded: bool) -> Result<(), ShellError> {
+        native::set_capture_excluded(self.id.0, excluded)
+    }
 }
 
 #[cfg(test)]

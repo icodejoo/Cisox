@@ -109,6 +109,11 @@ impl TinySkiaRasterizer {
         self.items.len()
     }
 
+    /// 当前场景镜像中的全部元素（按 z 序）；上层用它绘制文字与滤镜元素。
+    pub fn scene_items(&self) -> &[SceneDisplayItem] {
+        &self.items
+    }
+
     /// 出错后作废场景状态（保留已提交块记录，供 `reset` 返回释放列表）。
     fn invalidate(&mut self) {
         self.items.clear();
@@ -282,6 +287,7 @@ impl TinySkiaRasterizer {
                 col: index as u32 % cols,
                 row: index as u32 / cols,
             };
+            output.touched_tiles.push(key);
             let (x, y) = (key.col * ts, key.row * ts);
             let (w, h) = (ts.min(width - x), ts.min(height - y));
             let mut rgba = Vec::with_capacity(w as usize * h as usize * 4);

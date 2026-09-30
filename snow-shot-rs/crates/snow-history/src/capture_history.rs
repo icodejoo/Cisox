@@ -10,7 +10,7 @@ use std::fmt;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::fsutil::{contained_path, write_atomic};
@@ -153,9 +153,9 @@ pub struct Options {
     /// 初始策略；非法时回退默认值。
     pub policy: CaptureHistoryPolicy,
     /// 时钟，返回 UTC 毫秒时间戳。
-    pub clock: Rc<dyn Fn() -> i64>,
+    pub clock: Arc<dyn Fn() -> i64 + Send + Sync>,
     /// 故障注入钩子（测试用）：返回 `true` 表示在该点模拟崩溃。
-    pub fault_hook: Option<Rc<dyn Fn(CrashPoint) -> bool>>,
+    pub fault_hook: Option<Arc<dyn Fn(CrashPoint) -> bool + Send + Sync>>,
 }
 
 impl Default for Options {
@@ -164,7 +164,7 @@ impl Default for Options {
         Self {
             write_available: true,
             policy: CaptureHistoryPolicy::default(),
-            clock: Rc::new(now_utc_ms),
+            clock: Arc::new(now_utc_ms),
             fault_hook: None,
         }
     }
@@ -355,7 +355,7 @@ impl CaptureHistoryRepository {
             usage: Usage::default(),
             last_error: String::new(),
         };
-        if snow_config::paths::is_upstream_location(config_dir) {
+        if snow_config::paths::is_upstream_location_resolved(config_dir) {
             repo.healthy = false;
             repo.options.write_available = false;
             repo.last_error = "Refusing to use an upstream data directory".to_string();

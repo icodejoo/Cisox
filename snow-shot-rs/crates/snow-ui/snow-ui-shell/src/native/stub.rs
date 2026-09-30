@@ -46,7 +46,27 @@ pub(crate) fn set_topmost(_hwnd: isize, _topmost: bool) -> Result<(), ShellError
     Err(unsupported(Capability::OverlayClickThrough))
 }
 
+/// 提到层级最上面：桩返回不支持。
+pub(crate) fn bring_to_top(_hwnd: isize, _topmost: bool) -> Result<(), ShellError> {
+    Err(unsupported(Capability::OverlayClickThrough))
+}
+
 /// 读取鼠标位置：桩返回不支持。
 pub(crate) fn cursor_pos() -> Result<PhysicalPoint, ShellError> {
+    Err(unsupported(Capability::OverlayClickThrough))
+}
+
+/// 去掉窗口边框：桩返回不支持。
+pub(crate) fn strip_window_frame(_hwnd: isize) -> Result<(), ShellError> {
+    Err(unsupported(Capability::OverlayClickThrough))
+}
+
+/// 抢占前台：桩返回不支持。
+pub(crate) fn force_foreground(_hwnd: isize) -> Result<(), ShellError> {
+    Err(unsupported(Capability::OverlayClickThrough))
+}
+
+/// 设置窗口捕获排除：桩返回不支持。
+pub(crate) fn set_capture_excluded(_hwnd: isize, _excluded: bool) -> Result<(), ShellError> {
     Err(unsupported(Capability::OverlayClickThrough))
 }

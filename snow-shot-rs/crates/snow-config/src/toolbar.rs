@@ -7,6 +7,11 @@ use crate::value::{Normalization, json_eq};
 use serde_json::{Value, json};
 use std::collections::HashSet;
 
+/// 快速保存功能标识符
+const QUICK_SAVE_ID: &str = "quick-save";
+/// LaTeX 公式识别功能标识符
+const LATEX_RECOGNITION_ID: &str = "latex-recognition";
+
 /// 绘图工具的内部标识符列表（`kDrawingToolIds`）。
 pub const DRAWING_TOOL_IDS: &[&str] = &[
     "shape",
@@ -257,20 +262,20 @@ pub fn normalize_toolbar_layout(
         }
     }
 
-    if known.contains("quick-save")
-        && !positioned.contains("quick-save")
-        && !hidden_set.contains("quick-save")
+    if known.contains(QUICK_SAVE_ID)
+        && !positioned.contains(QUICK_SAVE_ID)
+        && !hidden_set.contains(QUICK_SAVE_ID)
     {
         for position in &mut positions {
             if let Some(save_index) = position.iter().position(|id| id == "save-as-file") {
-                position.insert(save_index, "quick-save".to_string());
-                positioned.insert("quick-save".to_string());
+                position.insert(save_index, QUICK_SAVE_ID.to_string());
+                positioned.insert(QUICK_SAVE_ID.to_string());
                 break;
             }
         }
-        if !positioned.contains("quick-save") && hidden_set.contains("save-as-file") {
-            hidden.push("quick-save".to_string());
-            hidden_set.insert("quick-save".to_string());
+        if !positioned.contains(QUICK_SAVE_ID) && hidden_set.contains("save-as-file") {
+            hidden.push(QUICK_SAVE_ID.to_string());
+            hidden_set.insert(QUICK_SAVE_ID.to_string());
         }
     }
 
@@ -331,25 +336,25 @@ pub fn normalize_toolbar_layout(
             position.swap(1, 2);
         }
     }
-    if known.contains("latex-recognition")
-        && !positioned.contains("latex-recognition")
-        && !hidden_set.contains("latex-recognition")
+    if known.contains(LATEX_RECOGNITION_ID)
+        && !positioned.contains(LATEX_RECOGNITION_ID)
+        && !hidden_set.contains(LATEX_RECOGNITION_ID)
     {
         for position in &mut positions {
-            if position.iter().any(|id| id == "latex-recognition") {
-                positioned.insert("latex-recognition".to_string());
+            if position.iter().any(|id| id == LATEX_RECOGNITION_ID) {
+                positioned.insert(LATEX_RECOGNITION_ID.to_string());
                 break;
             }
             if let Some(index) = position.iter().position(|id| id == "convert-to-markdown") {
                 // 弹出按钮会反转保存的栈：插在 Markdown 之后才会显示在其左侧
-                position.insert(index + 1, "latex-recognition".to_string());
-                positioned.insert("latex-recognition".to_string());
+                position.insert(index + 1, LATEX_RECOGNITION_ID.to_string());
+                positioned.insert(LATEX_RECOGNITION_ID.to_string());
                 break;
             }
         }
-        if !positioned.contains("latex-recognition") && hidden_set.contains("convert-to-markdown") {
-            hidden.push("latex-recognition".to_string());
-            hidden_set.insert("latex-recognition".to_string());
+        if !positioned.contains(LATEX_RECOGNITION_ID) && hidden_set.contains("convert-to-markdown") {
+            hidden.push(LATEX_RECOGNITION_ID.to_string());
+            hidden_set.insert(LATEX_RECOGNITION_ID.to_string());
         }
     }
     for default_position in default_positions {

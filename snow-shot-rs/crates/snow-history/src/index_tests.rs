@@ -187,6 +187,7 @@ fn uuid_check() {
     assert!(is_valid_uuid("b5ac6a4d-8770-4b99-b83c-414a3ef55710"));
     assert!(!is_valid_uuid("B5AC6A4D-8770-4B99-B83C-414A3EF55710"));
     assert!(!is_valid_uuid("xyz"));
+    assert!(!is_valid_uuid("00000000-0000-0000-0000-000000000000"));
 }
 
 /// Geometry 自定义形状边界 (合成)

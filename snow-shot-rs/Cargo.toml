@@ -20,6 +20,8 @@ members = [
     "crates/snow-update",
     "crates/snow-mcp",
     "crates/snow-platform",
+    "crates/snow-recorder-protocol",
+    "crates/snow-ocr-protocol",
     "tools/workspace-guard",
 ]
 resolver = "3"
@@ -76,3 +78,7 @@ gpui-pre-windows = { path = "vendor/gpui-pre-windows-0.3.7" }
 gpui-pre-zlog = { path = "vendor/gpui-pre-zlog-0.3.7" }
 gpui-pre-ztracing = { path = "vendor/gpui-pre-ztracing-0.3.7" }
 gpui-pre-ztracing-macro = { path = "vendor/gpui-pre-ztracing-macro-0.3.7" }
+
+# 滚动截图拼接库在 dev / test 下也按 opt-level 3 编译：位移估计（ORB + rayon）在 O0 下慢一个数量级，会拖垮测试与探针
+[profile.dev.package.snow-stitch-images]
+opt-level = 3

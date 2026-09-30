@@ -1,0 +1,74 @@
+# 录制工作进程：独立 workspace，主程序不链接 FFmpeg（避开静态 CRT 与 gpui 动态 CRT 的冲突）。
+# 构建入口见 scripts/build-snow-recorder.ps1（负责 +crt-static、FFMPEG_DIR、LIBCLANG_PATH）。
+[workspace]
+resolver = "3"
+
+[package]
+name = "snow-recorder"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-only"
+rust-version = "1.97"
+
+build = "build.rs"
+
+[[bin]]
+name = "snow-recorder"
+path = "src/main.rs"
+
+[dependencies]
+snow-recorder-protocol = { path = "../../crates/snow-recorder-protocol" }
+snow-screen-recorder = { path = "../../../snow-crates/crates/snow-screen-recorder" }
+# 仅为启用转换线程 / 异步编码这两个旋钮（上游把它们放在该 feature 之后）
+snow-recording-runtime = { path = "../../../snow-crates/crates/snow-recording-runtime", features = ["bench-synthetic-input"] }
+
+# 光标类型（跨平台；非 Windows 上采样器返回"不支持"）
+snow-cursor = { path = "../../../snow-crates/crates/snow-cursor" }
+
+# Windows 硬件流水线（DXGI 复制 + D3D11 VideoProcessor + 硬件编码）用到的组件；
+# 均为同仓库路径依赖或已在依赖树内的 crate，不是新增的第三方依赖。
+[target.'cfg(windows)'.dependencies]
+snow-d3d11 = { path = "../../../snow-crates/crates/snow-d3d11" }
+# FFmpeg 绑定：与 snow-crates 工作区同版本同特性（阶段 E2 获批直接依赖）
+ffmpeg-next = { version = "9.0.0", default-features = false, features = ["codec", "format"] }
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Media",
+    "Win32_Security",
+    "Win32_System_Performance",
+    "Win32_System_Threading",
+] }
+
+[features]
+# 诊断构建：打开上游的采集阶段耗时与流水线延迟统计，结果会出现在“录制报告”里（默认发布构建不启用）。
+diag = ["snow-recording-runtime/bench-stage-timing", "snow-recording-runtime/bench-pipeline-timing", "snow-recording-runtime/bench-compositor-timing"]
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+
+[profile.release]
+opt-level = 3
+codegen-units = 16
+lto = "thin"
+panic = "abort"
+debug = 0
+incremental = false
+
+# 采集与图像处理在 dev 下也要优化，否则帧率不可用（与 snow-crates 保持一致）
+[profile.dev.package.snow-capture]
+opt-level = 3
+
+[profile.dev.package.snow-cursor]
+opt-level = 3
+
+[profile.dev.package.rayon]
+opt-level = 3

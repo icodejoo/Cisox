@@ -4,7 +4,7 @@ mod common;
 
 use std::fs;
 use std::path::Path;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use common::*;
 use serde_json::json;
@@ -21,7 +21,7 @@ const MIB: usize = 1024 * 1024;
 /// 以固定时钟构造选项。
 fn options_at(now: i64) -> Options {
     Options {
-        clock: Rc::new(move || now),
+        clock: Arc::new(move || now),
         ..Options::default()
     }
 }
@@ -29,8 +29,8 @@ fn options_at(now: i64) -> Options {
 /// 以给定崩溃点构造选项。
 fn crash_at(point: CrashPoint) -> Options {
     Options {
-        clock: Rc::new(|| NOW),
-        fault_hook: Some(Rc::new(move |p| p == point)),
+        clock: Arc::new(|| NOW),
+        fault_hook: Some(Arc::new(move |p| p == point)),
         ..Options::default()
     }
 }
@@ -638,4 +638,22 @@ fn crash_after_pending_commit_before_delete() {
     let repo = reopen_and_check(dir.path());
     assert_eq!(repo.records(), vec![keep.clone()]);
     assert_eq!(record_dir_names(dir.path()), vec![keep.id]);
+}
+
+/// 末尾带点的 upstream 组件同样被拒绝，且不创建目录。
+#[test]
+fn trailing_dot_upstream_is_refused() {
+    let dir = TempDir::new("hist-dot");
+    let path = dir.path().join("SnowShot.").join("snow_shot");
+    let repo = CaptureHistoryRepository::open(&path, Options::default());
+    assert!(!repo.last_error().is_empty());
+    assert!(!dir.path().join("SnowShot.").exists());
+}
+
+/// 仓储与选项可跨线程移动。
+#[test]
+fn repository_and_options_are_send() {
+    fn assert_send<T: Send>() {}
+    assert_send::<CaptureHistoryRepository>();
+    assert_send::<Options>();
 }

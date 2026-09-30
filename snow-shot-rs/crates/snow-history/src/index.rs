@@ -13,17 +13,27 @@ pub type Extra = Map<String, Value>;
 pub const INDEX_VERSION: i64 = 2;
 /// 可读取的旧版本。
 pub const LEGACY_INDEX_VERSION: i64 = 1;
+/// 单条记录允许的最大显示器数量。
 pub const MAX_DISPLAYS: usize = 32;
+/// 画布历史文件名。
 pub const CANVAS_FILE: &str = "canvas_history.json";
+/// 截图结果图片文件名。
 pub const RESULT_FILE: &str = "capture_result.png";
 
 // 新增的范围边界常量
+/// 1 MiB 字节数
 pub const MIB: i64 = 1024 * 1024;
+/// 单个画布历史记录的最大字节数 (16 MiB)
 pub const MAX_CANVAS_BYTES: i64 = 16 * MIB;
+/// 单张图片的最大像素数量
 pub const MAX_PIXELS_PER_IMAGE: i64 = 64_000_000;
+/// 单条记录允许包含的总像素数量上限
 pub const MAX_PIXELS_PER_RECORD: i64 = 128_000_000;
+/// 单条历史记录存储文件的总字节数上限
 pub const MAX_STORED_BYTES: i64 = 1_i64 << 40;
+/// 32位有符号整数最小值
 pub const INT_MIN: i64 = -2147483648;
+/// 32位有符号整数最大值
 pub const INT_MAX: i64 = 2147483647;
 
 /// 整数矩形（x/y/width/height）。
@@ -244,11 +254,15 @@ pub fn json_semantic_eq(a: &Value, b: &Value) -> bool {
     }
 }
 
+/// 全零 UUID 文本（Qt 侧拒绝，视为非法）。
+const NIL_UUID: &str = "00000000-0000-0000-0000-000000000000";
+
 /// 判断是否为无花括号的小写 UUID 文本。
 pub fn is_valid_uuid(id: &str) -> bool {
     let parts: Vec<&str> = id.split('-').collect();
     let lens = [8, 4, 4, 4, 12];
-    parts.len() == 5
+    id != NIL_UUID
+        && parts.len() == 5
         && parts.iter().zip(lens).all(|(p, n)| {
             p.len() == n
                 && p.chars()

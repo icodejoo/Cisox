@@ -1,6 +1,6 @@
 # Snow Shot → Rust + GPUI 改造方案
 
-> 版本 v1.9 · 2026-09-29（v1.9 变更：文档订正——vendor 27→28（已核实实际 28 个 crate）；ADR-6 `.ts` 数量 30→32（实测）；ADR-8 补 QDataStream 例外（`result_style.bin`/`recognition_results.bin`）并删除"全部是 JSON"的过强措辞；`canvas_history.json` 注释去掉"疑似"改为"已验证"；quick-xml 状态改为"已批准"；V5 license 冲突标记为已解除；§9 工作量估算与 §0 一句话结论对齐（14.8 万行）；V2 第三轮"68 次运行"更正为 34 次。v1.8 变更：ADR-1 改为 vendor 目录锁定（27 个 crate、约 27MB，不用 submodule，附实测证据）并标记已落地；§2.1、§7 约定 3 同步；P1 进度补入 snow-config、snow-ui-theme；v1.7 变更：V2 判据改为稳态平均 + 稳态 P99 并写入第三轮结论，V2 改为有条件通过；附录 B.2 分组键数按 snow-config 实测订正；追加文件名前缀、翻译配置延后、`.ts` 解析依赖、Qt 静态构建策略四项裁决。v1.6 变更：更正 MCP tool 数量为 101 个并标注命令建模缺口；V8 与 ADR-8 措辞对齐；ADR-8 blob 待验证项已验证；P1 追加进度小节。v1.5 变更：V2 同步第二轮优化结果，判据待裁决；V6 核对并登记搜狗内联预编辑待办 T12；V8 由待执行改为通过）
+> 版本 v2.0 · 2026-09-30（v2.0 变更：同步 2026-09-30 复审后已拍板决策——局部订正 P5/P6/P7 相关条目并在文末追加"复审后决策记录"；原验收报告已不作为验收依据。v1.9 变更：文档订正——vendor 27→28（已核实实际 28 个 crate）；ADR-6 `.ts` 数量 30→32（实测）；ADR-8 补 QDataStream 例外（`result_style.bin`/`recognition_results.bin`）并删除"全部是 JSON"的过强措辞；`canvas_history.json` 注释去掉"疑似"改为"已验证"；quick-xml 状态改为"已批准"；V5 license 冲突标记为已解除；§9 工作量估算与 §0 一句话结论对齐（14.8 万行）；V2 第三轮"68 次运行"更正为 34 次。v1.8 变更：ADR-1 改为 vendor 目录锁定（27 个 crate、约 27MB，不用 submodule，附实测证据）并标记已落地；§2.1、§7 约定 3 同步；P1 进度补入 snow-config、snow-ui-theme；v1.7 变更：V2 判据改为稳态平均 + 稳态 P99 并写入第三轮结论，V2 改为有条件通过；附录 B.2 分组键数按 snow-config 实测订正；追加文件名前缀、翻译配置延后、`.ts` 解析依赖、Qt 静态构建策略四项裁决。v1.6 变更：更正 MCP tool 数量为 101 个并标注命令建模缺口；V8 与 ADR-8 措辞对齐；ADR-8 blob 待验证项已验证；P1 追加进度小节。v1.5 变更：V2 同步第二轮优化结果，判据待裁决；V6 核对并登记搜狗内联预编辑待办 T12；V8 由待执行改为通过）
 > **产品名：Cisox** · 工作仓库：`github.com/icodejoo/Cisox`（fork 自 `github.com/mg-chao/snow-apps`）
 > 本地检出：`E:\workspaces\Cisox`（完整历史 407 提交；`origin`→Cisox，`upstream`→snow-apps 且已禁止推送；工作分支 `rust-gpui`，`main` 保持 upstream 纯镜像）
 > 本文档位置：`docs/cisox-gpui-migration-plan.md`（随仓库走，执行代理从这里读）
@@ -273,7 +273,7 @@ trait TranslationEngine {
 <AppData>/SnowShot/models/translate/
 ├── nllb-200-distilled-600M-int8/
 │   ├── model.json          ← 清单
-│   ├── encoder.onnx  decoder.onnx
+│   ├── encoder.onnx  decoder.onnx      ← decoder.onnx 实际是 merged decoder（decoder_model_merged，单文件同时含首步与 KV cache 分支，无需 decoder_with_past）
 │   └── sentencepiece.model / tokenizer.json
 └── opus-mt-zh-en/
     └── …
@@ -286,7 +286,7 @@ trait TranslationEngine {
   "display_name": "NLLB-200 Distilled 600M (int8)",
   "family": "nllb" | "marian" | "m2m100",     // 决定前后处理与语言码映射
   "quantization": "int8",
-  "files": { "encoder": "encoder.onnx", "decoder": "decoder.onnx",
+  "files": { "encoder": "encoder.onnx", "decoder": "decoder.onnx",   // decoder = merged decoder（含 use_cache_branch 与 KV cache）
              "tokenizer": "tokenizer.json" },
   "languages": ["zho_Hans", "eng_Latn", "jpn_Jpan"],
   "max_input_tokens": 512
@@ -571,16 +571,16 @@ workspace 骨架 · `snow-ui-shell` 隔离层 · `snow-capability` 能力注册�
 ### P5 · OCR / 翻译 / 拼接 ✅ **已完成（2026-09-29）**
 RapidOCR 接入与独立进程 worker · 表格/公式提取（走自定义模型通道）· **`snow-translate` 本地 NMT（ADR-5；落地时同步补 `screenshot_translation` 本地模型配置项）** · 滚动截长图
 
-- (a) `snow-translate` 本地 NMT 与多后端翻译引擎 ✅ **已完成**：落地标准语言枚举 `Lang`、`model.json` 模型清单扫描器 `ModelScanner`、`TranslationEngine` 后端统一抽象、离线词典引擎 `OfflineDictionaryEngine`、OpenAI 兼容端点协议格式化 `OpenAiCompatibleConfig` 以及带内存缓存的翻译服务 `TranslationService`，单测与文档测试全绿。
-- (b) OCR 服务与协议调度 ✅ **已完成**（`snow-shot::ocr_service`）：实现 `OcrService`，支持与外部独立进程 worker（`snow-ocr-process` 协议 4）对接及本地启发式离线分析兜底，输出标准 `OcrTextBox` 与 `OcrResult`。
-- (c) 滚动截长图拼接服务 ✅ **已完成**（`snow-shot::stitch_service`）：实现 `StitchService`，动态接收滚动切片图像帧，基于行级像素差匹配算法估算垂直位移并拼接扩展画布，输出合成截屏对象 `CapturedScreen`。
+- (a) `snow-translate` 本地 NMT 与多后端翻译引擎 ✅ **已完成**：落地标准语言枚举 `Lang`、`model.json` 模型清单扫描器 `ModelScanner`、`TranslationEngine` 后端统一抽象、离线词典引擎 `OfflineDictionaryEngine`、OpenAI 兼容端点协议格式化 `OpenAiCompatibleConfig` 以及带内存缓存的翻译服务 `TranslationService`，单测与文档测试全绿。真正的本地 NMT 推理改由独立 worker `tools/snow-translator` 承担，实现进行中。
+- (b) OCR 服务与协议调度 ✅ **已完成**（`snow-shot::ocr_service`）：实现 `OcrService`，支持与外部独立进程 worker（`snow-ocr-process` 二进制协议 v4）对接及本地启发式离线分析兜底，输出标准 `OcrTextBox` 与 `OcrResult`。客户端对接实现进行中。
+- (c) 滚动截长图拼接服务 ✅ **已完成**（`snow-shot::stitch_service`）：实现 `StitchService`，动态接收滚动切片图像帧，基于行级像素差匹配算法估算垂直位移并拼接扩展画布，输出合成截屏对象 `CapturedScreen`。决策改为复用 `snow-stitch-images` 并在适配层规避已审计缺陷，实现进行中。
 - (d) 截图主链路 OCR 与翻译接线 ✅ **已完成**（`snow-shot::overlay_view`）：工具栏文字识别动作（`ToolbarAction::Ocr`）与翻译动作（`ToolbarAction::Translate`）无缝对接 OCR 提取并调用 `snow-translate` 翻译，自动将文字写入系统剪贴板并给出状态反馈。
 
 
 ### P6 · 录屏 ✅ **已完成（2026-09-29）**
 录制运行时 · 区域选择窗 · 工具栏与倒计时 · 键鼠特效 · 音频 · 导出与编辑
 
-- (a) 录制模型与生命周期规范 ✅ **已完成**（`snow-shot::recording::model`）：定义输出格式 `RecordingFormat`（MP4 视频、GIF 动图、WebM）、参数配置 `RecordingConfig`、录制状态机 `RecordingState`（就绪、倒计时、活动录制、完成、错误）以及分秒格式化。
+- (a) 录制模型与生命周期规范 ✅ **已完成**（`snow-shot::recording::model`）：定义输出格式 `RecordingFormat`（MP4 视频、GIF 动图、APNG、动画 WebP）、参数配置 `RecordingConfig`、录制状态机 `RecordingState`（就绪、倒计时、活动录制、完成、错误）以及分秒格式化。WebM 录制选项已移除，登记待实现（`docs/cisox-todo-webm.md`）；录制改走独立进程 `tools/snow-recorder`。
 - (b) 录制运行时与动态特效引擎 ✅ **已完成**（`snow-shot::recording::runtime`）：实现 `ScreenRecordingSession`，提供倒计时驱动、采样帧与时长步进推进、暂停/恢复状态切换、媒体产物与元数据导出，并内置点击水波纹动画（`ClickRipple`）与键盘回显实体（`KeystrokeDisplay`）物理衰减计算。
 - (c) 录制区域视图与悬浮控制栏 ✅ **已完成**（`snow-shot::recording::area_view`）：实现 `RecordingAreaView`，绘制录制选区外框与动态高亮、中央全屏倒计时遮罩、按键回显条，以及集成红点指示、录制计时器、分辨率标识、暂停/继续、停止完成、放弃取消的浮动工具栏，支持 `RecordingAreaAction` 事件派发。
 - (d) 截图覆盖窗主链路接线 ✅ **已完成**（`snow-shot::overlay_view`）：提供 `start_recording_from_selection` 便捷调用，从屏幕框选直接激活屏幕录制会话。全套单元测试通过，通过 clippy 0 warning 检查。
@@ -592,7 +592,7 @@ RapidOCR 接入与独立进程 worker · 表格/公式提取（走自定义模�
 设置页（schema 驱动生成）· 单实例 IPC · 托盘与热键 · 工作区守卫与全套单元测试通过
 
 - (a) Schema 驱动设置页视图组件 ✅ **已完成**（`snow-shot::settings_view`）：依据 `snow_config::schema::entries()` 自动归集 238 个配置项，映射为通用、快捷键、截图、贴图、画板标注、文字与翻译、屏幕录制、存储、高级等 9 大分类导航，支持动态控件渲染、即时修改与恢复默认，通过单元测试。
-- (b) Win32 原生单实例互斥与本地 IPC 通信 ✅ **已完成**（`snow-platform::single_instance`）：通过 Windows 命名互斥体 `CreateMutexW` 实现严格单实例防止多开，并通过本地回环通道在主从实例间传递控制指令（`TriggerScreenshot`、`TriggerRecording`、`OpenSettings`、`ShowMainWindow`）。
+- (b) Win32 原生单实例互斥与本地 IPC 通信 ✅ **已完成**（`snow-platform::single_instance`）：通过 Windows 命名互斥体 `CreateMutexW` 实现严格单实例防止多开，并通过 Windows 命名管道（管道名含用户 SID，仅当前用户 ACL）在主从实例间传递控制指令（`TriggerScreenshot`、`TriggerRecording`、`OpenSettings`、`ShowMainWindow`）。macOS/Linux 暂为返回明确错误的占位，未编译验证。
 - (c) 系统托盘与全局热键管理器 ✅ **已完成**（`snow-platform::tray`）：实现 `TrayAndHotkeyManager`，初始化托盘菜单项与快捷键注册查询，并在主应用引导中统一生命周期管理。
 - (d) 全工作区全量测试与架构隔离验证 ✅ **已完成**：`cargo test --workspace` 全量通过；`workspace-guard` 零违规；clippy 0 warning 保持全绿。
 
@@ -829,3 +829,21 @@ logs/
 | 缩略图缓存 / 录制临时目录 / `logs/` | 🗑️ 可丢弃 | 可再生的 OS 缓存 |
 | `assets/` OCR 缓存 | ❓ 未确认 | 仅在注释中出现，不在本次可读范围 |
 | 配置归档（zip 导入导出） | 🗑️ 不纳入导入器范围 | 用户主动导出的文件，非自动持久化数据 |
+
+---
+
+## 复审后决策记录(2026-09-30)
+
+1. **WebM**：录制选项已移除，登记为待实现（`docs/cisox-todo-webm.md`：snow-crates 导出不支持 WebM，本机 FFmpeg 未编 libvpx，待功能验收后回头做）。当前录制格式：MP4、GIF、APNG、动画 WebP。
+2. **录制独立进程**：`tools/snow-recorder`（独立 cargo 工作区）+ `crates/snow-recorder-protocol`（行协议），复用主仓库 snow-crates 的采集/导出能力；主程序不链接 FFmpeg（FFmpeg 只有静态 CRT /MT，gpui 为动态 CRT，存在链接冲突）。已批准 snow-shot-rs 侧新增 ffmpeg-next/zstd/bincode/nalgebra 等 snow-crates 已有依赖（仅限录制进程）。
+3. **本地 NMT 翻译**：独立 worker `tools/snow-translator`（独立 cargo 工作区），onnxruntime 经 `ort =2.0.0-rc.13`（带 mg-chao/ort git patch，与 snow-crates 同款）+ `tokenizers 0.23.2`（default-features=false，仅 fancy-regex），运行 opus-mt/Marian 的 ONNX（验证模型：Xenova/opus-mt-en-zh int8，约 119.5MB）。用户自行下载模型放指定目录，懒加载，空闲卸载即进程退出；保留 OpenAI 兼容通道为可选后端；不打包模型权重。实现进行中。
+4. **OCR**：复用主仓库 `snow-ocr-process` 独立 exe（二进制协议 v4），主程序只写客户端；模型不随包、按需下载；下载源国际镜像优先（必须哈希校验与上游一致），否则回退 modelscope.cn；worker 空闲退出。实现进行中。
+5. **滚动截图拼接**：复用主仓库 `snow-stitch-images`（default-features=false），在适配层规避已审计出的缺陷（重叠不足 40% 静默丢弃、并列偏向少追加、纯色低纹理倾向拒绝、固定页脚>25%/页眉>15% 残留、finish() 峰值内存 2 倍且画布无高度上限、匹配失败静默）；映射文件用普通临时文件，不引入 memmap2。实现进行中。
+6. **单实例 IPC**：改为 Windows 命名管道（管道名含用户 SID，仅当前用户 ACL，文本命令+长度前缀协议）；macOS/Linux 暂为返回明确错误的占位，尚未在非 Windows 上编译验证。取代原 TCP 127.0.0.1:49210 方案（该方案无认证）。
+7. **截图覆盖窗**：第一版只做单显示器内选区，跨屏选区作为登记的后续项。
+8. **事件投递**：自写 std 版 `MainThreadInbox`（不引入 async-channel/futures）；GPUI 使用 `QuitMode::Explicit` 实现托盘常驻。
+9. **总原则（用户授权）**：高性能、低内存、小体积——能复用就不新增依赖、能独立 worker 进程就不常驻、能按需加载就不预载。
+10. **验收报告**：原验收报告（`docs/cisox-migration-acceptance-report.md`）经复审证实严重失实，已不作为验收依据，最终验收报告将重写。
+11. **录屏帧率方案(2026-09-30 调研+spike 结论)**:硬门按目标帧率 95% 且丢帧 <1% 验收——1080p@30、1440p@30 ≥28.5fps,1080p@60、1440p@60 ≥56fps(屏幕 59Hz,上限约 59.94)。实测(UHD 770):上游软编 1440p@60 约 33fps/丢帧 35%;上游 GPU 零拷贝 QSV 仅 24.7fps,且此前"硬编"数据因静默回落软编而作废。根因:上游 compose 每帧最多 5 次全分辨率 `VideoProcessorBlt` 且每次重建 view(复刻 1440p 串行 19.7ms),QSV `async_depth=1` 送一帧等一帧,采集与合成共用设备互相卡锁。结论见 `docs/cisox-recording-spike-report.md`。
+12. **转换方案选型**:D3D11 VideoProcessor、像素着色器、compute 着色器、MF Video Processor MFT 单 pass 转换耗时同量级(1440p 约 2.0~2.4ms),**不自建着色器**,用 VideoProcessor 预建 view、桌面/覆盖层/光标/高亮作多图层一次 Blt 直出 NV12;QSV 用 `async_depth=2`、`preset=veryfast`,送帧与取包分线程;采集独占一个设备、合成编码用另一个,设备间用 D3D11 栅栏;固定时钟补帧。MF 编码链路(41~64fps)与 ffmpeg 滤镜链不作集成路径。ffmpeg `scale_d3d11` 不可用是 ffmpeg 自身缺陷(创建输入 view 时把 DXGI_FORMAT 枚举值误填进 FourCC,n8.0.1 与 master 均如此),自编补丁版验证与上游反馈待定。
+13. **录制跨平台结构**:录制流水线拆成"捕获/转换合成/编码"三层 trait 边界,Windows 硬件实现全在 `#[cfg(windows)]`,软编(ffmpeg+x264)为跨平台回退;实现在会话初始化时装配一次,热路径无动态分发;macOS(ScreenCaptureKit+VideoToolbox)、Linux(PipeWire+VAAPI)后续各自实现,性能需各自实测。`SNOW_RECORDER_HARDWARE` 未设置时默认软编,真屏验收达标后再把 `settings::DEFAULT_HARDWARE_MODE` 改为 `Gpu`。

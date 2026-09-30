@@ -4,6 +4,7 @@
 //! 撤销/重做堆栈操作以及导出动作（钉图、OCR、翻译、复制、保存、取消）。
 
 use snow_ui_shell::geometry::{PhysicalPoint, PhysicalRect};
+use std::rc::Rc;
 use snow_ui_shell::ui::*;
 
 /// 标注工具种类枚举。
@@ -24,8 +25,10 @@ pub enum AnnotationTool {
     Pencil,
     /// 文字标注工具。
     Text,
-    /// 马赛克/模糊工具。
+    /// 马赛克工具。
     Mosaic,
+    /// 高斯模糊工具。
+    Blur,
     /// 荧光笔高亮工具。
     Highlighter,
     /// 步骤序号标记球。
@@ -54,6 +57,7 @@ impl AnnotationTool {
             Self::Pencil => "画笔",
             Self::Text => "文字",
             Self::Mosaic => "马赛克",
+            Self::Blur => "模糊",
             Self::Highlighter => "高亮",
             Self::Counter => "序号",
         }
@@ -73,6 +77,10 @@ pub enum ToolbarAction {
     Ocr,
     /// 截图翻译。
     Translate,
+    /// 录制屏幕（以当前选区开始录屏）。
+    Record,
+    /// 长截图（对当前选区做滚动截屏并拼接）。
+    ScrollCapture,
     /// 保存为图片文件。
     Save,
     /// 复制图像到剪贴板并退出。
@@ -138,14 +146,54 @@ pub fn calculate_toolbar_placement(
     PhysicalPoint::new(x, y)
 }
 
+
+/// 工具栏动作回调：参数为被点击的动作与窗口 / 应用上下文。
+type ActionHandler = Rc<dyn Fn(ToolbarAction, &mut Window, &mut App)>;
+
+/// 工具栏工具切换回调。
+type ToolHandler = Rc<dyn Fn(AnnotationTool, &mut Window, &mut App)>;
+
+/// 工具栏动作按钮的显示顺序、文案。
+const TOOLBAR_ACTIONS: [(&str, ToolbarAction); 8] = [
+    ("贴图", ToolbarAction::Pin),
+    ("OCR", ToolbarAction::Ocr),
+    ("翻译", ToolbarAction::Translate),
+    ("长图", ToolbarAction::ScrollCapture),
+    ("录屏", ToolbarAction::Record),
+    ("保存", ToolbarAction::Save),
+    ("复制", ToolbarAction::Copy),
+    ("取消", ToolbarAction::Cancel),
+];
+
+/// 可选标注工具的显示顺序。
+const TOOLBAR_TOOLS: [AnnotationTool; 8] = [
+    AnnotationTool::Rectangle,
+    AnnotationTool::Ellipse,
+    AnnotationTool::Arrow,
+    AnnotationTool::Line,
+    AnnotationTool::Pencil,
+    AnnotationTool::Text,
+    AnnotationTool::Mosaic,
+    AnnotationTool::Blur,
+];
+
+/// 主色（选中 / 主按钮）。
+const COLOR_PRIMARY: u32 = 0x1677FF;
+/// 置灰按钮的文字颜色（RGBA）。
+const COLOR_DISABLED_TEXT: u32 = 0x6B6B6BFF;
+/// 普通按钮的文字颜色（RGBA）。
+const COLOR_NORMAL_TEXT: u32 = 0xCCCCCCFF;
+
 /// 截图主工具栏组件。
 pub struct ScreenshotToolbar {
     id: ElementId,
     active_tool: AnnotationTool,
     can_undo: bool,
     can_redo: bool,
-    on_tool_change: Option<Box<dyn Fn(AnnotationTool) + 'static>>,
-    on_action: Option<Box<dyn Fn(ToolbarAction) + 'static>>,
+    show_tools: bool,
+    disabled_actions: Vec<ToolbarAction>,
+    on_tool_change: Option<ToolHandler>,
+    on_action: Option<ActionHandler>,
 }
 
 impl ScreenshotToolbar {
@@ -168,6 +216,8 @@ impl ScreenshotToolbar {
             active_tool: AnnotationTool::None,
             can_undo: false,
             can_redo: false,
+            show_tools: true,
+            disabled_actions: Vec::new(),
             on_tool_change: None,
             on_action: None,
         }
@@ -186,15 +236,52 @@ impl ScreenshotToolbar {
         self
     }
 
-    /// 注册工具变更事件回调。
-    pub fn on_tool_change(mut self, handler: impl Fn(AnnotationTool) + 'static) -> Self {
-        self.on_tool_change = Some(Box::new(handler));
+    /// 是否显示标注工具组；标注尚未实现的场景传 `false` 直接隐藏。
+    pub fn show_tools(mut self, show: bool) -> Self {
+        self.show_tools = show;
         self
     }
 
-    /// 注册动作触发事件回调。
-    pub fn on_action(mut self, handler: impl Fn(ToolbarAction) + 'static) -> Self {
-        self.on_action = Some(Box::new(handler));
+    /// 置灰并禁用指定动作：按钮保持可见但不响应点击。
+    ///
+    /// # 参数
+    /// - `actions`: 需要禁用的动作列表。
+    ///
+    /// # 示例
+    /// ```rust
+    /// use snow_ui_widgets::{ScreenshotToolbar, ToolbarAction};
+    /// let tb = ScreenshotToolbar::new("t").disabled_actions(&[ToolbarAction::Ocr]);
+    /// assert!(tb.is_action_disabled(ToolbarAction::Ocr));
+    /// assert!(!tb.is_action_disabled(ToolbarAction::Copy));
+    /// ```
+    pub fn disabled_actions(mut self, actions: &[ToolbarAction]) -> Self {
+        self.disabled_actions = actions.to_vec();
+        self
+    }
+
+    /// 动作当前是否被禁用。
+    pub fn is_action_disabled(&self, action: ToolbarAction) -> bool {
+        self.disabled_actions.contains(&action)
+    }
+
+    /// 注册工具变更事件回调（点击工具按钮时触发）。
+    pub fn on_tool_change(
+        mut self,
+        handler: impl Fn(AnnotationTool, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_tool_change = Some(Rc::new(handler));
+        self
+    }
+
+    /// 注册动作触发事件回调（点击动作按钮时触发，被禁用的动作不会触发）。
+    ///
+    /// # 参数
+    /// - `handler`: 回调，参数为动作、窗口与应用上下文。
+    pub fn on_action(
+        mut self,
+        handler: impl Fn(ToolbarAction, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_action = Some(Rc::new(handler));
         self
     }
 }
@@ -202,25 +289,12 @@ impl ScreenshotToolbar {
 impl RenderOnce for ScreenshotToolbar {
     /// 渲染工具栏。
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
-        let tools = [
-            AnnotationTool::Rectangle,
-            AnnotationTool::Ellipse,
-            AnnotationTool::Arrow,
-            AnnotationTool::Line,
-            AnnotationTool::Pencil,
-            AnnotationTool::Text,
-            AnnotationTool::Mosaic,
-        ];
+        let mut tool_group = div().flex().flex_row().items_center().gap_1();
 
-        let mut tool_group = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_1();
-
-        for tool in tools {
+        for tool in TOOLBAR_TOOLS {
             let is_active = self.active_tool == tool;
             let mut btn = div()
+                .id(SharedString::from(format!("tb-tool-{tool:?}")))
                 .px_2()
                 .py_1()
                 .rounded_sm()
@@ -229,71 +303,93 @@ impl RenderOnce for ScreenshotToolbar {
 
             if is_active {
                 btn = btn
-                    .bg(rgba(0x1677FF33))
-                    .text_color(rgb(0x1677FF))
+                    .bg(rgba((COLOR_PRIMARY << 8) | 0x33))
+                    .text_color(rgb(COLOR_PRIMARY))
                     .font_weight(FontWeight::SEMIBOLD);
             } else {
                 btn = btn
-                    .text_color(rgba(0xCCCCCCFF))
+                    .text_color(rgba(COLOR_NORMAL_TEXT))
                     .hover(|s| s.bg(rgba(0xFFFFFF1A)).text_color(rgba(0xFFFFFFFF)));
             }
-
-            btn = btn.child(tool.label());
-            tool_group = tool_group.child(btn);
+            if let Some(handler) = self.on_tool_change.clone() {
+                btn = btn.on_click(move |_, window, cx| handler(tool, window, cx));
+            }
+            tool_group = tool_group.child(btn.child(tool.label()));
         }
 
-        // 分割线
-        let divider = div()
-            .w(px(1.0))
-            .h_4()
-            .bg(rgba(0xFFFFFF33));
-
-        // 动作按钮组
-        let mut action_group = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_1();
-
-        let actions = [
-            ("贴图", ToolbarAction::Pin),
-            ("OCR", ToolbarAction::Ocr),
-            ("翻译", ToolbarAction::Translate),
-            ("保存", ToolbarAction::Save),
-            ("复制", ToolbarAction::Copy),
-            ("取消", ToolbarAction::Cancel),
-        ];
-
-        for (label, act) in actions {
+        // 撤销 / 重做：不可用时置灰且不注册点击
+        let mut history_group = div().flex().flex_row().items_center().gap_1();
+        for (label, act, enabled) in [
+            ("撤销", ToolbarAction::Undo, self.can_undo),
+            ("重做", ToolbarAction::Redo, self.can_redo),
+        ] {
             let mut btn = div()
+                .id(SharedString::from(format!("tb-history-{act:?}")))
                 .px_2()
                 .py_1()
                 .rounded_sm()
                 .text_xs()
-                .cursor_pointer()
+                .child(label);
+            if enabled {
+                btn = btn
+                    .cursor_pointer()
+                    .text_color(rgba(COLOR_NORMAL_TEXT))
+                    .hover(|s| s.bg(rgba(0xFFFFFF1A)).text_color(rgba(0xFFFFFFFF)));
+                if let Some(handler) = self.on_action.clone() {
+                    btn = btn.on_click(move |_, window, cx| handler(act, window, cx));
+                }
+            } else {
+                btn = btn.text_color(rgba(COLOR_DISABLED_TEXT));
+            }
+            history_group = history_group.child(btn);
+        }
+
+        // 分割线
+        let divider = || div().w(px(1.0)).h_4().bg(rgba(0xFFFFFF33));
+
+        // 动作按钮组
+        let mut action_group = div().flex().flex_row().items_center().gap_1();
+
+        for (label, act) in TOOLBAR_ACTIONS {
+            let disabled = self.is_action_disabled(act);
+            let mut btn = div()
+                .id(SharedString::from(format!("tb-action-{act:?}")))
+                .px_2()
+                .py_1()
+                .rounded_sm()
+                .text_xs()
                 .child(label);
 
-            if act == ToolbarAction::Copy {
-                // 推荐主动作高亮
-                btn = btn
-                    .bg(rgb(0x1677FF))
-                    .text_color(rgba(0xFFFFFFFF))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .hover(|s| s.bg(rgb(0x4096FF)));
-            } else if act == ToolbarAction::Cancel {
-                btn = btn
-                    .text_color(rgba(0xFF4D4FFF))
-                    .hover(|s| s.bg(rgba(0xFF4D4F1A)));
+            if disabled {
+                // 置灰：不显示手型光标，不注册点击
+                btn = btn.text_color(rgba(COLOR_DISABLED_TEXT));
             } else {
-                btn = btn
-                    .text_color(rgba(0xCCCCCCFF))
-                    .hover(|s| s.bg(rgba(0xFFFFFF1A)).text_color(rgba(0xFFFFFFFF)));
+                btn = btn.cursor_pointer();
+                if act == ToolbarAction::Copy {
+                    // 推荐主动作高亮
+                    btn = btn
+                        .bg(rgb(COLOR_PRIMARY))
+                        .text_color(rgba(0xFFFFFFFF))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .hover(|s| s.bg(rgb(0x4096FF)));
+                } else if act == ToolbarAction::Cancel {
+                    btn = btn
+                        .text_color(rgba(0xFF4D4FFF))
+                        .hover(|s| s.bg(rgba(0xFF4D4F1A)));
+                } else {
+                    btn = btn
+                        .text_color(rgba(COLOR_NORMAL_TEXT))
+                        .hover(|s| s.bg(rgba(0xFFFFFF1A)).text_color(rgba(0xFFFFFFFF)));
+                }
+                if let Some(handler) = self.on_action.clone() {
+                    btn = btn.on_click(move |_, window, cx| handler(act, window, cx));
+                }
             }
 
             action_group = action_group.child(btn);
         }
 
-        div()
+        let mut bar = div()
             .id(self.id)
             .flex()
             .flex_row()
@@ -306,9 +402,17 @@ impl RenderOnce for ScreenshotToolbar {
             .shadow_lg()
             .border_1()
             .border_color(rgba(0x00000080))
-            .child(tool_group)
-            .child(divider)
-            .child(action_group)
+            // 点击工具栏不应穿透到下层选区，否则会误触发重新框选
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation());
+        if self.show_tools {
+            bar = bar
+                .child(tool_group)
+                .child(divider())
+                .child(history_group)
+                .child(divider());
+        }
+        bar.child(action_group)
     }
 }
 
@@ -336,6 +440,16 @@ mod tests {
         assert_eq!(AnnotationTool::Rectangle.label(), "矩形");
         assert_eq!(AnnotationTool::Arrow.label(), "箭头");
         assert_eq!(AnnotationTool::Mosaic.label(), "马赛克");
+        assert_eq!(AnnotationTool::Blur.label(), "模糊");
+    }
+
+    /// 工具表无重复且包含马赛克与模糊。
+    #[test]
+    fn tool_table_is_unique_and_has_filters() {
+        let mut seen = std::collections::HashSet::new();
+        assert!(TOOLBAR_TOOLS.iter().all(|t| seen.insert(*t)));
+        assert!(TOOLBAR_TOOLS.contains(&AnnotationTool::Mosaic));
+        assert!(TOOLBAR_TOOLS.contains(&AnnotationTool::Blur));
     }
 
     /// 验证工具栏定位算法。
@@ -354,5 +468,28 @@ mod tests {
         let sel_bottom = PhysicalRect::new(500, 800, 600, 260);
         let pos_flipped = calculate_toolbar_placement(sel_bottom, tb, screen, 8);
         assert_eq!(pos_flipped.y, 800 - 8 - 36); // 756
+    }
+
+    /// 禁用动作只影响指定项，且默认全部可用。
+    #[test]
+    fn disabled_actions_are_selective() {
+        let tb = ScreenshotToolbar::new("t");
+        assert!(TOOLBAR_ACTIONS.iter().all(|(_, a)| !tb.is_action_disabled(*a)));
+        let tb = tb.disabled_actions(&[ToolbarAction::Pin, ToolbarAction::Ocr]);
+        assert!(tb.is_action_disabled(ToolbarAction::Pin));
+        assert!(tb.is_action_disabled(ToolbarAction::Ocr));
+        assert!(!tb.is_action_disabled(ToolbarAction::Save));
+    }
+
+    /// 动作按钮表不含重复项，覆盖除撤销/重做外的全部动作。
+    #[test]
+    fn action_table_is_complete_and_unique() {
+        let mut seen = std::collections::HashSet::new();
+        for (_, a) in TOOLBAR_ACTIONS {
+            assert!(seen.insert(a), "动作重复: {a:?}");
+        }
+        assert_eq!(seen.len(), 8);
+        assert!(seen.contains(&ToolbarAction::Record));
+        assert!(!seen.contains(&ToolbarAction::Undo) && !seen.contains(&ToolbarAction::Redo));
     }
 }

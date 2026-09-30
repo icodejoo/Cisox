@@ -1,0 +1,3 @@
+# 独立 target 目录，避免与其他工作区抢构建锁
+[build]
+target-dir = "target"

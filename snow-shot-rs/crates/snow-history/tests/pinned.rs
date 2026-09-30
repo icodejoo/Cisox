@@ -4,7 +4,7 @@ mod common;
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
+use std::sync::Arc;
 
 use common::{TempDir, new_uuid};
 use serde_json::{Map, Value, json};
@@ -520,7 +520,7 @@ fn read_only_and_upstream_are_refused() {
 /// 以给定崩溃点构造选项。
 fn crash_at(point: PinCrashPoint) -> PinOptions {
     PinOptions {
-        fault_hook: Some(Rc::new(move |p| p == point)),
+        fault_hook: Some(Arc::new(move |p| p == point)),
         ..PinOptions::default()
     }
 }
@@ -616,4 +616,36 @@ fn failed_manifest_write_is_retried() {
     assert!(!store.is_dirty() && store.last_error().is_empty());
     let reopened = PinnedStore::open(dir.path(), PinOptions::default());
     assert_eq!(reopened.load_payload(&id).unwrap().unwrap(), payload(1));
+}
+
+/// 末尾带点的 upstream 组件同样被拒绝，且不创建目录。
+#[test]
+fn trailing_dot_upstream_is_refused() {
+    let dir = TempDir::new("pin-dot");
+    let path = dir.path().join("SnowShot ").join("snow_shot");
+    let store = PinnedStore::open(&path, PinOptions::default());
+    assert!(!store.last_error().is_empty());
+    assert!(!dir.path().join("SnowShot ").exists());
+}
+
+/// 贴图仓储与选项可跨线程移动。
+#[test]
+fn store_and_options_are_send() {
+    fn assert_send<T: Send>() {}
+    assert_send::<PinnedStore>();
+    assert_send::<PinOptions>();
+}
+
+/// 图片文件名与仓储保留文件撞名时被拒绝。
+#[test]
+fn reserved_image_file_name_is_rejected() {
+    let dir = TempDir::new("pin-reserved");
+    let mut store = PinnedStore::open(dir.path(), PinOptions::default());
+    let mut p = payload(1);
+    p.image.as_mut().unwrap().file_name = "canvas_session.bin".into();
+    assert!(
+        store
+            .upsert(record(&new_uuid(), "clipboard_image"), Some(p))
+            .is_err()
+    );
 }

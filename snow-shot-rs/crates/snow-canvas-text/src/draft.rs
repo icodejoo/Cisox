@@ -326,7 +326,8 @@ impl TextDraft {
     /// 若光标发生变动返回 `true`。
     pub fn move_home(&mut self, keep_selection: bool) -> bool {
         self.clear_preedit();
-        self.set_cursor(0, keep_selection)
+        let line_start = self.text[..self.cursor].rfind('\n').map_or(0, |i| i + 1);
+        self.set_cursor(line_start, keep_selection)
     }
 
     /// 移动光标至文本结尾。
@@ -338,8 +339,10 @@ impl TextDraft {
     /// 若光标发生变动返回 `true`。
     pub fn move_end(&mut self, keep_selection: bool) -> bool {
         self.clear_preedit();
-        let len = self.text.len();
-        self.set_cursor(len, keep_selection)
+        let line_end = self.text[self.cursor..]
+            .find('\n')
+            .map_or(self.text.len(), |i| self.cursor + i);
+        self.set_cursor(line_end, keep_selection)
     }
 
     /// 插入文本，替换当前选区（若有）。
@@ -536,15 +539,108 @@ impl TextDraft {
         self.from_utf16(range.start)..self.from_utf16(range.end)
     }
 
+    /// 显示文本（含预编辑）中的 UTF-8 字节偏移转 UTF-16 单元偏移。
+    ///
+    /// 与系统输入法交互的所有偏移都基于显示文本；无预编辑时等同 [`TextDraft::to_utf16`]。
+    ///
+    /// # 参数
+    /// - `offset_utf8`：显示文本内的字节偏移，超界按末尾处理。
+    ///
+    /// ```
+    /// use snow_canvas_text::TextDraft;
+    /// let mut d = TextDraft::with_text("ab");
+    /// d.ime_replace_and_mark(None, "你好", None);
+    /// // 显示文本 "ab你好"：预编辑之后的偏移必须计入预编辑的 UTF-16 长度
+    /// assert_eq!(d.display_to_utf16("ab你好".len()), 4);
+    /// ```
+    pub fn display_to_utf16(&self, offset_utf8: usize) -> usize {
+        let display = self.display_text();
+        let bounded = floor_char_boundary(&display, offset_utf8);
+        display[..bounded].chars().map(char::len_utf16).sum()
+    }
+
+    /// 显示文本中的 UTF-16 单元偏移转 UTF-8 字节偏移（落在代理对中间时向后取整）。
+    ///
+    /// # 参数
+    /// - `offset_utf16`：显示文本内的 UTF-16 偏移。
+    ///
+    /// ```
+    /// use snow_canvas_text::TextDraft;
+    /// let mut d = TextDraft::with_text("a");
+    /// d.ime_replace_and_mark(None, "🚀", None);
+    /// assert_eq!(d.display_from_utf16(3), "a🚀".len());
+    /// ```
+    pub fn display_from_utf16(&self, offset_utf16: usize) -> usize {
+        offset_from_utf16_in_str(&self.display_text(), offset_utf16)
+    }
+
+    /// 预编辑在显示文本中的字节区间；无预编辑返回 `None`。
+    pub fn display_marked_range(&self) -> Option<Range<usize>> {
+        self.marked_range()
+    }
+
+    /// 显示文本坐标下的选区：有预编辑时为预编辑内部的插入点（折叠区间），否则为常规选区。
+    pub fn display_selection_range(&self) -> Range<usize> {
+        if self.has_preedit() {
+            let caret = self.display_cursor();
+            caret..caret
+        } else {
+            self.selection_range()
+        }
+    }
+
+    /// 把系统输入法给出的 UTF-16 区间（显示文本坐标）换算成已提交文本的字节区间。
+    ///
+    /// 区间端点落在预编辑内部时，起点收敛到被替换区起点、终点收敛到被替换区终点；
+    /// 区间反向时自动交换；结果一定落在字符边界上。
+    ///
+    /// # 参数
+    /// - `range`：显示文本坐标的 UTF-16 区间。
+    ///
+    /// ```
+    /// use snow_canvas_text::TextDraft;
+    /// let mut d = TextDraft::with_text("ab");
+    /// d.ime_replace_and_mark(None, "ni", None);
+    /// // 显示文本 "abni"，预编辑 2..4；恰好覆盖预编辑的区间对应提交文本的 2..2
+    /// assert_eq!(d.committed_range_from_display_utf16(&(2..4)), 2..2);
+    /// ```
+    pub fn committed_range_from_display_utf16(&self, range: &Range<usize>) -> Range<usize> {
+        let display = self.display_text();
+        let s = offset_from_utf16_in_str(&display, range.start.min(range.end));
+        let e = offset_from_utf16_in_str(&display, range.start.max(range.end));
+        if !self.has_preedit() {
+            return s..e;
+        }
+        let start = self.preedit_start.min(self.text.len());
+        let preedit_len = self.preedit_text.len();
+        let replaced = self.preedit_replacement_len.min(self.text.len() - start);
+        let after = |p: usize| p - preedit_len + replaced;
+        let map_start = if s <= start {
+            s
+        } else if s >= start + preedit_len {
+            after(s)
+        } else {
+            start
+        };
+        let map_end = if e <= start {
+            e
+        } else if e >= start + preedit_len {
+            after(e)
+        } else {
+            start + replaced
+        };
+        map_start..map_end.max(map_start)
+    }
+
     /// 处理输入法上屏或直接替换文本（EntityInputHandler::replace_text_in_range）。
     ///
     /// # 参数
-    /// - `range_utf16`：可选的替换目标区间（UTF-16）。
+    /// - `range_utf16`：可选的替换目标区间（UTF-16，显示文本坐标）。
     /// - `text`：提交替换的文本。
     pub fn ime_replace_text(&mut self, range_utf16: Option<Range<usize>>, text: &str) {
         let range = range_utf16
             .as_ref()
-            .map(|r| self.range_from_utf16(r))
+            .map(|r| self.committed_range_from_display_utf16(r))
             .or_else(|| {
                 if !self.preedit_text.is_empty() {
                     let start = self.preedit_start.min(self.text.len());
@@ -556,9 +652,12 @@ impl TextDraft {
             })
             .unwrap_or_else(|| self.selection_range());
 
-        self.record_undo();
+        let range = self.clamp_range(range);
         let normalized = normalize_newlines(text);
-        self.text.replace_range(range.clone(), &normalized);
+        if self.text[range.clone()] != normalized {
+            self.record_undo();
+            self.text.replace_range(range.clone(), &normalized);
+        }
         let next_pos = range.start + normalized.len();
         self.cursor = next_pos;
         self.anchor = next_pos;
@@ -579,7 +678,7 @@ impl TextDraft {
     ) {
         let target_range = range_utf16
             .as_ref()
-            .map(|r| self.range_from_utf16(r))
+            .map(|r| self.committed_range_from_display_utf16(r))
             .or_else(|| {
                 if !self.preedit_text.is_empty() {
                     let start = self.preedit_start.min(self.text.len());
@@ -672,6 +771,24 @@ impl TextDraft {
         self.cursor = self.snap_to_char_boundary(snapshot.cursor.min(self.text.len()));
         self.anchor = self.snap_to_char_boundary(snapshot.anchor.min(self.text.len()));
     }
+}
+
+impl TextDraft {
+    /// 把字节区间夹进提交文本并保证端点落在字符边界上。
+    fn clamp_range(&self, range: Range<usize>) -> Range<usize> {
+        let start = floor_char_boundary(&self.text, range.start);
+        let end = floor_char_boundary(&self.text, range.end).max(start);
+        start..end
+    }
+}
+
+/// 不超过 `index` 的最大字符边界（超界取末尾）。
+fn floor_char_boundary(text: &str, index: usize) -> usize {
+    let mut i = index.min(text.len());
+    while i > 0 && !text.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
 }
 
 /// 规范化换行符（CRLF/CR -> LF）。

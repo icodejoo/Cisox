@@ -5,5 +5,6 @@
 pub mod capture_history;
 pub mod fsutil;
 pub mod index;
+pub mod pin_id;
 pub mod pinned;
 pub mod timeutil;

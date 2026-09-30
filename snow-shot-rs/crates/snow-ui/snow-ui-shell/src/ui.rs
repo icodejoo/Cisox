@@ -5,6 +5,7 @@
 //! 自身不依赖也不书写 `gpui::` 路径（守卫友好）。上游 API 变动只需改这里。
 
 use crate::error::ShellError;
+use crate::geometry::PhysicalRect;
 use crate::monitor::Monitors;
 use crate::native;
 use crate::overlay::{NativeWindowId, OverlayWindow};
@@ -14,16 +15,20 @@ use gpui_kit::{
     WindowKind, WindowOptions,
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+use crate::inbox::MainThreadInbox;
 use snow_capability::CapabilityRegistry;
 
 // ---- 精选 GPUI 子集（视图层使用）----
 pub use gpui_kit::{
-    Anchor, AnyElement, App, AppContext, Bounds, ClickEvent, Context, CursorStyle, Element,
+    Anchor, AnyElement, App, AppContext, Bounds, ClickEvent, Context, CursorStyle, Div, Element,
     ElementId, ElementInputHandler, Entity, EntityInputHandler, FocusHandle, Focusable, FontWeight,
-    Hsla, InteractiveElement, IntoElement, MouseButton, ParentElement, Pixels, Point, Render,
-    RenderOnce, Rgba, SharedString, Size, StatefulInteractiveElement, Styled, TextAlign, TextRun,
-    UTF16Selection, UnderlineStyle, ViewElement, Window, actions, component, div, hsla, point, px,
-    rgb, rgba, size,
+    Hsla, ImageSource, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, ObjectFit, ParentElement, Pixels, Point, QuitMode, Render,
+    RenderImage, RenderOnce, Rgba, SharedString, Size, StatefulInteractiveElement, Styled,
+    StyledImage, TextAlign, TextRun, UTF16Selection, UnderlineStyle, ViewElement, WeakEntity,
+    Window, actions,
+    DispatchPhase, ScrollDelta, ScrollStrategy, ScrollWheelEvent, ShapedLine, UniformListScrollHandle, canvas, component, div, hsla, img, point,
+    px, rgb, rgba, size, uniform_list,
 };
 pub use gpui_kit::prelude::FluentBuilder;
 
@@ -78,6 +83,40 @@ impl ShellWindow {
     pub fn gpui_handle(&self) -> AnyWindowHandle {
         self.handle
     }
+
+    /// 读取窗口外框（屏幕物理像素）。
+    ///
+    /// # 返回
+    /// 外框矩形；取不到原生句柄或窗口已销毁返回错误。
+    pub fn rect(&self) -> Result<PhysicalRect, ShellError> {
+        native::window_rect(self.native_hwnd()?)
+    }
+
+    /// 设置窗口外框（屏幕物理像素），不激活、不改 Z 序。
+    ///
+    /// 注意：会同步触发窗口尺寸 / 位置消息，**不能**在 GPUI 视图回调（App 被借用）里直接调用，
+    /// 应放进 `cx.spawn` 的异步任务里。
+    ///
+    /// # 参数
+    /// - `rect`：目标外框。
+    pub fn set_rect(&self, rect: PhysicalRect) -> Result<(), ShellError> {
+        native::set_window_rect(self.native_hwnd()?, rect)
+    }
+
+    /// 把窗口提到同一置顶层级的最上面，不抢焦点；同样不能在 App 被借用时直接调用。
+    ///
+    /// # 参数
+    /// - `topmost`：窗口是否属于置顶层（决定提到哪一层的最上面，并同步更新置顶状态）。
+    pub fn raise(&self, topmost: bool) -> Result<(), ShellError> {
+        native::bring_to_top(self.native_hwnd()?, topmost)
+    }
+
+    /// 原生窗口句柄整数值；取不到返回 `Platform` 错误。
+    fn native_hwnd(&self) -> Result<isize, ShellError> {
+        self.native
+            .map(|id| id.0)
+            .ok_or_else(|| ShellError::Platform("无法获取原生窗口句柄".into()))
+    }
 }
 
 /// 启动期上下文：在 [`run`] 的回调里创建窗口、启动服务。
@@ -113,6 +152,57 @@ impl ShellContext<'_> {
                 cx.update(|app| app.quit());
             })
             .detach();
+    }
+
+    /// 在 GPUI 主线程上消费收件箱：每个事件回调一次 `handler`，收件箱关闭后循环结束。
+    ///
+    /// 其它线程（热键、托盘、IPC）只需 `inbox.push(..)`，事件会在主线程上被分发，
+    /// `handler` 内可安全创建窗口、退出应用。
+    ///
+    /// # 参数
+    /// - `inbox`：事件收件箱（与生产者线程共享克隆）。
+    /// - `handler`：主线程事件处理函数。
+    ///
+    /// ```no_run
+    /// use snow_ui_shell::inbox::MainThreadInbox;
+    /// let inbox = MainThreadInbox::new();
+    /// let tx = inbox.clone();
+    /// snow_ui_shell::ui::run_resident(move |cx| {
+    ///     cx.run_inbox(inbox, |cx, ev: u32| if ev == 0 { cx.quit() });
+    ///     tx.push(0);
+    /// });
+    /// ```
+    pub fn run_inbox<T: 'static>(
+        &mut self,
+        inbox: MainThreadInbox<T>,
+        mut handler: impl FnMut(&mut ShellContext, T) + 'static,
+    ) {
+        self.app
+            .spawn(async move |cx| {
+                while let Some(event) = inbox.recv().await {
+                    cx.update(|app| handler(&mut ShellContext { app }, event));
+                }
+            })
+            .detach();
+    }
+
+    /// 窗口是否仍然打开。
+    ///
+    /// # 参数
+    /// - `window`：之前 `open_window` 返回的窗口句柄。
+    pub fn is_window_open(&self, window: &ShellWindow) -> bool {
+        let id = window.handle.window_id();
+        self.app.windows().iter().any(|w| w.window_id() == id)
+    }
+
+    /// 把窗口带到前台并激活；窗口已关闭时静默忽略。
+    ///
+    /// # 参数
+    /// - `window`：要激活的窗口。
+    pub fn activate_window(&mut self, window: &ShellWindow) {
+        let _ = window
+            .handle
+            .update(self.app, |_, window, _| window.activate_window());
     }
 
     /// 最后一个窗口关闭时自动退出应用。
@@ -165,12 +255,22 @@ impl ShellContext<'_> {
         })
         .map_err(|e| ShellError::Platform(format!("创建窗口失败: {e}")))?;
         if let Some(id) = native_id {
-            // 逻辑坐标经 gpui 换算可能有 1px 取整误差，这里按物理像素精确落位
-            native::set_window_rect(id.0, placed.rect)?;
+            // 逻辑坐标经 gpui 换算可能有 1px 取整误差，需按物理像素精确落位。
+            // 不能在此同步调用 SetWindowPos：它会同步触发 gpui 的 WM_SIZE / WM_MOVE 回调，
+            // 而此刻 App 正处于可变借用中，gpui 会记 `RefCell already borrowed` 且收不到通知。
+            // 因此推迟到本次 update 结束之后再落位。
+            let rect = placed.rect;
             let popup = !spec.show_in_taskbar;
-            if spec.always_on_top != popup {
-                native::set_topmost(id.0, spec.always_on_top)?;
-            }
+            let topmost = (spec.always_on_top != popup).then_some(spec.always_on_top);
+            let borderless = !spec.decorations;
+            let focus = spec.focus;
+            self.app
+                .spawn(async move |_cx| {
+                    if let Err(e) = finalize_native_placement(id, rect, topmost, borderless, focus) {
+                        tracing::warn!(error = %e, "窗口物理落位失败");
+                    }
+                })
+                .detach();
         }
         Ok((
             ShellWindow {
@@ -180,6 +280,37 @@ impl ShellContext<'_> {
             entity,
         ))
     }
+}
+
+/// 在 App 未被借用时把窗口精确落到物理矩形；已经吻合则不触碰窗口，避免多余的尺寸消息。
+///
+/// # 参数
+/// - `id`：原生窗口句柄。
+/// - `rect`：目标物理矩形。
+/// - `topmost`：需要显式切换置顶时给出目标状态。
+/// - `borderless`：为真时去掉系统边框样式，使客户区等于窗口矩形。
+/// - `focus`：为真时强制抢到前台键盘焦点（后台 IPC / 热键触发的窗口默认拿不到前台）。
+fn finalize_native_placement(
+    id: NativeWindowId,
+    rect: PhysicalRect,
+    topmost: Option<bool>,
+    borderless: bool,
+    focus: bool,
+) -> Result<(), ShellError> {
+    if borderless {
+        native::strip_window_frame(id.0)?;
+    }
+    if native::window_rect(id.0).ok() != Some(rect) {
+        native::set_window_rect(id.0, rect)?;
+    }
+    if let Some(flag) = topmost {
+        native::set_topmost(id.0, flag)?;
+    }
+    if focus && let Err(e) = native::force_foreground(id.0) {
+        // 抢焦点失败不影响窗口显示，只是键盘可能暂时无响应，必须留痕便于排查
+        tracing::warn!(error = %e, "窗口未能取得前台键盘焦点");
+    }
+    Ok(())
 }
 
 /// 由窗口规格与落点生成 GPUI 窗口选项。
@@ -248,6 +379,26 @@ pub fn run(setup: impl FnOnce(&mut ShellContext) + 'static) {
     native::ensure_dpi_awareness();
     gpui_kit::application().run(move |app| {
         gpui_kit::init(app);
+        setup(&mut ShellContext { app });
+    });
+}
+
+/// 启动常驻型 GPUI 应用主循环（阻塞直到 `quit`）。
+///
+/// 与 [`run`] 的区别：退出模式为 [`QuitMode::Explicit`]，关闭所有窗口不会结束进程，
+/// 只有显式调用 [`ShellContext::quit`] 才会退出（托盘常驻应用使用）。
+///
+/// # 参数
+/// - `setup`：应用就绪后的回调，在此创建托盘、热键、收件箱循环。
+///
+/// ```no_run
+/// snow_ui_shell::ui::run_resident(|cx| cx.quit());
+/// ```
+pub fn run_resident(setup: impl FnOnce(&mut ShellContext) + 'static) {
+    native::ensure_dpi_awareness();
+    gpui_kit::application().run(move |app| {
+        gpui_kit::init(app);
+        app.set_quit_mode(QuitMode::Explicit);
         setup(&mut ShellContext { app });
     });
 }

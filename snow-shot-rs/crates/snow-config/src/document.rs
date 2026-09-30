@@ -593,7 +593,7 @@ mod tests {
         assert_eq!(doc.compatibility(), Compatibility::Current);
         assert!(doc.is_dirty());
         let mut changed_keys = Vec::new();
-        for item in entries() {
+        for item in crate::schema::core_entries() {
             let loaded = doc.value(item.key);
             match value_at_path(map, item.key) {
                 None => {
@@ -636,7 +636,7 @@ mod tests {
     fn missing_or_malformed_falls_back_to_defaults() {
         let missing = ConfigDocument::from_bytes(None);
         assert!(missing.is_dirty() && missing.compatibility() == Compatibility::Current);
-        assert_eq!(missing.values().len(), 238);
+        assert_eq!(missing.values().len(), entries().len());
         for bad in [
             "{not json",
             "[]",

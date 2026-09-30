@@ -11,12 +11,12 @@ use std::fmt;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
+use std::sync::Arc;
 
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 
-use crate::fsutil::{contained_path, safe_file_name, write_atomic};
+use crate::fsutil::{contained_path, safe_file_name, safe_user_file_name, write_atomic};
 use crate::index::is_valid_uuid;
 use crate::timeutil::{format_iso_utc_ms, now_utc_ms};
 
@@ -156,9 +156,9 @@ pub struct PinOptions {
     /// 是否允许写盘。
     pub write_available: bool,
     /// 时钟（UTC 毫秒），仅用于损坏留档的文件名。
-    pub clock: Rc<dyn Fn() -> i64>,
+    pub clock: Arc<dyn Fn() -> i64 + Send + Sync>,
     /// 故障注入钩子（测试用）。
-    pub fault_hook: Option<Rc<dyn Fn(PinCrashPoint) -> bool>>,
+    pub fault_hook: Option<Arc<dyn Fn(PinCrashPoint) -> bool + Send + Sync>>,
 }
 
 impl Default for PinOptions {
@@ -166,7 +166,7 @@ impl Default for PinOptions {
     fn default() -> Self {
         Self {
             write_available: true,
-            clock: Rc::new(now_utc_ms),
+            clock: Arc::new(now_utc_ms),
             fault_hook: None,
         }
     }
@@ -351,7 +351,10 @@ fn validate_descriptor(
         let Some(name) = value.as_str() else {
             return false;
         };
-        if !safe_file_name(name) || (key == KEY_IMAGE && !dir.join(name).is_file()) {
+        if !safe_file_name(name)
+            || (key == KEY_IMAGE && !safe_user_file_name(name))
+            || (key == KEY_IMAGE && !dir.join(name).is_file())
+        {
             return false;
         }
     }
@@ -416,7 +419,7 @@ impl PinnedStore {
             skipped: 0,
             payload_writes: 0,
         };
-        if snow_config::paths::is_upstream_location(config_dir) {
+        if snow_config::paths::is_upstream_location_resolved(config_dir) {
             store.options.write_available = false;
             store.error = "Refusing to use an upstream data directory".to_string();
             return store;
@@ -621,7 +624,7 @@ impl PinnedStore {
         let mut payload = PinPayload::default();
         if stored.kind != SourceKind::ClipboardText {
             let name = name_of(KEY_IMAGE)
-                .filter(|n| safe_file_name(n))
+                .filter(|n| safe_user_file_name(n))
                 .ok_or_else(|| PinError::Invalid("missing image payload".into()))?;
             let bytes = read_blob(&self.root, &dir.join(name), MAX_IMAGE_BYTES)?;
             if bytes.is_empty() {
@@ -759,7 +762,7 @@ impl PinnedStore {
             (kind, Some(image)) => {
                 let expected_name = kind == SourceKind::ImageData;
                 if image.bytes.len() > MAX_IMAGE_BYTES
-                    || !safe_file_name(&image.file_name)
+                    || !safe_user_file_name(&image.file_name)
                     || (expected_name && image.file_name != SOURCE_IMAGE_FILE)
                 {
                     Err(invalid("invalid pin image"))

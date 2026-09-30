@@ -3,7 +3,7 @@
 //! 磁盘格式沿用 upstream `config.json`（`"组/名"` 两级 JSON、`storage/schema_version = 3`、
 //! 4 空格缩进），数据根目录使用自有名称（见 [`paths`]），不读写 upstream 目录。
 //!
-//! - [`schema`]：238 个键的类型/默认值/取值约束
+//! - [`schema`]：238 个键的类型/默认值/取值约束（另有 [`extensions`] 的 Cisox 扩展项）
 //! - [`normalize`]：约 20 个键专属规范化，非法值回退默认
 //! - [`document`]：加载修复、迁移、未知字段保留、Qt 风格序列化
 //! - [`store`]：文件读写（损坏留档、原子写入）
@@ -22,6 +22,7 @@
 
 pub mod custom_models;
 pub mod document;
+pub mod extensions;
 pub mod normalize;
 pub mod paths;
 pub mod schema;

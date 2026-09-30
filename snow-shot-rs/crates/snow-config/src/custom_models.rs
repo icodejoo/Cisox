@@ -119,11 +119,11 @@ fn authority_is_valid(authority: &str) -> bool {
             .all(|c| !c.is_ascii() || c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_'))
 }
 
-/// 端口须为非空数字且不超过 65535。
+/// 端口为空（按 QUrl 视为未指定）或为不超过 65535 的数字。
 fn port_is_valid(port: &str) -> bool {
-    !port.is_empty()
-        && port.chars().all(|c| c.is_ascii_digit())
-        && port.parse::<u32>().is_ok_and(|value| value <= PORT_MAX)
+    port.is_empty()
+        || (port.chars().all(|c| c.is_ascii_digit())
+            && port.parse::<u32>().is_ok_and(|value| value <= PORT_MAX))
 }
 
 /// 校验基础地址（`QUrl::StrictMode` 的受限子集）。
@@ -384,6 +384,18 @@ mod tests {
         assert_eq!(
             custom_ai_model_url_error("https://example.com/v1/chat/completions"),
             FullEndpoint
+        );
+    }
+
+    /// 空端口（`http://host:/v1`）按 QUrl 行为接受。
+    #[test]
+    fn empty_port_is_accepted_like_qurl() {
+        use CustomAiModelUrlError::*;
+        assert_eq!(custom_ai_model_url_error("http://host:/v1"), None);
+        assert_eq!(custom_ai_model_url_error("http://[::1]:/v1"), None);
+        assert_eq!(
+            custom_ai_model_url_error("http://host:x/v1"),
+            InvalidBaseUrl
         );
     }
 

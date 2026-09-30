@@ -207,6 +207,44 @@ pub(crate) fn set_topmost(hwnd: isize, topmost: bool) -> Result<(), ShellError> 
     .map_err(|e| platform_err("SetWindowPos(topmost)", e))
 }
 
+/// 把窗口提到所属层级（置顶层或普通层）的最上面，同时设置置顶状态；不移动、不缩放、不激活。
+///
+/// 取消置顶必须显式用 `HWND_NOTOPMOST`（`HWND_TOP` 不会去掉置顶样式），之后再提到普通层顶部。
+pub(crate) fn bring_to_top(hwnd: isize, topmost: bool) -> Result<(), ShellError> {
+    use windows::Win32::UI::WindowsAndMessaging::{HWND_TOP, SWP_NOMOVE, SWP_NOSIZE};
+    let place = |after: HWND| {
+        // SAFETY: 纯值参数。
+        unsafe {
+            SetWindowPos(
+                to_hwnd(hwnd),
+                Some(after),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            )
+        }
+        .map_err(|e| platform_err("SetWindowPos(raise)", e))
+    };
+    if topmost {
+        return place(HWND_TOPMOST);
+    }
+    place(HWND_NOTOPMOST)?;
+    place(HWND_TOP)
+}
+
+/// 设置窗口是否从屏幕捕获中排除（`WDA_EXCLUDEFROMCAPTURE`，Windows 10 2004+）。
+pub(crate) fn set_capture_excluded(hwnd: isize, excluded: bool) -> Result<(), ShellError> {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE, WDA_NONE,
+    };
+    let affinity = if excluded { WDA_EXCLUDEFROMCAPTURE } else { WDA_NONE };
+    // SAFETY: 纯值参数。
+    unsafe { SetWindowDisplayAffinity(to_hwnd(hwnd), affinity) }
+        .map_err(|e| platform_err("SetWindowDisplayAffinity", e))
+}
+
 /// 后台消息循环的唤醒/退出句柄，可跨线程使用。
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct LoopWaker {
@@ -257,6 +295,80 @@ pub(crate) fn run_message_loop(mut tick: impl FnMut() -> bool) {
         }
         if !tick() {
             break;
+        }
+    }
+}
+
+/// 去掉窗口的标题栏 / 边框样式（无边框覆盖窗使用），并通知系统重算客户区。
+///
+/// gpui 的 PopUp 窗口样式是 `WS_OVERLAPPED`，保留了 8px 的非客户区边框，
+/// 会让客户区比窗口矩形小一圈，导致铺屏内容错位。
+pub(crate) fn strip_window_frame(hwnd: isize) -> Result<(), ShellError> {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GWL_STYLE, GetWindowLongPtrW, SWP_FRAMECHANGED, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+        SetWindowLongPtrW, WS_BORDER, WS_CAPTION, WS_DLGFRAME, WS_THICKFRAME,
+    };
+    let h = to_hwnd(hwnd);
+    // SAFETY: 纯句柄 / 值参数；窗口无效时系统返回错误而不是崩溃。
+    unsafe {
+        let style = GetWindowLongPtrW(h, GWL_STYLE);
+        let mask = (WS_CAPTION | WS_THICKFRAME | WS_BORDER | WS_DLGFRAME).0 as isize;
+        SetWindowLongPtrW(h, GWL_STYLE, style & !mask);
+        SetWindowPos(
+            h,
+            None,
+            0,
+            0,
+            0,
+            0,
+            SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        )
+    }
+    .map_err(|e| platform_err("SetWindowPos(frame)", e))
+}
+
+/// 让窗口成为前台窗口并获得键盘焦点。
+///
+/// 后台进程直接 `SetForegroundWindow` 会被系统拒绝（只闪任务栏）。这里临时把本线程的输入队列
+/// 挂到当前前台窗口所在线程上，借用其前台权限完成切换，随后立即解除挂接。
+///
+/// # 参数
+/// - `hwnd`：目标窗口句柄。
+///
+/// # 返回
+/// 目标窗口最终成为前台窗口则 `Ok`；被系统拒绝返回错误说明。
+pub(crate) fn force_foreground(hwnd: isize) -> Result<(), ShellError> {
+    use windows::Win32::System::Threading::AttachThreadInput;
+    use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        BringWindowToTop, GetForegroundWindow, GetWindowThreadProcessId, SetForegroundWindow,
+    };
+    let target = to_hwnd(hwnd);
+    // SAFETY: 纯句柄 / 值参数；窗口无效时各调用返回失败而不是崩溃。挂接与解除成对出现。
+    unsafe {
+        let foreground = GetForegroundWindow();
+        if foreground == target {
+            return Ok(());
+        }
+        let current_thread = GetCurrentThreadId();
+        let foreground_thread = if foreground.0.is_null() {
+            0
+        } else {
+            GetWindowThreadProcessId(foreground, None)
+        };
+        let attached = foreground_thread != 0
+            && foreground_thread != current_thread
+            && AttachThreadInput(current_thread, foreground_thread, true).as_bool();
+        let _ = BringWindowToTop(target);
+        let switched = SetForegroundWindow(target).as_bool();
+        let _ = SetFocus(Some(target));
+        if attached {
+            let _ = AttachThreadInput(current_thread, foreground_thread, false);
+        }
+        if switched || GetForegroundWindow() == target {
+            Ok(())
+        } else {
+            Err(platform_err("SetForegroundWindow", "被系统拒绝"))
         }
     }
 }

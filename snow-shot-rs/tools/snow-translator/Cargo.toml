@@ -1,0 +1,42 @@
+# 翻译工作进程：独立 workspace，ORT/tokenizers 与主程序构建隔离；空闲卸载 = 进程退出。
+[workspace]
+resolver = "3"
+
+[package]
+name = "snow-translator"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-only"
+rust-version = "1.97"
+
+[[bin]]
+name = "snow-translator"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ndarray = "0.17"
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "ndarray", "api-28", "load-dynamic"] }
+tokenizers = { version = "0.23.2", default-features = false, features = ["fancy-regex"] }
+
+# 与 snow-crates 保持同一 ort 补丁（保留原生诊断日志），wrapper 与 sys 必须同 rev。
+[patch.crates-io]
+ort = { git = "https://github.com/mg-chao/ort.git", rev = "90018ee581fb1bb1baf8e82eba8e679728ff27dc" }
+ort-sys = { git = "https://github.com/mg-chao/ort.git", rev = "90018ee581fb1bb1baf8e82eba8e679728ff27dc" }
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+
+[profile.release]
+opt-level = 3
+codegen-units = 16
+lto = "thin"
+panic = "unwind"
+debug = 0
+incremental = false

@@ -16,6 +16,7 @@ pub mod dispatch;
 pub mod error;
 pub mod geometry;
 pub mod hotkey;
+pub mod inbox;
 pub mod monitor;
 mod native;
 pub mod overlay;

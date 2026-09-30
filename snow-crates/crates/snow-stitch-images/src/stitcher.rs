@@ -388,6 +388,8 @@ impl StitchAccumulator {
             }
             return Ok(());
         };
+        // 用精确命中数复核估计位移（修正弱对比度内容上的偶发 ±1 行偏差）
+        let offset = refine_offset_exactly(reference, &incoming, self.options.axis, offset);
 
         self.accepted_count =
             self.accepted_count
@@ -598,6 +600,72 @@ where
     I: IntoIterator<Item = Result<Frame, StitchError>>,
 {
     stitch_owned(frames.into_iter(), options)
+}
+
+/// 精确匹配位移修正：估计位移左右各搜索的范围。
+const EXACT_REFINE_RADIUS: i32 = 2;
+/// 精确匹配位移修正：沿位移方向的采样步长。
+const EXACT_REFINE_PRIMARY_STEP: usize = 2;
+/// 精确匹配位移修正：垂直于位移方向的采样步长。
+const EXACT_REFINE_CROSS_STEP: usize = 3;
+
+/// 在估计位移附近按“逐像素完全相等”的采样命中数挑选位移。
+///
+/// 位移估计用 60 分位误差比较候选，在弱对比度内容（例如只有红色通道有纹理）上会偶发 ±1 行偏差，
+/// 且置信度仍然通过。屏幕滚动是整像素平移，正确位移下重叠区域逐像素相同，所以用精确命中数复核：
+/// 只有别的候选严格多于估计值时才改用它，平局保持原估计（周期内容不会被误改）。
+fn refine_offset_exactly(
+    reference: &Frame,
+    incoming: &Frame,
+    axis: StitchAxis,
+    estimate: i32,
+) -> i32 {
+    let (width, height) = (incoming.width() as usize, incoming.height() as usize);
+    let channels = incoming.pixel_format().channels() as usize;
+    // Rgba8 忽略 alpha，其余格式比较全部通道
+    let compared = channels.min(3);
+    let (reference_pixels, incoming_pixels) = (reference.pixels(), incoming.pixels());
+    let hits = |offset: i32| -> u64 {
+        let mut count = 0_u64;
+        for y in (0..height).step_by(match axis {
+            StitchAxis::Vertical => EXACT_REFINE_PRIMARY_STEP,
+            StitchAxis::Horizontal => EXACT_REFINE_CROSS_STEP,
+        }) {
+            for x in (0..width).step_by(match axis {
+                StitchAxis::Vertical => EXACT_REFINE_CROSS_STEP,
+                StitchAxis::Horizontal => EXACT_REFINE_PRIMARY_STEP,
+            }) {
+                let (rx, ry) = match axis {
+                    StitchAxis::Vertical => (x as i64, y as i64 - i64::from(offset)),
+                    StitchAxis::Horizontal => (x as i64 - i64::from(offset), y as i64),
+                };
+                if rx < 0 || ry < 0 || rx >= width as i64 || ry >= height as i64 {
+                    continue;
+                }
+                let a = (y * width + x) * channels;
+                let b = (ry as usize * width + rx as usize) * channels;
+                if incoming_pixels[a..a + compared] == reference_pixels[b..b + compared] {
+                    count += 1;
+                }
+            }
+        }
+        count
+    };
+    let extent = match axis {
+        StitchAxis::Vertical => height,
+        StitchAxis::Horizontal => width,
+    } as i64;
+    let mut best = (estimate, hits(estimate));
+    for candidate in (estimate - EXACT_REFINE_RADIUS)..=(estimate + EXACT_REFINE_RADIUS) {
+        if candidate == estimate || candidate == 0 || i64::from(candidate).abs() >= extent {
+            continue;
+        }
+        let count = hits(candidate);
+        if count > best.1 {
+            best = (candidate, count);
+        }
+    }
+    best.0
 }
 
 #[cfg(test)]
@@ -927,5 +995,67 @@ mod tests {
             .unwrap_err();
             assert!(matches!(error, StitchError::InvalidOptions { .. }));
         }
+    }
+}
+
+#[cfg(test)]
+mod exact_refinement_tests {
+    use super::*;
+    use crate::PixelFormat;
+
+    /// 只有红色通道有纹理的文档像素（RGBA）。
+    fn red_only(x: u32, y: u32) -> [u8; 4] {
+        let mut hash = x.wrapping_mul(0xc2b2_ae35) ^ y.wrapping_mul(0x27d4_eb2d);
+        hash ^= hash >> 16;
+        hash = hash.wrapping_mul(0x7feb_352d);
+        hash ^= hash >> 15;
+        [(hash >> 24) as u8, 128, 128, 255]
+    }
+
+    /// 截取文档第 `scroll` 行起的一帧。
+    fn frame(width: u32, height: u32, scroll: u32, pixel: fn(u32, u32) -> [u8; 4]) -> Frame {
+        let mut bytes = Vec::with_capacity((width * height * 4) as usize);
+        for y in 0..height {
+            for x in 0..width {
+                bytes.extend_from_slice(&pixel(x, y + scroll));
+            }
+        }
+        Frame::new(width, height, PixelFormat::Rgba8, bytes).unwrap()
+    }
+
+    /// 弱对比度（只有 R 通道有纹理）序列必须逐字节拼回，不能有 ±1 行偏差。
+    #[test]
+    fn weak_contrast_sequence_stitches_exactly() {
+        let (width, height, step) = (1280, 800, 240);
+        let frames: Vec<Frame> = (0..8).map(|i| frame(width, height, i * step, red_only)).collect();
+        let result = stitch(&frames, StitchOptions::default()).unwrap();
+        let expected = frame(width, height + 7 * step, 0, red_only);
+        assert_eq!(result.image, expected);
+    }
+
+    /// 精确命中数复核：正确位移下别的候选不会抢走；错位 1 行的估计会被纠正。
+    #[test]
+    fn refinement_corrects_off_by_one_and_keeps_correct() {
+        let (width, height, shift) = (320, 200, 37);
+        let reference = frame(width, height, 0, red_only);
+        let incoming = frame(width, height, shift, red_only);
+        // 向下滚动 shift：incoming 的第 y 行对应 reference 的第 y + shift 行，位移为 -shift
+        let truth = -(shift as i32);
+        assert_eq!(refine_offset_exactly(&reference, &incoming, StitchAxis::Vertical, truth), truth);
+        assert_eq!(refine_offset_exactly(&reference, &incoming, StitchAxis::Vertical, truth + 1), truth);
+        assert_eq!(refine_offset_exactly(&reference, &incoming, StitchAxis::Vertical, truth - 2), truth);
+    }
+
+    /// 周期内容出现平局时保持原估计。
+    #[test]
+    fn refinement_keeps_estimate_on_ties() {
+        let stripes = |x: u32, y: u32| {
+            let v = ((x.wrapping_mul(31) ^ (y % 8).wrapping_mul(97)) & 0xff) as u8;
+            [v, v, v, 255]
+        };
+        let reference = frame(64, 64, 0, stripes);
+        let incoming = frame(64, 64, 8, stripes);
+        // 周期为 8：-8 与 -16 等价，估计 -8 时不应被改成别的
+        assert_eq!(refine_offset_exactly(&reference, &incoming, StitchAxis::Vertical, -8), -8);
     }
 }

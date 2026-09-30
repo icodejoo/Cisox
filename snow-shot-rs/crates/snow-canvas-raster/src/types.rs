@@ -112,6 +112,8 @@ pub struct RasterOutput {
     pub tiles: Vec<RasterTile>,
     /// 之前提交过、现在已全透明或已失效的块；上层应释放对应纹理。
     pub released: Vec<TileKey>,
+    /// 本帧被脏区触及的全部块（含全透明块）；上层据此叠加文字、滤镜后再判断块是否为空。
+    pub touched_tiles: Vec<TileKey>,
     /// 脏区内被跳过、需外部绘制的元素（文字、滤镜）。
     pub deferred: Vec<DeferredItem>,
     /// 当前画布物理尺寸（宽，高）。

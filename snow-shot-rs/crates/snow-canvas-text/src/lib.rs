@@ -8,7 +8,7 @@ pub mod layout;
 pub mod style;
 
 pub use draft::TextDraft;
-pub use input::CanvasTextInput;
+pub use input::{CanvasTextInput, EditKeyOutcome, apply_edit_key};
 pub use layout::{
     TextCharMetric, TextLayoutResult, TextLineLayout, TextPoint, TextRect, TextSize,
 };

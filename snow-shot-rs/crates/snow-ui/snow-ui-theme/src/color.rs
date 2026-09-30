@@ -1,6 +1,6 @@
 //! 令牌用颜色类型：复刻 Qt6 `QColor`(Rgb) 的 16 位通道语义，以便与 C++ 令牌逐值一致。
 //!
-//! 8 位读取 = 高 8 位（`>> 8`）；浮点读取 = `通道 / 65535`（f32）；浮点写入 = `round(值 * 65535)`（f32）。
+//! 8 位读取 = 16 位值除以 257 四舍五入（对拍真 Qt 6.11.1）；浮点读取 = `通道 / 65535`（f32）；浮点写入 = `round(值 * 65535)`（f32）。
 
 use crate::fast_color::FastColor;
 
@@ -94,22 +94,22 @@ impl Color {
 
     /// 红色通道（8 位）。
     pub fn red(&self) -> u8 {
-        (self.r >> 8) as u8
+        narrow_to_u8(self.r)
     }
 
     /// 绿色通道（8 位）。
     pub fn green(&self) -> u8 {
-        (self.g >> 8) as u8
+        narrow_to_u8(self.g)
     }
 
     /// 蓝色通道（8 位）。
     pub fn blue(&self) -> u8 {
-        (self.b >> 8) as u8
+        narrow_to_u8(self.b)
     }
 
-    /// 透明度（8 位，高 8 位截断）。
+    /// 透明度（8 位，16 位值除以 257 四舍五入）。
     pub fn alpha(&self) -> u8 {
-        (self.a >> 8) as u8
+        narrow_to_u8(self.a)
     }
 
     /// 16 位原始通道 `[r, g, b, a]`，用于精确对拍。
@@ -141,7 +141,7 @@ impl Color {
     ///
     /// ```rust
     /// use snow_ui_theme::color::Color;
-    /// assert_eq!(Color::BLACK.with_alpha_f(0.88).alpha(), 225);
+    /// assert_eq!(Color::BLACK.with_alpha_f(0.88).alpha(), 224);
     /// ```
     pub fn with_alpha_f(&self, alpha: f32) -> Self {
         Self {
@@ -244,4 +244,25 @@ pub fn mix_color(first: Color, second: Color, amount_percent: f64) -> Color {
         .to_fast_color()
         .mix(&second.to_fast_color(), amount_percent);
     Color::from_hex(&mixed.to_hex_string()).unwrap_or(first)
+}
+
+/// 16 位通道转 8 位：除以 257 并四舍五入（与真 Qt 输出一致）。
+fn narrow_to_u8(value: u16) -> u8 {
+    ((value as u32 + EXPAND_8_TO_16 as u32 / 2) / EXPAND_8_TO_16 as u32) as u8
+}
+
+#[cfg(test)]
+mod narrow_tests {
+    use super::*;
+
+    /// 8 位读取对拍真 Qt：0.88 -> 224、0.95 -> 242，且 8 位往返不失真。
+    #[test]
+    fn narrowing_matches_real_qt() {
+        assert_eq!(Color::BLACK.with_alpha_f(0.88).alpha(), 224);
+        assert_eq!(Color::BLACK.with_alpha_f(0.95).alpha(), 242);
+        for byte in 0..=255u16 {
+            assert_eq!(narrow_to_u8(byte * EXPAND_8_TO_16) as u16, byte);
+        }
+        assert_eq!(narrow_to_u8(u16::MAX), 255);
+    }
 }

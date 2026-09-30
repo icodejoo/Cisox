@@ -6,11 +6,12 @@
 //! - `snow-i18n-tool extract <源码目录>... [--locales <目录>] [--exclude <路径子串>]... [--strict-refs]`
 //!
 //! `--strict-refs`：代码引用了基准语言（en-US）没有的 id 时失败；孤儿 id 只报告数量。
+//! `--min-refs N`：引用数少于 N 时失败；源码路径不存在或没有 `.rs` 文件时一律报错（防门禁空转）。
 
 use snow_i18n::convert::{
     ConvertStats, IssueKind, convert_catalog, ftl_message_ids, identity_catalog, missing_ids,
 };
-use snow_i18n::extract::{base_ids, compare_refs, scan};
+use snow_i18n::extract::{base_ids, collect_rs, compare_refs, scan};
 use snow_i18n::ts::{TsCatalog, parse_ts};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -26,7 +27,7 @@ const BASE_LANG: &str = "en-US";
 const DEFAULT_LOCALES: &str = "crates/snow-i18n/locales";
 
 /// 命令行用法。
-const USAGE: &str = "用法：convert <输出目录> <ts...> | check <locales 目录> [--src 目录]... [--exclude 子串]... [--strict-refs] | extract <源码目录...> [--locales 目录] [--exclude 子串]... [--strict-refs]";
+const USAGE: &str = "用法：convert <输出目录> <ts...> | check <locales 目录> [--src 目录]... [--exclude 子串]... [--strict-refs] [--min-refs N] | extract <源码目录...> [--locales 目录] [--exclude 子串]... [--strict-refs] [--min-refs N]";
 
 /// 引用扫描相关选项。
 #[derive(Default)]
@@ -41,6 +42,8 @@ struct RefOpts {
     locales: Option<PathBuf>,
     /// 是否严格。
     strict: bool,
+    /// 引用数下限（`--min-refs`），低于该值视为失败；默认 0。
+    min_refs: usize,
 }
 
 /// 解析选项；未知 `--` 选项报错。
@@ -54,11 +57,34 @@ fn parse_opts(args: &[String]) -> Result<RefOpts, String> {
             "--exclude" => o.excludes.push(value("--exclude")?),
             "--locales" => o.locales = Some(PathBuf::from(value("--locales")?)),
             "--strict-refs" => o.strict = true,
+            "--min-refs" => {
+                o.min_refs = value("--min-refs")?
+                    .parse()
+                    .map_err(|_| "--min-refs 需要非负整数".to_string())?;
+            }
             s if s.starts_with("--") => return Err(format!("未知选项 {s}")),
             _ => o.positional.push(a.clone()),
         }
     }
     Ok(o)
+}
+
+/// 校验源码路径全部存在且至少包含一个会被扫描的 `.rs` 文件，避免门禁空转。
+fn ensure_sources_scannable(src: &[PathBuf], excludes: &[String]) -> Result<(), String> {
+    for path in src {
+        if !path.exists() {
+            return Err(format!("源码路径不存在：{}", path.display()));
+        }
+        let mut files = Vec::new();
+        collect_rs(path, excludes, &mut files).map_err(|e| e.to_string())?;
+        if files.is_empty() {
+            return Err(format!(
+                "源码路径下没有可扫描的 .rs 文件：{}",
+                path.display()
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// 扫描源码并与基准语言对齐；返回是否通过（非严格模式恒通过）。
@@ -67,7 +93,9 @@ fn run_refs(
     src: &[PathBuf],
     excludes: &[String],
     strict: bool,
+    min_refs: usize,
 ) -> Result<bool, String> {
+    ensure_sources_scannable(src, excludes)?;
     let base = base_ids(locales, BASE_LANG).map_err(|e| format!("{}: {e}", locales.display()))?;
     let refs = scan(src, excludes).map_err(|e| e.to_string())?;
     let report = compare_refs(&refs, &base);
@@ -81,7 +109,11 @@ fn run_refs(
         base.len(),
         report.orphans.len()
     );
-    let ok = report.missing.is_empty() || !strict;
+    let enough = report.total_refs >= min_refs;
+    if !enough {
+        println!("引用数 {} 低于下限 {min_refs}", report.total_refs);
+    }
+    let ok = (report.missing.is_empty() || !strict) && enough;
     println!(
         "{}",
         if ok {
@@ -248,7 +280,7 @@ fn run_check_cmd(args: &[String]) -> Result<bool, String> {
     if o.src.is_empty() {
         return Ok(aligned);
     }
-    let refs_ok = run_refs(Path::new(root), &o.src, &o.excludes, o.strict)?;
+    let refs_ok = run_refs(Path::new(root), &o.src, &o.excludes, o.strict, o.min_refs)?;
     Ok(aligned && refs_ok)
 }
 
@@ -260,7 +292,7 @@ fn run_extract_cmd(args: &[String]) -> Result<bool, String> {
     }
     let src: Vec<PathBuf> = o.positional.iter().map(PathBuf::from).collect();
     let locales = o.locales.unwrap_or_else(|| PathBuf::from(DEFAULT_LOCALES));
-    run_refs(&locales, &src, &o.excludes, o.strict)
+    run_refs(&locales, &src, &o.excludes, o.strict, o.min_refs)
 }
 
 /// 程序入口。

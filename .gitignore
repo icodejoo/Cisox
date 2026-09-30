@@ -104,3 +104,6 @@ snow-crates/crates/snow-audio-recorder/tests/output/
 /spikes/p0-v1-overlay-window/screenshot.png
 # V8 样本里的真实桌面截图含个人内容，只留本地；测试只读 json，不依赖它们
 /spikes/p0-v8-history-compat/sample/records/*/*.png
+
+# Local model/test caches
+/.cache/

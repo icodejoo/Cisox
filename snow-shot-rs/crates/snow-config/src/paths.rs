@@ -13,8 +13,11 @@ pub const CONFIG_FILE_NAME: &str = "config.json";
 pub const PORTABLE_MARKER_FILE: &str = "__data_directory";
 /// upstream 数据目录的组件名（仅用于拒绝，不用于拼路径）。
 const UPSTREAM_DIRECTORY_NAME: &str = "SnowShot";
-/// 写权限探测用的临时文件名。
-const WRITE_PROBE_FILE: &str = ".cisox-write-test";
+/// 写权限探测文件名后缀（前缀由 `APP_ID` 派生）。
+const WRITE_PROBE_SUFFIX: &str = "-write-test";
+/// 目录指向 upstream 时的拒绝原因。
+const UPSTREAM_REFUSED_MESSAGE: &str =
+    "The storage directory points at the upstream application's data";
 /// UTF-8 BOM 字符。
 const BYTE_ORDER_MARK: char = '\u{feff}';
 
@@ -126,11 +129,61 @@ pub fn default_app_data_directory() -> Option<PathBuf> {
 /// ```
 pub fn is_upstream_location(path: &Path) -> bool {
     path.components().any(|component| match component {
+        // Windows 会丢弃组件末尾的点与空格，`SnowShot.` 等价于 `SnowShot`
         Component::Normal(name) => name
             .to_string_lossy()
+            .trim_end_matches(['.', ' '])
             .eq_ignore_ascii_case(UPSTREAM_DIRECTORY_NAME),
         _ => false,
     })
+}
+
+/// 写权限探测文件名，由 `APP_ID` 派生。
+fn write_probe_file_name() -> String {
+    format!(".{APP_ID}{WRITE_PROBE_SUFFIX}")
+}
+
+/// 判断路径（解析 junction/符号链接后）是否落在 upstream 目录；无法确认时按"是"处理。
+///
+/// 路径无需存在：对最近的已存在祖先做 canonicalize，再拼回其余组件比较；
+/// canonicalize 失败一律返回 `true`（拒绝）。本函数不会创建任何目录。
+///
+/// # 参数
+/// - `path`：待检查的目录路径
+///
+/// # 返回
+/// `true` 表示应拒绝使用该路径。
+///
+/// # 示例
+/// ```
+/// use std::path::Path;
+/// use snow_config::paths::is_upstream_location_resolved;
+///
+/// assert!(is_upstream_location_resolved(Path::new("SnowShot./x")));
+/// ```
+pub fn is_upstream_location_resolved(path: &Path) -> bool {
+    if is_upstream_location(path) {
+        return true;
+    }
+    let Ok(absolute) = std::path::absolute(path) else {
+        return true;
+    };
+    let mut existing = absolute.as_path();
+    let mut tail: Vec<&std::ffi::OsStr> = Vec::new();
+    while !existing.exists() {
+        match (existing.file_name(), existing.parent()) {
+            (Some(name), Some(parent)) => {
+                tail.push(name);
+                existing = parent;
+            }
+            _ => return true,
+        }
+    }
+    let Ok(mut resolved) = fs::canonicalize(existing) else {
+        return true;
+    };
+    resolved.extend(tail.into_iter().rev());
+    is_upstream_location(&resolved)
 }
 
 /// 读取便携标记：返回标记指定目录（相对路径以可执行目录为基准）。
@@ -162,24 +215,20 @@ fn ensure_writable_directory(path: &Path) -> Result<(), String> {
     if path.as_os_str().is_empty() {
         return Err("The storage directory path is empty".to_string());
     }
-    // 静态检查：在目录实际存在前就能拦截明显的 SnowShot 路径
-    if is_upstream_location(path) {
-        return Err("The storage directory points at the upstream application's data".to_string());
+    // 先校验（含 junction/末尾点解析）再创建，避免在 upstream 下留下副作用
+    if is_upstream_location_resolved(path) {
+        return Err(UPSTREAM_REFUSED_MESSAGE.to_string());
     }
     fs::create_dir_all(path)
         .map_err(|_| "The storage directory could not be created".to_string())?;
     if !path.is_dir() {
         return Err("The storage path is not a directory".to_string());
     }
-    // 高优 bug #2：先 canonicalize，再二次检查，防止 junction/末尾点（SnowShot.）绕过
-    if let Ok(canonical) = fs::canonicalize(path)
-        && is_upstream_location(&canonical)
-    {
-        return Err(
-            "The storage directory points at the upstream application's data".to_string(),
-        );
+    // 创建后复核一次，防止创建过程中被替换成 junction
+    if is_upstream_location_resolved(path) {
+        return Err(UPSTREAM_REFUSED_MESSAGE.to_string());
     }
-    let probe = path.join(WRITE_PROBE_FILE);
+    let probe = path.join(write_probe_file_name());
     fs::write(&probe, b"").map_err(|_| "The storage directory is not writable".to_string())?;
     let _ = fs::remove_file(probe);
     Ok(())
@@ -368,5 +417,54 @@ mod tests {
         assert_eq!(degraded.mode, StorageMode::Degraded);
         assert!(degraded.effective_directory.is_none() && !upstream.exists());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 末尾带点/空格的 upstream 组件被拒绝，且不会先创建目录。
+    #[test]
+    fn trailing_dot_and_space_upstream_refused_without_creating() {
+        let root = temp_dir("trail");
+        for name in ["SnowShot.", "SnowShot ", "snowshot.. "] {
+            let target = root.join(name).join("x");
+            assert!(is_upstream_location_resolved(&target));
+            assert!(ensure_writable_directory(&target).is_err());
+            assert!(!root.join(name).exists(), "不得先创建后校验");
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 正常目录（含尚不存在的深层路径）不被误拒。
+    #[test]
+    fn ordinary_paths_are_not_upstream() {
+        let root = temp_dir("ok");
+        assert!(!is_upstream_location_resolved(&root.join("a").join("b")));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// junction 指向 upstream 目录时被拒绝（仅 Windows）。
+    #[cfg(windows)]
+    #[test]
+    fn junction_to_upstream_is_refused() {
+        let root = temp_dir("junction");
+        let upstream = root.join("SnowShot");
+        fs::create_dir_all(&upstream).unwrap();
+        let link = root.join("link");
+        let output = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&link)
+            .arg(&upstream)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "mklink /J 失败");
+        assert!(is_upstream_location_resolved(&link.join("child")));
+        assert!(ensure_writable_directory(&link.join("child")).is_err());
+        assert!(!upstream.join("child").exists());
+        let _ = fs::remove_dir(&link);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 探测文件名由 APP_ID 派生。
+    #[test]
+    fn write_probe_name_derives_from_app_id() {
+        assert!(write_probe_file_name().contains(APP_ID));
     }
 }

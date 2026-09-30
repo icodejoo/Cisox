@@ -10,11 +10,21 @@ workspace = true
 
 [dependencies]
 snow-app-core = { path = "../snow-app-core" }
+snow-canvas-filters = { path = "../snow-canvas-filters" }
+snow-canvas-raster = { path = "../snow-canvas-raster" }
+snow-canvas-text = { path = "../snow-canvas-text" }
 snow-capability = { path = "../snow-capability" }
 snow-config = { path = "../snow-config" }
+# 标注引擎内核（仓库内 path 依赖，仅依赖 serde，不引入新外部 crate）
+snow-draw-engine = { path = "../../../snow_draw_engine_qt/crates/snow-draw-engine" }
+snow-draw-engine-editor = { path = "../../../snow_draw_engine_qt/crates/snow-draw-engine-editor" }
 snow-history = { path = "../snow-history" }
+snow-ocr-protocol = { path = "../snow-ocr-protocol" }
 snow-platform = { path = "../snow-platform" }
+snow-recorder-protocol = { path = "../snow-recorder-protocol" }
 snow-translate = { path = "../snow-translate" }
+# 滚动截图拼接（主仓库 Apache-2.0 库；必须关默认特性，否则会拉入 avif/tiff/webp 等编解码）
+snow-stitch-images = { path = "../../../snow-crates/crates/snow-stitch-images", default-features = false }
 snow-ui = { path = "../snow-ui" }
 image = { version = "0.25", default-features = false, features = ["png"] }
 serde = { version = "1", features = ["derive"] }

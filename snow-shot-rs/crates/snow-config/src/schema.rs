@@ -3,12 +3,16 @@
 //! 对应 C++ `ConfigurationSchema` 的 `entries()/entry()/defaultValue()/completeDefaultDocument()`。
 //! 键名、默认值、范围、白名单均由 C++ 源码机械转换（见 `schema_table.rs`）。
 
+use crate::extensions::extension_entries;
 use crate::schema_table::raw_entries;
 use crate::shortcut::{shortcut_bindings_from_json, shortcut_bindings_to_json};
 use serde_json::{Map, Value};
 use snow_app_core::PRODUCT_NAME;
 use std::collections::HashMap;
 use std::sync::OnceLock;
+
+/// 与 C++ 逐项对齐的核心条目数；其后是 Cisox 扩展项（见 [`crate::extensions`]）。
+pub const CORE_ENTRY_COUNT: usize = 238;
 
 /// 使用快捷键列表语义的分组前缀（C++ `shortcutConfigurationKey`）。
 const SHORTCUT_GROUP_PREFIXES: [&str; 5] = [
@@ -129,6 +133,7 @@ pub(crate) fn default_output_directory(kind: OutputDirKind) -> String {
 /// （C++ `buildEntries`）。
 fn build_entries() -> Vec<SchemaEntry> {
     let mut entries = raw_entries();
+    entries.extend(extension_entries());
     for item in &mut entries {
         let is_shortcut_group = SHORTCUT_GROUP_PREFIXES
             .iter()
@@ -143,15 +148,41 @@ fn build_entries() -> Vec<SchemaEntry> {
     entries
 }
 
-/// 全部条目（顺序与 C++ 一致）。
+/// 全部条目：前 238 项顺序与 C++ 一致，之后是 Cisox 扩展项。
 ///
 /// # 示例
 /// ```
-/// assert_eq!(snow_config::schema::entries().len(), 238);
+/// use snow_config::schema::{CORE_ENTRY_COUNT, entries};
+/// assert!(entries().len() >= CORE_ENTRY_COUNT);
+/// assert_eq!(entries()[0].key, "api_configuration/custom_models");
 /// ```
 pub fn entries() -> &'static [SchemaEntry] {
     static ENTRIES: OnceLock<Vec<SchemaEntry>> = OnceLock::new();
     ENTRIES.get_or_init(build_entries)
+}
+
+/// 与 C++ 对齐的 238 个核心条目（不含 Cisox 扩展项）。
+///
+/// # 示例
+/// ```
+/// assert_eq!(snow_config::schema::core_entries().len(), 238);
+/// ```
+pub fn core_entries() -> &'static [SchemaEntry] {
+    &entries()[..CORE_ENTRY_COUNT]
+}
+
+/// 键是否属于 Cisox 扩展项（不在 C++ 的 238 项里）。
+///
+/// # 参数
+/// - `key`：`"组/名"` 键
+///
+/// # 示例
+/// ```
+/// assert!(snow_config::schema::is_extension_key("screenshot_translation/backend"));
+/// assert!(!snow_config::schema::is_extension_key("screenshot_translation/model"));
+/// ```
+pub fn is_extension_key(key: &str) -> bool {
+    entries()[CORE_ENTRY_COUNT..].iter().any(|item| item.key == key)
 }
 
 /// 按键查找条目。
@@ -269,10 +300,13 @@ mod tests {
     /// 条目数、键唯一且恰含一个 `/`。
     #[test]
     fn entry_count_and_key_shape() {
-        assert_eq!(entries().len(), 238);
-        let keys: HashSet<_> = entries().iter().map(|item| item.key).collect();
+        assert_eq!(core_entries().len(), 238);
+        let keys: HashSet<_> = core_entries().iter().map(|item| item.key).collect();
         assert_eq!(keys.len(), 238);
         assert!(keys.iter().all(|key| key.matches('/').count() == 1));
+        let all: HashSet<_> = entries().iter().map(|item| item.key).collect();
+        assert_eq!(all.len(), entries().len(), "扩展项不得与核心键重名");
+        assert!(all.iter().all(|key| key.matches('/').count() == 1));
     }
 
     /// 27 个分组名与方案附录 B.2 一致；各组键数取自 C++ 源码（方案文档 B.2 列出的
@@ -309,7 +343,7 @@ mod tests {
             ("updates", 1),
         ];
         let mut counts: HashMap<&str, usize> = HashMap::new();
-        for item in entries() {
+        for item in core_entries() {
             *counts
                 .entry(item.key.split('/').next().unwrap())
                 .or_default() += 1;

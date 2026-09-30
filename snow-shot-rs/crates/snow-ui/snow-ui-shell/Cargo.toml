@@ -28,6 +28,7 @@ windows = { version = "0.62", features = [
     "Win32_Graphics_Gdi",
     "Win32_System_Threading",
     "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
 ] }
 # 托盘 / 全局热键（P0 V4 已批准）；muda 经 tray_icon::menu 重导出使用，不单独声明

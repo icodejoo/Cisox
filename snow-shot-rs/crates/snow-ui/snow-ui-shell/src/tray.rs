@@ -183,6 +183,8 @@ mod backend {
     enum Ctl {
         /// 更新悬停提示。
         SetTooltip(String),
+        /// 设置信号出口（设置后信号不再进入 `signals()` 通道）。
+        SetSignalSink(SignalSink),
         /// 停止线程。
         Shutdown,
     }
@@ -242,6 +244,8 @@ mod backend {
         dispatcher: Dispatcher,
         /// 信号发送端。
         signals: Sender<String>,
+        /// 自定义信号出口；有值时优先于 `signals` 通道。
+        sink: Option<SignalSink>,
     }
 
     impl Worker {
@@ -249,9 +253,12 @@ mod backend {
         fn run(&self, action: &TrayAction) {
             match action {
                 TrayAction::Command(cmd) => self.dispatcher.send(CommandSource::Tray, cmd.clone()),
-                TrayAction::Signal(s) => {
-                    let _ = self.signals.send(s.clone());
-                }
+                TrayAction::Signal(s) => match &self.sink {
+                    Some(sink) => sink(s.clone()),
+                    None => {
+                        let _ = self.signals.send(s.clone());
+                    }
+                },
             }
         }
 
@@ -264,6 +271,7 @@ mod backend {
                             tracing::warn!(%e, "更新托盘提示失败");
                         }
                     }
+                    Ctl::SetSignalSink(sink) => self.sink = Some(sink),
                     Ctl::Shutdown => return false,
                 }
             }
@@ -322,6 +330,7 @@ mod backend {
                         on_double: spec.on_double_click,
                         dispatcher,
                         signals: sig_tx,
+                        sink: None,
                     };
                     let _ = ready_tx.send(Ok(waker));
                     native::run_message_loop(|| worker.tick(&ctl_rx));
@@ -356,6 +365,15 @@ mod backend {
         pub(super) fn set_tooltip(&self, text: String) -> Result<(), ShellError> {
             self.ctl
                 .send(Ctl::SetTooltip(text))
+                .map_err(|_| ShellError::ServiceClosed)?;
+            self.waker.wake();
+            Ok(())
+        }
+
+        /// 设置信号出口。
+        pub(super) fn set_signal_sink(&self, sink: SignalSink) -> Result<(), ShellError> {
+            self.ctl
+                .send(Ctl::SetSignalSink(sink))
                 .map_err(|_| ShellError::ServiceClosed)?;
             self.waker.wake();
             Ok(())
@@ -415,12 +433,20 @@ mod backend {
             Err(unsupported())
         }
 
+        /// 设置信号出口：不支持。
+        pub(super) fn set_signal_sink(&self, _sink: SignalSink) -> Result<(), ShellError> {
+            Err(unsupported())
+        }
+
         /// 信号接收端。
         pub(super) fn signals(&self) -> &Receiver<String> {
             &self.signals
         }
     }
 }
+
+/// 托盘自定义信号出口：在托盘线程上同步调用，只应做轻量转发（如投递到主线程收件箱）。
+pub type SignalSink = Box<dyn Fn(String) + Send + 'static>;
 
 /// 托盘服务：后台线程持有系统托盘图标，菜单/点击按 [`TraySpec`] 派发动作。
 /// 丢弃即移除托盘图标。进程内只能启动一个实例。
@@ -475,6 +501,23 @@ impl TrayService {
     /// 更新悬停提示文字。
     pub fn set_tooltip(&self, text: impl Into<String>) -> Result<(), ShellError> {
         self.inner.set_tooltip(text.into())
+    }
+
+    /// 设置自定义信号出口：此后 `TrayAction::Signal` 直接回调 `sink`，不再进入 `signals()` 通道。
+    ///
+    /// # 参数
+    /// - `sink`：在托盘线程上被调用，只做轻量转发。
+    ///
+    /// # 返回
+    /// 服务已关闭返回 `ServiceClosed`。
+    ///
+    /// ```no_run
+    /// # fn demo(tray: &snow_ui_shell::tray::TrayService) {
+    /// tray.set_signal_sink(Box::new(|sig| println!("signal {sig}"))).unwrap();
+    /// # }
+    /// ```
+    pub fn set_signal_sink(&self, sink: SignalSink) -> Result<(), ShellError> {
+        self.inner.set_signal_sink(sink)
     }
 
     /// 自定义信号（`TrayAction::Signal`）的接收端，由应用主循环轮询。

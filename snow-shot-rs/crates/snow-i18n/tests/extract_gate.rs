@@ -71,6 +71,7 @@ fn extract_fails_on_missing_when_strict() {
 #[test]
 fn exclude_skips_paths() {
     let root = fixture("excl", "fn f(i: &I) { i.tr(\"nope\"); }");
+    write(&root.join("src/b.rs"), "fn g(i: &I) { i.tr(\"have\"); }");
     let (loc, src) = (root.join("loc"), root.join("src"));
     let o = run(&[
         "extract",
@@ -101,4 +102,54 @@ fn check_gate() {
     // 语言间 id 不一致仍失败
     write(&loc.join("zh-CN/m.ftl"), "have = 甲\n");
     assert_eq!(run(&["check", l]).status.code(), Some(1));
+}
+
+/// 源码路径不存在时报错（退出码 2），不再空转通过。
+#[test]
+fn extract_fails_when_source_path_missing() {
+    let root = fixture("nopath", "fn f() {}");
+    let loc = root.join("loc");
+    let missing = root.join("no-such-dir");
+    let o = run(&[
+        "extract",
+        missing.to_str().unwrap(),
+        "--locales",
+        loc.to_str().unwrap(),
+        "--strict-refs",
+    ]);
+    assert_eq!(o.status.code(), Some(2));
+}
+
+/// 目录下没有 `.rs` 文件时同样报错。
+#[test]
+fn extract_fails_when_no_rs_files() {
+    let root = fixture("norsfiles", "fn f() {}");
+    let (loc, empty) = (root.join("loc"), root.join("empty"));
+    std::fs::create_dir_all(&empty).unwrap();
+    let o = run(&[
+        "extract",
+        empty.to_str().unwrap(),
+        "--locales",
+        loc.to_str().unwrap(),
+    ]);
+    assert_eq!(o.status.code(), Some(2));
+}
+
+/// `--min-refs` 生效：引用数不足失败，足够通过。
+#[test]
+fn min_refs_is_enforced() {
+    let root = fixture("minrefs", "fn f(i: &I) { let _ = t!(i, \"have\"); }");
+    let (loc, src) = (root.join("loc"), root.join("src"));
+    let (l, s) = (loc.to_str().unwrap(), src.to_str().unwrap());
+    assert!(
+        run(&["extract", s, "--locales", l, "--min-refs", "1"])
+            .status
+            .success()
+    );
+    assert_eq!(
+        run(&["extract", s, "--locales", l, "--min-refs", "2"])
+            .status
+            .code(),
+        Some(1)
+    );
 }

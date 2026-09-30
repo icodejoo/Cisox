@@ -169,7 +169,7 @@ fn dark_neutral_tokens() {
 fn alpha_tokens_follow_qt_semantics() {
     let light = theme(ThemeScheme::Light, ThemeDensity::Comfortable).palette;
     let cases = [
-        (light.color_text, 225),
+        (light.color_text, 224),
         (light.color_text_secondary, 166),
         (light.color_text_tertiary, 115),
         (light.color_text_quaternary, 64),
@@ -179,7 +179,7 @@ fn alpha_tokens_follow_qt_semantics() {
         (light.color_fill_quaternary, 5),
         (light.color_bg_solid, 255),
         (light.color_bg_solid_hover, 191),
-        (light.color_bg_solid_active, 243),
+        (light.color_bg_solid_active, 242),
         (light.color_bg_spotlight, 217),
         (light.color_bg_mask, 115),
     ];
@@ -193,7 +193,7 @@ fn alpha_tokens_follow_qt_semantics() {
     let dark = theme(ThemeScheme::Dark, ThemeDensity::Comfortable).palette;
     assert_eq!(dark.color_text.alpha(), 217);
     assert_eq!(dark.color_fill.alpha(), 46);
-    assert_eq!(dark.color_bg_solid.alpha(), 243);
+    assert_eq!(dark.color_bg_solid.alpha(), 242);
     assert_eq!(dark.color_bg_solid_hover.alpha(), 255);
     assert_eq!(dark.color_bg_solid_active.alpha(), 230);
     // 0.9*65535 恰为 58981.5，f32 舍入后 qRound 得 58982
@@ -212,7 +212,7 @@ fn semantic_palette_composites() {
     assert_eq!(l.surface_disabled.name(), "#f5f5f5");
     assert_eq!(l.surface_elevated.name(), "#ffffff");
     assert_eq!(l.window.alpha(), 255);
-    assert_eq!(l.text.alpha(), 225);
+    assert_eq!(l.text.alpha(), 224);
     assert_eq!(l.accent.name(), "#1677ff");
     assert_eq!(l.accent_subtle.name(), "#e6f4ff");
     assert_eq!(l.accent_border.name(), "#91caff");

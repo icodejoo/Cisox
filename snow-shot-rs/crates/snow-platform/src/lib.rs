@@ -4,8 +4,16 @@
 
 pub mod capture;
 pub mod clipboard;
+pub mod console;
 pub mod crash;
+pub mod dib;
+pub mod local_time;
+pub mod menu;
+pub mod process_mem;
+pub mod scroll_input;
+pub mod shell;
 pub mod single_instance;
+pub mod text_raster;
 pub mod tray;
 
 /// 本 crate 的阶段标记，用于骨架连通性测试。

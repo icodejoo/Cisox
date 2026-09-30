@@ -1,0 +1,25 @@
+{
+  "version": "1.28.0",
+  "platform": "windows-x64",
+  "source": "PyPI 上 Microsoft 官方发布的 onnxruntime 1.28.0（cp312 win_amd64 wheel，仅取其中的 CPU 版 DLL；wheel 与 DLL 的 sha256 均由本仓库在真实下载后核对，wheel 的值与 PyPI JSON API 的 digests.sha256 一致）",
+  "archive": {
+    "name": "onnxruntime-1.28.0-cp312-cp312-win_amd64.whl",
+    "size": 13755036,
+    "sha256": "c35064f9b3c43c81c5d5d282091401d0f1ff22796d93ccade4ea2ece5e137ab8",
+    "url": "https://files.pythonhosted.org/packages/3e/3b/986ca67c274932ba9ac5332fb10de56f643dfd433c74e33f8ae8f847cf24/onnxruntime-1.28.0-cp312-cp312-win_amd64.whl"
+  },
+  "members": [
+    {
+      "path_in_archive": "onnxruntime/capi/onnxruntime.dll",
+      "name": "onnxruntime.dll",
+      "size": 17766752,
+      "sha256": "3d6bd02dc137b9a1dfdac045a52b147ffb920bb06ab812b08fc8e14279859855"
+    },
+    {
+      "path_in_archive": "onnxruntime/capi/onnxruntime_providers_shared.dll",
+      "name": "onnxruntime_providers_shared.dll",
+      "size": 21816,
+      "sha256": "7ef797110a893f820db67a3f6cf38650110ccb3373567e3048fa8f3af1790040"
+    }
+  ]
+}

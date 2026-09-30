@@ -1,0 +1,387 @@
+//! OCR 资产定位：运行时（`snow-ocr-process`）与模型的目录布局、清单解析与就绪判定。
+//!
+//! 目录布局与上游一致（不随包，按需下载到用户目录）：
+//! `<数据根>/assets/ocr/runtimes/<版本>/<平台>/`、`models/<模型 ID>/`、`state/<版本>/`。
+//! 清单是上游的原样副本（`resources/ocr-asset-manifest.json`），下载后的哈希校验以它为准。
+
+use serde::Deserialize;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
+/// 环境变量：直接指定 `snow-ocr-process` 可执行文件（开发 / 自测用）。
+pub const ENV_OCR_PROCESS_EXE: &str = "SNOW_OCR_PROCESS_EXE";
+/// 环境变量：覆盖 OCR 资产根目录（默认 `<数据根>/assets/ocr`）。
+pub const ENV_OCR_ASSET_DIR: &str = "SNOW_OCR_ASSET_DIR";
+/// 资产目录名（位于数据根下）。
+const ASSETS_DIR: &str = "assets";
+/// OCR 子目录名。
+const OCR_DIR: &str = "ocr";
+/// 运行时子目录名。
+const RUNTIMES_DIR: &str = "runtimes";
+/// 模型子目录名。
+const MODELS_DIR: &str = "models";
+/// 能力缓存子目录名。
+const STATE_DIR: &str = "state";
+/// 校验完成标记文件名。
+pub const COMPLETE_MARKER: &str = ".complete.json";
+/// 可执行文件扩展名（清单里用它找到运行时主程序）。
+const EXE_SUFFIX: &str = ".exe";
+/// 内置清单（上游原样副本）。
+const MANIFEST_JSON: &str = include_str!("../resources/ocr-asset-manifest.json");
+
+/// 清单里的单个文件。
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct AssetFile {
+    /// 文件名。
+    pub name: String,
+    /// 字节数。
+    pub size: u64,
+    /// SHA-256（小写十六进制）。
+    pub sha256: String,
+    /// 下载地址（运行时内的子文件没有）。
+    #[serde(default)]
+    pub url: String,
+}
+
+/// 运行时压缩包与其内含文件。
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct RuntimeSpec {
+    /// 运行时版本。
+    pub version: String,
+    /// 平台标记。
+    pub platform: String,
+    /// 压缩包。
+    pub archive: AssetFile,
+    /// 解压后应有的文件。
+    pub files: Vec<AssetFile>,
+}
+
+/// 一套模型（检测 + 识别 + 字典）。
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct ModelSpec {
+    /// 配置里的模型类型键（`small` 等）。
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// 模型目录 ID。
+    pub id: String,
+    /// 检测模型文件名。
+    pub detector: String,
+    /// 识别模型文件名。
+    pub recognizer: String,
+    /// 字典文件名。
+    pub dictionary: String,
+    /// 全部文件。
+    pub files: Vec<AssetFile>,
+}
+
+/// OCR 资产清单。
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct Manifest {
+    /// 默认模型类型。
+    pub default_model: String,
+    /// 运行时。
+    pub runtime: RuntimeSpec,
+    /// 全部模型。
+    pub models: Vec<ModelSpec>,
+}
+
+/// 解析内置清单（只解析一次）。
+///
+/// # 返回
+/// 清单引用；内置 JSON 损坏时返回错误说明。
+///
+/// ```ignore
+/// assert_eq!(manifest().unwrap().default_model, "small");
+/// ```
+pub fn manifest() -> Result<&'static Manifest, String> {
+    static CELL: OnceLock<Result<Manifest, String>> = OnceLock::new();
+    CELL.get_or_init(|| serde_json::from_str(MANIFEST_JSON).map_err(|e| format!("OCR 清单损坏: {e}")))
+        .as_ref()
+        .map_err(Clone::clone)
+}
+
+/// 已就绪的 OCR 资产路径。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OcrAssets {
+    /// `snow-ocr-process` 可执行文件。
+    pub exe: PathBuf,
+    /// 检测模型。
+    pub detector: PathBuf,
+    /// 识别模型。
+    pub recognizer: PathBuf,
+    /// 字典。
+    pub dictionary: PathBuf,
+    /// 能力缓存目录（交给 worker 的 Hello）。
+    pub state_dir: PathBuf,
+    /// 模型目录 ID（日志用）。
+    pub model_id: String,
+}
+
+/// OCR 资产不可用的原因。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OcrUnavailable {
+    /// 没有运行时可执行文件。
+    NoRuntime,
+    /// 模型缺失或不完整。
+    NoModel {
+        /// 模型目录 ID。
+        id: String,
+    },
+    /// 配置的模型类型不在清单里。
+    UnknownModel(String),
+    /// 清单本身损坏。
+    Manifest(String),
+}
+
+impl OcrUnavailable {
+    /// 面向用户的提示文案。
+    ///
+    /// # 返回
+    /// 一句中文说明，含下一步（下载）指引。
+    pub fn message(&self) -> String {
+        match self {
+            Self::NoRuntime => "未安装 OCR 运行时，请先下载（约 17 MB）".to_string(),
+            Self::NoModel { id } => format!("未安装 OCR 模型 {id}，请先下载"),
+            Self::UnknownModel(kind) => format!("未知的 OCR 模型类型: {kind}"),
+            Self::Manifest(detail) => detail.clone(),
+        }
+    }
+
+    /// 是否可以通过下载解决。
+    pub fn can_download(&self) -> bool {
+        matches!(self, Self::NoRuntime | Self::NoModel { .. })
+    }
+}
+
+/// 计算 OCR 资产根目录：环境变量优先，否则 `<数据根>/assets/ocr`。
+///
+/// # 参数
+/// - `data_root`：应用数据根目录。
+/// - `env_override`：`SNOW_OCR_ASSET_DIR` 的值（为空视为未设置）。
+///
+/// ```ignore
+/// assert!(ocr_root(Path::new("D"), None).ends_with("ocr"));
+/// ```
+pub fn ocr_root(data_root: &Path, env_override: Option<&str>) -> PathBuf {
+    match env_override.map(str::trim).filter(|v| !v.is_empty()) {
+        Some(dir) => PathBuf::from(dir),
+        None => data_root.join(ASSETS_DIR).join(OCR_DIR),
+    }
+}
+
+/// 运行时目录。
+pub fn runtime_dir(root: &Path, runtime: &RuntimeSpec) -> PathBuf {
+    root.join(RUNTIMES_DIR).join(&runtime.version).join(&runtime.platform)
+}
+
+/// 模型目录。
+pub fn model_dir(root: &Path, model: &ModelSpec) -> PathBuf {
+    root.join(MODELS_DIR).join(&model.id)
+}
+
+/// 能力缓存目录。
+pub fn state_dir(root: &Path, runtime: &RuntimeSpec) -> PathBuf {
+    root.join(STATE_DIR).join(&runtime.version)
+}
+
+/// 目录里的文件是否齐全且已校验：有完成标记，且每个文件存在、大小与清单一致。
+///
+/// # 参数
+/// - `dir`：目标目录。
+/// - `files`：清单里应有的文件。
+pub fn dir_complete(dir: &Path, files: &[AssetFile]) -> bool {
+    dir.join(COMPLETE_MARKER).is_file()
+        && files.iter().all(|f| {
+            std::fs::metadata(dir.join(&f.name)).is_ok_and(|m| m.is_file() && m.len() == f.size)
+        })
+}
+
+/// 按模型类型查找模型；类型为空时用默认模型。
+///
+/// # 参数
+/// - `manifest`：清单。
+/// - `kind`：配置里的模型类型。
+pub fn find_model<'a>(manifest: &'a Manifest, kind: &str) -> Result<&'a ModelSpec, OcrUnavailable> {
+    let wanted = if kind.trim().is_empty() { manifest.default_model.as_str() } else { kind };
+    manifest
+        .models
+        .iter()
+        .find(|m| m.kind == wanted)
+        .ok_or_else(|| OcrUnavailable::UnknownModel(wanted.to_string()))
+}
+
+/// 运行时主程序文件名（清单里唯一的 `.exe`）。
+pub fn runtime_exe_name(runtime: &RuntimeSpec) -> Option<&str> {
+    runtime
+        .files
+        .iter()
+        .map(|f| f.name.as_str())
+        .find(|name| name.ends_with(EXE_SUFFIX))
+}
+
+/// 定位 OCR 资产。
+///
+/// # 参数
+/// - `root`：资产根目录（见 [`ocr_root`]）。
+/// - `exe_override`：`SNOW_OCR_PROCESS_EXE` 指定的可执行文件（存在时优先，且不要求运行时目录）。
+/// - `model_kind`：配置里的模型类型。
+///
+/// # 返回
+/// 全部就绪时返回路径集合；否则返回具体缺什么。
+///
+/// ```ignore
+/// let assets = resolve_assets(&root, None, "small")?;
+/// ```
+pub fn resolve_assets(
+    root: &Path,
+    exe_override: Option<&Path>,
+    model_kind: &str,
+) -> Result<OcrAssets, OcrUnavailable> {
+    let manifest = manifest().map_err(OcrUnavailable::Manifest)?;
+    let model = find_model(manifest, model_kind)?;
+    let runtime = &manifest.runtime;
+    let exe = match exe_override.filter(|p| p.is_file()) {
+        Some(path) => path.to_path_buf(),
+        None => {
+            let dir = runtime_dir(root, runtime);
+            let name = runtime_exe_name(runtime).ok_or(OcrUnavailable::NoRuntime)?;
+            if !dir_complete(&dir, &runtime.files) {
+                return Err(OcrUnavailable::NoRuntime);
+            }
+            dir.join(name)
+        }
+    };
+    let dir = model_dir(root, model);
+    if !dir_complete(&dir, &model.files) {
+        return Err(OcrUnavailable::NoModel { id: model.id.clone() });
+    }
+    Ok(OcrAssets {
+        exe,
+        detector: dir.join(&model.detector),
+        recognizer: dir.join(&model.recognizer),
+        dictionary: dir.join(&model.dictionary),
+        state_dir: state_dir(root, runtime),
+        model_id: model.id.clone(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 在临时目录里按清单伪造一套“完整”资产（文件内容为占位，但大小与清单一致）。
+    fn fake_complete_dir(dir: &Path, files: &[AssetFile]) {
+        std::fs::create_dir_all(dir).expect("建目录");
+        for f in files {
+            let file = std::fs::File::create(dir.join(&f.name)).expect("建文件");
+            file.set_len(f.size).expect("定长");
+        }
+        std::fs::write(dir.join(COMPLETE_MARKER), b"{}").expect("标记");
+    }
+
+    /// 生成唯一临时目录。
+    fn temp_root(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("snow-ocr-assets-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("建根目录");
+        dir
+    }
+
+    /// 内置清单可解析，含默认模型与全部 7 套模型，运行时有 exe。
+    #[test]
+    fn embedded_manifest_parses() {
+        let m = manifest().expect("清单");
+        assert_eq!(m.default_model, "small");
+        assert_eq!(m.models.len(), 7);
+        assert!(runtime_exe_name(&m.runtime).is_some());
+        assert_eq!(m.runtime.archive.sha256.len(), 64);
+        for model in &m.models {
+            for f in &model.files {
+                assert_eq!(f.sha256.len(), 64, "{}", f.name);
+                assert!(f.url.starts_with("https://"), "{}", f.name);
+            }
+        }
+    }
+
+    /// 配置里的 7 个模型类型都能在清单里找到；未知类型报错；空串用默认。
+    #[test]
+    fn find_model_by_kind() {
+        let m = manifest().expect("清单");
+        for kind in ["extra_small", "small", "medium", "small_v5", "medium_v5", "small_v4", "medium_v4"] {
+            assert_eq!(find_model(m, kind).expect(kind).kind, kind);
+        }
+        assert_eq!(find_model(m, "").expect("默认").kind, "small");
+        assert_eq!(find_model(m, "nope"), Err(OcrUnavailable::UnknownModel("nope".into())));
+    }
+
+    /// 环境变量覆盖根目录；空白视为未设置。
+    #[test]
+    fn root_override() {
+        assert_eq!(ocr_root(Path::new("D"), Some("X")), PathBuf::from("X"));
+        assert_eq!(ocr_root(Path::new("D"), Some("  ")), Path::new("D").join("assets").join("ocr"));
+        assert_eq!(ocr_root(Path::new("D"), None), Path::new("D").join("assets").join("ocr"));
+    }
+
+    /// 什么都没有：缺运行时；运行时齐全但没模型：缺模型；都齐：解析出路径。
+    #[test]
+    fn resolve_progression() {
+        let root = temp_root("resolve");
+        let m = manifest().expect("清单");
+        assert_eq!(resolve_assets(&root, None, "small"), Err(OcrUnavailable::NoRuntime));
+        fake_complete_dir(&runtime_dir(&root, &m.runtime), &m.runtime.files);
+        let model = find_model(m, "small").expect("模型");
+        assert_eq!(
+            resolve_assets(&root, None, "small"),
+            Err(OcrUnavailable::NoModel { id: model.id.clone() })
+        );
+        fake_complete_dir(&model_dir(&root, model), &model.files);
+        let assets = resolve_assets(&root, None, "small").expect("齐全");
+        assert!(assets.exe.starts_with(runtime_dir(&root, &m.runtime)));
+        assert!(assets.detector.ends_with(&model.detector));
+        assert_eq!(assets.model_id, model.id);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 缺完成标记、或文件大小不符都算不完整。
+    #[test]
+    fn incomplete_dirs_are_rejected() {
+        let root = temp_root("incomplete");
+        let m = manifest().expect("清单");
+        let model = find_model(m, "extra_small").expect("模型");
+        let dir = model_dir(&root, model);
+        fake_complete_dir(&dir, &model.files);
+        assert!(dir_complete(&dir, &model.files));
+        std::fs::remove_file(dir.join(COMPLETE_MARKER)).expect("删标记");
+        assert!(!dir_complete(&dir, &model.files));
+        std::fs::write(dir.join(COMPLETE_MARKER), b"{}").expect("标记");
+        std::fs::write(dir.join(&model.detector), b"short").expect("改小");
+        assert!(!dir_complete(&dir, &model.files));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 环境变量指定的 exe 存在时优先于运行时目录；不存在则忽略。
+    #[test]
+    fn exe_override_wins_when_present() {
+        let root = temp_root("override");
+        let m = manifest().expect("清单");
+        let model = find_model(m, "small").expect("模型");
+        fake_complete_dir(&model_dir(&root, model), &model.files);
+        let exe = root.join("custom-ocr.exe");
+        std::fs::write(&exe, b"x").expect("写 exe");
+        assert_eq!(resolve_assets(&root, Some(&exe), "small").expect("齐全").exe, exe);
+        let missing = root.join("missing.exe");
+        assert_eq!(resolve_assets(&root, Some(&missing), "small"), Err(OcrUnavailable::NoRuntime));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 提示文案非空，且只有缺运行时 / 缺模型可下载。
+    #[test]
+    fn messages_and_download_flags() {
+        assert!(OcrUnavailable::NoRuntime.can_download());
+        assert!(OcrUnavailable::NoModel { id: "m".into() }.can_download());
+        assert!(!OcrUnavailable::UnknownModel("x".into()).can_download());
+        assert!(!OcrUnavailable::Manifest("e".into()).can_download());
+        assert!(OcrUnavailable::NoRuntime.message().contains("运行时"));
+        assert!(OcrUnavailable::NoModel { id: "m1".into() }.message().contains("m1"));
+    }
+}

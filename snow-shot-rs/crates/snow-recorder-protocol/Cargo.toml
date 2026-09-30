@@ -1,0 +1,12 @@
+[package]
+name = "snow-recorder-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+# 主程序与录制进程共享的行协议，零第三方依赖
+[dependencies]
