@@ -38,7 +38,7 @@ scripts\build-snow-recorder.ps1 -Test
 # 2) 构建夹具(独立 workspace)
 cd snow-shot-rs\tools\snow-fps-fixture
 cargo build --release
-scripts\..\target\release\snow-fps-fixture.exe --check     # 必须能识别到非主屏,否则不要继续
+target\release\snow-fps-fixture.exe --check              # 必须能识别到非主屏,否则不要继续
 target\release\snow-fps-fixture.exe --dxgi-list            # 看副屏对应的 DXGI output_idx
 
 # 3) 自建硬件流水线,四档各 3 轮(通过线:30fps档有效fps>=28.5,60fps档>=56,且丢帧率<1%)
