@@ -20,7 +20,7 @@ $ErrorActionPreference = "Stop"
 $toolRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $repoRoot = (Resolve-Path (Join-Path $toolRoot "../../..")).Path
 if (-not $Materials) { $Materials = Join-Path $repoRoot "materials/ocr" }
-if (-not $Out) { $Out = Join-Path $repoRoot "build/ocr-materials" }
+if (-not $Out) { $Out = Join-Path $Materials "results" }
 if (-not $Exe) { $Exe = Join-Path $repoRoot "build/cargo/release/snow-ocr-compare.exe" }
 if (-not (Test-Path $Materials)) { throw "找不到样片目录: $Materials" }
 if (-not (Test-Path $Exe)) { throw "找不到对比工具，请先在 $toolRoot 下执行 cargo build --release: $Exe" }
@@ -71,4 +71,35 @@ if ($count -eq 0) { throw "没有找到任何 图片+答案 配对: $Materials" 
 Write-Host "已配对 $count 个样片，工作目录: $stage"
 New-Item -ItemType Directory -Force -Path $Out | Out-Null
 & $Exe run --dir $stage --csv (Join-Path $Out "compare.csv") --dump (Join-Path $Out "texts") --backends $Backends
-Write-Host "识别文本: $(Join-Path $Out 'texts')  CSV: $(Join-Path $Out 'compare.csv')"
+# 并排对照与汇总：每个引擎的产物各占一个目录（system/、local-model/），核对稿（我转写，不是任何 OCR 的输出）单独标注
+$csvPath = Join-Path $Out "compare.csv"
+$rows = Get-Content $csvPath -Encoding UTF8 | Where-Object { $_ -notmatch '^#' } | ConvertFrom-Csv
+$sbs = Join-Path $Out "side-by-side"
+New-Item -ItemType Directory -Force -Path $sbs | Out-Null
+$titles = [ordered]@{ "system" = "系统 OCR（Windows.Media.Ocr）"; "local-model" = "本地 PP-OCR（local-model）" }
+foreach ($name in ($rows | Select-Object -ExpandProperty image -Unique)) {
+    $parts = @("【核对稿：人工/模型转写，不是任何 OCR 的输出】", (Get-Content (Join-Path $stage "$name.txt") -Raw -Encoding UTF8).TrimEnd())
+    foreach ($b in $titles.Keys) {
+        $r = $rows | Where-Object { $_.image -eq $name -and $_.backend -eq $b } | Select-Object -First 1
+        $f = Join-Path $Out "texts/$b/$name.txt"
+        $head = "【$($titles[$b])】"
+        if ($r -and $r.cer) { $head += "  CER=$([math]::Round([double]$r.cer * 100, 1))%  耗时=$([math]::Round([double]$r.ms, 0))ms" }
+        $parts += ""; $parts += $head
+        $parts += $(if (Test-Path $f) { (Get-Content $f -Raw -Encoding UTF8).TrimEnd() } else { "（无结果：$($r.error)）" })
+    }
+    Set-Content -Path (Join-Path $sbs "$name.txt") -Value ($parts -join "`r`n") -Encoding UTF8
+}
+$md = @("# OCR 对比汇总（核对稿 vs 两个引擎）", "", "| 样片 | 系统 OCR CER | 本地 PP-OCR CER | 系统耗时 ms | 本地耗时 ms |", "|---|---|---|---|---|")
+foreach ($name in ($rows | Select-Object -ExpandProperty image -Unique)) {
+    $sys = $rows | Where-Object { $_.image -eq $name -and $_.backend -eq "system" } | Select-Object -First 1
+    $loc = $rows | Where-Object { $_.image -eq $name -and $_.backend -eq "local-model" } | Select-Object -First 1
+    $fmt = { param($x) if ($x -and $x.cer) { "{0:N1}%" -f ([double]$x.cer * 100) } else { "-" } }
+    $ms = { param($x) if ($x -and $x.ms) { "{0:N0}" -f [double]$x.ms } else { "-" } }
+    $md += "| $name | $(& $fmt $sys) | $(& $fmt $loc) | $(& $ms $sys) | $(& $ms $loc) |"
+}
+Set-Content -Path (Join-Path $Out "summary.md") -Value ($md -join "`r`n") -Encoding UTF8
+Write-Host "结果目录: $Out"
+Write-Host "  texts/system/<名>.txt        系统 OCR 的识别结果"
+Write-Host "  texts/local-model/<名>.txt   本地 PP-OCR 的识别结果"
+Write-Host "  side-by-side/<名>.txt        核对稿与两个引擎并排对照"
+Write-Host "  summary.md / compare.csv     汇总"

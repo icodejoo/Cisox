@@ -70,12 +70,15 @@ fn run(options: &RunOptions) -> Result<(), String> {
     Ok(())
 }
 
-/// 把每个后端识别出的文本写成 `<图名>.<后端>.txt`，便于逐字核对。
+/// 把每个后端识别出的文本写成 `<目录>/<后端>/<图名>.txt`（每个引擎一个独立子目录），便于逐字核对与区分来源。
 fn dump_texts(dir: &std::path::Path, runs: &[BackendRun]) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     for run in runs {
         for row in run.rows.iter().filter(|r| r.error.is_none()) {
-            let path = dir.join(format!("{}.{}.txt", row.image, run.name));
+            let sub = dir.join(&run.name);
+            std::fs::create_dir_all(&sub)
+                .map_err(|e| format!("cannot create {}: {e}", sub.display()))?;
+            let path = sub.join(format!("{}.txt", row.image));
             std::fs::write(&path, &row.actual)
                 .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
         }

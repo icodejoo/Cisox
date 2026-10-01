@@ -24,7 +24,7 @@ pub struct RunOptions {
     pub dir: PathBuf,
     /// CSV 输出路径。
     pub csv: Option<PathBuf>,
-    /// 把每个后端识别出的文本逐图写入该目录（`<图名>.<后端>.txt`）。
+    /// 把每个后端识别出的文本逐图写入该目录（`<后端>/<图名>.txt`，每个引擎一个子目录）。
     pub dump: Option<PathBuf>,
     /// 是否跑系统 OCR。
     pub system: bool,
