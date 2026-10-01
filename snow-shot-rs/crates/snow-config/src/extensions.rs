@@ -1,14 +1,14 @@
 //! Cisox 扩展配置项：不属于 Qt 版 238 项 schema 的新增键。
 //!
-//! 现有 238 项与 C++ 逐项对齐、不得改动；本地翻译（NMT）相关的新增项集中在这里，全部放在
-//! `screenshot_translation/` 分组下。文档层对未知字段是“保留”的，因此 Qt 版读到这些键只会忽略，
+//! 现有 238 项与 C++ 逐项对齐、不得改动；本地翻译（NMT）相关的新增项集中在这里，放在
+//! `screenshot_translation/` 分组下；OCR 后端选择放在 `text_recognition/` 分组下。文档层对未知字段是“保留”的，因此 Qt 版读到这些键只会忽略，
 //! 不会破坏磁盘 JSON 的兼容性；Rust 侧则把它们当作正式配置项（有默认值、类型与范围校验）。
 
 use crate::schema::{IntRange, SchemaEntry, ValueKind, entry};
 use serde_json::json;
 
 /// 扩展项数量（`schema::entries()` 在原 238 项之后追加的条目数）。
-pub const EXTENSION_ENTRY_COUNT: usize = 6;
+pub const EXTENSION_ENTRY_COUNT: usize = 7;
 
 /// 翻译后端：`local` 本地 NMT worker，`openai` OpenAI 兼容通道。
 pub const KEY_TRANSLATION_BACKEND: &str = "screenshot_translation/backend";
@@ -22,6 +22,32 @@ pub const KEY_LOCAL_IDLE_SECONDS: &str = "screenshot_translation/local_idle_unlo
 pub const KEY_LOCAL_NUM_BEAMS: &str = "screenshot_translation/local_num_beams";
 /// 本地低内存模式：强制贪心解码，并在每次请求后收缩内存。
 pub const KEY_LOCAL_LOW_MEMORY: &str = "screenshot_translation/local_low_memory";
+
+/// OCR 后端：`system` 系统原生 OCR，`local-model` 本地模型（snow-ocr-process）。
+pub const KEY_OCR_BACKEND: &str = "text_recognition/backend";
+/// OCR 后端取值：系统原生 OCR。
+pub const OCR_BACKEND_SYSTEM: &str = "system";
+/// OCR 后端取值：本地模型。
+pub const OCR_BACKEND_LOCAL_MODEL: &str = "local-model";
+/// OCR 后端白名单。
+const OCR_BACKEND_VALUES: &[&str] = &[OCR_BACKEND_SYSTEM, OCR_BACKEND_LOCAL_MODEL];
+
+/// 全新安装与配置损坏时的 OCR 后端默认值：所有平台一致为 `local-model`。
+///
+/// 待办（P1）：系统后端真正可用、并与 PP-OCR 做完同图对比后，再把新用户默认值切到 `system`
+/// （已决定的方向不变）；在那之前默认走一个未实现的后端只会靠回落兜底，没有收益。
+/// 老用户（磁盘配置里没有该键）由文档层迁移为 `local-model`，与此默认值无关。
+///
+/// # 返回
+/// 后端取值字符串。
+///
+/// # 示例
+/// ```
+/// assert_eq!(snow_config::extensions::default_ocr_backend(), "local-model");
+/// ```
+pub const fn default_ocr_backend() -> &'static str {
+    OCR_BACKEND_LOCAL_MODEL
+}
 
 /// 后端取值：本地 NMT。
 pub const BACKEND_LOCAL: &str = "local";
@@ -101,6 +127,14 @@ pub(crate) fn extension_entries() -> Vec<SchemaEntry> {
             &[],
             None,
         ),
+        entry(
+            KEY_OCR_BACKEND,
+            json!(default_ocr_backend()),
+            ValueKind::String,
+            None,
+            OCR_BACKEND_VALUES,
+            None,
+        ),
     ]
 }
 
@@ -120,7 +154,11 @@ mod tests {
         let core: std::collections::HashSet<_> = core_entries().iter().map(|e| e.key).collect();
         for item in &entries()[CORE_ENTRY_COUNT..] {
             assert!(!core.contains(item.key), "{}", item.key);
-            assert!(item.key.starts_with("screenshot_translation/"), "{}", item.key);
+            assert!(
+                item.key.starts_with("screenshot_translation/") || item.key == KEY_OCR_BACKEND,
+                "{}",
+                item.key
+            );
             assert!(crate::schema::is_extension_key(item.key));
         }
         assert!(!crate::schema::is_extension_key("screenshot_translation/model"));
@@ -180,5 +218,52 @@ mod tests {
             Some(MAX_IDLE_SECONDS)
         );
         assert_eq!(entry_for(KEY_TRANSLATION_BACKEND).map(|e| e.allowed.len()), Some(2));
+        assert_eq!(entry_for(KEY_OCR_BACKEND).map(|e| e.allowed.len()), Some(2));
+    }
+
+    /// OCR 后端白名单：合法值通过（含首尾空白修剪），未知值与非字符串被拒绝，写入后可读回。
+    #[test]
+    fn ocr_backend_normalization_and_round_trip() {
+        assert!(normalize(KEY_OCR_BACKEND, &json!("system")).valid);
+        assert!(normalize(KEY_OCR_BACKEND, &json!(" local-model ")).changed);
+        assert!(!normalize(KEY_OCR_BACKEND, &json!("remote-api")).valid);
+        assert!(!normalize(KEY_OCR_BACKEND, &json!(true)).valid);
+        let mut doc = ConfigDocument::from_bytes(None);
+        assert_eq!(doc.value(KEY_OCR_BACKEND), json!(default_ocr_backend()));
+        assert!(doc.set_value(KEY_OCR_BACKEND, json!("cloud")).is_err());
+        doc.set_value(KEY_OCR_BACKEND, json!(OCR_BACKEND_LOCAL_MODEL)).expect("合法后端");
+        let reloaded = ConfigDocument::from_bytes(Some(&doc.to_bytes()));
+        assert_eq!(reloaded.value(KEY_OCR_BACKEND), json!(OCR_BACKEND_LOCAL_MODEL));
+    }
+
+    /// 配置损坏（RecoveredDefaults）回落到默认值，同样是 local-model。
+    #[test]
+    fn ocr_backend_corrupt_config_uses_default() {
+        let doc = ConfigDocument::from_bytes(Some(b"{not json"));
+        assert_eq!(doc.compatibility(), crate::document::Compatibility::RecoveredDefaults);
+        assert_eq!(doc.value(KEY_OCR_BACKEND), json!(OCR_BACKEND_LOCAL_MODEL));
+    }
+
+    /// 旧配置迁移：磁盘文件存在但没有该键 = 老用户 -> local-model；全新安装默认 local-model；已有值原样保留。
+    #[test]
+    fn ocr_backend_migration_for_existing_users() {
+        let fresh = ConfigDocument::from_bytes(None);
+        assert_eq!(fresh.value(KEY_OCR_BACKEND), json!(OCR_BACKEND_LOCAL_MODEL));
+
+        // 取一份全新文档，抹掉后端键，模拟升级前写出的旧配置文件
+        let mut legacy: serde_json::Value = serde_json::from_slice(&fresh.to_bytes()).expect("json");
+        legacy["text_recognition"].as_object_mut().expect("分组").remove("backend");
+        let bytes = serde_json::to_vec(&legacy).expect("序列化");
+        let migrated = ConfigDocument::from_bytes(Some(&bytes));
+        assert_eq!(migrated.value(KEY_OCR_BACKEND), json!(OCR_BACKEND_LOCAL_MODEL));
+        assert!(migrated.is_dirty(), "迁移结果应落盘");
+        let text = String::from_utf8(migrated.to_bytes()).expect("utf8");
+        assert!(text.contains("\"backend\": \"local-model\""), "{text}");
+
+        // 已经写了值的配置不被迁移覆盖
+        let mut explicit = legacy.clone();
+        explicit["text_recognition"]["backend"] = json!(OCR_BACKEND_SYSTEM);
+        let kept = ConfigDocument::from_bytes(Some(&serde_json::to_vec(&explicit).expect("序列化")));
+        assert_eq!(kept.value(KEY_OCR_BACKEND), json!(OCR_BACKEND_SYSTEM));
     }
 }

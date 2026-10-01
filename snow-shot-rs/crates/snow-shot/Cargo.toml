@@ -15,6 +15,7 @@ snow-canvas-raster = { path = "../snow-canvas-raster" }
 snow-canvas-text = { path = "../snow-canvas-text" }
 snow-capability = { path = "../snow-capability" }
 snow-config = { path = "../snow-config" }
+snow-i18n = { path = "../snow-i18n" }
 # 标注引擎内核（仓库内 path 依赖，仅依赖 serde，不引入新外部 crate）
 snow-draw-engine = { path = "../../../snow_draw_engine_qt/crates/snow-draw-engine" }
 snow-draw-engine-editor = { path = "../../../snow_draw_engine_qt/crates/snow-draw-engine-editor" }

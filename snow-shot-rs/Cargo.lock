@@ -6934,6 +6934,7 @@ dependencies = [
  "snow-draw-engine",
  "snow-draw-engine-editor",
  "snow-history",
+ "snow-i18n",
  "snow-ocr-protocol",
  "snow-platform",
  "snow-recorder-protocol",

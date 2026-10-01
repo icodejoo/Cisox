@@ -90,6 +90,22 @@ impl std::fmt::Display for SetError {
 
 impl std::error::Error for SetError {}
 
+/// 已有配置（磁盘文件或导入快照）里缺失某键时补什么值。
+///
+/// 大多数键补 schema 默认；OCR 后端是例外：缺失说明配置写于该键出现之前（老用户），
+/// 保持原有的本地模型行为，只有全新安装（不经过本函数）才用平台默认。
+///
+/// # 参数
+/// - `key`：缺失的配置键。
+/// - `default`：该键的 schema 默认值。
+fn missing_key_value(key: &str, default: &Value) -> Value {
+    if key == crate::extensions::KEY_OCR_BACKEND {
+        Value::String(crate::extensions::OCR_BACKEND_LOCAL_MODEL.to_string())
+    } else {
+        default.clone()
+    }
+}
+
 /// 按 C++ `materializeConfiguration` 把覆盖值物化：缺失键补默认、非法值回退默认、执行迁移。
 fn materialize(
     overlay: &BTreeMap<String, Value>,
@@ -112,11 +128,10 @@ fn materialize(
             continue;
         }
         let Some(stored) = overlay.get(item.key) else {
-            result
-                .values
-                .insert(item.key.to_string(), item.default.clone());
+            let filled = missing_key_value(item.key, &item.default);
+            result.values.insert(item.key.to_string(), filled.clone());
             if mutate_document {
-                insert_path(&mut result.document, item.key, item.default.clone());
+                insert_path(&mut result.document, item.key, filled);
                 result.dirty = result.dirty || !replace_all;
             }
             continue;

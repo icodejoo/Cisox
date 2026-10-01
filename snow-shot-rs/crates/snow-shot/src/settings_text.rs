@@ -35,6 +35,32 @@ impl Lang {
     }
 }
 
+/// 解析 snow-i18n 语料使用的语言标记（含繁体）。
+///
+/// # 参数
+/// - `value`：`interface/language` 配置值，`system` 表示跟随系统。
+/// - `system_language`：系统语言标识。
+///
+/// # 返回
+/// `zh-TW`（繁体：`zh_TW` / `zh-Hant` / `zh-HK` / `zh-MO`）、`zh-CN`（其余中文）或 `en-US`。
+///
+/// # 示例
+/// ```ignore
+/// assert_eq!(ui_locale("system", "zh-TW"), "zh-TW");
+/// assert_eq!(ui_locale("en_US", "zh-CN"), "en-US");
+/// ```
+pub fn ui_locale(value: &str, system_language: &str) -> &'static str {
+    let chosen = if value.trim().eq_ignore_ascii_case("system") { system_language } else { value };
+    let tag = chosen.trim().to_lowercase().replace('_', "-");
+    if ["zh-tw", "zh-hant", "zh-hk", "zh-mo"].iter().any(|p| tag.starts_with(p)) {
+        "zh-TW"
+    } else if tag.starts_with("zh") {
+        "zh-CN"
+    } else {
+        "en-US"
+    }
+}
+
 /// 界面文案文本。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Text {
@@ -208,6 +234,18 @@ mod tests {
         // 测试非 system 配置使用自身值。
         assert_eq!(Lang::from_config("zh_TW", "en-US"), Lang::ZhCn);
         assert_eq!(Lang::from_config("en_US", "zh-CN"), Lang::EnUs);
+    }
+
+    #[test]
+    fn test_ui_locale() {
+        // 跟随系统与显式选择、繁简与未知语言。
+        assert_eq!(ui_locale("system", "zh-TW"), "zh-TW");
+        assert_eq!(ui_locale("system", "zh-Hant-HK"), "zh-TW");
+        assert_eq!(ui_locale("system", "zh-CN"), "zh-CN");
+        assert_eq!(ui_locale("zh_TW", "en-US"), "zh-TW");
+        assert_eq!(ui_locale("zh_CN", "en-US"), "zh-CN");
+        assert_eq!(ui_locale("en_US", "zh-CN"), "en-US");
+        assert_eq!(ui_locale("system", "fr-FR"), "en-US");
     }
 
     #[test]

@@ -11,6 +11,7 @@ use crate::frozen_frame::FrozenFrame;
 use crate::ocr_assets::{ENV_OCR_ASSET_DIR, ocr_root};
 use crate::ocr_client::OcrError;
 use crate::ocr_download;
+use crate::ocr_backend::{OcrInput, select_from_document};
 use crate::ocr_service::{OcrRequestConfig, OcrResult, OcrService};
 use crate::ort_runtime;
 use crate::sys_prefs::system_ui_language;
@@ -1100,11 +1101,14 @@ fn open_overlay(cx: &mut ShellContext, state: &mut AppState, payload: CapturePay
 /// - `serial`：请求序号。
 /// - `width` / `height` / `rgba`：待识别图像。
 fn spawn_ocr(state: &AppState, serial: u64, width: u32, height: u32, rgba: Vec<u8>) {
-    let config = OcrRequestConfig::from_document(state.config.borrow().document());
-    let service = Arc::clone(&state.ocr);
+    let selection = select_from_document(state.config.borrow().document(), Arc::clone(&state.ocr));
+    if let Some(notice) = selection.notice {
+        tracing::warn!(?notice, requested = ?selection.requested, effective = ?selection.effective, "OCR 后端回落");
+    }
+    let engine = selection.engine;
     let inbox = state.inbox.clone();
     let spawned = std::thread::Builder::new().name("snow-ocr-request".into()).spawn(move || {
-        let result = service.recognize_rgba(&config, width, height, &rgba);
+        let result = engine.recognize(&OcrInput { width, height, rgba: &rgba });
         inbox.push(UiEvent::OcrFinished { serial, result });
     });
     if let Err(e) = spawned {
@@ -1123,20 +1127,23 @@ fn spawn_ocr(state: &AppState, serial: u64, width: u32, height: u32, rgba: Vec<u
 /// - `serial`：请求序号。
 /// - `width` / `height` / `rgba`：选区图像。
 fn spawn_translate(state: &AppState, serial: u64, width: u32, height: u32, rgba: Vec<u8>) {
-    let (ocr_config, translate_config) = {
+    let (selection, translate_config) = {
         let config = state.config.borrow();
         (
-            OcrRequestConfig::from_document(config.document()),
+            select_from_document(config.document(), Arc::clone(&state.ocr)),
             TranslateConfig::from_document(config.document(), &system_ui_language()),
         )
     };
-    let ocr = Arc::clone(&state.ocr);
+    if let Some(notice) = selection.notice {
+        tracing::warn!(?notice, requested = ?selection.requested, effective = ?selection.effective, "OCR 后端回落");
+    }
+    let ocr = selection.engine;
     let translator = Arc::clone(&state.translator);
     let inbox = state.inbox.clone();
     let spawned = std::thread::Builder::new().name("snow-translate-request".into()).spawn(move || {
         let progress_inbox = inbox.clone();
         let result = run_flow(
-            || ocr.recognize_rgba(&ocr_config, width, height, &rgba),
+            || ocr.recognize(&OcrInput { width, height, rgba: &rgba }),
             translator.as_ref(),
             &translate_config,
             |stage| {

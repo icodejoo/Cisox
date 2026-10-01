@@ -26,6 +26,7 @@ pub mod app_runtime;
 pub mod capture_flow;
 pub mod frozen_frame;
 pub mod ocr_assets;
+pub mod ocr_backend;
 pub mod ocr_client;
 pub mod ocr_download;
 pub mod ocr_flow;

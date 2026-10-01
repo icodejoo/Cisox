@@ -10,7 +10,7 @@ use crate::settings_model::{
     parse_hex_color, parse_input, portable_to_hotkey_text, shortcut_from_keystroke,
     shortcut_texts, with_shortcut, without_shortcut, GLOBAL_SHORTCUT_GROUP,
 };
-use crate::settings_text::{Lang, Text, group_title, t};
+use crate::settings_text::{Lang, Text, group_title, t, ui_locale};
 use serde_json::Value;
 use snow_config::schema::{self, entries};
 use snow_config::store::ConfigStore;
@@ -144,6 +144,8 @@ pub struct UiPrefs {
     pub dark: bool,
     /// 界面语言。
     pub lang: Lang,
+    /// snow-i18n 语料语言（`en-US` / `zh-CN` / `zh-TW`）。
+    pub locale: &'static str,
     /// 主色 RGBA。
     pub accent: [u8; 4],
 }
@@ -165,6 +167,7 @@ impl UiPrefs {
         Self {
             dark,
             lang: Lang::from_config(language, &system.language),
+            locale: ui_locale(language, &system.language),
             accent: parse_hex_color(accent).unwrap_or(DEFAULT_ACCENT),
         }
     }
@@ -1170,6 +1173,9 @@ mod tests {
         assert!(p.dark && p.lang == Lang::ZhCn && p.accent == [0x11, 0x22, 0x33, 0xFF]);
         let p = UiPrefs::resolve("light", "en_US", "bad", &dark_system);
         assert!(!p.dark && p.lang == Lang::EnUs && p.accent == DEFAULT_ACCENT);
+        assert_eq!(p.locale, "en-US");
+        let tw_system = SystemPrefs { dark: false, language: "zh-TW".into() };
+        assert_eq!(UiPrefs::resolve("system", "system", "bad", &tw_system).locale, "zh-TW");
     }
 
     /// 回滚辅助：还原并落盘。

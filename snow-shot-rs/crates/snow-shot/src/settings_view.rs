@@ -11,7 +11,9 @@ use crate::settings_state::{
     ConfigChange, EditTarget, KeyMods, RowModel, Scope, SettingsAction, SettingsState,
     SharedConfig, StatusKind, SystemPrefs, read_only_note,
 };
+use crate::ocr_backend::{OcrBackend, OcrNotice};
 use crate::settings_text::{Lang, Text, group_title, t};
+use snow_config::extensions::KEY_OCR_BACKEND;
 use serde_json::{Value, json};
 use snow_ui::ui::*;
 use std::ops::Range;
@@ -502,8 +504,13 @@ impl SettingsView {
             Control::Choice(options) => {
                 let current = row.value.as_str().unwrap_or_default().to_string();
                 let mut chips = row_div;
+                let locale = self.state.prefs().locale;
                 for option in options {
-                    chips = chips.child(Self::chip(*option, current == *option, p).on_mouse_down(
+                    let text = match OcrBackend::from_config_value(option).filter(|_| key == KEY_OCR_BACKEND) {
+                        Some(backend) => backend.label(locale),
+                        None => (*option).to_string(),
+                    };
+                    chips = chips.child(Self::chip(text, current == *option, p).on_mouse_down(
                         MouseButton::Left,
                         Self::click(cx, SettingsAction::Change { key, value: json!(option) }),
                     ));
@@ -637,9 +644,11 @@ impl SettingsView {
                 button
             }
         };
-        let sub = match &row.error {
-            Some(error) => div().text_color(p.danger).child(error.clone()),
-            None => div().text_color(p.dim).child(key),
+        let backend_notice = if key == KEY_OCR_BACKEND { OcrNotice::for_config_value(&row.value) } else { None };
+        let sub = match (&row.error, backend_notice) {
+            (Some(error), _) => div().text_color(p.danger).child(error.clone()),
+            (None, Some(notice)) => div().text_color(p.danger).child(notice.message(self.state.prefs().locale)),
+            (None, None) => div().text_color(p.dim).child(key),
         };
         let label = div()
             .w(px(LABEL_WIDTH))
