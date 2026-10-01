@@ -25,6 +25,7 @@ use windows::Win32::Graphics::Dxgi::{
 };
 use windows::core::{Interface, PCWSTR};
 
+use crate::frametrace::{Thread, TraceBuf, code};
 use crate::geom::Rect;
 use crate::pipeline::{CaptureDiag, CaptureFault, CaptureSource, CaptureStats, Captured};
 use crate::settings::{AdapterInfo, EncoderPreference, rank_adapters};
@@ -242,6 +243,8 @@ pub struct DdaCapture {
     last_acquire: Option<Instant>,
     /// WGC 取帧源（实验对照）：有值时不用 `AcquireNextFrame`。
     wgc: Option<crate::win::wgc::WgcSource>,
+    /// 帧追踪缓冲（未开启时是空操作）。
+    trace: TraceBuf,
 }
 
 impl DdaCapture {
@@ -274,7 +277,7 @@ impl DdaCapture {
         // 复制命令已提交，帧可以归还帧池（GPU 侧顺序由驱动保证）
         drop(frame);
         let cursor = self.sample_cursor();
-        let captured = Captured { frame: GpuFrame::single(slot), cursor, present: arrived, captured_at: Instant::now(), fresh: true };
+        let captured = Captured { frame: GpuFrame::single(slot), cursor, present: arrived, captured_at: Instant::now(), fresh: true, id: self.stats.frames + 1 };
         self.stats.frames += 1;
         self.latest = Some(captured.clone());
         Ok(Some(captured))
@@ -382,6 +385,7 @@ impl DdaCapture {
             slow_acquire_ms: Vec::new(),
             last_acquire: None,
             wgc: None,
+            trace: TraceBuf::new(Thread::Capture),
         })
     }
 
@@ -397,6 +401,14 @@ impl DdaCapture {
             cursor.shape = CursorShapeState::Embedded(shape.clone());
         }
         Some(cursor)
+    }
+
+    /// DXGI 呈现时刻换算成 `Instant`（只在追踪开启时用，口径与取帧路径一致）。
+    fn present_instant(&self, info: &DXGI_OUTDUPL_FRAME_INFO, captured_at: Instant) -> Instant {
+        match self.anchor {
+            Some(a) => a.to_instant(info.LastPresentTime).min(captured_at),
+            None => captured_at,
+        }
     }
 
     /// 把设备 A 上已记录的命令提交给 GPU。
@@ -505,11 +517,15 @@ impl CaptureSource for DdaCapture {
                 Ok(()) => break,
                 Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT => {
                     if Instant::now() >= deadline {
+                        self.trace.idle(0, timeout);
                         return Ok(None);
                     }
                     std::thread::sleep(POLL_SLEEP);
                 }
-                Err(e) if e.code() == DXGI_ERROR_ACCESS_LOST => return Err(CaptureFault::Lost),
+                Err(e) if e.code() == DXGI_ERROR_ACCESS_LOST => {
+                    self.trace.lost(0);
+                    return Err(CaptureFault::Lost);
+                }
                 Err(e) => return Err(CaptureFault::Other(format!("AcquireNextFrame 失败: {e}"))),
             }
         }
@@ -517,10 +533,12 @@ impl CaptureSource for DdaCapture {
         let duplication = self.duplication.clone();
         let guard = FrameGuard(&duplication);
         if !want {
+            self.trace.acquire(0, captured_at, None, info.AccumulatedFrames, 0, code::ACQ_UNWANTED);
             return Ok(None);
         }
         if info.LastPresentTime == 0 {
             drop(guard);
+            self.trace.acquire(0, captured_at, None, info.AccumulatedFrames, 0, code::ACQ_CURSOR_ONLY);
             let cursor = self.sample_cursor();
             // 只有光标移动：沿用上一张桌面图
             return Ok(self.latest.as_ref().map(|f| Captured { cursor, captured_at, fresh: false, ..f.clone() }));
@@ -537,6 +555,10 @@ impl CaptureSource for DdaCapture {
         let copy_started = Instant::now();
         let Some(slot) = self.slots.iter().find(|s| Arc::strong_count(s) == 1).cloned() else {
             self.stats.pool_drops += 1;
+            if self.trace.enabled() {
+                let present = self.present_instant(&info, captured_at);
+                self.trace.acquire(0, captured_at, Some(present), info.AccumulatedFrames, 0, code::ACQ_POOL_DROP);
+            }
             return Ok(None);
         };
         self.copy_into(&slot, &source)?;
@@ -551,7 +573,8 @@ impl CaptureSource for DdaCapture {
             Some(a) => a.to_instant(info.LastPresentTime),
             None => captured_at,
         };
-        let captured = Captured { frame: GpuFrame::single(slot), cursor, present: present.min(captured_at), captured_at, fresh: true };
+        let captured = Captured { frame: GpuFrame::single(slot), cursor, present: present.min(captured_at), captured_at, fresh: true, id: self.stats.frames + 1 };
+        self.trace.acquire(0, captured_at, Some(captured.present), info.AccumulatedFrames, captured.id, code::ACQ_FRESH);
         self.stats.frames += 1;
         self.latest = Some(captured.clone());
         Ok(Some(captured))

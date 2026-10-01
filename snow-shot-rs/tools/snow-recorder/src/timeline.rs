@@ -143,11 +143,29 @@ impl<T> TimedQueue<T> {
     /// q.push(Duration::from_millis(10), "a");
     /// assert_eq!(q.take_for_slot(Duration::from_millis(20)), Some("a"));
     /// ```
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn push(&mut self, at: Duration, item: T) {
+        self.push_with(at, item, |_| {});
+    }
+
+    /// 放入一帧，溢出被挤掉的最旧帧交给 `on_evict`（帧追踪用；行为与 [`TimedQueue::push`] 完全一致）。
+    ///
+    /// # 参数
+    /// - `at`：该帧呈现时的有效时长（扣除暂停）。
+    /// - `item`：帧。
+    /// - `on_evict`：每挤掉一帧调用一次。
+    ///
+    /// # 示例
+    /// ```ignore
+    /// q.push_with(Duration::from_millis(10), "a", |old| println!("evicted {old}"));
+    /// ```
+    pub fn push_with(&mut self, at: Duration, item: T, mut on_evict: impl FnMut(&T)) {
         let index = self.pending.iter().rposition(|(t, _)| *t <= at).map_or(0, |i| i + 1);
         self.pending.insert(index, (at, item));
         while self.pending.len() > MAX_PENDING_FRAMES {
-            self.pending.pop_front();
+            if let Some((_, old)) = self.pending.pop_front() {
+                on_evict(&old);
+            }
             self.dropped += 1;
         }
     }
@@ -156,13 +174,34 @@ impl<T> TimedQueue<T> {
     ///
     /// # 参数
     /// - `slot_time`：输出槽对应的有效时长。
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn take_for_slot(&mut self, slot_time: Duration) -> Option<T> {
+        self.take_for_slot_with(slot_time, |_| {})
+    }
+
+    /// 取呈现时间不晚于 `slot_time` 的最新一帧，被取代丢弃的更旧帧交给 `on_discard`
+    /// （帧追踪用；行为与 [`TimedQueue::take_for_slot`] 完全一致）。
+    ///
+    /// # 参数
+    /// - `slot_time`：输出槽对应的有效时长。
+    /// - `on_discard`：每丢弃一帧调用一次。
+    ///
+    /// # 示例
+    /// ```ignore
+    /// let chosen = q.take_for_slot_with(Duration::from_millis(20), |old| println!("dropped {old}"));
+    /// ```
+    pub fn take_for_slot_with(&mut self, slot_time: Duration, mut on_discard: impl FnMut(&T)) -> Option<T> {
         let count = self.pending.iter().take_while(|(t, _)| *t <= slot_time).count();
         if count == 0 {
             return None;
         }
         self.dropped += count as u64 - 1;
-        self.pending.drain(..count).next_back().map(|(_, item)| item)
+        let mut drained = self.pending.drain(..count);
+        let chosen = drained.next_back().map(|(_, item)| item);
+        for (_, item) in drained {
+            on_discard(&item);
+        }
+        chosen
     }
 
     /// 清空（暂停/恢复时丢弃过期帧）。
@@ -466,6 +505,25 @@ mod tests {
         }
         assert_eq!(q.take_for_slot(ms(0)), None);
         assert_eq!(q.dropped, 3);
+    }
+
+    /// 带回调的变体：丢弃与溢出的帧逐个交给回调，结果与计数同无回调版本一致。
+    #[test]
+    fn timed_queue_callbacks_report_discarded_and_evicted() {
+        let ms = Duration::from_millis;
+        let mut q = TimedQueue::default();
+        let mut evicted = Vec::new();
+        for i in 0..(MAX_PENDING_FRAMES as u64 + 2) {
+            q.push_with(ms(10 + i), i, |old| evicted.push(*old));
+        }
+        assert_eq!(evicted, vec![0, 1]);
+        assert_eq!(q.dropped, 2);
+        let mut discarded = Vec::new();
+        let chosen = q.take_for_slot_with(ms(15), |old| discarded.push(*old));
+        assert_eq!(chosen, Some(5));
+        assert_eq!(discarded, vec![2, 3, 4]);
+        assert_eq!(q.dropped, 5);
+        assert_eq!(q.take_for_slot_with(ms(15), |_| panic!("无帧可丢")), None);
     }
 
     /// 乱序到达的帧按时间排序。

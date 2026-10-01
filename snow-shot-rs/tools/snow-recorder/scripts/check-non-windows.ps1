@@ -29,7 +29,7 @@ edition = "2024"
 snow-cursor = { path = "$cursor" }
 snow-recorder-protocol = { path = "$protocol" }
 "@ | Set-Content -Encoding utf8 (Join-Path $work "Cargo.toml")
-$common = "backend", "clock", "geom", "os", "pipeline", "settings", "timeline"
+$common = "backend", "clock", "frametrace", "geom", "os", "pipeline", "settings", "timeline"
 # 第一遍：含 tailfix 的生产代码；第二遍：带测试代码（tailfix 的测试要用上游 crate 造文件，不在此检查范围内）
 $passes = @(
     @{ modules = $common + "tailfix"; args = @("check") },

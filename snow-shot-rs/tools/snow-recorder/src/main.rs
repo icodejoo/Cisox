@@ -6,6 +6,7 @@
 
 mod backend;
 mod clock;
+mod frametrace;
 mod geom;
 mod os;
 mod pipeline;

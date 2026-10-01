@@ -22,6 +22,7 @@ use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoTaskMe
 use windows::Win32::System::Variant::VARIANT;
 use windows::core::{GUID, IUnknown, Interface, PCWSTR, implement};
 
+use crate::frametrace::{self, Tracer};
 use crate::pipeline::{EncoderStats, VideoEncoder};
 use crate::win::hwenc::{HwContext, HwResult, STAT_SAMPLE_LIMIT, Surface};
 
@@ -119,11 +120,18 @@ struct SurfaceHolder {
     sent: Instant,
     /// 输入被消费的耗时样本（毫秒）。
     consumed_ms: Arc<Mutex<Vec<f32>>>,
+    /// 样本的槽号（帧追踪用）。
+    slot: i64,
+    /// 帧追踪器（未开启时为 `None`）。
+    trace: Option<Arc<Tracer>>,
 }
 
 impl Drop for SurfaceHolder {
     /// 记录"送帧到 MFT 释放样本"的耗时。
     fn drop(&mut self) {
+        if let Some(trace) = &self.trace {
+            trace.push_consumed(self.slot, self.sent);
+        }
         let ms = self.sent.elapsed().as_secs_f32() * 1000.0;
         if let Ok(mut v) = self.consumed_ms.lock()
             && v.len() < LATENCY_SAMPLE_LIMIT
@@ -223,6 +231,8 @@ pub struct MfEncoder {
     path: std::path::PathBuf,
     /// 实际选中的编码 MFT 名称与码率控制描述（诊断用）。
     description: String,
+    /// 帧追踪器（未开启时为 `None`）。
+    trace: Option<Arc<Tracer>>,
 }
 
 // SAFETY: SinkWriter/设备管理器是自由线程（MTA）对象；编码器只由创建者移交给唯一的编码线程使用。
@@ -421,6 +431,7 @@ impl MfEncoder {
                 probe,
                 path: path.to_path_buf(),
                 description: format!("{name}；{described}"),
+                trace: frametrace::global().cloned(),
             })
         }
     }
@@ -465,7 +476,7 @@ impl MfEncoder {
             sample.AddBuffer(&buffer).map_err(|e| e.to_string())?;
             sample.SetSampleTime(slot_to_hns(pts, self.fps)).map_err(|e| e.to_string())?;
             sample.SetSampleDuration(HNS_PER_SECOND / i64::from(self.fps)).map_err(|e| e.to_string())?;
-            let holder: IUnknown = SurfaceHolder { _surface: surface, sent, consumed_ms: Arc::clone(&self.consumed_ms) }.into();
+            let holder: IUnknown = SurfaceHolder { _surface: surface, sent, consumed_ms: Arc::clone(&self.consumed_ms), slot: pts, trace: self.trace.clone() }.into();
             sample.SetUnknown(&HOLDER_KEY, &holder).map_err(|e| e.to_string())?;
             if let Some(probe) = &mut self.probe {
                 probe.submits.push(sent);

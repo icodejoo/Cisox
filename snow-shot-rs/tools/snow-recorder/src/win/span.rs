@@ -21,6 +21,7 @@ use windows::Win32::Graphics::Dxgi::{
 };
 use windows::core::Interface;
 
+use crate::frametrace::{Thread, TraceBuf, code};
 use crate::geom::{Rect, scale_coordinate};
 use crate::pipeline::{CaptureDiag, CaptureFault, CaptureSource, CaptureStats, Captured};
 use crate::timeline::QpcAnchor;
@@ -216,6 +217,8 @@ pub struct SpanCapture {
     copy_ms: Vec<f32>,
     /// 上一轮轮询的时刻。
     last_acquire: Option<Instant>,
+    /// 帧追踪缓冲（未开启时是空操作）；`src` 列标注来源输出序号。
+    trace: TraceBuf,
 }
 
 impl SpanCapture {
@@ -290,6 +293,7 @@ impl SpanCapture {
             acquire_gap_ms: Vec::new(),
             copy_ms: Vec::new(),
             last_acquire: None,
+            trace: TraceBuf::new(Thread::Capture),
         };
         eprintln!("跨屏选区：{} 块显示器，空洞{}", capture.outputs.len(), if plan.has_hole { "（黑色填充）" } else { "无" });
         Ok(Some((capture, compose)))
@@ -326,11 +330,14 @@ impl SpanCapture {
         let captured_at = Instant::now();
         let duplication = self.outputs[index].duplication.clone();
         let guard = FrameGuard(&duplication);
+        let src = u8::try_from(index).unwrap_or(u8::MAX);
         if !want {
+            self.trace.acquire(src, captured_at, None, info.AccumulatedFrames, 0, code::ACQ_UNWANTED);
             return Ok(None);
         }
         if info.LastPresentTime == 0 {
             drop(guard);
+            self.trace.acquire(src, captured_at, None, info.AccumulatedFrames, 0, code::ACQ_CURSOR_ONLY);
             let cursor = self.sample_cursor();
             // 只有光标移动：沿用上一张桌面图
             return Ok(self.latest.as_ref().map(|f| Captured { cursor, captured_at, fresh: false, ..f.clone() }));
@@ -347,6 +354,10 @@ impl SpanCapture {
         let copy_started = Instant::now();
         let Some(slot) = self.outputs[index].slots.iter().find(|s| Arc::strong_count(s) == 1).cloned() else {
             self.stats.pool_drops += 1;
+            if self.trace.enabled() {
+                let present = self.anchor.map_or(captured_at, |a| a.to_instant(info.LastPresentTime).min(captured_at));
+                self.trace.acquire(src, captured_at, Some(present), info.AccumulatedFrames, 0, code::ACQ_POOL_DROP);
+            }
             return Ok(None);
         };
         copy_into_slot(&self.device, &self.context4, &slot, &source, &self.outputs[index].crop)?;
@@ -364,7 +375,8 @@ impl SpanCapture {
             None => captured_at,
         };
         let frame = GpuFrame { slot: Arc::clone(&tiles[0].slot), tiles: Some(tiles) };
-        let captured = Captured { frame, cursor, present: present.min(captured_at), captured_at, fresh: true };
+        let captured = Captured { frame, cursor, present: present.min(captured_at), captured_at, fresh: true, id: self.stats.frames + 1 };
+        self.trace.acquire(src, captured_at, Some(captured.present), info.AccumulatedFrames, captured.id, code::ACQ_FRESH);
         self.stats.frames += 1;
         self.latest = Some(captured.clone());
         Ok(Some(captured))
@@ -399,12 +411,14 @@ impl CaptureSource for SpanCapture {
                     Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT => {}
                     Err(e) if e.code() == DXGI_ERROR_ACCESS_LOST => {
                         self.lost = Some(index);
+                        self.trace.lost(u8::try_from(index).unwrap_or(u8::MAX));
                         return Err(CaptureFault::Lost);
                     }
                     Err(e) => return Err(CaptureFault::Other(format!("显示器 {index} AcquireNextFrame 失败: {e}"))),
                 }
             }
             if Instant::now() >= deadline {
+                self.trace.idle(u8::MAX, timeout);
                 return Ok(None);
             }
             std::thread::sleep(POLL_SLEEP);

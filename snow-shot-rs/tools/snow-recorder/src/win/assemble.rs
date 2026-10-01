@@ -104,6 +104,8 @@ pub fn start_hardware(spec: &HardwareSpec) -> Result<Running, String> {
     if spec.encoder == EncoderPreference::Software {
         return Err(format!("{ENV_ENCODER} 已关闭硬件编码"));
     }
+    // 回落重试时丢掉上一次尝试的追踪残留（未开启帧追踪时什么也不做）
+    crate::frametrace::reset();
     match DdaCapture::open(spec.region, QpcAnchor::capture_now(), spec.encoder) {
         Ok((mut capture, device)) => {
             if crate::win::dda::wgc_mode() {

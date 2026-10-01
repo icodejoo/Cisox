@@ -6,6 +6,12 @@
 #   跨屏: -AllowPrimary -SeamX 2560（两屏接缝的 x 坐标；每档窗口/录制区域以接缝为中心横跨两屏，占用主屏的一部分）
 #   双窗口（需同时给 -SeamX）: 加 -Dual，每块屏一个夹具窗口各按自己的 vsync 出帧
 #   软编对照: -EnvPairs "SNOW_RECORDER_HARDWARE=0"
+#   帧级追踪与归因: 加 -Trace。每轮在 <OutDir>\runs\ 下建独立子目录（夹具 frames.csv、录制追踪 csv、成品、analysis、env.json、trace_join 报告/JSON），
+#   结束后运行 analyze/aggregate_trace.py 按档位汇总（过线数、失败归因分布、受干扰轮数、剔除干扰后过线率、丢帧与停顿窗口同时性）。
+#   追踪开销对比（不要同时开 -Trace，它还会启动 typeperf 采样）: 同档位同轮数各跑一次，
+#     scripts/run-matrix.ps1 -RecorderExe <exe> -Name off -Repeats 5
+#     scripts/run-matrix.ps1 -RecorderExe <exe> -Name on  -Repeats 5 -EnvPairs "SNOW_RECORDER_FRAME_TRACE=C:\temp\matrix-trace.csv"
+#   再分别 python analyze/summarize_runs.py <OutDir> off / on，比较 CPU 核、内存、丢帧均值（建议 off/on 交错执行，减小系统漂移影响）。
 # 输出: <OutDir>\<Name>-r<轮>-<WxH>-<fps>.txt（原始输出）与末尾汇总表（通过线: 30fps>=28.5、60fps>=56，且丢帧率<1%）。
 [CmdletBinding(PositionalBinding = $false)]
 param(
@@ -18,6 +24,7 @@ param(
     [switch]$AllowPrimary,
     [int]$SeamX = 0,
     [switch]$Dual,
+    [switch]$Trace,
     [string]$FixtureExe = "",
     [string]$FfmpegDir = "",
     [string]$OutDir = (Join-Path $env:TEMP "snow-fps-matrix")
@@ -41,6 +48,10 @@ try {
             $extra = @{}
             if ($FixtureExe) { $extra.FixtureExe = $FixtureExe }
             if ($FfmpegDir) { $extra.FfmpegDir = $FfmpegDir }
+            if ($Trace) {
+                $extra.Trace = $true
+                $extra.OutDir = Join-Path $OutDir "runs"
+            }
             if ($Dual) {
                 if ($SeamX -le 0) { throw "-Dual 只能与 -SeamX（跨屏）同用" }
                 $extra.Dual = $true
@@ -64,3 +75,7 @@ finally {
     foreach ($k in $set) { Remove-Item "Env:$k" -ErrorAction SilentlyContinue }
 }
 python (Join-Path $toolRoot "analyze/summarize_runs.py") $OutDir $Name
+if ($Trace) {
+    "--- 帧级追踪汇总 ($OutDir\runs) ---"
+    python (Join-Path $toolRoot "analyze/aggregate_trace.py") (Join-Path $OutDir "runs") --name $Name --json (Join-Path $OutDir "$Name-trace-summary.json")
+}

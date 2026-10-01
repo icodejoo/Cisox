@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 
 use snow_cursor::AttachedCursorSample;
 
+use crate::frametrace::{self, Thread, TraceBuf, code};
 use crate::os::{TimerGuard, raise_thread_priority};
 use crate::timeline::{NANOS_PER_SEC, PhaseTracker, TickClock, TimedQueue, Timeline, slot_of};
 
@@ -57,6 +58,8 @@ pub struct Captured<F> {
     pub captured_at: Instant,
     /// 桌面是否有新内容（`false` 表示只有光标移动，画面沿用上一帧）。
     pub fresh: bool,
+    /// 捕获序号（采集实现自己递增，从 1 起；光标补帧沿用所复用桌面帧的序号），仅供帧追踪关联。
+    pub id: u64,
 }
 
 /// 采集故障分类。
@@ -333,6 +336,8 @@ pub struct Running {
     encode: Option<JoinHandle<Result<EncoderStats, String>>>,
     /// 后端名。
     backend: String,
+    /// 输出帧率（写帧追踪元数据用）。
+    fps: u32,
     /// 启动耗时分解（毫秒）。
     startup_ms: (f32, f32, f32),
     /// 计时器精度守卫（随录制结束释放）。
@@ -352,11 +357,13 @@ pub fn slot_time(slot: u64, fps: u32) -> Duration {
 /// 采集线程主循环：阻塞取帧并转交合成线程，会话失效时重建。
 fn capture_loop<C: CaptureSource>(mut source: C, tx: Sender<CaptureMsg<C::Frame>>, shared: Arc<CaptureShared>) -> CaptureDiag {
     raise_thread_priority();
+    let mut trace = TraceBuf::new(Thread::Capture);
     let mut recreates = 0;
     while !shared.stop.load(Ordering::Acquire) {
         let want = !shared.paused.load(Ordering::Acquire);
         match source.next(ACQUIRE_TIMEOUT, want) {
             Ok(Some(captured)) => {
+                trace.enqueue(captured.id, captured.fresh);
                 if tx.send(CaptureMsg::Frame(Box::new(captured))).is_err() {
                     break;
                 }
@@ -390,20 +397,26 @@ fn capture_loop<C: CaptureSource>(mut source: C, tx: Sender<CaptureMsg<C::Frame>
 /// 编码线程主循环：送帧、取包、收尾。
 fn encode_loop<E: VideoEncoder>(mut encoder: E, rx: Receiver<EncodeMsg<E::Surface>>) -> Result<EncoderStats, String> {
     let mut failure: Option<String> = None;
+    let mut trace = TraceBuf::new(Thread::Encode);
     while let Ok(msg) = rx.recv() {
         match msg {
             EncodeMsg::Frame(surface, pts) => {
+                let started = trace.mark();
                 if failure.is_none()
                     && let Err(e) = encoder.submit(surface, pts)
                 {
                     failure = Some(e);
                 }
+                trace.submit(pts, started);
             }
             EncodeMsg::Finish(end) => {
-                return match failure {
+                let started = trace.mark();
+                let result = match failure {
                     Some(e) => Err(e),
                     None => encoder.finish(end),
                 };
+                trace.finish(end, started);
+                return result;
             }
         }
     }
@@ -464,6 +477,10 @@ struct ComposeContext<C: CaptureSource, P, S> {
     capture: Receiver<CaptureMsg<C::Frame>>,
     /// 发往编码线程的通道。
     frames: Sender<EncodeMsg<S>>,
+    /// 帧追踪缓冲（未开启时是空操作）。
+    trace: TraceBuf,
+    /// 已写进追踪的跳槽累计数（只在追踪开启时推进）。
+    traced_missed: u64,
 }
 
 /// 距离下一个输出槽的等待时间（上限 [`COMPOSE_WAIT`]）。
@@ -602,7 +619,8 @@ fn absorb_frame<C: CaptureSource, P, S>(c: &mut ComposeContext<C, P, S>, capture
         }
         c.arrive_lag.push(Instant::now().saturating_duration_since(captured.present).as_secs_f32() * 1000.0);
         c.phase.observe(active);
-        c.queue.push(active, captured.clone());
+        c.trace.absorb(captured.id, true);
+        c.queue.push_with(active, captured.clone(), |evicted| c.trace.discard(evicted.id, None, code::DISCARD_OVERFLOW));
     }
     if captured.fresh || c.latest.is_none() {
         c.latest = Some(captured);
@@ -618,27 +636,41 @@ where
 {
     let cursor_key_now = c.latest_cursor.as_ref().map(cursor_key);
     let cutoff = slot_time(slot, c.config.fps) + c.phase.offset();
-    let captured = match c.queue.take_for_slot(cutoff) {
+    if c.trace.enabled() && c.ticks.missed > c.traced_missed {
+        let skipped = c.ticks.missed - c.traced_missed;
+        c.trace.skip(slot.saturating_sub(skipped), skipped);
+        c.traced_missed = c.ticks.missed;
+    }
+    let mut slot_kind = code::SLOT_NEW;
+    let captured = match c.queue.take_for_slot_with(cutoff, |old| c.trace.discard(old.id, Some(slot), code::DISCARD_SUPERSEDED)) {
         Some(f) => f,
         None if c.config.show_cursor && cursor_key_now.is_some() && cursor_key_now != c.last_emitted_cursor => {
             let Some(f) = c.latest.clone() else { return Ok(()) };
             report.cursor_frames += 1;
+            slot_kind = code::SLOT_CURSOR_REUSE;
             f
         }
-        None => return Ok(()),
+        None => {
+            c.trace.slot(slot, 0, code::SLOT_EMPTY);
+            return Ok(());
+        }
     };
     let Some(mut surface) = c.composer.acquire_surface()? else {
+        c.trace.slot(slot, captured.id, code::SLOT_SURFACE_EXHAUSTED);
         report.pool_dropped += 1;
         return Ok(());
     };
+    c.trace.slot(slot, captured.id, slot_kind);
     report.pool_peak = report.pool_peak.max(c.composer.in_flight());
     report.queue_ms.push(Instant::now().saturating_duration_since(captured.captured_at).as_secs_f32() * 1000.0);
     let started = Instant::now();
     c.composer.compose(&captured.frame, c.latest_cursor.as_ref().filter(|_| c.config.show_cursor), &mut surface)?;
     report.compose_ms.push(started.elapsed().as_secs_f32() * 1000.0);
+    c.trace.compose(slot, captured.id, started);
     c.last_emitted_cursor = cursor_key_now;
     c.last_slot = Some(slot);
     c.frames.send(EncodeMsg::Frame(surface, i64::try_from(slot).unwrap_or(i64::MAX))).map_err(|_| "编码线程已退出".to_string())?;
+    c.trace.send(slot);
     report.encoded_frames += 1;
     Ok(())
 }
@@ -689,12 +721,18 @@ where
     let start = first.present.min(Instant::now());
     let waited = wait_started.elapsed();
     let mut compose_took = Duration::ZERO;
+    let mut probe_trace = TraceBuf::new(Thread::Compose);
     let probe = (|| -> Result<(), String> {
         let mut surface = composer.acquire_surface()?.ok_or("编码表面池为空")?;
+        probe_trace.slot(0, first.id, code::SLOT_PROBE);
         let compose_started = Instant::now();
         composer.compose(&first.frame, first.cursor.as_ref().filter(|_| config.show_cursor), &mut surface)?;
         compose_took = compose_started.elapsed();
-        encoder.submit(surface, 0)
+        probe_trace.compose(0, first.id, compose_started);
+        let submit_started = probe_trace.mark();
+        let submitted = encoder.submit(surface, 0);
+        probe_trace.submit(0, submit_started);
+        submitted
     })();
     let startup_ms = (
         waited.as_secs_f32() * 1000.0,
@@ -733,6 +771,8 @@ where
         control: control_rx,
         capture: capture_rx,
         frames: frame_tx,
+        trace: TraceBuf::new(Thread::Compose),
+        traced_missed: 0,
     };
     let compose = std::thread::Builder::new()
         .name("snow-compose".into())
@@ -745,6 +785,7 @@ where
         compose: Some(compose),
         encode: Some(encode),
         backend: backend.to_string(),
+        fps: config.fps,
         startup_ms,
         _timer: timer,
     })
@@ -778,6 +819,8 @@ impl Running {
         self.shared.stop.store(true, Ordering::Release);
         let diag = self.capture.take().and_then(|t| t.join().ok()).unwrap_or_default();
         let encode = self.encode.take().ok_or("录制已结束")?.join().map_err(|_| "编码线程崩溃".to_string())?;
+        // 各线程都已退出，追踪缓冲已并入全局记录（未开启追踪时什么也不做）
+        frametrace::finish(self.fps, &self.backend);
         let mut report = compose?.report;
         let stats = encode?;
         report.encoder_frames = stats.frames;
@@ -872,7 +915,7 @@ mod tests {
                 return Ok(None);
             }
             self.stats.frames += 1;
-            Ok(Some(Captured { frame: seq, cursor: None, present: due, captured_at: Instant::now(), fresh: true }))
+            Ok(Some(Captured { frame: seq, cursor: None, present: due, captured_at: Instant::now(), fresh: true, id: seq + 1 }))
         }
 
         fn recreate(&mut self) -> Result<(), String> {
@@ -1007,6 +1050,69 @@ mod tests {
         let max_seq_jump = log.windows(2).map(|w| w[1].0 - w[0].0).max().unwrap();
         assert!(max_seq_jump >= 30, "max_seq_jump {max_seq_jump}");
         assert!(max_pts_jump <= 12, "pts 跳变 {max_pts_jump}");
+    }
+
+    /// 帧追踪：槽选择、被取代丢弃、空槽、合成、送编码与跳槽都按捕获序号记录。
+    #[test]
+    fn trace_records_slot_selection_discards_and_compose() {
+        use crate::frametrace::{Event, Tracer};
+        let tracer = Arc::new(Tracer::new(std::path::PathBuf::from("unused.csv")));
+        let base = Instant::now();
+        let fps = 60;
+        let (_control_tx, control) = mpsc::channel();
+        let (_capture_tx, capture) = mpsc::channel();
+        let (frames, _frame_rx) = mpsc::channel();
+        let mut report = PipelineReport::default();
+        {
+            let mut ctx = ComposeContext::<MockCapture, MockComposer, u64> {
+                config: PipelineConfig { fps, show_cursor: false },
+                composer: MockComposer { fail_compose: false, used: 0, capacity: 100 },
+                timeline: Timeline::new(base, fps),
+                ticks: TickClock::starting_at(1),
+                queue: TimedQueue::default(),
+                phase: PhaseTracker::new(Duration::from_nanos(NANOS_PER_SEC / u64::from(fps))),
+                hold: Duration::from_millis(20),
+                warmed: true,
+                started: base,
+                latest: None,
+                latest_cursor: None,
+                last_emitted_cursor: None,
+                last_slot: Some(0),
+                last_present: None,
+                present_dt: Samples::default(),
+                arrive_lag: Samples::default(),
+                control,
+                capture,
+                frames,
+                trace: TraceBuf::attach(Some(Arc::clone(&tracer)), Thread::Compose),
+                traced_missed: 0,
+            };
+            let frame = |id: u64, ms: u64| {
+                let at = base + Duration::from_millis(ms);
+                Captured { frame: id, cursor: None, present: at, captured_at: at, fresh: true, id }
+            };
+            absorb_frame(&mut ctx, frame(1, 2), false);
+            absorb_frame(&mut ctx, frame(2, 4), false);
+            absorb_frame(&mut ctx, frame(3, 60), false);
+            // 槽 1：帧 1、2 都早于切点，选 2 并丢弃 1；槽 2：帧 3 晚于切点，空槽
+            emit_slot(&mut ctx, &mut report, 1).unwrap();
+            emit_slot(&mut ctx, &mut report, 2).unwrap();
+            // 节拍落后：直接触发槽 5 会跳过 4 个槽
+            let late = ctx.ticks.fire(5).unwrap();
+            emit_slot(&mut ctx, &mut report, late).unwrap();
+        }
+        let recs = tracer.collect();
+        let of = |event: Event| recs.iter().filter(|r| r.event == event).collect::<Vec<_>>();
+        assert_eq!(of(Event::Absorb).len(), 3);
+        let discard = of(Event::Discard);
+        assert_eq!((discard.len(), discard[0].cap_id, discard[0].slot, discard[0].code), (1, 1, 1, code::DISCARD_SUPERSEDED));
+        let slots: Vec<(i64, u64, u8)> = of(Event::Slot).iter().map(|r| (r.slot, r.cap_id, r.code)).collect();
+        assert_eq!(slots, vec![(1, 2, code::SLOT_NEW), (2, 0, code::SLOT_EMPTY), (5, 3, code::SLOT_NEW)]);
+        let skip = of(Event::Skip);
+        assert_eq!((skip.len(), skip[0].slot, skip[0].n), (1, 1, 4));
+        assert_eq!(of(Event::Compose).iter().map(|r| (r.slot, r.cap_id)).collect::<Vec<_>>(), vec![(1, 2), (5, 3)]);
+        assert_eq!(of(Event::Send).len(), 2);
+        assert_eq!(report.encoded_frames, 2);
     }
 
     /// 首帧探测阶段合成失败：启动返回错误（调用方据此回落），不会留下运行中的线程。

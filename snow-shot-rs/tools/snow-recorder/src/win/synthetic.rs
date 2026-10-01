@@ -200,7 +200,7 @@ impl CaptureSource for SyntheticCapture {
                 shape: CursorShapeState::Embedded(self.cursor_shape.clone()),
             }
         });
-        Ok(Some(Captured { frame: GpuFrame::single(slot), cursor, present: due, captured_at: Instant::now(), fresh: true }))
+        Ok(Some(Captured { frame: GpuFrame::single(slot), cursor, present: due, captured_at: Instant::now(), fresh: true, id: self.seq }))
     }
 
     /// 合成源不会失效。
