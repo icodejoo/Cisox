@@ -27,6 +27,8 @@
 
 - [guides/ocr-model-tiers-benchmark.md](guides/ocr-model-tiers-benchmark.md) — 本地 OCR 七档模型同图实测：CER、耗时、worker 内存、DirectML 对比、复现命令。有效。
 
+- [guides/translation-quantization-benchmark.md](guides/translation-quantization-benchmark.md) — 本地翻译模型 int8 / int4 量化实测（mul-mul、NLLB-600M 6/14 语言裁剪版）：质量、体积、内存、延迟、性价比拐点、ORT 算子兼容与 worker 改动清单。有效。
+
 ## 调研
 - [research/cross-monitor-recording-hw.md](research/cross-monitor-recording-hw.md) — 跨屏/双屏选区录屏硬编方案，含裁决记录。探针已实现，跨屏 16/20（单屏对照 18/20），接缝与光标已验证；跨适配器待验证。
 - [research/video-editor-backends.md](research/video-editor-backends.md) — 视频编辑器后端调研。
