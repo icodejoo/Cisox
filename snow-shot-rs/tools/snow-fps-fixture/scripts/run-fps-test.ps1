@@ -6,6 +6,7 @@
 #   scripts/run-fps-test.ps1 -Size 1280x720  -Fps 30 -Seconds 6 -Format mp4
 #   scripts/run-fps-test.ps1 -Size 1920x1080 -AllowPrimary   # 单屏机器：显式允许占用主屏
 #   scripts/run-fps-test.ps1 -SpanRegion 1280,0,2560,1440 -AllowPrimary -Fps 60   # 跨屏：窗口与录制区域横跨两块屏（会占用主屏的一部分，须同时传 -AllowPrimary）
+#   scripts/run-fps-test.ps1 -SpanRegion 1280,0,2560,1440 -AllowPrimary -Dual -Fps 60   # 双窗口：每块屏一个窗口各按自己的 vsync 出帧（排除单窗口跨屏的 DWM 合成抖动）
 # 可用环境变量透传给录制进程: SNOW_RECORDER_CONV_THREADS / _ASYNC / _PRESET / _HARDWARE
 param(
     [string]$Size = "2560x1440",
@@ -22,6 +23,7 @@ param(
     [switch]$Diag,
     [switch]$AllowPrimary,
     [string]$SpanRegion = "",
+    [switch]$Dual,
     [ValidateSet(0, 1)][int]$Cursor = 1
 )
 $ErrorActionPreference = "Stop"
@@ -39,9 +41,11 @@ $fixOut = "$base.fixture.txt"
 
 # 目标显示器校验：不通过则一个窗口都不创建（默认拒绝主屏；单屏机器须显式 -AllowPrimary）
 $checkArgs = @("--check"); if ($AllowPrimary) { $checkArgs += "--allow-primary" }
+if ($Dual -and -not $SpanRegion) { throw "-Dual 只能与 -SpanRegion 同用，中止" }
 if ($SpanRegion) {
     if (-not $AllowPrimary) { throw "跨屏模式会占用主屏的一部分，必须同时传 -AllowPrimary，中止" }
     $checkArgs += @("--span", "--region", $SpanRegion)
+    if ($Dual) { $checkArgs += "--dual" }
 }
 $check = & $FixtureExe @checkArgs
 if ($LASTEXITCODE -ne 0) { throw "夹具校验目标显示器失败，中止: $check" }
@@ -110,6 +114,7 @@ $fixSeconds = $Seconds + 2.5
 $fixture = $null; $rec = $null
 try {
     $fixArgs = if ($SpanRegion) { @("--span", "--region", $SpanRegion) } else { @("--size", $Size) }
+    if ($Dual) { $fixArgs += "--dual" }
     $fixArgs += @("--seconds", "$fixSeconds", "--divisor", "$divisor", "--load", $Load, "--log", $logFile, "--ready", $readyFile)
     if ($AllowPrimary) { $fixArgs += "--allow-primary" }
     $fixture = Start-Process -FilePath $FixtureExe -ArgumentList $fixArgs -PassThru -WindowStyle Hidden -RedirectStandardOutput $fixOut

@@ -106,9 +106,8 @@ impl FixtureWindow {
                 lpszClassName: CLASS_NAME,
                 ..Default::default()
             };
-            if RegisterClassExW(&class) == 0 {
-                return Err("RegisterClassExW 失败".into());
-            }
+            // 双窗口模式会重复创建：类已注册时返回 0 属正常，真失败会在 CreateWindowExW 处报错
+            let _ = RegisterClassExW(&class);
             let hwnd = CreateWindowExW(
                 WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
                 CLASS_NAME,

@@ -4,15 +4,17 @@
 //! 每帧把单调递增序号编码进画面顶部色块条，并记录提交时间戳供对账。
 //! 硬性约束：目标显示器默认必须是唯一的非主屏（按属性，不按设备名），传 `--allow-primary` 才改占主屏；窗口区域必须落在其内，否则不创建窗口直接退出。
 
+mod dual;
 mod gpu;
 mod win;
 
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use snow_fps_fixture::content::{Load, build_scene_at};
 use snow_fps_fixture::{
     FrameRecord, MAX_SECONDS, Mode, MonitorInfo, Options, frames_to_csv, parse_args, pick_target, resolve_region,
-    resolve_span_region, summarize,
+    resolve_span_region, split_region_by_monitors, summarize,
 };
 
 /// 退出码：参数或显示器校验失败。
@@ -39,6 +41,7 @@ fn print_monitors(monitors: &[MonitorInfo]) {
 /// - `options`：命令行选项。
 /// - `width`、`height`：画面尺寸。
 /// - `origin`：窗口左上角桌面坐标（网格负载用）。
+/// - `shared`：双窗口模式的共享状态（主节拍据此发布序号、响应结束标志）；单窗口传 `None`。
 fn run_loop(
     window: &win::FixtureWindow,
     renderer: &mut gpu::Renderer,
@@ -46,6 +49,7 @@ fn run_loop(
     width: u32,
     height: u32,
     origin: (i32, i32),
+    shared: Option<&dual::Shared>,
 ) -> Result<Vec<FrameRecord>, String> {
     let start = Instant::now();
     let seconds = options.seconds.min(MAX_SECONDS);
@@ -55,6 +59,9 @@ fn run_loop(
     let mut seq: u32 = 0;
     let mut pending_vsyncs: u32 = 0;
     while start.elapsed() < deadline && start.elapsed() < hard_limit {
+        if shared.is_some_and(|s| s.stop.load(Ordering::Acquire)) {
+            break;
+        }
         window.pump();
         // 半速模式：每 divisor 次 Present 才换一帧新序号，其余重复上一帧（序号不变）
         if pending_vsyncs == 0 {
@@ -62,6 +69,9 @@ fn run_loop(
             pending_vsyncs = options.divisor;
         }
         pending_vsyncs -= 1;
+        if let Some(s) = shared {
+            s.seq.store(seq, Ordering::Release);
+        }
         let scene = build_scene_at(width, height, options.load, seq, origin);
         renderer.draw_and_present(&scene, seq)?;
         if pending_vsyncs + 1 == options.divisor {
@@ -137,10 +147,30 @@ fn main() {
         println!("target={} primary={} monitor={:?} window={:?}", target.device, target.primary, target.rect, rect);
         rect
     };
+    // 双窗口：按显示器切分区域；只落在一块屏上时退化为单窗口
+    let pieces = if options.dual {
+        match split_region_by_monitors(&monitors, rect) {
+            Ok(p) => {
+                println!("dual pieces={p:?}");
+                p
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(EXIT_REJECTED);
+            }
+        }
+    } else {
+        Vec::new()
+    };
     if options.mode == Mode::Check {
         return;
     }
     win::keep_display_awake();
+    if pieces.len() > 1 {
+        let result = dual::run_dual(&pieces, rect, &options);
+        finish(&options, result);
+        return;
+    }
     let window = match win::FixtureWindow::create(rect) {
         Ok(w) => w,
         Err(e) => {
@@ -156,9 +186,18 @@ fn main() {
             std::process::exit(EXIT_FAILED);
         }
     };
-    let result = run_loop(&window, &mut renderer, &options, rect.w, rect.h, (rect.x, rect.y));
+    let result = run_loop(&window, &mut renderer, &options, rect.w, rect.h, (rect.x, rect.y), None);
     drop(renderer);
     drop(window);
+    finish(&options, result);
+}
+
+/// 收尾：写帧日志并打印统计；出帧失败则按运行时错误退出。
+///
+/// # 参数
+/// - `options`：命令行选项（取日志路径）。
+/// - `result`：主节拍的帧记录或失败原因。
+fn finish(options: &Options, result: Result<Vec<FrameRecord>, String>) {
     let records = match result {
         Ok(r) => r,
         Err(e) => {

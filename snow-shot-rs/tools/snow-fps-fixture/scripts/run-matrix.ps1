@@ -4,6 +4,7 @@
 # 用法:
 #   scripts/run-matrix.ps1 -RecorderExe <exe> -Name hw [-Repeats 3] [-EnvPairs "SNOW_RECORDER_HARDWARE=1"] [-Tiers "1920x1080:30,1920x1080:60,2560x1440:30,2560x1440:60"]
 #   跨屏: -AllowPrimary -SeamX 2560（两屏接缝的 x 坐标；每档窗口/录制区域以接缝为中心横跨两屏，占用主屏的一部分）
+#   双窗口（需同时给 -SeamX）: 加 -Dual，每块屏一个夹具窗口各按自己的 vsync 出帧
 #   软编对照: -EnvPairs "SNOW_RECORDER_HARDWARE=0"
 # 输出: <OutDir>\<Name>-r<轮>-<WxH>-<fps>.txt（原始输出）与末尾汇总表（通过线: 30fps>=28.5、60fps>=56，且丢帧率<1%）。
 [CmdletBinding(PositionalBinding = $false)]
@@ -16,6 +17,7 @@ param(
     [int]$Seconds = 6,
     [switch]$AllowPrimary,
     [int]$SeamX = 0,
+    [switch]$Dual,
     [string]$FixtureExe = "",
     [string]$FfmpegDir = "",
     [string]$OutDir = (Join-Path $env:TEMP "snow-fps-matrix")
@@ -39,6 +41,10 @@ try {
             $extra = @{}
             if ($FixtureExe) { $extra.FixtureExe = $FixtureExe }
             if ($FfmpegDir) { $extra.FfmpegDir = $FfmpegDir }
+            if ($Dual) {
+                if ($SeamX -le 0) { throw "-Dual 只能与 -SeamX（跨屏）同用" }
+                $extra.Dual = $true
+            }
             if ($SeamX -gt 0) {
                 if (-not $AllowPrimary) { throw "跨屏会占用主屏的一部分，必须同时传 -AllowPrimary" }
                 $tw, $th = $size.ToLower().Split("x") | ForEach-Object { [int]$_ }

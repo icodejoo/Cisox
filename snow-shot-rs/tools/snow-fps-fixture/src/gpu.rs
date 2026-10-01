@@ -4,7 +4,7 @@
 //! 这样 2560x1440 下 CPU 与带宽占用都很低，不会成为 60fps 的瓶颈。
 
 use snow_fps_fixture::content::{Fill, Scene, fill_noise};
-use snow_fps_fixture::seqbar::{bar_height, paint_bar};
+use snow_fps_fixture::seqbar::{bar_height, paint_bar_segment};
 use windows::Win32::Foundation::{HMODULE, RECT};
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
 use windows::Win32::Graphics::Direct3D11::{
@@ -54,6 +54,10 @@ pub struct Renderer {
     width: u32,
     /// 画面高。
     height: u32,
+    /// 本窗口在整条序号条中的横向偏移（单窗口为 0）。
+    bar_offset: u32,
+    /// 整条序号条总宽（单窗口等于画面宽）。
+    bar_total_w: u32,
 }
 
 /// 创建一张默认用途的 BGRA 纹理。
@@ -155,7 +159,19 @@ impl Renderer {
             noise_state: 0,
             width,
             height,
+            bar_offset: 0,
+            bar_total_w: width,
         })
+    }
+
+    /// 双窗口模式：声明本窗口只画整条序号条中的一段。
+    ///
+    /// # 参数
+    /// - `offset_x`：本窗口左边缘在整个区域中的横向偏移。
+    /// - `total_w`：整个区域宽度。
+    pub fn set_bar_segment(&mut self, offset_x: u32, total_w: u32) {
+        self.bar_offset = offset_x;
+        self.bar_total_w = total_w;
     }
 
     /// 绘制一帧并 `Present(1, 0)`（阻塞到合适的垂直同步）。
@@ -174,7 +190,7 @@ impl Renderer {
             unsafe { self.ctx1.ClearView(&view, color, Some(&rc)) };
         }
         // 序号条：CPU 画到小缓冲后上传，再拷贝到后备缓冲顶部
-        paint_bar(&mut self.bar_px, self.width, self.height, seq);
+        paint_bar_segment(&mut self.bar_px, self.width, self.height, seq, self.bar_offset, self.bar_total_w);
         let bar_res: ID3D11Resource = self.bar_tex.cast().map_err(|e| e.to_string())?;
         // SAFETY: 缓冲大小 = 宽*条高*4，行距与之一致；资源均存活。
         unsafe {

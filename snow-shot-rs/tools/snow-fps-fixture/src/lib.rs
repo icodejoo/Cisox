@@ -103,6 +103,8 @@ pub struct Options {
     pub allow_primary: bool,
     /// 跨屏模式：窗口区域可横跨多块显示器（须同时给 `--allow-primary` 与 `--region`）。
     pub span: bool,
+    /// 双窗口模式：跨屏区域按显示器切成多个窗口，各自按所在屏 vsync 出帧（只在 `--span` 下有效）。
+    pub dual: bool,
 }
 
 impl Default for Options {
@@ -118,6 +120,7 @@ impl Default for Options {
             ready: None,
             allow_primary: false,
             span: false,
+            dual: false,
         }
     }
 }
@@ -155,6 +158,7 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
             "--dxgi-list" => o.mode = Mode::DxgiList,
             "--allow-primary" => o.allow_primary = true,
             "--span" => o.span = true,
+            "--dual" => o.dual = true,
             "--region" => {
                 let [x, y, w, h] = parse_ints::<4>(&value("--region")?).ok_or("--region 需为 x,y,w,h")?;
                 let (Ok(x), Ok(y), Ok(w), Ok(h)) =
@@ -200,6 +204,9 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
     }
     if o.span && (!o.allow_primary || o.region.is_none()) {
         return Err("--span 必须同时给出 --allow-primary 与 --region".into());
+    }
+    if o.dual && !o.span {
+        return Err("--dual 只能与 --span 同用".into());
     }
     Ok(o)
 }
@@ -295,6 +302,55 @@ pub fn resolve_span_region(monitors: &[MonitorInfo], options: &Options) -> Resul
         return Err(format!("区域 {rect:?} 没有被现有显示器完整覆盖，中止"));
     }
     Ok(rect)
+}
+
+/// 双窗口模式：按显示器边界把跨屏区域切成左右并排的子矩形（每块屏一个）。
+///
+/// # 参数
+/// - `monitors`：枚举到的全部显示器。
+/// - `region`：跨屏区域（调用方已用 [`resolve_span_region`] 校验过覆盖）。
+///
+/// # 返回
+/// 按 x 升序、首尾相接、总宽等于区域宽的子矩形；只落在一块屏上时只有一个元素。
+/// 区域在某块屏上高度不完整（上下错位的屏）、显示器重叠或有空洞时返回原因。
+///
+/// # 示例
+/// ```
+/// use snow_fps_fixture::{split_region_by_monitors, MonitorInfo, Rect};
+/// let m = |x| MonitorInfo { device: "d".into(), rect: Rect { x, y: 0, w: 2560, h: 1440 }, primary: false };
+/// let region = Rect { x: 1280, y: 0, w: 2560, h: 1440 };
+/// let parts = split_region_by_monitors(&[m(0), m(2560)], region).unwrap();
+/// assert_eq!(parts.len(), 2);
+/// assert_eq!(parts[0], Rect { x: 1280, y: 0, w: 1280, h: 1440 });
+/// ```
+pub fn split_region_by_monitors(monitors: &[MonitorInfo], region: Rect) -> Result<Vec<Rect>, String> {
+    let (rx0, rx1) = (i64::from(region.x), i64::from(region.x) + i64::from(region.w));
+    let (ry0, ry1) = (i64::from(region.y), i64::from(region.y) + i64::from(region.h));
+    let mut pieces: Vec<Rect> = Vec::new();
+    for m in monitors {
+        let (mx, my) = (i64::from(m.rect.x), i64::from(m.rect.y));
+        let (x0, x1) = (rx0.max(mx), rx1.min(mx + i64::from(m.rect.w)));
+        let (y0, y1) = (ry0.max(my), ry1.min(my + i64::from(m.rect.h)));
+        if x1 <= x0 || y1 <= y0 {
+            continue;
+        }
+        if y0 != ry0 || y1 != ry1 {
+            return Err(format!("--dual 只支持左右并排的显示器：区域 {region:?} 在 {} 上高度不完整", m.device));
+        }
+        pieces.push(Rect { x: x0 as i32, y: region.y, w: (x1 - x0) as u32, h: region.h });
+    }
+    pieces.sort_by_key(|r| r.x);
+    let mut cursor = rx0;
+    for p in &pieces {
+        if i64::from(p.x) != cursor {
+            return Err(format!("区域 {region:?} 切分后不连续（显示器重叠或有空洞），中止"));
+        }
+        cursor += i64::from(p.w);
+    }
+    if pieces.is_empty() || cursor != rx1 {
+        return Err(format!("区域 {region:?} 没有被现有显示器完整覆盖，中止"));
+    }
+    Ok(pieces)
 }
 
 /// 一帧的提交记录。
@@ -428,6 +484,27 @@ mod tests {
         assert!(resolve_span_region(&list[..1], &ok).is_err());
         assert!(parse_args(&args("--span --region 0,0,10,10")).is_err());
         assert!(parse_args(&args("--span --allow-primary")).is_err());
+    }
+
+    /// 双窗口切分：跨两屏、含负坐标、单屏退化、上下错位/空洞拒绝；`--dual` 必须配 `--span`。
+    #[test]
+    fn dual_split_rules() {
+        let at = |x: i32, y: i32| MonitorInfo { device: "d".into(), rect: Rect { x, y, w: 2560, h: 1440 }, primary: false };
+        let region = Rect { x: 1280, y: 0, w: 2560, h: 1440 };
+        let two = split_region_by_monitors(&[at(2560, 0), at(0, 0)], region).unwrap();
+        assert_eq!(two, vec![Rect { x: 1280, y: 0, w: 1280, h: 1440 }, Rect { x: 2560, y: 0, w: 1280, h: 1440 }]);
+        // 负坐标：副屏在主屏左侧
+        let neg = split_region_by_monitors(&[at(-2560, 0), at(0, 0)], Rect { x: -1000, y: 0, w: 1500, h: 1440 }).unwrap();
+        assert_eq!(neg, vec![Rect { x: -1000, y: 0, w: 1000, h: 1440 }, Rect { x: 0, y: 0, w: 500, h: 1440 }]);
+        // 只落在一块屏上：退化为单窗口
+        let one = split_region_by_monitors(&[at(0, 0), at(2560, 0)], Rect { x: 100, y: 10, w: 800, h: 600 }).unwrap();
+        assert_eq!(one, vec![Rect { x: 100, y: 10, w: 800, h: 600 }]);
+        // 上下错位的屏、有空洞、完全不在屏上都拒绝
+        assert!(split_region_by_monitors(&[at(0, 0), at(2560, 500)], region).is_err());
+        assert!(split_region_by_monitors(&[at(0, 0), at(3000, 0)], region).is_err());
+        assert!(split_region_by_monitors(&[at(0, 0)], Rect { x: 5000, y: 0, w: 10, h: 10 }).is_err());
+        assert!(parse_args(&args("--span --dual --allow-primary --region 0,0,10,10")).unwrap().dual);
+        assert!(parse_args(&args("--dual --allow-primary --region 0,0,10,10")).is_err());
     }
 
     /// 区域必须落在目标屏内；默认整屏；size 锚定左上角。

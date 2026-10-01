@@ -2,6 +2,7 @@
 # 安全约束：跨屏会占用主屏一部分，必须显式传 -AllowPrimary，否则中止；先用夹具 --check 校验区域，结束后确认夹具/录制进程均已退出。
 # 用法示例:
 #   scripts/run-seam-test.ps1 -AllowPrimary                 # 仅接缝对齐
+#   scripts/run-seam-test.ps1 -AllowPrimary -Dual           # 双窗口：每块屏一个夹具窗口
 #   scripts/run-seam-test.ps1 -AllowPrimary -Cursor         # 另加光标跨接缝检查（会移动鼠标到接缝处）
 #   scripts/run-seam-test.ps1 -AllowPrimary -SeamX 2560 -RecorderExe D:\x\snow-recorder.exe
 # 退出码: 0=全部通过，1=有检查不通过，其它=运行出错。
@@ -9,6 +10,7 @@ param(
     [string]$RecorderExe = "",
     [string]$FixtureExe = "",
     [switch]$AllowPrimary,
+    [switch]$Dual,
     [int]$SeamX = 2560,
     [switch]$Cursor,
     [int]$CursorY = 500,
@@ -33,7 +35,8 @@ $stamp = Get-Date -Format "HHmmss"
 $spanRegion = "$X0,$Y0,$W,$H"
 
 # 夹具校验：区域不被显示器并集完整覆盖则一个窗口都不创建
-$check = & $FixtureExe --check --span --allow-primary --region $spanRegion
+[string[]]$dualArgs = if ($Dual) { "--dual" } else { @() }
+$check = & $FixtureExe --check --span --allow-primary --region $spanRegion @dualArgs
 if ($LASTEXITCODE -ne 0) { throw "夹具校验区域 $spanRegion 失败，中止: $check" }
 Write-Warning "已传 -AllowPrimary：将占用主屏一部分 ($spanRegion) 约 $($Seconds + 3) 秒/段，期间请勿操作屏幕与鼠标"
 Write-Output "校验通过: 区域=$spanRegion 接缝输出列=$($SeamX - $X0) fps=$Fps"
@@ -56,7 +59,7 @@ function Invoke-Segment([string]$Name, [int]$CursorOn) {
     $outFile = "$base.mp4"; $readyFile = "$base.ready"; $fixOut = "$base.fixture.txt"
     $fixture = $null; $rec = $null
     try {
-        $fixArgs = @("--span", "--allow-primary", "--region", $spanRegion, "--load", "grid", "--seconds", "$($Seconds + 2.5)", "--ready", $readyFile)
+        $fixArgs = @("--span", "--allow-primary", "--region", $spanRegion, "--load", "grid", "--seconds", "$($Seconds + 2.5)", "--ready", $readyFile) + $dualArgs
         $fixture = Start-Process -FilePath $FixtureExe -ArgumentList $fixArgs -PassThru -WindowStyle Hidden -RedirectStandardOutput $fixOut
         $t0 = Get-Date
         while (-not (Test-Path $readyFile)) {

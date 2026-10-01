@@ -79,17 +79,39 @@ pub fn decode_samples(samples: &[u8]) -> Option<u32> {
 /// - `width`、`height`：画面尺寸；宽度不足 32 或缓冲过小时不绘制。
 /// - `seq`：帧序号。
 pub fn paint_bar(pixels: &mut [u32], width: u32, height: u32, seq: u32) {
+    paint_bar_segment(pixels, width, height, seq, 0, width);
+}
+
+/// 把整条序号条中的一段画进 BGRA 缓冲（双窗口模式：每个窗口只画自己那一段，编码同一个序号）。
+///
+/// # 参数
+/// - `pixels`：本段的 BGRA 像素缓冲（宽 `width`，至少条高行）。
+/// - `width`、`height`：本段尺寸；`height` 取整个区域的高度以保证条高一致。
+/// - `seq`：帧序号。
+/// - `offset_x`：本段左边缘在整条序号条中的横向偏移（像素）。
+/// - `total_w`：整条序号条的总宽；不足 32 或缓冲过小时不绘制。
+///
+/// # 示例
+/// ```
+/// use snow_fps_fixture::seqbar::{paint_bar, paint_bar_segment};
+/// let (mut whole, mut right) = (vec![0u32; 640 * 64], vec![0u32; 320 * 64]);
+/// paint_bar(&mut whole, 640, 64, 0xA5);
+/// paint_bar_segment(&mut right, 320, 64, 0xA5, 320, 640);
+/// assert_eq!(&whole[320..640], &right[..320]);
+/// ```
+pub fn paint_bar_segment(pixels: &mut [u32], width: u32, height: u32, seq: u32, offset_x: u32, total_w: u32) {
     let w = width as usize;
+    let total = total_w as usize;
     let bar_h = bar_height(height) as usize;
-    if w < SEQ_BITS || pixels.len() < bar_h * w {
+    if total < SEQ_BITS || pixels.len() < bar_h * w {
         return;
     }
     let bits = seq_bits(seq);
     for row in 0..bar_h {
         let line = &mut pixels[row * w..(row + 1) * w];
         for (x, px) in line.iter_mut().enumerate() {
-            // 每位占 w/32 像素宽；余数并入最后一位
-            let idx = (x * SEQ_BITS / w).min(SEQ_BITS - 1);
+            // 每位占 total/32 像素宽；余数并入最后一位
+            let idx = ((x + offset_x as usize) * SEQ_BITS / total).min(SEQ_BITS - 1);
             *px = if bits[idx] { PIXEL_ONE } else { PIXEL_ZERO };
         }
     }
