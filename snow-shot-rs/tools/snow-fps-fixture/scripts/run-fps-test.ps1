@@ -137,14 +137,14 @@ function Read-GpuCsv($path) {
 # 采样方式沿用 -Diag：typeperf 每秒一次，录制结束后再解析，录制期间脚本本身不做任何采样工作。
 # CPU 口径：整机为占全部逻辑核的百分比；进程为占单核的百分比（多线程可超过 100）。
 # 受干扰判据（任一满足即 interfered=true，原因写进 env.json 的 interference_reasons）:
-$InterfereBgPeakPct = 60        # 非本测试进程（录制/夹具/dwm/typeperf/powershell/Idle）任一秒的 CPU 合计超过该值
+$InterfereBgPeakPct = 100       # 非本测试进程（录制/夹具/dwm/typeperf/powershell/Idle）任一秒的 CPU 合计超过该值
 $InterfereSuspectPeakPct = 20   # "可能干扰"名单内进程任一秒的 CPU 合计超过该值
 $InterfereSystemMeanPct = 85    # 整机 CPU 均值超过该值
 $InterfereSystemPeakPct = 95    # 整机 CPU 任一秒峰值超过该值
 # "可能干扰"进程名单（构建/脚本/转码/杀毒/索引/更新）。
 $SuspectPattern = '^(cargo|rustc|link|lld-link|cl|clang|msbuild|devenv|python|py|node|ffmpeg|MsMpEng|MpDefenderCoreService|NisSrv|SearchIndexer|TiWorker|TrustedInstaller|vctip)$'
 # 本测试自身的进程（不计入后台占用）。
-$SelfPattern = '^(snow-recorder|snow-fps-fixture|snow-cpu-hog|typeperf|powershell|pwsh|dwm|idle|_total)$'
+$SelfPattern = '^(snow-recorder|snow-fps-fixture|snow-cpu-hog|typeperf|powershell|pwsh|dwm|idle|_total|system|wmiprvse|conhost|audiodg|windowsterminal)$'
 # 解析 typeperf 的 CPU 采样（整机 + 各进程），每秒一条。
 function Read-CpuSamples($path) {
     if (-not (Test-Path $path)) { return @() }
