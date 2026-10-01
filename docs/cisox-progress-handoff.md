@@ -140,7 +140,8 @@ P0 验证基本完成，P1 地基完成，P2/P4/P5 已开工；**参考版（C++
 - [x] 默认硬件模式已改为 `Auto`（MF → FFmpeg 厂商硬编 → 软编），本机四档 12/12、16/16 过线。
 - [ ] 他机验证（Intel MF 已在 UHD 770 实测，8/8 过线，见台账 §8.6）：AMD（AMF、MF）、非 NVIDIA 的 MFT 输入积压深度（`MF_POOL_CAPACITY=64` 够不够）、有副屏的机器、干净环境。
 - [ ] 显卡驱动升到 ≥570 后，用仓库原版 `ffnvcodec` 复测 NVENC（系统级变更，需用户动手）。
-- [ ] 跨屏录制性能不达标（2026-10-01 实测，台账 §8.6）：跨显示器选区只能走 x264 软编，四档 0/8，CPU 0.95~4.02 核。要达标需硬件路径支持多屏拼接合成；夹具已加 `--span` 可复测。
+- [x] 跨屏录制硬件路径（2026-10-01，台账 §8.6）：同适配器多屏拼接已实现（`src/win/span.rs`，多层 VideoProcessor），四档 8/8 过线，CPU 0.21~0.30 核（此前软编回落 0/8）。
+- [ ] 跨屏待验证：接缝处 1px 缝/错位、光标沿接缝移动、另一屏首帧未到时该块为黑、跨适配器分支（需双适配器机器）、每档仅 2 轮需加轮次；旋转/HDR 屏的跨屏仍回落软编（后续项）；`SpanCapture::sample_cursor` 与单屏版约 10 行重复，裁决为暂不合并（不动已验证的单屏路径）。
 - [ ] MF 已知限制：录制中途出问题无运行时回落（只有 `SNOW_RECORDER_MF_DISABLE`）；不支持恒定质量（同画质码率高 1.5~1.7 倍）；编码延迟约 300ms；启动比 NVENC 慢约 0.22 秒。
 - [x] 清理决定（2026-10-01 完成）：删除 `queue.rs` 与 `CAPTURE_MODE=serial`；保留 `wgc.rs` 与 GPU 优先级开关。
 - [ ] macOS / Linux 录屏各自实现与实测（迁移方案第 13 条）。
@@ -156,7 +157,7 @@ P0 验证基本完成，P1 地基完成，P2/P4/P5 已开工；**参考版（C++
 
 **OCR / 翻译可选后端（`docs/research/system-ocr-translate-backends.md`）**
 - 已决定：老用户保持 `local-model`、新用户默认 `system`；API 密钥存配置文件（设置页提示明文保存，导出与日志不带密钥）；i18n 用 `snow-i18n`（Fluent）。
-- [ ] P0 抽象与配置（`OcrEngine` trait、`backend` 键、迁移、设置页）约 3~4 人天。
+- [x] P0 抽象与配置（2026-10-01 完成，`ocr_backend.rs`、`text_recognition/backend`、迁移、设置页、三语文案）。**新用户默认暂为 `local-model`**，P1 系统 OCR 可用并与 PP-OCR 同图对比通过后再切 `system`。遗留：结果面板回落提示未做（P1 前新用户不会触发）、`screenshot_translation/backend` 旧值迁移留给翻译阶段、旧代码 `cargo fmt` 不干净（不做全仓重排）、密钥提示与日志脱敏留到 P4。
 - [ ] P1 Windows 系统 OCR 约 3~5 人天；**先做与 PP-OCR 的同图对比再定默认值**。
 - [ ] P2 macOS Vision（`objc2-vision`）约 3~5 人天；P3 macOS 翻译（Swift 桥，15.x 需视图宿主）约 5~8 人天；P4 远程 OCR（可选）；P5 Windows AI OCR（仅 Copilot+，不建议）。
 - [ ] Windows 没有系统翻译 API：翻译在 Windows 默认仍用本地模型。
