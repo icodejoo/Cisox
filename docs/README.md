@@ -22,6 +22,9 @@
 - [cisox-recording-spike-report.md](cisox-recording-spike-report.md) — BGRA→NV12 转换方案对比 spike。历史参考。
 - [cisox-todo-webm.md](cisox-todo-webm.md) — WebM 录制待实现说明。待办。
 
+## 操作手册
+- [guides/ocr-samples.md](guides/ocr-samples.md) — OCR 真实样片的位置、格式、核对稿局限、同图对比怎么跑与当前结果。有效。
+
 ## 调研
 - [research/cross-monitor-recording-hw.md](research/cross-monitor-recording-hw.md) — 跨屏/双屏选区录屏硬编方案，含裁决记录。探针已实现，跨屏 16/20（单屏对照 18/20），接缝与光标已验证；跨适配器待验证。
 - [research/video-editor-backends.md](research/video-editor-backends.md) — 视频编辑器后端调研。
