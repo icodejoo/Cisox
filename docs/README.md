@@ -25,11 +25,15 @@
 ## 操作手册
 - [guides/ocr-samples.md](guides/ocr-samples.md) — OCR 真实样片的位置、格式、核对稿局限、同图对比怎么跑与当前结果。有效。
 
+- [guides/ocr-model-tiers-benchmark.md](guides/ocr-model-tiers-benchmark.md) — 本地 OCR 七档模型同图实测：CER、耗时、worker 内存、DirectML 对比、复现命令。有效。
+
 ## 调研
 - [research/cross-monitor-recording-hw.md](research/cross-monitor-recording-hw.md) — 跨屏/双屏选区录屏硬编方案，含裁决记录。探针已实现，跨屏 16/20（单屏对照 18/20），接缝与光标已验证；跨适配器待验证。
 - [research/video-editor-backends.md](research/video-editor-backends.md) — 视频编辑器后端调研。
 - [research/video-editor-mvp-design.md](research/video-editor-mvp-design.md) — 视频编辑器 MVP 设计（worker 方案）。
 - [research/system-ocr-translate-backends.md](research/system-ocr-translate-backends.md) — 系统 OCR/翻译与可选后端方案。P0 开发中。
+- [research/local-ocr-model-options.md](research/local-ocr-model-options.md) — 本地 OCR 模型/方案选型：PP-OCRv6 官方数据与其它候选对比，结论是默认 small 合理，附最小验证计划。
+- [research/local-translation-model-options.md](research/local-translation-model-options.md) — 本地离线翻译模型选型（≤300MB）：NLLB 裁剪版核实、OPUS-MT/Bergamot/M2M100 等对比、后端搭配、推荐短名单与验证计划。
 - [research/windows-hevc-support.md](research/windows-hevc-support.md) — Windows H.265 支持现状。已搁置，存档。
 - [research/adr5-local-nmt.md](research/adr5-local-nmt.md) — ADR-5 本地 NMT 推理后端选型。
 - [research/adr8-canvas-blob.md](research/adr8-canvas-blob.md) — ADR-8 canvas 历史/会话文件调研。
