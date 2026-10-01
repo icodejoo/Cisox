@@ -287,8 +287,8 @@ try {
 
     if ($Trace) {
         foreach ($p in @($tpCpu, $tp)) { if ($p) { $null = $p.WaitForExit(8000) } }
-        $samples = @(Read-CpuSamples $cpuCsv)
-        $verdict = Get-Interference $samples
+        $cpuSamples = @(Read-CpuSamples $cpuCsv)
+        $verdict = Get-Interference $cpuSamples
         $recEnv = [ordered]@{}
         foreach ($e in @(Get-ChildItem Env: | Where-Object { $_.Name -like "SNOW_RECORDER_*" })) { $recEnv[$e.Name] = $e.Value }
         $envInfo = [ordered]@{
@@ -303,7 +303,7 @@ try {
             thresholds = [ordered]@{ bg_peak_pct = $InterfereBgPeakPct; suspect_peak_pct = $InterfereSuspectPeakPct; system_mean_pct = $InterfereSystemMeanPct; system_peak_pct = $InterfereSystemPeakPct }
             peaks = [ordered]@{ system_mean_pct = $verdict.sys_mean; system_peak_pct = $verdict.sys_peak; bg_peak_pct = $verdict.bg_peak; suspect_peak_pct = $verdict.suspect_peak }
             gpu_engines = Read-GpuEngines $gpuCsv
-            cpu_samples = $samples
+            cpu_samples = $cpuSamples
         }
         $envInfo | ConvertTo-Json -Depth 6 | Set-Content -Encoding UTF8 (Join-Path $runDir "env.json")
         "--- trace env ---"
