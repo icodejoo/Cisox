@@ -90,6 +90,7 @@ def main():
     ap.add_argument("--work", required=True)
     ap.add_argument("--sentences", type=int, default=300000, help="每种语言用于统计的句子数")
     ap.add_argument("--max-mb", type=int, default=40, help="每个语对最多下载的压缩 MB")
+    ap.add_argument("--dump-sets", default="", help="若给出目录，则导出各语言集按频率排序的片段 id 序列")
     args = ap.parse_args()
     os.makedirs(args.work, exist_ok=True)
 
@@ -124,6 +125,12 @@ def main():
             for i, cnt in freq[code].items():
                 score[i] = max(score[i], cnt / tot)
         ranked = sorted(score, key=lambda i: -score[i])
+        if args.dump_sets:
+            # 导出按频率排序的片段 id 序列，供词表裁剪脚本按 K 截取（id 为原版 sentencepiece 词表中的编号）
+            os.makedirs(args.dump_sets, exist_ok=True)
+            tag = "un6" if name.startswith("联合国") else "main14"
+            json.dump({"langs": langs, "source": "CCMatrix head slices (NLLB mined training data)", "sentences_per_lang": args.sentences,
+                       "ranked_ids": ranked}, open(os.path.join(args.dump_sets, f"{tag}_ccm_ranked.json"), "w", encoding="utf-8"))
         dev_all = set().union(*(dev_used[c] for c in langs))
 
         def rep(label, kept):
