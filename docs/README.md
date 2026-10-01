@@ -1,0 +1,32 @@
+# 文档索引
+
+新人或新会话从这里开始。**续做任务先读「当前入口」**；做裁决先读「原则」。新增或改动文档时同步更新本索引。
+
+## 原则
+- [principles.md](principles.md) — **总原则 / 第一原则 / 根本原则**（三词同义）及执行原则、红线、能力降级。唯一出处。
+
+## 当前入口
+- [cisox-progress-handoff.md](cisox-progress-handoff.md) — 进度交接。文件开头是 09-29 暂停点，**最新待办清单在 §5.1（2026-10-01）**。
+
+## 方案与决策
+- [cisox-gpui-migration-plan.md](cisox-gpui-migration-plan.md) — Snow Shot → Rust + GPUI 改造方案（v2.0，含 ADR 与已拍板决策）。有效。
+- [cisox-upstream-patches.md](cisox-upstream-patches.md) — 对 upstream 共享代码的补丁清单。有效。
+- [cisox-migration-acceptance-report.md](cisox-migration-acceptance-report.md) — 迁移验收报告。**已失实，不作验收依据**（见迁移方案 §845 第 10 条），待重写。
+- [snow-shot-releases.md](snow-shot-releases.md) — 发布与更新规格（有自己的优先级，见 principles.md 末尾）。
+
+## 录屏
+- [cisox-recording-handover.md](cisox-recording-handover.md) — 换机接手指南：构建、夹具、验收怎么跑。有效。
+- [recording-handover/experiment-ledger.md](recording-handover/experiment-ledger.md) — 实验台账（含 §8.6 Intel UHD 770 复测与跨屏数据）。有效，最新。
+- [recording-handover/e2-brief-and-data.md](recording-handover/e2-brief-and-data.md) — 阶段 E2 自建流水线简报与数据。历史，部分结论已被台账 §8 取代。
+- [recording-handover/contention-research.md](recording-handover/contention-research.md) — 采集设备锁争用的替代方案调研。历史参考。
+- [cisox-recording-spike-report.md](cisox-recording-spike-report.md) — BGRA→NV12 转换方案对比 spike。历史参考。
+- [cisox-todo-webm.md](cisox-todo-webm.md) — WebM 录制待实现说明。待办。
+
+## 调研
+- [research/cross-monitor-recording-hw.md](research/cross-monitor-recording-hw.md) — 跨屏/双屏选区录屏硬编方案，含裁决记录。探针已实现，跨屏四档 8/8 过线；接缝/光标/跨适配器待验证。
+- [research/video-editor-backends.md](research/video-editor-backends.md) — 视频编辑器后端调研。
+- [research/video-editor-mvp-design.md](research/video-editor-mvp-design.md) — 视频编辑器 MVP 设计（worker 方案）。
+- [research/system-ocr-translate-backends.md](research/system-ocr-translate-backends.md) — 系统 OCR/翻译与可选后端方案。P0 开发中。
+- [research/windows-hevc-support.md](research/windows-hevc-support.md) — Windows H.265 支持现状。已搁置，存档。
+- [research/adr5-local-nmt.md](research/adr5-local-nmt.md) — ADR-5 本地 NMT 推理后端选型。
+- [research/adr8-canvas-blob.md](research/adr8-canvas-blob.md) — ADR-8 canvas 历史/会话文件调研。

@@ -842,7 +842,7 @@ logs/
 6. **单实例 IPC**：改为 Windows 命名管道（管道名含用户 SID，仅当前用户 ACL，文本命令+长度前缀协议）；macOS/Linux 暂为返回明确错误的占位，尚未在非 Windows 上编译验证。取代原 TCP 127.0.0.1:49210 方案（该方案无认证）。
 7. **截图覆盖窗**：第一版只做单显示器内选区，跨屏选区作为登记的后续项。
 8. **事件投递**：自写 std 版 `MainThreadInbox`（不引入 async-channel/futures）；GPUI 使用 `QuitMode::Explicit` 实现托盘常驻。
-9. **总原则（用户授权）**：高性能、低内存、小体积——能复用就不新增依赖、能独立 worker 进程就不常驻、能按需加载就不预载。
+9. **总原则（用户授权）**：高性能、低内存、小体积——能复用就不新增依赖、能独立 worker 进程就不常驻、能按需加载就不预载；**优先利用操作系统已有能力**（2026-10-01 用户补充）。
 10. **验收报告**：原验收报告（`docs/cisox-migration-acceptance-report.md`）经复审证实严重失实，已不作为验收依据，最终验收报告将重写。
 11. **录屏帧率方案(2026-09-30 调研+spike 结论)**:硬门按目标帧率 95% 且丢帧 <1% 验收——1080p@30、1440p@30 ≥28.5fps,1080p@60、1440p@60 ≥56fps(屏幕 59Hz,上限约 59.94)。实测(UHD 770):上游软编 1440p@60 约 33fps/丢帧 35%;上游 GPU 零拷贝 QSV 仅 24.7fps,且此前"硬编"数据因静默回落软编而作废。根因:上游 compose 每帧最多 5 次全分辨率 `VideoProcessorBlt` 且每次重建 view(复刻 1440p 串行 19.7ms),QSV `async_depth=1` 送一帧等一帧,采集与合成共用设备互相卡锁。结论见 `docs/cisox-recording-spike-report.md`。
 12. **转换方案选型**:D3D11 VideoProcessor、像素着色器、compute 着色器、MF Video Processor MFT 单 pass 转换耗时同量级(1440p 约 2.0~2.4ms),**不自建着色器**,用 VideoProcessor 预建 view、桌面/覆盖层/光标/高亮作多图层一次 Blt 直出 NV12;QSV 用 `async_depth=2`、`preset=veryfast`,送帧与取包分线程;采集独占一个设备、合成编码用另一个,设备间用 D3D11 栅栏;固定时钟补帧。MF 编码链路(41~64fps)与 ffmpeg 滤镜链不作集成路径。ffmpeg `scale_d3d11` 不可用是 ffmpeg 自身缺陷(创建输入 view 时把 DXGI_FORMAT 枚举值误填进 FourCC,n8.0.1 与 master 均如此),自编补丁版验证与上游反馈待定。
