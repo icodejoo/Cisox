@@ -1,0 +1,39 @@
+# 系统 OCR 与本地 PP-OCR 的同图对比工具：独立 workspace（自己的 target / Cargo.lock）。
+# 只依赖仓库内 path crate 与已批准的 image(png)，不新增第三方依赖。
+[workspace]
+resolver = "3"
+
+[package]
+name = "snow-ocr-compare"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-only"
+rust-version = "1.97"
+
+[[bin]]
+name = "snow-ocr-compare"
+path = "src/main.rs"
+
+[lib]
+name = "snow_ocr_compare"
+path = "src/lib.rs"
+
+[dependencies]
+snow-platform = { path = "../../crates/snow-platform" }
+snow-ocr-protocol = { path = "../../crates/snow-ocr-protocol" }
+# local-model 客户端（ocr_assets.rs / ocr_client.rs）经 #[path] 复用主程序源码，需要这两个
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+
+[profile.release]
+opt-level = 3
+debug = 0
