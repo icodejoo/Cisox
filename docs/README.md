@@ -23,7 +23,7 @@
 - [cisox-todo-webm.md](cisox-todo-webm.md) — WebM 录制待实现说明。待办。
 
 ## 调研
-- [research/cross-monitor-recording-hw.md](research/cross-monitor-recording-hw.md) — 跨屏/双屏选区录屏硬编方案，含裁决记录。探针已实现，跨屏四档 8/8 过线；接缝/光标/跨适配器待验证。
+- [research/cross-monitor-recording-hw.md](research/cross-monitor-recording-hw.md) — 跨屏/双屏选区录屏硬编方案，含裁决记录。探针已实现，跨屏 16/20（单屏对照 18/20），接缝与光标已验证；跨适配器待验证。
 - [research/video-editor-backends.md](research/video-editor-backends.md) — 视频编辑器后端调研。
 - [research/video-editor-mvp-design.md](research/video-editor-mvp-design.md) — 视频编辑器 MVP 设计（worker 方案）。
 - [research/system-ocr-translate-backends.md](research/system-ocr-translate-backends.md) — 系统 OCR/翻译与可选后端方案。P0 开发中。
