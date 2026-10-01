@@ -245,3 +245,13 @@ HY-MT（地域许可 + 体积）、TranslateGemma（体积 + Gemma 条款）、M
 - **Meta 的后继者**：【来源】Slator、arXiv:2603.16309、Meta AI 发布页——**2026-03-17 发布 Omnilingual MT（OMT）**，扩到 1,600+ 语言；变体 **OMT-LLaMA**（基于 LLaMA 3，1B/3B/8B）与 **OMT-NLLB**（3B 参数编码器-解码器，基于 OmniSONAR）；称 1B~8B 专门模型可匹敌 70B 通用模型。**最小也是 1B，比 NLLB-600M 还大**，int4 约 600MB 量级【推断】，**不适合 300MB 预算**。权重仓库、许可证【未核实】：按 `omnilingual` 搜 HF 只出现语音识别（ASR）模型，没有翻译权重。
 - 其它相关文献（未精读）：ACL 2023《Memory-efficient NLLB-200: Language-specific Expert Pruning》（针对 54.5B MoE，可裁掉 80% 专家而质量损失可忽略，**不适用于稠密 600M**）；arXiv:2605.28042《Extracting Small Translation Specialists from LLMs by Aggressively Pruning Experts》；arXiv:2608.03480 英阿词表裁剪案例。
 - **结论**：没有比 NLLB-200-Distilled-600M 更小的更新 NLLB；OMT 最小 1B，不满足预算；社区 350M 是层裁剪加微调的单语向模型，不是通用小模型。
+
+### 多语种需求下 OPUS-MT 不止"一语向一模型"（2026-10-01，主会话读 HF 页面）
+**背景**：用户要求"覆盖主流语言（最多十几种，必要时联合国六语）"，而 `opus-mt-xx-yy` 是单语向模型，需要按语向下载、非英语对经英语中转。核实到 Helsinki-NLP 还有**多语种模型**：
+| 模型 | 规模 | 覆盖 | 许可 | 备注 |
+|---|---|---|---|---|
+| `Helsinki-NLP/opus-mt-tc-bible-big-mul-mul`（2024-10） | 247,766,051 参数（F32；transformer-big，Marian） | **469 种语言互译**，含 cmn/zho、eng、fra、spa、rus、ara、jpn、kor、deu、por；句首须加 `>>目标语言id<<` | **Apache-2.0** | 模型卡只给整体 Tatoeba 分数（multi-multi BLEU 28.1、chrF 0.5176，73531 句），**没有任何具体语对分数**；卡上写明"许多语言支持不好，大多数语言训练数据极少，许多语对根本不能用"；训练数据为 Tatoeba Challenge、HPLT v1、Bible 语料 |
+| `opus-mt-tc-bible-big-deu_eng_fra_por_spa-mul` / `…-mul-deu_eng_fra_por_spa` / 各语族 `…-xxx-en`（含 `zhx-en` 汉语族→英） | 同为 transformer-big 量级（【推断】） | 德英法葡西 ↔ 多语 / 语族 | 同系列 | 未读卡 |
+| `opus-mt-mul-en`、`opus-mt-en-mul`（2022） | 体积未读到 | 多语→英 / 英→多语 | Apache-2.0 | 老版本，质量【未验证】 |
+**估算（【推断】，需实测）**：`mul-mul` 247.8M 参数，int8 权重约 236MiB、int4 约 118MiB（含词表嵌入；词表大小未读，裁词表可再省）；**有可能在 300MB 预算内**，且是 **Marian 架构**，现有 worker 已放行 `family=marian`，不用新增运行时。**未知数**：① 没有现成 ONNX（搜到的 ONNX 只有其它语族组合的个人转换件）→ 需要用 torch+optimum 自己导出；② 中↔英、英↔法/西/俄/阿的真实 FLORES 质量；③ 中文目标语言 id 写法（`cmn_Hans`？）；④ 下载来源：自己转换的 ONNX 需要托管。
+**替代路线对比**：A 单语向模型+英语中转（质量好但要下载多个、非英语对要两次翻译，联合国六语 10 个方向约 0.8GB）；B `mul-mul` 单模型多语（Apache-2.0、一个文件、质量待测）；C NLLB-600M 自裁词表+int4（质量最可能最好，但 CC-BY-NC、工具链最重、int4 损失未知）；D 自裁 M2M100-418M（MIT，质量低于 NLLB）。**可行组合**：B 作为"多语默认"，A 的单语向模型作为"高质量可选下载"，两者同属 Marian 家族、同一 worker。
