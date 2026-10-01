@@ -27,7 +27,7 @@ use crate::pipeline::{CaptureDiag, CaptureFault, CaptureSource, CaptureStats, Ca
 use crate::timeline::QpcAnchor;
 use crate::win::dda::{
     COMPOSE_GPU_PRIORITY, DIAG_LIMIT, ENV_CAPTURE_GPU_PRIORITY, ENV_COMPOSE_GPU_PRIORITY, FrameGuard, GpuFrame, POLL_SLEEP, POOL_SIZE, SharedSlot, Tile,
-    copy_into_slot, create_slot, env_priority, list_adapters, set_gpu_priority,
+    classify_poll, copy_into_slot, create_slot, env_priority, list_adapters, set_gpu_priority,
 };
 
 /// 一个显示器输出的几何与归属（规划用，不含 COM 对象）。
@@ -328,6 +328,13 @@ impl SpanCapture {
         waited
     }
 
+    /// 释放第 `index` 路已取得的桌面帧；逐调用追踪开启时记录这次 `ReleaseFrame` 的时刻与耗时。
+    fn release_frame(&mut self, index: usize, guard: FrameGuard<'_>) {
+        let started = self.trace.poll_mark();
+        drop(guard);
+        self.trace.release(u8::try_from(index).unwrap_or(u8::MAX), started);
+    }
+
     /// 处理第 `index` 路输出刚取到的一次更新：复制进该路的空闲槽，并和其余各路的最近一块组成一帧。
     fn on_acquired(&mut self, index: usize, info: DXGI_OUTDUPL_FRAME_INFO, resource: Option<IDXGIResource>, want: bool) -> Result<Option<Captured<GpuFrame>>, CaptureFault> {
         let captured_at = Instant::now();
@@ -336,10 +343,11 @@ impl SpanCapture {
         let src = u8::try_from(index).unwrap_or(u8::MAX);
         if !want {
             self.trace.acquire(src, captured_at, None, info.AccumulatedFrames, 0, code::ACQ_UNWANTED);
+            self.release_frame(index, guard);
             return Ok(None);
         }
         if info.LastPresentTime == 0 {
-            drop(guard);
+            self.release_frame(index, guard);
             self.trace.acquire(src, captured_at, None, info.AccumulatedFrames, 0, code::ACQ_CURSOR_ONLY);
             let cursor = self.sample_cursor();
             // 只有光标移动：沿用上一张桌面图
@@ -361,6 +369,7 @@ impl SpanCapture {
                 let present = self.anchor.map_or(captured_at, |a| a.to_instant(info.LastPresentTime).min(captured_at));
                 self.trace.acquire(src, captured_at, Some(present), info.AccumulatedFrames, 0, code::ACQ_POOL_DROP);
             }
+            self.release_frame(index, guard);
             return Ok(None);
         };
         let traced = self.trace.enabled();
@@ -373,7 +382,7 @@ impl SpanCapture {
             self.trace.iter_add(IterStage::Lock, lock_wait);
         }
         // 复制一记录完就立刻释放桌面帧，光标采样与 Flush 都放到释放之后
-        drop(guard);
+        self.release_frame(index, guard);
         let flush_started = self.trace.mark();
         let flush_wait = self.flush(traced);
         self.trace.iter_since(IterStage::Copy, flush_started);
@@ -414,7 +423,14 @@ impl SpanCapture {
                 let acquire_started = self.trace.mark();
                 // SAFETY: 输出指针指向局部变量。
                 let call = unsafe { self.outputs[index].duplication.AcquireNextFrame(0, &mut info, &mut resource) };
-                self.trace.iter_since(IterStage::Acquire, acquire_started);
+                if let Some(started) = acquire_started {
+                    let took = started.elapsed();
+                    self.trace.iter_add(IterStage::Acquire, took);
+                    if self.trace.poll_enabled() {
+                        let (outcome, sample) = classify_poll(&call, &info, self.anchor, started + took);
+                        self.trace.poll(u8::try_from(index).unwrap_or(u8::MAX), started, took, outcome, sample);
+                    }
+                }
                 match call {
                     Ok(()) => {
                         self.next_output = (index + 1) % count;

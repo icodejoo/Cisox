@@ -15,6 +15,13 @@
 #   2) 录制期间用 typeperf 每秒采样整机/各进程 CPU 与 GPU 引擎占用（录制结束后解析），并记录电源计划、显示器刷新率；
 #   3) 写 env.json（含 interfered 标记与原因，判据见下方 $Interfere* 常量），并在分析后运行 analyze/trace_join.py 归因丢帧；
 #   产物目录: <OutDir>\<Tag>-<时间戳>\（env.json、trace_join.json/txt、analysis.txt、recorder.txt 为固定文件名，其余以 <Tag> 为前缀）。
+# -PollTrace（默认关闭，须与 -Trace 同用）: 额外给录制进程设 SNOW_RECORDER_POLL_TRACE=1，逐次记录每一次 AcquireNextFrame/ReleaseFrame（poll/release 事件，
+#   列定义见 snow-recorder/src/frametrace.rs 模块文档），轮次结束后自动运行 analyze/acquire_timeline.py，把夹具呈现/取帧调用/流水线事件/被丢序号
+#   对齐成时间线，报告写入该轮目录的 acquire_timeline.txt 与 acquire_timeline.json（控制台只打印报告开头）。不带该开关行为与之前完全一致。
+# -Etw（默认关闭，只能与 -Trace 同用，不带时行为与之前完全一致；需要管理员权限）: 用 ETW 抓 DWM/DxgKrnl/DXGI 的合成与呈现底层事件（见 etw-capture.ps1，
+#   抓取会带来约 6~7 千事件/秒的探针开销），夹具启动前开会话、夹具与录制都结束后停会话（try/finally 保证停止，并按会话名清理残留），
+#   再由 analyze/etw_join.py 解析：夹具每个 Present 是否被 DWM 合成并上屏、DWM 呈现间隔、vsync 间隔。
+#   产物进该轮目录: etw_report.txt、etw_join.json、etw_presents.csv、<Tag>.etl.clock.json；.etl 默认解析后删除，加 -KeepEtl 保留。
 # -Hog <N>（默认 0 = 不加压，行为与之前完全一致）: 录制开始前启动 N 个 snow-cpu-hog 进程（普通优先级、单线程各占满一个逻辑核），
 #   录制结束后清理（try/finally，并检查无残留）。-HogAffinityMask 把全部压力进程限制在掩码（0x.. 或十进制）指定的核上。
 #   压力进程不计入"后台干扰"：CPU 干扰判据里的整机占用会扣除它们；env.json 写 controlled_load=true、hog_cores、hog_affinity_mask，
@@ -33,17 +40,22 @@ param(
     [string]$FfmpegDir = "C:\ProgramData\chocolatey\bin",
     [switch]$Diag,
     [switch]$Trace,
+    [switch]$PollTrace,
     [switch]$AllowPrimary,
     [string]$SpanRegion = "",
     [switch]$Dual,
     [ValidateSet(0, 1)][int]$Cursor = 1,
     [ValidateRange(0, 256)][int]$Hog = 0,
-    [string]$HogAffinityMask = ""
+    [string]$HogAffinityMask = "",
+    [switch]$Etw,
+    [switch]$KeepEtl
 )
 $ErrorActionPreference = "Stop"
 $toolRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $repoRoot = (Resolve-Path (Join-Path $toolRoot "../../..")).Path
 . (Join-Path $PSScriptRoot "cpu-hog.ps1")   # 只定义函数（Get-CpuHogExe/Start-CpuHog/Stop-CpuHog 等）
+. (Join-Path $PSScriptRoot "etw-capture.ps1")   # 只定义函数（Start-EtwCapture/Stop-EtwCapture/Convert-EtwToCsv 等）
+if ($Etw -and -not $Trace) { throw "-Etw 只能与 -Trace 同用（产物要放进 -Trace 的轮目录），中止" }
 if (-not $RecorderExe) { $RecorderExe = Join-Path $repoRoot "snow-shot-rs/tools/snow-recorder/target/release/snow-recorder.exe" }
 if (-not $FixtureExe) { $FixtureExe = Join-Path $toolRoot "target/release/snow-fps-fixture.exe" }
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
@@ -62,10 +74,15 @@ $readyFile = "$base.ready"
 $fixOut = "$base.fixture.txt"
 $traceCsv = "$base.trace.csv"
 $prevTraceEnv = $env:SNOW_RECORDER_FRAME_TRACE
+$etlFile = "$base.etl"
+$etwName = "snowetw-$PID-$stamp"
+$etwStop = $null
+$prevPollEnv = $env:SNOW_RECORDER_POLL_TRACE
 
 # 目标显示器校验：不通过则一个窗口都不创建（默认拒绝主屏；单屏机器须显式 -AllowPrimary）
 $checkArgs = @("--check"); if ($AllowPrimary) { $checkArgs += "--allow-primary" }
 if ($Dual -and -not $SpanRegion) { throw "-Dual 只能与 -SpanRegion 同用，中止" }
+if ($PollTrace -and -not $Trace) { throw "-PollTrace 须与 -Trace 同用（逐调用追踪复用帧追踪的输出文件），中止" }
 if ($SpanRegion) {
     if (-not $AllowPrimary) { throw "跨屏模式会占用主屏的一部分，必须同时传 -AllowPrimary，中止" }
     $checkArgs += @("--span", "--region", $SpanRegion)
@@ -254,6 +271,7 @@ if ($Hog -gt 0) {
     $null = Get-CpuHogExe
 }
 try {
+    if ($Etw) { $null = Start-EtwCapture -Name $etwName -Out $etlFile; "ETW 会话已启动: $etwName -> $etlFile" }   # 夹具启动前开，覆盖全部夹具帧
     $fixArgs = if ($SpanRegion) { @("--span", "--region", $SpanRegion) } else { @("--size", $Size) }
     if ($Dual) { $fixArgs += "--dual" }
     $fixArgs += @("--seconds", "$fixSeconds", "--divisor", "$divisor", "--load", $Load, "--log", $logFile, "--ready", $readyFile)
@@ -272,6 +290,7 @@ try {
         Start-Sleep -Milliseconds 500
     }
     if ($Trace) { $env:SNOW_RECORDER_FRAME_TRACE = $traceCsv }   # 只影响随后启动的录制进程
+    if ($PollTrace) { $env:SNOW_RECORDER_POLL_TRACE = "1" }
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $RecorderExe
     $psi.RedirectStandardInput = $true; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
@@ -306,6 +325,7 @@ try {
     if (-not $rec.WaitForExit(60000)) { throw "录制进程 60 秒未退出" }
     $null = $fixture.WaitForExit(15000)
     if ($hogs.Count -gt 0) { $hogLeft = Stop-CpuHog -Processes $hogs; $hogs = @() }   # 压力只覆盖录制期间
+    if ($Etw) { $etwStop = Stop-EtwCapture; "ETW 会话已停止: buffers_lost=$($etwStop.buffers_lost) buffers_written=$($etwStop.buffers_written)" }
 
     if ($Trace) {
         foreach ($p in @($tpCpu, $tp)) { if ($p) { $null = $p.WaitForExit(8000) } }
@@ -328,6 +348,7 @@ try {
             gpu_engines = Read-GpuEngines $gpuCsv
             cpu_samples = $cpuSamples
         }
+        if ($Etw) { $envInfo["etw"] = [ordered]@{ enabled = $true; session = $etwName; buffers_lost = $etwStop.buffers_lost; buffers_written = $etwStop.buffers_written; keep_etl = [bool]$KeepEtl } }
         $envInfo | ConvertTo-Json -Depth 6 | Set-Content -Encoding UTF8 (Join-Path $runDir "env.json")
         "--- trace env ---"
         "interfered={0} system_cpu mean/peak={1}/{2}% bg peak={3}% suspects peak={4}% reasons: {5}" -f $verdict.interfered, $verdict.sys_mean, $verdict.sys_peak, $verdict.bg_peak, $verdict.suspect_peak, (@($verdict.reasons) -join "; ")
@@ -356,7 +377,9 @@ try {
 finally {
     foreach ($p in @($rec, $fixture, $tp, $tpCpu)) { if ($p -and -not $p.HasExited) { try { $p.Kill() } catch { } } }
     if ($hogs.Count -gt 0) { $hogLeft = Stop-CpuHog -Processes $hogs; $hogs = @() }
+    if ($Etw) { $etwLeft = Stop-EtwCapture -Name $etwName -Force; "leftover etw session: $etwLeft" }   # 无论成败都确保 ETW 会话已停
     if ($Trace) { if ($null -eq $prevTraceEnv) { Remove-Item Env:SNOW_RECORDER_FRAME_TRACE -ErrorAction SilentlyContinue } else { $env:SNOW_RECORDER_FRAME_TRACE = $prevTraceEnv } }
+    if ($PollTrace) { if ($null -eq $prevPollEnv) { Remove-Item Env:SNOW_RECORDER_POLL_TRACE -ErrorAction SilentlyContinue } else { $env:SNOW_RECORDER_POLL_TRACE = $prevPollEnv } }
     Start-Sleep -Milliseconds 300
     $left = @(Get-Process -Name snow-fps-fixture, snow-recorder -ErrorAction SilentlyContinue)
     "leftover processes: $($left.Count)"
@@ -384,4 +407,29 @@ if ($Trace) {
         python (Join-Path $toolRoot "analyze/trace_join.py") --fixture $logFile --trace $traceCsv --video $outFile --fps $Fps --refresh $Refresh --ffmpeg-dir $FfmpegDir --env (Join-Path $runDir "env.json") --report (Join-Path $runDir "trace_join.txt") --json (Join-Path $runDir "trace_join.json")
     } else { "!! 缺少追踪 csv 或成品，跳过 trace_join: $traceCsv" }
 }
-
+if ($PollTrace) {
+    "--- acquire_timeline ---"
+    if ((Test-Path $traceCsv) -and (Test-Path $logFile)) {
+        $joinJson = Join-Path $runDir "trace_join.json"
+        $tlArgs = @("--fixture", $logFile, "--trace", $traceCsv, "--report", (Join-Path $runDir "acquire_timeline.txt"), "--json", (Join-Path $runDir "acquire_timeline.json"))
+        if (Test-Path $joinJson) { $tlArgs += @("--join", $joinJson) }
+        $tlText = python (Join-Path $toolRoot "analyze/acquire_timeline.py") @tlArgs | Out-String
+        ($tlText -split "`r?`n" | Select-Object -First 45) -join "`n"
+        "（完整报告: $(Join-Path $runDir 'acquire_timeline.txt')）"
+    } else { "!! 缺少追踪 csv 或夹具 frames.csv，跳过 acquire_timeline: $traceCsv" }
+}
+if ($Etw) {
+    "--- etw_join ---"
+    if ($etwStop -and (Test-Path $etlFile)) {
+        $etwCsv = "$base.etw.csv"
+        try {
+            $conv = Convert-EtwToCsv -Etl $etlFile -Csv $etwCsv
+            "tracerpt: events=$($conv.events_processed) lost=$($conv.events_lost)"
+            python (Join-Path $toolRoot "analyze/etw_join.py") --csv $etwCsv --clock $etwStop.clock --summary $conv.summary --pid $fixture.Id --fixture $logFile --report (Join-Path $runDir "etw_report.txt") --json (Join-Path $runDir "etw_join.json") --table (Join-Path $runDir "etw_presents.csv")
+        }
+        finally {
+            Remove-Item -ErrorAction SilentlyContinue $etwCsv, "$base.etw.summary.txt"
+            if (-not $KeepEtl) { Remove-Item -ErrorAction SilentlyContinue $etlFile }
+        }
+    } else { "!! 没有 ETW 产物，跳过解析: $etlFile" }
+}

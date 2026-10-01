@@ -10,6 +10,8 @@
 #   采集线程调度对照: -EnvPairs "SNOW_RECORDER_CAPTURE_SCHED=mmcss"（另有 timecritical、mmcss+timecritical；SNOW_RECORDER_MMCSS_TASK 改任务名；多个变量用 ; 分隔）
 #   帧级追踪与归因: 加 -Trace。每轮在 <OutDir>\runs\ 下建独立子目录（夹具 frames.csv、录制追踪 csv、成品、analysis、env.json、trace_join 报告/JSON），
 #   结束后运行 analyze/aggregate_trace.py 按档位汇总（过线数、失败归因分布、受干扰轮数、剔除干扰后过线率、丢帧与停顿窗口同时性）。
+#   逐调用追踪: 与 -Trace 同用再加 -PollTrace（每轮额外记录每次 AcquireNextFrame/ReleaseFrame，并自动在该轮目录生成 acquire_timeline.txt/json 时间线报告）。
+#   ETW 底层真值: 加 -Trace -Etw（需管理员）。每轮额外抓 DWM/DxgKrnl/DXGI 合成与呈现事件并解析进该轮目录（etw_report.txt/etw_join.json/etw_presents.csv，见 run-fps-test.ps1 -Etw）；-KeepEtl 保留 .etl。
 #   追踪开销对比（不要同时开 -Trace，它还会启动 typeperf 采样）: 同档位同轮数各跑一次，
 #     scripts/run-matrix.ps1 -RecorderExe <exe> -Name off -Repeats 5
 #     scripts/run-matrix.ps1 -RecorderExe <exe> -Name on  -Repeats 5 -EnvPairs "SNOW_RECORDER_FRAME_TRACE=C:\temp\matrix-trace.csv"
@@ -27,6 +29,9 @@ param(
     [int]$SeamX = 0,
     [switch]$Dual,
     [switch]$Trace,
+    [switch]$Etw,
+    [switch]$KeepEtl,
+    [switch]$PollTrace,
     [ValidateRange(0, 256)][int]$Hog = 0,
     [string]$HogAffinityMask = "",
     [string]$FixtureExe = "",
@@ -55,6 +60,12 @@ try {
             if ($Trace) {
                 $extra.Trace = $true
                 $extra.OutDir = Join-Path $OutDir "runs"
+            }
+            if ($PollTrace) { $extra.PollTrace = $true }
+            if ($Etw) {
+                if (-not $Trace) { throw "-Etw 只能与 -Trace 同用" }
+                $extra.Etw = $true
+                if ($KeepEtl) { $extra.KeepEtl = $true }
             }
             if ($Hog -gt 0) {
                 $extra.Hog = $Hog

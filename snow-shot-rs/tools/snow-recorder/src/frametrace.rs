@@ -25,6 +25,28 @@
 //! - `lock_us`：本圈等设备锁耗时（复制与 Flush 里的 `Enter`）；
 //! - `copy_us`：本圈复制 + Flush 总耗时（含 `lock_us`）；
 //! - `gap_us`：间隔 = 上一圈结束到本圈开始。`sleep_req_us` 为 0 时它是"线程在两次调用之间/调用方里"的时间。
+//!
+//! # `poll` / `release` 事件（逐调用追踪）
+//! 开关：环境变量 [`ENV_POLL_TRACE`] 设为 `1`，且 [`ENV_FRAME_TRACE`] 也已设置才有效；未开启时每个调用点只是一次分支。
+//! 开启时采集线程另有一块预分配的专用缓冲（[`CAPACITY_POLL`] 条，约 8 秒 x 2500 次/秒），写满只计数，
+//! 文件头多两行 `# poll_trace=1`、`# poll_overflow=<丢弃条数>`；追加时不做 I/O、不分配、不额外读时钟
+//! （起点与耗时复用取帧环路本来就测的值）。未开启时输出文件与之前完全一致。
+//!
+//! `poll`：**每一次** `AcquireNextFrame` 调用一行。通用列：
+//! - `mono_ns`/`unix_us`：调用开始时刻；`src`：输出序号（单屏 0）；`dur_us`：调用耗时；
+//! - `code`：结果，0 = 取到帧，1 = 超时（`DXGI_ERROR_WAIT_TIMEOUT`），2 = 权限丢失（需重建），3 = 其他错误；
+//! - `present_unix_us`：成功且 `LastPresentTime != 0` 时的呈现挂钟，否则留空；`n`：成功时的 `AccumulatedFrames`，否则 0；
+//! - `cap_id`、`slot`：留空/0。
+//!
+//! `poll` 复用六个扩展列（列名沿用 `slow_iter` 的，含义如下；无值留空）：
+//! - 第 1 列（`sleep_req_us`）= `flags` 位集：bit0 `LastMouseUpdateTime != 0`，bit1 `LastPresentTime != 0`，
+//!   bit2 `RectsCoalesced`，bit3 `ProtectedContentMaskedOut`；仅成功时有值；
+//! - 第 2 列（`sleep_over_us`）= `PointerShapeBufferSize`，第 3 列（`acq_us`）= `TotalMetadataBufferSize`（仅成功时有值）；
+//! - 第 4 列（`lock_us`）= 上一次 `ReleaseFrame` 结束到本次调用开始的间隔（微秒，此前没有释放过则留空）；
+//! - 第 5、6 列留空。
+//!
+//! `release`：每次 `ReleaseFrame` 一行（只记最常见的"复制后释放/光标帧释放/不要的帧释放/池耗尽释放"路径；
+//! 出错提前返回时隐式释放的不记）。`mono_ns`/`unix_us`：调用开始；`dur_us`：耗时；`src`：输出序号；其余留空。
 
 use std::ffi::OsString;
 use std::fmt::Write as _;
@@ -37,6 +59,10 @@ use crate::settings::{DEFAULT_SLOW_ITER_US, ENV_SLOW_ITER_US, parse_slow_iter_us
 
 /// 环境变量：非空时开启帧追踪，值为输出 CSV 路径（仅覆盖自建 GPU 流水线）。
 pub const ENV_FRAME_TRACE: &str = "SNOW_RECORDER_FRAME_TRACE";
+/// 逐调用追踪的环境变量：设为 `1` 且已设置 [`ENV_FRAME_TRACE`] 时记录每次 `AcquireNextFrame`（见模块文档）。
+pub const ENV_POLL_TRACE: &str = "SNOW_RECORDER_POLL_TRACE";
+/// 逐调用追踪缓冲容量（记录条数）：约 8 秒 x 2500 次/秒的轮询加释放事件。
+pub const CAPACITY_POLL: usize = 24_576;
 /// 采集线程缓冲容量（记录条数）。
 const CAPACITY_CAPTURE: usize = 32_768;
 /// 合成线程缓冲容量（记录条数）。
@@ -74,6 +100,26 @@ pub mod code {
     pub const SLOT_SURFACE_EXHAUSTED: u8 = 3;
     /// `slot`：启动探测帧（槽 0）。
     pub const SLOT_PROBE: u8 = 4;
+    /// `poll`：取到帧。
+    pub const POLL_OK: u8 = 0;
+    /// `poll`：超时没有新帧。
+    pub const POLL_TIMEOUT: u8 = 1;
+    /// `poll`：桌面复制权限丢失。
+    pub const POLL_LOST: u8 = 2;
+    /// `poll`：其他错误。
+    pub const POLL_ERROR: u8 = 3;
+}
+
+/// `poll` 事件第 1 扩展列 `flags` 的位。
+pub mod poll_flag {
+    /// `LastMouseUpdateTime != 0`。
+    pub const MOUSE_UPDATE: u32 = 1;
+    /// `LastPresentTime != 0`（带桌面内容更新）。
+    pub const PRESENT: u32 = 2;
+    /// `RectsCoalesced`。
+    pub const RECTS_COALESCED: u32 = 4;
+    /// `ProtectedContentMaskedOut`。
+    pub const PROTECTED_MASKED: u32 = 8;
 }
 
 /// 追踪事件种类。
@@ -107,6 +153,10 @@ pub enum Event {
     Finish,
     /// 采集环路慢迭代（列约定见模块文档）。
     SlowIter,
+    /// 一次 `AcquireNextFrame` 调用（逐调用追踪，列约定见模块文档）。
+    Poll,
+    /// 一次 `ReleaseFrame` 调用（逐调用追踪）。
+    Release,
 }
 
 impl Event {
@@ -127,6 +177,8 @@ impl Event {
             Self::Consumed => "consumed",
             Self::Finish => "finish",
             Self::SlowIter => "slow_iter",
+            Self::Poll => "poll",
+            Self::Release => "release",
         }
     }
 }
@@ -200,6 +252,24 @@ impl Rec {
     }
 }
 
+/// `poll` 记录里"无值"的哨兵（渲染成空单元格）。
+const NA: u32 = u32::MAX;
+
+/// 一次成功取帧的 `DXGI_OUTDUPL_FRAME_INFO` 摘要（由调用方从帧信息读出，零成本字段）。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PollSample {
+    /// `AccumulatedFrames`。
+    pub accumulated: u32,
+    /// `LastPresentTime` 换算的时刻（为 0 或无锚点时 `None`）。
+    pub present: Option<Instant>,
+    /// 标志位，见 [`poll_flag`]。
+    pub flags: u32,
+    /// `PointerShapeBufferSize`。
+    pub pointer_bytes: u32,
+    /// `TotalMetadataBufferSize`。
+    pub meta_bytes: u32,
+}
+
 /// 耗时转微秒（饱和到 `u32`）。
 fn micros(d: Duration) -> u32 {
     u32::try_from(d.as_micros()).unwrap_or(u32::MAX)
@@ -223,6 +293,10 @@ pub struct Tracer {
     notes: Mutex<Vec<(String, String)>>,
     /// 采集环路慢迭代阈值（微秒）。
     slow_iter_us: u32,
+    /// 是否开启逐调用追踪（`poll`/`release`）。
+    poll: bool,
+    /// 逐调用缓冲因容量不足被丢弃的记录数。
+    poll_overflow: AtomicU64,
 }
 
 impl Tracer {
@@ -233,7 +307,16 @@ impl Tracer {
     pub fn new(path: PathBuf) -> Self {
         let origin = Instant::now();
         let origin_unix_us = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| i64::try_from(d.as_micros()).unwrap_or(i64::MAX));
-        Self { path, origin, origin_unix_us, shared: Mutex::new(Vec::with_capacity(CAPACITY_SHARED)), merged: Mutex::new(Vec::new()), overflow: AtomicU64::new(0), notes: Mutex::new(Vec::new()), slow_iter_us: DEFAULT_SLOW_ITER_US }
+        Self { path, origin, origin_unix_us, shared: Mutex::new(Vec::with_capacity(CAPACITY_SHARED)), merged: Mutex::new(Vec::new()), overflow: AtomicU64::new(0), notes: Mutex::new(Vec::new()), slow_iter_us: DEFAULT_SLOW_ITER_US, poll: false, poll_overflow: AtomicU64::new(0) }
+    }
+
+    /// 开关逐调用追踪（`poll`/`release` 事件）。
+    ///
+    /// # 参数
+    /// - `on`：是否开启。
+    pub fn with_poll_trace(mut self, on: bool) -> Self {
+        self.poll = on;
+        self
     }
 
     /// 指定慢迭代阈值（微秒）。
@@ -317,6 +400,7 @@ impl Tracer {
             v.clear();
         }
         self.overflow.store(0, Ordering::Relaxed);
+        self.poll_overflow.store(0, Ordering::Relaxed);
     }
 
     /// 取走全部记录并按时刻稳定排序（写盘前调用；测试也用它读回记录）。
@@ -349,15 +433,22 @@ impl Tracer {
         }
         let _ = writeln!(out, "# records={}", recs.len());
         let _ = writeln!(out, "# overflow={}", self.overflow.load(Ordering::Relaxed));
+        if self.poll {
+            let _ = writeln!(out, "# poll_trace=1");
+            let _ = writeln!(out, "# poll_overflow={}", self.poll_overflow.load(Ordering::Relaxed));
+        }
         let _ = writeln!(out, "{CSV_HEADER}");
         for r in recs {
             let present = if r.present_ns == NONE { String::new() } else { self.unix_us(r.present_ns).to_string() };
             let slot = if r.slot == NONE { String::new() } else { r.slot.to_string() };
-            let ext = if r.event == Event::SlowIter {
-                let [a, b, c, d, e, f] = r.x;
-                format!("{a},{b},{c},{d},{e},{f}")
-            } else {
-                ",,,,,".to_string()
+            let cell = |v: u32| if v == NA { String::new() } else { v.to_string() };
+            let ext = match r.event {
+                Event::SlowIter => {
+                    let [a, b, c, d, e, f] = r.x;
+                    format!("{a},{b},{c},{d},{e},{f}")
+                }
+                Event::Poll => format!("{},{},{},{},,", cell(r.x[0]), cell(r.x[1]), cell(r.x[2]), cell(r.x[3])),
+                _ => ",,,,,".to_string(),
             };
             let _ = writeln!(
                 out,
@@ -396,9 +487,20 @@ impl Tracer {
 /// 全进程唯一的追踪器（首次访问时按环境变量决定是否启用）。
 static TRACER: OnceLock<Option<Arc<Tracer>>> = OnceLock::new();
 
+/// 逐调用追踪开关的取值判断：仅 `1` 开启。
+fn poll_trace_requested(value: Option<&str>) -> bool {
+    value.is_some_and(|v| v.trim() == "1")
+}
+
 /// 由环境变量取值构造追踪器；空值视为未开启。
 fn tracer_from_env(value: Option<OsString>) -> Option<Arc<Tracer>> {
-    value.filter(|v| !v.is_empty()).map(|v| Arc::new(Tracer::new(PathBuf::from(v)).with_slow_iter_us(parse_slow_iter_us(std::env::var(ENV_SLOW_ITER_US).ok().as_deref()))))
+    value.filter(|v| !v.is_empty()).map(|v| {
+        Arc::new(
+            Tracer::new(PathBuf::from(v))
+                .with_slow_iter_us(parse_slow_iter_us(std::env::var(ENV_SLOW_ITER_US).ok().as_deref()))
+                .with_poll_trace(poll_trace_requested(std::env::var(ENV_POLL_TRACE).ok().as_deref())),
+        )
+    })
 }
 
 /// 取全局追踪器；未设置 [`ENV_FRAME_TRACE`] 返回 `None`。只在构造阶段调用，不在热路径。
@@ -454,6 +556,14 @@ struct Inner {
     iter: IterState,
     /// 慢迭代阈值。
     slow: Duration,
+    /// 是否记录逐调用事件（只有采集线程且追踪器开启时为真）。
+    poll: bool,
+    /// 逐调用专用缓冲（预分配，不扩容）。
+    poll_buf: Vec<Rec>,
+    /// 逐调用缓冲容量上限。
+    poll_limit: usize,
+    /// 上一次 `ReleaseFrame` 的结束时刻。
+    last_release_end: Option<Instant>,
 }
 
 /// 迭代内的分段累加项。
@@ -569,6 +679,15 @@ impl Inner {
             self.tracer.overflow.fetch_add(1, Ordering::Relaxed);
         }
     }
+
+    /// 追加一条逐调用记录；缓冲已满只计数。
+    fn push_poll(&mut self, rec: Rec) {
+        if self.poll_buf.len() < self.poll_limit {
+            self.poll_buf.push(rec);
+        } else {
+            self.tracer.poll_overflow.fetch_add(1, Ordering::Relaxed);
+        }
+    }
 }
 
 /// 线程私有的追踪缓冲：关闭时是一个 `None`，所有追踪点都是一次分支判断；丢弃时并入全局记录。
@@ -602,10 +721,17 @@ impl TraceBuf {
     /// - `thread`：所属线程。
     /// - `limit`：缓冲容量（记录条数）。
     pub fn attach_limited(tracer: Option<Arc<Tracer>>, thread: Thread, limit: usize) -> Self {
+        Self::attach_full(tracer, thread, limit, CAPACITY_POLL)
+    }
+
+    /// 绑定指定追踪器并分别指定普通缓冲与逐调用缓冲的容量（逐调用只在采集线程且追踪器开启时分配）。
+    fn attach_full(tracer: Option<Arc<Tracer>>, thread: Thread, limit: usize, poll_limit: usize) -> Self {
         Self {
             inner: tracer.map(|tracer| {
                 let slow = Duration::from_micros(u64::from(tracer.slow_iter_us));
-                Inner { tracer, thread, buf: Vec::with_capacity(limit), limit, iter: IterState::default(), slow }
+                let poll = tracer.poll && thread == Thread::Capture;
+                let poll_buf = Vec::with_capacity(if poll { poll_limit } else { 0 });
+                Inner { tracer, thread, buf: Vec::with_capacity(limit), limit, iter: IterState::default(), slow, poll, poll_buf, poll_limit, last_release_end: None }
             }),
         }
     }
@@ -620,6 +746,64 @@ impl TraceBuf {
     #[inline]
     pub fn mark(&self) -> Option<Instant> {
         self.inner.as_ref().map(|_| Instant::now())
+    }
+
+    /// 逐调用追踪是否开启（关闭时只是一次分支）。
+    #[inline]
+    pub fn poll_enabled(&self) -> bool {
+        self.inner.as_ref().is_some_and(|i| i.poll)
+    }
+
+    /// 逐调用追踪开启时返回当前时刻（给 [`TraceBuf::release`] 当起点），否则 `None`，不读时钟。
+    #[inline]
+    pub fn poll_mark(&self) -> Option<Instant> {
+        self.inner.as_ref().filter(|i| i.poll).map(|_| Instant::now())
+    }
+
+    /// 记录一次 `AcquireNextFrame` 调用（逐调用追踪未开启时什么也不做）。
+    ///
+    /// # 参数
+    /// - `src`：输出序号。
+    /// - `start`：调用开始时刻。
+    /// - `dur`：调用耗时。
+    /// - `outcome`：`code::POLL_*`。
+    /// - `sample`：成功时的帧信息摘要，失败为 `None`。
+    #[inline]
+    pub fn poll(&mut self, src: u8, start: Instant, dur: Duration, outcome: u8, sample: Option<PollSample>) {
+        let Some(inner) = &mut self.inner else { return };
+        if !inner.poll {
+            return;
+        }
+        let mut rec = Rec::new(Event::Poll, inner.thread, inner.tracer.ns_of(start));
+        rec.src = src;
+        rec.dur_us = micros(dur);
+        rec.code = outcome;
+        rec.x = [NA; 6];
+        rec.x[3] = inner.last_release_end.map_or(NA, |end| micros(start.saturating_duration_since(end)));
+        if let Some(s) = sample {
+            rec.n = s.accumulated;
+            rec.present_ns = s.present.map_or(NONE, |p| inner.tracer.ns_of(p));
+            rec.x[0] = s.flags;
+            rec.x[1] = s.pointer_bytes;
+            rec.x[2] = s.meta_bytes;
+        }
+        inner.push_poll(rec);
+    }
+
+    /// 记录一次 `ReleaseFrame` 调用（耗时 = 现在 - `started`；未开启或 `started` 为 `None` 时什么也不做）。
+    ///
+    /// # 参数
+    /// - `src`：输出序号。
+    /// - `started`：调用前由 [`TraceBuf::poll_mark`] 取得的起点。
+    #[inline]
+    pub fn release(&mut self, src: u8, started: Option<Instant>) {
+        let (Some(inner), Some(s)) = (&mut self.inner, started) else { return };
+        let dur = s.elapsed();
+        inner.last_release_end = Some(s + dur);
+        let mut rec = Rec::new(Event::Release, inner.thread, inner.tracer.ns_of(s));
+        rec.src = src;
+        rec.dur_us = micros(dur);
+        inner.push_poll(rec);
     }
 
     /// 追加一条记录；`at` 为事件时刻（缺省取当前），`fill` 填充其余字段。
@@ -873,6 +1057,7 @@ impl Drop for TraceBuf {
     fn drop(&mut self) {
         if let Some(inner) = self.inner.take() {
             inner.tracer.merge(inner.buf);
+            inner.tracer.merge(inner.poll_buf);
         }
     }
 }
@@ -994,6 +1179,69 @@ mod tests {
         assert!(text.contains("# slow_iter_us=2000"));
         let row = text.lines().find(|l| l.contains(",slow_iter,")).unwrap();
         assert_eq!(row.split(',').count(), CSV_HEADER.split(',').count());
+    }
+
+    /// 逐调用开关：仅 `1` 开启。
+    #[test]
+    fn poll_trace_flag_parsing() {
+        assert!(!poll_trace_requested(None) && !poll_trace_requested(Some("")) && !poll_trace_requested(Some("0")));
+        assert!(poll_trace_requested(Some("1")) && poll_trace_requested(Some(" 1 ")));
+    }
+
+    /// 逐调用追踪关闭（追踪器未开 poll）：不分配、不记录、不出现头部行。
+    #[test]
+    fn poll_off_records_nothing() {
+        let t = tracer();
+        {
+            let mut buf = TraceBuf::attach(Some(Arc::clone(&t)), Thread::Capture);
+            assert!(!buf.poll_enabled() && buf.poll_mark().is_none());
+            buf.poll(0, Instant::now(), Duration::from_millis(1), code::POLL_OK, None);
+            buf.release(0, buf.poll_mark());
+        }
+        let recs = t.collect();
+        assert!(recs.is_empty());
+        assert!(!t.render(&recs, 60, "x").contains("poll_overflow"));
+    }
+
+    /// 逐调用追踪开启：poll/release 列正确，释放间隔被换算，写满只计数。
+    #[test]
+    fn poll_records_columns_and_overflow() {
+        let t = Arc::new(Tracer::new(PathBuf::from("unused-trace.csv")).with_poll_trace(true));
+        {
+            let mut buf = TraceBuf::attach_full(Some(Arc::clone(&t)), Thread::Capture, 16, 4);
+            assert!(buf.poll_enabled());
+            let t0 = Instant::now();
+            // 超时调用：没有帧信息，也没有上一次释放
+            buf.poll(0, t0, Duration::from_micros(4400), code::POLL_TIMEOUT, None);
+            // 成功调用，随后释放，再来一次调用以验证释放间隔
+            let sample = PollSample { accumulated: 2, present: Some(t0), flags: poll_flag::PRESENT | poll_flag::MOUSE_UPDATE, pointer_bytes: 7, meta_bytes: 9 };
+            buf.poll(0, t0, Duration::from_micros(30), code::POLL_OK, Some(sample));
+            let started = buf.poll_mark();
+            buf.release(0, started);
+            std::thread::sleep(Duration::from_millis(2));
+            buf.poll(0, Instant::now(), Duration::from_micros(10), code::POLL_TIMEOUT, None);
+            // 第 5 条超出容量 4
+            buf.poll(0, Instant::now(), Duration::from_micros(10), code::POLL_TIMEOUT, None);
+        }
+        let recs = t.collect();
+        assert_eq!(recs.len(), 4);
+        let text = t.render(&recs, 60, "x");
+        assert!(text.contains("# poll_trace=1
+") && text.contains("# poll_overflow=1
+"));
+        let rows: Vec<Vec<&str>> = text.lines().skip_while(|l| !l.starts_with("mono_ns")).skip(1).map(|l| l.split(',').collect()).collect();
+        assert!(rows.iter().all(|c| c.len() == CSV_HEADER.split(',').count()));
+        let by_event = |name: &str| rows.iter().filter(|c| c[2] == name).collect::<Vec<_>>();
+        assert_eq!(by_event("poll").len(), 3);
+        assert_eq!(by_event("release").len(), 1);
+        let timeout = by_event("poll")[0].clone();
+        assert_eq!((timeout[9], timeout[10], timeout[8], timeout[7]), ("4400", "1", "0", ""));
+        assert_eq!((timeout[11], timeout[12], timeout[13], timeout[14]), ("", "", "", ""));
+        let ok = by_event("poll")[1].clone();
+        assert_eq!((ok[8], ok[10], ok[11], ok[12], ok[13]), ("2", "0", "3", "7", "9"));
+        assert!(!ok[7].is_empty());
+        let later = by_event("poll")[2].clone();
+        assert!(later[14].parse::<u32>().unwrap() >= 1500, "释放结束到下次调用约 2ms");
     }
 
     /// 元数据行：同名覆盖、换行被替换。

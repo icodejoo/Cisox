@@ -25,7 +25,7 @@ use windows::Win32::Graphics::Dxgi::{
 };
 use windows::core::{Interface, PCWSTR};
 
-use crate::frametrace::{IterStage, Thread, TraceBuf, code};
+use crate::frametrace::{IterStage, PollSample, Thread, TraceBuf, code, poll_flag};
 use crate::geom::Rect;
 use crate::pipeline::{CaptureDiag, CaptureFault, CaptureSource, CaptureStats, Captured};
 use crate::settings::{AdapterInfo, EncoderPreference, rank_adapters};
@@ -202,6 +202,42 @@ impl Drop for FrameGuard<'_> {
     fn drop(&mut self) {
         // SAFETY: 只在 AcquireNextFrame 成功后创建，成对释放。
         let _ = unsafe { self.0.ReleaseFrame() };
+    }
+}
+
+/// 把一次 `AcquireNextFrame` 的结果归类，并在成功时摘出帧信息（逐调用追踪用，只读帧信息里的现成字段）。
+///
+/// # 参数
+/// - `call`：调用结果。
+/// - `info`：调用填写的帧信息（只在成功时有效）。
+/// - `anchor`：QPC 锚点，用于换算呈现时刻。
+/// - `ended`：调用结束时刻（呈现时刻不会晚于它）。
+///
+/// # 返回
+/// `(code::POLL_*, 成功时的帧信息摘要)`。
+pub(crate) fn classify_poll(call: &windows::core::Result<()>, info: &DXGI_OUTDUPL_FRAME_INFO, anchor: Option<QpcAnchor>, ended: Instant) -> (u8, Option<PollSample>) {
+    match call {
+        Ok(()) => {
+            let mut flags = 0;
+            if info.LastMouseUpdateTime != 0 {
+                flags |= poll_flag::MOUSE_UPDATE;
+            }
+            if info.LastPresentTime != 0 {
+                flags |= poll_flag::PRESENT;
+            }
+            if info.RectsCoalesced.as_bool() {
+                flags |= poll_flag::RECTS_COALESCED;
+            }
+            if info.ProtectedContentMaskedOut.as_bool() {
+                flags |= poll_flag::PROTECTED_MASKED;
+            }
+            let present = if info.LastPresentTime != 0 { anchor.map(|a| a.to_instant(info.LastPresentTime).min(ended)) } else { None };
+            let sample = PollSample { accumulated: info.AccumulatedFrames, present, flags, pointer_bytes: info.PointerShapeBufferSize, meta_bytes: info.TotalMetadataBufferSize };
+            (code::POLL_OK, Some(sample))
+        }
+        Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT => (code::POLL_TIMEOUT, None),
+        Err(e) if e.code() == DXGI_ERROR_ACCESS_LOST => (code::POLL_LOST, None),
+        Err(_) => (code::POLL_ERROR, None),
     }
 }
 
@@ -500,6 +536,13 @@ pub(crate) fn create_device_pair(preference: EncoderPreference) -> Result<(Share
 }
 
 impl DdaCapture {
+    /// 释放已取得的桌面帧；逐调用追踪开启时记录这次 `ReleaseFrame` 的时刻与耗时。
+    fn release_frame(&mut self, guard: FrameGuard<'_>) {
+        let started = self.trace.poll_mark();
+        drop(guard);
+        self.trace.release(0, started);
+    }
+
     /// 取帧轮询主体（`next` 的实现）：每圈开始/睡眠前由慢迭代追踪计时，返回前的收尾由 `next` 负责。
     fn next_poll(&mut self, timeout: Duration, want: bool) -> Result<Option<Captured<GpuFrame>>, CaptureFault> {
         if self.wgc.is_some() {
@@ -520,6 +563,10 @@ impl DdaCapture {
             let call = unsafe { self.duplication.AcquireNextFrame(0, &mut info, &mut resource) };
             let took_dur = now.elapsed();
             self.trace.iter_add(IterStage::Acquire, took_dur);
+            if self.trace.poll_enabled() {
+                let (outcome, sample) = classify_poll(&call, &info, self.anchor, now + took_dur);
+                self.trace.poll(0, now, took_dur, outcome, sample);
+            }
             let took = took_dur.as_secs_f32() * 1000.0;
             if took > 1.0 && self.slow_acquire_ms.len() < DIAG_LIMIT {
                 self.slow_acquire_ms.push(took);
@@ -546,10 +593,11 @@ impl DdaCapture {
         let guard = FrameGuard(&duplication);
         if !want {
             self.trace.acquire(0, captured_at, None, info.AccumulatedFrames, 0, code::ACQ_UNWANTED);
+            self.release_frame(guard);
             return Ok(None);
         }
         if info.LastPresentTime == 0 {
-            drop(guard);
+            self.release_frame(guard);
             self.trace.acquire(0, captured_at, None, info.AccumulatedFrames, 0, code::ACQ_CURSOR_ONLY);
             let cursor = self.sample_cursor();
             // 只有光标移动：沿用上一张桌面图
@@ -571,6 +619,7 @@ impl DdaCapture {
                 let present = self.present_instant(&info, captured_at);
                 self.trace.acquire(0, captured_at, Some(present), info.AccumulatedFrames, 0, code::ACQ_POOL_DROP);
             }
+            self.release_frame(guard);
             return Ok(None);
         };
         let traced = self.trace.enabled();
@@ -583,7 +632,7 @@ impl DdaCapture {
             self.trace.iter_add(IterStage::Lock, lock_wait);
         }
         // 复制一记录完就立刻释放桌面帧（持有越久，下一次呈现越容易被 DXGI 合并），光标采样与 Flush 都放到释放之后
-        drop(guard);
+        self.release_frame(guard);
         let flush_started = self.trace.mark();
         let flush_wait = self.flush(traced);
         self.trace.iter_since(IterStage::Copy, flush_started);
