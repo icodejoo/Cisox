@@ -15,6 +15,7 @@ pub mod shell;
 pub mod single_instance;
 pub mod text_raster;
 pub mod tray;
+pub mod win_ocr;
 
 /// 本 crate 的阶段标记，用于骨架连通性测试。
 pub const PHASE: &str = "P1";

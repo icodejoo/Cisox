@@ -164,7 +164,7 @@ mod tests {
             .map(|(i, t)| OcrTextBox {
                 rect: PhysicalRect::new(0, i as i32 * 20, 100, 18),
                 text: (*t).to_string(),
-                confidence: 0.9,
+                confidence: Some(0.9),
             })
             .collect();
         OcrResult {

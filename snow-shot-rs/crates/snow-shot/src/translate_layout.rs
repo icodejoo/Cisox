@@ -184,7 +184,7 @@ mod tests {
         OcrTextBox {
             rect: PhysicalRect::new(x, y, w, h),
             text: text.to_string(),
-            confidence: 0.9,
+            confidence: Some(0.9),
         }
     }
 

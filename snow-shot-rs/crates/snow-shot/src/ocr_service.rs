@@ -41,8 +41,8 @@ pub struct OcrTextBox {
     pub rect: PhysicalRect,
     /// 识别出的文字内容。
     pub text: String,
-    /// 置信度分数 (0.0 ~ 1.0)。
-    pub confidence: f32,
+    /// 置信度分数 (0.0 ~ 1.0)；系统 OCR 不提供时为 `None`。
+    pub confidence: Option<f32>,
 }
 
 /// 完整 OCR 识别结果集合。
@@ -185,7 +185,7 @@ pub fn lines_to_boxes(lines: &[OcrLine], scale: (f32, f32), bounds: (u32, u32)) 
             OcrTextBox {
                 rect: PhysicalRect::new(x, y, w, h),
                 text: line.text.clone(),
-                confidence: line.score,
+                confidence: Some(line.score),
             }
         })
         .collect()
@@ -737,7 +737,7 @@ mod real_worker_tests {
         let warm_ms = warm.elapsed().as_millis();
         println!("REAL|image={w}x{h}|cold_ms={cold_ms}|warm_ms={warm_ms}|text1={:?}|text2={:?}", first.full_text, second.full_text);
         for b in &first.boxes {
-            println!("REAL|box|{:?}|{}|{:.3}", b.rect, b.text, b.confidence);
+            println!("REAL|box|{:?}|{}|{:?}", b.rect, b.text, b.confidence);
         }
         assert!(first.full_text.contains("Snow") || first.full_text.contains("Hello"), "{:?}", first.full_text);
         assert!(first.full_text.contains("识别") || first.full_text.contains("你好"), "{:?}", first.full_text);

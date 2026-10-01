@@ -790,7 +790,7 @@ mod tests {
     fn ocr(lines: &[(&str, i32)]) -> OcrResult {
         let boxes: Vec<OcrTextBox> = lines
             .iter()
-            .map(|(t, y)| OcrTextBox { rect: PhysicalRect::new(0, *y, 200, 20), text: (*t).to_string(), confidence: 0.9 })
+            .map(|(t, y)| OcrTextBox { rect: PhysicalRect::new(0, *y, 200, 20), text: (*t).to_string(), confidence: Some(0.9) })
             .collect();
         OcrResult { full_text: lines.iter().map(|l| l.0).collect::<Vec<_>>().join("\n"), boxes, elapsed_ms: 7 }
     }

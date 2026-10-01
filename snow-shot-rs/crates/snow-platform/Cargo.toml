@@ -15,7 +15,14 @@ tracing = "0.1"
 # 与 gpui 使用的 windows 绑定同版本（0.62），避免重复编译
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [
+    "Foundation",
+    "Foundation_Collections",
+    "Globalization",
+    "Graphics_Imaging",
+    "Media_Ocr",
+    "Storage_Streams",
     "Win32_Foundation",
+    "Win32_System_Com",
     "Win32_System_Console",
     "Win32_Graphics_Gdi",
     "Win32_Security",

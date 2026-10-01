@@ -2885,7 +2885,7 @@ mod tests {
                 .map(|(i, t)| OcrTextBox {
                     rect: PhysicalRect::new(2, 2 + i as i32 * 10, 30, 8),
                     text: (*t).to_string(),
-                    confidence: 0.9,
+                    confidence: Some(0.9),
                 })
                 .collect(),
             elapsed_ms: 3,
