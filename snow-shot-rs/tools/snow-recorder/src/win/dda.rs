@@ -10,7 +10,7 @@
 //!
 //! 只支持单显示器内的选区、SDR（BGRA）、不旋转的输出；其余情形返回错误，由调用方回落软件路径。
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -27,10 +27,7 @@ use windows::core::{Interface, PCWSTR};
 
 use crate::pipeline::{CaptureDiag, CaptureFault, CaptureSource, CaptureStats, Captured};
 use crate::settings::{AdapterInfo, EncoderPreference, rank_adapters};
-use crate::geom::Rect;
 use crate::timeline::QpcAnchor;
-use crate::win::hwenc::{HwContext, Surface};
-use crate::win::vp::{VideoBlitter, VpLayer};
 
 /// 共享纹理池容量（采集队列 + 待输出队列 + 最近帧 + 合成中都占用名额）。
 pub const POOL_SIZE: usize = 10;
@@ -80,10 +77,8 @@ impl SharedSlot {
 /// 采集帧句柄：引用计数的共享槽；所有持有者释放后，采集才会复用该槽。
 #[derive(Clone)]
 pub struct GpuFrame {
-    /// 共享槽（直入模式下是占位，不含内容）。
+    /// 共享槽。
     pub slot: Arc<SharedSlot>,
-    /// 直入模式（实验）：采集线程已把桌面选区转成 NV12 的表面（不含光标）。
-    pub direct: Option<Arc<Mutex<Surface>>>,
 }
 
 /// 采集使用的设备对：A 给采集，B 给合成与编码。
@@ -148,7 +143,7 @@ const COMPOSE_GPU_PRIORITY: i32 = -7;
 pub const ENV_CAPTURE_GPU_PRIORITY: &str = "SNOW_RECORDER_CAPTURE_GPU_PRIORITY";
 /// 环境变量：合成设备的 GPU 线程优先级（-7..=7，缺省 -7；设 0 等于不降级）。
 pub const ENV_COMPOSE_GPU_PRIORITY: &str = "SNOW_RECORDER_COMPOSE_GPU_PRIORITY";
-/// 环境变量：采集模式（实验）：`serial` = 单设备 + 采集线程直接 VideoProcessor 出 NV12，省掉 BGRA 共享槽拷贝。
+/// 环境变量：采集模式（实验）：`wgc` = 用 Windows Graphics Capture 取帧。
 pub const ENV_CAPTURE_MODE: &str = "SNOW_RECORDER_CAPTURE_MODE";
 
 /// 读取环境变量里的 GPU 优先级（限制在 -7..=7）；未设置或非法返回 `None`。
@@ -167,11 +162,6 @@ fn set_gpu_priority(device: &SharedDevice, priority: i32) {
 /// 是否用 WGC 取帧（实验对照）。
 pub fn wgc_mode() -> bool {
     std::env::var(ENV_CAPTURE_MODE).as_deref() == Ok("wgc")
-}
-
-/// 是否启用直入（串行单设备）实验模式。
-pub fn serial_mode() -> bool {
-    std::env::var(ENV_CAPTURE_MODE).as_deref() == Ok("serial")
 }
 
 /// 选区是否完整落在显示器范围内。
@@ -228,22 +218,8 @@ pub struct DdaCapture {
     slow_acquire_ms: Vec<f32>,
     /// 上一次调用 `AcquireNextFrame` 的时刻。
     last_acquire: Option<Instant>,
-    /// 直入模式（实验）：采集线程直接做 BGRA→NV12。
-    direct: Option<DirectBlit>,
     /// WGC 取帧源（实验对照）：有值时不用 `AcquireNextFrame`。
     wgc: Option<crate::win::wgc::WgcSource>,
-}
-
-/// 直入模式的转换资源：采集设备上的 VideoProcessor 与 NV12 表面池。
-struct DirectBlit {
-    /// 视频处理器（采集设备上）。
-    blitter: VideoBlitter,
-    /// NV12 表面池。
-    hw: Arc<HwContext>,
-    /// 输出尺寸。
-    out_size: (u32, u32),
-    /// 选区在显示器内的源矩形。
-    source: Rect,
 }
 
 impl DdaCapture {
@@ -276,29 +252,10 @@ impl DdaCapture {
         // 复制命令已提交，帧可以归还帧池（GPU 侧顺序由驱动保证）
         drop(frame);
         let cursor = self.sample_cursor();
-        let captured = Captured { frame: GpuFrame { slot, direct: None }, cursor, present: arrived, captured_at: Instant::now(), fresh: true };
+        let captured = Captured { frame: GpuFrame { slot }, cursor, present: arrived, captured_at: Instant::now(), fresh: true };
         self.stats.frames += 1;
         self.latest = Some(captured.clone());
         Ok(Some(captured))
-    }
-
-    /// 启用直入模式（实验）：采集线程直接把桌面选区 VideoProcessor 成 NV12，不再复制进 BGRA 共享槽。
-    ///
-    /// # 参数
-    /// - `hw`：NV12 表面池（必须与采集设备同一设备）。
-    /// - `out_size`：输出尺寸。
-    /// - `fps`：帧率（视频处理器内容描述用）。
-    ///
-    /// # 返回
-    /// 设备不同或视频处理器不可用时返回原因。
-    pub fn enable_direct(&mut self, hw: Arc<HwContext>, out_size: (u32, u32), fps: u32) -> Result<(), String> {
-        if !hw.device().same_device(&self.device) {
-            return Err("直入模式要求采集与编码表面池是同一设备".into());
-        }
-        let blitter = VideoBlitter::new(self.device.device(), self.device.context(), (self.region.2, self.region.3), out_size, fps)?;
-        let source = Rect { x: self.crop.left as i32, y: self.crop.top as i32, width: self.region.2, height: self.region.3 };
-        self.direct = Some(DirectBlit { blitter, hw, out_size, source });
-        Ok(())
     }
 
     /// 打开采集：找到完整包含选区的显示器，创建设备对、共享纹理池与桌面复制。
@@ -356,9 +313,8 @@ impl DdaCapture {
     ) -> Result<(Self, SharedDevice), String> {
         let base: IDXGIAdapter = adapter.cast().map_err(|e| e.to_string())?;
         let compose = SharedDevice::create(&base).map_err(|e| format!("创建合成设备失败: {e:#}"))?;
-        // 串行单设备实验：采集与合成共用一个设备
         let pair = DevicePair {
-            capture: if serial_mode() { compose.clone() } else { SharedDevice::create(&base).map_err(|e| format!("创建采集设备失败: {e:#}"))? },
+            capture: SharedDevice::create(&base).map_err(|e| format!("创建采集设备失败: {e:#}"))?,
             compose,
         };
         let output1: IDXGIOutput1 = output.cast().map_err(|e| format!("显示器不支持桌面复制: {e}"))?;
@@ -403,7 +359,6 @@ impl DdaCapture {
             copy_ms: Vec::new(),
             slow_acquire_ms: Vec::new(),
             last_acquire: None,
-            direct: None,
             wgc: None,
         })
     }
@@ -427,16 +382,6 @@ impl DdaCapture {
         let _lock = self.device.lock();
         // SAFETY: 持有设备锁；Flush 只提交已记录的命令。
         unsafe { self.device.context().Flush() };
-    }
-
-    /// 直入模式：把桌面纹理选区直接 VideoProcessor 到一张 NV12 表面（不含光标）；池耗尽返回 `None`。
-    fn blit_direct(&mut self, source: &ID3D11Texture2D) -> Result<Option<Arc<Mutex<Surface>>>, CaptureFault> {
-        let Some(direct) = self.direct.as_mut() else { return Ok(None) };
-        let Some(surface) = direct.hw.allocate().map_err(CaptureFault::Other)? else { return Ok(None) };
-        let layer = VpLayer { texture: source.clone(), source: direct.source, destination: Rect::full(direct.out_size), alpha: false };
-        let _lock = self.device.lock();
-        direct.blitter.blit(&[layer], surface.texture(), surface.slice()).map_err(CaptureFault::Other)?;
-        Ok(Some(Arc::new(Mutex::new(surface))))
     }
 
     /// 在设备 A 上把桌面选区复制进共享槽。
@@ -568,34 +513,23 @@ impl CaptureSource for DdaCapture {
             return Err(CaptureFault::Other(format!("桌面格式 {:?} 不是 BGRA8（HDR 走软件路径）", desc.Format)));
         }
         let copy_started = Instant::now();
-        let (slot, direct) = if self.direct.is_some() {
-            match self.blit_direct(&source)? {
-                Some(surface) => (self.slots[0].clone(), Some(surface)),
-                None => {
-                    self.stats.pool_drops += 1;
-                    return Ok(None);
-                }
-            }
-        } else {
-            let Some(slot) = self.slots.iter().find(|s| Arc::strong_count(s) == 1).cloned() else {
-                self.stats.pool_drops += 1;
-                return Ok(None);
-            };
-            self.copy_into(&slot, &source)?;
-            (slot, None)
+        let Some(slot) = self.slots.iter().find(|s| Arc::strong_count(s) == 1).cloned() else {
+            self.stats.pool_drops += 1;
+            return Ok(None);
         };
+        self.copy_into(&slot, &source)?;
         if self.copy_ms.len() < DIAG_LIMIT {
             self.copy_ms.push(copy_started.elapsed().as_secs_f32() * 1000.0);
         }
         // 复制一记录完就立刻释放桌面帧（持有越久，下一次呈现越容易被 DXGI 合并），光标采样与 Flush 都放到释放之后
         drop(guard);
         self.flush();
-        let cursor = if self.direct.is_some() { None } else { self.sample_cursor() };
+        let cursor = self.sample_cursor();
         let present = match self.anchor {
             Some(a) => a.to_instant(info.LastPresentTime),
             None => captured_at,
         };
-        let captured = Captured { frame: GpuFrame { slot, direct }, cursor, present: present.min(captured_at), captured_at, fresh: true };
+        let captured = Captured { frame: GpuFrame { slot }, cursor, present: present.min(captured_at), captured_at, fresh: true };
         self.stats.frames += 1;
         self.latest = Some(captured.clone());
         Ok(Some(captured))
@@ -629,6 +563,8 @@ impl CaptureSource for DdaCapture {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::geom::Rect;
+    use crate::win::vp::{VideoBlitter, VpLayer};
     use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_NV12;
 
     /// 选区必须完整落在显示器内。

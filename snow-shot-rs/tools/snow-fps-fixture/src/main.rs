@@ -12,7 +12,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use snow_fps_fixture::content::{Load, build_scene};
 use snow_fps_fixture::{
     FrameRecord, MAX_SECONDS, Mode, MonitorInfo, Options, frames_to_csv, parse_args, pick_target, resolve_region,
-    summarize,
+    resolve_span_region, summarize,
 };
 
 /// 退出码：参数或显示器校验失败。
@@ -103,23 +103,38 @@ fn main() {
         print_monitors(&monitors);
         return;
     }
-    // 创建窗口之前的强制校验：默认仅非主屏（显式开关才允许主屏）、区域落在其内
-    let target = match pick_target(&monitors, options.allow_primary) {
-        Ok(t) => t,
-        Err(e) => {
-            print_monitors(&monitors);
-            eprintln!("{e}");
-            std::process::exit(EXIT_REJECTED);
+    // 创建窗口之前的强制校验：默认仅非主屏（显式开关才允许主屏）、区域落在其内；跨屏模式要求区域被显示器并集完整覆盖
+    let rect = if options.span {
+        match resolve_span_region(&monitors, &options) {
+            Ok(r) => {
+                println!("target=span primary=true monitor={r:?} window={r:?}");
+                r
+            }
+            Err(e) => {
+                print_monitors(&monitors);
+                eprintln!("{e}");
+                std::process::exit(EXIT_REJECTED);
+            }
         }
+    } else {
+        let target = match pick_target(&monitors, options.allow_primary) {
+            Ok(t) => t,
+            Err(e) => {
+                print_monitors(&monitors);
+                eprintln!("{e}");
+                std::process::exit(EXIT_REJECTED);
+            }
+        };
+        let rect = match resolve_region(target, &options) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(EXIT_REJECTED);
+            }
+        };
+        println!("target={} primary={} monitor={:?} window={:?}", target.device, target.primary, target.rect, rect);
+        rect
     };
-    let rect = match resolve_region(target, &options) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("{e}");
-            std::process::exit(EXIT_REJECTED);
-        }
-    };
-    println!("target={} primary={} monitor={:?} window={:?}", target.device, target.primary, target.rect, rect);
     if options.mode == Mode::Check {
         return;
     }

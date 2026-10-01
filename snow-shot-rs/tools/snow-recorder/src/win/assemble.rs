@@ -119,10 +119,6 @@ pub fn start_hardware(spec: &HardwareSpec) -> Result<Running, String> {
         capture.enable_wgc()?;
         eprintln!("实验：用 Windows Graphics Capture 取帧");
     }
-    if crate::win::dda::serial_mode() {
-        capture.enable_direct(Arc::clone(&hw), spec.out_size, spec.fps)?;
-        eprintln!("实验：串行单设备直入模式（采集线程直接 VideoProcessor，不含光标）");
-    }
     let composer = GpuComposer::new(device, Arc::clone(&hw), (w, h), spec.out_size, spec.fps)?;
     if spec.media_foundation {
         let encoder = MfEncoder::open(hw, &spec.output, spec.out_size, spec.fps, parse_rate_control(std::env::var(ENV_MF_QUALITY).ok().as_deref()))?;

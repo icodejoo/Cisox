@@ -5,6 +5,7 @@
 #   scripts/run-fps-test.ps1 -Size 2560x1440 -Fps 60 -Seconds 6
 #   scripts/run-fps-test.ps1 -Size 1280x720  -Fps 30 -Seconds 6 -Format mp4
 #   scripts/run-fps-test.ps1 -Size 1920x1080 -AllowPrimary   # 单屏机器：显式允许占用主屏
+#   scripts/run-fps-test.ps1 -SpanRegion 1280,0,2560,1440 -AllowPrimary -Fps 60   # 跨屏：窗口与录制区域横跨两块屏（会占用主屏的一部分，须同时传 -AllowPrimary）
 # 可用环境变量透传给录制进程: SNOW_RECORDER_CONV_THREADS / _ASYNC / _PRESET / _HARDWARE
 param(
     [string]$Size = "2560x1440",
@@ -20,6 +21,7 @@ param(
     [string]$FfmpegDir = "C:\ProgramData\chocolatey\bin",
     [switch]$Diag,
     [switch]$AllowPrimary,
+    [string]$SpanRegion = "",
     [ValidateSet(0, 1)][int]$Cursor = 1
 )
 $ErrorActionPreference = "Stop"
@@ -37,6 +39,10 @@ $fixOut = "$base.fixture.txt"
 
 # 目标显示器校验：不通过则一个窗口都不创建（默认拒绝主屏；单屏机器须显式 -AllowPrimary）
 $checkArgs = @("--check"); if ($AllowPrimary) { $checkArgs += "--allow-primary" }
+if ($SpanRegion) {
+    if (-not $AllowPrimary) { throw "跨屏模式会占用主屏的一部分，必须同时传 -AllowPrimary，中止" }
+    $checkArgs += @("--span", "--region", $SpanRegion)
+}
 $check = & $FixtureExe @checkArgs
 if ($LASTEXITCODE -ne 0) { throw "夹具校验目标显示器失败，中止: $check" }
 $mon = [regex]::Match($check, "primary=(true|false) monitor=Rect \{ x: (-?\d+), y: (-?\d+), w: (\d+), h: (\d+) \}")
@@ -46,6 +52,7 @@ $mx, $my, $mw, $mh = 2..5 | ForEach-Object { [int]$mon.Groups[$_].Value }
 # 二次防线：未传 -AllowPrimary 时，主屏（Primary=true 或坐标 (0,0)）立刻中止；期望值取自夹具实测 bounds，不写死分辨率
 if (-not $AllowPrimary -and ($isPrimary -or ($mx -eq 0 -and $my -eq 0))) { throw "目标显示器是主屏 ($mx,$my,${mw}x${mh})，未传 -AllowPrimary，中止" }
 if ($AllowPrimary) { Write-Warning "已传 -AllowPrimary：将占用主屏 (${mw}x${mh}) 约 10 秒/轮，期间请勿操作屏幕" }
+if ($SpanRegion) { $Size = "${mw}x${mh}" }  # 跨屏：夹具回显的 monitor 即窗口区域本身
 $w, $h = $Size.ToLower().Split("x") | ForEach-Object { [int]$_ }
 if ($w -le 0 -or $h -le 0 -or $w -gt $mw -or $h -gt $mh) { throw "尺寸 $Size 超出目标显示器 (${mw}x${mh})，中止" }
 # 夹具窗口贴目标显示器左上角，录制区域与之重合
@@ -102,7 +109,8 @@ if ($Refresh -le 0) { $Refresh = if ($Fps -ge 60) { 59.0 } else { 30.0 } }
 $fixSeconds = $Seconds + 2.5
 $fixture = $null; $rec = $null
 try {
-    $fixArgs = @("--size", $Size, "--seconds", "$fixSeconds", "--divisor", "$divisor", "--load", $Load, "--log", $logFile, "--ready", $readyFile)
+    $fixArgs = if ($SpanRegion) { @("--span", "--region", $SpanRegion) } else { @("--size", $Size) }
+    $fixArgs += @("--seconds", "$fixSeconds", "--divisor", "$divisor", "--load", $Load, "--log", $logFile, "--ready", $readyFile)
     if ($AllowPrimary) { $fixArgs += "--allow-primary" }
     $fixture = Start-Process -FilePath $FixtureExe -ArgumentList $fixArgs -PassThru -WindowStyle Hidden -RedirectStandardOutput $fixOut
     $t0 = Get-Date

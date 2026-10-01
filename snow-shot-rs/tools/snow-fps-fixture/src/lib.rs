@@ -101,6 +101,8 @@ pub struct Options {
     pub ready: Option<PathBuf>,
     /// 显式允许占用主屏（默认拒绝，仅单屏机器等场景使用）。
     pub allow_primary: bool,
+    /// 跨屏模式：窗口区域可横跨多块显示器（须同时给 `--allow-primary` 与 `--region`）。
+    pub span: bool,
 }
 
 impl Default for Options {
@@ -115,6 +117,7 @@ impl Default for Options {
             log: None,
             ready: None,
             allow_primary: false,
+            span: false,
         }
     }
 }
@@ -151,6 +154,7 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
             "--check" => o.mode = Mode::Check,
             "--dxgi-list" => o.mode = Mode::DxgiList,
             "--allow-primary" => o.allow_primary = true,
+            "--span" => o.span = true,
             "--region" => {
                 let [x, y, w, h] = parse_ints::<4>(&value("--region")?).ok_or("--region 需为 x,y,w,h")?;
                 let (Ok(x), Ok(y), Ok(w), Ok(h)) =
@@ -193,6 +197,9 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
     }
     if o.region.is_some() && o.size.is_some() {
         return Err("--region 与 --size 不能同时使用".into());
+    }
+    if o.span && (!o.allow_primary || o.region.is_none()) {
+        return Err("--span 必须同时给出 --allow-primary 与 --region".into());
     }
     Ok(o)
 }
@@ -252,6 +259,40 @@ pub fn resolve_region(monitor: &MonitorInfo, options: &Options) -> Result<Rect, 
     };
     if !rect.inside(&monitor.rect) {
         return Err(format!("区域 {rect:?} 越出 {} 的范围 {:?}，中止", monitor.device, monitor.rect));
+    }
+    Ok(rect)
+}
+
+/// 跨屏模式下取窗口区域：必须显式给出，且被所有显示器的并集完整覆盖（不留黑洞）。
+///
+/// # 参数
+/// - `monitors`：枚举到的全部显示器（互不重叠）。
+/// - `options`：命令行选项（须含 `region`）。
+///
+/// # 返回
+/// 窗口矩形；未给区域或区域有一部分不在任何显示器上返回原因。
+///
+/// # 示例
+/// ```
+/// use snow_fps_fixture::{parse_args, resolve_span_region, MonitorInfo, Rect};
+/// let m = |x, p| MonitorInfo { device: "d".into(), rect: Rect { x, y: 0, w: 2560, h: 1440 }, primary: p };
+/// let list = [m(0, true), m(2560, false)];
+/// let args: Vec<String> = "--span --allow-primary --region 1280,0,2560,1440".split(' ').map(String::from).collect();
+/// let o = parse_args(&args).unwrap();
+/// assert_eq!(resolve_span_region(&list, &o).unwrap().w, 2560);
+/// ```
+pub fn resolve_span_region(monitors: &[MonitorInfo], options: &Options) -> Result<Rect, String> {
+    let rect = options.region.ok_or_else(|| "跨屏模式必须给 --region".to_string())?;
+    let covered: i64 = monitors
+        .iter()
+        .map(|m| {
+            let w = (i64::from(rect.x) + i64::from(rect.w)).min(i64::from(m.rect.x) + i64::from(m.rect.w)) - i64::from(rect.x).max(i64::from(m.rect.x));
+            let h = (i64::from(rect.y) + i64::from(rect.h)).min(i64::from(m.rect.y) + i64::from(m.rect.h)) - i64::from(rect.y).max(i64::from(m.rect.y));
+            w.max(0) * h.max(0)
+        })
+        .sum();
+    if rect.w == 0 || rect.h == 0 || covered != i64::from(rect.w) * i64::from(rect.h) {
+        return Err(format!("区域 {rect:?} 没有被现有显示器完整覆盖，中止"));
     }
     Ok(rect)
 }
@@ -374,6 +415,19 @@ mod tests {
         assert!(pick_target(&[mon("b", 2560, false)], true).is_err());
         assert!(parse_args(&args("--check --allow-primary")).unwrap().allow_primary);
         assert!(!parse_args(&args("--check")).unwrap().allow_primary);
+    }
+
+    /// 跨屏区域：被两块屏完整覆盖才放行，越出并集或缺开关都拒绝。
+    #[test]
+    fn span_region_must_be_covered() {
+        let list = [mon("a", 0, true), mon("b", 2560, false)];
+        let ok = parse_args(&args("--span --allow-primary --region 1280,0,2560,1440")).unwrap();
+        assert_eq!(resolve_span_region(&list, &ok).unwrap(), Rect { x: 1280, y: 0, w: 2560, h: 1440 });
+        let out = parse_args(&args("--span --allow-primary --region 3000,0,3000,1440")).unwrap();
+        assert!(resolve_span_region(&list, &out).is_err());
+        assert!(resolve_span_region(&list[..1], &ok).is_err());
+        assert!(parse_args(&args("--span --region 0,0,10,10")).is_err());
+        assert!(parse_args(&args("--span --allow-primary")).is_err());
     }
 
     /// 区域必须落在目标屏内；默认整屏；size 锚定左上角。
