@@ -9,7 +9,7 @@ mod win;
 
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use snow_fps_fixture::content::{Load, build_scene};
+use snow_fps_fixture::content::{Load, build_scene_at};
 use snow_fps_fixture::{
     FrameRecord, MAX_SECONDS, Mode, MonitorInfo, Options, frames_to_csv, parse_args, pick_target, resolve_region,
     resolve_span_region, summarize,
@@ -38,12 +38,14 @@ fn print_monitors(monitors: &[MonitorInfo]) {
 /// - `renderer`：渲染器。
 /// - `options`：命令行选项。
 /// - `width`、`height`：画面尺寸。
+/// - `origin`：窗口左上角桌面坐标（网格负载用）。
 fn run_loop(
     window: &win::FixtureWindow,
     renderer: &mut gpu::Renderer,
     options: &Options,
     width: u32,
     height: u32,
+    origin: (i32, i32),
 ) -> Result<Vec<FrameRecord>, String> {
     let start = Instant::now();
     let seconds = options.seconds.min(MAX_SECONDS);
@@ -60,7 +62,7 @@ fn run_loop(
             pending_vsyncs = options.divisor;
         }
         pending_vsyncs -= 1;
-        let scene = build_scene(width, height, options.load, seq);
+        let scene = build_scene_at(width, height, options.load, seq, origin);
         renderer.draw_and_present(&scene, seq)?;
         if pending_vsyncs + 1 == options.divisor {
             // 只在序号首次提交时记录一次，时间戳取 Present 返回时刻
@@ -154,7 +156,7 @@ fn main() {
             std::process::exit(EXIT_FAILED);
         }
     };
-    let result = run_loop(&window, &mut renderer, &options, rect.w, rect.h);
+    let result = run_loop(&window, &mut renderer, &options, rect.w, rect.h, (rect.x, rect.y));
     drop(renderer);
     drop(window);
     let records = match result {

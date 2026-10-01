@@ -20,6 +20,12 @@ pub const NOISE_SEED: u32 = 0x9E37_79B9;
 const LIGHT_BACKGROUND: [f32; 4] = [0.125, 0.125, 0.125, 1.0];
 /// 轻负载方块色。
 const LIGHT_BOX: [f32; 4] = [0.88, 0.63, 0.125, 1.0];
+/// 网格竖线的桌面绝对 x 间距（像素）。
+pub const GRID_PITCH: i32 = 64;
+/// 网格背景色（纯黑）。
+const GRID_BACKGROUND: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
+/// 网格线颜色（纯白）。
+const GRID_LINE: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 
 /// 背景负载模式。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -30,13 +36,15 @@ pub enum Load {
     Stripes,
     /// 全屏条纹 + 逐帧随机噪声块（编码最重）。
     Noise,
+    /// 静态网格：黑底，桌面绝对 x 为 64 整数倍处 1px 白竖线，窗口垂直中线 1px 白横线（用于接缝/光标验证）。
+    Grid,
 }
 
 impl Load {
     /// 解析命令行取值。
     ///
     /// # 参数
-    /// - `text`：`light` / `stripes` / `noise`。
+    /// - `text`：`light` / `stripes` / `noise` / `grid`。
     ///
     /// # 返回
     /// 对应模式；未知取值返回 `None`。
@@ -45,6 +53,7 @@ impl Load {
             "light" => Some(Self::Light),
             "stripes" => Some(Self::Stripes),
             "noise" => Some(Self::Noise),
+            "grid" => Some(Self::Grid),
             _ => None,
         }
     }
@@ -95,9 +104,51 @@ fn palette(idx: usize) -> [f32; 4] {
 /// assert_ne!(a, b);
 /// ```
 pub fn build_scene(width: u32, height: u32, load: Load, frame: u32) -> Scene {
+    build_scene_at(width, height, load, frame, (0, 0))
+}
+
+/// 同 [`build_scene`]，另给出窗口左上角的桌面坐标（`grid` 负载据此把竖线画在桌面绝对坐标上）。
+///
+/// # 参数
+/// - `width`、`height`：画面尺寸。
+/// - `load`：负载模式。
+/// - `frame`：帧序号。
+/// - `origin`：窗口左上角桌面坐标 `(x, y)`。
+///
+/// # 返回
+/// 场景描述；`grid` 的内容与 `frame` 无关。
+///
+/// # 示例
+/// ```
+/// use snow_fps_fixture::content::{build_scene_at, Load};
+/// let s = build_scene_at(1920, 1080, Load::Grid, 1, (1600, 0));
+/// assert!(s.fills[1].rects.contains(&(960, 67, 961, 1080)));
+/// ```
+pub fn build_scene_at(width: u32, height: u32, load: Load, frame: u32, origin: (i32, i32)) -> Scene {
     let (w, h) = (width as i32, height as i32);
     let top = bar_height(height) as i32;
     match load {
+        Load::Grid => {
+            // 竖线：窗口内所有桌面 x 为 GRID_PITCH 整数倍的列；横线：窗口垂直中线
+            let first = (origin.0 + w - 1).div_euclid(GRID_PITCH) * GRID_PITCH;
+            let mut lines: Vec<Span> = Vec::new();
+            let mut x = origin.0.div_euclid(GRID_PITCH) * GRID_PITCH;
+            if x < origin.0 {
+                x += GRID_PITCH;
+            }
+            while x <= first {
+                lines.push((x - origin.0, top, x - origin.0 + 1, h));
+                x += GRID_PITCH;
+            }
+            lines.push((0, h / 2, w, h / 2 + 1));
+            Scene {
+                fills: vec![
+                    Fill { color: GRID_BACKGROUND, rects: vec![(0, top, w, h)] },
+                    Fill { color: GRID_LINE, rects: lines },
+                ],
+                noise: None,
+            }
+        }
         Load::Light => {
             let size = BOX_SIZE.min(w).min(h - top).max(1);
             let span_x = (w - size).max(1);
@@ -206,7 +257,7 @@ mod tests {
     /// 极小画面不越界不崩溃。
     #[test]
     fn tiny_frame_is_safe() {
-        for load in [Load::Light, Load::Stripes, Load::Noise] {
+        for load in [Load::Light, Load::Stripes, Load::Noise, Load::Grid] {
             let s = build_scene(40, 40, load, 3);
             assert!(!s.fills.is_empty());
         }
@@ -224,9 +275,34 @@ mod tests {
         assert_ne!(state, 0);
     }
 
+    /// 网格：竖线落在桌面绝对 64 倍数列，窗口跨接缝时接缝列有线，且内容不随帧变化。
+    #[test]
+    fn grid_lines_use_desktop_coordinates() {
+        let a = build_scene_at(1920, 1080, Load::Grid, 1, (1600, 0));
+        let b = build_scene_at(1920, 1080, Load::Grid, 99, (1600, 0));
+        assert_eq!(a, b);
+        let lines = &a.fills[1].rects;
+        let cols: Vec<i32> = lines.iter().filter(|r| r.3 == 1080).map(|r| r.0).collect();
+        // 1600=64*25 → 输出列 0 有线；2560=64*40 → 输出列 960 有线；末列 1919 对应桌面 3519，最后一条在 3520-64 = 3456
+        assert_eq!(cols.first(), Some(&0));
+        assert!(cols.contains(&960));
+        assert_eq!(cols.last(), Some(&1856));
+        assert!(cols.iter().all(|c| (c + 1600) % GRID_PITCH == 0));
+        assert!(lines.contains(&(0, 540, 1920, 541)));
+    }
+
+    /// 网格：窗口原点不在 64 倍数时，首条线按桌面坐标偏移。
+    #[test]
+    fn grid_offset_origin() {
+        let s = build_scene_at(200, 200, Load::Grid, 1, (10, 0));
+        let cols: Vec<i32> = s.fills[1].rects.iter().filter(|r| r.3 == 200).map(|r| r.0).collect();
+        assert_eq!(cols, vec![54, 118, 182]);
+    }
+
     /// 模式解析。
     #[test]
     fn load_parse() {
+        assert_eq!(Load::parse("grid"), Some(Load::Grid));
         assert_eq!(Load::parse("noise"), Some(Load::Noise));
         assert_eq!(Load::parse("x"), None);
     }

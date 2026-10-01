@@ -188,7 +188,7 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
             }
             "--load" => {
                 let text = value("--load")?;
-                o.load = Load::parse(&text).ok_or("--load 需为 light|stripes|noise")?;
+                o.load = Load::parse(&text).ok_or("--load 需为 light|stripes|noise|grid")?;
             }
             "--log" => o.log = Some(PathBuf::from(value("--log")?)),
             "--ready" => o.ready = Some(PathBuf::from(value("--ready")?)),
