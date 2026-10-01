@@ -30,6 +30,9 @@ for q in ("int8", "int4", "int8wo"):
         for kind in ("", "-oracle", "-ccm"):
             JOBS[f"nllb600m-pruned-{v}{kind}-{q}"] = ("nllb-pruned", f"{MODELS}/nllb600m-pruned-{v}{kind}-fp32", pairs)
     JOBS[f"nllb600m-orig-{q}"] = ("nllb", None, "all")
+# int2 探针与 HQQ int4 对照（只针对 un6-ccm）
+for t in ("int2-rtn-b32", "int2-rtn-b16", "int2-hqq-b32", "int2-hqq-b16", "int4-hqq-b32"):
+    JOBS[f"nllb600m-pruned-un6-ccm-{t}"] = ("nllb-pruned", f"{MODELS}/nllb600m-pruned-un6-ccm-fp32", "un6")
 # 主 14 语言版的"初版"目录名里没有 "-ccm"/"-oracle"，上面的循环已覆盖；目录与作业名保持一致
 PS_CHECK = r"""
 $s = (Get-Counter '\Processor(_Total)\% Processor Time' -SampleInterval 1 -MaxSamples 5).CounterSamples | ForEach-Object { [math]::Round($_.CookedValue,1) }
@@ -71,7 +74,10 @@ def build_cmd(name, mode, config):
     cmd = [PY, f"{HERE}/eval_quant.py", "--dir", f"{MODELS}/{name}", "--kind", kind, "--name", name, "--config", config]
     if pruned:
         cmd += ["--pruned-dir", pruned]
-    if mode == "quality":
+    if mode == "quick":  # 快速止损：2 个语向，译文写进结果目录
+        out_json = f"{QUANT}/metrics/{name}.quick.json"
+        cmd += ["--pairs", "perf", "--threads", "6"]
+    elif mode == "quality":
         out_json = f"{QUANT}/metrics/{name}.quality.json"
         cmd += ["--pairs", pairs, "--threads", "6"]
     else:
@@ -128,17 +134,17 @@ def main():
     """命令行入口：quality 并行（-P），perf 串行。"""
     from concurrent.futures import ThreadPoolExecutor
     ap = argparse.ArgumentParser()
-    ap.add_argument("mode", choices=["quality", "perf"])
+    ap.add_argument("mode", choices=["quality", "perf", "quick"])
     ap.add_argument("--jobs", nargs="+", required=True)
     ap.add_argument("--configs", nargs="+", default=["default", "tight"], help="仅 perf 遍使用")
     ap.add_argument("-P", type=int, default=3, help="质量遍并发数")
     ap.add_argument("--force", action="store_true")
     a = ap.parse_args()
-    if a.mode == "quality":
+    if a.mode in ("quality", "quick"):
         def task(name):
             while free_gb() < 6:  # 每个进程约占 1.5~3GB，空闲不足就等
                 time.sleep(30)
-            run_one(name, "quality", "default", a.force)
+            run_one(name, a.mode, "default", a.force)
         with ThreadPoolExecutor(a.P) as ex:
             list(ex.map(task, a.jobs))
     else:

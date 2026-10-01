@@ -28,6 +28,7 @@ FLORES = "E:/workspaces/Cisox/build/flores/flores200_dataset"
 ORIG_DIR = "E:/models/translate-eval/nllb-200-distilled-600M"
 BEAMS = 4
 MAX_NEW = 256
+MAXNEW = [MAX_NEW]  # 可被 --max-new 覆盖（快速止损检查用）
 N = 30
 CORE11 = [("zho_Hans", "eng_Latn"), ("eng_Latn", "zho_Hans"), ("eng_Latn", "fra_Latn"), ("fra_Latn", "eng_Latn"),
           ("rus_Cyrl", "eng_Latn"), ("arb_Arab", "eng_Latn"), ("eng_Latn", "spa_Latn"),
@@ -139,7 +140,7 @@ def load_model(a, so):
         def tr(text, src, tgt):
             b = tok([f">>{MARIAN_ID[tgt]}<< {text}"], return_tensors="pt", padding=True)
             with torch.inference_mode():
-                out = model.generate(**b, num_beams=BEAMS, max_new_tokens=MAX_NEW)
+                out = model.generate(**b, num_beams=BEAMS, max_new_tokens=MAXNEW[0])
             return repair_byte_literals(tok.batch_decode(out, skip_special_tokens=True)[0])
     elif a.kind == "nllb":
         from transformers import NllbTokenizer
@@ -150,7 +151,7 @@ def load_model(a, so):
             b = tok([text], return_tensors="pt", padding=True)
             with torch.inference_mode():
                 out = model.generate(**b, forced_bos_token_id=tok.convert_tokens_to_ids(tgt),
-                                     num_beams=BEAMS, max_new_tokens=MAX_NEW)
+                                     num_beams=BEAMS, max_new_tokens=MAXNEW[0])
             return tok.batch_decode(out, skip_special_tokens=True)[0]
     else:
         from prune_nllb_vocab import PrunedNllbTokenizer
@@ -159,7 +160,7 @@ def load_model(a, so):
         def tr(text, src, tgt):
             b = tok.encode([text], src)
             with torch.inference_mode():
-                out = model.generate(**b, forced_bos_token_id=tok.lang_id(tgt), num_beams=BEAMS, max_new_tokens=MAX_NEW)
+                out = model.generate(**b, forced_bos_token_id=tok.lang_id(tgt), num_beams=BEAMS, max_new_tokens=MAXNEW[0])
             return tok.decode(out.numpy())[0]
     return tr
 
@@ -177,10 +178,12 @@ def main():
     ap.add_argument("--out-json", required=True, help="metrics.json 输出路径")
     ap.add_argument("--hyp-root", help="译文输出根目录（默认 results/<name>；tight 配置建议改到临时目录）")
     ap.add_argument("--limit", type=int, default=N)
+    ap.add_argument("--max-new", type=int, default=MAX_NEW)
     ap.add_argument("--opt-level", choices=["all", "extended", "basic", "disable"], default="all")
     ap.add_argument("--entry", action="append", default=[], help="额外 ORT 会话配置项 key=value，可重复")
     ap.add_argument("--threads", type=int, default=0, help="default 配置下的 intra_op 线程数（0=自动）")
     a = ap.parse_args()
+    MAXNEW[0] = a.max_new
 
     t_imp = time.perf_counter()
     import numpy  # noqa: F401

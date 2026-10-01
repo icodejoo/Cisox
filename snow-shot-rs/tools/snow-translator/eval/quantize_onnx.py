@@ -38,17 +38,20 @@ def q_int4(src, dst, block=32, algo="rtn", gather_bits=8, bits=4):
     ops = ("MatMul", "Gather") if gather_bits == 4 else ("MatMul",)
     if bits == 8:  # RTN 路径在 ORT 里写死 4 位，8 位权重只能走 DEFAULT 算法
         cfg = None
-    elif algo == "rtn":
-        cfg = m.RTNWeightOnlyQuantConfig(ops, bits=4) if "bits" in m.RTNWeightOnlyQuantConfig.__init__.__code__.co_varnames else m.RTNWeightOnlyQuantConfig()
-    else:
-        cfg = m.HQQWeightOnlyQuantConfig(block_size=block, bits=4)
+    elif algo == "rtn":  # ORT 的 RTN 路径只支持 4/8 位
+        cfg = m.RTNWeightOnlyQuantConfig()
+    else:  # hqq；minmax = 关掉 HQQ 的权重优化，即非对称 min-max 取整（2 位 RTN 的替代，ORT 自带 RTN 不支持 2 位）
+        cfg = m.HQQWeightOnlyQuantConfig(block_size=block, bits=bits)
+        if algo == "minmax":
+            orig = m.HQQWeightOnlyQuantizer.quantize_internal
+            m.HQQWeightOnlyQuantizer.quantize_internal = lambda self, *a, **k: orig(self, *a, **{**k, "optimize": False})
     # 先量化嵌入 Gather（int8），再做 MatMulNBits：反过来时第二步的形状推断找不到 com.microsoft 域
     mid = src
     if gather_bits == 8:
         mid = dst + ".g8.onnx"
         q_int8_gather_only(src, mid)
     model = onnx.load(mid)
-    qz = m.MatMulNBitsQuantizer(model, bits=bits, block_size=block, is_symmetric=True, op_types_to_quantize=ops,
+    qz = m.MatMulNBitsQuantizer(model, bits=bits, block_size=block, is_symmetric=(algo == "rtn"), op_types_to_quantize=ops,
                                 algo_config=cfg)
     qz.process()
     qz.model.save_model_to_file(dst, use_external_data_format=False)
@@ -96,7 +99,7 @@ def quantize_file(mode, s, d, a):
     if mode == "int8":
         q_int8(s, d)
     else:
-        q_int4(s, d, a.block, a.algo, a.gather_bits, bits=8 if mode == "int8wo" else 4)
+        q_int4(s, d, a.block, a.algo, a.gather_bits, bits=a.bits or (8 if mode == "int8wo" else 4))
 
 
 def main():
@@ -105,8 +108,9 @@ def main():
     ap.add_argument("--src", required=True)
     ap.add_argument("--dst", required=True)
     ap.add_argument("--mode", choices=["int8", "int4", "int8wo"], required=True)
-    ap.add_argument("--algo", choices=["rtn", "hqq"], default="rtn")
+    ap.add_argument("--algo", choices=["rtn", "hqq", "minmax"], default="rtn")
     ap.add_argument("--block", type=int, default=32)
+    ap.add_argument("--bits", type=int, choices=[2, 4, 8], default=None, help="MatMulNBits 位宽（int4 模式下可改成 2）")
     ap.add_argument("--gather-bits", type=int, choices=[0, 4, 8], default=8)
     a = ap.parse_args()
     from optimum.onnx.graph_transformations import merge_decoders
