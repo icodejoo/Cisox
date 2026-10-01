@@ -21,7 +21,7 @@ use windows::Win32::Graphics::Dxgi::{
 };
 use windows::core::Interface;
 
-use crate::frametrace::{Thread, TraceBuf, code};
+use crate::frametrace::{IterStage, Thread, TraceBuf, code};
 use crate::geom::{Rect, scale_coordinate};
 use crate::pipeline::{CaptureDiag, CaptureFault, CaptureSource, CaptureStats, Captured};
 use crate::timeline::QpcAnchor;
@@ -318,11 +318,14 @@ impl SpanCapture {
         Some(cursor)
     }
 
-    /// 把设备 A 上已记录的命令提交给 GPU。
-    fn flush(&self) {
+    /// 把设备 A 上已记录的命令提交给 GPU；`timed` 为真时返回等设备锁的耗时，否则不读时钟、返回零。
+    fn flush(&self, timed: bool) -> Duration {
+        let lock_started = timed.then(Instant::now);
         let _lock = self.device.lock();
+        let waited = lock_started.map_or(Duration::ZERO, |s| s.elapsed());
         // SAFETY: 持有设备锁；Flush 只提交已记录的命令。
         unsafe { self.device.context().Flush() };
+        waited
     }
 
     /// 处理第 `index` 路输出刚取到的一次更新：复制进该路的空闲槽，并和其余各路的最近一块组成一帧。
@@ -360,13 +363,21 @@ impl SpanCapture {
             }
             return Ok(None);
         };
-        copy_into_slot(&self.device, &self.context4, &slot, &source, &self.outputs[index].crop)?;
+        let traced = self.trace.enabled();
+        let lock_wait = copy_into_slot(&self.device, &self.context4, &slot, &source, &self.outputs[index].crop, traced)?;
         if self.copy_ms.len() < DIAG_LIMIT {
             self.copy_ms.push(copy_started.elapsed().as_secs_f32() * 1000.0);
         }
+        if traced {
+            self.trace.iter_add(IterStage::Copy, copy_started.elapsed());
+            self.trace.iter_add(IterStage::Lock, lock_wait);
+        }
         // 复制一记录完就立刻释放桌面帧，光标采样与 Flush 都放到释放之后
         drop(guard);
-        self.flush();
+        let flush_started = self.trace.mark();
+        let flush_wait = self.flush(traced);
+        self.trace.iter_since(IterStage::Copy, flush_started);
+        self.trace.iter_add(IterStage::Lock, flush_wait);
         self.outputs[index].current = Some(slot);
         let tiles: Arc<[Tile]> = self.outputs.iter().filter_map(|o| o.current.as_ref().map(|slot| Tile { slot: Arc::clone(slot), rect: o.rect })).collect();
         let cursor = self.sample_cursor();
@@ -383,15 +394,14 @@ impl SpanCapture {
     }
 }
 
-impl CaptureSource for SpanCapture {
-    type Frame = GpuFrame;
-
-    /// 零超时轮流取各路输出，任一路有更新就出帧；全部无更新则亚毫秒睡眠后重试，直到超时。
-    fn next(&mut self, timeout: Duration, want: bool) -> Result<Option<Captured<GpuFrame>>, CaptureFault> {
+impl SpanCapture {
+    /// 轮询取帧主体（`next` 的实现）：每圈开始/睡眠前由慢迭代追踪计时，返回前的收尾由 `next` 负责。
+    fn next_poll(&mut self, timeout: Duration, want: bool) -> Result<Option<Captured<GpuFrame>>, CaptureFault> {
         let deadline = Instant::now() + timeout;
         let count = self.outputs.len();
         loop {
             let now = Instant::now();
+            self.trace.iter_begin(now, u8::MAX);
             if let Some(prev) = self.last_acquire.replace(now)
                 && self.acquire_gap_ms.len() < DIAG_LIMIT
             {
@@ -401,8 +411,10 @@ impl CaptureSource for SpanCapture {
                 let index = (self.next_output + step) % count;
                 let mut info = DXGI_OUTDUPL_FRAME_INFO::default();
                 let mut resource: Option<IDXGIResource> = None;
+                let acquire_started = self.trace.mark();
                 // SAFETY: 输出指针指向局部变量。
                 let call = unsafe { self.outputs[index].duplication.AcquireNextFrame(0, &mut info, &mut resource) };
+                self.trace.iter_since(IterStage::Acquire, acquire_started);
                 match call {
                     Ok(()) => {
                         self.next_output = (index + 1) % count;
@@ -421,8 +433,20 @@ impl CaptureSource for SpanCapture {
                 self.trace.idle(u8::MAX, timeout);
                 return Ok(None);
             }
+            self.trace.iter_sleep(POLL_SLEEP);
             std::thread::sleep(POLL_SLEEP);
         }
+    }
+}
+
+impl CaptureSource for SpanCapture {
+    type Frame = GpuFrame;
+
+    /// 零超时轮流取各路输出，任一路有更新就出帧；全部无更新则亚毫秒睡眠后重试，直到超时。
+    fn next(&mut self, timeout: Duration, want: bool) -> Result<Option<Captured<GpuFrame>>, CaptureFault> {
+        let result = self.next_poll(timeout, want);
+        self.trace.iter_finish();
+        result
     }
 
     /// 只重建权限丢失的那一路，其余保持。

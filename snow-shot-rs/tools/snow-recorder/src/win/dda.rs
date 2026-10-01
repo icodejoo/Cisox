@@ -25,7 +25,7 @@ use windows::Win32::Graphics::Dxgi::{
 };
 use windows::core::{Interface, PCWSTR};
 
-use crate::frametrace::{Thread, TraceBuf, code};
+use crate::frametrace::{IterStage, Thread, TraceBuf, code};
 use crate::geom::Rect;
 use crate::pipeline::{CaptureDiag, CaptureFault, CaptureSource, CaptureStats, Captured};
 use crate::settings::{AdapterInfo, EncoderPreference, rank_adapters};
@@ -269,11 +269,11 @@ impl DdaCapture {
             return Ok(None);
         };
         let copy_started = Instant::now();
-        self.copy_into(&slot, &source)?;
+        self.copy_into(&slot, &source, false)?;
         if self.copy_ms.len() < DIAG_LIMIT {
             self.copy_ms.push(copy_started.elapsed().as_secs_f32() * 1000.0);
         }
-        self.flush();
+        self.flush(false);
         // 复制命令已提交，帧可以归还帧池（GPU 侧顺序由驱动保证）
         drop(frame);
         let cursor = self.sample_cursor();
@@ -411,16 +411,19 @@ impl DdaCapture {
         }
     }
 
-    /// 把设备 A 上已记录的命令提交给 GPU。
-    fn flush(&self) {
+    /// 把设备 A 上已记录的命令提交给 GPU；`timed` 为真时返回等设备锁的耗时，否则不读时钟、返回零。
+    fn flush(&self, timed: bool) -> Duration {
+        let lock_started = timed.then(Instant::now);
         let _lock = self.device.lock();
+        let waited = lock_started.map_or(Duration::ZERO, |s| s.elapsed());
         // SAFETY: 持有设备锁；Flush 只提交已记录的命令。
         unsafe { self.device.context().Flush() };
+        waited
     }
 
-    /// 在设备 A 上把桌面选区复制进共享槽。
-    fn copy_into(&self, slot: &SharedSlot, source: &ID3D11Texture2D) -> Result<(), CaptureFault> {
-        copy_into_slot(&self.device, &self.context4, slot, source, &self.crop)
+    /// 在设备 A 上把桌面选区复制进共享槽；`timed` 含义同 [`copy_into_slot`]。
+    fn copy_into(&self, slot: &SharedSlot, source: &ID3D11Texture2D, timed: bool) -> Result<Duration, CaptureFault> {
+        copy_into_slot(&self.device, &self.context4, slot, source, &self.crop, timed)
     }
 }
 
@@ -432,14 +435,21 @@ impl DdaCapture {
 /// - `slot`：目标槽（调用时不能有其他持有者）。
 /// - `source`：源纹理（设备 A 上）。
 /// - `crop`：源里要复制的区域。
+/// - `timed`：为真时统计等设备锁的耗时（慢迭代追踪用），否则不读时钟。
+///
+/// # 返回
+/// 等设备锁的耗时（`timed` 为假时为零）。
 pub(crate) fn copy_into_slot(
     device: &SharedDevice,
     context4: &ID3D11DeviceContext4,
     slot: &SharedSlot,
     source: &ID3D11Texture2D,
     crop: &D3D11_BOX,
-) -> Result<(), CaptureFault> {
+    timed: bool,
+) -> Result<Duration, CaptureFault> {
+    let lock_started = timed.then(Instant::now);
     let _lock = device.lock();
+    let waited = lock_started.map_or(Duration::ZERO, |s| s.elapsed());
     let last = slot.value();
     let fail = |what: &str, e: windows::core::Error| CaptureFault::Other(format!("{what}: {e}"));
     // SAFETY: 持有设备锁；纹理与栅栏都属于设备 A（或其共享视图），槽此刻没有其他持有者。
@@ -451,7 +461,7 @@ pub(crate) fn copy_into_slot(
         context4.Signal(&slot.fence_a, last + 1).map_err(|e| fail("栅栏 Signal 失败", e))?;
     }
     slot.set_value(last + 1);
-    Ok(())
+    Ok(waited)
 }
 
 /// 枚举所有 DXGI 适配器及其描述（含软件适配器，由选择逻辑按厂商号过滤）。
@@ -489,11 +499,9 @@ pub(crate) fn create_device_pair(preference: EncoderPreference) -> Result<(Share
     Ok((a, b))
 }
 
-impl CaptureSource for DdaCapture {
-    type Frame = GpuFrame;
-
-    /// 零超时取帧 + 亚毫秒睡眠，直到有新桌面内容/光标移动或超时。
-    fn next(&mut self, timeout: Duration, want: bool) -> Result<Option<Captured<GpuFrame>>, CaptureFault> {
+impl DdaCapture {
+    /// 取帧轮询主体（`next` 的实现）：每圈开始/睡眠前由慢迭代追踪计时，返回前的收尾由 `next` 负责。
+    fn next_poll(&mut self, timeout: Duration, want: bool) -> Result<Option<Captured<GpuFrame>>, CaptureFault> {
         if self.wgc.is_some() {
             return self.next_wgc(timeout, want);
         }
@@ -502,6 +510,7 @@ impl CaptureSource for DdaCapture {
         let deadline = Instant::now() + timeout;
         loop {
             let now = Instant::now();
+            self.trace.iter_begin(now, 0);
             if let Some(prev) = self.last_acquire.replace(now)
                 && self.acquire_gap_ms.len() < DIAG_LIMIT
             {
@@ -509,7 +518,9 @@ impl CaptureSource for DdaCapture {
             }
             // SAFETY: 输出指针指向局部变量。
             let call = unsafe { self.duplication.AcquireNextFrame(0, &mut info, &mut resource) };
-            let took = now.elapsed().as_secs_f32() * 1000.0;
+            let took_dur = now.elapsed();
+            self.trace.iter_add(IterStage::Acquire, took_dur);
+            let took = took_dur.as_secs_f32() * 1000.0;
             if took > 1.0 && self.slow_acquire_ms.len() < DIAG_LIMIT {
                 self.slow_acquire_ms.push(took);
             }
@@ -520,6 +531,7 @@ impl CaptureSource for DdaCapture {
                         self.trace.idle(0, timeout);
                         return Ok(None);
                     }
+                    self.trace.iter_sleep(POLL_SLEEP);
                     std::thread::sleep(POLL_SLEEP);
                 }
                 Err(e) if e.code() == DXGI_ERROR_ACCESS_LOST => {
@@ -561,13 +573,21 @@ impl CaptureSource for DdaCapture {
             }
             return Ok(None);
         };
-        self.copy_into(&slot, &source)?;
+        let traced = self.trace.enabled();
+        let lock_wait = self.copy_into(&slot, &source, traced)?;
         if self.copy_ms.len() < DIAG_LIMIT {
             self.copy_ms.push(copy_started.elapsed().as_secs_f32() * 1000.0);
         }
+        if traced {
+            self.trace.iter_add(IterStage::Copy, copy_started.elapsed());
+            self.trace.iter_add(IterStage::Lock, lock_wait);
+        }
         // 复制一记录完就立刻释放桌面帧（持有越久，下一次呈现越容易被 DXGI 合并），光标采样与 Flush 都放到释放之后
         drop(guard);
-        self.flush();
+        let flush_started = self.trace.mark();
+        let flush_wait = self.flush(traced);
+        self.trace.iter_since(IterStage::Copy, flush_started);
+        self.trace.iter_add(IterStage::Lock, flush_wait);
         let cursor = self.sample_cursor();
         let present = match self.anchor {
             Some(a) => a.to_instant(info.LastPresentTime),
@@ -578,6 +598,17 @@ impl CaptureSource for DdaCapture {
         self.stats.frames += 1;
         self.latest = Some(captured.clone());
         Ok(Some(captured))
+    }
+}
+
+impl CaptureSource for DdaCapture {
+    type Frame = GpuFrame;
+
+    /// 零超时取帧 + 亚毫秒睡眠，直到有新桌面内容/光标移动或超时。
+    fn next(&mut self, timeout: Duration, want: bool) -> Result<Option<Captured<GpuFrame>>, CaptureFault> {
+        let result = self.next_poll(timeout, want);
+        self.trace.iter_finish();
+        result
     }
 
     /// 重建桌面复制（权限丢失后）。

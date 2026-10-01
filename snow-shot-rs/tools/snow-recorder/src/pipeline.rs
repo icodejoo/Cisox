@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 use snow_cursor::AttachedCursorSample;
 
 use crate::frametrace::{self, Thread, TraceBuf, code};
-use crate::os::{TimerGuard, raise_thread_priority};
+use crate::os::{TimerGuard, apply_capture_sched_from_env};
 use crate::timeline::{NANOS_PER_SEC, PhaseTracker, TickClock, TimedQueue, Timeline, slot_of};
 
 /// 合成线程等待采集事件的最长时间。
@@ -356,7 +356,8 @@ pub fn slot_time(slot: u64, fps: u32) -> Duration {
 
 /// 采集线程主循环：阻塞取帧并转交合成线程，会话失效时重建。
 fn capture_loop<C: CaptureSource>(mut source: C, tx: Sender<CaptureMsg<C::Frame>>, shared: Arc<CaptureShared>) -> CaptureDiag {
-    raise_thread_priority();
+    // 调度方式由环境变量决定（缺省与历史一致：HIGHEST）；守卫持有到线程退出，退出 MMCSS 须在本线程完成
+    let _sched = apply_capture_sched_from_env();
     let mut trace = TraceBuf::new(Thread::Capture);
     let mut recreates = 0;
     while !shared.stop.load(Ordering::Acquire) {

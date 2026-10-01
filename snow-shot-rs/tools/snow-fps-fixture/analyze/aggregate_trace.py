@@ -9,7 +9,9 @@
 
 输出每个档位一行：
     过线数、失败轮的归因类别分布（按被丢序号计）、受干扰轮数、剔除受干扰轮后的过线率、
-    失败轮的被丢序号有多少落在停顿窗口内（以及其中多环节同时停顿的）。
+    失败轮的被丢序号有多少落在停顿窗口内（以及其中多环节同时停顿的）；
+    失败轮被丢序号的"停顿成因"分布与所有轮取帧间隔窗口的成因分布（来自 trace_join 的 slow_iter 归因，见 trace_join.CAUSE_TEXT）；
+    受控压力轮（env.json 的 controlled_load，由 run-fps-test.ps1 -Hog 产生）单独计数，不算受干扰。
 """
 
 import argparse
@@ -100,6 +102,10 @@ def make_run(run_dir: str, summary: dict, env: Optional[dict]) -> dict:
         "tier": tier_of(run_dir, summary, env),
         "passed": product.get("passed"),
         "interfered": None if env is None or env.get("interfered") is None else bool(env["interfered"]),
+        "controlled_load": bool((env or {}).get("controlled_load")),
+        "hog_cores": int((env or {}).get("hog_cores") or 0),
+        "lost_stall_causes": summary.get("lost_stall_causes") or {},
+        "window_stall_causes": (summary.get("stalls") or {}).get("acquire_causes") or {},
         "categories": summary.get("categories") or {},
         "lost": (summary.get("counts") or {}).get("lost", 0),
         "lost_in_stall": stall.get("any", 0),
@@ -146,6 +152,8 @@ def _summarize_group(group: Sequence[dict]) -> dict:
     for run in failed:
         for cat, n in run["categories"].items():
             categories[cat] = categories.get(cat, 0) + n
+    failed_causes = _sum_dicts(r.get("lost_stall_causes") for r in failed)
+    window_causes = _sum_dicts(r.get("window_stall_causes") for r in judged)
     return {
         "runs": len(group),
         "judged": len(judged),
@@ -153,6 +161,7 @@ def _summarize_group(group: Sequence[dict]) -> dict:
         "pass_rate": _rate(len(passed), len(judged)),
         "interfered_runs": sum(1 for r in group if r["interfered"] is True),
         "env_unknown_runs": sum(1 for r in group if r["interfered"] is None),
+        "controlled_load_runs": sum(1 for r in group if r.get("controlled_load")),
         "clean_runs": len(clean),
         "clean_passed": len(clean_passed),
         "clean_pass_rate": _rate(len(clean_passed), len(clean)),
@@ -164,7 +173,18 @@ def _summarize_group(group: Sequence[dict]) -> dict:
         "failed_lost_in_multi_stage": sum(r["lost_in_multi_stage"] for r in failed),
         "failed_runs_with_stall": sum(1 for r in failed if r["lost_in_stall"] > 0),
         "failed_runs_with_multi_stage": sum(1 for r in failed if r["lost_in_multi_stage"] > 0),
+        "failed_stall_causes": failed_causes,
+        "window_stall_causes": window_causes,
     }
+
+
+def _sum_dicts(items) -> Dict[str, int]:
+    """把若干 {键: 次数} 字典按键求和（None 视为空）。"""
+    total: Dict[str, int] = {}
+    for item in items:
+        for key, n in (item or {}).items():
+            total[key] = total.get(key, 0) + n
+    return total
 
 
 def _pct(value: Optional[float]) -> str:
@@ -187,6 +207,17 @@ def format_table(summary: Dict[str, dict]) -> str:
         clean = f"{s['clean_passed']}/{s['clean_runs']} ({_pct(s['clean_pass_rate'])})"
         ok = f"{s['passed']}/{s['judged']}"
         lines.append(f"{key:<16}{ok:>7}{s['interfered_runs']:>9}{clean:>13}{cats:>38}{stall:>16}{multi:>20}")
+    for key, s in summary.items():
+        if key == "ALL" and len(summary) > 1:
+            continue
+        causes = s.get("failed_stall_causes") or {}
+        windows = s.get("window_stall_causes") or {}
+        if causes or windows:
+            fmt = lambda d: "; ".join(f"{k}={v}" for k, v in sorted(d.items())) or "-"
+            lines.append(f"停顿成因 {key}: 失败轮丢失序号[{fmt(causes)}] 全部轮取帧间隔窗口[{fmt(windows)}]")
+    controlled = summary.get("ALL", {}).get("controlled_load_runs", 0)
+    if controlled:
+        lines.append(f"受控压力: {controlled} 轮带 -Hog 压力（env.json controlled_load），不计入受干扰，可按子目录名/hog_cores 另行对比。")
     lines.append("")
     lines.append("归因: a=DXGI 合并 b=槽选择/队列丢弃 c=合成/编码丢失 d=无法归因 e=采集池丢弃；受干扰判据见 run-fps-test.ps1 的 -Trace 说明；")
     lines.append("剔除干扰后=只统计 env.json 标记为未受干扰的轮次；停顿窗口来自 trace_join（夹具/取帧/合成/送帧/跳槽）。")

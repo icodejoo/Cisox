@@ -13,6 +13,19 @@ pub const ENV_QSV_PRESET: &str = "SNOW_RECORDER_QSV_PRESET";
 pub const ENV_MAX_SIZE: &str = "SNOW_RECORDER_MAX_SIZE";
 /// 环境变量：硬件编码器选择（`auto` 按适配器厂商自动选；`qsv`/`nvenc`/`amf` 强制；`off` 不用硬编）。
 pub const ENV_ENCODER: &str = "SNOW_RECORDER_ENCODER";
+/// 环境变量：采集线程调度实验（未设置 = `default`；`mmcss` 加入 MMCSS 任务，`timecritical` 线程优先级设为 TIME_CRITICAL，
+/// `mmcss+timecritical` 两者都用）。
+pub const ENV_CAPTURE_SCHED: &str = "SNOW_RECORDER_CAPTURE_SCHED";
+/// 环境变量：MMCSS 任务名（仅 `mmcss` 系列模式生效，缺省 [`DEFAULT_MMCSS_TASK`]）。
+pub const ENV_MMCSS_TASK: &str = "SNOW_RECORDER_MMCSS_TASK";
+/// 环境变量：采集环路慢迭代阈值（微秒，仅帧追踪开启时生效，缺省 [`DEFAULT_SLOW_ITER_US`]）。
+pub const ENV_SLOW_ITER_US: &str = "SNOW_RECORDER_SLOW_ITER_US";
+/// MMCSS 任务名缺省值。
+pub const DEFAULT_MMCSS_TASK: &str = "Capture";
+/// 慢迭代阈值缺省值（微秒）。
+pub const DEFAULT_SLOW_ITER_US: u32 = 4000;
+/// 慢迭代阈值允许的范围（微秒），超出视为无效并回落缺省值。
+pub const SLOW_ITER_US_RANGE: std::ops::RangeInclusive<u32> = 100..=1_000_000;
 
 /// DXGI VendorId：NVIDIA。
 pub const VENDOR_NVIDIA: u32 = 0x10de;
@@ -194,6 +207,96 @@ pub fn parse_hardware_mode(text: Option<&str>) -> HardwareMode {
     }
 }
 
+/// 采集线程调度方式（实验开关，缺省 [`CaptureSched::Default`] 与历史行为一致）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureSched {
+    /// 现状：普通优先级类内的最高线程优先级（HIGHEST）。
+    Default,
+    /// 在 HIGHEST 之上加入 MMCSS 任务。
+    Mmcss,
+    /// 线程优先级设为 TIME_CRITICAL，不用 MMCSS。
+    TimeCritical,
+    /// TIME_CRITICAL 加 MMCSS 任务。
+    MmcssTimeCritical,
+}
+
+impl CaptureSched {
+    /// 取值名（与环境变量写法一致，写进日志与追踪元数据）。
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Mmcss => "mmcss",
+            Self::TimeCritical => "timecritical",
+            Self::MmcssTimeCritical => "mmcss+timecritical",
+        }
+    }
+
+    /// 是否要加入 MMCSS。
+    pub fn uses_mmcss(self) -> bool {
+        matches!(self, Self::Mmcss | Self::MmcssTimeCritical)
+    }
+
+    /// 是否要把线程优先级设为 TIME_CRITICAL。
+    pub fn uses_time_critical(self) -> bool {
+        matches!(self, Self::TimeCritical | Self::MmcssTimeCritical)
+    }
+}
+
+/// 解析 `SNOW_RECORDER_CAPTURE_SCHED` 的取值。
+///
+/// # 参数
+/// - `text`：环境变量值；`None` 或空串表示未设置。
+///
+/// # 返回
+/// 调度方式；无法识别时返回 `Err(原始取值)`，调用方应回落 `default` 并提示。
+///
+/// # 示例
+/// ```ignore
+/// assert_eq!(parse_capture_sched(Some("MMCSS")), Ok(CaptureSched::Mmcss));
+/// assert_eq!(parse_capture_sched(None), Ok(CaptureSched::Default));
+/// ```
+pub fn parse_capture_sched(text: Option<&str>) -> Result<CaptureSched, String> {
+    let raw = text.map_or("", str::trim);
+    match raw.to_ascii_lowercase().as_str() {
+        "" | "default" => Ok(CaptureSched::Default),
+        "mmcss" => Ok(CaptureSched::Mmcss),
+        "timecritical" | "time_critical" | "tc" => Ok(CaptureSched::TimeCritical),
+        "mmcss+timecritical" | "mmcss+time_critical" | "mmcss+tc" => Ok(CaptureSched::MmcssTimeCritical),
+        _ => Err(raw.to_string()),
+    }
+}
+
+/// 解析 `SNOW_RECORDER_MMCSS_TASK` 的取值：去首尾空白，空值取缺省 [`DEFAULT_MMCSS_TASK`]。
+///
+/// # 参数
+/// - `text`：环境变量值；`None` 表示未设置。
+///
+/// # 示例
+/// ```ignore
+/// assert_eq!(parse_mmcss_task(Some(" Pro Audio ")), "Pro Audio");
+/// assert_eq!(parse_mmcss_task(None), "Capture");
+/// ```
+pub fn parse_mmcss_task(text: Option<&str>) -> String {
+    match text.map(str::trim) {
+        Some(t) if !t.is_empty() => t.to_string(),
+        _ => DEFAULT_MMCSS_TASK.to_string(),
+    }
+}
+
+/// 解析 `SNOW_RECORDER_SLOW_ITER_US` 的取值（微秒）；非整数或超出 [`SLOW_ITER_US_RANGE`] 取缺省。
+///
+/// # 参数
+/// - `text`：环境变量值；`None` 表示未设置。
+///
+/// # 示例
+/// ```ignore
+/// assert_eq!(parse_slow_iter_us(Some("2500")), 2500);
+/// assert_eq!(parse_slow_iter_us(Some("0")), DEFAULT_SLOW_ITER_US);
+/// ```
+pub fn parse_slow_iter_us(text: Option<&str>) -> u32 {
+    text.and_then(|t| t.trim().parse::<u32>().ok()).filter(|v| SLOW_ITER_US_RANGE.contains(v)).unwrap_or(DEFAULT_SLOW_ITER_US)
+}
+
 /// 产品默认输出上限的长边（1080p）。
 pub const DEFAULT_MAX_LONG_SIDE: u32 = 1920;
 /// 产品默认输出上限的短边（1080p）。
@@ -325,6 +428,46 @@ mod tests {
         assert_eq!(rank_adapters(&list, EncoderPreference::Force(HwCodec::Nvenc)), vec![2, 0, 1]);
         assert_eq!(rank_adapters(&list, EncoderPreference::Software), vec![0, 1, 2]);
         assert!(rank_adapters(&[], EncoderPreference::Auto).is_empty());
+    }
+
+    /// 采集调度解析：缺省与空值为 default，大小写与别名可识别，未知值返回原文。
+    #[test]
+    fn capture_sched_parsing() {
+        assert_eq!(parse_capture_sched(None), Ok(CaptureSched::Default));
+        assert_eq!(parse_capture_sched(Some("  ")), Ok(CaptureSched::Default));
+        assert_eq!(parse_capture_sched(Some("default")), Ok(CaptureSched::Default));
+        assert_eq!(parse_capture_sched(Some(" MMCSS ")), Ok(CaptureSched::Mmcss));
+        assert_eq!(parse_capture_sched(Some("TimeCritical")), Ok(CaptureSched::TimeCritical));
+        assert_eq!(parse_capture_sched(Some("tc")), Ok(CaptureSched::TimeCritical));
+        assert_eq!(parse_capture_sched(Some("mmcss+timecritical")), Ok(CaptureSched::MmcssTimeCritical));
+        assert_eq!(parse_capture_sched(Some("mmcss+tc")), Ok(CaptureSched::MmcssTimeCritical));
+        assert_eq!(parse_capture_sched(Some("realtime")), Err("realtime".to_string()));
+    }
+
+    /// 调度方式的能力位与名字互相一致。
+    #[test]
+    fn capture_sched_flags_match_names() {
+        assert!(!CaptureSched::Default.uses_mmcss() && !CaptureSched::Default.uses_time_critical());
+        assert!(CaptureSched::Mmcss.uses_mmcss() && !CaptureSched::Mmcss.uses_time_critical());
+        assert!(!CaptureSched::TimeCritical.uses_mmcss() && CaptureSched::TimeCritical.uses_time_critical());
+        assert!(CaptureSched::MmcssTimeCritical.uses_mmcss() && CaptureSched::MmcssTimeCritical.uses_time_critical());
+        for s in [CaptureSched::Default, CaptureSched::Mmcss, CaptureSched::TimeCritical, CaptureSched::MmcssTimeCritical] {
+            assert_eq!(parse_capture_sched(Some(s.name())), Ok(s));
+        }
+    }
+
+    /// MMCSS 任务名与慢迭代阈值解析：空值/非法值取缺省。
+    #[test]
+    fn mmcss_task_and_slow_iter_parsing() {
+        assert_eq!(parse_mmcss_task(None), "Capture");
+        assert_eq!(parse_mmcss_task(Some("  ")), "Capture");
+        assert_eq!(parse_mmcss_task(Some(" Pro Audio ")), "Pro Audio");
+        assert_eq!(parse_slow_iter_us(None), DEFAULT_SLOW_ITER_US);
+        assert_eq!(parse_slow_iter_us(Some("2500")), 2500);
+        assert_eq!(parse_slow_iter_us(Some(" 100 ")), 100);
+        assert_eq!(parse_slow_iter_us(Some("99")), DEFAULT_SLOW_ITER_US);
+        assert_eq!(parse_slow_iter_us(Some("2000000")), DEFAULT_SLOW_ITER_US);
+        assert_eq!(parse_slow_iter_us(Some("abc")), DEFAULT_SLOW_ITER_US);
     }
 
     /// 输出上限解析、取向与默认值。

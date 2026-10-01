@@ -10,6 +10,10 @@
     夹具提交(frames.csv) -> DXGI 取帧(acquire，带 LastPresentTime 与 AccumulatedFrames) -> 采集池/入队(enqueue)
     -> 待输出队列(absorb) -> 时间槽选择(slot / discard / skip) -> 合成(compose) -> 送编码(send/submit) -> 成品
 
+取帧停顿成因（每个 acquire_gap 窗口用窗口内的 slow_iter 事件归因，详见 CAUSE_TEXT；事件列定义见 frametrace.rs 模块文档）:
+    sleep_overrun / acquire_blocked / lock_wait / copy_flush / caller_gap / other；窗口内没有慢迭代记为 no_slow_iter，
+    追踪里没有慢迭代元数据（旧版录制进程）记为 no_data。被丢序号落在取帧停顿簇里时，按同样口径给出 stall_cause。
+
 归因类别（每个"夹具提交了但成品里没有"的序号落入其一，详见 CATEGORY_TEXT）:
     a_dxgi_coalesced      DXGI 从未单独交付：取帧被合并，且覆盖它的那次取帧 AccumulatedFrames>1
     b_slot_dropped        取到了，但在待输出队列里被时间槽选择取代/溢出丢弃，或一直没被选中
@@ -53,6 +57,28 @@ CATEGORY_TEXT = {
     CAT_D: "无法归因（时间对不上或追踪不完整，原因见 reason）",
     CAT_E: "取到了，但采集共享槽耗尽，在采集阶段被丢弃",
 }
+# ---- 取帧停顿成因（对应 slow_iter 里占比最大的分段）----
+CAUSE_SLEEP = "sleep_overrun"
+CAUSE_ACQUIRE = "acquire_blocked"
+CAUSE_LOCK = "lock_wait"
+CAUSE_COPY = "copy_flush"
+CAUSE_CALLER = "caller_gap"
+CAUSE_OTHER = "other"
+CAUSE_NONE = "no_slow_iter"
+CAUSE_NODATA = "no_data"
+CAUSE_NOT_ACQUIRE = "not_acquire_stall"  # 被丢序号所在停顿簇里没有"非源头驱动"的取帧间隔窗口
+CAUSES = (CAUSE_SLEEP, CAUSE_ACQUIRE, CAUSE_LOCK, CAUSE_COPY, CAUSE_CALLER, CAUSE_OTHER, CAUSE_NONE, CAUSE_NODATA, CAUSE_NOT_ACQUIRE)
+CAUSE_TEXT = {
+    CAUSE_SLEEP: "睡眠超额：请求的轮询睡眠醒得过晚（线程晚调度/抢占/计时器粒度）",
+    CAUSE_ACQUIRE: "取帧调用卡住：AcquireNextFrame 本身耗时过长（也包含在调用内被抢占，二者无法区分）",
+    CAUSE_LOCK: "设备锁等待：复制/Flush 等设备锁过久（与合成/编码线程争锁）",
+    CAUSE_COPY: "复制/Flush 本身过慢（不含等锁）",
+    CAUSE_CALLER: "两次 next 调用之间过久：线程在调用方里被抢占或卡住（上一圈不是以睡眠结束）",
+    CAUSE_OTHER: "慢迭代存在但各分段都解释不了（迭代内未计时的部分）",
+    CAUSE_NONE: "窗口内没有慢迭代记录：采集线程按时轮询，取帧间隔可能来自源头没出帧或 DXGI 无新内容",
+    CAUSE_NODATA: "追踪不含慢迭代元数据（旧版录制进程），无法判断",
+    CAUSE_NOT_ACQUIRE: "所在停顿簇没有录制侧的取帧间隔窗口（夹具/合成/送帧/跳槽停顿，或取帧停顿由夹具源头造成）",
+}
 # 重复帧成因。
 DUP_CURSOR_REUSE = "cursor_reuse"
 DUP_SAME_CAP = "same_cap_reselected"
@@ -95,6 +121,13 @@ class Ev:
     n: int
     dur_us: int
     code: int
+    # 仅 slow_iter 事件有值（微秒），列定义见 frametrace.rs 模块文档；旧版追踪没有这些列，取 0。
+    sleep_req_us: int = 0
+    sleep_over_us: int = 0
+    acq_us: int = 0
+    lock_us: int = 0
+    copy_us: int = 0
+    gap_us: int = 0
 
 
 @dataclass
@@ -147,6 +180,12 @@ def parse_trace(text: str) -> Trace:
                     n=int(row["n"]),
                     dur_us=int(row["dur_us"]),
                     code=int(row["code"]),
+                    sleep_req_us=_opt_int(row.get("sleep_req_us") or "") or 0,
+                    sleep_over_us=_opt_int(row.get("sleep_over_us") or "") or 0,
+                    acq_us=_opt_int(row.get("acq_us") or "") or 0,
+                    lock_us=_opt_int(row.get("lock_us") or "") or 0,
+                    copy_us=_opt_int(row.get("copy_us") or "") or 0,
+                    gap_us=_opt_int(row.get("gap_us") or "") or 0,
                 )
             )
         except (KeyError, ValueError):
@@ -364,6 +403,7 @@ class LostRecord:
     residual_us: Optional[int] = None
     in_stall: List[int] = field(default_factory=list)  # 命中的停顿簇下标
     in_multi_stage_stall: bool = False
+    stall_cause: str = ""  # 命中停顿簇时的取帧停顿成因（CAUSES 之一），没命中为空
 
 
 def _progress(cap: CapInfo) -> int:
@@ -573,6 +613,8 @@ class Window:
     end_us: int
     detail: str = ""
     source_driven: bool = False  # 仅取帧间隔：与夹具停顿重叠，说明是源头没出帧而非录制进程卡住
+    cause: str = ""  # 仅取帧间隔：停顿成因（CAUSES 之一）
+    slow_iters: List[dict] = field(default_factory=list)  # 仅取帧间隔：窗口内的慢迭代及其归因
 
 
 def find_gaps(times: Sequence[int], ratio: float) -> List[Tuple[int, int, int]]:
@@ -602,6 +644,68 @@ def _slow(durs: List[Tuple[int, int]], floor_us: int) -> List[Tuple[int, int]]:
     return [(t, d) for t, d in durs if d > limit]
 
 
+def classify_slow_iter(e: Ev) -> Tuple[str, int]:
+    """给一条 slow_iter 事件找占比最大的分段。
+
+    参数:
+        e: slow_iter 事件。
+    返回:
+        (成因, 该分段微秒数)；所有分段都为 0 返回 (CAUSE_OTHER, 0)。
+    示例:
+        >>> e = Ev(0, 0, "slow_iter", "cap", 0, 0, None, None, 0, 9000, 0, 400, 8000, 100, 0, 0, 8400)
+        >>> classify_slow_iter(e)
+        ('sleep_overrun', 8000)
+    """
+    parts = (
+        (CAUSE_SLEEP, e.sleep_over_us),
+        (CAUSE_ACQUIRE, e.acq_us),
+        (CAUSE_LOCK, e.lock_us),
+        (CAUSE_COPY, max(e.copy_us - e.lock_us, 0)),
+        (CAUSE_CALLER, e.gap_us if e.sleep_req_us == 0 else 0),
+    )
+    cause, value = max(parts, key=lambda p: p[1])
+    return (cause, value) if value > 0 else (CAUSE_OTHER, 0)
+
+
+def attribute_window(start_us: int, end_us: int, slow: Sequence[Ev], has_data: bool) -> Tuple[str, List[dict]]:
+    """用窗口内（迭代开始时刻落在 [start, end]）的慢迭代给一个取帧间隔窗口定成因。
+
+    参数:
+        start_us: 窗口起点（上一次带内容取帧，挂钟微秒）。
+        end_us: 窗口终点（下一次带内容取帧）。
+        slow: 全部 slow_iter 事件。
+        has_data: 追踪是否带慢迭代元数据（旧版录制进程没有）。
+    返回:
+        (成因, 窗口内慢迭代明细)；成因取窗口内"最大单项分段"最大的那条慢迭代的成因。
+    示例:
+        >>> attribute_window(0, 10, [], True)
+        ('no_slow_iter', [])
+    """
+    if not has_data:
+        return CAUSE_NODATA, []
+    items = []
+    for e in slow:
+        if start_us <= e.unix_us <= end_us:
+            cause, value = classify_slow_iter(e)
+            items.append(
+                {
+                    "t_us": e.unix_us,
+                    "cause": cause,
+                    "value_us": value,
+                    "total_us": e.dur_us,
+                    "gap_us": e.gap_us,
+                    "sleep_req_us": e.sleep_req_us,
+                    "sleep_over_us": e.sleep_over_us,
+                    "acq_us": e.acq_us,
+                    "lock_us": e.lock_us,
+                    "copy_us": e.copy_us,
+                }
+            )
+    if not items:
+        return CAUSE_NONE, []
+    return max(items, key=lambda i: i["value_us"])["cause"], items
+
+
 def find_stall_windows(fixture: Dict[int, int], trace: Trace, fps: float, params: Params) -> List[Window]:
     """收集夹具提交、DXGI 取帧、合成、送编码、跳槽五类停顿窗口。
 
@@ -619,9 +723,12 @@ def find_stall_windows(fixture: Dict[int, int], trace: Trace, fps: float, params
         windows.append(Window(SERIES_FIXTURE, a, b, f"夹具提交间隔 {g / 1000:.1f}ms"))
     fresh = sorted(e.unix_us for e in trace.events if e.event == "acquire" and e.code == ACQ_FRESH)
     fixture_windows = [w for w in windows if w.series == SERIES_FIXTURE]
+    slow = [e for e in trace.events if e.event == "slow_iter"]
+    has_slow_data = "slow_iter_us" in trace.meta
     for a, b, g in find_gaps(fresh, params.stall_ratio):
         driven = any(w.start_us - params.margin_us <= b and a - params.margin_us <= w.end_us for w in fixture_windows)
-        windows.append(Window(SERIES_ACQUIRE, a, b, f"取帧间隔 {g / 1000:.1f}ms", driven))
+        cause, items = attribute_window(a, b, slow, has_slow_data)
+        windows.append(Window(SERIES_ACQUIRE, a, b, f"取帧间隔 {g / 1000:.1f}ms", driven, cause, items))
     compose = [(e.unix_us, e.dur_us) for e in trace.events if e.event == "compose"]
     for t, d in _slow(compose, params.compose_floor_us):
         windows.append(Window(SERIES_COMPOSE, t - d, t, f"合成耗时 {d / 1000:.1f}ms"))
@@ -662,8 +769,42 @@ def cluster_windows(windows: Sequence[Window], margin_us: int) -> List[dict]:
         c["series"] = sorted({w.series for w in members})
         c["independent"] = sorted({w.series for w in members if not (w.series == SERIES_ACQUIRE and w.source_driven)})
         c["multi_stage"] = len(c["independent"]) >= 2
-        c["windows"] = [{"series": w.series, "start_us": w.start_us, "end_us": w.end_us, "detail": w.detail, "source_driven": w.source_driven} for w in members]
+        c["windows"] = [
+            {
+                "series": w.series,
+                "start_us": w.start_us,
+                "end_us": w.end_us,
+                "detail": w.detail,
+                "source_driven": w.source_driven,
+                "cause": w.cause,
+                "slow_iters": w.slow_iters,
+            }
+            for w in members
+        ]
     return clusters
+
+
+def lost_stall_cause(rec: "LostRecord", clusters: Sequence[dict], offset_us: int, margin_us: int) -> str:
+    """被丢序号命中停顿簇时的取帧停顿成因：优先取时间上覆盖它的"非源头驱动"取帧窗口，否则取簇里第一个。
+
+    参数:
+        rec: 丢帧记录（in_stall 已填）。
+        clusters: cluster_windows 的结果。
+        offset_us: 夹具时间到呈现时间的标定偏移。
+        margin_us: 判定余量。
+    返回:
+        CAUSES 之一；没命中停顿簇返回空串。
+    """
+    if not rec.in_stall:
+        return ""
+    wins = [w for i in rec.in_stall for w in clusters[i]["windows"] if w["series"] == SERIES_ACQUIRE and not w["source_driven"]]
+    if not wins:
+        return CAUSE_NOT_ACQUIRE
+    for t in (rec.fixture_us + offset_us, rec.fixture_us):
+        for w in wins:
+            if w["start_us"] - margin_us <= t <= w["end_us"] + margin_us:
+                return w["cause"]
+    return wins[0]["cause"]
 
 
 # ---------------------------------------------------------------- 汇总
@@ -719,6 +860,7 @@ def analyze(
             if lo <= rec.fixture_us <= hi or lo <= rec.fixture_us + offset.offset_us <= hi:
                 rec.in_stall.append(i)
                 rec.in_multi_stage_stall |= c["multi_stage"]
+        rec.stall_cause = lost_stall_cause(rec, clusters, offset.offset_us, params.margin_us)
     counts = {c: 0 for c in CATEGORIES}
     reasons: Dict[str, int] = {}
     for rec in lost:
@@ -772,6 +914,7 @@ def analyze(
                 "residual_us": r.residual_us,
                 "in_stall": r.in_stall,
                 "in_multi_stage_stall": r.in_multi_stage_stall,
+                "stall_cause": r.stall_cause,
             }
             for r in lost
         ],
@@ -782,11 +925,17 @@ def analyze(
             "window_count": len(windows),
             "clusters": clusters,
             "multi_stage_clusters": sum(1 for c in clusters if c["multi_stage"]),
+            "acquire_causes": _tally(w.cause for w in windows if w.series == SERIES_ACQUIRE and not w.source_driven),
+            "slow_iter_us": int(trace.meta.get("slow_iter_us", "0") or 0),
+            "slow_iters": sum(1 for e in trace.events if e.event == "slow_iter"),
+            "capture_sched": trace.meta.get("capture_sched", ""),
+            "capture_sched_detail": trace.meta.get("capture_sched_detail", ""),
         },
         "lost_in_stall": {
             "any": sum(1 for r in lost if r.in_stall),
             "multi_stage": sum(1 for r in lost if r.in_multi_stage_stall),
         },
+        "lost_stall_causes": _tally(r.stall_cause for r in lost if r.stall_cause),
     }
 
 
@@ -834,7 +983,7 @@ def format_report(summary: dict) -> str:
         lines.append(f"{'序号':>6} {'夹具时刻(ms)':>12} {'类别':<24}{'原因':<22}说明")
         t0 = min(r["fixture_us"] for r in summary["lost"])
         for r in summary["lost"]:
-            flag = " [停顿窗口内" + ("，多环节同时停顿" if r["in_multi_stage_stall"] else "") + "]" if r["in_stall"] else ""
+            flag = " [停顿窗口内" + ("，多环节同时停顿" if r["in_multi_stage_stall"] else "") + (f"，成因={r['stall_cause']}" if r.get("stall_cause") else "") + "]" if r["in_stall"] else ""
             lines.append(f"{r['seq']:>6} {(r['fixture_us'] - t0) / 1000:>12.1f} {r['category']:<24}{r['reason']:<22}{r['detail']}{flag}")
     lines.append("")
     lines.append(f"--- 重复帧 {summary['duplicates']['count']}（成因: {summary['duplicates']['causes'] or '无'}）---")
@@ -847,8 +996,21 @@ def format_report(summary: dict) -> str:
         tag = "多环节同时停顿(疑似系统级抖动)" if cl["multi_stage"] else "单环节"
         lines.append(f"  簇{i}: t{(cl['start_us'] - base) / 1000:+.1f}..{(cl['end_us'] - base) / 1000:+.1f}ms 环节={','.join(cl['series'])} 独立={','.join(cl['independent'])} -> {tag}")
         for w in cl["windows"][:6]:
-            lines.append(f"       {w['series']:<13} {w['detail']}" + ("（源头驱动）" if w["source_driven"] else ""))
+            lines.append(f"       {w['series']:<13} {w['detail']}" + ("（源头驱动）" if w["source_driven"] else "") + (f" 成因={w['cause']}" if w.get("cause") else ""))
+            for it in w.get("slow_iters", [])[:4]:
+                lines.append(
+                    f"           慢迭代 t{(it['t_us'] - base) / 1000:+.1f}ms {it['cause']} 总{it['total_us'] / 1000:.1f} 间隔{it['gap_us'] / 1000:.1f}"
+                    f"(请求睡眠{it['sleep_req_us'] / 1000:.1f} 超额{it['sleep_over_us'] / 1000:.1f}) 取帧{it['acq_us'] / 1000:.1f} 锁{it['lock_us'] / 1000:.1f} 复制{it['copy_us'] / 1000:.1f}ms"
+                )
     lines.append(f"被丢序号落在停顿窗口内: {summary['lost_in_stall']['any']}/{c['lost']}，其中多环节同时停顿: {summary['lost_in_stall']['multi_stage']}")
+    if st.get("capture_sched"):
+        lines.append(f"采集线程调度: {st.get('capture_sched_detail') or st['capture_sched']}；慢迭代阈值 {st.get('slow_iter_us', 0) / 1000:.1f}ms，慢迭代 {st.get('slow_iters', 0)} 条")
+    if st.get("acquire_causes"):
+        lines.append("取帧间隔窗口成因分布（不含源头驱动）: " + "; ".join(f"{k}={v}" for k, v in sorted(st["acquire_causes"].items())))
+    if summary.get("lost_stall_causes"):
+        lines.append("被丢序号的停顿成因: " + "; ".join(f"{k}={v}" for k, v in sorted(summary["lost_stall_causes"].items())))
+        for k in sorted(summary["lost_stall_causes"]):
+            lines.append(f"  {k}: {CAUSE_TEXT.get(k, '')}")
     return "\n".join(lines)
 
 
@@ -915,7 +1077,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         try:
             with open(args.env, encoding="utf-8-sig") as fh:
                 env = json.load(fh)
-            summary["env"] = {k: env.get(k) for k in ("tag", "size", "fps", "interfered", "interference_reasons")}
+            summary["env"] = {k: env.get(k) for k in ("tag", "size", "fps", "interfered", "interference_reasons", "controlled_load", "hog_cores", "hog_affinity_mask")}
         except (OSError, ValueError) as e:
             summary["env"] = {"error": str(e)}
     text = format_report(summary)

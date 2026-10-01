@@ -8,12 +8,17 @@
 #   scripts/run-fps-test.ps1 -SpanRegion 1280,0,2560,1440 -AllowPrimary -Fps 60   # 跨屏：窗口与录制区域横跨两块屏（会占用主屏的一部分，须同时传 -AllowPrimary）
 #   scripts/run-fps-test.ps1 -SpanRegion 1280,0,2560,1440 -AllowPrimary -Dual -Fps 60   # 双窗口：每块屏一个窗口各按自己的 vsync 出帧（排除单窗口跨屏的 DWM 合成抖动）
 #   scripts/run-fps-test.ps1 -Size 1920x1080 -Fps 60 -Trace   # 帧级追踪：每轮建独立子目录，归档夹具/录制追踪/成品/分析/env.json/trace_join 报告
+#   scripts/run-fps-test.ps1 -Size 1920x1080 -Fps 60 -Trace -Hog 4 [-HogAffinityMask 0xF]   # 受控 CPU 压力：测试期间并行跑 4 个 snow-cpu-hog 忙循环进程（见 cpu-hog.ps1），可选限制在掩码指定的核上
 # 可用环境变量透传给录制进程: SNOW_RECORDER_CONV_THREADS / _ASYNC / _PRESET / _HARDWARE
 # -Trace（默认关闭，不带时行为与之前完全一致）:
 #   1) 给录制进程设 SNOW_RECORDER_FRAME_TRACE=<子目录>\<Tag>.trace.csv（录制进程帧级追踪，结束时一次性写出）；
 #   2) 录制期间用 typeperf 每秒采样整机/各进程 CPU 与 GPU 引擎占用（录制结束后解析），并记录电源计划、显示器刷新率；
 #   3) 写 env.json（含 interfered 标记与原因，判据见下方 $Interfere* 常量），并在分析后运行 analyze/trace_join.py 归因丢帧；
 #   产物目录: <OutDir>\<Tag>-<时间戳>\（env.json、trace_join.json/txt、analysis.txt、recorder.txt 为固定文件名，其余以 <Tag> 为前缀）。
+# -Hog <N>（默认 0 = 不加压，行为与之前完全一致）: 录制开始前启动 N 个 snow-cpu-hog 进程（普通优先级、单线程各占满一个逻辑核），
+#   录制结束后清理（try/finally，并检查无残留）。-HogAffinityMask 把全部压力进程限制在掩码（0x.. 或十进制）指定的核上。
+#   压力进程不计入"后台干扰"：CPU 干扰判据里的整机占用会扣除它们；env.json 写 controlled_load=true、hog_cores、hog_affinity_mask，
+#   interfered 仍只反映真正的外来干扰。
 param(
     [string]$Size = "2560x1440",
     [ValidateSet(30, 60)][int]$Fps = 60,
@@ -31,11 +36,14 @@ param(
     [switch]$AllowPrimary,
     [string]$SpanRegion = "",
     [switch]$Dual,
-    [ValidateSet(0, 1)][int]$Cursor = 1
+    [ValidateSet(0, 1)][int]$Cursor = 1,
+    [ValidateRange(0, 256)][int]$Hog = 0,
+    [string]$HogAffinityMask = ""
 )
 $ErrorActionPreference = "Stop"
 $toolRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $repoRoot = (Resolve-Path (Join-Path $toolRoot "../../..")).Path
+. (Join-Path $PSScriptRoot "cpu-hog.ps1")   # 只定义函数（Get-CpuHogExe/Start-CpuHog/Stop-CpuHog 等）
 if (-not $RecorderExe) { $RecorderExe = Join-Path $repoRoot "snow-shot-rs/tools/snow-recorder/target/release/snow-recorder.exe" }
 if (-not $FixtureExe) { $FixtureExe = Join-Path $toolRoot "target/release/snow-fps-fixture.exe" }
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
@@ -136,7 +144,7 @@ $InterfereSystemPeakPct = 95    # 整机 CPU 任一秒峰值超过该值
 # "可能干扰"进程名单（构建/脚本/转码/杀毒/索引/更新）。
 $SuspectPattern = '^(cargo|rustc|link|lld-link|cl|clang|msbuild|devenv|python|py|node|ffmpeg|MsMpEng|MpDefenderCoreService|NisSrv|SearchIndexer|TiWorker|TrustedInstaller|vctip)$'
 # 本测试自身的进程（不计入后台占用）。
-$SelfPattern = '^(snow-recorder|snow-fps-fixture|typeperf|powershell|pwsh|dwm|idle|_total)$'
+$SelfPattern = '^(snow-recorder|snow-fps-fixture|snow-cpu-hog|typeperf|powershell|pwsh|dwm|idle|_total)$'
 # 解析 typeperf 的 CPU 采样（整机 + 各进程），每秒一条。
 function Read-CpuSamples($path) {
     if (-not (Test-Path $path)) { return @() }
@@ -165,20 +173,22 @@ function Read-CpuSamples($path) {
         }
         $ranked = @($byName.GetEnumerator() | Where-Object { $_.Name -notmatch '^(idle|_total)$' } | Sort-Object Value -Descending)
         $bg = 0.0; $sus = 0.0; $susList = @()
+        $hogPct = [double]$byName[$script:CpuHogName]   # 受控压力自身的 CPU（占单核百分比之和）
         foreach ($e in $ranked) {
             if ($e.Name -notmatch $SelfPattern) { $bg += $e.Value }
             if ($e.Name -match $SuspectPattern) { $sus += $e.Value; $susList += [pscustomobject]@{ name = $e.Name; cpu_pct = [math]::Round($e.Value, 1) } }
         }
         $top5 = @($ranked | Select-Object -First 5 | ForEach-Object { [pscustomobject]@{ name = $_.Name; cpu_pct = [math]::Round($_.Value, 1) } })
-        $out.Add([pscustomobject]@{ t = $i; system_cpu_pct = [math]::Round($sys, 1); top5 = $top5; suspects = @($susList); bg_total_pct = [math]::Round($bg, 1); suspect_total_pct = [math]::Round($sus, 1) })
+        $sysExHog = [math]::Max(0.0, $sys - $hogPct / [Environment]::ProcessorCount)   # 整机占用扣除压力进程后的值（无压力时与 system_cpu_pct 相同）
+        $out.Add([pscustomobject]@{ t = $i; system_cpu_pct = [math]::Round($sys, 1); system_cpu_excl_hog_pct = [math]::Round($sysExHog, 1); hog_cpu_pct = [math]::Round($hogPct, 1); top5 = $top5; suspects = @($susList); bg_total_pct = [math]::Round($bg, 1); suspect_total_pct = [math]::Round($sus, 1) })
     }
     return $out.ToArray()
 }
 # 按判据给出"受干扰"结论；没有采样数据时 interfered=$null（未知，不当作未受干扰）。
 function Get-Interference($samples) {
     if ($samples.Count -eq 0) { return @{ interfered = $null; reasons = @("CPU 采样不可用（typeperf 没有产出，可能是系统语言导致计数器名不同）"); sys_mean = $null; sys_peak = $null; bg_peak = $null; suspect_peak = $null } }
-    $sysMean = ($samples | Measure-Object system_cpu_pct -Average).Average
-    $sysPeak = ($samples | Measure-Object system_cpu_pct -Maximum).Maximum
+    $sysMean = ($samples | Measure-Object system_cpu_excl_hog_pct -Average).Average
+    $sysPeak = ($samples | Measure-Object system_cpu_excl_hog_pct -Maximum).Maximum
     $bgPeak = ($samples | Measure-Object bg_total_pct -Maximum).Maximum
     $susPeak = ($samples | Measure-Object suspect_total_pct -Maximum).Maximum
     $reasons = @()
@@ -237,6 +247,12 @@ $divisor = if ($Fps -ge 60) { 1 } else { 2 }
 if ($Refresh -le 0) { $Refresh = if ($Fps -ge 60) { 59.0 } else { 30.0 } }
 $fixSeconds = $Seconds + 2.5
 $fixture = $null; $rec = $null
+$hogs = @(); $hogMask = [long]0; $hogLeft = 0
+if ($Hog -gt 0) {
+    # 先校验掩码并编译压力进程，避免在夹具窗口已经占屏时才失败
+    $hogMask = ConvertTo-AffinityMask $HogAffinityMask
+    $null = Get-CpuHogExe
+}
 try {
     $fixArgs = if ($SpanRegion) { @("--span", "--region", $SpanRegion) } else { @("--size", $Size) }
     if ($Dual) { $fixArgs += "--dual" }
@@ -250,6 +266,11 @@ try {
     }
     Start-Sleep -Milliseconds 700
 
+    if ($Hog -gt 0) {
+        $hogs = @(Start-CpuHog -Count $Hog -AffinityMask $hogMask -MaxSeconds ($Seconds + 40))
+        "受控压力: $Hog 个 $($script:CpuHogName)，掩码=$(if ($hogMask) { '0x{0:X}' -f $hogMask } else { '不限' })"
+        Start-Sleep -Milliseconds 500
+    }
     if ($Trace) { $env:SNOW_RECORDER_FRAME_TRACE = $traceCsv }   # 只影响随后启动的录制进程
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $RecorderExe
@@ -284,6 +305,7 @@ try {
     $stdin.WriteLine("STOP"); $stdin.Flush()
     if (-not $rec.WaitForExit(60000)) { throw "录制进程 60 秒未退出" }
     $null = $fixture.WaitForExit(15000)
+    if ($hogs.Count -gt 0) { $hogLeft = Stop-CpuHog -Processes $hogs; $hogs = @() }   # 压力只覆盖录制期间
 
     if ($Trace) {
         foreach ($p in @($tpCpu, $tp)) { if ($p) { $null = $p.WaitForExit(8000) } }
@@ -300,6 +322,7 @@ try {
             logical_processors = [Environment]::ProcessorCount
             on_battery = [bool](@(Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue | Where-Object { $_.BatteryStatus -eq 1 }).Count)
             interfered = $verdict.interfered; interference_reasons = @($verdict.reasons)
+            controlled_load = ($Hog -gt 0); hog_cores = $Hog; hog_affinity_mask = $(if ($hogMask) { '0x{0:X}' -f $hogMask } else { "" }); hog_process = $script:CpuHogName
             thresholds = [ordered]@{ bg_peak_pct = $InterfereBgPeakPct; suspect_peak_pct = $InterfereSuspectPeakPct; system_mean_pct = $InterfereSystemMeanPct; system_peak_pct = $InterfereSystemPeakPct }
             peaks = [ordered]@{ system_mean_pct = $verdict.sys_mean; system_peak_pct = $verdict.sys_peak; bg_peak_pct = $verdict.bg_peak; suspect_peak_pct = $verdict.suspect_peak }
             gpu_engines = Read-GpuEngines $gpuCsv
@@ -332,10 +355,16 @@ try {
 }
 finally {
     foreach ($p in @($rec, $fixture, $tp, $tpCpu)) { if ($p -and -not $p.HasExited) { try { $p.Kill() } catch { } } }
+    if ($hogs.Count -gt 0) { $hogLeft = Stop-CpuHog -Processes $hogs; $hogs = @() }
     if ($Trace) { if ($null -eq $prevTraceEnv) { Remove-Item Env:SNOW_RECORDER_FRAME_TRACE -ErrorAction SilentlyContinue } else { $env:SNOW_RECORDER_FRAME_TRACE = $prevTraceEnv } }
     Start-Sleep -Milliseconds 300
     $left = @(Get-Process -Name snow-fps-fixture, snow-recorder -ErrorAction SilentlyContinue)
     "leftover processes: $($left.Count)"
+    if ($Hog -gt 0) {
+        $hogLeft = @(Get-Process -Name $script:CpuHogName -ErrorAction SilentlyContinue).Count
+        "leftover hog processes: $hogLeft"
+        if ($hogLeft -gt 0) { Write-Warning "仍有 $hogLeft 个 $($script:CpuHogName) 进程残留，请手动结束" }
+    }
 }
 if (Test-Path $outFile) {
     "--- analysis ($outFile) ---"

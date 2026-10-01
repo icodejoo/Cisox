@@ -309,8 +309,99 @@ class StallTests(unittest.TestCase):
         self.assertGreaterEqual(summary["stalls"]["multi_stage_clusters"], 1)
 
 
+def slow_ev(t_us, req=0, over=0, acq=0, lock=0, copy=0, gap=0, total=5000) -> tj.Ev:
+    """构造一条 slow_iter 事件（采集线程）。"""
+    return tj.Ev(t_us * 1000, t_us, "slow_iter", "cap", 0, 0, None, None, 0, total, 0, req, over, acq, lock, copy, gap)
+
+
+class SlowIterCauseTests(unittest.TestCase):
+    """取帧停顿窗口的成因归因（slow_iter）。"""
+
+    def test_classify_picks_largest_segment(self):
+        self.assertEqual(tj.classify_slow_iter(slow_ev(0, req=400, over=8000, acq=100, gap=8400)), (tj.CAUSE_SLEEP, 8000))
+        self.assertEqual(tj.classify_slow_iter(slow_ev(0, req=400, over=100, acq=9000, gap=500)), (tj.CAUSE_ACQUIRE, 9000))
+        self.assertEqual(tj.classify_slow_iter(slow_ev(0, req=400, over=100, lock=6000, copy=6500, gap=500)), (tj.CAUSE_LOCK, 6000))
+        # 复制耗时含等锁，扣除等锁后才是复制本身
+        self.assertEqual(tj.classify_slow_iter(slow_ev(0, req=400, over=100, lock=500, copy=7000, gap=500)), (tj.CAUSE_COPY, 6500))
+        # 上一圈不是以睡眠结束：间隔算调用方里的时间，只有此时才归 caller_gap
+        self.assertEqual(tj.classify_slow_iter(slow_ev(0, req=0, gap=12000)), (tj.CAUSE_CALLER, 12000))
+        self.assertEqual(tj.classify_slow_iter(slow_ev(0, req=400, over=0, gap=0)), (tj.CAUSE_OTHER, 0))
+
+    def test_attribute_window_cases(self):
+        slow = [slow_ev(1000, req=400, over=300, gap=700), slow_ev(5000, req=400, over=30000, gap=30400), slow_ev(99000, acq=50000)]
+        self.assertEqual(tj.attribute_window(0, 10, slow, False), (tj.CAUSE_NODATA, []))
+        self.assertEqual(tj.attribute_window(2000, 3000, slow, True), (tj.CAUSE_NONE, []))
+        cause, items = tj.attribute_window(0, 10000, slow, True)
+        self.assertEqual((cause, len(items)), (tj.CAUSE_SLEEP, 2))  # 取最大单项分段所在的那条
+        self.assertEqual(items[1]["sleep_over_us"], 30000)
+        self.assertEqual(tj.attribute_window(90000, 100000, slow, True)[0], tj.CAUSE_ACQUIRE)
+
+    def stalled(self, slow_events, with_meta=True):
+        """夹具正常出帧、录制侧取帧停了约 50ms 的场景，返回 (夹具, 追踪)。"""
+        st = StallTests()
+        fx = st.regular_fixture()
+        events = [e for e in st.acquires(fx) if e.cap_id not in (20, 21, 22)] + slow_events(fx)
+        meta = {"slow_iter_us": "4000"} if with_meta else {}
+        return fx, tj.Trace(meta, sorted(events, key=lambda e: e.mono_ns))
+
+    def test_window_and_lost_seq_get_cause(self):
+        fx, trace = self.stalled(lambda fx: [slow_ev(fx[21], req=400, over=45000, gap=45400, total=45500)])
+        windows = tj.find_stall_windows(fx, trace, FPS, tj.Params())
+        acq = [w for w in windows if w.series == tj.SERIES_ACQUIRE]
+        self.assertEqual((len(acq), acq[0].cause, acq[0].source_driven), (1, tj.CAUSE_SLEEP, False))
+        self.assertEqual(len(acq[0].slow_iters), 1)
+        clusters = tj.cluster_windows(windows, tj.Params().margin_us)
+        self.assertEqual(clusters[0]["windows"][0]["cause"], tj.CAUSE_SLEEP)
+        rec = tj.LostRecord(21, fx[21], tj.CAT_A, "coalesced_by_dxgi", "", in_stall=[0])
+        self.assertEqual(tj.lost_stall_cause(rec, clusters, 3000, tj.Params().margin_us), tj.CAUSE_SLEEP)
+        self.assertEqual(tj.lost_stall_cause(tj.LostRecord(5, fx[5], tj.CAT_A, "x", ""), clusters, 0, 8000), "")
+
+    def test_no_slow_iter_and_no_meta(self):
+        fx, trace = self.stalled(lambda fx: [])
+        acq = [w for w in tj.find_stall_windows(fx, trace, FPS, tj.Params()) if w.series == tj.SERIES_ACQUIRE]
+        self.assertEqual(acq[0].cause, tj.CAUSE_NONE)
+        fx, old = self.stalled(lambda fx: [], with_meta=False)
+        acq = [w for w in tj.find_stall_windows(fx, old, FPS, tj.Params()) if w.series == tj.SERIES_ACQUIRE]
+        self.assertEqual(acq[0].cause, tj.CAUSE_NODATA)
+
+    def test_source_driven_window_is_not_counted_in_cause_tally(self):
+        s = build_mixed(stall_after=8, stall_us=40000)
+        summary = s.run()
+        self.assertEqual(sum(summary["stalls"]["acquire_causes"].values()), sum(1 for c in summary["stalls"]["clusters"] for w in c["windows"] if w["series"] == tj.SERIES_ACQUIRE and not w["source_driven"]))
+        self.assertIsInstance(summary["lost_stall_causes"], dict)
+        self.assertIn("stall_cause", summary["lost"][0])
+        tj.format_report(summary)
+
+    def test_report_lists_slow_iter_detail_and_cause_distribution(self):
+        fx, trace = self.stalled(lambda fx: [slow_ev(fx[21], req=400, over=45000, gap=45400, total=45500)])
+        trace.meta.update({"capture_sched": "mmcss", "capture_sched_detail": "mmcss(Capture) 已生效"})
+        frames = [(q / FPS, q) for q in fx if q not in (20, 21, 22)]
+        summary = tj.analyze(fx, trace, frames, FPS)
+        text = tj.format_report(summary)
+        self.assertEqual(summary["stalls"]["acquire_causes"], {tj.CAUSE_SLEEP: 1})
+        self.assertEqual((summary["stalls"]["capture_sched"], summary["stalls"]["slow_iters"]), ("mmcss", 1))
+        self.assertIn("慢迭代 t", text)
+        self.assertIn("取帧间隔窗口成因分布（不含源头驱动）: sleep_overrun=1", text)
+        self.assertIn("采集线程调度: mmcss(Capture) 已生效", text)
+
+
 class ParsingTests(unittest.TestCase):
     """CSV 解析、标定与槽号对齐。"""
+
+    def test_parse_slow_iter_columns_and_old_format(self):
+        new = (
+            "# slow_iter_us=4000\n"
+            "mono_ns,unix_us,event,thread,src,cap_id,slot,present_unix_us,n,dur_us,code,sleep_req_us,sleep_over_us,acq_us,lock_us,copy_us,gap_us\n"
+            "10,1010,slow_iter,cap,0,0,,,0,9000,0,400,8000,100,5,70,8400\n"
+            "20,1020,acquire,cap,0,1,,1000,1,0,0,,,,,,\n"
+        )
+        t = tj.parse_trace(new)
+        self.assertEqual(t.meta["slow_iter_us"], "4000")
+        slow, acq = t.events
+        self.assertEqual((slow.event, slow.dur_us, slow.sleep_req_us, slow.sleep_over_us, slow.acq_us, slow.lock_us, slow.copy_us, slow.gap_us), ("slow_iter", 9000, 400, 8000, 100, 5, 70, 8400))
+        self.assertEqual((acq.sleep_over_us, acq.gap_us), (0, 0))  # 其余事件这几列留空，取 0
+        old = tj.parse_trace("mono_ns,unix_us,event,thread,src,cap_id,slot,present_unix_us,n,dur_us,code\n1,2,acquire,cap,0,1,,,1,0,0\n")
+        self.assertEqual((len(old.events), old.events[0].gap_us), (1, 0))
 
     TRACE = (
         "# snow-recorder frame trace v1\n# fps=60\n# backend=mock\n# overflow=2\n"

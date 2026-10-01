@@ -6,6 +6,8 @@
 #   跨屏: -AllowPrimary -SeamX 2560（两屏接缝的 x 坐标；每档窗口/录制区域以接缝为中心横跨两屏，占用主屏的一部分）
 #   双窗口（需同时给 -SeamX）: 加 -Dual，每块屏一个夹具窗口各按自己的 vsync 出帧
 #   软编对照: -EnvPairs "SNOW_RECORDER_HARDWARE=0"
+#   受控 CPU 压力: -Hog 4 [-HogAffinityMask 0xF]（每轮录制期间并行 N 个 snow-cpu-hog 忙循环进程，轮后清理；env.json 标 controlled_load，不算受干扰）
+#   采集线程调度对照: -EnvPairs "SNOW_RECORDER_CAPTURE_SCHED=mmcss"（另有 timecritical、mmcss+timecritical；SNOW_RECORDER_MMCSS_TASK 改任务名；多个变量用 ; 分隔）
 #   帧级追踪与归因: 加 -Trace。每轮在 <OutDir>\runs\ 下建独立子目录（夹具 frames.csv、录制追踪 csv、成品、analysis、env.json、trace_join 报告/JSON），
 #   结束后运行 analyze/aggregate_trace.py 按档位汇总（过线数、失败归因分布、受干扰轮数、剔除干扰后过线率、丢帧与停顿窗口同时性）。
 #   追踪开销对比（不要同时开 -Trace，它还会启动 typeperf 采样）: 同档位同轮数各跑一次，
@@ -25,6 +27,8 @@ param(
     [int]$SeamX = 0,
     [switch]$Dual,
     [switch]$Trace,
+    [ValidateRange(0, 256)][int]$Hog = 0,
+    [string]$HogAffinityMask = "",
     [string]$FixtureExe = "",
     [string]$FfmpegDir = "",
     [string]$OutDir = (Join-Path $env:TEMP "snow-fps-matrix")
@@ -51,6 +55,10 @@ try {
             if ($Trace) {
                 $extra.Trace = $true
                 $extra.OutDir = Join-Path $OutDir "runs"
+            }
+            if ($Hog -gt 0) {
+                $extra.Hog = $Hog
+                if ($HogAffinityMask) { $extra.HogAffinityMask = $HogAffinityMask }
             }
             if ($Dual) {
                 if ($SeamX -le 0) { throw "-Dual 只能与 -SeamX（跨屏）同用" }

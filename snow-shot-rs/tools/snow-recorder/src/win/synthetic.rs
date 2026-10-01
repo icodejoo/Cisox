@@ -183,7 +183,7 @@ impl CaptureSource for SyntheticCapture {
             self.stats.pool_drops += 1;
             return Ok(None);
         };
-        copy_into_slot(&self.device, &self.context4, &slot, &self.content[variant], &self.crop)?;
+        copy_into_slot(&self.device, &self.context4, &slot, &self.content[variant], &self.crop, false)?;
         {
             let _lock = self.device.lock();
             // SAFETY: 持有设备锁。
