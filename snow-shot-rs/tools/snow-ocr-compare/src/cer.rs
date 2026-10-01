@@ -13,7 +13,16 @@
 /// assert_eq!(snow_ocr_compare::cer::normalize("a b\n中 文"), vec!['a', 'b', '中', '文']);
 /// ```
 pub fn normalize(text: &str) -> Vec<char> {
-    text.chars().filter(|c| !c.is_whitespace()).collect()
+    text.chars().filter(|c| !c.is_whitespace()).map(fold_width).collect()
+}
+
+/// 全角 ASCII 折成半角（`：`→`:`、`，`→`,`），`￥` 折成 `¥`：宽度变体不算识别错误。
+fn fold_width(c: char) -> char {
+    match c {
+        '\u{FF01}'..='\u{FF5E}' => char::from_u32(c as u32 - 0xFEE0).unwrap_or(c),
+        '\u{FFE5}' => '\u{00A5}',
+        other => other,
+    }
 }
 
 /// 两个字符序列的 Levenshtein 编辑距离（插入、删除、替换各算 1）。
@@ -92,6 +101,15 @@ pub fn score(expected: &str, actual: &str) -> CerScore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 全角标点与 `￥` 折成半角，不算识别错误；汉字不受影响。
+    #[test]
+    fn width_variants_are_folded() {
+        assert_eq!(score("姓名:吴**", "姓名：吴＊＊").distance, 0);
+        assert_eq!(score("¥53.0元", "￥53.0元").distance, 0);
+        assert_eq!(score("12306,95306", "12306，95306").distance, 0);
+        assert_eq!(score("南丰站", "南丰占").distance, 1);
+    }
 
     /// 编辑距离的经典用例。
     #[test]

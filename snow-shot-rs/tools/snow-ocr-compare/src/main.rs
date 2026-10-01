@@ -59,11 +59,28 @@ fn run(options: &RunOptions) -> Result<(), String> {
         runs.push(run_local(options, &cases));
     }
     println!("{}", render_table(&runs));
+    if let Some(dir) = &options.dump {
+        dump_texts(dir, &runs)?;
+    }
     if let Some(path) = &options.csv {
         std::fs::write(path, to_csv(&runs))
             .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
         println!("csv written to {}", path.display());
     }
+    Ok(())
+}
+
+/// 把每个后端识别出的文本写成 `<图名>.<后端>.txt`，便于逐字核对。
+fn dump_texts(dir: &std::path::Path, runs: &[BackendRun]) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    for run in runs {
+        for row in run.rows.iter().filter(|r| r.error.is_none()) {
+            let path = dir.join(format!("{}.{}.txt", row.image, run.name));
+            std::fs::write(&path, &row.actual)
+                .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+        }
+    }
+    println!("recognized texts written to {}", dir.display());
     Ok(())
 }
 

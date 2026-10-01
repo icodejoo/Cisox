@@ -24,6 +24,8 @@ pub struct RunOptions {
     pub dir: PathBuf,
     /// CSV 输出路径。
     pub csv: Option<PathBuf>,
+    /// 把每个后端识别出的文本逐图写入该目录（`<图名>.<后端>.txt`）。
+    pub dump: Option<PathBuf>,
     /// 是否跑系统 OCR。
     pub system: bool,
     /// 是否跑本地模型。
@@ -44,7 +46,7 @@ pub struct RunOptions {
 pub fn usage() -> &'static str {
     "usage:\n  snow-ocr-compare gen --out <dir>\n  snow-ocr-compare run --dir <dir> [--csv <file>] \
      [--backends system,local] [--lang <bcp47>]\n                       [--asset-dir <dir>] \
-     [--ocr-exe <file>] [--model small] [--directml]"
+     [--ocr-exe <file>] [--model small] [--directml] [--dump <dir>]"
 }
 
 /// 解析命令行参数（不含程序名）。
@@ -95,6 +97,7 @@ fn parse_run(rest: &[String]) -> Result<Command, String> {
     let mut opts = RunOptions {
         dir: PathBuf::new(),
         csv: None,
+        dump: None,
         system: true,
         local: true,
         language: None,
@@ -113,6 +116,7 @@ fn parse_run(rest: &[String]) -> Result<Command, String> {
                 have_dir = true;
             }
             "--csv" => opts.csv = Some(PathBuf::from(take("--csv")?)),
+            "--dump" => opts.dump = Some(PathBuf::from(take("--dump")?)),
             "--lang" => opts.language = Some(take("--lang")?),
             "--asset-dir" => opts.asset_dir = Some(PathBuf::from(take("--asset-dir")?)),
             "--ocr-exe" => opts.ocr_exe = Some(PathBuf::from(take("--ocr-exe")?)),
@@ -184,6 +188,17 @@ mod tests {
         assert!(o.system && !o.local && o.directml);
         assert_eq!(o.language.as_deref(), Some("en-US"));
         assert_eq!(o.csv, Some(PathBuf::from("o.csv")));
+        assert_eq!(o.dump, None);
+    }
+
+    /// `--dump` 取目录；缺少取值被拒绝。
+    #[test]
+    fn dump_option_takes_a_directory() {
+        let Ok(Command::Run(o)) = parse_args(&args(&["run", "--dir", "d", "--dump", "out"])) else {
+            panic!("应解析成功")
+        };
+        assert_eq!(o.dump, Some(PathBuf::from("out")));
+        assert!(parse_args(&args(&["run", "--dir", "d", "--dump"])).is_err());
     }
 
     /// 非法输入给出原因。
