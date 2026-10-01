@@ -158,7 +158,8 @@ P0 验证基本完成，P1 地基完成，P2/P4/P5 已开工；**参考版（C++
 **OCR / 翻译可选后端（`docs/research/system-ocr-translate-backends.md`）**
 - 已决定：老用户保持 `local-model`、新用户默认 `system`；API 密钥存配置文件（设置页提示明文保存，导出与日志不带密钥）；i18n 用 `snow-i18n`（Fluent）。
 - [x] P0 抽象与配置（2026-10-01 完成，`ocr_backend.rs`、`text_recognition/backend`、迁移、设置页、三语文案）。**新用户默认暂为 `local-model`**，P1 系统 OCR 可用并与 PP-OCR 同图对比通过后再切 `system`。遗留：结果面板回落提示未做（P1 前新用户不会触发）、`screenshot_translation/backend` 旧值迁移留给翻译阶段、旧代码 `cargo fmt` 不干净（不做全仓重排）、密钥提示与日志脱敏留到 P4。
-- [ ] P1 Windows 系统 OCR 约 3~5 人天；**先做与 PP-OCR 的同图对比再定默认值**。
+- [x] P1 Windows 系统 OCR 已实现（2026-10-01，`snow-platform/src/win_ocr.rs`）与对比工具 `snow-ocr-compare` 已完成；合成样片对比：system 速度快约 3.6 倍（冷启动快约 25 倍）、内存约 1/8，但 CER 8.93% 对 PP-OCR 的 0%，**默认值仍保持 `local-model`**。
+- [ ] 待你提供真实截图（中文/英文/中英混排/小字号/深色主题/代码编辑器/聊天窗口，每张配同名 `.txt` 期望文本）后再对比并裁决是否切 `system`；中英混排的多引擎策略仍是开放问题。
 - [ ] P2 macOS Vision（`objc2-vision`）约 3~5 人天；P3 macOS 翻译（Swift 桥，15.x 需视图宿主）约 5~8 人天；P4 远程 OCR（可选）；P5 Windows AI OCR（仅 Copilot+，不建议）。
 - [ ] Windows 没有系统翻译 API：翻译在 Windows 默认仍用本地模型。
 - [ ] 开放问题：中英混排引擎策略、`windows` crate 的 `Media_Ocr` 特性名、macOS 各项需实机验证。

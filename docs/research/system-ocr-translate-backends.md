@@ -212,3 +212,13 @@ pub trait OcrEngine: Send + Sync {
 - [objc2-vision 0.3.2](https://docs.rs/objc2-vision/latest/objc2_vision/struct.VNRecognizeTextRequest.html)
 - 二手：[gancho PR #133（26 上无界面 session 实测）](https://github.com/johnny4young/gancho/pull/133)
 - 仓库内：`docs/research/adr5-local-nmt.md`、`snow-crates/crates/snow-ocr-process/PROTOCOL.md`、`snow-shot-rs/crates/snow-shot/src/{ocr_service,translate_service,ocr_assets}.rs`、`snow-shot-rs/crates/snow-translate/src/lib.rs`、`snow-shot-rs/crates/snow-config/src/extensions.rs`
+
+## P1 同图对比结果(2026-10-01,合成样片,Intel UHD 770 机器)
+工具 `snow-shot-rs/tools/snow-ocr-compare`(`gen` 生成确定性合成样片,`run` 对比),11 张合成图。**合成图不代表真实截图,只能看相对趋势**。
+| 指标 | system(Windows.Media.Ocr) | local-model(PP-OCR) |
+|---|---|---|
+| 平均 CER | 8.93%(micro 10.71%;小字号 10/12px 为 26.1%/22.0%,符号 22.1%,其余多在 0~8.7%) | 0.00% |
+| 热启动均耗时 | 20.9ms | 76.0ms |
+| 冷启动首张 | 45.3ms | 1156.6ms |
+| 内存 | 进程内工作集 7.9→13.2MiB,峰值 22.5MiB | worker 约 180.6MiB |
+**裁决**:按总原则,system 在性能与内存上占优,但识别准确度(尤其小字号与符号)明显更差,且结论只来自合成图;**新用户默认值继续保持 `local-model`,不切 `system`**,待用真实截图(中文/英文/中英混排/小字号/深色主题/代码编辑器/聊天窗口,每张配同名 `.txt` 期望文本)对比后再定。已观察:中文引擎会把英文符号识别成全角乱码(如 `$ 1 ， 234 ． 56`),印证"中英混排需多引擎"的开放问题,尚未验证解法。
