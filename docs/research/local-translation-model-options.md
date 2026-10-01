@@ -220,3 +220,15 @@ HY-MT（地域许可 + 体积）、TranslateGemma（体积 + Gemma 条款）、M
 - slimt 的许可；HY-MT 现行许可（Tencent HY Community 与"Apache-2.0 的 HY-MT2"并存的说法，只核实了前者）。
 - CT2/ort 对词表映射的原生支持；M2M100 的现成 ONNX 件。
 - 任何 Intel 核显上的实测速度。
+
+## 补充：HuggingFace 上的 NLLB 裁剪模型核实（2026-10-01，主会话直接读 HF 页面与 config.json）
+上一轮只找到 `slone` 一个，**漏了其余几个**；以下按 HF 接口与模型页面核实，【来源】均为 HF 页面。
+| 模型 | 裁了什么（【来源】） | 规模 | 对我们的意义 |
+|---|---|---|---|
+| `ayymen/nllb-200-distilled-600M-pruned`（2025-09，safetensors，F32） | **仅词表被裁**：`config.json` 里 `vocab_size=15273`（原版约 25.6 万），`d_model=1024`、编码/解码各 12 层、ffn 4096 未变；参数 **368,358,400** | 约 368M（F32 约 1.47GB） | **模型卡为空**：没写裁剪方法、保留了哪些语言、许可证、评测，作者未填；下游全是柏柏尔语（Tamazight）微调，推断是按该语种语料裁的词表。词表仅 1.5 万，**能否覆盖中文常用字、俄语、阿拉伯语未验证**，不能直接用于联合国六语 |
+| `edyrkaj/nllb-executorch-pruned`（2025-12） | **只保留 6 种语言**：eng_Latn、deu_Latn、als_Latn、ell_Grek、ita_Latn、tur_Latn；ExecuTorch `.pte`、FP32、面向 react-native-executorch；许可 CC-BY-NC-4.0 | 体积、内存、速度、质量均未公开 | **不含中、法、俄、西、阿**；移动端专用格式，无法用于我们的 worker |
+| `slone/nllb-pruned-6L-512d`、`-65Kv`、`-finetuned`（2023） | **层数与维度裁剪**：6 层、512 维，另有 65K 词表版 | 约 175M | 作者自称质量很差，只能当微调起点 |
+| `vocabtrimmer/*` | 通用的词表裁剪工具及成品（mT5、XLM-R、mBART 等） | — | **没有 NLLB/M2M 的成品**，但方法可复用 |
+**数学约束（【推断】，由上面的 config 推出）**：NLLB-600M 词表裁到约 1.5 万后仍有 **约 3.5 亿非嵌入参数**（12+12 层、d_model 1024、ffn 4096）。int8 约 1 字节/参数，**仅权重就约 350MB，超过 300MB 内存预算**，还没算激活与 KV 缓存；int4 才可能进 300MB，但质量损失没有数据。所以"只裁词表"对 NLLB-600M **不足以满足 300MB**；要进 300MB 只能裁层数/维度（如 slone 的 175M，但质量很差、需微调）。
+**结论**：HF 上有裁剪版，但**没有一个是现成可用于我们语种集的**（ayymen 的语言覆盖未知且无许可/评测，edyrkaj 缺我们要的语种且非商用，slone 质量差）；自己裁词表可行，但即使成功也难进 300MB。因此第一阶段仍以 OPUS-MT 按语向下载为主线；M2M100-418M（词表裁后约 310MB 的估算见上文）是唯一"一个模型多语种"的备选，需自裁自验。
+**未验证**：ayymen 模型的词表实际保留了哪些语言（需下载 `sentencepiece.bpe.model` 做覆盖测试）；其质量；int4 的 CT2/ONNX 路径。
