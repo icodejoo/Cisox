@@ -17,6 +17,7 @@ use crate::geom::{Rect, cursor_geometry, rgba_to_bgra};
 use crate::pipeline::FrameComposer;
 use crate::win::dda::GpuFrame;
 use crate::win::hwenc::{HwContext, Surface};
+use crate::win::span::{check_streams, tile_destination};
 use crate::win::vp::{VideoBlitter, VpLayer};
 
 /// 光标贴图缓存上限（按形状 ID，先进先出淘汰）。
@@ -67,6 +68,14 @@ impl GpuComposer {
             textures: HashMap::new(),
             order: VecDeque::new(),
         })
+    }
+
+    /// 检查视频处理器的输入流够不够拼接 `tiles` 块显示器（外加光标层）；不够返回回落原因。
+    ///
+    /// # 参数
+    /// - `tiles`：显示器块数。
+    pub fn ensure_tile_streams(&self, tiles: usize) -> Result<(), String> {
+        check_streams(tiles, self.blitter.max_input_streams())
     }
 
     /// 解析光标形状（`Embedded` 入缓存，`Cached` 查表）。
@@ -126,12 +135,24 @@ impl FrameComposer for GpuComposer {
 
     /// 桌面 + 光标一次 Blt 合成到表面；栅栏保证与采集复制、采集复用之间的顺序。
     fn compose(&mut self, frame: &GpuFrame, cursor: Option<&AttachedCursorSample>, surface: &mut Surface) -> Result<(), String> {
-        let mut layers = vec![VpLayer {
-            texture: frame.slot.texture_b().clone(),
-            source: Rect::full(self.src_size),
-            destination: Rect::full(self.out_size),
-            alpha: false,
-        }];
+        let mut layers = match &frame.tiles {
+            // 跨屏：每块显示器一层，目标矩形带偏移；空洞由视频处理器的黑色背景填充
+            Some(tiles) => tiles
+                .iter()
+                .map(|tile| VpLayer {
+                    texture: tile.slot.texture_b().clone(),
+                    source: Rect::full((tile.rect.width, tile.rect.height)),
+                    destination: tile_destination(tile.rect, self.src_size, self.out_size),
+                    alpha: false,
+                })
+                .collect(),
+            None => vec![VpLayer {
+                texture: frame.slot.texture_b().clone(),
+                source: Rect::full(self.src_size),
+                destination: Rect::full(self.out_size),
+                alpha: false,
+            }],
+        };
         if let Some(sample) = cursor
             && let Some(shape) = self.resolve_shape(sample)
             && let Some((source, destination)) = cursor_geometry(sample, &shape, self.src_size, self.out_size)
@@ -140,19 +161,38 @@ impl FrameComposer for GpuComposer {
             layers.push(VpLayer { texture: texture.raw().clone(), source, destination, alpha: true });
         }
         let _lock = self.device.lock();
-        let value = frame.slot.value();
         let fail = |what: &str, e: windows::core::Error| format!("{what}: {e}");
+        // 每个槽各自等采集复制完（跨屏时有多个槽）
         // SAFETY: 持有设备锁；栅栏与纹理都属于设备 B（或其共享视图）。
         unsafe {
-            self.context4.Wait(frame.slot.fence_b(), value).map_err(|e| fail("栅栏等待失败", e))?;
+            match &frame.tiles {
+                Some(tiles) => {
+                    for tile in tiles.iter() {
+                        self.context4.Wait(tile.slot.fence_b(), tile.slot.value()).map_err(|e| fail("栅栏等待失败", e))?;
+                    }
+                }
+                None => self.context4.Wait(frame.slot.fence_b(), frame.slot.value()).map_err(|e| fail("栅栏等待失败", e))?,
+            }
         }
         self.blitter.blit(&layers, surface.texture(), surface.slice())?;
         // SAFETY: 同上；Signal 排在 Blt 之后，采集复用该槽前会等它。
         unsafe {
-            self.context4.Signal(frame.slot.fence_b(), value + 1).map_err(|e| fail("栅栏 Signal 失败", e))?;
+            match &frame.tiles {
+                Some(tiles) => {
+                    for tile in tiles.iter() {
+                        let value = tile.slot.value();
+                        self.context4.Signal(tile.slot.fence_b(), value + 1).map_err(|e| fail("栅栏 Signal 失败", e))?;
+                        tile.slot.set_value(value + 1);
+                    }
+                }
+                None => {
+                    let value = frame.slot.value();
+                    self.context4.Signal(frame.slot.fence_b(), value + 1).map_err(|e| fail("栅栏 Signal 失败", e))?;
+                    frame.slot.set_value(value + 1);
+                }
+            }
             self.device.context().Flush();
         }
-        frame.slot.set_value(value + 1);
         Ok(())
     }
 

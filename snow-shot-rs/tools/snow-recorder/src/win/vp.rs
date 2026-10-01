@@ -120,6 +120,11 @@ impl VideoBlitter {
         Ok(blitter)
     }
 
+    /// 处理器支持的最大输入流（图层）数。
+    pub fn max_input_streams(&self) -> u32 {
+        self.caps.MaxInputStreams
+    }
+
     /// 检查 `input -> output` 的格式转换是否被支持。
     pub fn check_conversion(&self, input: DXGI_FORMAT, output: DXGI_FORMAT) -> Result<(), String> {
         let enumerator: ID3D11VideoProcessorEnumerator1 = self.enumerator.cast().map_err(|e| e.to_string())?;

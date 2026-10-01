@@ -7,6 +7,7 @@ pub mod compose;
 pub mod dda;
 pub mod hwenc;
 pub mod mfenc;
+pub mod span;
 pub mod wgc;
 pub mod vp;
 #[cfg(test)]

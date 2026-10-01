@@ -6,11 +6,14 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::pipeline::{self, PipelineConfig, Running};
+use snow_d3d11::SharedDevice;
+
+use crate::pipeline::{self, CaptureSource, PipelineConfig, Running};
 use crate::settings::{AdapterInfo, ENV_ENCODER, EncoderPreference, HwCodec, select_encoder};
 use crate::timeline::QpcAnchor;
 use crate::win::compose::GpuComposer;
-use crate::win::dda::DdaCapture;
+use crate::win::dda::{DdaCapture, GpuFrame};
+use crate::win::span::SpanCapture;
 use crate::win::mfenc::{ENV_MF_QUALITY, MF_POOL_CAPACITY, MfEncoder, parse_rate_control};
 use crate::win::hwenc::{SURFACE_ALIGN, DEFAULT_POOL_CAPACITY, HwConfig, HwContext, HwEncoder, QSV_ASYNC_DEPTH, QSV_PRESET};
 
@@ -88,6 +91,8 @@ impl HardwareSpec {
 
 /// 装配并启动 Windows 硬件流水线（DXGI 复制 + VideoProcessor + 厂商硬件编码）。
 ///
+/// 选区在单个显示器内走 `DdaCapture`；跨显示器（同适配器、无旋转）走 `SpanCapture`，其余回落。
+///
 /// # 参数
 /// - `spec`：装配参数。
 ///
@@ -95,12 +100,38 @@ impl HardwareSpec {
 /// 运行中的流水线；能力检测或首帧探测失败返回原因（输出文件可能已创建，由调用方清理）。
 pub fn start_hardware(spec: &HardwareSpec) -> Result<Running, String> {
     spec.validate()?;
-    let (_, _, w, h) = spec.region;
     // 关闭硬编时不必打开采集设备，直接让上层回落软编
     if spec.encoder == EncoderPreference::Software {
         return Err(format!("{ENV_ENCODER} 已关闭硬件编码"));
     }
-    let (mut capture, device) = DdaCapture::open(spec.region, QpcAnchor::capture_now(), spec.encoder)?;
+    match DdaCapture::open(spec.region, QpcAnchor::capture_now(), spec.encoder) {
+        Ok((mut capture, device)) => {
+            if crate::win::dda::wgc_mode() {
+                capture.enable_wgc()?;
+                eprintln!("实验：用 Windows Graphics Capture 取帧");
+            }
+            run_pipeline(spec, capture, device, 1)
+        }
+        // 单屏打不开：若是跨屏选区则改走多输出采集，否则沿用原失败原因
+        Err(single_error) => match SpanCapture::open(spec.region, QpcAnchor::capture_now())? {
+            Some((capture, device)) => {
+                let tiles = capture.tile_count();
+                run_pipeline(spec, capture, device, tiles)
+            }
+            None => Err(single_error),
+        },
+    }
+}
+
+/// 用已打开的采集源装配合成与编码并启动流水线。
+///
+/// # 参数
+/// - `spec`：装配参数。
+/// - `capture`：采集源（单屏或跨屏）。
+/// - `device`：合成设备 B。
+/// - `tiles`：显示器块数（单屏为 1）。
+fn run_pipeline<C: CaptureSource<Frame = GpuFrame>>(spec: &HardwareSpec, capture: C, device: SharedDevice, tiles: usize) -> Result<Running, String> {
+    let (_, _, w, h) = spec.region;
     let identity = device.identity();
     let adapter = AdapterInfo { vendor: identity.vendor, description: identity.description.clone() };
     // Media Foundation 不依赖 FFmpeg 编码器：厂商不认识也能用（帧池借用非 QSV 的 D3D11 路径）
@@ -115,11 +146,10 @@ pub fn start_hardware(spec: &HardwareSpec) -> Result<Running, String> {
     let align = if spec.media_foundation { MF_SURFACE_ALIGN } else { SURFACE_ALIGN };
     let hw = Arc::new(HwContext::with_align(device.clone(), spec.out_size, if spec.media_foundation { MF_POOL_CAPACITY } else { DEFAULT_POOL_CAPACITY }, codec, align, !spec.media_foundation)?);
     hw.prewarm(PREWARM_SURFACES)?;
-    if crate::win::dda::wgc_mode() {
-        capture.enable_wgc()?;
-        eprintln!("实验：用 Windows Graphics Capture 取帧");
-    }
     let composer = GpuComposer::new(device, Arc::clone(&hw), (w, h), spec.out_size, spec.fps)?;
+    if tiles > 1 {
+        composer.ensure_tile_streams(tiles)?;
+    }
     if spec.media_foundation {
         let encoder = MfEncoder::open(hw, &spec.output, spec.out_size, spec.fps, parse_rate_control(std::env::var(ENV_MF_QUALITY).ok().as_deref()))?;
         return pipeline::start(

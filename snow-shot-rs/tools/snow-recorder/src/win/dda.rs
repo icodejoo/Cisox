@@ -25,6 +25,7 @@ use windows::Win32::Graphics::Dxgi::{
 };
 use windows::core::{Interface, PCWSTR};
 
+use crate::geom::Rect;
 use crate::pipeline::{CaptureDiag, CaptureFault, CaptureSource, CaptureStats, Captured};
 use crate::settings::{AdapterInfo, EncoderPreference, rank_adapters};
 use crate::timeline::QpcAnchor;
@@ -34,7 +35,7 @@ pub const POOL_SIZE: usize = 10;
 /// 零超时轮询之间的睡眠：阻塞式 `AcquireNextFrame` 会在等待期间占着设备锁，所以改成"零超时取帧 + 亚毫秒睡眠"。
 pub const POLL_SLEEP: Duration = Duration::from_micros(400);
 /// 诊断样本上限。
-const DIAG_LIMIT: usize = 20_000;
+pub(crate) const DIAG_LIMIT: usize = 20_000;
 /// 栅栏共享句柄的访问权限（GENERIC_ALL）。
 const FENCE_ACCESS: u32 = 0x1000_0000;
 
@@ -74,11 +75,32 @@ impl SharedSlot {
     }
 }
 
+/// 跨屏帧里的一块：某个显示器落入选区的裁剪块（槽尺寸 = 块尺寸）。
+#[derive(Clone)]
+pub struct Tile {
+    /// 共享槽。
+    pub slot: Arc<SharedSlot>,
+    /// 块在选区内的矩形（选区坐标，1:1 物理像素）。
+    pub rect: Rect,
+}
+
 /// 采集帧句柄：引用计数的共享槽；所有持有者释放后，采集才会复用该槽。
 #[derive(Clone)]
 pub struct GpuFrame {
-    /// 共享槽。
+    /// 共享槽（跨屏时指向 `tiles` 的第一块，仅作占位）。
     pub slot: Arc<SharedSlot>,
+    /// 跨屏时每块显示器一项；`None` 表示 `slot` 覆盖整个选区（单屏）。
+    pub tiles: Option<Arc<[Tile]>>,
+}
+
+impl GpuFrame {
+    /// 单屏帧：一个槽覆盖整个选区。
+    ///
+    /// # 参数
+    /// - `slot`：覆盖整个选区的共享槽。
+    pub fn single(slot: Arc<SharedSlot>) -> Self {
+        Self { slot, tiles: None }
+    }
 }
 
 /// 采集使用的设备对：A 给采集，B 给合成与编码。
@@ -137,7 +159,7 @@ pub(crate) fn create_slot(a: &SharedDevice, b: &SharedDevice, size: (u32, u32)) 
 
 /// GPU 线程优先级（-7..=7）：合成/编码设备调到最低，让 DWM 合成与桌面复制优先拿到 GPU 时间，
 /// 否则 VideoProcessor/编码占着引擎时，`AcquireNextFrame` 会被拖长十几毫秒而漏掉呈现。
-const COMPOSE_GPU_PRIORITY: i32 = -7;
+pub(crate) const COMPOSE_GPU_PRIORITY: i32 = -7;
 
 /// 环境变量：采集设备的 GPU 线程优先级（-7..=7，实验；缺省不设置）。
 pub const ENV_CAPTURE_GPU_PRIORITY: &str = "SNOW_RECORDER_CAPTURE_GPU_PRIORITY";
@@ -147,12 +169,12 @@ pub const ENV_COMPOSE_GPU_PRIORITY: &str = "SNOW_RECORDER_COMPOSE_GPU_PRIORITY";
 pub const ENV_CAPTURE_MODE: &str = "SNOW_RECORDER_CAPTURE_MODE";
 
 /// 读取环境变量里的 GPU 优先级（限制在 -7..=7）；未设置或非法返回 `None`。
-fn env_priority(name: &str) -> Option<i32> {
+pub(crate) fn env_priority(name: &str) -> Option<i32> {
     std::env::var(name).ok().and_then(|v| v.trim().parse::<i32>().ok()).map(|p| p.clamp(-7, 7))
 }
 
 /// 设置设备的 GPU 线程优先级；失败忽略（只是少一层保护）。
-fn set_gpu_priority(device: &SharedDevice, priority: i32) {
+pub(crate) fn set_gpu_priority(device: &SharedDevice, priority: i32) {
     if let Ok(dxgi) = device.device().cast::<windows::Win32::Graphics::Dxgi::IDXGIDevice>() {
         // SAFETY: 只设置设备的调度优先级。
         let _ = unsafe { dxgi.SetGPUThreadPriority(priority) };
@@ -172,7 +194,7 @@ fn contains(monitor: (i32, i32, i32, i32), region: (i32, i32, u32, u32)) -> bool
 }
 
 /// 离开作用域时释放已取得的桌面帧。
-struct FrameGuard<'a>(&'a IDXGIOutputDuplication);
+pub(crate) struct FrameGuard<'a>(pub(crate) &'a IDXGIOutputDuplication);
 
 impl Drop for FrameGuard<'_> {
     /// 释放帧。
@@ -252,7 +274,7 @@ impl DdaCapture {
         // 复制命令已提交，帧可以归还帧池（GPU 侧顺序由驱动保证）
         drop(frame);
         let cursor = self.sample_cursor();
-        let captured = Captured { frame: GpuFrame { slot }, cursor, present: arrived, captured_at: Instant::now(), fresh: true };
+        let captured = Captured { frame: GpuFrame::single(slot), cursor, present: arrived, captured_at: Instant::now(), fresh: true };
         self.stats.frames += 1;
         self.latest = Some(captured.clone());
         Ok(Some(captured))
@@ -421,7 +443,7 @@ pub(crate) fn copy_into_slot(
 }
 
 /// 枚举所有 DXGI 适配器及其描述（含软件适配器，由选择逻辑按厂商号过滤）。
-fn list_adapters() -> Result<Vec<(IDXGIAdapter1, AdapterInfo)>, String> {
+pub(crate) fn list_adapters() -> Result<Vec<(IDXGIAdapter1, AdapterInfo)>, String> {
     // SAFETY: 只调用 DXGI 枚举接口。
     let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }.map_err(|e| format!("创建 DXGI 工厂失败: {e}"))?;
     let mut out = Vec::new();
@@ -529,7 +551,7 @@ impl CaptureSource for DdaCapture {
             Some(a) => a.to_instant(info.LastPresentTime),
             None => captured_at,
         };
-        let captured = Captured { frame: GpuFrame { slot }, cursor, present: present.min(captured_at), captured_at, fresh: true };
+        let captured = Captured { frame: GpuFrame::single(slot), cursor, present: present.min(captured_at), captured_at, fresh: true };
         self.stats.frames += 1;
         self.latest = Some(captured.clone());
         Ok(Some(captured))
