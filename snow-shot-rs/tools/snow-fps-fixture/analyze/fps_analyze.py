@@ -26,6 +26,8 @@ DECODE_THRESHOLD = 128
 FPS_RATIO_LINE = 0.95
 # 丢帧率上限。
 DROP_RATE_LIMIT = 0.01
+# 至少这么多个有效帧才把启动首帧排除出稳态丢帧口径。
+STEADY_MIN_FRAMES = 30
 # 不带夹具日志时，序号偏离中位数超过该值视为解码错误。
 OUTLIER_SEQ_SPAN = 1_000_000
 # 抽取序号条中间一半高度的 ffmpeg 滤镜（对缩放后的成品同样适用）。
@@ -80,8 +82,11 @@ class Stats:
     fps_effective: float = 0.0  # 有效帧率 = 不同序号数 / 时长
     seq_min: int = 0
     seq_max: int = 0
-    dropped_seqs: int = 0  # 序号区间内缺失的序号数
-    drop_rate: float = 0.0  # 缺失 / 区间长度
+    dropped_seqs: int = 0  # 稳态序号区间内缺失的序号数（已排除启动首帧）
+    drop_rate: float = 0.0  # 稳态缺失 / 稳态区间长度，判定用
+    dropped_seqs_raw: int = 0  # 含启动首帧的缺失序号数（原始口径）
+    drop_rate_raw: float = 0.0  # 含启动首帧的丢帧比例（原始口径）
+    startup_skipped: bool = False  # 是否已把启动首帧排除出稳态口径
     duplicate_frames: int = 0  # 序号重复的帧数
     out_of_order: int = 0  # 序号倒退次数
     max_seq_gap: int = 0  # 相邻帧最大序号跳变
@@ -171,8 +176,15 @@ def compute_stats(
     st.unique_seqs = len(uniq)
     st.seq_min, st.seq_max = min(seqs), max(seqs)
     span = st.seq_max - st.seq_min + 1
-    st.dropped_seqs = span - st.unique_seqs
-    st.drop_rate = st.dropped_seqs / span if span else 0.0
+    st.dropped_seqs_raw = span - st.unique_seqs
+    st.drop_rate_raw = st.dropped_seqs_raw / span if span else 0.0
+    # 稳态口径：成品第 1 帧是复制接口刚建立时取到的陈旧启动帧，它与随后第一个新帧之间被合并的一帧
+    # 发生在录制开始之前，不算录制中的丢帧；帧数太少时不排除。
+    steady = seqs[1:] if len(seqs) >= STEADY_MIN_FRAMES else seqs
+    st.startup_skipped = steady is not seqs
+    steady_span = max(steady) - min(steady) + 1
+    st.dropped_seqs = steady_span - len(set(steady))
+    st.drop_rate = st.dropped_seqs / steady_span if steady_span else 0.0
     st.duplicate_frames = len(seqs) - st.unique_seqs
     st.out_of_order = sum(1 for a, b in zip(seqs, seqs[1:]) if b < a)
     st.max_seq_gap = max((b - a for a, b in zip(seqs, seqs[1:])), default=0)
@@ -294,6 +306,7 @@ def format_report(st: Stats) -> str:
         f"有效帧率            : {st.fps_effective:.2f} fps（不同序号 {st.unique_seqs} / {st.duration_s:.3f}s）",
         f"序号区间            : {st.seq_min} .. {st.seq_max}",
         f"被丢序号数          : {st.dropped_seqs}（丢帧率 {st.drop_rate * 100:.3f}%，最大序号跳变 {st.max_seq_gap}）",
+        f"启动首帧边界        : {'已排除出上面的稳态口径' if st.startup_skipped else '帧数太少，未排除'}；含首帧的原始口径 缺 {st.dropped_seqs_raw} 个（{st.drop_rate_raw * 100:.3f}%）",
         f"重复帧数            : {st.duplicate_frames}",
         f"序号乱序次数        : {st.out_of_order}",
     ]
