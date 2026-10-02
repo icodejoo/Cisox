@@ -8,7 +8,7 @@
 
 | 问题 | 结论 |
 |---|---|
-| sherpa-onnx 能与现有 ort 共用一份 onnxruntime.dll 吗 | **版本上能对上**：sherpa 1.13.8 发布包自带 ORT 1.28.2【已核实】，本仓库 ort rc.13 开了 `api-28`（对应 ORT 1.28）【已核实】。sherpa 的 C API DLL 按名字导入 `onnxruntime.dll`【实测】，用仓库内的 ORT 1.28.0 DLL 替换后 sherpa 能加载并报版本【实测】。但「替换后真的建 recognizer 跑识别」没测【未验证】。 |
+| sherpa-onnx 能与现有 ort 共用一份 onnxruntime.dll 吗 | **版本上能对上**：sherpa 1.13.8 发布包自带 ORT 1.28.2【已核实】，本仓库 ort rc.13 开了 `api-28`（对应 ORT 1.28）【已核实】。sherpa 的 C API DLL 按名字导入 `onnxruntime.dll`【实测】，用仓库内的 ORT 1.28.0 DLL 替换后 sherpa 能加载并报版本【实测】。「替换后真的建 recognizer 跑识别」后来已测通，见 §8【实测】。 |
 | 不用 sherpa，纯 ort 自研可行吗 | **可行，且已跑通**：一个 ~300 行的探针（含 WAV/内存统计）用 ort rc.13 + 手写 Kaldi fbank + 贪心 transducer 解码，加载 sherpa 的流式 zipformer 中英双语 int8 模型，识别出中英混说的样例【实测】。真正的工作量在 VAD/端点、标点、多模型家族适配，不在核心推理。 |
 | 本地模型实测成绩（2 线程，BelowNormal） | 常驻内存峰值 ~253MB；每 320ms 音频块计算 p50 31~37ms，RTF 0.105~0.135【实测】。 |
 | Windows 系统语音 | 三条路：`Windows.Media.SpeechRecognition`（流式，有 hypothesis，但**要求开「联机语音识别」**，且只吃默认麦克风）；SAPI/`System.Speech`（真离线、有流式 hypothesis，但本机测两段样例准确率很差）；Windows AI `SpeechRecognitionModel`（真离线+流式，但需 Win11 24H2 + WinAppSDK + MSIX 打包）。 |
@@ -27,12 +27,12 @@
 ### 1.2 外部/动态 ORT
 - sherpa 构建期支持预装 ORT：环境变量 `SHERPA_ONNXRUNTIME_INCLUDE_DIR`/`SHERPA_ONNXRUNTIME_LIB_DIR`，CMake 开关 `SHERPA_ONNX_USE_PRE_INSTALLED_ONNXRUNTIME_IF_AVAILABLE`【已核实：[onnxruntime.cmake](https://github.com/k2-fsa/sherpa-onnx/blob/master/cmake/onnxruntime.cmake)】。
 - 运行期：`sherpa-onnx-c-api.dll` 的导入表含 `onnxruntime.dll`（按名字，非绝对路径）【实测：在二进制里扫到该字符串】。
-- 实测：新建目录只放 `sherpa-onnx-c-api.dll` + 仓库里的 ORT 1.28.0 `onnxruntime.dll`，Python ctypes 加载 c-api 成功，`SherpaOnnxGetVersionStr()` 返回 `1.13.8`，进程里的 `onnxruntime.dll` 模块路径确为替换的那份【实测】。**未做**：用替换 DLL 实际创建 recognizer 并识别（会覆盖更多 ORT API 符号，不能由此推出完全兼容）【未验证】。
+- 实测：新建目录只放 `sherpa-onnx-c-api.dll` + 仓库里的 ORT 1.28.0 `onnxruntime.dll`，Python ctypes 加载 c-api 成功，`SherpaOnnxGetVersionStr()` 返回 `1.13.8`，进程里的 `onnxruntime.dll` 模块路径确为替换的那份【实测】。（订正：后续已用替换 DLL 实际创建 recognizer 并识别，成功，见 §8。）
 - 注意「共用」的含义：STT 是独立 worker 进程，一个进程里只会走 sherpa 或 ort 其中之一。共用的实际收益是**安装包里只放一份 onnxruntime.dll**（翻译、OCR、STT 同一份），不是进程内省内存。
 
 ### 1.3 Rust 绑定与许可证
 - crate `sherpa-onnx` 1.13.8（2026-09-11），包装 C API；依赖 `serde`、`serde_json`、`sherpa-onnx-sys =1.13.8`【已核实：[docs.rs](https://docs.rs/crate/sherpa-onnx/latest)】。特性 `static`（默认，首次构建自动下载原生库）与 `shared`；可用 `SHERPA_ONNX_LIB_DIR` 指向自带库【已核实：[rust-api-examples README](https://github.com/k2-fsa/sherpa-onnx/tree/master/rust-api-examples)】。另有社区包装 `sherpa-rs`、`sherpa-transducers`、`wavekat-asr`【二手：[搜索结果](https://lib.rs/crates/sherpa-transducers)】。
-- 许可证：仓库 Apache-2.0【已核实：仓库页脚】；Rust crate 自身 license 字段本次没读到（docs.rs 页未显示）【未验证】。
+- 许可证：仓库 Apache-2.0【已核实：仓库页脚】；Rust crate 自身许可证已核实为 Apache-2.0，见 §8。
 - 代价（对照总原则）：`static` 模式下构建时联网下载原生库、sherpa 静态库里是否另带一份 ORT 没验证【未验证】；`shared` 模式新增 2.9MB DLL。两者都比「纯 ort」多一个外部二进制依赖，违反「少编译依赖」。收益：现成的 VAD、端点检测、热词、Paraformer/Whisper/SenseVoice 等多模型家族、已验证过的 fbank。
 
 ## 2. 纯 ort 自研：工作量与风险
@@ -193,7 +193,7 @@ trait SttEngine {
 2. **P2 切换式 + 端点 + 降级**：静音超时/Esc 取消、UIPI 探测与禁用态、粘贴降级、稳定前缀法与回删。
 3. **P3 模型管理**：资产清单/下载/校验（沿用 OCR 方式），评估 small 版与量化；评估标点模型。
 4. **P4 系统后端**：`SpeechRecognizer`（hypothesis 经稳定前缀法接入）；联机开关检测与禁用态文案；SAPI 是否做另议。
-5. **P5（按需）sherpa 后端**：仅当要支持 Paraformer/Whisper/SenseVoice 等多家族时再引入，走 shared 模式、与 ort 共用同一份 `onnxruntime.dll`；先补做 §1.2 未验证的"替换 DLL 后真实识别"。
+5. **P5（按需）sherpa 后端**：仅当要支持 Paraformer/Whisper/SenseVoice 等多家族时再引入，走 shared 模式、与 ort 共用同一份 `onnxruntime.dll`；"替换 DLL 后真实识别"已在 §8 补做通过。
 
 ### 7.4 还没验证、动手前要先清的事
 1. 手写 fbank 与 sherpa 官方输出的 golden 对比（本探针只证明"能出对的字"）。
@@ -203,3 +203,89 @@ trait SttEngine {
 5. `SpeechRecognizer` 中文听写在联机开关打开后的真实质量与延迟。
 6. small 版 Zipformer 的下载来源与实测。
 7. 模型训练数据与权重许可细节（尤其 Paraformer 上游 FunASR 许可、Moonshine 条款）。
+
+## 8. sherpa-onnx 实测（2026-10-02 追加）
+
+一次性探针在系统临时目录（不在仓库），`sherpa-onnx = 1.13.8`，`cargo build --release -j 2`，进程 BelowNormal。模型同 §2.3（Zipformer 中英双语 int8），音频为 3 段样例各接 2s 静音（共 25.8s，81 块×320ms）。机器同 §2.3（i5-13500，Windows 10）。
+
+### 8.1 许可证与依赖【已核实：crate 清单 + `cargo metadata`】
+- `sherpa-onnx`、`sherpa-onnx-sys` 均为 **Apache-2.0**（Cargo.toml `license` 字段 + crate 内 LICENSE 文本）。Apache-2.0 可并入 GPL-3.0-only 工程（单向兼容），本身无冲突。
+- Rust 传递依赖约 100 个包，许可证全是 MIT / Apache-2.0 / BSD / ISC / Zlib / Unicode-3.0 / 0BSD / CC0 / Unlicense / CDLA-Permissive-2.0（webpki-roots 数据）/ `ring` 的 Apache-2.0 AND ISC，**没有与 GPL-3.0-only 不兼容的**。运行时依赖只有 `serde`、`serde_json`（及其小依赖）；`ureq`、`rustls`、`ring`、`zip`、`tar`、`bzip2`、`xz2`、`zstd` 等全是 `sherpa-onnx-sys` 的 **build-dependencies**（构建期下载解压预编译库用），不进最终二进制，但拉长首次编译（shared 约 1m58s，static 约 2m31s，`-j 2`）。
+- 预编译原生库（build.rs 下载，不属于 crate）：ORT（MIT）、kaldi-native-fbank / kaldi-decoder / kaldifst / openfst（Apache-2.0）、piper_phonemize、kissfft、ssentencepiece 等；另含 **espeak-ng**（TTS 用，`sherpa-onnx-c-api.dll` 内能搜到 espeak 字样【实测】）。espeak-ng 上游为 GPL-3.0-or-later【常识，本次没读到该 fork 的一手 LICENSE，未验证】，GPLv3 工程使用本身可行。结论：**可用于 GPL-3.0-only 工程**；分发这些 DLL 时需补第三方许可证声明（`collect-third-party-licenses.ps1` 是否覆盖未核实）。
+- crate 的 build.rs 只会下载含 TTS 的 `shared-MT-Release-lib`（c-api 4.6MB）；§1.1 的 `no-tts` 包（2.9MB）需自己用 `SHERPA_ONNX_LIB_DIR` 指向。
+
+### 8.2 构建与产物【实测】
+| 项 | shared | static |
+|---|---|---|
+| 下载包（build.rs 自动联网下，GitHub Releases） | 7.7MB | 117.5MB（解压后 lib 约 1GB，onnxruntime.lib 就占 900MB） |
+| 最终产物 | `onnxruntime.dll` 17.8MB + `sherpa-onnx-c-api.dll` 4.6MB + `onnxruntime_providers_shared.dll` 0.1MB = 3 个 DLL 约 22.5MB（`sherpa-onnx-cxx-api.dll` 0.26MB 用不到），exe 0.3MB | 单个 exe 19.1MB，无 DLL |
+| 额外工具链 | 不需要 libclang / cmake（绑定手写，build.rs 只下载解压）；MSVC + cargo 即可 | 同 |
+| 联网 | **构建期必须联网**（`ureq`，支持代理环境变量）；可用 `SHERPA_ONNX_LIB_DIR`（已解压 lib 目录）或 `SHERPA_ONNX_ARCHIVE_DIR`（本地 tar.bz2）离线构建 | 同 |
+| CRT | 预编译包为 MT（静态 CRT），与仓库静态 CRT 约定一致 | 同 |
+
+踩坑：**Windows 长路径**。build.rs 默认把包解压到 `<target>/…/out/sherpa-onnx-prebuilt/<长名字>/lib/`，target 目录路径较深时解压静默失败，随后链接报 `LNK1104 无法打开 sherpa-onnx-c-api.lib`。设 `CARGO_TARGET_DIR` 为短路径即正常（此时解压到 `<CARGO_TARGET_DIR>/sherpa-onnx-prebuilt/`）。仓库 target-dir 是 `build/cargo`，路径较短，但独立 worker 工作区放得深时要留意。
+
+### 8.3 shared 模式替换 ORT【实测】
+- 自带 `onnxruntime.dll` 文件版本 1.28.2；替换为仓库 `build/mt-quant/ort128/onnxruntime/capi/onnxruntime.dll`（1.28.0.20260724，17.8MB，同目录 `onnxruntime_providers_shared.dll` 一并替换）。
+- 进程内 `GetModuleFileName(onnxruntime.dll)` 确认加载的是各自目录里的那份。
+- **替换后真实创建流式 Zipformer recognizer 并识别成功**，4 段 final 文本与自带 ORT 完全一致（`昨天是 MONDAY` / `TODAY IS LIBR THE DAY AFTER TOMORROW是星期三` / `这是第一种第二种叫呃与 ALWAYS ALWAYS什么意思啊` / `这个是频繁的啊不认识记下来 FREQUENTLY频繁的`）；Silero VAD 在替换版上也能建会话并出相同切分。
+- 范围限制：只覆盖本模型 + VAD 用到的算子；其他模型家族（Paraformer / Whisper / SenseVoice）、TTS 没用替换 DLL 跑过【未验证】。
+
+### 8.4 性能（2 线程、BelowNormal、320ms 块；每块含 accept + decode + 取结果 + 端点判断）
+| 配置 | 模型加载 | 工作集（加载后 / 峰值） | 每块 p50 | 每块 p95 | RTF |
+|---|---|---|---|---|---|
+| shared + 自带 ORT 1.28.2（正常的 2 次） | 3.0~4.0s（首次冷 11s） | 245~255 / 267MB | 46.6~48.6ms | 67.8~68.4ms | 0.152~0.156 |
+| shared + 仓库 ORT 1.28.0（3 次） | 3.4~4.9s | 246~257 / 268~270MB | 43.7~47.2ms | 55.2~68.7ms | 0.137~0.152 |
+| static（内置 ORT，1 次） | 3.5s | 244~254 / 267MB | 44.5ms | 61.1ms | 0.142 |
+| 自研 ort 探针（§2.3，对照） | 1.4s（热） | ~245 / 253MB | 31~37ms | 40~46ms | 0.105~0.135 |
+
+解读：
+- 内存与自研基本持平（峰值多约 14MB）。**替换 ORT 与否无可见差别**，仓库那份略快或持平，差异在噪声内。
+- sherpa 每块比自研高约 10ms（RTF 0.14~0.15 对 0.105~0.135）。可能因为本次计时含 JSON 取结果与端点判断、不同时段机器负载不同、图优化设置差异——**没做同时段交叉对比，不能定论**。都远低于 1.0，实时足够。
+- 加载 3~5s，比自研探针的 1.4s 慢（默认配置），一次性开销；首次 11s 与 §2.3 的 49.9s 同类（冷文件）。
+- **离群值**：shared 自带 ORT 两次运行出现秒级卡顿（最大块 8.8s / 1.7s，RTF 0.83 / 0.30），同一二进制其余 4 次均无。判断为本机其他进程抢占（BelowNormal 易被饿），非 sherpa 缺陷，**但实时场景下要有缓冲与超时保护**。
+
+### 8.5 VAD 与端点【实测】
+- **Silero VAD 可用**：`silero_vad.onnx` 0.64MB（GitHub asr-models 发布），建会话 160~190ms；单独进程工作集 6→27MB（含 ORT / c-api DLL 映射），**在已加载 ASR 的进程里再建 VAD 只多约 2MB**（246→248MB）；每 512 样本窗口 p50 0.24ms / p95 0.3~0.44ms，可忽略。
+- 样例上切出 5 段（threshold 0.5、min_silence 0.5s）：0.68s/1.61s、3.81s/2.12s、6.53s/3.37s、12.87s/4.26s、19.14s/4.10s，与听感一致，无漏段。
+- **ASR 自带端点检测可直接用于「说完一句」**：`enable_endpoint=true`，`rule1_min_trailing_silence=2.4`、`rule2=1.2`、`rule3_min_utterance_length=20`（sherpa 示例默认）；`is_endpoint()` 为真时取该句定稿，`reset(stream)` 开下一句。样例触发 4 次端点，都落在静音处，文本无丢失。第一段样例自带 >1.2s 停顿，被切成 `昨天是 MONDAY` 与 `TODAY IS…` 两句（规则 2 的正常行为，调大 `rule2` 可减少过切）。切换式「静音自动结束」不接 VAD 即可做；VAD 的价值是与模型无关、更快（0.5s 级）的静音判断，以及先滤静音再喂 ASR 省算力，属选项而非必需。
+- 阈值怎么设才贴合真实说话节奏（比如要「说完 0.8s 出定稿」就把 rule2 调到约 0.8）没在麦克风下评估【未验证】。
+
+### 8.6 流式结果接口与进程内骨架【已核实 API 源码 + 实测可跑】
+- **没有回调，是拉取式**：`accept_waveform(sr, &[f32])` 推音频 → `while is_ready { decode }` → `get_result(&stream)` 取 `RecognizerResult { text, tokens, timestamps, segment, start_time, is_final }`（内部 JSON 往返，每块一次，开销已计入 8.4）。partial = 每块 `get_result` 的当前文本（本模型只追加，实测 35 次变化均为增长）；final = `is_endpoint()` 为真那一次的文本，或 `input_finished()` 后冲刷的尾部。
+- 对象标了 `Send + Sync`，但 C 库按「单对象单线程」用更稳：采集线程 → channel → 推理线程 → 写管道线程。
+- 适合独立进程经管道回传：每块（0.32s）最多一条纯文本消息，带宽极低，可复用 `snow-ocr-protocol` 命名管道帧格式。
+
+```rust
+// 最小骨架：worker 内循环，结果经管道发回主进程
+let rec = OnlineRecognizer::create(&cfg).ok_or("create recognizer")?; // num_threads=2, enable_endpoint=true
+let stream = rec.create_stream();
+let mut last = String::new();
+for pcm in audio_rx {                        // 16k 单声道 f32，约 320ms 一块；收到 Stop 就 break
+    stream.accept_waveform(16000, &pcm);
+    while rec.is_ready(&stream) { rec.decode(&stream); }
+    let r = rec.get_result(&stream).unwrap();
+    if r.text != last { pipe.send(SttEvent::Partial(r.text.clone())); last = r.text; }
+    if rec.is_endpoint(&stream) {
+        if !last.is_empty() { pipe.send(SttEvent::Final(last.clone())); }
+        rec.reset(&stream); last.clear();
+    }
+}
+stream.input_finished();                     // 冲刷尾部
+while rec.is_ready(&stream) { rec.decode(&stream); }
+if let Some(r) = rec.get_result(&stream) { if !r.text.is_empty() { pipe.send(SttEvent::Final(r.text)); } }
+```
+
+### 8.7 结论与取舍
+- **推荐 shared**：下载与解压小（7.7MB 包 对 117.5MB / 1GB），ORT 可与翻译 / OCR 共用同一份并由仓库自管版本（已验证可替换）；代价是随 worker 多分发 2~3 个 DLL，且要保证同目录优先加载，别被 PATH 里别的 `onnxruntime.dll` 抢先。static 的好处是单 exe，但内置 ORT 无法共用、构建缓存巨大。
+- 相对自研：VAD、端点、多模型家族、已验证的 fbank 全包，内存持平，每块多约 10ms；代价是多一个预编译二进制依赖（构建期联网）、第三方声明、DLL 分发。
+- 订正 §7.3：P1 可直接用 sherpa（shared）替代自研 fbank / 解码，golden 对比一项因此可省。是否改动 §7.1 的首期推荐由用户定。
+
+### 8.8 未验证 / 遗留风险
+1. 真实麦克风链路（WASAPI → 重采样 → sherpa）端到端延迟与 CPU 占用；本次是文件按 320ms 块喂入。
+2. 端点阈值在真实说话节奏下的过切 / 漏切；仍无标点。
+3. 其他模型家族、small 版 Zipformer 未用 sherpa 跑。
+4. 离群卡顿根因只是推断，未单独复现；与自研 10ms/块的差距未做同时段交叉对比。
+5. 替换 ORT 仅验证了本机这份 1.28.0 开发版；ORT 升级（如仓库 venv 里的 1.30）后与 sherpa 1.13.8 是否兼容需重测。
+6. espeak-ng 等随包库的确切许可证文本与第三方声明脚本覆盖情况未核实。
+7. 构建期联网与长路径问题（见 §8.2）；CI / 离线环境需预置 `SHERPA_ONNX_ARCHIVE_DIR`。
