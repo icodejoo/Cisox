@@ -74,6 +74,7 @@ impl Dedup {
                     Some(Event::Final(t))
                 }
             }
+            SttEvent::Failed(why) => Some(Event::Error(why)),
         }
     }
 }
@@ -142,7 +143,9 @@ pub fn run_session(
                     stats.chunk_micros.push(t0.elapsed().as_micros() as u64);
                     stats.fed_samples += CHUNK_SAMPLES as u64;
                     buf.drain(..CHUNK_SAMPLES);
-                    emit_all(events, &mut dedup, emit);
+                    if emit_all(events, &mut dedup, emit) {
+                        return (SessionEnd::Failed, stats);
+                    }
                 }
                 if limit > 0 && stats.fed_samples >= limit {
                     return finish(backend, &mut buf, &mut dedup, emit, stats);
@@ -153,12 +156,18 @@ pub fn run_session(
 }
 
 /// 把后端事件去重后依次发出。
-fn emit_all(events: Vec<SttEvent>, dedup: &mut Dedup, emit: &mut dyn FnMut(Event)) {
+///
+/// # 返回
+/// 其中含后端失败（已发出 ERROR）时为 `true`，调用方据此结束会话。
+fn emit_all(events: Vec<SttEvent>, dedup: &mut Dedup, emit: &mut dyn FnMut(Event)) -> bool {
+    let mut failed = false;
     for e in events {
+        failed |= matches!(e, SttEvent::Failed(_));
         if let Some(out) = dedup.map(e) {
             emit(out);
         }
     }
+    failed
 }
 
 /// 冲刷剩余样本与后端尾部，发出最后的事件和 STOPPED。
@@ -177,7 +186,9 @@ fn finish(
         events.extend(backend.poll());
     }
     events.extend(backend.finish());
-    emit_all(events, dedup, emit);
+    if emit_all(events, dedup, emit) {
+        return (SessionEnd::Failed, stats);
+    }
     emit(Event::Stopped);
     (SessionEnd::Stopped, stats)
 }
@@ -426,6 +437,35 @@ mod tests {
     }
 
     #[test]
+    fn backend_failure_emits_error_and_fails() {
+        let mut b = FakeBackend::new(
+            vec![vec![
+                p("你"),
+                SttEvent::Failed("[system:mic-denied] x".into()),
+            ]],
+            vec![f("丢弃")],
+        );
+        let src = vec![silence(CHUNK_SAMPLES), silence(CHUNK_SAMPLES)];
+        let (end, _, out) = run(&mut b, src, vec![], 0);
+        assert_eq!(end, SessionEnd::Failed);
+        assert_eq!(
+            out,
+            vec![
+                Event::Partial("你".into()),
+                Event::Error("[system:mic-denied] x".into())
+            ]
+        );
+    }
+
+    #[test]
+    fn failure_during_flush_skips_stopped() {
+        let mut b = FakeBackend::new(vec![], vec![SttEvent::Failed("boom".into())]);
+        let (end, _, out) = run(&mut b, vec![], vec![Ctl::Cmd(Command::Stop)], 0);
+        assert_eq!(end, SessionEnd::Failed);
+        assert_eq!(out, vec![Event::Error("boom".into())]);
+    }
+
+    #[test]
     fn max_seconds_triggers_stop() {
         let mut b = FakeBackend::new(vec![], vec![f("够了")]);
         // 1 秒上限 = 16000 样本，第 4 块（20480）时越界
@@ -440,6 +480,7 @@ mod tests {
     fn wait_for_start_handles_idle_commands() {
         use snow_stt_protocol::{EndpointRules, StartRequest};
         let req = StartRequest {
+            backend: snow_stt_protocol::BackendKind::Local,
             language: "zh-en".into(),
             threads: 1,
             endpoint: EndpointRules::default(),

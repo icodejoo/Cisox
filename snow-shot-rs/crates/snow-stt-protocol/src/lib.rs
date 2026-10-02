@@ -32,6 +32,14 @@ const EVT_PONG: &str = "PONG";
 const EVT_STOPPED: &str = "STOPPED";
 /// START 命令的固定字段个数（不含行尾的模型目录）。
 const START_FIELDS: usize = 6;
+/// START 里可选的后端前缀键；缺省表示本地模型（旧版主程序不发这个字段）。
+const START_BACKEND_KEY: &str = "backend=";
+/// 后端取值：本地模型。
+const BACKEND_LOCAL: &str = "local";
+/// 后端取值：Windows 系统语音。
+const BACKEND_SYSTEM: &str = "system";
+/// 系统语音错误在 ERROR 文本里的前缀标记。
+const SYSTEM_ERROR_PREFIX: &str = "[system:";
 
 /// 端点检测规则（单位毫秒），含义同 sherpa-onnx 的三条规则。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,9 +63,88 @@ impl Default for EndpointRules {
     }
 }
 
+/// 识别后端种类。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BackendKind {
+    /// 本地模型（sherpa-onnx），需要模型目录；旧协议的唯一取值。
+    #[default]
+    Local,
+    /// Windows 系统语音（`SpeechRecognizer`），只吃默认麦克风，不需要模型目录。
+    System,
+}
+
+/// 系统语音后端的可识别错误类别，经 ERROR 文本的前缀标记传给主程序，由主程序翻译成本地化提示。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SystemError {
+    /// 系统「联机语音识别」开关未开。
+    OnlineSpeechOff,
+    /// 麦克风被隐私设置拒绝或不可用。
+    MicrophoneDenied,
+    /// 所需语言的语音包缺失或语言不受支持。
+    LanguageUnavailable,
+    /// 联机识别时网络失败。
+    Network,
+    /// 无法创建系统识别器或其它未归类的失败。
+    Other,
+}
+
+impl SystemError {
+    /// 全部类别，便于遍历（如检查每个类别都有文案）。
+    pub const ALL: [SystemError; 5] = [
+        Self::OnlineSpeechOff,
+        Self::MicrophoneDenied,
+        Self::LanguageUnavailable,
+        Self::Network,
+        Self::Other,
+    ];
+
+    /// 稳定的类别标记（协议值，不翻译）。
+    pub fn tag(self) -> &'static str {
+        match self {
+            Self::OnlineSpeechOff => "online-off",
+            Self::MicrophoneDenied => "mic-denied",
+            Self::LanguageUnavailable => "language",
+            Self::Network => "network",
+            Self::Other => "other",
+        }
+    }
+
+    /// 把类别与细节编码成 ERROR 原因文本（如 `[system:mic-denied] 细节`）。
+    ///
+    /// # 参数
+    /// - `detail`：附加细节，可为空。
+    pub fn to_error_text(self, detail: &str) -> String {
+        format!("{SYSTEM_ERROR_PREFIX}{}] {detail}", self.tag())
+    }
+
+    /// 从 ERROR 原因文本解析类别与细节；不带前缀标记时返回 `None`。
+    ///
+    /// # 参数
+    /// - `text`：ERROR 事件携带的原因。
+    ///
+    /// # 返回
+    /// 类别与细节。
+    ///
+    /// # 示例
+    /// ```
+    /// use snow_stt_protocol::SystemError;
+    /// let text = SystemError::Network.to_error_text("x");
+    /// assert_eq!(SystemError::from_error_text(&text), Some((SystemError::Network, "x".to_string())));
+    /// assert_eq!(SystemError::from_error_text("普通错误"), None);
+    /// ```
+    pub fn from_error_text(text: &str) -> Option<(Self, String)> {
+        let rest = text.strip_prefix(SYSTEM_ERROR_PREFIX)?;
+        let (tag, detail) = rest.split_once(']')?;
+        let kind = Self::ALL.into_iter().find(|k| k.tag() == tag)?;
+        Some((kind, detail.trim_start().to_string()))
+    }
+}
+
 /// 开始识别请求。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StartRequest {
+    /// 识别后端；序列化时本地模型不写该字段，保持旧格式。
+    pub backend: BackendKind,
     /// 语言提示（如 `zh-en`），无特殊需求传 `auto`；单词，不含空白。
     pub language: String,
     /// 推理线程数，至少为 1。
@@ -66,7 +153,7 @@ pub struct StartRequest {
     pub endpoint: EndpointRules,
     /// 单次录音最长秒数，超过自动当作 STOP；0 表示不限。
     pub max_seconds: u32,
-    /// 模型目录（含 encoder/decoder/joiner/tokens），放在行尾。
+    /// 模型目录（含 encoder/decoder/joiner/tokens），放在行尾；系统语音后端可为空。
     pub model_dir: String,
 }
 
@@ -202,7 +289,11 @@ impl Command {
     pub fn to_line(&self) -> String {
         match self {
             Self::Start(r) => format!(
-                "{CMD_START} {} {} {} {} {} {} {}",
+                "{CMD_START} {}{} {} {} {} {} {} {}",
+                match r.backend {
+                    BackendKind::Local => String::new(),
+                    BackendKind::System => format!("{START_BACKEND_KEY}{BACKEND_SYSTEM} "),
+                },
                 r.language.replace(char::is_whitespace, "_"),
                 r.threads,
                 r.endpoint.rule1_ms,
@@ -237,6 +328,19 @@ impl Command {
             CMD_CANCEL => Ok(Self::Cancel),
             CMD_PING => Ok(Self::Ping),
             CMD_START => {
+                // 可选的后端前缀；没有它就是旧格式（本地模型）
+                let (backend, rest) = match rest.strip_prefix(START_BACKEND_KEY) {
+                    Some(tail) => {
+                        let (value, after) = tail.split_once(' ').unwrap_or((tail, ""));
+                        let kind = match value {
+                            BACKEND_LOCAL => BackendKind::Local,
+                            BACKEND_SYSTEM => BackendKind::System,
+                            other => return err(format!("未知后端: {other}")),
+                        };
+                        (kind, after)
+                    }
+                    None => (BackendKind::Local, rest),
+                };
                 let mut it = rest.splitn(START_FIELDS + 1, ' ');
                 let language = match it.next() {
                     Some(l) if !l.is_empty() => l.to_string(),
@@ -252,11 +356,13 @@ impl Command {
                     rule3_ms: number(it.next(), "rule3_ms")?,
                 };
                 let max_seconds = number(it.next(), "max_seconds")?;
-                let model_dir = match it.next() {
-                    Some(d) if !d.is_empty() => unescape(d)?,
+                let model_dir = match (it.next(), backend) {
+                    (Some(d), _) if !d.is_empty() => unescape(d)?,
+                    (_, BackendKind::System) => String::new(),
                     _ => return err("字段 model_dir 缺失"),
                 };
                 Ok(Self::Start(StartRequest {
+                    backend,
                     language,
                     threads,
                     endpoint,
@@ -325,6 +431,7 @@ mod tests {
     /// 构造一个带空格路径的请求。
     fn sample() -> StartRequest {
         StartRequest {
+            backend: BackendKind::Local,
             language: "zh-en".into(),
             threads: 2,
             endpoint: EndpointRules {
@@ -375,6 +482,52 @@ mod tests {
         r.model_dir = "a b\tc\\d".into();
         let line = Command::Start(r.clone()).to_line();
         assert_eq!(Command::parse(&line).unwrap(), Command::Start(r));
+    }
+
+    #[test]
+    fn local_start_keeps_legacy_wire_format() {
+        let line = Command::Start(sample()).to_line();
+        assert!(!line.contains("backend="), "{line}");
+        // 旧版主程序发的行（无后端字段）仍解析成本地模型
+        let legacy = "START zh-en 2 2400 800 20000 60 D:\\\\m";
+        let Command::Start(r) = Command::parse(legacy).unwrap() else {
+            panic!("应为 Start");
+        };
+        assert_eq!(r.backend, BackendKind::Local);
+        assert_eq!(r.model_dir, "D:\\m");
+    }
+
+    #[test]
+    fn system_start_roundtrips_with_and_without_model_dir() {
+        for dir in ["", "D:\\x y"] {
+            let mut r = sample();
+            r.backend = BackendKind::System;
+            r.model_dir = dir.into();
+            let line = Command::Start(r.clone()).to_line();
+            assert!(line.starts_with("START backend=system zh-en "), "{line}");
+            assert_eq!(Command::parse(&line).unwrap(), Command::Start(r));
+        }
+        // 显式 local 也接受；未知后端被拒绝
+        assert!(Command::parse("START backend=local zh 1 1 2 3 0 d").is_ok());
+        assert!(Command::parse("START backend=cloud zh 1 1 2 3 0 d").is_err());
+        // 本地模型仍必须带模型目录
+        assert!(Command::parse("START backend=local zh 1 1 2 3 0").is_err());
+    }
+
+    #[test]
+    fn system_error_text_roundtrips() {
+        for kind in SystemError::ALL {
+            let text = kind.to_error_text("细节 a\\b");
+            let (back, detail) = SystemError::from_error_text(&text).unwrap();
+            assert_eq!((back, detail.as_str()), (kind, "细节 a\\b"));
+            // 经 ERROR 事件整行往返后依旧可解析
+            let Event::Error(t) = Event::parse(&Event::Error(text).to_line()).unwrap() else {
+                panic!("应为 Error");
+            };
+            assert_eq!(SystemError::from_error_text(&t).unwrap().0, kind);
+        }
+        assert_eq!(SystemError::from_error_text("模型缺失"), None);
+        assert_eq!(SystemError::from_error_text("[system:bogus] x"), None);
     }
 
     #[test]

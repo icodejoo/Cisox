@@ -21,6 +21,17 @@ snow-audio-recorder = { path = "../../../snow-crates/crates/snow-audio-recorder"
 # 用户已批准新增；shared 链接，onnxruntime.dll 由构建脚本替换为仓库同版
 sherpa-onnx = { version = "=1.13.8", default-features = false, features = ["shared"] }
 
+# 系统语音后端：只用 windows crate 的 feature（版本与 Cargo.lock 中已有的 0.62 一致，未新增 crate）
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Foundation",
+    "Globalization",
+    "Media_SpeechRecognition",
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_Registry",
+] }
+
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
 

@@ -5,12 +5,13 @@ use super::output::RouteNote;
 use crate::ocr_backend::i18n_for;
 use snow_config::extensions::DICTATION_BACKEND_SYSTEM;
 use snow_i18n::Args;
+use snow_stt_protocol::SystemError;
 
 /// 失败原因。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Failure {
-    /// 选了系统语音后端，尚未实现。
-    NotImplemented,
+    /// 系统语音后端报告的可识别错误（类别与细节）。
+    SystemSpeech(SystemError, String),
     /// 找不到语音识别工作进程。
     WorkerMissing,
     /// 工作进程启动失败。
@@ -122,7 +123,16 @@ pub fn route_message(note: &RouteNote, locale: &str) -> String {
 fn failure_message(failure: &Failure, locale: &str) -> String {
     let i18n = i18n_for(locale);
     match failure {
-        Failure::NotImplemented => i18n.tr("dictation-error-not-implemented"),
+        Failure::SystemSpeech(kind, detail) => {
+            let id = match kind {
+                SystemError::OnlineSpeechOff => "dictation-error-system-online-off",
+                SystemError::MicrophoneDenied => "dictation-error-system-mic-denied",
+                SystemError::LanguageUnavailable => "dictation-error-system-language",
+                SystemError::Network => "dictation-error-system-network",
+                SystemError::Other => "dictation-error-system-other",
+            };
+            i18n.tr_with(id, &Args::new().named("detail", detail.as_str()))
+        }
         Failure::WorkerMissing => i18n.tr("dictation-error-worker-missing"),
         Failure::Spawn(detail) => i18n.tr_with(
             "dictation-error-spawn",
@@ -152,7 +162,7 @@ fn failure_message(failure: &Failure, locale: &str) -> String {
     }
 }
 
-/// 设置页里选中语音后端时的提示：选了系统语音（尚未实现）返回明确说明，其余返回 `None`。
+/// 设置页里选中语音后端时的提示：选了系统语音返回使用前提与设置指引，其余返回 `None`。
 ///
 /// # 参数
 /// - `value`：`dictation/backend` 的当前值。
@@ -163,7 +173,7 @@ fn failure_message(failure: &Failure, locale: &str) -> String {
 /// ```
 pub fn backend_notice(value: &serde_json::Value, locale: &str) -> Option<String> {
     (value.as_str() == Some(DICTATION_BACKEND_SYSTEM))
-        .then(|| failure_message(&Failure::NotImplemented, locale))
+        .then(|| i18n_for(locale).tr("dictation-notice-system"))
 }
 
 #[cfg(test)]
@@ -174,7 +184,6 @@ mod tests {
     #[test]
     fn every_status_has_text_in_all_locales() {
         let failures = [
-            Failure::NotImplemented,
             Failure::WorkerMissing,
             Failure::Spawn("x".into()),
             Failure::ModelDirMissing("D:/m".into()),
@@ -185,6 +194,9 @@ mod tests {
             Failure::Worker("bad".into()),
             Failure::Link("pipe".into()),
         ];
+        let system_failures = SystemError::ALL
+            .into_iter()
+            .map(|k| Failure::SystemSpeech(k, "d".into()));
         let reasons = [
             NoTypeReason::NoFocus,
             NoTypeReason::NotEditable,
@@ -192,7 +204,12 @@ mod tests {
             NoTypeReason::Uncertain,
         ];
         let mut statuses = vec![Status::Loading, Status::Finishing, Status::Done];
-        statuses.extend(failures.into_iter().map(Status::Failed));
+        statuses.extend(
+            failures
+                .into_iter()
+                .chain(system_failures)
+                .map(Status::Failed),
+        );
         for note in [
             RouteNote::Pending,
             RouteNote::Typing,
@@ -230,6 +247,29 @@ mod tests {
         assert!(text.contains('?'), "{text}");
         assert!(Status::Failed(Failure::StartTimeout).is_failed());
         assert!(!Status::Done.is_failed());
+    }
+
+    /// 系统语音各类错误的文案互不相同，且给出设置指引，细节会带进文案。
+    #[test]
+    fn system_failures_have_guidance() {
+        for locale in ["zh-CN", "en-US"] {
+            let mut seen = std::collections::HashSet::new();
+            for kind in SystemError::ALL {
+                let text =
+                    Status::Failed(Failure::SystemSpeech(kind, "DETAIL".into())).message(locale);
+                assert!(seen.insert(text.clone()), "{locale} {kind:?} 文案重复");
+                assert!(!text.starts_with("dictation-"), "{text}");
+            }
+            let off = Status::Failed(Failure::SystemSpeech(
+                SystemError::OnlineSpeechOff,
+                String::new(),
+            ))
+            .message(locale);
+            assert!(off.contains("ms-settings:privacy-speech"), "{off}");
+            let other = Status::Failed(Failure::SystemSpeech(SystemError::Other, "DETAIL".into()))
+                .message(locale);
+            assert!(other.contains("DETAIL"), "{other}");
+        }
     }
 
     /// 设置页提示：只有选了系统语音才有，且两种语言都有文案。

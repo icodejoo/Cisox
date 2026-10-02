@@ -1233,6 +1233,7 @@ dependencies = [
  "sherpa-onnx",
  "snow-audio-recorder",
  "snow-stt-protocol",
+ "windows",
 ]
 
 [[package]]

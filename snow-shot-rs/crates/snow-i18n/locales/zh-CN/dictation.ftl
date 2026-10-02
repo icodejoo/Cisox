@@ -32,7 +32,17 @@ dictation-reason-elevated = 目标窗口权限更高
 
 dictation-reason-uncertain = 无法确定目标是否接受键入
 
-dictation-error-not-implemented = 系统语音引擎暂未提供，请在设置里把语音引擎改成本地模型
+dictation-error-system-online-off = 系统语音需要开启「联机语音识别」。请打开 Windows 设置 → 隐私 → 语音（可在开始菜单运行 ms-settings:privacy-speech），打开「联机语音识别」后重试；也可以在本程序设置里改用本地模型
+
+dictation-error-system-mic-denied = 系统语音无法使用麦克风。请打开 Windows 设置 → 隐私 → 麦克风（ms-settings:privacy-microphone），允许桌面应用访问麦克风，并确认有可用的默认录音设备。{ $detail }
+
+dictation-error-system-language = 系统缺少所需语言的语音识别支持。请在 Windows 设置 → 时间和语言 → 语音（ms-settings:speech）里添加该语言的语音包，或在本程序设置里把语言改成系统已有的语言。{ $detail }
+
+dictation-error-system-network = 联机语音识别连接失败，请检查网络后重试；也可以在本程序设置里改用本地模型
+
+dictation-error-system-other = 系统语音识别出错：{ $detail }。请检查 Windows 设置 → 隐私 → 语音（ms-settings:privacy-speech）里的「联机语音识别」是否已开启
+
+dictation-notice-system = 系统语音使用 Windows 自带识别，只能用默认麦克风，并需要开启「联机语音识别」（Windows 设置 → 隐私 → 语音，ms-settings:privacy-speech）
 
 dictation-error-worker-missing = 找不到语音引擎程序。请把它放在主程序旁边，或用环境变量 SNOW_STT_EXE 指定路径
 

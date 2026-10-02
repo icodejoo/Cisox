@@ -3,29 +3,36 @@
 //! 由主程序拉起：从 stdin 读行协议命令，向 stdout 回报事件（见 `snow-stt-protocol`）。
 //! 一个进程只做一次识别；STOP/CANCEL/stdin 断开都会结束进程，退出即释放全部资源。
 //! 测试用参数：`--wav <文件>` 用 16kHz 单声道 wav 代替麦克风，`--wav-pad-ms <n>` 在末尾补静音，
-//! `--stats` 结束时向 stderr 打印耗时统计。
+//! `--stats` 结束时向 stderr 打印耗时统计，`--probe-system [--probe-lang <语言>]` 只探测系统语音能力后退出。
 
 mod backend;
 mod session;
 mod sherpa;
 mod source;
+mod system;
 
 use std::io::{BufRead, Write};
 use std::sync::mpsc;
 use std::time::Instant;
 
-use snow_stt_protocol::{Command, Event};
+use snow_stt_protocol::{BackendKind, Command, Event, SystemError};
 
+use backend::SttBackend;
 use session::{Ctl, SessionEnd, SessionStats, run_session, wait_for_start};
-use source::{AudioSource, MicSource, WavSource};
+use source::{AudioSource, ClockSource, MicSource, WavSource};
 
 /// 进程退出码：正常结束。
 const EXIT_OK: i32 = 0;
 /// 进程退出码：识别失败。
 const EXIT_FAILED: i32 = 1;
 
+/// 系统语音后端的节拍间隔。
+const SYSTEM_TICK: std::time::Duration = std::time::Duration::from_millis(100);
+
 /// 命令行参数（均为测试用途）。
 struct Args {
+    /// 只做系统语音能力探测并退出（附带语言提示，默认 auto）。
+    probe_system: Option<String>,
     /// 用 wav 代替麦克风。
     wav: Option<String>,
     /// wav 末尾补的静音毫秒数。
@@ -37,6 +44,7 @@ struct Args {
 /// 解析命令行参数；未知参数忽略。
 fn parse_args() -> Args {
     let mut args = Args {
+        probe_system: None,
         wav: None,
         wav_pad_ms: 0,
         stats: false,
@@ -47,6 +55,10 @@ fn parse_args() -> Args {
             "--wav" => args.wav = it.next(),
             "--wav-pad-ms" => args.wav_pad_ms = it.next().and_then(|v| v.parse().ok()).unwrap_or(0),
             "--stats" => args.stats = true,
+            "--probe-system" => args.probe_system = Some("auto".into()),
+            "--probe-lang" => {
+                args.probe_system = Some(it.next().unwrap_or_else(|| "auto".into()));
+            }
             _ => {}
         }
     }
@@ -114,6 +126,10 @@ fn print_stats(load_ms: u128, stats: &SessionStats) {
 /// 进程入口：READY → 等 START → 加载模型 → 打开来源 → 跑会话 → 退出。
 fn main() {
     let args = parse_args();
+    if let Some(lang) = &args.probe_system {
+        println!("{}", system::probe_report(lang));
+        return;
+    }
     let ctl = spawn_stdin_reader();
     emit(&Event::Ready);
 
@@ -122,7 +138,19 @@ fn main() {
     };
 
     let t0 = Instant::now();
-    let mut backend = match sherpa::SherpaBackend::load(&req) {
+    let loaded: Result<Box<dyn SttBackend>, String> = match req.backend {
+        BackendKind::Local => {
+            sherpa::SherpaBackend::load(&req).map(|b| Box::new(b) as Box<dyn SttBackend>)
+        }
+        // 系统语音：识别器自己占用默认麦克风
+        BackendKind::System if args.wav.is_some() => {
+            Err(SystemError::Other.to_error_text("系统语音后端不支持 --wav，只能用麦克风"))
+        }
+        BackendKind::System => {
+            system::SystemBackend::load(&req).map(|b| Box::new(b) as Box<dyn SttBackend>)
+        }
+    };
+    let mut backend = match loaded {
         Ok(b) => b,
         Err(why) => {
             emit(&Event::Error(why));
@@ -131,10 +159,13 @@ fn main() {
     };
     let load_ms = t0.elapsed().as_millis();
 
-    // 模型加载完才开麦克风，避免把加载期间的旧音频喂进去
-    let opened: Result<Box<dyn AudioSource>, String> = match &args.wav {
-        Some(p) => WavSource::open(p, args.wav_pad_ms).map(|s| Box::new(s) as Box<dyn AudioSource>),
-        None => MicSource::open().map(|s| Box::new(s) as Box<dyn AudioSource>),
+    // 本地模型加载完才开麦克风，避免把加载期间的旧音频喂进去；系统语音只需节拍
+    let opened: Result<Box<dyn AudioSource>, String> = match (&args.wav, req.backend) {
+        (_, BackendKind::System) => Ok(Box::new(ClockSource::new(SYSTEM_TICK))),
+        (Some(p), _) => {
+            WavSource::open(p, args.wav_pad_ms).map(|s| Box::new(s) as Box<dyn AudioSource>)
+        }
+        (None, _) => MicSource::open().map(|s| Box::new(s) as Box<dyn AudioSource>),
     };
     let mut source = match opened {
         Ok(s) => s,
@@ -145,7 +176,7 @@ fn main() {
     };
 
     let (end, stats) = run_session(
-        &mut backend,
+        backend.as_mut(),
         source.as_mut(),
         &ctl,
         &mut |e| emit(&e),

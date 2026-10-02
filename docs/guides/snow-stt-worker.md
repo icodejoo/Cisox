@@ -1,18 +1,18 @@
 # snow-stt 语音转文字工作进程
 
-> 状态：P1 第二步，worker 与协议已接入主程序（热键触发、键入 / 右下角浮窗输出，见「主程序接入」「输出行为」两节；真机项尚未验证，见「已知限制与未验证」）。背景与选型见 [research/speech-to-text-backends.md](../research/speech-to-text-backends.md)（尤其 §8），原则见 [principles.md](../principles.md)。
+> 状态：P1 第二步（含系统语音后端），worker 与协议已接入主程序（热键触发、键入 / 右下角浮窗输出，见「主程序接入」「输出行为」两节；真机项尚未验证，见「已知限制与未验证」）。背景与选型见 [research/speech-to-text-backends.md](../research/speech-to-text-backends.md)（尤其 §8），原则见 [principles.md](../principles.md)。
 
 ## 组成
 - `snow-shot-rs/crates/snow-stt-protocol`：主 workspace 成员，零依赖的行文本协议，主程序与 worker 共用。
 - `snow-shot-rs/tools/snow-stt`：独立 workspace（自己的 `[workspace]` 与 `Cargo.lock`），二进制 `snow-stt`。依赖 sherpa-onnx 1.13.8（shared 链接，用户已批准新增）、协议 crate、`snow-crates/snow-audio-recorder`（WASAPI 默认麦克风采集与 16k 单声道重采样，不自写）。
-- 识别后端是 `SttBackend` trait（`feed` / `poll` / `finish`），sherpa 一份实现；主循环 `session.rs` 只认 trait 和 `AudioSource`，单测用 Fake 后端与脚本化来源，不依赖麦克风和模型。
+- 识别后端是 `SttBackend` trait（`feed` / `poll` / `finish`），有两份实现：sherpa（本地模型）与 Windows 系统语音（见「系统语音后端」）；主循环 `session.rs` 只认 trait 和 `AudioSource`，单测用 Fake 后端与脚本化来源，不依赖麦克风和模型。
 
 ## 协议
 每条消息一行 UTF-8，字段以空格分隔，自由文本放行尾，其中 `\`、换行、回车、制表符转义为 `\\`、`\n`、`\r`、`\t`（Windows 路径里的反斜杠也要双写，用 `Command::to_line` 生成即可）。
 
 | 方向 | 消息 | 说明 |
 |---|---|---|
-| 主程序 → worker | `START <lang> <threads> <rule1_ms> <rule2_ms> <rule3_ms> <max_seconds> <model_dir>` | 加载模型并开始采集。端点规则含义同 sherpa（2400/1200/20000 为示例默认）；`max_seconds` 为 0 表示不限，超过自动当作 STOP |
+| 主程序 → worker | `START [backend=local\|system] <lang> <threads> <rule1_ms> <rule2_ms> <rule3_ms> <max_seconds> <model_dir>` | 加载模型并开始采集。`backend=` 可省略，省略即本地模型（旧格式不变）；`system` 时 `model_dir` 可为空。端点规则含义同 sherpa（2400/1200/20000 为示例默认）；`max_seconds` 为 0 表示不限，超过自动当作 STOP |
 | | `STOP` | 停止采集，冲刷尾部，发最后的 `FINAL` 与 `STOPPED` 后退出 |
 | | `CANCEL` | 不冲刷，直接 `STOPPED` 后退出 |
 | | `PING` | 回 `PONG` |
@@ -54,7 +54,7 @@ scripts\verify-snow-stt.ps1 -ModelDir <模型目录> -Wav <wav> [-PadMs 3000] [-
 走真实 stdin/stdout 协议，打印带时间戳的事件序列、退出码、峰值工作集和每块耗时统计。
 
 ## 单测
-`scripts\build-snow-stt.ps1 -Test`（worker 16 个，含主循环 Fake 测试）与 `cargo test -p snow-stt-protocol`（协议往返与异常输入）。
+`scripts\build-snow-stt.ps1 -Test`（worker 25 个，含主循环 Fake 测试、系统后端的纯逻辑：HRESULT / 状态分类、语言解析、假设升格、节拍来源）与 `cargo test -p snow-stt-protocol`（协议往返与异常输入）。
 
 ## 主程序接入
 入口代码在 `snow-shot-rs/crates/snow-shot/src/dictation/`，分层如下（纯逻辑层都有离屏单测）：
@@ -80,7 +80,7 @@ scripts\verify-snow-stt.ps1 -ModelDir <模型目录> -Wav <wav> [-PadMs 3000] [-
 ### 配置键（`dictation/` 分组）
 | 键 | 默认 | 说明 |
 |---|---|---|
-| `backend` | `local-model` | `local-model` 用 `snow-stt`；`system`（Windows 系统语音）只是占位：设置里可选，选中时设置页显示「尚未实现」，开始听写时给出同样的提示并不拉起任何进程，不 panic |
+| `backend` | `local-model` | `local-model` 用本地模型；`system` 用 Windows 系统语音，同样拉起 `snow-stt`（START 带 `backend=system`，不检查模型目录）。选中 `system` 时设置页显示使用前提与设置指引 |
 | `trigger_mode` | `both` | 见上 |
 | `model_dir` | 空 | 空则用 `<数据根>/models/stt`；不存在时给出带路径的可读错误 |
 | `language` | `auto` | 传给 worker 的语言提示（单词） |
@@ -131,6 +131,19 @@ scripts\verify-snow-stt.ps1 -ModelDir <模型目录> -Wav <wav> [-PadMs 3000] [-
 - 结束（`STOPPED`）后窗口保留，直到用户按 Esc / 点「关闭」/ 下一轮开始（下一轮清空）。用户关掉窗口后本轮不再自动重开；浮窗是唯一输出时关窗等于结束这一轮。
 - 状态行显示：加载中、正在听（含去向说明）、收尾中、已结束、错误原因。
 
+## 系统语音后端
+`START backend=system ...` 时 worker 用 `Windows.Media.SpeechRecognition.SpeechRecognizer` 的连续识别（`ContinuousRecognitionSession`），代码在 `tools/snow-stt/src/system.rs`。
+- 事件映射：`HypothesisGenerated` -> `PARTIAL`；`ResultGenerated`（状态成功、非空）-> `FINAL`。`STOP` 时 `StopAsync` 冲刷，静默 300ms（上限 3s）取尽回调，仍未被定稿的最后一条假设会升格成 `FINAL`，免得丢字。`CANCEL` / stdin 断开不冲刷；进程退出前停止会话并 `Close` 识别器。
+- 音频：系统识别器**只吃默认麦克风、不能喂 PCM**，所以 `feed` 是空操作；主循环用 `ClockSource`（每 100ms 一拍的静音节拍）驱动轮询、命令响应和 `max_seconds` 计时。因此 **`--wav` 与系统后端互斥**（给了会报错）。
+- 静默自动停止：连续识别默认 20s 静默会自行结束，已放宽到 1 小时；若会话仍提前结束且状态不是成功 / 用户取消，会以对应类别报 `ERROR`。
+- 语言：`auto` 取系统语音语言，其余按完全匹配、再按主语言子标签匹配（`zh-en`、`zh-CN` 都落到 `zh-Hans-CN`）；没有匹配报「语言不可用」。本机支持 `en-US`、`zh-Hans-CN`。
+- 错误分类：worker 的 `ERROR` 文本以 `[system:<类别>]` 打头（`online-off` / `mic-denied` / `language` / `network` / `other`，定义在 `snow-stt-protocol::SystemError`），主程序据此取 `.ftl` 里的本地化提示，提示内带「Windows 设置 -> 隐私 -> 语音 / 麦克风」与 `ms-settings:` 指引文字（只是文字，不会替用户打开设置）。分类依据：HRESULT `0x80045509`（隐私声明未接受）、`0x8004503A`（语言包未装）、`0x80070005`（拒绝访问），其余未归类错误在注册表 `OnlineSpeechPrivacy\HasAccepted` 不为 1 时按「联机识别未开」处理；这几个 HRESULT 取自微软文档与社区资料，除第一个外没有在本机逐个触发过。
+- 依赖：只给 `snow-stt` 新增 `windows` crate（0.62，`Cargo.lock` 里本来就有，未新增 crate），feature：`Foundation`、`Globalization`、`Media_SpeechRecognition`、`Win32_Foundation`、`Win32_System_Com`、`Win32_System_Registry`。
+- 能力探测：`snow-stt.exe --probe-system [--probe-lang <语言>]` 打印联机开关（注册表）、系统语音语言、支持语言、语言解析结果，并实际创建识别器、编译默认听写约束（不开麦克风），然后退出。
+- 前提：系统「联机语音识别」打开（它不是纯离线方案）、麦克风隐私放行、对应语言包已装。限制：只能默认麦克风，START 里的线程 / 端点规则等字段被忽略，识别质量由系统决定。
+
+本机实测（Win10 19045，联机开关关闭）：`--probe-system` 报 `online_speech_enabled: false`、语言 `zh-Hans-CN`、支持 `en-US,zh-Hans-CN`、识别器可创建；`--probe-lang ja` 报语言不可用；真实 `START backend=system` 返回 `ERROR [system:online-off] ...`（`StartAsync` 阶段失败，进程退出码 1）。**打开联机开关后的真实听写没有测过。**
+
 ## 已知限制与未验证
 **以下都没有在真机上验证过，只有离屏单测覆盖了纯逻辑；不要当作已验证的能力。**
 - **热键松开事件实机**：`Released` 转发有单测（边沿选择命令），但真实的 `WM_HOTKEY` → 轮询 → 松开链路没有在真机跑过；全局热键无法在无人值守环境里模拟。
@@ -142,7 +155,7 @@ scripts\verify-snow-stt.ps1 -ModelDir <模型目录> -Wav <wav> [-PadMs 3000] [-
 - **UIA 阻塞**：目标程序无响应时 `GetFocusedElement` 可能卡住。探测在后台线程执行、2.5s 无结果就按不确定处理，但该线程会一直挂到调用返回（不影响主线程）。
 - **浮窗**：位置（含多显示器、副屏负坐标、混合 DPI）、「不抢焦点」（依赖 gpui `focus: false` 与 PopUp 窗口样式，未确认不会触发窗口激活）、文本区更新时光标位置（每次落定都会重置选区，用户正在中间编辑时光标会跳到开头）、Esc 只在浮窗拿到焦点后才有效——都是真机项。
 - **「已就绪」判定依赖 PONG**：见「进程生命周期」第 2 点；用旧版没有 PING 应答的 worker 时，会一直显示「加载中」直到第一条识别文本出现。
-- **系统语音后端**：只有占位。
+- **系统语音后端**：实机听写质量、延迟、中英文表现**未验证**（本机联机语音识别开关是关的，没有对着麦克风说过话）；只验证了错误路径与能力探测，见「系统语音后端」一节。
 - 打包：三个 DLL 与 `snow-stt.exe` 必须同目录，主程序旁的布局与安装包尚未做。
 
 ## 许可证注意

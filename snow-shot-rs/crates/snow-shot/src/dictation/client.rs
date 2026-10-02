@@ -322,12 +322,13 @@ mod tests {
         use crate::dictation::engine::{Effect, Engine, Launch};
         use crate::dictation::overlay_model::OverlayModel;
         use crate::dictation::text::Transcript;
-        use snow_stt_protocol::{EndpointRules, StartRequest};
+        use snow_stt_protocol::{BackendKind, EndpointRules, StartRequest};
 
         let var =
             |name: &str| std::env::var(name).unwrap_or_else(|_| panic!("缺少环境变量 {name}"));
         let exe = PathBuf::from(var(ENV_STT_EXE));
         let request = StartRequest {
+            backend: BackendKind::Local,
             language: "auto".into(),
             threads: 2,
             endpoint: EndpointRules::default(),

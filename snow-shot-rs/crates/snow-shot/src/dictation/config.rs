@@ -9,7 +9,7 @@ use snow_config::extensions::{
     KEY_DICTATION_OUTPUT_MODE, KEY_DICTATION_THREADS, KEY_DICTATION_TRIGGER_MODE,
     KEY_DICTATION_TYPE_WITH_OVERLAY,
 };
-use snow_stt_protocol::{EndpointRules, StartRequest};
+use snow_stt_protocol::{BackendKind, EndpointRules, StartRequest};
 use std::path::{Path, PathBuf};
 
 /// 数据根下的默认模型目录（相对路径各段）。
@@ -20,7 +20,7 @@ const DEFAULT_MODEL_SUBDIR: [&str; 2] = ["models", "stt"];
 pub enum Backend {
     /// 本地模型（snow-stt 工作进程）。
     LocalModel,
-    /// 系统语音（占位，尚未实现）。
+    /// 系统语音（Windows `SpeechRecognizer`，同样由 snow-stt 工作进程承载）。
     System,
 }
 
@@ -129,7 +129,7 @@ impl DictationConfig {
     }
 }
 
-/// 启动前检查：后端、可执行文件、模型目录都满足才返回 START 请求，否则给出可读的失败原因。
+/// 启动前检查：可执行文件、（本地模型时的）模型目录都满足才返回 START 请求，否则给出可读的失败原因。
 ///
 /// # 参数
 /// - `config`：配置快照。
@@ -149,25 +149,29 @@ pub fn prepare_launch(
     exe: Option<PathBuf>,
     dir_exists: impl Fn(&Path) -> bool,
 ) -> Result<(PathBuf, StartRequest), Failure> {
-    if config.backend == Backend::System {
-        return Err(Failure::NotImplemented);
-    }
     let exe = exe.ok_or(Failure::WorkerMissing)?;
-    let model_dir = config.resolved_model_dir(data_root);
-    if !dir_exists(&model_dir) {
-        return Err(Failure::ModelDirMissing(model_dir.display().to_string()));
-    }
+    // 系统语音不需要模型目录
+    let (backend, model_dir) = if config.backend == Backend::System {
+        (BackendKind::System, String::new())
+    } else {
+        let dir = config.resolved_model_dir(data_root);
+        if !dir_exists(&dir) {
+            return Err(Failure::ModelDirMissing(dir.display().to_string()));
+        }
+        (BackendKind::Local, dir.display().to_string())
+    };
     let language = if config.language.is_empty() {
         "auto".to_string()
     } else {
         config.language.clone()
     };
     let request = StartRequest {
+        backend,
         language,
         threads: config.threads,
         endpoint: EndpointRules::default(),
         max_seconds: config.max_seconds,
-        model_dir: model_dir.display().to_string(),
+        model_dir,
     };
     Ok((exe, request))
 }
@@ -237,17 +241,22 @@ mod tests {
         );
     }
 
-    /// 启动前检查：系统后端 → 尚未实现；找不到 exe → 可读错误；模型目录不存在 → 带路径的错误；齐全 → 请求。
+    /// 启动前检查：找不到 exe → 可读错误；本地模型目录不存在 → 带路径的错误；系统后端不查模型目录；齐全 → 请求。
     #[test]
     fn launch_preconditions() {
         let root = Path::new("D:/data");
         let mut config = DictationConfig::from_document(&ConfigDocument::from_bytes(None));
         let exe = Some(PathBuf::from("D:/stt/snow-stt.exe"));
 
+        // 系统语音：不看模型目录，请求里后端为 System、模型目录为空
         config.backend = Backend::System;
+        let (path, sys) = prepare_launch(&config, root, exe.clone(), |_| false).unwrap();
+        assert_eq!(Some(path), exe);
+        assert_eq!(sys.backend, BackendKind::System);
+        assert!(sys.model_dir.is_empty());
         assert_eq!(
-            prepare_launch(&config, root, exe.clone(), |_| true).unwrap_err(),
-            Failure::NotImplemented
+            prepare_launch(&config, root, None, |_| true).unwrap_err(),
+            Failure::WorkerMissing
         );
 
         config.backend = Backend::LocalModel;
@@ -264,6 +273,7 @@ mod tests {
         config.max_seconds = 90;
         let (path, request) = prepare_launch(&config, root, exe.clone(), |_| true).unwrap();
         assert_eq!(Some(path), exe);
+        assert_eq!(request.backend, BackendKind::Local);
         assert_eq!(request.language, "auto");
         assert_eq!((request.threads, request.max_seconds), (2, 90));
         assert!(request.model_dir.contains("stt"));

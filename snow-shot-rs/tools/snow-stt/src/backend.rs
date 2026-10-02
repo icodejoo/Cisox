@@ -9,6 +9,8 @@ pub enum SttEvent {
     Partial(String),
     /// 一句话的定稿文本。
     Final(String),
+    /// 后端自身失败（原因为单行文本）；会话据此发 ERROR 并结束。
+    Failed(String),
 }
 
 /// 流式识别后端。输入固定为 16kHz 单声道 f32（范围 -1..1）。

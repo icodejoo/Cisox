@@ -137,9 +137,70 @@ impl AudioSource for WavSource {
     }
 }
 
+/// 节拍来源：按实时节奏交出静音样本，不碰任何音频设备。
+///
+/// 系统语音后端自己采麦克风，主循环只需要一个按时间推进的节拍
+/// （驱动后端轮询、命令响应与最长时长计数）。
+pub struct ClockSource {
+    /// 每个节拍的间隔。
+    tick: Duration,
+    /// 下一个节拍到期时刻。
+    due: std::time::Instant,
+}
+
+impl ClockSource {
+    /// 创建节拍来源。
+    ///
+    /// # 参数
+    /// - `tick`：节拍间隔，同时决定每次交出的静音样本数（16kHz 折算）。
+    pub fn new(tick: Duration) -> Self {
+        Self {
+            tick,
+            due: std::time::Instant::now() + tick,
+        }
+    }
+}
+
+impl AudioSource for ClockSource {
+    /// 到点交出一批静音样本，否则最多等 `timeout` 后返回空闲。
+    fn next(&mut self, timeout: Duration) -> SourceEvent {
+        let now = std::time::Instant::now();
+        if now < self.due {
+            std::thread::sleep(self.due.saturating_duration_since(now).min(timeout));
+            if std::time::Instant::now() < self.due {
+                return SourceEvent::Idle;
+            }
+        }
+        self.due += self.tick;
+        // 长时间没被调用时不连发补拍，直接对齐到当前
+        let now = std::time::Instant::now();
+        if self.due < now {
+            self.due = now + self.tick;
+        }
+        let n = (SAMPLE_RATE as u128 * self.tick.as_millis() / 1000) as usize;
+        SourceEvent::Samples(vec![0.0; n])
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clock_source_ticks_in_real_time() {
+        let mut s = ClockSource::new(Duration::from_millis(40));
+        // 超时短于节拍：先空闲
+        assert_eq!(s.next(Duration::from_millis(1)), SourceEvent::Idle);
+        let started = std::time::Instant::now();
+        let got = loop {
+            match s.next(Duration::from_millis(50)) {
+                SourceEvent::Idle => continue,
+                other => break other,
+            }
+        };
+        assert!(matches!(got, SourceEvent::Samples(v) if v.len() == 640));
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
 
     #[test]
     fn wav_source_steps_then_ends() {

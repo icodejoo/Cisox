@@ -32,7 +32,17 @@ dictation-reason-elevated = the target window runs with higher privileges
 
 dictation-reason-uncertain = it could not be determined whether the target accepts typing
 
-dictation-error-not-implemented = The system speech engine is not available yet. Switch the speech engine to the local model in settings.
+dictation-error-system-online-off = System speech needs "Online speech recognition" turned on. Open Windows Settings > Privacy > Speech (or run ms-settings:privacy-speech), switch it on and try again, or switch to the local model in this app's settings.
+
+dictation-error-system-mic-denied = System speech cannot use the microphone. Open Windows Settings > Privacy > Microphone (ms-settings:privacy-microphone), allow desktop apps to access the microphone, and make sure a default recording device exists. { $detail }
+
+dictation-error-system-language = Windows has no speech recognition support for the required language. Add the language's speech pack in Windows Settings > Time & language > Speech (ms-settings:speech), or change the language in this app's settings to one Windows already has. { $detail }
+
+dictation-error-system-network = Online speech recognition could not connect. Check your network and try again, or switch to the local model in this app's settings.
+
+dictation-error-system-other = System speech recognition failed: { $detail }. Check that "Online speech recognition" is on under Windows Settings > Privacy > Speech (ms-settings:privacy-speech).
+
+dictation-notice-system = System speech uses Windows' built-in recognition, only works with the default microphone, and needs "Online speech recognition" turned on (Windows Settings > Privacy > Speech, ms-settings:privacy-speech).
 
 dictation-error-worker-missing = The speech engine program was not found. Put it next to the app, or set its path in the SNOW_STT_EXE environment variable.
 

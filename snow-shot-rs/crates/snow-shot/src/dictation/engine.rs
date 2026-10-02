@@ -8,7 +8,7 @@
 //! 收到 PONG（或第一条识别事件）就说明模型已加载、麦克风已开，可以进入“正在听”。
 
 use super::status::Failure;
-use snow_stt_protocol::{Command, Event, StartRequest};
+use snow_stt_protocol::{Command, Event, StartRequest, SystemError};
 use std::time::{Duration, Instant};
 
 /// 等待进程就绪（READY）的上限；冷启动要装载 DLL，给足时间。
@@ -274,7 +274,12 @@ impl Engine {
             LinkEvent::Event(Event::Partial(text)) => self.on_text(Effect::Partial(text)),
             LinkEvent::Event(Event::Final(text)) => self.on_text(Effect::Final(text)),
             LinkEvent::Event(Event::Error(reason)) => {
-                self.finish(Duration::ZERO, Effect::Failed(Failure::Worker(reason)))
+                // 系统语音的可识别错误带类别标记，翻译成本地化提示；其余原样上报
+                let failure = match SystemError::from_error_text(&reason) {
+                    Some((kind, detail)) => Failure::SystemSpeech(kind, detail),
+                    None => Failure::Worker(reason),
+                };
+                self.finish(Duration::ZERO, Effect::Failed(failure))
             }
             LinkEvent::Event(Event::Stopped) => self.finish(EXIT_GRACE, Effect::Done),
         }
@@ -382,6 +387,7 @@ mod tests {
         let mut engine = Engine::new(Timeouts::default());
         let now = Instant::now();
         let request = StartRequest {
+            backend: Default::default(),
             language: "auto".into(),
             threads: 2,
             endpoint: Default::default(),
