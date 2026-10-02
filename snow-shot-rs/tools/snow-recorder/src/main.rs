@@ -6,6 +6,8 @@
 
 mod backend;
 mod clock;
+#[cfg(windows)]
+mod edit;
 mod frametrace;
 mod geom;
 mod os;
@@ -20,10 +22,14 @@ mod win;
 
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
-use snow_recorder_protocol::{Command, Event, MediaFormat, StartRequest, scratch_dir, scratch_file};
+use snow_recorder_protocol::{
+    Command, EditRequest, Event, MediaFormat, StartRequest, scratch_dir, scratch_file,
+};
 
 use backend::RecordingBackend;
 use clock::ActiveClock;
@@ -49,6 +55,14 @@ struct Active {
     final_path: PathBuf,
     /// 中间产物文件路径（位于中间目录内）。
     partial: PathBuf,
+}
+
+/// 一个进行中的编辑任务（在独立线程里执行，主线程继续收命令以便取消）。
+struct EditJob {
+    /// 取消标志，与任务线程共享。
+    cancel: Arc<AtomicBool>,
+    /// 任务线程；它自己负责回报结果并结束进程。
+    handle: std::thread::JoinHandle<()>,
 }
 
 /// 向 stdout 写一条事件并刷新；管道断开时静默（随后 stdin EOF 会触发清理）。
@@ -148,6 +162,63 @@ fn exit_idle() -> ! {
     std::process::exit(EXIT_OK);
 }
 
+/// 编辑任务线程体：执行、回报，并以对应退出码结束进程。
+#[cfg(windows)]
+fn run_edit(req: &EditRequest, cancel: Arc<AtomicBool>) -> ! {
+    let ctl = edit::TaskCtl::new(cancel, Box::new(emit));
+    match edit::execute(req, &ctl) {
+        Ok((report, engine)) => {
+            emit(&Event::EditFinished { path: report.path, frames: report.frames, engine });
+            std::process::exit(EXIT_OK);
+        }
+        // 取消不是错误：抽帧模块已清掉中间目录，直接正常退出
+        Err(e) if e.is_cancelled() => std::process::exit(EXIT_OK),
+        Err(e) => {
+            emit(&Event::Error { reason: e.to_string() });
+            std::process::exit(EXIT_FAILED);
+        }
+    }
+}
+
+/// 提交编辑任务：进程空闲时才接受。
+fn start_edit(req: EditRequest, job: &mut Option<EditJob>, recording: bool) {
+    if recording || job.is_some() {
+        eprintln!("进程忙，忽略 EDIT");
+        return;
+    }
+    #[cfg(windows)]
+    {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&cancel);
+        let handle = std::thread::spawn(move || run_edit(&req, flag));
+        *job = Some(EditJob { cancel, handle });
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = req;
+        emit(&Event::Error { reason: "视频编辑目前只支持 Windows".to_string() });
+        std::process::exit(EXIT_FAILED);
+    }
+}
+
+/// 探测视频信息并回报；失败按协议回报 `Error` 并退出。
+fn probe_input(input: &Path) {
+    #[cfg(windows)]
+    match edit::probe(input) {
+        Ok(info) => emit(&Event::ProbeResult(info)),
+        Err(e) => {
+            emit(&Event::Error { reason: e.to_string() });
+            std::process::exit(EXIT_FAILED);
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = input;
+        emit(&Event::Error { reason: "视频探测目前只支持 Windows".to_string() });
+        std::process::exit(EXIT_FAILED);
+    }
+}
+
 /// 进程入口：命令循环。
 fn main() {
     os::enable_dpi_awareness();
@@ -169,6 +240,7 @@ fn main() {
 
     emit(&Event::Ready);
     let mut active: Option<Active> = None;
+    let mut job: Option<EditJob> = None;
     loop {
         match rx.recv_timeout(TICK) {
             Ok(Some(line)) => {
@@ -176,15 +248,29 @@ fn main() {
                     continue;
                 }
                 match Command::parse(line.trim_start_matches('\u{feff}')) {
+                    Ok(Command::Edit(req)) => start_edit(req, &mut job, active.is_some()),
+                    Ok(Command::Probe { input }) => probe_input(&input),
+                    Ok(Command::Cancel) if job.is_some() => {
+                        if let Some(j) = &job {
+                            j.cancel.store(true, Ordering::SeqCst);
+                        }
+                    }
                     Ok(cmd) => active = handle(cmd, active),
                     Err(e) => eprintln!("忽略无法解析的命令: {e}"),
                 }
             }
             // 主程序关闭了管道（退出或崩溃）：取消并清理
-            Ok(None) | Err(RecvTimeoutError::Disconnected) => match active {
-                Some(a) => cancel(a),
-                None => exit_idle(),
-            },
+            Ok(None) | Err(RecvTimeoutError::Disconnected) => {
+                if let Some(j) = job.take() {
+                    // 先取消再等任务线程收尾：它会清理中间目录并自行结束进程
+                    j.cancel.store(true, Ordering::SeqCst);
+                    let _ = j.handle.join();
+                }
+                match active {
+                    Some(a) => cancel(a),
+                    None => exit_idle(),
+                }
+            }
             Err(RecvTimeoutError::Timeout) => {}
         }
         if let Some(a) = &active
@@ -234,6 +320,8 @@ fn handle(cmd: Command, active: Option<Active>) -> Option<Active> {
         (Command::Stop, Some(a)) => finish(a),
         (Command::Cancel, Some(a)) => cancel(a),
         (Command::Cancel, None) => exit_idle(),
+        // 编辑类命令已在命令循环里分流，这里不会再见到
+        (Command::Edit(_) | Command::Probe { .. }, a) => a,
         (other, None) => {
             eprintln!("未开始录制，忽略命令: {other:?}");
             None
