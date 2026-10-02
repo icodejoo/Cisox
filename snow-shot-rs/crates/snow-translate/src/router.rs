@@ -539,7 +539,21 @@ impl RoutedEngine {
         }
     }
 
+    /// 判定一条文本的主导源语言：按脚本切分后取文字量最大的有语言片段；全是中性字符返回 `None`。
+    fn detect_source(&self, text: &str) -> Option<Lang> {
+        self.splitter
+            .split(text, Lang::Auto)
+            .into_iter()
+            .filter_map(|s| s.lang.map(|lang| (segment_weight(&s.text), lang)))
+            .max_by_key(|(weight, _)| *weight)
+            .map(|(_, lang)| lang)
+    }
+
     /// 单包路径（`single` / `specialized_first`）：选一个包，整批交给它。
+    ///
+    /// 源语言为 `Auto` 时先逐条用脚本识别器判定语言，再按判定结果分组选包；
+    /// 识别不出（纯数字标点）或已是目标语言的条目原样保留；判定出的语向没有包支持时返回
+    /// `UnsupportedLanguagePair(判定语言, 目标)`，不 panic。
     fn translate_routed(
         &self,
         texts: &[String],
@@ -548,13 +562,49 @@ impl RoutedEngine {
         policy: &RoutePolicy,
     ) -> Result<Vec<String>, TranslateError> {
         let manifests = self.manifests();
-        let index = pick_index(&manifests, &policy.preferred_id, src, tgt, policy.mode)
-            .ok_or(TranslateError::UnsupportedLanguagePair(src, tgt))?;
-        let resolved = manifests[index]
-            .resolve_source(src, tgt)
-            .ok_or(TranslateError::UnsupportedLanguagePair(src, tgt))?;
-        let lease = self.acquire(index, policy.max_resident)?;
-        lease.engine().translate_batch(texts, resolved, tgt)
+        if src != Lang::Auto {
+            let index = pick_index(&manifests, &policy.preferred_id, src, tgt, policy.mode)
+                .ok_or(TranslateError::UnsupportedLanguagePair(src, tgt))?;
+            let resolved = manifests[index]
+                .resolve_source(src, tgt)
+                .ok_or(TranslateError::UnsupportedLanguagePair(src, tgt))?;
+            let lease = self.acquire(index, policy.max_resident)?;
+            return lease.engine().translate_batch(texts, resolved, tgt);
+        }
+        // Auto：逐条判定语言，按语言分组
+        let mut out: Vec<String> = texts.to_vec();
+        let mut groups: Vec<(Lang, Vec<usize>)> = Vec::new();
+        for (i, text) in texts.iter().enumerate() {
+            let Some(lang) = self.detect_source(text) else {
+                continue;
+            };
+            if same_language(lang, tgt) {
+                continue;
+            }
+            match groups.iter_mut().find(|(l, _)| *l == lang) {
+                Some((_, members)) => members.push(i),
+                None => groups.push((lang, vec![i])),
+            }
+        }
+        // 先给所有语向选好包：任何模型加载之前就确定能不能翻
+        let mut plans: Vec<(usize, Lang, Vec<usize>)> = Vec::with_capacity(groups.len());
+        for (lang, members) in groups {
+            let index = pick_index(&manifests, &policy.preferred_id, lang, tgt, policy.mode)
+                .ok_or(TranslateError::UnsupportedLanguagePair(lang, tgt))?;
+            plans.push((index, lang, members));
+        }
+        for (index, lang, members) in plans {
+            let batch: Vec<String> = members.iter().map(|&i| texts[i].clone()).collect();
+            let lease = self.acquire(index, policy.max_resident)?;
+            let translated = lease.engine().translate_batch(&batch, lang, tgt)?;
+            if translated.len() != batch.len() {
+                return Err(TranslateError::Inference("后端返回的译文条数不符".into()));
+            }
+            for (&i, text) in members.iter().zip(translated) {
+                out[i] = text;
+            }
+        }
+        Ok(out)
     }
 
     /// 混合拆分路径：切片段 → 分配引擎 → 按引擎（再按源语言）分组翻译 → 按原序拼回。
@@ -1121,6 +1171,67 @@ mod tests {
         assert_eq!(
             run(&engine, "x", Lang::En, Lang::Fr).unwrap_err(),
             TranslateError::UnsupportedLanguagePair(Lang::En, Lang::Fr)
+        );
+    }
+
+    /// 源语言 Auto：按脚本识别结果选包，不再被专用包钉成英文；日 / 中（目标英）走通用包。
+    #[test]
+    fn auto_source_detects_language_per_text() {
+        let (engine, general_engine, special_engine) = router(RoutePolicy::default());
+        assert_eq!(
+            run(&engine, "hello world", Lang::Auto, Lang::ZhHans).unwrap(),
+            "opus:en:hello world"
+        );
+        assert_eq!(general_engine.launch_count(), 0);
+        assert_eq!(
+            run(&engine, "こんにちは", Lang::Auto, Lang::ZhHans).unwrap(),
+            "nllb:ja:こんにちは"
+        );
+        assert_eq!(
+            run(&engine, "今天天气很好", Lang::Auto, Lang::En).unwrap(),
+            "nllb:zh-CN:今天天气很好"
+        );
+        assert_eq!(special_engine.call_count(), 1);
+    }
+
+    /// Auto 批量：同批多语言按语言分组，结果按原序返回；中性文本与目标语言同语的原样保留。
+    #[test]
+    fn auto_source_batch_groups_and_keeps_order() {
+        let (engine, _g, _s) = router(RoutePolicy::default());
+        let texts: Vec<String> = ["hello", "こんにちは", "123 !?", "你好", "world"]
+            .iter()
+            .map(|t| (*t).to_string())
+            .collect();
+        let out = engine
+            .translate_batch(&texts, Lang::Auto, Lang::ZhHans)
+            .unwrap();
+        assert_eq!(
+            out,
+            [
+                "opus:en:hello",
+                "nllb:ja:こんにちは",
+                "123 !?",
+                "你好",
+                "opus:en:world"
+            ]
+        );
+    }
+
+    /// Auto：俄语 / 带变音的德语没有包支持时给出可展示的不支持错误，不 panic 且不加载模型。
+    #[test]
+    fn auto_source_unsupported_language_errors() {
+        let (engine, general_engine, special_engine) = router(RoutePolicy::default());
+        assert_eq!(
+            run(&engine, "Привет, мир", Lang::Auto, Lang::ZhHans).unwrap_err(),
+            TranslateError::UnsupportedLanguagePair(Lang::Ru, Lang::ZhHans)
+        );
+        assert_eq!(
+            run(&engine, "Straße über Müller", Lang::Auto, Lang::ZhHans).unwrap_err(),
+            TranslateError::UnsupportedLanguagePair(Lang::De, Lang::ZhHans)
+        );
+        assert_eq!(
+            general_engine.launch_count() + special_engine.launch_count(),
+            0
         );
     }
 

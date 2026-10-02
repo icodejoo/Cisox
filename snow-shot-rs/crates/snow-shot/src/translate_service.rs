@@ -357,7 +357,8 @@ impl TranslateHost {
             mode => {
                 let (model, src) =
                     pick_model_routed(&report.models, &config.model_id, config.source, config.target, mode)?;
-                (model_label(model), src)
+                // Auto 保持 Auto：由路由器逐条识别语言再选包，不能按专用包钉成其方向的源语言
+                (model_label(model), if config.source == Lang::Auto { Lang::Auto } else { src })
             }
         };
         let exe = locate_worker_exe(self.exe_env.as_deref())?;
@@ -721,7 +722,7 @@ mod tests {
         let mut cfg = config();
         cfg.target = Lang::ZhHans;
         let (label, src, _) = host.prepare(&cfg).expect("默认专用包优先");
-        assert_eq!((label.as_str(), src), ("Model z-opus", Lang::En));
+        assert_eq!((label.as_str(), src), ("Model z-opus", Lang::Auto));
         cfg.model_id = "a-nllb".into();
         assert_eq!(host.prepare(&cfg).expect("指定通用包").0, "Model a-nllb");
         cfg.model_id = String::new();
@@ -865,7 +866,7 @@ mod tests {
         let mut cfg = config();
         cfg.target = Lang::ZhHans;
         let (label, src, tgt) = host.prepare(&cfg).expect("装配");
-        assert_eq!((label.as_str(), src, tgt), ("Model en-zh", Lang::En, Lang::ZhHans));
+        assert_eq!((label.as_str(), src, tgt), ("Model en-zh", Lang::Auto, Lang::ZhHans));
         let first = host.built.lock().unwrap().as_ref().map(|b| Arc::as_ptr(&b.engine) as *const () as usize);
         host.prepare(&cfg).expect("再次装配");
         let second = host.built.lock().unwrap().as_ref().map(|b| Arc::as_ptr(&b.engine) as *const () as usize);
