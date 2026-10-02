@@ -87,7 +87,11 @@ pub fn penalized_argmax(logits: &[f32], seen: &[bool], penalty: f32) -> Option<u
     let mut best: Option<(usize, f32)> = None;
     for (i, &raw) in logits.iter().enumerate() {
         let v = if penalty != 1.0 && seen.get(i).copied().unwrap_or(false) {
-            if raw < 0.0 { raw * penalty } else { raw / penalty }
+            if raw < 0.0 {
+                raw * penalty
+            } else {
+                raw / penalty
+            }
         } else {
             raw
         };
@@ -361,7 +365,10 @@ impl ChatEngine {
     /// ```
     pub fn load(manifest: &Manifest, dir: &Path, tgt: &str) -> Result<Self, EngineError> {
         let prompt = manifest.prompt.clone().ok_or_else(|| {
-            EngineError::new(ErrorKind::ManifestInvalid, "family hunyuan_chat requires `prompt`")
+            EngineError::new(
+                ErrorKind::ManifestInvalid,
+                "family hunyuan_chat requires `prompt`",
+            )
         })?;
         prompt
             .render("", tgt)
@@ -370,7 +377,10 @@ impl ChatEngine {
         init_runtime()?;
         let params = resolve_decode_params(manifest, dir)?;
         let tokenizer = load_tokenizer(&manifest.resolve_file(dir, FILE_TOKENIZER)?)?;
-        let session = build_session(&manifest.resolve_file(dir, FILE_MODEL)?, &manifest.execution)?;
+        let session = build_session(
+            &manifest.resolve_file(dir, FILE_MODEL)?,
+            &manifest.execution,
+        )?;
 
         let input_names: Vec<&str> = session.inputs().iter().map(|o| o.name()).collect();
         for required in [INPUT_IDS, INPUT_MASK] {
@@ -396,9 +406,7 @@ impl ChatEngine {
             .iter()
             .find(|o| o.name().starts_with(PAST_PREFIX))
             .and_then(|o| match o.dtype() {
-                ValueType::Tensor { shape, .. } if shape.len() == 4 => {
-                    Some((shape[1], shape[3]))
-                }
+                ValueType::Tensor { shape, .. } if shape.len() == 4 => Some((shape[1], shape[3])),
                 _ => None,
             })
             .filter(|&(h, d)| h > 0 && d > 0);
@@ -622,11 +630,23 @@ mod tests {
     fn repetition_penalty_formula() {
         let seen = [false, true, true, false];
         // 下标 1：1.04/1.05 < 1.02，被压到第二；下标 2 为负，乘 1.05 更负
-        assert_eq!(penalized_argmax(&[0.5, 1.04, -0.1, 1.02], &seen, 1.05), Some(3));
-        assert_eq!(penalized_argmax(&[0.5, 1.04, -0.1, 1.02], &seen, 1.0), Some(1));
-        assert_eq!(penalized_argmax(&[-1.0, -0.99, -2.0], &[true, true, false], 2.0), Some(1));
+        assert_eq!(
+            penalized_argmax(&[0.5, 1.04, -0.1, 1.02], &seen, 1.05),
+            Some(3)
+        );
+        assert_eq!(
+            penalized_argmax(&[0.5, 1.04, -0.1, 1.02], &seen, 1.0),
+            Some(1)
+        );
+        assert_eq!(
+            penalized_argmax(&[-1.0, -0.99, -2.0], &[true, true, false], 2.0),
+            Some(1)
+        );
         // 负 logit 乘以系数后比未出现的更小
-        assert_eq!(penalized_argmax(&[-1.0, -1.4], &[true, false], 1.5), Some(1));
+        assert_eq!(
+            penalized_argmax(&[-1.0, -1.4], &[true, false], 1.5),
+            Some(1)
+        );
         // 并列取小下标；seen 比 logits 短不越界；NaN 不参与
         assert_eq!(penalized_argmax(&[1.0, 1.0], &[], 1.05), Some(0));
         assert_eq!(penalized_argmax(&[f32::NAN, 0.1], &[], 1.0), Some(1));
@@ -651,8 +671,16 @@ mod tests {
         assert_eq!(out, vec![3, 4]);
         assert_eq!(m.calls.len(), 2);
         let mut none = Scripted::new(&[3], 16);
-        assert!(greedy_decode(&mut none, &[1], &params(0)).unwrap().is_empty());
-        assert!(greedy_decode(&mut none, &[], &params(5)).unwrap().is_empty());
+        assert!(
+            greedy_decode(&mut none, &[1], &params(0))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            greedy_decode(&mut none, &[], &params(5))
+                .unwrap()
+                .is_empty()
+        );
         assert!(none.calls.is_empty());
     }
 
@@ -673,9 +701,15 @@ mod tests {
             repetition_penalty: 1.05,
         };
         // 提示词含 2：2 被压低，选 1
-        assert_eq!(greedy_decode(&mut Close(vec![]), &[2], &p).unwrap(), vec![1]);
+        assert_eq!(
+            greedy_decode(&mut Close(vec![]), &[2], &p).unwrap(),
+            vec![1]
+        );
         // 提示词不含 2：直接选 2
-        assert_eq!(greedy_decode(&mut Close(vec![]), &[3], &p).unwrap(), vec![2]);
+        assert_eq!(
+            greedy_decode(&mut Close(vec![]), &[3], &p).unwrap(),
+            vec![2]
+        );
     }
 
     /// 原文里的特殊符号被剔除，拼出的新特殊串也会继续剔除。

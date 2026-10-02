@@ -176,7 +176,11 @@ pub fn pick_index(
         .copied()
         .filter(|&i| manifests[i].default_eligible)
         .collect();
-    let pool = if eligible.is_empty() { &candidates } else { &eligible };
+    let pool = if eligible.is_empty() {
+        &candidates
+    } else {
+        &eligible
+    };
     let first = pool[0];
     if mode == RouteMode::Single {
         return Some(first);
@@ -1060,18 +1064,36 @@ mod tests {
             Some(1)
         );
         assert_eq!(
-            pick_index(&list, "", Lang::En, Lang::ZhHans, RouteMode::SpecializedFirst),
+            pick_index(
+                &list,
+                "",
+                Lang::En,
+                Lang::ZhHans,
+                RouteMode::SpecializedFirst
+            ),
             Some(2)
         );
         assert_eq!(
-            pick_index(&list, "a-hymt", Lang::En, Lang::ZhHans, RouteMode::SpecializedFirst),
+            pick_index(
+                &list,
+                "a-hymt",
+                Lang::En,
+                Lang::ZhHans,
+                RouteMode::SpecializedFirst
+            ),
             Some(0),
             "显式指定仍尊重"
         );
         // 只有可选包装着时退回它，不报“不支持”
         let only = [&h];
         assert_eq!(
-            pick_index(&only, "", Lang::En, Lang::ZhHans, RouteMode::SpecializedFirst),
+            pick_index(
+                &only,
+                "",
+                Lang::En,
+                Lang::ZhHans,
+                RouteMode::SpecializedFirst
+            ),
             Some(0)
         );
         // 缺省清单（不写字段）视为可参与默认选包

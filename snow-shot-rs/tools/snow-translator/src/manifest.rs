@@ -864,17 +864,25 @@ mod tests {
         assert_eq!(m.generation.repetition_penalty, Some(1.05));
         assert!(m.supports_pair("en", "ZH-cn"));
         let spec = m.prompt.as_ref().unwrap();
-        assert_eq!(spec.render("Hi.", "zh-cn").unwrap(), "<U>To Chinese:\n\nHi.<A>");
+        assert_eq!(
+            spec.render("Hi.", "zh-cn").unwrap(),
+            "<U>To Chinese:\n\nHi.<A>"
+        );
         assert!(spec.render("Hi.", "fr").is_err());
         // 原文里的占位符不会被二次替换
         assert_eq!(
             spec.render("{target_lang}", "en").unwrap(),
             "<U>To English:\n\n{target_lang}<A>"
         );
-        let beams = chat_json("").replace(r#""eos_token_id":7"#, r#""eos_token_id":7,"num_beams":4"#);
+        let beams =
+            chat_json("").replace(r#""eos_token_id":7"#, r#""eos_token_id":7,"num_beams":4"#);
         assert!(Manifest::parse(&beams, &dir).is_ok());
         // 其他族缺省参与默认选包
-        assert!(Manifest::parse(&manifest_json(""), &temp_model_dir("elig")).unwrap().default_eligible);
+        assert!(
+            Manifest::parse(&manifest_json(""), &temp_model_dir("elig"))
+                .unwrap()
+                .default_eligible
+        );
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -885,7 +893,8 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         touch_chat_files(&dir);
-        let invalid = |json: String| matches!(Manifest::parse(&json, &dir), Err(ManifestError::Invalid(_)));
+        let invalid =
+            |json: String| matches!(Manifest::parse(&json, &dir), Err(ManifestError::Invalid(_)));
         let no_prompt = chat_json("").replace(r#""prompt""#, r#""prompt_x""#);
         assert!(invalid(no_prompt));
         assert!(invalid(chat_json("").replace("{source_text}", "x")));

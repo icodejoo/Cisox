@@ -2,7 +2,7 @@
 title: 翻译模型发布与授权方案
 status: active
 updated: 2026-10-02
-summary: 本地翻译模型的最终选型、release 发布方式（A 直接发布现成文件 + B 提供自行生成脚本）、CC-BY-NC 授权声明与应用内提示要求、产物规格与待办
+summary: 本地翻译模型的最终选型（含 Hy-MT2 可选包 §9）、release 发布方式（A 直接发布现成文件 + B 提供自行生成脚本）、CC-BY-NC 授权声明与应用内提示要求、产物规格与待办
 ---
 ## 结论先行（用户已拍板，2026-10-02）
 - **模型**：NLLB-200-distilled-600M + 用 NLLB 自己的训练数据（CCMatrix 开头切片）选词表裁剪 + 对称 RTN int4（MatMulNBits，块 32）。实测依据见 `translation-quantization-benchmark.md`（相对原版 fp32 仅掉约 1.3 分，int8/int2/HQQ/mul-mul 均不如它）。
@@ -193,3 +193,32 @@ encoder.onnx  encoder.onnx_data  decoder.onnx  decoder.onnx_data
 - 保留：`E:\models\translate-eval\` 下 `opusmt-{en-zh,zh-en}-int4-pack`、`hymt2-1.8b-int4`、`hymt2-1.8b-int4-ext`、`nllb600m-main14-ccm-int4-ext`。
 - Hy-MT2 减体积结论见 `translation-hymt2-eval.md` §8：只有外部数据加 mmap 有效（加载后约 953 MiB、峰值约 1261 MiB），词表裁剪与嵌入共享都不值得。
 - 同口径提醒：研究文档里 OPUS-MT 与 NLLB 英→中差 9 分，子代理用另一套脚本复测只差 2~3 分，NLLB 英→中在不同脚本下分别为 22.8 / 27.76，横向比较需同脚本同句。
+
+## 9. Hy-MT2-1.8B 可选包（2026-10-02，用户自行下载，不是默认）
+
+定位：和 NLLB（默认）、OPUS-MT 英↔中（可选）并列的第三个包，**中日互译与英→中质量更好、许可 Apache-2.0 可商用**；欧洲语言目标（英→法 -5.5、阿→英 -4.2 等）不如 NLLB，体积与内存是 NLLB 的 2 到 3 倍、延迟约 5 倍。数据与结论见 `translation-hymt2-eval.md`（FLORES 前 30 句：英→中 chrF 39.7 对 NLLB 22.8，中→英 55.6 对 52.1；中日互译与日→英**没有单独评测**，英→日 43.8）。
+
+### 9.1 规格
+
+| 项 | 值 |
+|---|---|
+| 包目录 | `hymt2-1.8b-int4-pack\`：`model.json`、`model.onnx`、`model.onnx_data`、`tokenizer.json`、`LICENSE-Apache-2.0.txt`、`NOTICE.txt`、`hymt2-1.8b-int4.manifest.json` |
+| 体积 | 约 1.3 GiB（`model.onnx_data` 1.27 GiB + tokenizer 9 MiB），下载总量 1,379,169,302 字节 |
+| 量化 | MatMulNBits int4 对称 RTN 块 32（含 lm_head），嵌入 int8 Gather，权重未改动 |
+| 内存（Rust worker，release，外部数据内存映射） | 加载后工作集约 950 MiB，翻译期峰值约 1.2 到 1.3 GiB（实测 1241 / 1216 MiB，私有内存加载后约 940 MiB） |
+| 延迟 | 每句约 9 到 17 秒（4 线程，BelowNormal，机器有别的负载，平均 33 个生成 token），适合短文本与逐句；长段落要等 |
+| 许可 | Apache-2.0：HF 模型卡 `license: apache-2.0`，模型目录 `LICENSE.txt` 头部 "Copyright (C) 2026 Tencent … licensed under the Apache License, Version 2.0"；包内 `LICENSE-Apache-2.0.txt` 即该文件原文，NOTICE 写明来源、版权、修改（转 ONNX、int4 量化、外部数据、加清单）、无隶属、非法律意见。`make_hymt2_pack.py` 会核对卡片 license 字段，不是 apache-2.0 直接退出 |
+| 声明的语向（`pairs`） | 中、英、日六向全排列 + 评测过的 英↔法、俄→英、阿→英、英→西、中→法、法→中、俄→西、阿→法，共 15 向。模型卡还列了韩、德、意、葡、土等，没评测不声明（`prompt.lang_names` 已含全部 13 个应用语言名，扩 `pairs` 即可） |
+
+### 9.2 worker 与路由实现
+
+- **worker**：新增 `family=hunyuan_chat`（`src/chat.rs`）。清单 `files.model`（+`model_data`）、`prompt`（前缀、后缀、模板、语言名表）、`generation.repetition_penalty`，不写死在 Rust；加载单个 `model.onnx`（外部数据由 ORT 内存映射），探测 `past_key_values.*` 形状；贪心 + 与 HF 同公式的 repetition_penalty（缺省 1.05，提示词与已生成 token 都计入），eos 120020 / 最大 512 新 token 停止，输出去首尾空白。`num_beams` 请求字段对它无效但不报错。整段一次翻译（评测同口径），原文超过 `max_input_tokens` 才分句打包。详见 `snow-translator/README.md`。
+- **路由不抢默认**：`ModelManifest`（`snow-translate`）新增 `default_eligible`（缺省 `true`，worker 清单同名透传）。`router::pick_index` 在没有指定包时只从 `default_eligible` 的包里选（`single` 取第一个，`specialized_first` / `mixed_split` 取最窄专用包），**Hy-MT2 包设为 `false`**，因此即使它声明了 `pairs`、id 排在前面，也不会被默认选中；用户在设置里手动指定模型 ID 时照常使用；只有别的包都不支持该语向时才作为兜底（不报"不支持"）。其余包的行为不变（旧清单没有该字段即 `true`）。
+- **真实对拍**（`cargo test --release --test e2e real_hymt2 -- --ignored --nocapture`）：评测前 2 句，英→中与中→英各起一个 worker（BelowNormal，4 线程），共 4 句译文与 `ort_gen.py`（ORT 1.30，同一个包）输出**逐字一致 4/4**。
+
+### 9.3 待办
+
+- [ ] 发布到 Release 与镜像（对外动作，需用户确认）；`hymt2-1.8b-int4.manifest.json` 没有 url 字段，下载地址由发布流程填。
+- [ ] 应用内下载入口与设置页文案/i18n（本轮没做）：展示 NOTICE 署名与修改说明；提示体积 1.3 GiB、内存约 1 到 1.3 GiB、每句 10 秒以上、适用中日互译与英→中、欧洲语言不如 NLLB。
+- [ ] 设置页让用户指定 Hy-MT2（模型 ID `hymt2-1.8b-int4`）；`mixed_split` 标签文案里是否列出 `default_eligible=false` 的包待定。
+- [ ] 中↔日、日→英及其余语言没评测；机器安静时重测延迟；`make_hymt2_pack.py` 的 `HINTS` 数据来自评测机，换机器需更新。

@@ -551,7 +551,7 @@ fn real_hymt2_parity_and_memory() {
         eprintln!("skip: {} not found (set {ENV_HYMT_DIR})", dir.display());
         return;
     }
-    let dir = dir.to_string_lossy().replace('\', "/");
+    let dir = dir.to_string_lossy().replace('\\', "/");
     let (mut total, mut exact) = (0, 0);
     for (pair, src, tgt) in HYMT_PAIRS {
         let Some((srcs, refs)) = read_hymt_ref(pair) else {
