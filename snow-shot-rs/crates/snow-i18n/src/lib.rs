@@ -10,9 +10,11 @@
 pub mod convert;
 mod embedded;
 pub mod extract;
+pub mod locales;
 mod runtime;
 pub mod ts;
 
+pub use locales::{FALLBACK_LOCALE, LocaleInfo, locales, match_locale};
 pub use runtime::{Args, I18n, I18nError, IntoArg};
 
 /// 本 crate 的阶段标记，用于骨架连通性测试。

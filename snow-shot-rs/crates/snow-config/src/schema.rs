@@ -399,7 +399,7 @@ mod tests {
     }
 
     /// 完整默认文档含全部 27 个分组；默认值经规范化为不动点，仅有 C++ 同款的例外：
-    /// 目标翻译语言默认 `""` 不在白名单（判非法），三个全局鼠标默认的单元素数组会被规范化成字符串。
+    /// 三个全局鼠标默认的单元素数组会被规范化成字符串。
     #[test]
     fn default_document_fixed_points() {
         let doc = complete_default_document();
@@ -414,7 +414,6 @@ mod tests {
         assert_eq!(
             exceptions,
             [
-                "screenshot_translation/target_language",
                 "global_mouse/screenshot_copy",
                 "global_mouse/screenshot_fixed",
                 "global_mouse/screenshot_ocr",

@@ -54,6 +54,7 @@ pub mod sys_prefs;
 pub mod translate_flow;
 pub mod translate_layout;
 pub mod translate_service;
+pub mod language_names;
 pub mod translate_settings;
 
 /// 单实例互斥体 / 管道名使用的应用标识。

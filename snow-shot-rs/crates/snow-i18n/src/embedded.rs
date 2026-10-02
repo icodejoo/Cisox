@@ -1,53 +1,5 @@
-//! 内置语料：由 `snow-i18n-tool convert` 生成的 `.ftl` 编译进二进制。
+//! 内置语料：`build.rs` 扫描 `locales/*/*.ftl` 与 `locales/*/locale.toml` 生成，新增文件无需改代码。
 
-/// `(语言, ftl 文本)` 列表。
-pub const RESOURCES: &[(&str, &str)] = &[
-    ("en-US", include_str!("../locales/en-US/annotation.ftl")),
-    ("en-US", include_str!("../locales/en-US/ant_design_qt.ftl")),
-    ("en-US", include_str!("../locales/en-US/capture.ftl")),
-    ("en-US", include_str!("../locales/en-US/core.ftl")),
-    ("en-US", include_str!("../locales/en-US/export.ftl")),
-    ("en-US", include_str!("../locales/en-US/history.ftl")),
-    ("en-US", include_str!("../locales/en-US/ocr_backend.ftl")),
-    ("en-US", include_str!("../locales/en-US/recognition.ftl")),
-    ("en-US", include_str!("../locales/en-US/recording.ftl")),
-    ("en-US", include_str!("../locales/en-US/settings.ftl")),
-    (
-        "en-US",
-        include_str!("../locales/en-US/translate_settings.ftl"),
-    ),
-    ("en-US", include_str!("../locales/en-US/translation.ftl")),
-    ("en-US", include_str!("../locales/en-US/updates.ftl")),
-    ("zh-CN", include_str!("../locales/zh-CN/annotation.ftl")),
-    ("zh-CN", include_str!("../locales/zh-CN/ant_design_qt.ftl")),
-    ("zh-CN", include_str!("../locales/zh-CN/capture.ftl")),
-    ("zh-CN", include_str!("../locales/zh-CN/core.ftl")),
-    ("zh-CN", include_str!("../locales/zh-CN/export.ftl")),
-    ("zh-CN", include_str!("../locales/zh-CN/history.ftl")),
-    ("zh-CN", include_str!("../locales/zh-CN/ocr_backend.ftl")),
-    ("zh-CN", include_str!("../locales/zh-CN/recognition.ftl")),
-    ("zh-CN", include_str!("../locales/zh-CN/recording.ftl")),
-    ("zh-CN", include_str!("../locales/zh-CN/settings.ftl")),
-    (
-        "zh-CN",
-        include_str!("../locales/zh-CN/translate_settings.ftl"),
-    ),
-    ("zh-CN", include_str!("../locales/zh-CN/translation.ftl")),
-    ("zh-CN", include_str!("../locales/zh-CN/updates.ftl")),
-    ("zh-TW", include_str!("../locales/zh-TW/annotation.ftl")),
-    ("zh-TW", include_str!("../locales/zh-TW/ant_design_qt.ftl")),
-    ("zh-TW", include_str!("../locales/zh-TW/capture.ftl")),
-    ("zh-TW", include_str!("../locales/zh-TW/core.ftl")),
-    ("zh-TW", include_str!("../locales/zh-TW/export.ftl")),
-    ("zh-TW", include_str!("../locales/zh-TW/history.ftl")),
-    ("zh-TW", include_str!("../locales/zh-TW/ocr_backend.ftl")),
-    ("zh-TW", include_str!("../locales/zh-TW/recognition.ftl")),
-    ("zh-TW", include_str!("../locales/zh-TW/recording.ftl")),
-    ("zh-TW", include_str!("../locales/zh-TW/settings.ftl")),
-    (
-        "zh-TW",
-        include_str!("../locales/zh-TW/translate_settings.ftl"),
-    ),
-    ("zh-TW", include_str!("../locales/zh-TW/translation.ftl")),
-    ("zh-TW", include_str!("../locales/zh-TW/updates.ftl")),
-];
+use crate::locales::LocaleInfo;
+
+include!(concat!(env!("OUT_DIR"), "/embedded_generated.rs"));

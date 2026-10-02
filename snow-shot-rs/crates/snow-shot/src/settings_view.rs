@@ -11,8 +11,9 @@ use crate::settings_state::{
     ConfigChange, EditTarget, KeyMods, RowModel, Scope, SettingsAction, SettingsState,
     SharedConfig, StatusKind, SystemPrefs, read_only_note,
 };
+use crate::language_names::{is_language_key, language_option_label};
 use crate::ocr_backend::{OcrBackend, OcrNotice};
-use crate::settings_text::{Lang, Text, group_title, t};
+use crate::settings_text::{Lang, Text, group_title, item_desc, item_label, option_text, t};
 use crate::translate_settings::{
     HYMT2_LINE_COUNT, Hymt2Button, Hymt2Click, Hymt2Row, Hymt2View, hymt2_click, hymt2_rows,
     hymt2_view, route_hint, route_mode_label, split_list_index,
@@ -276,11 +277,13 @@ pub struct SettingsView {
     dropdowns: HashMap<&'static str, Dropdown>,
     /// 已应用到组件主题的深浅色；`None` 表示尚未应用。
     themed_dark: Option<bool>,
+    /// 窗口标题当前对应的界面语言代码（变化时刷新标题）。
+    titled_locale: Option<&'static str>,
     /// 上一帧列表的纵向滚动偏移（逻辑像素），变化即视为滚动。
     last_scroll_y: f32,
 }
 
-/// 选项的显示标签：OCR 后端与本地路由模式有专用本地化，其余原样显示。
+/// 选项的显示标签：OCR 后端与本地路由模式有专用本地化，语言类选项固定显示各语言自称，其余原样显示。
 ///
 /// # 参数
 /// - `key`：配置键
@@ -292,7 +295,8 @@ fn option_label(key: &str, option: &str, locale: &str) -> String {
         None if key == KEY_LOCAL_ROUTE_MODE => {
             route_mode_label(option, locale).unwrap_or_else(|| option.to_string())
         }
-        None => option.to_string(),
+        None if is_language_key(key) => language_option_label(option, locale),
+        None => option_text(locale, key, option).unwrap_or_else(|| option.to_string()),
     }
 }
 
@@ -345,6 +349,7 @@ impl SettingsView {
             hymt2_notice: None,
             dropdowns: HashMap::new(),
             themed_dark: None,
+            titled_locale: None,
             last_scroll_y: 0.0,
         });
         let handle = view.read(app).focus.clone();
@@ -673,20 +678,7 @@ impl SettingsView {
                     .child(div().size(px(22.0)).rounded_md().border_1().border_color(p.border).bg(swatch))
                     .child(self.text_field(row, FIELD_WIDTH - 30.0, p, lang, cx))
             }
-            Control::Choice(options) => {
-                let current = row.value.as_str().unwrap_or_default().to_string();
-                let mut chips = row_div;
-                let locale = self.state.prefs().locale;
-                for option in options {
-                    let text = option_label(key, option, locale);
-                    chips = chips.child(Self::chip(text, current == *option, p).on_mouse_down(
-                        MouseButton::Left,
-                        Self::click(cx, SettingsAction::Change { key, value: json!(option) }),
-                    ));
-                }
-                chips
-            }
-            Control::Cycle(_) => {
+            Control::Choice(_) => {
                 let select = self.dropdowns.get(key).map(|dropdown| {
                     div().w(px(DROPDOWN_WIDTH)).h(px(DROPDOWN_HEIGHT)).child(
                         Select::new(&dropdown.state)
@@ -802,8 +794,8 @@ impl SettingsView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let cycle = self.state.visible_row(position).and_then(|row| match row.control {
-            Control::Cycle(options) => {
-                Some((row.key, options, row.value.as_str().unwrap_or_default().to_string()))
+            Control::Choice(options) => {
+                Some((row.key, options, self.state.choice_value(row.key, &row.value)))
             }
             _ => None,
         });
@@ -830,7 +822,7 @@ impl SettingsView {
             (Some(error), _, _) => div().text_color(p.danger).child(error.clone()),
             (None, Some(notice), _) => div().text_color(p.danger).child(notice.message(self.state.prefs().locale)),
             (None, None, Some(note)) => div().text_color(p.dim).child(note),
-            (None, None, None) => div().text_color(p.dim).child(key),
+            (None, None, None) => div().text_color(p.dim).child(item_desc(lang, key).unwrap_or_else(|| key.to_string())),
         };
         let label = div()
             .w(px(LABEL_WIDTH))
@@ -842,7 +834,7 @@ impl SettingsView {
                     .text_size(px(13.0))
                     .font_weight(FontWeight::MEDIUM)
                     .whitespace_nowrap()
-                    .child(row.label.clone()),
+                    .child(item_label(lang, key)),
             )
             .child(div().text_size(px(11.0)).max_h(px(SUB_MAX_HEIGHT)).overflow_hidden().child(sub));
         div()
@@ -1116,6 +1108,11 @@ impl Render for SettingsView {
             }
         }
         let prefs = self.state.prefs();
+        if self.titled_locale != Some(prefs.locale) {
+            // 窗口标题跟随界面语言（首帧与语言切换后各设一次）。
+            self.titled_locale = Some(prefs.locale);
+            window.set_window_title(&crate::settings_text::window_title(prefs.lang));
+        }
         if self.themed_dark != Some(prefs.dark) {
             // 组件库（下拉选择器）的主题跟随设置页深浅色。
             self.themed_dark = Some(prefs.dark);
@@ -1235,10 +1232,20 @@ mod tests {
     /// 选项标签：路由模式本地化，其余原样；下拉与平铺共用。
     #[test]
     fn option_labels_localized() {
-        assert_eq!(option_label("screenshot/image_format", "png", "zh-CN"), "png");
+        assert_eq!(option_label("screenshot/image_format", "png", "zh-CN"), "PNG");
+        assert_eq!(option_label("screen_recording/output_format", "mp4", "zh-CN"), "mp4");
+        assert_eq!(option_label("tray/icon", "dark", "zh-CN"), "深色");
+        assert_eq!(option_label("tray/icon", "dark", "en-US"), "Dark");
         let mode = option_label(KEY_LOCAL_ROUTE_MODE, "single", "zh-CN");
         assert_ne!(mode, "single");
         assert_eq!(option_label("other/key", "single", "zh-CN"), "single");
+        for info in snow_i18n::locales() {
+            assert_eq!(option_label("screenshot_translation/target_language", "ja", info.code), "日本語");
+            assert_eq!(option_label("interface/language", "zh_CN", info.code), "简体中文");
+            assert_eq!(option_label("interface/language", "en_US", info.code), "English");
+        }
+        assert_eq!(option_label("screenshot_translation/source_language", "auto", "en-US"), "Auto detect");
+        assert_eq!(option_label("screenshot_translation/source_language", "auto", "zh-CN"), "自动识别");
     }
 
     /// 下拉选项保持候选顺序，值与标签一一对应；选中值只认候选内的值。

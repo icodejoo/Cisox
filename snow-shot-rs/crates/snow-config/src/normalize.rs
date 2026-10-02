@@ -65,6 +65,8 @@ const LEGACY_TRAY_COMMAND: &str = "tray.disable-shortcut-functions";
 const MIGRATED_TRAY_COMMAND: &str = "quick.toggle-global-hotkeys";
 /// 语言键的系统值。
 const LANGUAGE_SYSTEM: &str = "system";
+/// 已不支持的繁体区域名（规范化之后的写法）。
+const UNSUPPORTED_TRADITIONAL: &[&str] = &["zh_TW", "zh_HK", "zh_MO"];
 /// 语言键 `en` 的展开值。
 const LANGUAGE_EN_US: &str = "en_US";
 /// 语言子标签数量上限对应的长度范围。
@@ -135,14 +137,19 @@ fn canonical_locale(text: &str) -> String {
     }
 }
 
-/// 语言键：`system`、`en`→`en_US`，或形如 `ll[_XX...]` 的区域名（受限子集，见 [`canonical_locale`]）。
+/// 语言键：空串（没有已保存值）、`en`→`en_US`，或形如 `ll[_XX...]` 的区域名（受限子集，见 [`canonical_locale`]）。
+/// 不再接受 `system`（已取消“跟随系统”选项）与繁体（`zh_TW` / `zh_HK` / `zh_MO` / `zh_Hant`），
+/// 旧配置里的这些值加载时按“没有已保存值”回落为默认空串。
 fn normalize_language(value: &Value) -> Normalization {
     let Some(original) = string_of(value) else {
         return Normalization::invalid();
     };
     let mut normalized = trimmed(original).to_string();
+    if normalized.is_empty() {
+        return Normalization::ok(Value::String(normalized), !original.is_empty());
+    }
     if eq_ignore_case(&normalized, LANGUAGE_SYSTEM) {
-        normalized = LANGUAGE_SYSTEM.to_string();
+        return Normalization::invalid();
     } else {
         normalized = normalized.replace('-', "_");
         if eq_ignore_case(&normalized, "en") {
@@ -160,6 +167,9 @@ fn normalize_language(value: &Value) -> Normalization {
                 return Normalization::invalid();
             }
             normalized = canonical_locale(&normalized);
+            if UNSUPPORTED_TRADITIONAL.contains(&normalized.as_str()) {
+                return Normalization::invalid();
+            }
         }
     }
     let changed = normalized != original;
@@ -268,6 +278,10 @@ fn normalize_translation_language(entry: &SchemaEntry, value: &Value) -> Normali
         return Normalization::invalid();
     };
     let trimmed_value = trimmed(original);
+    // 默认值为空串的键（目标语言）：空串表示没有已保存值，合法。
+    if trimmed_value.is_empty() && entry.default == Value::String(String::new()) {
+        return Normalization::ok(Value::String(String::new()), !original.is_empty());
+    }
     match entry
         .allowed
         .iter()
@@ -618,15 +632,20 @@ mod tests {
     #[test]
     fn language_rules() {
         let key = "interface/language";
-        check(key, json!("SYSTEM"), json!("system"), true);
+        // 取消“跟随系统”：system 与繁体旧值不再合法；空串是“没有已保存值”
+        check_invalid(key, json!("SYSTEM"));
+        check_invalid(key, json!("system"));
+        check(key, json!(""), json!(""), false);
+        check(key, json!("  "), json!(""), true);
+        for old in ["zh_TW", "zh-Hant", "zh_HK", "zh-TW", "zh_MO", "zh_Hant_TW"] {
+            check_invalid(key, json!(old));
+        }
         check(key, json!("en"), json!("en_US"), true);
         check(key, json!("EN"), json!("en_US"), true);
         check(key, json!("zh-cn"), json!("zh_CN"), true);
-        check(key, json!("zh_TW"), json!("zh_TW"), false);
-        check(key, json!("zh-Hant"), json!("zh_TW"), true);
         check(key, json!("zh"), json!("zh_CN"), true);
         check(key, json!("en_US"), json!("en_US"), false);
-        for bad in ["", "e", "english", "zh__CN", "zh_C", "zh_CN_!", "1234"] {
+        for bad in ["e", "english", "zh__CN", "zh_C", "zh_CN_!", "1234"] {
             check_invalid(key, json!(bad));
         }
         check_invalid(key, json!(1));
@@ -644,7 +663,7 @@ mod tests {
         check_invalid(target, json!("zh-Hant"));
         check(target, json!("ja"), json!("ja"), false);
         check_invalid(target, json!("auto"));
-        check_invalid(target, json!(""));
+        check(target, json!(""), json!(""), false);
         check_invalid(source, json!("xx"));
     }
 

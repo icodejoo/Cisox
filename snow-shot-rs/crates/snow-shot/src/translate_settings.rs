@@ -33,7 +33,7 @@ const ROUTE_MODE_MESSAGES: &[(&str, &str, &str)] = &[
 ///
 /// # 参数
 /// - `mode`：配置取值（`single` / `specialized_first` / `mixed_split`）。
-/// - `locale`：界面语言（`en-US` / `zh-CN` / `zh-TW`）。
+/// - `locale`：界面语言（内置语言代码，如 `en-US` / `zh-CN`）。
 ///
 /// # 返回
 /// 显示名；未知取值返回 `None`。
@@ -291,7 +291,7 @@ mod tests {
     use serde_json::json;
 
     /// 全部语言的占位符都不应残留为缺失消息。
-    const LOCALES: [&str; 3] = ["en-US", "zh-CN", "zh-TW"];
+    const LOCALES: [&str; 2] = ["en-US", "zh-CN"];
 
     #[test]
     fn route_labels_cover_all_modes_and_locales() {

@@ -19,13 +19,7 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
 /// 界面语料的回退语言。
-const FALLBACK_LOCALE: &str = "en-US";
-/// 界面语料支持的语言（与 `snow-i18n/locales` 下的目录一致）。
-const LOCALE_EN_US: &str = "en-US";
-/// 简体中文语料。
-const LOCALE_ZH_CN: &str = "zh-CN";
-/// 繁体中文语料。
-const LOCALE_ZH_TW: &str = "zh-TW";
+const FALLBACK_LOCALE: &str = snow_i18n::FALLBACK_LOCALE;
 /// 系统 OCR 可用性探测结果的缓存时长（设置页每帧都会查询，语言包安装后几秒内即可感知）。
 const SYSTEM_PROBE_TTL: Duration = Duration::from_secs(5);
 
@@ -89,7 +83,7 @@ impl OcrBackend {
     /// 按界面语言取显示名。
     ///
     /// # 参数
-    /// - `locale`：`en-US` / `zh-CN` / `zh-TW`，其它值回退英文。
+    /// - `locale`：内置语言代码（见 `locale.toml`），其它值回退英文。
     pub fn label(self, locale: &str) -> String {
         let i18n = i18n_for(locale);
         match self {
@@ -326,7 +320,7 @@ impl OcrNotice {
     /// 按界面语言取提示文案。
     ///
     /// # 参数
-    /// - `locale`：`en-US` / `zh-CN` / `zh-TW`，其它值回退英文。
+    /// - `locale`：内置语言代码（见 `locale.toml`），其它值回退英文。
     ///
     /// # 示例
     /// ```ignore
@@ -453,16 +447,22 @@ pub fn select_from_document(document: &ConfigDocument, service: Arc<OcrService>)
 
 /// 取某界面语言的语料（进程内缓存，构建失败时返回 `None`）。
 fn bundle(locale: &str) -> Option<&'static I18n> {
-    static EN_US: OnceLock<Option<I18n>> = OnceLock::new();
-    static ZH_CN: OnceLock<Option<I18n>> = OnceLock::new();
-    static ZH_TW: OnceLock<Option<I18n>> = OnceLock::new();
-    let (cell, name) = match locale {
-        LOCALE_ZH_CN => (&ZH_CN, LOCALE_ZH_CN),
-        LOCALE_ZH_TW => (&ZH_TW, LOCALE_ZH_TW),
-        _ => (&EN_US, LOCALE_EN_US),
-    };
-    cell.get_or_init(|| I18n::embedded(name, FALLBACK_LOCALE, snow_app_core::PRODUCT_NAME).ok())
-        .as_ref()
+    static BUNDLES: OnceLock<Vec<(&'static str, I18n)>> = OnceLock::new();
+    let all = BUNDLES.get_or_init(|| {
+        snow_i18n::locales()
+            .iter()
+            .filter_map(|info| {
+                I18n::embedded(info.code, FALLBACK_LOCALE, snow_app_core::PRODUCT_NAME)
+                    .ok()
+                    .map(|i18n| (info.code, i18n))
+            })
+            .collect()
+    });
+    let pick = |code: &str| all.iter().find(|(c, _)| *c == code).map(|(_, i18n)| i18n);
+    // 先按代码精确找，再按别名/系统前缀匹配，最后回退到 en-US。
+    pick(locale)
+        .or_else(|| snow_i18n::match_locale(locale).and_then(|info| pick(info.code)))
+        .or_else(|| pick(FALLBACK_LOCALE))
 }
 
 /// 语料句柄：语料构建失败时用空语料，`tr` 会返回降级文案而不会 panic。
@@ -702,12 +702,13 @@ mod tests {
         assert_eq!(OcrNotice::for_config_value(&json!(3)), None);
     }
 
-    /// 文案三种语言都有，且互不相同、不含缺失标记。
+    /// 文案每种内置语言都有，且互不相同、不含缺失标记。
     #[test]
     fn labels_and_notice_exist_in_all_locales() {
         let mut labels = Vec::new();
         let mut notices = Vec::new();
-        for locale in [LOCALE_EN_US, LOCALE_ZH_CN, LOCALE_ZH_TW] {
+        for info in snow_i18n::locales() {
+            let locale = info.code;
             for backend in [OcrBackend::System, OcrBackend::LocalModel] {
                 let label = backend.label(locale);
                 assert!(!label.contains("[!"), "{locale} {backend:?}: {label}");
@@ -723,16 +724,20 @@ mod tests {
         labels.dedup();
         assert_eq!(
             labels.len(),
-            6,
-            "三种语言 x 两个后端的显示名应各不相同: {labels:?}"
+            snow_i18n::locales().len() * 2,
+            "各语言 x 两个后端的显示名应各不相同: {labels:?}"
         );
         assert!(notices.iter().all(|n| !n.is_empty()));
         notices.sort();
         notices.dedup();
-        assert_eq!(notices.len(), 9, "三种语言 x 三种提示应各不相同: {notices:?}");
+        assert_eq!(
+            notices.len(),
+            snow_i18n::locales().len() * 3,
+            "各语言 x 三种提示应各不相同: {notices:?}"
+        );
         assert_eq!(
             OcrBackend::System.label("fr-FR"),
-            OcrBackend::System.label(LOCALE_EN_US)
+            OcrBackend::System.label(FALLBACK_LOCALE)
         );
     }
 

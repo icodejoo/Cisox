@@ -27,9 +27,11 @@ fn load_all() -> Vec<(String, TsCatalog)> {
     for d in dirs {
         walk(&d, &mut files);
     }
+    // 繁体已不支持：忽略上游 zh_TW 的 .ts。
+    files.retain(|f| !f.to_string_lossy().ends_with("_zh_TW.ts"));
     assert!(
-        files.len() >= 32,
-        "应至少找到 32 个 .ts，实际 {}",
+        files.len() >= 20,
+        "应至少找到 20 个 .ts，实际 {}",
         files.len()
     );
     files
@@ -159,7 +161,8 @@ fn all_real_messages_match_qt() {
             }
         }
     }
-    assert!(checked >= 6000, "对照条数过少：{checked}");
+    // 繁体移除后 en-US + zh-CN 共约 4157 条
+    assert!(checked >= 4000, "对照条数过少：{checked}");
 }
 
 /// 换成新产品名后，任何语言的任何文案都不应再含旧产品名。
@@ -290,7 +293,7 @@ fn committed_locales_are_fresh_and_embedded_loads() {
             );
         }
     }
-    for lang in ["en-US", "zh-CN", "zh-TW"] {
+    for lang in ["en-US", "zh-CN"] {
         let i = I18n::embedded(lang, "en-US", "Cisox").unwrap();
         let id = message_id(
             "AdministratorLaunch",

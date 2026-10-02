@@ -23,6 +23,8 @@ const SOURCE_LANG: &str = "en_US";
 /// 引用对齐的基准语言目录名。
 const BASE_LANG: &str = "en-US";
 
+/// 不再支持、转换时跳过的上游语言（繁体中文已移除）。
+const SKIPPED_SOURCE_LANGS: &[&str] = &["zh_TW"];
 /// 默认的 locales 目录（相对 workspace 根）。
 const DEFAULT_LOCALES: &str = "crates/snow-i18n/locales";
 
@@ -193,6 +195,10 @@ fn run_convert(out_dir: &Path, inputs: &[String]) -> Result<(), String> {
     for f in &files {
         let text = std::fs::read_to_string(f).map_err(|e| format!("{}: {e}", f.display()))?;
         let cat = parse_ts(&text).map_err(|e| format!("{}: {e}", f.display()))?;
+        if SKIPPED_SOURCE_LANGS.contains(&cat.language.as_str()) {
+            println!("跳过不再支持的语言 {}：{}", cat.language, f.display());
+            continue;
+        }
         by_module
             .entry(module_name(f, &cat.language))
             .or_default()

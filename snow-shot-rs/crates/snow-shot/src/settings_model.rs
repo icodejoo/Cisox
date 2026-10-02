@@ -2,7 +2,7 @@
 //!
 //! 本模块不依赖 GPUI，全部逻辑可离屏单测；视图层只负责把这里的结果画出来。
 
-use crate::settings_text::{GROUP_TITLES, Lang};
+use crate::settings_text::{GROUP_IDS, Lang, Text, t};
 use serde_json::Value;
 use snow_config::schema::{IntRange, SCHEMA_VERSION_KEY, SchemaEntry, ValueKind, entries};
 use snow_config::shortcut::{
@@ -17,10 +17,19 @@ pub const LANGUAGE_KEY: &str = "interface/language";
 pub const THEME_MODE_KEY: &str = "interface/theme_mode";
 /// 主题主色配置键。
 pub const THEME_COLOR_KEY: &str = "interface/theme_primary_color";
-/// 语言下拉的固定候选（schema 对语言不限白名单，界面给出常用项）。
-pub const LANGUAGE_OPTIONS: &[&str] = &["system", "en_US", "zh_CN", "zh_TW"];
-/// 候选数不超过该值时以平铺按钮展示，超过则用左右切换。
-pub const CHOICE_INLINE_MAX: usize = 4;
+/// 目标语言配置键。
+pub const TARGET_LANGUAGE_KEY: &str = "screenshot_translation/target_language";
+
+/// 界面语言下拉的候选：由已发现的内置语言（`locale.toml`）生成，取其写入配置的取值，如 `en_US`。
+///
+/// # 示例
+/// ```ignore
+/// assert!(language_options().contains(&"zh_CN"));
+/// ```
+pub fn language_options() -> &'static [&'static str] {
+    static OPTIONS: OnceLock<Vec<&'static str>> = OnceLock::new();
+    OPTIONS.get_or_init(|| snow_i18n::locales().iter().map(|l| l.config_value).collect())
+}
 /// 结构化 JSON 默认值序列化长度超过该值时只读展示。
 pub const JSON_EDIT_MAX_LEN: usize = 120;
 /// 滑条离散格数。
@@ -60,10 +69,8 @@ pub enum Control {
     Slider(IntRange),
     /// 无范围整数文本框。
     IntText,
-    /// 少量候选的平铺单选。
+    /// 固定候选的下拉单选（至少两项一律用下拉）。
     Choice(&'static [&'static str]),
-    /// 较多候选的左右切换。
-    Cycle(&'static [&'static str]),
     /// 单行文本。
     Text,
     /// 颜色（色块 + 十六进制文本）。
@@ -92,7 +99,7 @@ pub struct GroupInfo {
     pub entries: Vec<usize>,
 }
 
-/// 全部分组（顺序同 [`GROUP_TITLES`]），首次调用时构建并缓存。
+/// 全部分组（顺序同 [`GROUP_IDS`]），首次调用时构建并缓存。
 ///
 /// ```ignore
 /// assert_eq!(groups().iter().map(|g| g.entries.len()).sum::<usize>(), entries().len());
@@ -100,9 +107,9 @@ pub struct GroupInfo {
 pub fn groups() -> &'static [GroupInfo] {
     static GROUPS: OnceLock<Vec<GroupInfo>> = OnceLock::new();
     GROUPS.get_or_init(|| {
-        let mut list: Vec<GroupInfo> = GROUP_TITLES
+        let mut list: Vec<GroupInfo> = GROUP_IDS
             .iter()
-            .map(|(id, _, _)| GroupInfo {
+            .map(|id| GroupInfo {
                 id,
                 entries: Vec::new(),
             })
@@ -145,7 +152,7 @@ pub fn control_for(entry: &SchemaEntry) -> Control {
         return Control::ReadOnly(ReadOnlyReason::Secret);
     }
     if entry.key == LANGUAGE_KEY {
-        return Control::Cycle(LANGUAGE_OPTIONS);
+        return Control::Choice(language_options());
     }
     match entry.kind {
         ValueKind::Boolean => Control::Switch,
@@ -156,11 +163,7 @@ pub fn control_for(entry: &SchemaEntry) -> Control {
         },
         ValueKind::String => {
             if !entry.allowed.is_empty() {
-                if entry.allowed.len() <= CHOICE_INLINE_MAX {
-                    Control::Choice(entry.allowed)
-                } else {
-                    Control::Cycle(entry.allowed)
-                }
+                Control::Choice(entry.allowed)
             } else if entry.key.ends_with(COLOR_KEY_SUFFIX) {
                 Control::Color
             } else {
@@ -256,7 +259,7 @@ pub enum InputError {
 /// ```
 pub fn parse_input(control: Control, text: &str) -> Result<Value, InputError> {
     match control {
-        Control::Text | Control::Color | Control::Choice(_) | Control::Cycle(_) => {
+        Control::Text | Control::Color | Control::Choice(_) => {
             Ok(Value::String(text.trim().to_string()))
         }
         Control::IntText | Control::Slider(_) => text
@@ -281,15 +284,15 @@ pub fn parse_input(control: Control, text: &str) -> Result<Value, InputError> {
 /// # 参数
 /// - `lang`：界面语言
 /// - `error`：错误原因
-pub fn describe_input_error(lang: Lang, error: &InputError) -> &'static str {
-    match (lang, error) {
-        (Lang::ZhCn, InputError::NotInteger) => "请输入整数",
-        (Lang::EnUs, InputError::NotInteger) => "Enter an integer",
-        (Lang::ZhCn, InputError::BadJson) => "不是合法的 JSON",
-        (Lang::EnUs, InputError::BadJson) => "Not valid JSON",
-        (Lang::ZhCn, InputError::NotEditable) => "该项不可编辑",
-        (Lang::EnUs, InputError::NotEditable) => "This item is not editable",
-    }
+pub fn describe_input_error(lang: Lang, error: &InputError) -> String {
+    t(
+        lang,
+        match error {
+            InputError::NotInteger => Text::ErrNotInteger,
+            InputError::BadJson => Text::ErrBadJson,
+            InputError::NotEditable => Text::ErrNotEditable,
+        },
+    )
 }
 
 /// 单行文本编辑缓冲：光标以字符下标计。
@@ -763,7 +766,7 @@ mod tests {
                 ),
                 ValueKind::String => matches!(
                     control,
-                    Control::Choice(_) | Control::Cycle(_) | Control::Text | Control::Color
+                    Control::Choice(_) | Control::Text | Control::Color
                 ),
                 ValueKind::Structured => {
                     matches!(control, Control::JsonText | Control::ReadOnly(_))
@@ -779,8 +782,15 @@ mod tests {
         assert_eq!(control_of("mcp/enabled"), Control::Switch);
         assert!(matches!(control_of("screenshot/image_quality"), Control::Slider(r) if r.max == 100));
         assert!(matches!(control_of("interface/theme_mode"), Control::Choice(o) if o.len() == 3));
-        assert!(matches!(control_of("screenshot/image_format"), Control::Cycle(_)));
-        assert_eq!(control_of("interface/language"), Control::Cycle(LANGUAGE_OPTIONS));
+        assert!(matches!(control_of("screenshot/image_format"), Control::Choice(o) if o.len() > 4));
+        assert!(matches!(control_of("screenshot_translation/backend"), Control::Choice(o) if o.len() == 2));
+        assert_eq!(control_of("interface/language"), Control::Choice(language_options()));
+        // 界面语言候选来自已发现的语言，没有“跟随系统”与繁体
+        assert_eq!(language_options(), ["en_US", "zh_CN"]);
+        // 目标语言直接用 schema 白名单，没有“跟随系统”与繁体
+        let Control::Choice(target) = control_of(TARGET_LANGUAGE_KEY) else { panic!("目标语言应为下拉") };
+        assert!(!target.contains(&"system") && !target.contains(&"zh-Hant"));
+        assert!(target.contains(&"zh-Hans") && target.contains(&"ja"));
         assert_eq!(control_of("interface/theme_primary_color"), Control::Color);
         assert_eq!(control_of("screenshot/image_save_directory"), Control::Text);
         assert_eq!(control_of("screen_recording/frame_rate"), Control::IntText);

@@ -136,8 +136,8 @@ pub fn effective_target_language(config_value: Option<&str>, system_locale: &str
         .unwrap_or("en")
 }
 
-/// 界面语言的生效值：只支持 `en_US` / `zh_CN`。已保存的这两种值（拼写宽松）原样生效；
-/// 缺失、空串、`system`、`auto`、旧繁体 `zh_TW` / `zh-Hant` 等都视为没保存，
+/// 界面语言的生效值：只支持内置语言（`locale.toml` 发现，目前 `en_US` / `zh_CN`）。已保存的支持值（拼写宽松）
+/// 原样生效；缺失、空串、`system`、`auto`、旧繁体 `zh_TW` / `zh-Hant` 等都视为没保存，
 /// 取系统语言映射，映射不到退 `en_US`。纯函数，不写回配置。
 ///
 /// # 参数
@@ -145,23 +145,19 @@ pub fn effective_target_language(config_value: Option<&str>, system_locale: &str
 /// - `system_locale`：系统界面语言标记（如 `zh-CN`）。
 ///
 /// # 返回
-/// `"en_US"` 或 `"zh_CN"`。
+/// 内置语言写入配置的取值，如 `"en_US"` / `"zh_CN"`。
 ///
 /// ```ignore
 /// assert_eq!(effective_interface_language(None, "zh-CN"), "zh_CN");
 /// assert_eq!(effective_interface_language(Some("zh_TW"), "ja-JP"), "en_US");
 /// ```
 pub fn effective_interface_language(config_value: Option<&str>, system_locale: &str) -> &'static str {
-    let pick = |lang: Option<Lang>| match lang {
-        Some(Lang::ZhHans) => Some("zh_CN"),
-        Some(Lang::En) => Some("en_US"),
-        _ => None,
-    };
     let saved = config_value.map(str::trim).filter(|v| !v.is_empty());
     saved
-        .and_then(|v| pick(Lang::from_locale(v)))
-        .or_else(|| pick(Lang::from_locale(system_locale)))
-        .unwrap_or("en_US")
+        .and_then(snow_i18n::match_locale)
+        .or_else(|| snow_i18n::match_locale(system_locale))
+        .or_else(|| snow_i18n::match_locale(snow_i18n::FALLBACK_LOCALE))
+        .map_or("en_US", |info| info.config_value)
 }
 
 impl TranslateConfig {

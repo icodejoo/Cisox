@@ -32,10 +32,12 @@ fn dump_all() -> String {
         &root.join("ant_design_qt/packages/ant_design_qt/i18n"),
         &mut files,
     );
+    // 繁体已不支持：上游目录里的 zh_TW 的 .ts 不再参与解析基线。
+    files.retain(|f| !f.to_string_lossy().ends_with("_zh_TW.ts"));
     files.sort();
     assert!(
-        files.len() >= 32,
-        "应至少找到 32 个 .ts，实际 {}",
+        files.len() >= 20,
+        "应至少找到 20 个 .ts，实际 {}",
         files.len()
     );
     let mut out = String::new();

@@ -55,7 +55,7 @@ pub(crate) fn raw_entries() -> Vec<SchemaEntry> {
         ),
         entry(
             "interface/language",
-            json!("system"),
+            json!(""),
             ValueKind::String,
             None,
             &[],
@@ -164,7 +164,6 @@ pub(crate) fn raw_entries() -> Vec<SchemaEntry> {
             None,
             &[
                 "auto", "ar", "de", "en", "es", "fr", "it", "ja", "pt", "ru", "tr", "zh-Hans",
-                "zh-Hant",
             ],
             None,
         ),

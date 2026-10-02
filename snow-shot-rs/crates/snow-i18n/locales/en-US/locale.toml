@@ -1,0 +1,4 @@
+code = "en-US"
+native_name = "English"
+aliases = ["en_US", "en"]
+system_prefixes = ["en"]

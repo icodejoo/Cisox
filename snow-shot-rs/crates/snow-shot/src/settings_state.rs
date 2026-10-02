@@ -10,7 +10,7 @@ use crate::settings_model::{
     parse_hex_color, parse_input, portable_to_hotkey_text, shortcut_from_keystroke,
     shortcut_texts, with_shortcut, without_shortcut, GLOBAL_SHORTCUT_GROUP,
 };
-use crate::settings_text::{Lang, Text, group_title, t, ui_locale};
+use crate::settings_text::{Lang, Text, group_title, item_label, t};
 use serde_json::Value;
 use snow_config::schema::{self, entries};
 use snow_config::store::ConfigStore;
@@ -144,7 +144,7 @@ pub struct UiPrefs {
     pub dark: bool,
     /// 界面语言。
     pub lang: Lang,
-    /// snow-i18n 语料语言（`en-US` / `zh-CN` / `zh-TW`）。
+    /// snow-i18n 语料语言代码（`locale.toml` 里的 `code`，如 `en-US` / `zh-CN`）。
     pub locale: &'static str,
     /// 主色 RGBA。
     pub accent: [u8; 4],
@@ -155,7 +155,7 @@ impl UiPrefs {
     ///
     /// # 参数
     /// - `theme_mode`：`system` / `light` / `dark`
-    /// - `language`：`system` 或区域名
+    /// - `language`：已保存的界面语言（空串表示没有，取系统语言）
     /// - `accent`：主色文本
     /// - `system`：系统偏好
     pub fn resolve(theme_mode: &str, language: &str, accent: &str, system: &SystemPrefs) -> Self {
@@ -164,10 +164,11 @@ impl UiPrefs {
             THEME_LIGHT => false,
             _ => system.dark,
         };
+        let lang = Lang::from_config(language, &system.language);
         Self {
             dark,
-            lang: Lang::from_config(language, &system.language),
-            locale: ui_locale(language, &system.language),
+            lang,
+            locale: lang.locale(),
             accent: parse_hex_color(accent).unwrap_or(DEFAULT_ACCENT),
         }
     }
@@ -377,6 +378,28 @@ impl SettingsState {
         self.prefs
     }
 
+    /// 下拉当前应显示的选项值：界面语言与目标语言在没有已保存值时，按系统语言算出生效值
+    /// （纯计算，不写回配置）；其余键就是配置里的值。
+    ///
+    /// # 参数
+    /// - `key`：配置键
+    /// - `value`：配置里的当前值
+    pub fn choice_value(&self, key: &str, value: &Value) -> String {
+        let saved = value.as_str().map(str::trim).filter(|v| !v.is_empty());
+        match key {
+            LANGUAGE_KEY => crate::translate_service::effective_interface_language(
+                saved,
+                &self.system.language,
+            )
+            .to_string(),
+            crate::settings_model::TARGET_LANGUAGE_KEY => {
+                crate::translate_service::effective_target_language(saved, &self.system.language)
+                    .to_string()
+            }
+            _ => value.as_str().unwrap_or_default().to_string(),
+        }
+    }
+
     /// 性能探针。
     pub fn perf(&self) -> PerfStats {
         self.perf
@@ -390,8 +413,8 @@ impl SettingsState {
     /// 当前范围的标题。
     pub fn scope_title(&self) -> String {
         match self.scope {
-            Scope::Group(index) => group_title(self.prefs.lang, groups()[index].id).to_string(),
-            Scope::Search => t(self.prefs.lang, Text::SearchResults).to_string(),
+            Scope::Group(index) => group_title(self.prefs.lang, groups()[index].id),
+            Scope::Search => t(self.prefs.lang, Text::SearchResults),
         }
     }
 
@@ -683,7 +706,7 @@ impl SettingsState {
         let lang = self.prefs.lang;
         match parse_input(edit.control, edit.buffer.text()) {
             Err(error) => {
-                let message = describe_input_error(lang, &error).to_string();
+                let message = describe_input_error(lang, &error);
                 self.set_row_error(key, Some(message.clone()));
                 self.set_status(StatusKind::Error, message);
             }
@@ -853,14 +876,16 @@ fn build_row(entry_index: usize, store: &ConfigStore) -> RowModel {
         Vec::new()
     };
     let group = group_id_of(entry.key);
-    let haystack = format!(
-        "{} {} {} {}",
-        entry.key,
-        label,
-        group_title(Lang::ZhCn, group),
-        group_title(Lang::EnUs, group)
-    )
-    .to_lowercase();
+    // 搜索同时匹配键名与每种内置语言下的名称、分组标题
+    let mut haystack = entry.key.to_string();
+    for info in snow_i18n::locales() {
+        let each = Lang::new(info.code);
+        haystack.push(' ');
+        haystack.push_str(&item_label(each, entry.key));
+        haystack.push(' ');
+        haystack.push_str(&group_title(each, group));
+    }
+    let haystack = haystack.to_lowercase();
     RowModel {
         key: entry.key,
         label,
@@ -875,18 +900,12 @@ fn build_row(entry_index: usize, store: &ConfigStore) -> RowModel {
 
 /// “列表已满”提示。
 fn list_full_text(lang: Lang) -> String {
-    match lang {
-        Lang::ZhCn => "快捷键数量已达上限".to_string(),
-        Lang::EnUs => "Shortcut limit reached".to_string(),
-    }
+    t(lang, Text::ListFull)
 }
 
 /// “不支持该按键”提示。
 fn unsupported_key_text(lang: Lang) -> String {
-    match lang {
-        Lang::ZhCn => "不支持该按键".to_string(),
-        Lang::EnUs => "Unsupported key".to_string(),
-    }
+    t(lang, Text::UnsupportedKey)
 }
 
 /// 只读原因的界面文案。
@@ -894,15 +913,15 @@ fn unsupported_key_text(lang: Lang) -> String {
 /// # 参数
 /// - `lang`：界面语言
 /// - `reason`：只读原因
-pub fn read_only_note(lang: Lang, reason: ReadOnlyReason) -> &'static str {
-    match (lang, reason) {
-        (Lang::ZhCn, ReadOnlyReason::Internal) => "内部固定值",
-        (Lang::EnUs, ReadOnlyReason::Internal) => "internal value",
-        (Lang::ZhCn, ReadOnlyReason::Secret) => "含密钥，不在此显示",
-        (Lang::EnUs, ReadOnlyReason::Secret) => "contains secrets, hidden",
-        (Lang::ZhCn, ReadOnlyReason::TooLarge) => "结构较大，暂无行内编辑器",
-        (Lang::EnUs, ReadOnlyReason::TooLarge) => "large structure, no inline editor yet",
-    }
+pub fn read_only_note(lang: Lang, reason: ReadOnlyReason) -> String {
+    t(
+        lang,
+        match reason {
+            ReadOnlyReason::Internal => Text::ReadOnlyInternal,
+            ReadOnlyReason::Secret => Text::ReadOnlySecret,
+            ReadOnlyReason::TooLarge => Text::ReadOnlyTooLarge,
+        },
+    )
 }
 
 #[cfg(test)]
@@ -1154,12 +1173,14 @@ mod tests {
     fn prefs_follow_config() {
         let (mut state, _, _) = fixture();
         assert!(!state.prefs().dark);
-        assert_eq!(state.prefs().lang, Lang::EnUs);
+        assert_eq!(state.prefs().lang, Lang::new("en-US"));
         state.apply("interface/theme_mode", json!("dark")).unwrap();
         assert!(state.prefs().dark);
         state.apply("interface/language", json!("zh_CN")).unwrap();
-        assert_eq!(state.prefs().lang, Lang::ZhCn);
-        assert!(crate::settings_model::LANGUAGE_OPTIONS.contains(&"zh_CN"));
+        assert_eq!(state.prefs().lang, Lang::new("zh-CN"));
+        assert!(crate::settings_model::language_options().contains(&"zh_CN"));
+        // 旧的 system 值被拒绝
+        assert!(state.apply("interface/language", json!("system")).is_err());
         state.apply("interface/theme_primary_color", json!("#FF0000FF")).unwrap();
         assert_eq!(state.prefs().accent, [255, 0, 0, 255]);
         assert!(state.status().unwrap().text.contains("Saved") || state.status().unwrap().text.contains("已保存"));
@@ -1169,13 +1190,32 @@ mod tests {
     #[test]
     fn ui_prefs_resolution() {
         let dark_system = SystemPrefs { dark: true, language: "zh-CN".into() };
-        let p = UiPrefs::resolve("system", "system", "#112233FF", &dark_system);
-        assert!(p.dark && p.lang == Lang::ZhCn && p.accent == [0x11, 0x22, 0x33, 0xFF]);
+        let p = UiPrefs::resolve("system", "", "#112233FF", &dark_system);
+        assert!(p.dark && p.lang == Lang::new("zh-CN") && p.accent == [0x11, 0x22, 0x33, 0xFF]);
         let p = UiPrefs::resolve("light", "en_US", "bad", &dark_system);
-        assert!(!p.dark && p.lang == Lang::EnUs && p.accent == DEFAULT_ACCENT);
+        assert!(!p.dark && p.lang == Lang::new("en-US") && p.accent == DEFAULT_ACCENT);
         assert_eq!(p.locale, "en-US");
+        // 繁体系统语言不支持，回退英文；旧 system / zh_TW 值按没有保存处理
         let tw_system = SystemPrefs { dark: false, language: "zh-TW".into() };
-        assert_eq!(UiPrefs::resolve("system", "system", "bad", &tw_system).locale, "zh-TW");
+        assert_eq!(UiPrefs::resolve("system", "", "bad", &tw_system).locale, "en-US");
+        assert_eq!(UiPrefs::resolve("system", "zh_TW", "bad", &dark_system).locale, "zh-CN");
+        assert_eq!(UiPrefs::resolve("system", "system", "bad", &dark_system).locale, "zh-CN");
+    }
+
+    /// 下拉当前值：没有已保存值时用系统语言算出生效值，已保存值不变，不写回配置。
+    #[test]
+    fn choice_value_uses_effective_language() {
+        let (mut state, _, path) = fixture();
+        let target = crate::settings_model::TARGET_LANGUAGE_KEY;
+        state.system = SystemPrefs { dark: false, language: "ja-JP".into() };
+        assert_eq!(state.choice_value(target, &json!("")), "ja");
+        assert_eq!(state.choice_value(target, &json!("fr")), "fr");
+        assert_eq!(state.choice_value(LANGUAGE_KEY, &json!("")), "en_US");
+        state.system = SystemPrefs { dark: false, language: "zh-CN".into() };
+        assert_eq!(state.choice_value(LANGUAGE_KEY, &json!("")), "zh_CN");
+        assert_eq!(state.choice_value(LANGUAGE_KEY, &json!("en_US")), "en_US");
+        assert_eq!(state.choice_value("tray/icon", &json!("dark")), "dark");
+        assert!(!path.exists(), "只是计算，不应写盘");
     }
 
     /// 回滚辅助：还原并落盘。
@@ -1200,8 +1240,9 @@ mod tests {
         state.dispatch(SettingsAction::BeginEdit("api_configuration/custom_models"));
         assert!(state.edit().is_none());
         for reason in [ReadOnlyReason::Internal, ReadOnlyReason::Secret, ReadOnlyReason::TooLarge] {
-            assert!(!read_only_note(Lang::ZhCn, reason).is_empty());
-            assert!(!read_only_note(Lang::EnUs, reason).is_empty());
+            for info in snow_i18n::locales() {
+                assert!(!read_only_note(Lang::new(info.code), reason).is_empty());
+            }
         }
     }
 

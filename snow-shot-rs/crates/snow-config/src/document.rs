@@ -598,7 +598,7 @@ mod tests {
     /// 真实样本（旧版本产出）加载后：仅 C++ 同款修复项改变，其余每个键与磁盘原值一致。
     ///
     /// 预期改变的键：样本缺失的两个新键补默认；两个动作工具栏布局补 latex-recognition；
-    /// 目标翻译语言默认值 `""` 不在白名单内，C++ 每次加载都会判为非法并回写默认（同为空串）。
+    /// 界面语言样本里的旧 `system` 已不再合法，加载时回落为默认空串。
     #[test]
     fn real_sample_loads_with_only_cpp_repairs() {
         let text = sample();
@@ -622,6 +622,7 @@ mod tests {
         assert_eq!(
             changed_keys,
             [
+                "interface/language",
                 "text_recognition/detector_resize_policy",
                 "pin_to_screen/action_tools_layout",
                 "screenshot_toolbar/action_tools_layout",
@@ -795,6 +796,26 @@ mod tests {
         assert_eq!(write(json!("")).value(key), json!(""));
         assert_eq!(write(json!("ja")).value(key), json!("ja"));
         assert_eq!(write(json!("zh-Hans")).value(key), json!("zh-Hans"));
+    }
+
+    /// 界面语言迁移：旧 system 与繁体值作废回落为空串（没有已保存值），en_US / zh_CN 不变。
+    #[test]
+    fn interface_language_drops_system_and_traditional() {
+        let key = "interface/language";
+        let version = crate::schema::current_version();
+        let write = |v: Value| {
+            load(
+                &json!({"storage": {"schema_version": version},
+                         "interface": {"language": v}})
+                .to_string(),
+            )
+        };
+        for old in ["system", "zh_TW", "zh-Hant", "zh_HK"] {
+            assert_eq!(write(json!(old)).value(key), json!(""), "{old}");
+        }
+        assert_eq!(write(json!("zh_CN")).value(key), json!("zh_CN"));
+        assert_eq!(write(json!("en_US")).value(key), json!("en_US"));
+        assert_eq!(crate::schema::default_value(key), json!(""));
     }
 
     /// 托盘菜单：旧默认（缺 restore 项）升级；自定义顺序保持；旧命令名迁移并回写。

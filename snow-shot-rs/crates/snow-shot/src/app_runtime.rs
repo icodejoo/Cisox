@@ -29,6 +29,8 @@ use crate::screenshot_output::{configured_format, home_directory, resolve_save_d
 use crate::scroll_view::{ENV_SCROLL_AUTOTEST, ScrollHost, parse_scroll_autotest};
 use crate::settings_model::portable_to_hotkey_text;
 use crate::settings_state::{ConfigChange, SharedConfig, SystemPrefs, restore_value};
+use crate::settings_model::LANGUAGE_KEY;
+use crate::settings_text::{Lang, window_title};
 use crate::settings_view::{AUTOTEST_STEP_INTERVAL, SettingsView, parse_autotest_ops};
 use serde_json::Value;
 use snow_app_core::bus::{CommandBus, CommandOutcome};
@@ -84,8 +86,6 @@ pub const TRAY_SIGNAL_QUIT: &str = "quit";
 const TRAY_ICON_SIZE: u32 = 32;
 /// 托盘占位图标颜色（RGBA）。
 const TRAY_ICON_RGBA: [u8; 4] = [22, 119, 255, 255];
-/// 设置窗口标题。
-const SETTINGS_WINDOW_TITLE: &str = "设置";
 /// 设置窗口逻辑宽度。
 const SETTINGS_WINDOW_WIDTH: f32 = 1000.0;
 /// 设置窗口逻辑高度。
@@ -1357,8 +1357,14 @@ fn open_or_focus_settings(cx: &mut ShellContext, state: &mut AppState) {
         tracing::info!("settings window activated");
         return;
     }
+    let system = SystemPrefs::query();
+    let title = {
+        let store = state.config.borrow();
+        let text = |key: &str| store.value(key).as_str().unwrap_or_default().to_string();
+        window_title(Lang::from_config(&text(LANGUAGE_KEY), &system.language))
+    };
     let mut spec = WindowSpec::normal(
-        SETTINGS_WINDOW_TITLE,
+        title,
         LogicalSize::new(SETTINGS_WINDOW_WIDTH, SETTINGS_WINDOW_HEIGHT),
     );
     if let Some(target) = settings_monitor_from_env(cx) {
@@ -1375,7 +1381,6 @@ fn open_or_focus_settings(cx: &mut ShellContext, state: &mut AppState) {
             previous: change.previous,
         });
     });
-    let system = SystemPrefs::query();
     match cx.open_window(&spec, move |window, app| {
         SettingsView::create(window, app, config, system, notify)
     }) {
