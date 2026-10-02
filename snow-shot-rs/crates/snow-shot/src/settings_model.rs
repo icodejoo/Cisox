@@ -509,23 +509,6 @@ pub fn slider_active_cell(range: IntRange, value: i64) -> usize {
     (((value.clamp(min, max) - min) * cells + span / 2) / span) as usize
 }
 
-/// 在候选里循环切换，当前值不在候选中时从第一项开始。
-///
-/// # 参数
-/// - `options`：候选列表
-/// - `current`：当前值
-/// - `delta`：`1` 下一项、`-1` 上一项
-pub fn cycle_option(options: &'static [&'static str], current: &str, delta: i32) -> &'static str {
-    if options.is_empty() {
-        return "";
-    }
-    let len = options.len() as i32;
-    match options.iter().position(|o| *o == current) {
-        Some(index) => options[(index as i32 + delta).rem_euclid(len) as usize],
-        None => options[0],
-    }
-}
-
 /// 解析 `#RRGGBBAA`（也接受 `#RRGGBB`）颜色。
 ///
 /// # 参数
@@ -921,15 +904,6 @@ mod tests {
         assert_eq!(slider_active_cell(range, 2000), SLIDER_CELLS - 1);
         let quality = IntRange { min: 0, max: 100, step: 1 };
         assert_eq!(step_int(50, quality, 1, true), 52);
-    }
-
-    /// 候选循环。
-    #[test]
-    fn cycle_options() {
-        assert_eq!(cycle_option(LANGUAGE_OPTIONS, "system", 1), "en_US");
-        assert_eq!(cycle_option(LANGUAGE_OPTIONS, "system", -1), "zh_TW");
-        assert_eq!(cycle_option(LANGUAGE_OPTIONS, "zh_TW", 1), "system");
-        assert_eq!(cycle_option(LANGUAGE_OPTIONS, "fr_FR", 1), "system");
     }
 
     /// 颜色解析。

@@ -4,7 +4,7 @@
 //! 每帧只构建屏幕内可见的几行，与配置项总数无关。
 
 use crate::settings_model::{
-    Control, SLIDER_CELLS, cycle_option, edit_text, parse_hex_color, preview_text,
+    Control, SLIDER_CELLS, edit_text, parse_hex_color, preview_text,
     slider_active_cell, slider_cell_value, step_int, window_text,
 };
 use crate::settings_state::{
@@ -19,7 +19,11 @@ use crate::translate_settings::{
 };
 use snow_config::extensions::{KEY_LOCAL_MODEL_ID, KEY_LOCAL_ROUTE_MODE, KEY_OCR_BACKEND};
 use serde_json::{Value, json};
+use snow_ui::ui::component::searchable_list::{SearchableListItem, SearchableVec};
+use snow_ui::ui::component::select::{Select, SelectEvent, SelectState};
+use snow_ui::ui::component::{IndexPath, Sizable, Size as ComponentSize, Theme, ThemeMode};
 use snow_ui::ui::*;
+use std::collections::HashMap;
 use std::ops::Range;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -32,6 +36,12 @@ const SIDEBAR_WIDTH: f32 = 220.0;
 const LABEL_WIDTH: f32 = 300.0;
 /// 行说明最大高度，容纳两行 11px 文字（行高约 18px），保证定高行不被撑开。
 const SUB_MAX_HEIGHT: f32 = 36.0;
+/// 下拉选择器触发器宽度。
+const DROPDOWN_WIDTH: f32 = 200.0;
+/// 下拉选择器触发器高度。
+const DROPDOWN_HEIGHT: f32 = 28.0;
+/// 下拉浮层最大高度（超出后浮层内滚动）。
+const DROPDOWN_MENU_MAX_HEIGHT: f32 = 280.0;
 /// 文本输入框宽度。
 const FIELD_WIDTH: f32 = 300.0;
 /// 搜索框宽度。
@@ -106,6 +116,40 @@ fn palette(dark: bool, accent: [u8; 4]) -> Palette {
             ok: rgba(0x389E0DFF),
         }
     }
+}
+
+/// 下拉选项：配置值加本地化标签。
+#[derive(Clone)]
+struct DropdownItem {
+    /// 写入配置的值。
+    value: &'static str,
+    /// 界面显示的标签。
+    label: SharedString,
+}
+
+impl SearchableListItem for DropdownItem {
+    type Value = &'static str;
+
+    /// 下拉与触发器显示的标签。
+    fn title(&self) -> SharedString {
+        self.label.clone()
+    }
+
+    /// 选项的配置值。
+    fn value(&self) -> &Self::Value {
+        &self.value
+    }
+}
+
+/// 下拉状态实体的具体类型。
+type DropdownState = SelectState<SearchableVec<DropdownItem>>;
+
+/// 一个常驻的下拉选择器：状态实体与其标签所用的语料语言。
+struct Dropdown {
+    /// gpui-component 的选择器状态（必须常驻，行滚出视口后不能丢）。
+    state: Entity<DropdownState>,
+    /// 当前标签所用语料语言，语言切换时据此重建标签。
+    locale: &'static str,
 }
 
 /// 渲染耗时探针。
@@ -227,6 +271,49 @@ pub struct SettingsView {
     probe: RenderProbe,
     /// Hy-MT2 下载入口点击后的提示（暂无发布地址，只给手动放置指引）。
     hymt2_notice: Option<String>,
+    /// 各配置键的下拉选择器（按需创建后常驻）。
+    dropdowns: HashMap<&'static str, Dropdown>,
+    /// 已应用到组件主题的深浅色；`None` 表示尚未应用。
+    themed_dark: Option<bool>,
+    /// 上一帧列表的纵向滚动偏移（逻辑像素），变化即视为滚动。
+    last_scroll_y: f32,
+}
+
+/// 选项的显示标签：OCR 后端与本地路由模式有专用本地化，其余原样显示。
+///
+/// # 参数
+/// - `key`：配置键
+/// - `option`：选项配置值
+/// - `locale`：语料语言
+fn option_label(key: &str, option: &str, locale: &str) -> String {
+    match OcrBackend::from_config_value(option).filter(|_| key == KEY_OCR_BACKEND) {
+        Some(backend) => backend.label(locale),
+        None if key == KEY_LOCAL_ROUTE_MODE => {
+            route_mode_label(option, locale).unwrap_or_else(|| option.to_string())
+        }
+        None => option.to_string(),
+    }
+}
+
+/// 把候选列表转成下拉选项（保持顺序）。
+fn dropdown_items(key: &str, options: &[&'static str], locale: &str) -> Vec<DropdownItem> {
+    options
+        .iter()
+        .map(|option| DropdownItem {
+            value: option,
+            label: option_label(key, option, locale).into(),
+        })
+        .collect()
+}
+
+/// 当前配置值在候选里对应的选项；不在候选内返回 `None`。
+fn dropdown_value(options: &[&'static str], current: &str) -> Option<&'static str> {
+    options.iter().copied().find(|option| *option == current)
+}
+
+/// 当前配置值在候选里的下标（用作下拉初始选中）。
+fn dropdown_index(options: &[&'static str], current: &str) -> Option<usize> {
+    options.iter().position(|option| *option == current)
 }
 
 /// 翻译设置所在分组的 id。
@@ -255,10 +342,81 @@ impl SettingsView {
             list_scroll: UniformListScrollHandle::new(),
             probe: RenderProbe::default(),
             hymt2_notice: None,
+            dropdowns: HashMap::new(),
+            themed_dark: None,
+            last_scroll_y: 0.0,
         });
         let handle = view.read(app).focus.clone();
         window.focus(&handle, app);
         view
+    }
+
+    /// 确保 `key` 的下拉选择器存在，并把选中项与标签同步到当前配置值与界面语言。
+    ///
+    /// 状态实体存放在视图里，行滚出视口不会丢失；选中事件走 [`SettingsAction::Change`] 写配置。
+    fn ensure_dropdown(
+        &mut self,
+        key: &'static str,
+        options: &'static [&'static str],
+        current: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let locale = self.state.prefs().locale;
+        let want = dropdown_value(options, current);
+        let Some(existing) = self.dropdowns.get(key) else {
+            let items = SearchableVec::new(dropdown_items(key, options, locale));
+            let index = dropdown_index(options, current).map(|row| IndexPath::default().row(row));
+            let state = cx.new(|cx| SelectState::new(items, index, window, cx));
+            cx.subscribe_in(
+                &state,
+                window,
+                move |this,
+                      _state,
+                      event: &SelectEvent<SearchableVec<DropdownItem>>,
+                      window,
+                      cx| {
+                    if let SelectEvent::Confirm(Some(value)) = event {
+                        this.act(
+                            SettingsAction::Change { key, value: json!(value) },
+                            window,
+                            cx,
+                        );
+                    }
+                },
+            )
+            .detach();
+            self.dropdowns.insert(key, Dropdown { state, locale });
+            return;
+        };
+        let relabel = existing.locale != locale;
+        let state = existing.state.clone();
+        let stale = state.read(cx).selected_value().copied() != want;
+        if relabel {
+            let items = SearchableVec::new(dropdown_items(key, options, locale));
+            state.update(cx, |select, cx| select.set_items(items, window, cx));
+        }
+        if relabel || stale {
+            state.update(cx, |select, cx| match want {
+                Some(value) => select.set_selected_value(&value, window, cx),
+                None => select.set_selected_index(None, window, cx),
+            });
+        }
+        if let Some(entry) = self.dropdowns.get_mut(key) {
+            entry.locale = locale;
+        }
+    }
+
+    /// 收起展开中的下拉浮层：组件把焦点锁在浮层内，改焦点无效，
+    /// 所以向持有焦点的浮层派发 Esc 同款的取消动作，走组件自己的关闭逻辑。
+    fn close_dropdowns(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let focused = self
+            .dropdowns
+            .values()
+            .any(|dropdown| dropdown.state.focus_handle(cx).contains_focused(window, cx));
+        if focused {
+            window.dispatch_action(Box::new(Cancel), cx);
+        }
     }
 
     /// 执行动作：抢焦点、更新状态、转发变更、重绘。
@@ -519,12 +677,7 @@ impl SettingsView {
                 let mut chips = row_div;
                 let locale = self.state.prefs().locale;
                 for option in options {
-                    let text = match OcrBackend::from_config_value(option).filter(|_| key == KEY_OCR_BACKEND) {
-                        Some(backend) => backend.label(locale),
-                        None if key == KEY_LOCAL_ROUTE_MODE => route_mode_label(option, locale)
-                            .unwrap_or_else(|| (*option).to_string()),
-                        None => (*option).to_string(),
-                    };
+                    let text = option_label(key, option, locale);
                     chips = chips.child(Self::chip(text, current == *option, p).on_mouse_down(
                         MouseButton::Left,
                         Self::click(cx, SettingsAction::Change { key, value: json!(option) }),
@@ -532,20 +685,15 @@ impl SettingsView {
                 }
                 chips
             }
-            Control::Cycle(options) => {
-                let current = row.value.as_str().unwrap_or_default().to_string();
-                let arrow = |label: &'static str, delta: i32, cx: &mut Context<Self>| {
-                    let next = cycle_option(options, &current, delta);
-                    Self::button(label, true, p).on_mouse_down(
-                        MouseButton::Left,
-                        Self::click(cx, SettingsAction::Change { key, value: json!(next) }),
+            Control::Cycle(_) => {
+                let select = self.dropdowns.get(key).map(|dropdown| {
+                    div().w(px(DROPDOWN_WIDTH)).h(px(DROPDOWN_HEIGHT)).child(
+                        Select::new(&dropdown.state)
+                            .with_size(ComponentSize::Small)
+                            .menu_max_h(px(DROPDOWN_MENU_MAX_HEIGHT)),
                     )
-                };
-                let shown = preview_text(&row.value, 24);
-                row_div
-                    .child(arrow("<", -1, cx))
-                    .child(div().min_w(px(120.0)).px_2().text_size(px(12.0)).child(shown))
-                    .child(arrow(">", 1, cx))
+                });
+                row_div.children(select)
             }
             Control::Shortcuts { max_items, .. } => self.shortcut_editor(row, max_items, p, lang, cx),
             Control::ReadOnly(reason) => {
@@ -644,7 +792,23 @@ impl SettingsView {
     }
 
     /// 渲染第 `position` 个可见行。
-    fn render_row(&self, position: usize, p: &Palette, lang: Lang, cx: &mut Context<Self>) -> AnyElement {
+    fn render_row(
+        &mut self,
+        position: usize,
+        p: &Palette,
+        lang: Lang,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let cycle = self.state.visible_row(position).and_then(|row| match row.control {
+            Control::Cycle(options) => {
+                Some((row.key, options, row.value.as_str().unwrap_or_default().to_string()))
+            }
+            _ => None,
+        });
+        if let Some((key, options, current)) = cycle {
+            self.ensure_dropdown(key, options, &current, window, cx);
+        }
         let Some(row) = self.state.visible_row(position) else {
             return div().into_any_element();
         };
@@ -936,9 +1100,23 @@ impl SettingsView {
 
 impl Render for SettingsView {
     /// 渲染设置窗口：左侧分组，右侧标题栏 + 虚拟滚动列表 + 状态栏。
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let started = Instant::now();
+        let scroll_y = uniform_list_offset_y(&self.list_scroll);
+        if scroll_y != self.last_scroll_y {
+            // 列表滚动时收起已展开的下拉：焦点回根即触发选择器的失焦关闭。
+            self.last_scroll_y = scroll_y;
+            if !self.dropdowns.is_empty() {
+                // 渲染中改焦点不会触发失焦通知，推迟到本帧之后再做。
+                cx.defer_in(window, |this, window, cx| this.close_dropdowns(window, cx));
+            }
+        }
         let prefs = self.state.prefs();
+        if self.themed_dark != Some(prefs.dark) {
+            // 组件库（下拉选择器）的主题跟随设置页深浅色。
+            self.themed_dark = Some(prefs.dark);
+            Theme::change(if prefs.dark { ThemeMode::Dark } else { ThemeMode::Light }, None, cx);
+        }
         let p = palette(prefs.dark, prefs.accent);
         let lang = prefs.lang;
         let header = self.hymt2_header_len();
@@ -958,13 +1136,13 @@ impl Render for SettingsView {
             uniform_list(
                 "settings-rows",
                 total,
-                cx.processor(move |this, range: Range<usize>, _window, cx| {
+                cx.processor(move |this, range: Range<usize>, window, cx| {
                     let started = Instant::now();
                     let rows: Vec<AnyElement> = range
                         .clone()
                         .map(|position| match split_list_index(position, header) {
                             Err(row) => this.render_hymt2_row(row, &p, cx),
-                            Ok(row) => this.render_row(row, &p, lang, cx),
+                            Ok(row) => this.render_row(row, &p, lang, window, cx),
                         })
                         .collect();
                     let elapsed = started.elapsed();
@@ -1049,6 +1227,29 @@ impl Drop for SettingsView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 选项标签：路由模式本地化，其余原样；下拉与平铺共用。
+    #[test]
+    fn option_labels_localized() {
+        assert_eq!(option_label("screenshot/image_format", "png", "zh-CN"), "png");
+        let mode = option_label(KEY_LOCAL_ROUTE_MODE, "single", "zh-CN");
+        assert_ne!(mode, "single");
+        assert_eq!(option_label("other/key", "single", "zh-CN"), "single");
+    }
+
+    /// 下拉选项保持候选顺序，值与标签一一对应；选中值只认候选内的值。
+    #[test]
+    fn dropdown_items_and_selection() {
+        const OPTIONS: &[&str] = &["a", "b", "c", "d", "e"];
+        let items = dropdown_items("x/y", OPTIONS, "en-US");
+        let values: Vec<&str> = items.iter().map(|i| i.value).collect();
+        assert_eq!(values, OPTIONS);
+        assert_eq!(items[2].title().as_ref(), "c");
+        assert_eq!(dropdown_value(OPTIONS, "d"), Some("d"));
+        assert_eq!(dropdown_value(OPTIONS, "zzz"), None);
+        assert_eq!(dropdown_index(OPTIONS, "e"), Some(4));
+        assert_eq!(dropdown_index(OPTIONS, ""), None);
+    }
 
     /// 自动化操作 JSON 解析：全部操作类型与错误输入。
     #[test]

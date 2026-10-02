@@ -31,6 +31,19 @@ pub use gpui_kit::{
     px, rgb, rgba, size, uniform_list,
 };
 pub use gpui_kit::prelude::FluentBuilder;
+/// 组件库的“取消”动作（Esc）：向焦点所在的下拉浮层派发即可关闭它。
+pub use gpui_kit::base::actions::Cancel;
+
+/// 读取虚拟列表当前的纵向滚动偏移（逻辑像素，向下滚动为负）。
+///
+/// # 参数
+/// - `handle`：已通过 `track_scroll` 绑定到列表的滚动句柄
+///
+/// # 返回
+/// 纵向偏移；用于判断列表是否发生了滚动。
+pub fn uniform_list_offset_y(handle: &UniformListScrollHandle) -> f32 {
+    f32::from(handle.0.borrow().base_handle.offset().y)
+}
 
 pub use crate::selection::{
     DEFAULT_EDGE_TOLERANCE, DEFAULT_HANDLE_SIZE, DEFAULT_MINIMUM_SELECTION_SIZE,
