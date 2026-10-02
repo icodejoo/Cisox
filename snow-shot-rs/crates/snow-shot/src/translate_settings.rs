@@ -199,6 +199,72 @@ pub fn hymt2_view(locale: &str, model_id: &str) -> Hymt2View {
     }
 }
 
+/// 说明区文本行数（不含标题），与 [`hymt2_panel`] 的 `lines` 一致。
+pub const HYMT2_LINE_COUNT: usize = 7;
+
+/// 每个定高行容纳的文本行数（标题算一行）。
+const HYMT2_LINES_PER_ROW: usize = 3;
+
+/// 说明区拆成的定高行。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Hymt2Row {
+    /// 文本行：`title` 为真时首行是标题，`lines` 是其后紧跟的说明行区间。
+    Text {
+        /// 本行是否以标题开头。
+        title: bool,
+        /// 说明行下标区间。
+        lines: std::ops::Range<usize>,
+    },
+    /// 按钮行（使用 / 下载与下载提示）。
+    Actions,
+}
+
+/// 把说明区拆成若干定高行，便于混入定高虚拟列表随之滚动。
+///
+/// # 参数
+/// - `line_count`：说明行数。
+///
+/// # 返回
+/// 依次为文本行（标题 + 说明行，每行最多 3 个文本行）与末尾的按钮行。
+///
+/// # 示例
+/// ```ignore
+/// assert_eq!(hymt2_rows(7).len(), 4);
+/// ```
+pub fn hymt2_rows(line_count: usize) -> Vec<Hymt2Row> {
+    let mut rows = vec![Hymt2Row::Text {
+        title: true,
+        lines: 0..line_count.min(HYMT2_LINES_PER_ROW - 1),
+    }];
+    let mut next = line_count.min(HYMT2_LINES_PER_ROW - 1);
+    while next < line_count {
+        let end = (next + HYMT2_LINES_PER_ROW).min(line_count);
+        rows.push(Hymt2Row::Text {
+            title: false,
+            lines: next..end,
+        });
+        next = end;
+    }
+    rows.push(Hymt2Row::Actions);
+    rows
+}
+
+/// 把列表下标换算成（说明区行下标 / 普通行位置）。
+///
+/// # 参数
+/// - `index`：虚拟列表下标。
+/// - `header_len`：说明区占的行数。
+///
+/// # 返回
+/// `Err(i)` 表示第 `i` 个说明区行，`Ok(p)` 表示第 `p` 个普通可见行。
+pub fn split_list_index(index: usize, header_len: usize) -> Result<usize, usize> {
+    if index < header_len {
+        Err(index)
+    } else {
+        Ok(index - header_len)
+    }
+}
+
 /// 处理按钮点击：使用 → 把 `local_model_id` 设为 Hy-MT2；下载 → 只给提示。
 ///
 /// # 参数
@@ -335,6 +401,39 @@ mod tests {
             panic!("应为配置修改");
         };
         assert!(hymt2_view("en-US", &value).in_use);
+    }
+
+    /// 说明行数常量与文案一致；拆行覆盖全部文本行且末行是按钮行。
+    #[test]
+    fn rows_cover_all_lines() {
+        for locale in LOCALES {
+            assert_eq!(hymt2_panel(locale).lines.len(), HYMT2_LINE_COUNT);
+        }
+        for n in [0, 1, 2, 3, 7, 8] {
+            let rows = hymt2_rows(n);
+            assert_eq!(rows.last(), Some(&Hymt2Row::Actions));
+            let mut next = 0;
+            for row in &rows[..rows.len() - 1] {
+                let Hymt2Row::Text { title, lines } = row else {
+                    panic!("中间应为文本行")
+                };
+                assert_eq!(lines.start, next);
+                assert!(lines.len() + usize::from(*title) <= 3);
+                next = lines.end;
+            }
+            assert_eq!(next, n);
+        }
+        assert_eq!(hymt2_rows(HYMT2_LINE_COUNT).len(), 4);
+    }
+
+    /// 列表下标：前 header_len 个属于说明区，其后按普通行偏移。
+    #[test]
+    fn list_index_split_includes_header() {
+        assert_eq!(split_list_index(0, 4), Err(0));
+        assert_eq!(split_list_index(3, 4), Err(3));
+        assert_eq!(split_list_index(4, 4), Ok(0));
+        assert_eq!(split_list_index(9, 4), Ok(5));
+        assert_eq!(split_list_index(2, 0), Ok(2));
     }
 
     #[test]

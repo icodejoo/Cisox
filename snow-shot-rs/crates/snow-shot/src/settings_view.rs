@@ -14,7 +14,8 @@ use crate::settings_state::{
 use crate::ocr_backend::{OcrBackend, OcrNotice};
 use crate::settings_text::{Lang, Text, group_title, t};
 use crate::translate_settings::{
-    hymt2_click, hymt2_view, route_hint, route_mode_label, Hymt2Button, Hymt2Click, Hymt2View,
+    HYMT2_LINE_COUNT, Hymt2Button, Hymt2Click, Hymt2Row, Hymt2View, hymt2_click, hymt2_rows,
+    hymt2_view, route_hint, route_mode_label, split_list_index,
 };
 use snow_config::extensions::{KEY_LOCAL_MODEL_ID, KEY_LOCAL_ROUTE_MODE, KEY_OCR_BACKEND};
 use serde_json::{Value, json};
@@ -282,7 +283,7 @@ impl SettingsView {
 
     /// 列表滚回顶部。
     fn scroll_to_top(&self) {
-        if self.state.visible_len() > 0 {
+        if self.state.visible_len() + self.hymt2_header_len() > 0 {
             self.list_scroll.scroll_to_item_strict(0, ScrollStrategy::Top);
         }
     }
@@ -354,7 +355,8 @@ impl SettingsView {
             }
             AutotestOp::Scroll(index) => {
                 if *index < self.state.visible_len() {
-                    self.list_scroll.scroll_to_item_strict(*index, ScrollStrategy::Top);
+                    let target = self.hymt2_header_len() + *index;
+                    self.list_scroll.scroll_to_item_strict(target, ScrollStrategy::Top);
                     cx.notify();
                 }
             }
@@ -831,12 +833,17 @@ impl SettingsView {
             .child(div().flex().items_center().gap_3().child(search).child(reset_group))
     }
 
-    /// 渲染翻译分组顶部的 Hy-MT2 可选包说明区；其它范围返回 `None`。
-    fn render_hymt2_panel(&self, p: &Palette, cx: &mut Context<Self>) -> Option<Div> {
-        let Scope::Group(index) = self.state.scope() else { return None };
-        if crate::settings_model::groups().get(index)?.id != TRANSLATION_GROUP_ID {
-            return None;
+    /// 翻译分组下说明区占的列表行数；其它范围为 0。
+    fn hymt2_header_len(&self) -> usize {
+        let Scope::Group(index) = self.state.scope() else { return 0 };
+        match crate::settings_model::groups().get(index) {
+            Some(group) if group.id == TRANSLATION_GROUP_ID => hymt2_rows(HYMT2_LINE_COUNT).len(),
+            _ => 0,
         }
+    }
+
+    /// 渲染 Hy-MT2 说明区的第 `row_index` 个定高行（与普通行同高，随列表滚动）。
+    fn render_hymt2_row(&self, row_index: usize, p: &Palette, cx: &mut Context<Self>) -> AnyElement {
         let locale = self.state.prefs().locale;
         let current = self
             .state
@@ -844,42 +851,64 @@ impl SettingsView {
             .and_then(|row| row.value.as_str().map(str::to_owned))
             .unwrap_or_default();
         let Hymt2View { panel, in_use } = hymt2_view(locale, &current);
-        let use_button = match hymt2_click(Hymt2Button::Use, locale) {
-            _ if in_use => Self::button(panel.in_use_label, false, p),
-            Hymt2Click::SetConfig { key, value } => Self::button(panel.use_label, true, p)
-                .on_mouse_down(MouseButton::Left, Self::click(cx, SettingsAction::Change { key, value: json!(value) })),
-            Hymt2Click::ShowNotice(_) => Self::button(panel.use_label, true, p),
-        };
-        let download = Self::button(panel.download_label, true, p).on_mouse_down(
-            MouseButton::Left,
-            cx.listener(move |this, _event: &MouseDownEvent, _window, cx| {
-                if let Hymt2Click::ShowNotice(text) = hymt2_click(Hymt2Button::Download, locale) {
-                    this.hymt2_notice = Some(text);
-                }
-                cx.stop_propagation();
-                cx.notify();
-            }),
-        );
-        let mut block = div()
+        let rows = hymt2_rows(panel.lines.len());
+        let frame = div()
+            .h(px(ROW_HEIGHT))
+            .w_full()
             .px_4()
-            .py_2()
+            .py_1()
             .flex()
-            .flex_none()
             .flex_col()
-            .gap_1()
-            .border_b_1()
-            .border_color(p.border)
+            .overflow_hidden()
             .text_size(px(12.0))
-            .child(div().font_weight(FontWeight::BOLD).child(panel.title));
-        for line in panel.lines {
-            block = block.child(div().text_color(p.dim).child(line));
+            .line_height(px(16.0));
+        let Some(row) = rows.get(row_index) else { return frame.into_any_element() };
+        match row {
+            Hymt2Row::Text { title, lines } => {
+                let mut block = frame;
+                if *title {
+                    block = block.child(div().font_weight(FontWeight::BOLD).child(panel.title.clone()));
+                }
+                for line in &panel.lines[lines.clone()] {
+                    block = block.child(div().text_color(p.dim).whitespace_nowrap().child(line.clone()));
+                }
+                block.into_any_element()
+            }
+            Hymt2Row::Actions => {
+                let use_button = match hymt2_click(Hymt2Button::Use, locale) {
+                    _ if in_use => Self::button(panel.in_use_label, false, p),
+                    Hymt2Click::SetConfig { key, value } => Self::button(panel.use_label, true, p).on_mouse_down(
+                        MouseButton::Left,
+                        Self::click(cx, SettingsAction::Change { key, value: json!(value) }),
+                    ),
+                    Hymt2Click::ShowNotice(_) => Self::button(panel.use_label, true, p),
+                };
+                let download = Self::button(panel.download_label, true, p).on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _event: &MouseDownEvent, _window, cx| {
+                        if let Hymt2Click::ShowNotice(text) = hymt2_click(Hymt2Button::Download, locale) {
+                            this.hymt2_notice = Some(text);
+                        }
+                        cx.stop_propagation();
+                        cx.notify();
+                    }),
+                );
+                let mut block = frame
+                    .py_0()
+                    .pt(px(2.0))
+                    .gap(px(2.0))
+                    .border_b_1()
+                    .border_color(p.border)
+                    .child(div().flex().gap_2().child(use_button).child(download));
+                // 提示放在按钮下方并用中性色，出现时不挤动按钮。
+                if let Some(notice) = &self.hymt2_notice {
+                    block = block.child(
+                        div().text_size(px(11.0)).line_height(px(14.0)).text_color(p.text).child(notice.clone()),
+                    );
+                }
+                block.into_any_element()
+            }
         }
-        block = block.child(div().flex().gap_2().child(use_button).child(download));
-        // 提示放在按钮下方并用中性色，出现时不挤动按钮。
-        if let Some(notice) = &self.hymt2_notice {
-            block = block.child(div().text_color(p.text).child(notice.clone()));
-        }
-        Some(block)
     }
 
     /// 渲染状态栏。
@@ -912,9 +941,11 @@ impl Render for SettingsView {
         let prefs = self.state.prefs();
         let p = palette(prefs.dark, prefs.accent);
         let lang = prefs.lang;
+        let header = self.hymt2_header_len();
         let visible = self.state.visible_len();
+        let total = header + visible;
 
-        let body = if visible == 0 {
+        let body = if total == 0 {
             div()
                 .flex_1()
                 .flex()
@@ -926,12 +957,15 @@ impl Render for SettingsView {
         } else {
             uniform_list(
                 "settings-rows",
-                visible,
+                total,
                 cx.processor(move |this, range: Range<usize>, _window, cx| {
                     let started = Instant::now();
                     let rows: Vec<AnyElement> = range
                         .clone()
-                        .map(|position| this.render_row(position, &p, lang, cx))
+                        .map(|position| match split_list_index(position, header) {
+                            Err(row) => this.render_hymt2_row(row, &p, cx),
+                            Ok(row) => this.render_row(row, &p, lang, cx),
+                        })
                         .collect();
                     let elapsed = started.elapsed();
                     this.probe.row_batches += 1;
@@ -993,7 +1027,6 @@ impl Render for SettingsView {
                     .flex()
                     .flex_col()
                     .child(self.render_header(&p, lang, cx))
-                    .children(self.render_hymt2_panel(&p, cx))
                     .child(body)
                     .child(self.render_status(&p)),
             );
