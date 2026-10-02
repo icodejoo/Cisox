@@ -35,6 +35,13 @@ const MARK_TR: usize = 4;
 /// 与候选下标一一对应的语言。
 const MARK_LANGS: [Lang; LATIN_CANDIDATES] = [Lang::De, Lang::Es, Lang::Pt, Lang::Fr, Lang::Tr];
 
+/// 汉字找假名时可跳过的拉丁片段最大字符数（去掉首尾空白后，约一个词，如 OK、PDF）。
+const KANA_BRIDGE_MAX_CHARS: usize = 6;
+/// 西里尔文片段可遵守 hint 的语言（`Lang` 目前只有俄语；新增乌克兰语等时在此补充）。
+const CYRILLIC_LANGS: &[Lang] = &[Lang::Ru];
+/// 阿拉伯文片段可遵守 hint 的语言（`Lang` 目前只有阿拉伯语；新增波斯语等时在此补充）。
+const ARABIC_LANGS: &[Lang] = &[Lang::Ar];
+
 /// 字符所属的文字系统。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Script {
@@ -182,6 +189,15 @@ impl ScriptSplitter {
         }
     }
 
+    /// hint 属于该文字系统的语言集合时遵守 hint，否则用默认语言。
+    fn hinted(hint: Lang, family: &[Lang], default: Lang) -> Lang {
+        if family.contains(&hint) {
+            hint
+        } else {
+            default
+        }
+    }
+
     /// 收尾一个片段，拉丁片段在此决定语言。
     fn close(start: usize, script: Option<Script>, stats: &LatinStats, hint: Lang) -> Span {
         let latin = if is_latin_lang(hint) {
@@ -224,8 +240,34 @@ impl SegmentSplitter for ScriptSplitter {
         }
         spans.push(Self::close(start, current, &stats, hint));
 
-        let near_kana =
-            |other: Option<&Span>| other.is_some_and(|s| s.script == Some(Script::Kana));
+        // 沿某方向找最近的假名：跳过无语言片段和短拉丁片段（如 "日本語 OK です" 里的 OK）。
+        let kana_toward = |from: usize, forward: bool| -> bool {
+            let mut i = from;
+            loop {
+                i = if forward {
+                    i + 1
+                } else {
+                    match i.checked_sub(1) {
+                        Some(v) => v,
+                        None => return false,
+                    }
+                };
+                let Some(s) = spans.get(i) else {
+                    return false;
+                };
+                match s.script {
+                    Some(Script::Kana) => return true,
+                    None => {}
+                    Some(Script::Latin) => {
+                        let end = spans.get(i + 1).map_or(text.len(), |n| n.start);
+                        if text[s.start..end].trim().chars().count() > KANA_BRIDGE_MAX_CHARS {
+                            return false;
+                        }
+                    }
+                    Some(_) => return false,
+                }
+            }
+        };
         let mut out: Vec<Segment> = Vec::with_capacity(spans.len());
         for (index, span) in spans.iter().enumerate() {
             let next = spans.get(index + 1);
@@ -233,8 +275,8 @@ impl SegmentSplitter for ScriptSplitter {
             let lang = match span.script {
                 None | Some(Script::Other) => None,
                 Some(Script::Han) => {
-                    let before = index.checked_sub(1).and_then(|i| spans.get(i));
-                    if near_kana(before) || near_kana(next) {
+                    // 纯汉字无假名时脚本无法区分中日文，判中文（已知局限，可用 hint 指定日语）。
+                    if kana_toward(index, false) || kana_toward(index, true) {
                         Some(Lang::Ja)
                     } else {
                         Some(Self::han_lang(hint))
@@ -242,8 +284,8 @@ impl SegmentSplitter for ScriptSplitter {
                 }
                 Some(Script::Kana) => Some(Lang::Ja),
                 Some(Script::Hangul) => Some(Lang::Ko),
-                Some(Script::Cyrillic) => Some(Lang::Ru),
-                Some(Script::Arabic) => Some(Lang::Ar),
+                Some(Script::Cyrillic) => Some(Self::hinted(hint, CYRILLIC_LANGS, Lang::Ru)),
+                Some(Script::Arabic) => Some(Self::hinted(hint, ARABIC_LANGS, Lang::Ar)),
                 Some(Script::Latin) => Some(span.latin),
             };
             let piece = &text[span.start..end];
@@ -439,6 +481,37 @@ mod tests {
             DEFAULT_MIN_SEGMENT_WEIGHT,
         );
         assert_eq!(three.len(), 3);
+    }
+
+    /// 汉字与假名隔着短拉丁片段仍判日语；纯汉字无假名判中文（已知局限）。
+    #[test]
+    fn han_bridges_short_latin_to_kana() {
+        let parts = run("日本語 OK です", Lang::Auto);
+        assert_eq!(parts[0], ("日本語 ".to_string(), Some(Lang::Ja)));
+        assert_eq!(langs("日本語", Lang::Auto), [Some(Lang::ZhHans)]);
+        // 长拉丁片段不桥接
+        assert_eq!(
+            langs("日本語 international です", Lang::Auto)[0],
+            Some(Lang::ZhHans)
+        );
+    }
+
+    /// 西里尔 / 阿拉伯文 hint 属于本系统时遵守，否则用默认语言。
+    #[test]
+    fn cyrillic_arabic_hint() {
+        assert_eq!(langs("Україна", Lang::Auto), [Some(Lang::Ru)]);
+        assert_eq!(langs("Україна", Lang::Ru), [Some(Lang::Ru)]);
+        assert_eq!(langs("Україна", Lang::En), [Some(Lang::Ru)]);
+        assert_eq!(langs("مرحبا", Lang::Fr), [Some(Lang::Ar)]);
+    }
+
+    /// 空串、纯空白、emoji、全角数字标点的结果固定。
+    #[test]
+    fn neutral_only_inputs() {
+        assert!(ScriptSplitter.split("", Lang::Auto).is_empty());
+        assert_eq!(langs("   ", Lang::Auto), [None]);
+        assert_eq!(langs("😀😀", Lang::Auto), [None]);
+        assert_eq!(langs("１２３，。", Lang::Auto), [None]);
     }
 
     /// 识别器名称稳定。
