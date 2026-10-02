@@ -19,9 +19,10 @@ use crate::translate_settings::{
 };
 use snow_config::extensions::{KEY_LOCAL_MODEL_ID, KEY_LOCAL_ROUTE_MODE, KEY_OCR_BACKEND};
 use serde_json::{Value, json};
+use snow_ui::ui::component::button::Button;
 use snow_ui::ui::component::searchable_list::{SearchableListItem, SearchableVec};
 use snow_ui::ui::component::select::{Select, SelectEvent, SelectState};
-use snow_ui::ui::component::{IndexPath, Sizable, Size as ComponentSize, Theme, ThemeMode};
+use snow_ui::ui::component::{Disableable, IndexPath, Sizable, Size as ComponentSize, Theme, ThemeMode};
 use snow_ui::ui::*;
 use std::collections::HashMap;
 use std::ops::Range;
@@ -1039,17 +1040,20 @@ impl SettingsView {
                 block.into_any_element()
             }
             Hymt2Row::Actions => {
+                // 用 gpui-component 的 Button；已选中时禁用并显示“使用中”。
                 let use_button = match hymt2_click(Hymt2Button::Use, locale) {
-                    _ if in_use => Self::button(panel.in_use_label, false, p),
-                    Hymt2Click::SetConfig { key, value } => Self::button(panel.use_label, true, p).on_mouse_down(
-                        MouseButton::Left,
-                        Self::click(cx, SettingsAction::Change { key, value: json!(value) }),
-                    ),
-                    Hymt2Click::ShowNotice(_) => Self::button(panel.use_label, true, p),
+                    _ if in_use => Button::new("hymt2-use").small().label(panel.in_use_label).disabled(true),
+                    Hymt2Click::SetConfig { key, value } => {
+                        Button::new("hymt2-use").small().label(panel.use_label).on_click(cx.listener(
+                            move |this, _event: &ClickEvent, window, cx| {
+                                this.act(SettingsAction::Change { key, value: json!(value) }, window, cx);
+                            },
+                        ))
+                    }
+                    Hymt2Click::ShowNotice(_) => Button::new("hymt2-use").small().label(panel.use_label),
                 };
-                let download = Self::button(panel.download_label, true, p).on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, _event: &MouseDownEvent, _window, cx| {
+                let download = Button::new("hymt2-download").small().outline().label(panel.download_label).on_click(
+                    cx.listener(move |this, _event: &ClickEvent, _window, cx| {
                         if let Hymt2Click::ShowNotice(text) = hymt2_click(Hymt2Button::Download, locale) {
                             this.hymt2_notice = Some(text);
                         }
