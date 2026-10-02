@@ -1,4 +1,4 @@
-# Cisox 进度交接（2026-09-29 暂停点）
+# Cisox 进度交接（2026-10-03 暂停点）
 
 > 因 token 预算不足，所有任务已暂停。本文记录暂停时的真实状态与续做方法。方案主文档：`docs/cisox-gpui-migration-plan.md`。
 
@@ -133,15 +133,20 @@ P0 验证基本完成，P1 地基完成，P2/P4/P5 已开工；**参考版（C++
 ## 5.1 2026-10-01 待办清单（录屏 / OCR·翻译 / 视频编辑；上面 §5 是 09-29 旧清单，未逐条核对）
 
 **收尾**
-- [ ] 工作区约 29 个文件未提交（录屏改动、夹具脚本、`docs/research/*`、台账）。提交前：diff 自查并做 simplify、确认范围；推送前先 `git status` 看有没有范围外的改动。
+- [ ] 工作区约 29 个文件未提交（录屏改动、夹具脚本、`docs/research/*`、台账）。提交前：diff 自查并做 simplify、确认范围；推送前先 `git status` 看有没有范围外的改动。本地领先远端 2 个提交（可用 `git rev-list --count origin/rust-gpui..HEAD` 查证）。
 - [ ] 根目录 `AGENTS.md` 仍是旧 Qt/C++ 版本，与本分支（纯 Rust+GPUI）不符，需改写或标注作废。
+
+**复审修复（2026-10-03）**
+- [x] MCP 命令载荷对齐 schema（提交 c04e41fb）：schema 必填字段补全。
+- [x] capability 文案化 .ftl、extract 门禁与漏检修复（提交 cf0d6384）：capability 说明文字转 Fluent、extract 添加 --min-refs 10 与路径存在检验、vendor 数量订正（28 个）。
+- [ ] 暂不处理（需用户或后续会话决策）：fast_color_lite 真 Qt 黄金、qt_render 对照、Cargo.lock vendored checksum、history format_version。
 
 **录屏（详见 `docs/recording-handover/experiment-ledger.md` §8）**
 - [x] 默认硬件模式已改为 `Auto`（MF → FFmpeg 厂商硬编 → 软编），本机四档 12/12、16/16 过线。
 - [ ] 他机验证（Intel MF 已在 UHD 770 实测，8/8 过线，见台账 §8.6）：AMD（AMF、MF）、非 NVIDIA 的 MFT 输入积压深度（`MF_POOL_CAPACITY=64` 够不够）、有副屏的机器、干净环境。
 - [ ] 显卡驱动升到 ≥570 后，用仓库原版 `ffnvcodec` 复测 NVENC（系统级变更，需用户动手）。
 - [x] 跨屏录制硬件路径（2026-10-01，台账 §8.6）：同适配器多屏拼接已实现（`src/win/span.rs`，多层 VideoProcessor），5 轮 16/20 过线（单屏对照 18/20，失败轮与夹具自身掉帧相关），CPU 0.25~0.31 核（此前软编回落 0/8）。接缝对齐与光标跨接缝已验证通过。
-- [ ] 跨屏待验证：双窗口夹具（`--dual`）已做但其序号帧率不可信（两窗口相位不同致解码误判，见台账 §8.6），需改成序号条只由一个窗口绘制、分析只读该区域后才能用来排除混杂；另一屏首帧未到时该块为黑、跨适配器分支（需双适配器机器）、两屏不同刷新率；旋转/HDR 屏的跨屏仍回落软编（后续项）；`SpanCapture::sample_cursor` 与单屏版约 10 行重复，裁决为暂不合并（不动已验证的单屏路径）。
+- [ ] 跨屏待验证：双窗口夹具（`--dual`）已做但其序号帧率不可信（两窗口相位不同致解码误判，见台账 §8.6）。序号条只由一个窗口绘制的改动已在工作区（未验证、暂不提交），用户决定暂时跳过；分析只读该区域后才能用来排除混杂。另待：另一屏首帧未到时该块为黑、跨适配器分支（需双适配器机器）、两屏不同刷新率；旋转/HDR 屏的跨屏仍回落软编（后续项）；`SpanCapture::sample_cursor` 与单屏版约 10 行重复，裁决为暂不合并（不动已验证的单屏路径）。
 - [ ] MF 已知限制：录制中途出问题无运行时回落（只有 `SNOW_RECORDER_MF_DISABLE`）；不支持恒定质量（同画质码率高 1.5~1.7 倍）；编码延迟约 300ms；启动比 NVENC 慢约 0.22 秒。
 - [x] 清理决定（2026-10-01 完成）：删除 `queue.rs` 与 `CAPTURE_MODE=serial`；保留 `wgc.rs` 与 GPU 优先级开关。
 - [ ] macOS / Linux 录屏各自实现与实测（迁移方案第 13 条）。
@@ -176,12 +181,22 @@ P0 验证基本完成，P1 地基完成，P2/P4/P5 已开工；**参考版（C++
 - [x] 只支持 en-US 与 zh-CN：zh-TW 已于 2026-10-02 全工程移除（语料、枚举、schema 繁体取值；旧配置里的繁体值按没有已保存值处理）。
 - [ ] `materials/` 未入库。
 
+**语音转文字（speech-to-text）**
+- [x] 调研完成（2026-10-02，提交 fb4ae46a、766e678e）：sherpa-onnx 与 ort 共用 ORT、纯 ort 流式 Zipformer（RTF≈0.12、~253MB）、Windows 系统语音、SendInput 键入；详见 `docs/research/speech-to-text-backends.md`。
+- [x] worker 已实现（2026-10-03，提交 e2a07adc）：`snow-stt` + `snow-stt-protocol`（sherpa-onnx shared 链接；espeak-ng 随包库 GPL-3.0-or-later，需补第三方声明；打包脚本不覆盖独立 workspace）。
+- [x] 主程序接入（2026-10-03，提交 68529abb）：切换/按住两种触发、键入+右下角浮窗两套输出、输出方式 自动/只键入/只浮窗、UIA 焦点检测+UIPI 探测，system 后端仍占位。
+- [ ] 未做真机验证：热键 Released 实机、键入到真实应用/IME/游戏/远程桌面/Chrome、管理员窗口、浮窗位置与不抢焦点与多屏 DPI、麦克风实录识别质量。
+
+**文本输入翻译浮窗**
+- [x] 快捷键唤起的文本输入翻译浮窗（2026-10-03，提交 07b5e518）：配置键 `global_shortcuts/translate_input`、`AppCommand::OpenTranslateInput`、模型下拉=已装包+自动、点击译文复制。
+- [ ] 真机渲染验证：浮窗位置、焦点获取、Esc 关闭、Select 选择误关窗。
+
 **视频编辑器（`docs/research/video-editor-backends.md`）**
 - 已决定：输入只处理本软件录的 MP4（解码 h264）；系统引擎与 FFmpeg 引擎并存、用户自选；输出只做 H.264；不新增第三方依赖（抽帧：FFmpeg 引擎用 FFmpeg，系统引擎用 WIC/ImageIO）。
 - 已决定：编辑任务走 worker（`snow-recorder` + `snow-recorder-protocol` 扩展），两引擎联动取消，默认输出均 H.264。
 - [x] MVP 设计文档已写：`docs/research/video-editor-mvp-design.md`（协议扩展、引擎 trait、四功能、测试、P0~P4 计划）。
-- [ ] 实现缺口：按时间戳精确 seek 的对外 API、抽帧模块、YUV 直通（现在解码后 RGBA 中转，1080p 约 8MB/帧）。
-- [ ] 用真实录屏样片重做基准，并实测两个引擎的内存（“系统引擎内存更低”目前只有录屏场景的数据）。
+- [x] 核心功能已实现（2026-10-03，提交 72837e20、7d2eb8c0）：协议扩展（EDIT/PROBE）、按时间戳精确 seek、抽帧（PNG/JPEG/无损 WebP）、YUV 直通；帧率降采、缩放、关键帧裁剪编辑操作，FFmpeg 引擎（libx264 软编、音频直通）。
+- [ ] 系统引擎（Media Foundation）、真实录屏样片基准与两引擎内存对比、合并操作（需改协议）仍缺。
 - [ ] 需要用户提供有代表性的录屏样片。
 
 **已搁置（存档，可恢复）**
