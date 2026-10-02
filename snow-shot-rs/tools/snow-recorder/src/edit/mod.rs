@@ -2,12 +2,15 @@
 //!
 //! 设计见 `docs/research/video-editor-mvp-design.md`：编辑任务并入 `snow-recorder`，
 //! 通过 [`EditEngine`] 抽象出引擎，目前只有 FFmpeg 引擎（系统引擎是后续阶段）。
-//! 已实现：探测（`probe`）、按时间戳精确 seek（`source`）、抽帧（`extract`）；
-//! 降 fps / 缩放 / 关键帧裁剪尚未实现，请求它们会得到明确的"未实现"错误，不会崩溃。
+//! 已实现：探测（`probe`）、按时间戳精确 seek（`source`）、抽帧（`extract`）、
+//! 降 fps / 缩放（`transcode`，H.264 重编码）、关键帧裁剪（`trim`，包级拷贝）；
+//! 音频一律直通不重编码。系统引擎未实现，显式选择会得到明确错误。
 
 pub mod extract;
 pub mod image;
 pub mod source;
+pub mod transcode;
+pub mod trim;
 pub mod yuv;
 
 #[cfg(test)]
@@ -192,8 +195,8 @@ pub trait EditEngine: Send {
 #[derive(Debug, Default)]
 pub struct FfmpegEngine;
 
-/// "尚未实现"的原因文案。
-const NOT_IMPLEMENTED: &str = "该操作尚未实现";
+/// 缺少 H.264 编码器时的不可用原因。
+const NO_H264_ENCODER: &str = "FFmpeg 缺少 libx264 编码器";
 
 impl EditEngine for FfmpegEngine {
     /// 见 trait。
@@ -201,14 +204,20 @@ impl EditEngine for FfmpegEngine {
         EngineKind::Ffmpeg
     }
 
-    /// 目前只有抽帧可用。
+    /// 抽帧与关键帧裁剪总是可用；降 fps / 缩放需要 libx264（具体参数合法性在 `run` 里校验）。
     fn capabilities(&self, _input: &ProbeInfo) -> EngineCaps {
-        let todo = || OpSupport::Unavailable(NOT_IMPLEMENTED.to_string());
+        let reencode = if ffmpeg_next::init().is_ok()
+            && ffmpeg_next::encoder::find_by_name("libx264").is_some()
+        {
+            OpSupport::Available
+        } else {
+            OpSupport::Unavailable(NO_H264_ENCODER.to_string())
+        };
         EngineCaps {
-            reduce_fps: todo(),
-            scale: todo(),
+            reduce_fps: reencode.clone(),
+            scale: reencode,
             extract_frames: OpSupport::Available,
-            trim_keyframe: todo(),
+            trim_keyframe: OpSupport::Available,
         }
     }
 
@@ -235,7 +244,35 @@ impl EditEngine for FfmpegEngine {
                     frames,
                 })
             }
-            _ => Err(EditError::new(NOT_IMPLEMENTED)),
+            EditOp::ReduceFps { .. } | EditOp::Scale { .. } => {
+                let frames = transcode::run(
+                    &transcode::TranscodeParams {
+                        input: &req.input,
+                        output: &req.output,
+                        op: req.op,
+                    },
+                    ctl,
+                )?;
+                Ok(EditReport {
+                    path: req.output.clone(),
+                    frames,
+                })
+            }
+            EditOp::TrimKeyframe { start_ms, end_ms } => {
+                let frames = trim::run(
+                    &trim::TrimParams {
+                        input: &req.input,
+                        output: &req.output,
+                        start_ms,
+                        end_ms,
+                    },
+                    ctl,
+                )?;
+                Ok(EditReport {
+                    path: req.output.clone(),
+                    frames,
+                })
+            }
         }
     }
 }
@@ -319,7 +356,7 @@ mod tests {
         assert!(ctl.is_cancelled());
     }
 
-    /// 能力：抽帧可用，其余明确"未实现"；系统引擎显式选择时报错。
+    /// 能力：FFmpeg 引擎四项都可用；系统引擎显式选择时报错。
     #[test]
     fn capabilities_and_engine_choice() {
         let info = ProbeInfo {
@@ -337,10 +374,17 @@ mod tests {
             quality: 90,
         };
         assert_eq!(caps.support(&extract), &OpSupport::Available);
-        assert!(matches!(
+        assert_eq!(
             caps.support(&EditOp::ReduceFps { target_fps: 10 }),
-            OpSupport::Unavailable(_)
-        ));
+            &OpSupport::Available
+        );
+        assert_eq!(
+            caps.support(&EditOp::TrimKeyframe {
+                start_ms: 0,
+                end_ms: 1
+            }),
+            &OpSupport::Available
+        );
         assert!(pick_engine(EngineKind::System).is_err());
         assert_eq!(
             pick_engine(EngineKind::Auto).unwrap().kind(),
@@ -348,21 +392,22 @@ mod tests {
         );
     }
 
-    /// 未实现的操作经 `execute` 得到明确错误而非 panic。
+    /// 显式选择系统引擎时经 `execute` 得到明确错误而非 panic，且不产生输出。
     #[test]
-    fn unimplemented_op_is_clear_error() {
-        let dir = testclip::temp_dir("execute-unimpl");
+    fn system_engine_is_clear_error() {
+        let dir = testclip::temp_dir("execute-system");
         let input = dir.join("in.mp4");
         testclip::make_clip(&input, &testclip::Clip::default()).unwrap();
         let ctl = TaskCtl::new(Arc::new(AtomicBool::new(false)), Box::new(|_| {}));
         let req = EditRequest {
-            engine: EngineKind::Auto,
+            engine: EngineKind::System,
             op: EditOp::ReduceFps { target_fps: 10 },
             input,
             output: dir.join("o.mp4"),
         };
         let err = execute(&req, &ctl).unwrap_err();
         assert!(err.to_string().contains("尚未实现"));
+        assert!(!dir.join("o.mp4").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

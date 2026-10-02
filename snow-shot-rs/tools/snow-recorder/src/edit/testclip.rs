@@ -33,6 +33,8 @@ pub struct Clip {
     pub bframes: usize,
     /// 是否写 MP4 编辑列表；写了之后复用器可能把末帧裁出列表，解码器不再输出它。
     pub editlist: bool,
+    /// 是否附带一条 AAC 静音音轨（时长与视频一致）。
+    pub audio: bool,
 }
 
 impl Default for Clip {
@@ -48,6 +50,7 @@ impl Default for Clip {
             gop: 24,
             bframes: 0,
             editlist: false,
+            audio: false,
         }
     }
 }
@@ -129,6 +132,11 @@ pub fn make_clip(path: &Path, clip: &Clip) -> Result<(), String> {
         let mut stream = out.add_stream(codec).map_err(|e| err("stream", e))?;
         stream.set_parameters(&enc);
     }
+    let mut aenc = if clip.audio {
+        Some(add_audio_stream(&mut out).map_err(|e| err("audio", e))?)
+    } else {
+        None
+    };
     let mut header_opts = Dictionary::new();
     if !clip.editlist {
         header_opts.set("use_editlist", "0");
@@ -156,7 +164,125 @@ pub fn make_clip(path: &Path, clip: &Clip) -> Result<(), String> {
     }
     enc.send_eof().map_err(|e| err("eof", e))?;
     drain(&mut enc, &mut out)?;
+    if let Some(a) = aenc.as_mut() {
+        let samples = u64::from(clip.frames) * u64::from(AUDIO_RATE) / u64::from(clip.fps);
+        write_silence(a, &mut out, samples).map_err(|e| err("audio write", e))?;
+    }
     out.write_trailer().map_err(|e| err("trailer", e))
+}
+
+/// 输出文件的音频概况。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AudioFacts {
+    /// 音频包数。
+    pub packets: u64,
+    /// 音频总时长（毫秒，按包时长累加）。
+    pub duration_ms: i64,
+    /// 采样率。
+    pub rate: u32,
+}
+
+/// 读取文件的音频概况；没有音频流返回 `None`。
+///
+/// # 参数
+/// - `path`：媒体文件路径。
+pub fn audio_facts(path: &Path) -> Option<AudioFacts> {
+    ffmpeg::init().ok()?;
+    let mut input = format::input(path).ok()?;
+    let (idx, tb, rate) = {
+        let s = input.streams().best(ffmpeg::media::Type::Audio)?;
+        // SAFETY: 参数指针由流持有，仅读取采样率字段（白名单里没有 AAC 解码器，不能开解码器）。
+        let rate = unsafe { (*s.parameters().as_ptr()).sample_rate } as u32;
+        (s.index(), s.time_base(), rate)
+    };
+    let (mut packets, mut ticks) = (0u64, 0i64);
+    let mut pkt = ffmpeg::Packet::empty();
+    while pkt.read(&mut input).is_ok() {
+        if pkt.stream() == idx {
+            packets += 1;
+            ticks += pkt.duration();
+        }
+    }
+    let duration_ms = ticks * 1000 * i64::from(tb.numerator()) / i64::from(tb.denominator());
+    Some(AudioFacts {
+        packets,
+        duration_ms,
+        rate,
+    })
+}
+
+/// 音频采样率。
+const AUDIO_RATE: u32 = 44_100;
+/// AAC 编码器的预滚采样数。
+const AAC_PRIMING: i64 = 1024;
+/// 输出音频流下标（视频之后加入）。
+const AUDIO_OUT_INDEX: usize = 1;
+
+/// 加一条 AAC 单声道音轨并打开编码器。
+fn add_audio_stream(
+    out: &mut format::context::Output,
+) -> Result<encoder::audio::Encoder, ffmpeg::Error> {
+    let codec = encoder::find(codec::Id::AAC).ok_or(ffmpeg::Error::EncoderNotFound)?;
+    let mut enc = codec::context::Context::new_with_codec(codec)
+        .encoder()
+        .audio()?;
+    enc.set_rate(AUDIO_RATE as i32);
+    enc.set_channel_layout(ffmpeg::ChannelLayout::MONO);
+    enc.set_format(ffmpeg::format::Sample::F32(
+        ffmpeg::format::sample::Type::Planar,
+    ));
+    enc.set_time_base(Rational(1, AUDIO_RATE as i32));
+    if out.format().flags().contains(format::Flags::GLOBAL_HEADER) {
+        enc.set_flags(codec::Flags::GLOBAL_HEADER);
+    }
+    let enc = enc.open()?;
+    let mut stream = out.add_stream(codec)?;
+    stream.set_parameters(&enc);
+    Ok(enc)
+}
+
+/// 写入指定采样数的静音并收尾。
+fn write_silence(
+    enc: &mut encoder::audio::Encoder,
+    out: &mut format::context::Output,
+    total: u64,
+) -> Result<(), ffmpeg::Error> {
+    let tb = Rational(1, AUDIO_RATE as i32);
+    let out_tb = out
+        .stream(AUDIO_OUT_INDEX)
+        .ok_or(ffmpeg::Error::StreamNotFound)?
+        .time_base();
+    let chunk = 1024u64;
+    let mut pos = 0u64;
+    let drain = |enc: &mut encoder::audio::Encoder, out: &mut format::context::Output| {
+        let mut pkt = ffmpeg::Packet::empty();
+        while enc.receive_packet(&mut pkt).is_ok() {
+            pkt.set_stream(AUDIO_OUT_INDEX);
+            // AAC 编码器的首包 PTS 是 -1024（预滚），整体后移让音轨与视频同起点，
+            // 否则 MP4 复用器会把视频首帧拉长去对齐，样片时间轴就不均匀了
+            pkt.set_pts(pkt.pts().map(|p| p + AAC_PRIMING));
+            pkt.set_dts(pkt.dts().map(|p| p + AAC_PRIMING));
+            pkt.rescale_ts(tb, out_tb);
+            pkt.write_interleaved(out)?;
+        }
+        Ok::<(), ffmpeg::Error>(())
+    };
+    while pos < total {
+        let n = chunk.min(total - pos) as usize;
+        let mut f = frame::Audio::new(
+            ffmpeg::format::Sample::F32(ffmpeg::format::sample::Type::Planar),
+            n,
+            ffmpeg::ChannelLayout::MONO,
+        );
+        f.set_rate(AUDIO_RATE);
+        f.set_pts(Some(pos as i64));
+        f.data_mut(0).fill(0);
+        enc.send_frame(&f)?;
+        drain(enc, out)?;
+        pos += n as u64;
+    }
+    enc.send_eof()?;
+    drain(enc, out)
 }
 
 /// 用 FFmpeg 的 WebP 解码器解码一张静态 WebP，返回首像素的 R 通道。

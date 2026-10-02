@@ -5,6 +5,8 @@
 //! 目标离当前解码位置很近时直接向前解码，不重复 seek，抽帧按间隔取多帧时不会反复解整个 GOP。
 //! 解出的帧保持解码器原生像素格式（通常 YUV420P），这里不做任何 RGBA 中转。
 
+use std::collections::VecDeque;
+
 use ffmpeg_next as ffmpeg;
 use ffmpeg_next::packet::Ref;
 use ffmpeg_next::{Rational, codec, format, frame, media};
@@ -50,6 +52,10 @@ pub struct VideoSource {
     lookahead: Option<Decoded>,
     /// 是否已向解码器送过 EOF。
     eof_sent: bool,
+    /// 需要旁路收集的非视频流（音频直通用）。
+    tap_stream: Option<usize>,
+    /// 读视频包时顺带读到的旁路包，等调用方取走。
+    side: VecDeque<ffmpeg::Packet>,
 }
 
 /// 把毫秒换成时间基刻度（四舍五入）。
@@ -138,7 +144,37 @@ impl VideoSource {
             held: None,
             lookahead: None,
             eof_sent: false,
+            tap_stream: None,
+            side: VecDeque::new(),
         })
+    }
+
+    /// 输入容器（用于读取其它流的参数）。
+    pub fn input(&self) -> &format::context::Input {
+        &self.input
+    }
+
+    /// 视频流时间基。
+    pub fn time_base(&self) -> Rational {
+        self.time_base
+    }
+
+    /// 流起点（时间基单位），"相对 PTS"就是绝对 PTS 减去它。
+    pub fn start_pts(&self) -> i64 {
+        self.start_pts
+    }
+
+    /// 开启旁路收集：之后顺序解码时，该流的包会被留存，可用 [`Self::take_side`] 取走。
+    ///
+    /// # 参数
+    /// - `stream`：要收集的流下标（如音频流）。
+    pub fn tap_stream(&mut self, stream: usize) {
+        self.tap_stream = Some(stream);
+    }
+
+    /// 取走一个旁路包（按文件顺序）；没有则返回 `None`。
+    pub fn take_side(&mut self) -> Option<ffmpeg::Packet> {
+        self.side.pop_front()
     }
 
     /// 解码器输出的像素格式（直通格式）。
@@ -222,8 +258,8 @@ impl VideoSource {
         Ok((info, keys))
     }
 
-    /// 回到文件开头并清空解码状态。
-    fn rewind(&mut self) -> Result<(), EditError> {
+    /// 回到文件开头并清空解码状态（含旁路包）。
+    pub fn rewind(&mut self) -> Result<(), EditError> {
         self.input
             .seek(0, ..)
             .map_err(|e| EditError::new(format!("回到文件开头失败: {e}")))?;
@@ -237,10 +273,11 @@ impl VideoSource {
         self.held = None;
         self.lookahead = None;
         self.eof_sent = false;
+        self.side.clear();
     }
 
-    /// 取下一帧解码结果；文件结束返回 `None`。
-    fn pull(&mut self) -> Result<Option<Decoded>, EditError> {
+    /// 取下一帧解码结果（顺序解码，不做 seek）；文件结束返回 `None`。
+    pub fn pull(&mut self) -> Result<Option<Decoded>, EditError> {
         loop {
             let mut raw = frame::Video::empty();
             match self.decoder.receive_frame(&mut raw) {
@@ -270,6 +307,8 @@ impl VideoSource {
                         self.decoder
                             .send_packet(&packet)
                             .map_err(|e| EditError::new(format!("送入解码器失败: {e}")))?;
+                    } else if self.tap_stream == Some(packet.stream()) {
+                        self.side.push_back(packet);
                     }
                 }
                 Err(ffmpeg::Error::Eof) => {
