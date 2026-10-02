@@ -164,6 +164,18 @@ P0 验证基本完成，P1 地基完成，P2/P4/P5 已开工；**参考版（C++
 - [ ] Windows 没有系统翻译 API：翻译在 Windows 默认仍用本地模型。
 - [ ] 开放问题：中英混排引擎策略、`windows` crate 的 `Media_Ocr` 特性名、macOS 各项需实机验证。
 
+**本地翻译路由与 Hy-MT2 可选包（2026-10-02，已提交 227db5e5 至 57a2f308，细节见 `docs/guides/translation-model-release.md` §7、§9）**
+- [x] 路由器（`single` / `specialized_first` 默认 / `mixed_split`，常驻数 1~4）、脚本识别器、分段、chat 引擎、中文全角标点后处理。
+- [x] Hy-MT2 可选包（family `hunyuan_chat`，`default_eligible=false`，不会被默认选中，只在别的包都不支持该语向时兜底）。
+- [x] 源语言 Auto 时逐条判定语言再分组选包；不支持的语向加载模型前报 `UnsupportedLanguagePair`。
+- [x] 设置页：路由模式、常驻数、Hy-MT2 说明区（三语文案，下载按钮是占位，只提示手动放置模型文件夹）。
+- [ ] Hy-MT2 下载地址与发布（需用户确认）。
+- [ ] f16 KV 支持（需新增依赖，待用户批准）。
+- [ ] 设置页真机渲染验证、端到端 label 显示测试。
+- [ ] `pairs` 扩到韩、德、意、葡、土：先评测。
+- [ ] zh-TW 文案人工校对。
+- [ ] `materials/` 未入库。
+
 **视频编辑器（`docs/research/video-editor-backends.md`）**
 - 已决定：输入只处理本软件录的 MP4（解码 h264）；系统引擎与 FFmpeg 引擎并存、用户自选；输出只做 H.264；不新增第三方依赖（抽帧：FFmpeg 引擎用 FFmpeg，系统引擎用 WIC/ImageIO）。
 - 已决定：编辑任务走 worker（`snow-recorder` + `snow-recorder-protocol` 扩展），两引擎联动取消，默认输出均 H.264。

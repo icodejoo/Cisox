@@ -38,7 +38,7 @@ GitHub Release 单个附件上限 2GiB，当前体积远低于上限；中国大
 - [ ] 把评测脚本整理成面向用户的 B 方案脚本。
 - [ ] 补充评测：14 语言版里韩、葡、意、土、越、印尼 6 种语言尚未评测；每语向仅 30 句，需要更大样本。
 - [x] OPUS-MT 英↔中小包：来源与许可核对、量化档选择、真实 worker 验证、`scripts/make_opusmt_pack.py`（2026-10-02 完成，见 §6）。
-- [ ] OPUS-MT 小包：应用内下载入口与"英→中提示可选此包"的文案/i18n；发布到 Release 与镜像（对外发布需用户确认）；机器安静时重测延迟。
+- [ ] OPUS-MT 小包（Hy-MT2 的待办见 §9.3）：应用内下载入口与"英→中提示可选此包"的文案/i18n；发布到 Release 与镜像（对外发布需用户确认）；机器安静时重测延迟。
 
 ## 5. Rust worker 实现说明（2026-10-02）
 代码在 `snow-shot-rs/tools/snow-translator`（`src/engine.rs`、`src/manifest.rs`），用法与字段速查见该目录 `README.md`。Marian 路径与旧清单不变。
@@ -167,7 +167,7 @@ encoder.onnx  encoder.onnx_data  decoder.onnx  decoder.onnx_data
 - 选择逻辑建议：已安装对应方向的 OPUS-MT 包时，该方向优先用它；其它语向仍走 NLLB。两个包都只含一个方向，别的语向请求会得到 `unsupported_pair`，应用侧据此回退 NLLB。同一时刻只会加载一个模型（空闲卸载即进程退出）。
 - 下载界面：OPUS-MT 包不需要"仅限非商业"声明，但要展示 NOTICE 的署名与修改说明（CC-BY-4.0 包尤其必须）。
 
-## 7. 翻译路由与混合拆分（2026-10-02，工作区未提交）
+## 7. 翻译路由与混合拆分（2026-10-02，已提交 227db5e5、a55f0c89、d4e067e4、57a2f308）
 
 **设置项**（`snow-config/src/extensions.rs`）：`screenshot_translation/local_route_mode`（`single` / `specialized_first` 默认 / `mixed_split`）、`local_max_resident_models`（1~4，默认 1）。
 
@@ -176,13 +176,22 @@ encoder.onnx  encoder.onnx_data  decoder.onnx  decoder.onnx_data
 - `specialized_first`：未指定包时，`pairs` 非空且覆盖语向的窄包（如 OPUS-MT 英→中）优先于通用多语包（NLLB）；用户显式指定仍尊重。
 - `mixed_split`：按脚本把文本切成片段，英文片段走专用包，其余走 NLLB，按引擎分组后按原序拼回。
 
-**实现位置**（`snow-translate/src/`）：`router.rs`（`RoutedEngine`，每包一个懒加载 worker，常驻上限内只驱逐空闲包，卸载在池锁外执行，`shutdown` 有界超时）、`script_split.rs`（`ScriptSplitter` 默认识别器）、`segment.rs`（`Segment`/`SegmentSplitter` 接口、`NoSplit`、`merge_short_segments`）、`lib.rs`（`is_specialized`、`pick_model_routed`）。宿主侧见 `snow-shot/src/translate_service.rs` 的 `build_local`。
+**实现位置**（`snow-translate/src/`）：`router.rs`（`RoutedEngine`，每包一个懒加载 worker，常驻上限内只驱逐空闲包，卸载在池锁外执行，`shutdown` 有界超时）、`script_split.rs`（`ScriptSplitter` 默认识别器）、`segment.rs`（`Segment`/`SegmentSplitter` 接口、`NoSplit`、`merge_short_segments`）、`lib.rs`（`is_specialized`、`pick_model_routed`）。worker 侧另有 `snow-translator/src/zh_punct.rs`（中日文全角标点后处理）与 `chat.rs`（chat 引擎）。宿主侧见 `snow-shot/src/translate_service.rs` 的 `build_local`。
 
 **识别器规则**：汉字→中文，假名→日语（汉字邻近假名整块判日语），谚文→韩语，西里尔→俄语，阿拉伯文→阿拉伯语；其余脚本为未知，按用户源语言兜底。拉丁字母默认英语，仅当含足够多非英语特征字母（德 ä ö ü ß、西 ñ ¿ ¡、葡 ã õ、法 è ê à ç œ 等、土 ı ğ ş；至少 2 个且占字母 1/16 以上、有唯一领先语言）才判非英语；é á í ó ú 不计分。不用 lingua（+50 MB、常驻 18 MiB 不可释放、短句夹杂判错）。
 
+**已完成（a55f0c89 起）**
+- 源语言 Auto 时逐条用脚本识别器判定语言，按语言分组选包，不再被专用包钉成英文；识别不出的条目按用户源语言兜底。没有任何包支持的语向，在加载模型前就报 `UnsupportedLanguagePair`（`translate_service.rs`）。
+- 日语汉字夹短拉丁（至多 6 个字符）时桥接到假名，整块判日语（d4e067e4）。
+- 译文标签显示实际参与翻译的包：路由器记录 `used_ids`，`mixed_split` 的预选标签跳过 `default_eligible=false` 的可选包（只有它覆盖时才退回）（57a2f308）。
+- 设置页已有路由模式、常驻数与 Hy-MT2 说明区（606ea799，见 §9.3）。
+
 **已知限制**
-- 源语言 Auto 时专用包会把源语言钉成英文（旧行为一致，未改），非英文原文会被发给英→中包。
+- 纯汉字文本仍判中文，日语只有汉字没有假名时会误判（识别器的已知局限）。
+- 西里尔、阿拉伯文的 hint 机制已就位，但 `Lang` 枚举目前只有俄语、阿拉伯语，没有乌克兰语、波斯语等，所以暂无实际影响；加语言时在 `script_split.rs` 补充。
 - 拉丁字母里没有特征字母的法/德/西等句子仍当英语。
+- `used_ids` 是路由器上的全局记录，并发翻译可能互相覆盖，只影响标签显示，不影响译文。
+- 端到端的 label 显示没测过，目前只有离屏单测与路由器假引擎测试。
 - 一个包卸载过程中仍占常驻名额，慢卸载期间常驻数会短暂超限；`shutdown` 超时只是调用方不再等。
 - 路由器测试用假引擎，真实 `WorkerEngine` 路径未测。
 
@@ -216,9 +225,18 @@ encoder.onnx  encoder.onnx_data  decoder.onnx  decoder.onnx_data
 - **路由不抢默认**：`ModelManifest`（`snow-translate`）新增 `default_eligible`（缺省 `true`，worker 清单同名透传）。`router::pick_index` 在没有指定包时只从 `default_eligible` 的包里选（`single` 取第一个，`specialized_first` / `mixed_split` 取最窄专用包），**Hy-MT2 包设为 `false`**，因此即使它声明了 `pairs`、id 排在前面，也不会被默认选中；用户在设置里手动指定模型 ID 时照常使用；只有别的包都不支持该语向时才作为兜底（不报"不支持"）。其余包的行为不变（旧清单没有该字段即 `true`）。
 - **真实对拍**（`cargo test --release --test e2e real_hymt2 -- --ignored --nocapture`）：评测前 2 句，英→中与中→英各起一个 worker（BelowNormal，4 线程），共 4 句译文与 `ort_gen.py`（ORT 1.30，同一个包）输出**逐字一致 4/4**。
 
-### 9.3 待办
+### 9.3 进度与待办
 
-- [ ] 发布到 Release 与镜像（对外动作，需用户确认）；`hymt2-1.8b-int4.manifest.json` 没有 url 字段，下载地址由发布流程填。
-- [ ] 应用内下载入口与设置页文案/i18n（本轮没做）：展示 NOTICE 署名与修改说明；提示体积 1.3 GiB、内存约 1 到 1.3 GiB、每句 10 秒以上、适用中日互译与英→中、欧洲语言不如 NLLB。
-- [ ] 设置页让用户指定 Hy-MT2（模型 ID `hymt2-1.8b-int4`）；`mixed_split` 标签文案里是否列出 `default_eligible=false` 的包待定。
+**已完成**
+- [x] 设置页 Hy-MT2 说明区（606ea799、57a2f308）：说明文字与「使用该模型」按钮；面板逻辑抽成独立模块并有离屏测试；文案 `translate_settings.ftl` 已有 en-US、zh-CN、zh-TW 三份。
+- [x] `mixed_split` 标签不列 `default_eligible=false` 的包（57a2f308）。
+- [x] `chat.rs` 加载时校验输出名与 KV 类型：缺 KV 报错，非 float32 的 KV 报错（60d5824b）。
+
+**未完成 / 待决**
+- [ ] 下载地址与发布到 Release、镜像（对外动作，需用户确认）。`hymt2-1.8b-int4.manifest.json` 没有 url 字段，下载地址由发布流程填。设置页的「下载」按钮目前只是占位，点击仅提示手动把模型文件夹放进翻译模型目录，没有真正下载。
+- [ ] f16 KV：需要新增依赖（ORT 的 f16 张量支持），尚未获用户同意，目前遇到 f16 KV 直接报错。
+- [ ] 设置页没做真机渲染验证（只有离屏测试）；端到端的 label 显示也没测。
+- [ ] `pairs` 扩到韩、德、意、葡、土：先评测，没评测不声明。
+- [ ] zh-TW 文案已写但没有人工校对。
 - [ ] 中↔日、日→英及其余语言没评测；机器安静时重测延迟；`make_hymt2_pack.py` 的 `HINTS` 数据来自评测机，换机器需更新。
+- [ ] `materials/` 目录仍未入库（git 里是未跟踪状态），是否入库待用户定。
