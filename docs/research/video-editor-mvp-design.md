@@ -104,7 +104,7 @@ trait EditEngine: Send {
 
 ## 8. i18n
 
-用户可见文案（引擎名、置灰原因、进度阶段、错误提示）走 `snow-i18n`（Fluent），在 `snow-shot-rs/crates/snow-i18n/locales/{en-US,zh-CN,zh-TW}` 三目录各加一份 `.ftl`（可新增 `video-edit.ftl`，现有有 `recording.ftl`、`export.ftl` 等），三处键保持一致（`tests/parity.rs` 做对齐检查）。worker 只上报错误码/英文诊断，面向用户的文案由主程序按键翻译；简体用 zh-CN、繁体用 zh-TW。
+用户可见文案（引擎名、置灰原因、进度阶段、错误提示）走 `snow-i18n`（Fluent），在 `snow-shot-rs/crates/snow-i18n/locales/{en-US,zh-CN}` 两目录各加一份 `.ftl`（可新增 `video-edit.ftl`，现有有 `recording.ftl`、`export.ftl` 等），两处键保持一致（`tests/parity.rs` 做对齐检查）。worker 只上报错误码/英文诊断，面向用户的文案由主程序按键翻译；简体用 zh-CN、繁体用 zh-TW。
 
 ## 9. 测试策略
 

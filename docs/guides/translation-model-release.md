@@ -237,6 +237,6 @@ encoder.onnx  encoder.onnx_data  decoder.onnx  decoder.onnx_data
 - [ ] f16 KV：需要新增依赖（ORT 的 f16 张量支持），尚未获用户同意，目前遇到 f16 KV 直接报错。
 - [ ] 设置页没做真机渲染验证（只有离屏测试）；端到端的 label 显示也没测。
 - [ ] `pairs` 扩到韩、德、意、葡、土：先评测，没评测不声明。
-- [ ] zh-TW 文案已写但没有人工校对。
+- [x] zh-TW 已于 2026-10-02 移除，界面只支持 en-US 与 zh-CN。
 - [ ] 中↔日、日→英及其余语言没评测；机器安静时重测延迟；`make_hymt2_pack.py` 的 `HINTS` 数据来自评测机，换机器需更新。
 - [ ] `materials/` 目录仍未入库（git 里是未跟踪状态），是否入库待用户定。

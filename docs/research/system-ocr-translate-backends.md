@@ -163,7 +163,7 @@ pub trait OcrEngine: Send + Sync {
 ### 4.5 隐私与 i18n
 
 - 选 `remote-api` 时，设置页与首次使用弹窗用英文写明"screenshots / recognized text will be sent to <host>"，首次需确认；密钥**存放在配置文件中**（已决定，2026-10-01，沿用 `custom_models` 现状，不引入系统钥匙串）；设置页需提示"密钥以明文保存在本地配置文件"，且配置导出/日志不得带出密钥。
-- 所有用户可见文案走 `snow-i18n`（Fluent `.ftl` + `t!` 宏），在 `crates/snow-i18n/locales/{en-US,zh-CN,zh-TW}` 三个目录补齐同名 id；产品名不进文案，以变量 `product` 注入。本项目是纯 Rust+GPUI，没有 Qt，`AGENTS.md` 里的 Qt `tr()`/`.ts` 流程对本分支不适用。后端 ID、配置键用字面量，不翻译。
+- 所有用户可见文案走 `snow-i18n`（Fluent `.ftl` + `t!` 宏），在 `crates/snow-i18n/locales/{en-US,zh-CN}` 两个目录补齐同名 id；产品名不进文案，以变量 `product` 注入。本项目是纯 Rust+GPUI，没有 Qt，`AGENTS.md` 里的 Qt `tr()`/`.ts` 流程对本分支不适用。后端 ID、配置键用字面量，不翻译。
 
 ### 4.6 测试策略
 
