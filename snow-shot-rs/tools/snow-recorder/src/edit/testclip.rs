@@ -35,6 +35,8 @@ pub struct Clip {
     pub editlist: bool,
     /// 是否附带一条 AAC 静音音轨（时长与视频一致）。
     pub audio: bool,
+    /// 是否在帧内加纵向亮度渐变和横向色差渐变（首像素仍是帧序号亮度），用来发现上下翻转/通道互换。
+    pub gradient: bool,
 }
 
 impl Default for Clip {
@@ -51,6 +53,7 @@ impl Default for Clip {
             bframes: 0,
             editlist: false,
             audio: false,
+            gradient: false,
         }
     }
 }
@@ -158,6 +161,9 @@ pub fn make_clip(path: &Path, clip: &Clip) -> Result<(), String> {
         f.data_mut(0).fill(luma_of_frame(k));
         f.data_mut(1).fill(128);
         f.data_mut(2).fill(128);
+        if clip.gradient {
+            fill_gradient(&mut f, clip);
+        }
         f.set_pts(Some(i64::from(k)));
         enc.send_frame(&f).map_err(|e| err("send", e))?;
         drain(&mut enc, &mut out)?;
@@ -169,6 +175,25 @@ pub fn make_clip(path: &Path, clip: &Clip) -> Result<(), String> {
         write_silence(a, &mut out, samples).map_err(|e| err("audio write", e))?;
     }
     out.write_trailer().map_err(|e| err("trailer", e))
+}
+
+/// 给帧叠加梯度：亮度随行增加（首行不变），V 色差随列增加。
+fn fill_gradient(f: &mut frame::Video, clip: &Clip) {
+    let (w, h) = (clip.width as usize, clip.height as usize);
+    let stride = f.stride(0);
+    let rows = f.data_mut(0);
+    for y in 0..h {
+        for x in 0..w {
+            rows[y * stride + x] = rows[y * stride + x].saturating_add((y * 40 / h) as u8);
+        }
+    }
+    let cs = f.stride(2);
+    let v = f.data_mut(2);
+    for y in 0..h / 2 {
+        for x in 0..w / 2 {
+            v[y * cs + x] = 128 + (x * 60 / (w / 2).max(1)) as u8;
+        }
+    }
 }
 
 /// 输出文件的音频概况。

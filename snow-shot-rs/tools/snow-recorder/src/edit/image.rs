@@ -58,11 +58,11 @@ pub fn make_encoder(format: ImageFormat, quality: u8) -> Result<Box<dyn ImageEnc
 }
 
 /// 线程级 COM 初始化守卫。
-struct ComGuard(bool);
+pub(crate) struct ComGuard(bool);
 
 impl ComGuard {
     /// 以多线程套间初始化当前线程的 COM。
-    fn init() -> Self {
+    pub(crate) fn init() -> Self {
         // SAFETY: 标准 COM 初始化；成功才在 Drop 时配对反初始化。
         let ok = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.is_ok();
         Self(ok)
@@ -79,16 +79,14 @@ impl Drop for ComGuard {
     }
 }
 
-/// WIC 编码器（PNG / JPEG）。
-struct WicEncoder {
+/// WIC 编码器（PNG / JPEG），输入 BGR24 的原始字节。
+pub(crate) struct BgrWriter {
     /// 为 true 编码 JPEG，否则 PNG。
     jpeg: bool,
     /// JPEG 质量 0.0..=1.0。
     quality: f32,
     /// WIC 工厂。
     factory: IWICImagingFactory,
-    /// YUV -> BGR24 转换器。
-    conv: RgbConverter,
     /// COM 守卫，须在 `factory` 之后释放。
     _com: ComGuard,
 }
@@ -98,9 +96,13 @@ fn wic_err(what: &str, e: windows::core::Error) -> EditError {
     EditError::new(format!("{what}: {e}"))
 }
 
-impl WicEncoder {
-    /// 创建 WIC 工厂。
-    fn new(jpeg: bool, quality: u8) -> Result<Self, EditError> {
+impl BgrWriter {
+    /// 创建 WIC 工厂（须在将要使用它的线程里调用）。
+    ///
+    /// # 参数
+    /// - `jpeg`：为 true 写 JPEG，否则 PNG。
+    /// - `quality`：JPEG 质量 1..=100，PNG 忽略。
+    pub(crate) fn new(jpeg: bool, quality: u8) -> Result<Self, EditError> {
         let com = ComGuard::init();
         // SAFETY: COM 已在本线程初始化。
         let factory: IWICImagingFactory =
@@ -110,8 +112,50 @@ impl WicEncoder {
             jpeg,
             quality: f32::from(quality.clamp(1, 100)) / 100.0,
             factory,
-            conv: RgbConverter::new(Pixel::BGR24),
             _com: com,
+        })
+    }
+
+    /// 把 BGR24 像素写成图片文件。
+    ///
+    /// # 参数
+    /// - `size`：宽高。
+    /// - `stride`：行字节数。
+    /// - `data`：像素数据（自上而下）。
+    /// - `path`：输出路径（覆盖已有文件）。
+    pub(crate) fn write(
+        &self,
+        size: (u32, u32),
+        stride: usize,
+        data: &[u8],
+        path: &Path,
+    ) -> Result<(), EditError> {
+        write_bgr(
+            &self.factory,
+            self.jpeg,
+            self.quality,
+            size,
+            stride,
+            data,
+            path,
+        )
+    }
+}
+
+/// FFmpeg 引擎用的 WIC 编码器（先把 YUV 一步转 BGR24）。
+struct WicEncoder {
+    /// 底层写入器。
+    writer: BgrWriter,
+    /// YUV -> BGR24 转换器。
+    conv: RgbConverter,
+}
+
+impl WicEncoder {
+    /// 创建 WIC 编码器。
+    fn new(jpeg: bool, quality: u8) -> Result<Self, EditError> {
+        Ok(Self {
+            writer: BgrWriter::new(jpeg, quality)?,
+            conv: RgbConverter::new(Pixel::BGR24),
         })
     }
 }
@@ -122,18 +166,20 @@ impl WicEncoder {
 /// - `factory`：WIC 工厂。
 /// - `jpeg`：为 true 写 JPEG，否则 PNG。
 /// - `quality`：JPEG 质量 0.0..=1.0。
-/// - `bgr`：BGR24 帧。
+/// - `size`：宽高。
+/// - `stride`：行字节数。
+/// - `data`：BGR24 像素（自上而下）。
 /// - `path`：输出路径。
 fn write_bgr(
     factory: &IWICImagingFactory,
     jpeg: bool,
     quality: f32,
-    bgr: &frame::Video,
+    size: (u32, u32),
+    stride: usize,
+    data: &[u8],
     path: &Path,
 ) -> Result<(), EditError> {
-    let (width, height) = (bgr.width(), bgr.height());
-    let stride = bgr.stride(0);
-    let data = bgr.data(0);
+    let (width, height) = size;
     let name = HSTRING::from(path.as_os_str());
     let container = if jpeg {
         GUID_ContainerFormatJpeg
@@ -212,7 +258,12 @@ impl ImageEncoder for WicEncoder {
     /// 见 trait 说明；先一步转 BGR24 再交给 WIC。
     fn encode(&mut self, frame: &frame::Video, path: &Path) -> Result<(), EditError> {
         let bgr = self.conv.convert(frame)?;
-        write_bgr(&self.factory, self.jpeg, self.quality, bgr, path)
+        self.writer.write(
+            (bgr.width(), bgr.height()),
+            bgr.stride(0),
+            bgr.data(0),
+            path,
+        )
     }
 }
 

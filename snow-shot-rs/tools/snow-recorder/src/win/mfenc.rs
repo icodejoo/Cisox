@@ -307,7 +307,7 @@ pub fn enumerate_hardware_h264(luid: Option<LUID>) -> Result<Vec<String>, String
 }
 
 /// 核对 SinkWriter 实际选中的视频编码 MFT 是硬件 MFT；软件 MFT 或查询不到返回原因。
-fn verify_hardware_transform(writer: &IMFSinkWriter, stream: u32) -> Result<(String, IMFTransform), String> {
+pub(crate) fn verify_hardware_transform(writer: &IMFSinkWriter, stream: u32) -> Result<(String, IMFTransform), String> {
     let ex: IMFSinkWriterEx = writer.cast().map_err(|e| fail("SinkWriterEx", e))?;
     for index in 0..8 {
         let mut category = GUID::zeroed();

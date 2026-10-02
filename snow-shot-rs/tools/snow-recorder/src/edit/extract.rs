@@ -119,7 +119,7 @@ pub fn frame_file_name(index: usize, ms: i64, format: ImageFormat) -> String {
 }
 
 /// 图片编码线程数：环境变量优先，否则逻辑核数的一半，限制在 1..=4。
-fn encode_threads() -> usize {
+pub(crate) fn encode_threads() -> usize {
     if let Some(n) = std::env::var(ENV_EXTRACT_THREADS)
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
@@ -267,7 +267,7 @@ fn encode_all(
 }
 
 /// 把中间目录里的文件移入输出目录（输出目录不存在则创建，同名文件覆盖）。
-fn publish(scratch: &Path, out_dir: &Path) -> Result<(), EditError> {
+pub(crate) fn publish(scratch: &Path, out_dir: &Path) -> Result<(), EditError> {
     std::fs::create_dir_all(out_dir)
         .map_err(|e| EditError::new(format!("创建输出目录失败: {e}")))?;
     let entries =

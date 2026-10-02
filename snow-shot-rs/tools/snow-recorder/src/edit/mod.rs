@@ -1,14 +1,17 @@
 //! 视频编辑任务（worker 进程内）。
 //!
 //! 设计见 `docs/research/video-editor-mvp-design.md`：编辑任务并入 `snow-recorder`，
-//! 通过 [`EditEngine`] 抽象出引擎，目前只有 FFmpeg 引擎（系统引擎是后续阶段）。
-//! 已实现：探测（`probe`）、按时间戳精确 seek（`source`）、抽帧（`extract`）、
+//! 通过 [`EditEngine`] 抽象出两个引擎：FFmpeg 引擎与系统引擎（`system`，Media Foundation + WIC）。
+//! FFmpeg 引擎：探测（`probe`）、按时间戳精确 seek（`source`）、抽帧（`extract`）、
 //! 降 fps / 缩放（`transcode`，H.264 重编码）、关键帧裁剪（`trim`，包级拷贝）；
-//! 音频一律直通不重编码。系统引擎未实现，显式选择会得到明确错误。
+//! 系统引擎：探测、精确 seek、PNG/JPEG 抽帧、硬件 H.264 降 fps / 缩放；
+//! 无损 WebP 与无重编码裁剪它做不了，能力里标不可用。音频一律直通不重编码。
+//! `Auto`：系统引擎优先，能力不支持或初始化失败时回落 FFmpeg；显式选系统引擎不支持时报明确错误。
 
 pub mod extract;
 pub mod image;
 pub mod source;
+pub mod system;
 pub mod transcode;
 pub mod trim;
 pub mod yuv;
@@ -22,7 +25,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use snow_recorder_protocol::{EditOp, EditRequest, EngineKind, Event, ProbeInfo};
+use snow_recorder_protocol::{EditOp, EditRequest, EngineKind, Event, ImageFormat, ProbeInfo};
+
+pub use system::SystemEngine;
 
 /// 进度事件的最小间隔（限频到每秒约 10 次）。
 const REPORT_INTERVAL: Duration = Duration::from_millis(100);
@@ -34,6 +39,8 @@ pub struct EditError {
     message: String,
     /// 是否由用户取消造成。
     cancelled: bool,
+    /// 是否属于"该引擎做不了 / 没能启动"（尚未产出任何结果，`Auto` 可回落到别的引擎）。
+    fallback: bool,
 }
 
 impl EditError {
@@ -45,6 +52,19 @@ impl EditError {
         Self {
             message: message.into(),
             cancelled: false,
+            fallback: false,
+        }
+    }
+
+    /// 创建"引擎不支持 / 启动失败"错误：尚未写出任何结果，`Auto` 会据此回落。
+    ///
+    /// # 参数
+    /// - `message`：错误描述。
+    pub fn unsupported(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            cancelled: false,
+            fallback: true,
         }
     }
 
@@ -53,7 +73,13 @@ impl EditError {
         Self {
             message: "任务已取消".to_string(),
             cancelled: true,
+            fallback: false,
         }
+    }
+
+    /// 是否允许 `Auto` 回落到别的引擎（引擎不支持或启动失败，且没有产出结果）。
+    pub fn can_fallback(&self) -> bool {
+        self.fallback && !self.cancelled
     }
 
     /// 是否由取消造成。
@@ -142,8 +168,10 @@ pub struct EngineCaps {
     pub reduce_fps: OpSupport,
     /// 缩放。
     pub scale: OpSupport,
-    /// 抽帧。
+    /// 抽帧（PNG / JPEG）。
     pub extract_frames: OpSupport,
+    /// 抽帧导出无损 WebP（需要同时满足 `extract_frames`）。
+    pub extract_webp_lossless: OpSupport,
     /// 关键帧裁剪。
     pub trim_keyframe: OpSupport,
 }
@@ -157,7 +185,15 @@ impl EngineCaps {
         match op {
             EditOp::ReduceFps { .. } => &self.reduce_fps,
             EditOp::Scale { .. } => &self.scale,
-            EditOp::ExtractFrames { .. } => &self.extract_frames,
+            EditOp::ExtractFrames { format, .. } => {
+                if self.extract_frames != OpSupport::Available
+                    || format != &ImageFormat::WebpLossless
+                {
+                    &self.extract_frames
+                } else {
+                    &self.extract_webp_lossless
+                }
+            }
             EditOp::TrimKeyframe { .. } => &self.trim_keyframe,
         }
     }
@@ -176,6 +212,12 @@ pub struct EditReport {
 pub trait EditEngine: Send {
     /// 引擎种类（具体引擎，不会是 `Auto`）。
     fn kind(&self) -> EngineKind;
+
+    /// 探测输入视频（时长、分辨率、帧率、帧数、关键帧数）。
+    ///
+    /// # 参数
+    /// - `input`：输入视频路径。
+    fn probe(&self, input: &Path) -> Result<ProbeInfo, EditError>;
 
     /// 对给定输入，各项操作是否可用。
     ///
@@ -197,6 +239,8 @@ pub struct FfmpegEngine;
 
 /// 缺少 H.264 编码器时的不可用原因。
 const NO_H264_ENCODER: &str = "FFmpeg 缺少 libx264 编码器";
+/// 缺少 libwebp 编码器时的不可用原因。
+const NO_WEBP_ENCODER: &str = "FFmpeg 缺少 libwebp 编码器";
 
 impl EditEngine for FfmpegEngine {
     /// 见 trait。
@@ -204,7 +248,13 @@ impl EditEngine for FfmpegEngine {
         EngineKind::Ffmpeg
     }
 
-    /// 抽帧与关键帧裁剪总是可用；降 fps / 缩放需要 libx264（具体参数合法性在 `run` 里校验）。
+    /// 见 trait。
+    fn probe(&self, input: &Path) -> Result<ProbeInfo, EditError> {
+        probe_ffmpeg(input)
+    }
+
+    /// 抽帧与关键帧裁剪总是可用；降 fps / 缩放需要 libx264，无损 WebP 需要 libwebp
+    /// （具体参数合法性在 `run` 里校验）。
     fn capabilities(&self, _input: &ProbeInfo) -> EngineCaps {
         let reencode = if ffmpeg_next::init().is_ok()
             && ffmpeg_next::encoder::find_by_name("libx264").is_some()
@@ -213,10 +263,16 @@ impl EditEngine for FfmpegEngine {
         } else {
             OpSupport::Unavailable(NO_H264_ENCODER.to_string())
         };
+        let webp = if ffmpeg_next::encoder::find_by_name("libwebp_anim").is_some() {
+            OpSupport::Available
+        } else {
+            OpSupport::Unavailable(NO_WEBP_ENCODER.to_string())
+        };
         EngineCaps {
             reduce_fps: reencode.clone(),
             scale: reencode,
             extract_frames: OpSupport::Available,
+            extract_webp_lossless: webp,
             trim_keyframe: OpSupport::Available,
         }
     }
@@ -277,33 +333,68 @@ impl EditEngine for FfmpegEngine {
     }
 }
 
-/// 按请求选择引擎。
+/// 按请求选择引擎实例。
 ///
-/// `Auto` 的设计顺序是"系统引擎优先、FFmpeg 回落"；系统引擎还没有实现，
-/// 目前 `Auto` 直接落到 FFmpeg，显式要求系统引擎会得到明确错误（不静默切换）。
+/// `Auto` 返回首选的系统引擎；它做不了某项操作时的回落由 [`execute`] 负责。
 ///
 /// # 参数
 /// - `kind`：请求的引擎。
 ///
 /// # 返回
-/// 引擎实例；所选引擎不可用返回错误。
+/// 引擎实例。
 pub fn pick_engine(kind: EngineKind) -> Result<Box<dyn EditEngine>, EditError> {
     match kind {
-        EngineKind::Auto | EngineKind::Ffmpeg => Ok(Box::new(FfmpegEngine)),
-        EngineKind::System => Err(EditError::new("系统引擎尚未实现，请选择 FFmpeg 引擎")),
+        EngineKind::Auto | EngineKind::System => Ok(Box::new(SystemEngine)),
+        EngineKind::Ffmpeg => Ok(Box::new(FfmpegEngine)),
     }
 }
 
-/// 探测视频信息。
+/// 用 FFmpeg 探测视频信息。
 ///
 /// # 参数
 /// - `input`：输入视频。
-pub fn probe(input: &Path) -> Result<ProbeInfo, EditError> {
+fn probe_ffmpeg(input: &Path) -> Result<ProbeInfo, EditError> {
     let mut src = source::VideoSource::open(input)?;
     Ok(src.scan()?.0)
 }
 
+/// 探测视频信息：系统引擎优先，失败时回落 FFmpeg（与 `Auto` 的引擎顺序一致）。
+///
+/// # 参数
+/// - `input`：输入视频。
+pub fn probe(input: &Path) -> Result<ProbeInfo, EditError> {
+    match SystemEngine.probe(input) {
+        Ok(info) => Ok(info),
+        Err(_) => probe_ffmpeg(input),
+    }
+}
+
+/// 在指定引擎上执行：探测、检查能力、运行。
+///
+/// # 参数
+/// - `engine`：引擎。
+/// - `req`：编辑请求。
+/// - `ctl`：进度与取消控制。
+fn run_on(
+    engine: &mut dyn EditEngine,
+    req: &EditRequest,
+    ctl: &TaskCtl,
+) -> Result<(EditReport, EngineKind), EditError> {
+    let info = engine.probe(&req.input)?;
+    if let OpSupport::Unavailable(reason) = engine.capabilities(&info).support(&req.op) {
+        return Err(EditError::unsupported(format!(
+            "{}引擎不支持该操作: {reason}",
+            engine.kind().as_str()
+        )));
+    }
+    let report = engine.run(req, ctl)?;
+    Ok((report, engine.kind()))
+}
+
 /// 执行一个编辑请求：选引擎、检查能力、运行。
+///
+/// `Auto`：先试系统引擎，它不支持该操作或没能启动时回落 FFmpeg；取消和运行中途的失败不回落。
+/// 显式选 `System` / `Ffmpeg` 时绝不静默切换，不支持就返回明确错误。
 ///
 /// # 参数
 /// - `req`：编辑请求。
@@ -313,12 +404,12 @@ pub fn probe(input: &Path) -> Result<ProbeInfo, EditError> {
 /// 结果（`engine` 为实际使用的引擎）。
 pub fn execute(req: &EditRequest, ctl: &TaskCtl) -> Result<(EditReport, EngineKind), EditError> {
     let mut engine = pick_engine(req.engine)?;
-    let info = probe(&req.input)?;
-    if let OpSupport::Unavailable(reason) = engine.capabilities(&info).support(&req.op) {
-        return Err(EditError::new(reason.clone()));
+    match run_on(engine.as_mut(), req, ctl) {
+        Err(e) if req.engine == EngineKind::Auto && e.can_fallback() => {
+            run_on(pick_engine(EngineKind::Ffmpeg)?.as_mut(), req, ctl)
+        }
+        other => other,
     }
-    let report = engine.run(req, ctl)?;
-    Ok((report, engine.kind()))
 }
 
 #[cfg(test)]
@@ -356,7 +447,7 @@ mod tests {
         assert!(ctl.is_cancelled());
     }
 
-    /// 能力：FFmpeg 引擎四项都可用；系统引擎显式选择时报错。
+    /// 能力：FFmpeg 引擎各项都可用；系统引擎的 WebP 与裁剪标不可用；引擎选择符合约定。
     #[test]
     fn capabilities_and_engine_choice() {
         let info = ProbeInfo {
@@ -385,28 +476,103 @@ mod tests {
             }),
             &OpSupport::Available
         );
-        assert!(pick_engine(EngineKind::System).is_err());
+        let webp = EditOp::ExtractFrames {
+            mode: ExtractMode::Keyframes,
+            format: ImageFormat::WebpLossless,
+            quality: 90,
+        };
+        assert_eq!(caps.support(&webp), &OpSupport::Available);
+        let sys = SystemEngine.capabilities(&info);
+        assert_eq!(sys.support(&extract), &OpSupport::Available);
+        assert!(matches!(sys.support(&webp), OpSupport::Unavailable(_)));
+        assert!(matches!(
+            sys.support(&EditOp::TrimKeyframe {
+                start_ms: 0,
+                end_ms: 1
+            }),
+            OpSupport::Unavailable(_)
+        ));
+        assert_eq!(
+            pick_engine(EngineKind::System).unwrap().kind(),
+            EngineKind::System
+        );
         assert_eq!(
             pick_engine(EngineKind::Auto).unwrap().kind(),
+            EngineKind::System
+        );
+        assert_eq!(
+            pick_engine(EngineKind::Ffmpeg).unwrap().kind(),
             EngineKind::Ffmpeg
         );
     }
 
-    /// 显式选择系统引擎时经 `execute` 得到明确错误而非 panic，且不产生输出。
+    /// 构造一个静默的任务控制。
+    fn quiet() -> TaskCtl {
+        TaskCtl::new(Arc::new(AtomicBool::new(false)), Box::new(|_| {}))
+    }
+
+    /// 显式选系统引擎做它不支持的操作：得到明确错误、不静默切换、不产生输出；
+    /// 同样的请求用 Auto 会回落 FFmpeg 并成功。
     #[test]
-    fn system_engine_is_clear_error() {
-        let dir = testclip::temp_dir("execute-system");
+    fn explicit_system_is_clear_error_but_auto_falls_back() {
+        let dir = testclip::temp_dir("execute-fallback");
         let input = dir.join("in.mp4");
         testclip::make_clip(&input, &testclip::Clip::default()).unwrap();
-        let ctl = TaskCtl::new(Arc::new(AtomicBool::new(false)), Box::new(|_| {}));
+        let trim = EditOp::TrimKeyframe {
+            start_ms: 0,
+            end_ms: 1000,
+        };
         let req = EditRequest {
             engine: EngineKind::System,
-            op: EditOp::ReduceFps { target_fps: 10 },
+            op: trim,
+            input: input.clone(),
+            output: dir.join("o.mp4"),
+        };
+        let err = execute(&req, &quiet()).unwrap_err();
+        assert!(err.to_string().contains("system引擎不支持"), "{err}");
+        assert!(!dir.join("o.mp4").exists());
+        let req = EditRequest {
+            engine: EngineKind::Auto,
+            ..req
+        };
+        let (_, engine) = execute(&req, &quiet()).unwrap();
+        assert_eq!(engine, EngineKind::Ffmpeg);
+        assert!(dir.join("o.mp4").exists());
+        // 无损 WebP：显式系统引擎报错，Auto 回落 FFmpeg
+        let webp = EditRequest {
+            engine: EngineKind::System,
+            op: EditOp::ExtractFrames {
+                mode: ExtractMode::Single { at_ms: 500 },
+                format: ImageFormat::WebpLossless,
+                quality: 90,
+            },
+            input,
+            output: dir.join("w"),
+        };
+        assert!(execute(&webp, &quiet()).is_err());
+        assert!(!dir.join("w").exists());
+        let webp = EditRequest {
+            engine: EngineKind::Auto,
+            ..webp
+        };
+        assert_eq!(execute(&webp, &quiet()).unwrap().1, EngineKind::Ffmpeg);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 不是视频的输入：Auto 两个引擎都失败，返回可读错误而非 panic。
+    #[test]
+    fn auto_with_corrupt_input_reports_error() {
+        let dir = testclip::temp_dir("execute-corrupt");
+        let input = dir.join("bad.mp4");
+        std::fs::write(&input, b"not a video").unwrap();
+        let req = EditRequest {
+            engine: EngineKind::Auto,
+            op: EditOp::ReduceFps { target_fps: 5 },
             input,
             output: dir.join("o.mp4"),
         };
-        let err = execute(&req, &ctl).unwrap_err();
-        assert!(err.to_string().contains("尚未实现"));
+        let err = execute(&req, &quiet()).unwrap_err();
+        assert!(!err.is_cancelled() && !err.to_string().is_empty());
         assert!(!dir.join("o.mp4").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -434,7 +600,7 @@ mod tests {
             output: dir.join("frames"),
         };
         let (report, engine) = execute(&req, &ctl).unwrap();
-        assert_eq!(engine, EngineKind::Ffmpeg);
+        assert_eq!(engine, EngineKind::System, "Auto 应优先系统引擎");
         assert_eq!(report.frames, 3);
         let events = events.lock().unwrap();
         assert!(events.iter().any(|e| matches!(
