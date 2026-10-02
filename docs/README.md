@@ -30,6 +30,7 @@
 - [guides/translation-quantization-benchmark.md](guides/translation-quantization-benchmark.md) — 本地翻译模型 int8 / int4 量化实测（mul-mul、NLLB-600M 6/14 语言裁剪版）：质量、体积、内存、延迟、性价比拐点、ORT 算子兼容与 worker 改动清单。有效。
 - [guides/translation-model-release.md](guides/translation-model-release.md) — 翻译模型最终选型、release 发布方式（A 现成文件 + B 自行生成）、CC-BY-NC 授权声明与应用内提示要求、产物规格与待办。有效。
 - [guides/translation-hymt2-eval.md](guides/translation-hymt2-eval.md) — Hy-MT2-1.8B（Apache-2.0）int4 的 ONNX 导出与质量评测，对比 NLLB 14 语言 int4：核心 11 向 +2.4、英→中 +16.9，代价是体积 1.3 GiB、内存约 3 倍、延迟约 5 倍；含导出补丁与分词注意点。有效。
+- [guides/snow-stt-worker.md](guides/snow-stt-worker.md) — 语音转文字 worker（snow-stt）：行协议、构建（短 target、联网下载、DLL 同目录）、模型放置、wav 自检脚本、espeak-ng GPL 声明注意。P1 第一步，未接主程序。
 
 ## 调研
 - [research/cross-monitor-recording-hw.md](research/cross-monitor-recording-hw.md) — 跨屏/双屏选区录屏硬编方案，含裁决记录。探针已实现，跨屏 16/20（单屏对照 18/20），接缝与光标已验证；跨适配器待验证。

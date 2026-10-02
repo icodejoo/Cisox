@@ -22,6 +22,7 @@ members = [
     "crates/snow-platform",
     "crates/snow-recorder-protocol",
     "crates/snow-ocr-protocol",
+    "crates/snow-stt-protocol",
     "tools/workspace-guard",
 ]
 resolver = "3"

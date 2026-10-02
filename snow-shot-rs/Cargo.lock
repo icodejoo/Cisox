@@ -6957,6 +6957,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "snow-stt-protocol"
+version = "0.1.0"
+
+[[package]]
 name = "snow-translate"
 version = "0.1.0"
 dependencies = [

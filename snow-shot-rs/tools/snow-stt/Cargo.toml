@@ -1,0 +1,38 @@
+# 语音转文字工作进程：独立 workspace，sherpa-onnx 以 shared 方式链接，与主程序构建隔离；结束即退出。
+# 构建入口见 scripts/build-snow-stt.ps1（负责短 target 目录、+crt-static、拷贝 onnxruntime.dll）。
+[workspace]
+resolver = "3"
+
+[package]
+name = "snow-stt"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-only"
+rust-version = "1.97"
+
+[[bin]]
+name = "snow-stt"
+path = "src/main.rs"
+
+[dependencies]
+snow-stt-protocol = { path = "../../crates/snow-stt-protocol" }
+# 采集（WASAPI 默认麦克风）与重采样复用同仓库实现，不自写
+snow-audio-recorder = { path = "../../../snow-crates/crates/snow-audio-recorder" }
+# 用户已批准新增；shared 链接，onnxruntime.dll 由构建脚本替换为仓库同版
+sherpa-onnx = { version = "=1.13.8", default-features = false, features = ["shared"] }
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+
+[profile.release]
+opt-level = 3
+codegen-units = 16
+lto = "thin"
+panic = "unwind"
+debug = 0
+incremental = false
