@@ -36,7 +36,9 @@ def q_int4(src, dst, block=32, algo="rtn", gather_bits=8, bits=4):
     import onnx
     from onnxruntime.quantization import matmul_nbits_quantizer as m
     ops = ("MatMul", "Gather") if gather_bits == 4 else ("MatMul",)
-    if bits == 8:  # RTN 路径在 ORT 里写死 4 位，8 位权重只能走 DEFAULT 算法
+    if algo == "default":  # ORT DEFAULT 算法：对称、可同时量化 Gather（GatherBlockQuantized）
+        cfg = None
+    elif bits == 8:  # RTN 路径在 ORT 里写死 4 位，8 位权重只能走 DEFAULT 算法
         cfg = None
     elif algo == "rtn":  # ORT 的 RTN 路径只支持 4/8 位
         cfg = m.RTNWeightOnlyQuantConfig()
@@ -51,7 +53,7 @@ def q_int4(src, dst, block=32, algo="rtn", gather_bits=8, bits=4):
         mid = dst + ".g8.onnx"
         q_int8_gather_only(src, mid)
     model = onnx.load(mid)
-    qz = m.MatMulNBitsQuantizer(model, bits=bits, block_size=block, is_symmetric=(algo == "rtn"), op_types_to_quantize=ops,
+    qz = m.MatMulNBitsQuantizer(model, bits=bits, block_size=block, is_symmetric=(algo in ("rtn", "default")), op_types_to_quantize=ops,
                                 algo_config=cfg)
     qz.process()
     qz.model.save_model_to_file(dst, use_external_data_format=False)
@@ -108,7 +110,7 @@ def main():
     ap.add_argument("--src", required=True)
     ap.add_argument("--dst", required=True)
     ap.add_argument("--mode", choices=["int8", "int4", "int8wo"], required=True)
-    ap.add_argument("--algo", choices=["rtn", "hqq", "minmax"], default="rtn")
+    ap.add_argument("--algo", choices=["rtn", "hqq", "minmax", "default"], default="rtn")
     ap.add_argument("--block", type=int, default=32)
     ap.add_argument("--bits", type=int, choices=[2, 4, 8], default=None, help="MatMulNBits 位宽（int4 模式下可改成 2）")
     ap.add_argument("--gather-bits", type=int, choices=[0, 4, 8], default=8)

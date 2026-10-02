@@ -38,7 +38,7 @@ PS_CHECK = r"""
 $s = (Get-Counter '\Processor(_Total)\% Processor Time' -SampleInterval 1 -MaxSamples 5).CounterSamples | ForEach-Object { [math]::Round($_.CookedValue,1) }
 $bad = Get-CimInstance Win32_Process | Where-Object {
   $_.Name -match '^(cargo|rustc|ffmpeg)(\.exe)?$' -or
-  ($_.Name -match '^python' -and $_.CommandLine -notmatch 'srv\.py|run_quant_matrix|run_session_exp')
+  ($_.Name -match '^python' -and $_.ExecutablePath -notlike 'C:\Python314\*' -and $_.CommandLine -notmatch 'srv\.py|run_quant_matrix|run_session_exp|run_pb')
 } | ForEach-Object { $_.Name + ':' + $_.ProcessId }
 @{cpu=$s; bad=@($bad)} | ConvertTo-Json -Compress
 """
