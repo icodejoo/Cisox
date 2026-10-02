@@ -253,6 +253,7 @@ mod tests {
                 operation_id: "op".to_string(),
             }),
             CommandKind::StartRecording => AppCommand::StartRecording(RecordingConfig::default()),
+            CommandKind::OpenTranslateInput => AppCommand::OpenTranslateInput,
         }
     }
 
@@ -409,6 +410,33 @@ mod tests {
         assert_eq!(
             bus.emit_from(CommandSource::Ui, sample(CommandKind::StartRecording)),
             Err(CommandError::NoHandler(CommandKind::StartRecording))
+        );
+    }
+
+    /// OpenTranslateInput 未注册时返回明确错误，注册后可派发。
+    #[test]
+    fn open_translate_input_dispatch() {
+        let bus = CommandBus::new();
+        assert_eq!(
+            bus.emit_from(
+                CommandSource::Hotkey,
+                sample(CommandKind::OpenTranslateInput)
+            ),
+            Err(CommandError::NoHandler(CommandKind::OpenTranslateInput))
+        );
+        bus.register(
+            CommandKind::OpenTranslateInput,
+            std::sync::Arc::new(|ctx, _| {
+                assert_eq!(ctx.source, CommandSource::Hotkey);
+                Ok(CommandOutcome::Done)
+            }),
+        );
+        assert_eq!(
+            bus.emit_from(
+                CommandSource::Hotkey,
+                sample(CommandKind::OpenTranslateInput)
+            ),
+            Ok(CommandOutcome::Done)
         );
     }
 }

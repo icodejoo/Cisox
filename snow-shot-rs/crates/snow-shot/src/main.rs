@@ -52,6 +52,8 @@ pub mod stitch_service;
 mod stitch_audit_tests;
 pub mod sys_prefs;
 pub mod translate_flow;
+pub mod translate_input;
+pub mod translate_input_view;
 pub mod translate_layout;
 pub mod translate_service;
 pub mod language_names;

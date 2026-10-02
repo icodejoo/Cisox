@@ -16,8 +16,10 @@ use crate::ocr_service::{OcrRequestConfig, OcrResult, OcrService};
 use crate::ort_runtime;
 use crate::sys_prefs::system_ui_language;
 use crate::translate_flow::TranslateUiState;
+use crate::translate_input::{InputError, translate_text};
+use crate::translate_input_view::{TranslateInputView, WINDOW_HEIGHT as TRANSLATE_INPUT_HEIGHT, WINDOW_WIDTH as TRANSLATE_INPUT_WIDTH};
 use crate::translate_service::{
-    TranslateConfig, TranslateFlowError, TranslateHost, TranslateOutcome, TranslateStage, run_flow,
+    TranslateConfig, TranslateFlowError, TranslateHost, TranslateOutcome, TranslateStage, Translated, run_flow,
 };
 use crate::overlay_view::{OverlayOutcome, ScreenshotOverlayView, SystemOutput};
 use crate::pinned_manager::PinnedManager;
@@ -28,8 +30,8 @@ use snow_ui::widgets::{AnnotationTool, ToolbarAction};
 use crate::screenshot_output::{configured_format, home_directory, resolve_save_directory};
 use crate::scroll_view::{ENV_SCROLL_AUTOTEST, ScrollHost, parse_scroll_autotest};
 use crate::settings_model::portable_to_hotkey_text;
-use crate::settings_state::{ConfigChange, SharedConfig, SystemPrefs, restore_value};
-use crate::settings_model::LANGUAGE_KEY;
+use crate::settings_state::{ConfigChange, SharedConfig, SystemPrefs, UiPrefs, restore_value};
+use crate::settings_model::{LANGUAGE_KEY, THEME_COLOR_KEY, THEME_MODE_KEY};
 use crate::settings_text::{Lang, window_title};
 use crate::settings_view::{AUTOTEST_STEP_INTERVAL, SettingsView, parse_autotest_ops};
 use serde_json::Value;
@@ -96,6 +98,8 @@ pub const SCREENSHOT_HOTKEY_CONFIG_KEY: &str = "global_shortcuts/screenshot";
 pub const RECORDING_HOTKEY_CONFIG_KEY: &str = "global_shortcuts/screen_record";
 /// “贴图剪贴板内容”全局热键的配置键。
 pub const PIN_CLIPBOARD_HOTKEY_CONFIG_KEY: &str = "global_shortcuts/pin_clipboard_content";
+/// “输入框翻译浮窗”全局热键的配置键。
+pub const TRANSLATE_INPUT_HOTKEY_CONFIG_KEY: &str = snow_config::extensions::KEY_TRANSLATE_INPUT_HOTKEY;
 /// 规范化热键对象中的文本字段名。
 const PORTABLE_FIELD: &str = "portable";
 /// 事件来源标签：全局热键。
@@ -148,6 +152,24 @@ pub enum UiEvent {
     OpenSettings,
     /// 请求录制：进入选区，确认后拉起独立的录制进程。
     StartRecording,
+    /// 打开（或激活）输入框翻译浮窗。
+    OpenTranslateInput,
+    /// 输入框翻译浮窗请求翻译（在后台线程执行）。
+    TranslateInputRequested {
+        /// 请求序号（回传结果时带回）。
+        serial: u64,
+        /// 用户输入的原文。
+        text: String,
+        /// 下拉选中的包 ID（空串为自动）。
+        model_id: String,
+    },
+    /// 输入框翻译完成（成功或失败）。
+    TranslateInputFinished {
+        /// 对应的请求序号。
+        serial: u64,
+        /// 译文或失败原因。
+        result: Result<Translated, InputError>,
+    },
     /// 请求长截图：进入选区，确认后开始滚动采集。
     StartScrollCapture,
     /// 长截图界面 / 采集线程有进度（周期刷新或线程唤醒）。
@@ -374,6 +396,14 @@ pub fn register_bus_handlers(bus: &CommandBus, inbox: &MainThreadInbox<UiEvent>)
             Ok(CommandOutcome::Done)
         }),
     );
+    let translate_input_inbox = inbox.clone();
+    bus.register(
+        CommandKind::OpenTranslateInput,
+        std::sync::Arc::new(move |_ctx, _cmd| {
+            translate_input_inbox.push(UiEvent::OpenTranslateInput);
+            Ok(CommandOutcome::Done)
+        }),
+    );
     // 全局热键 `pin_clipboard_content` 绑定的是 `PinSelection` 命令：没有进行中的截图会话，
     // 因此这里把它解释为“把剪贴板内容贴到屏幕”（避免为此新增命令变体波及 MCP 映射）
     let pin_inbox = inbox.clone();
@@ -576,7 +606,28 @@ pub fn register_pin_clipboard_hotkeys(
     )
 }
 
-/// 注册全部已接线的全局热键（截图 + 录屏 + 贴图剪贴板内容）。
+/// 按配置注册“输入框翻译浮窗”全局热键（`global_shortcuts/translate_input`，默认未绑定，未绑定时不注册）。
+///
+/// # 参数
+/// - `service`：热键服务。
+/// - `document`：配置文档。
+///
+/// # 返回
+/// 成功句柄与失败列表。
+pub fn register_translate_input_hotkeys(
+    service: &HotkeyService,
+    document: &ConfigDocument,
+) -> HotkeyRegistration {
+    register_hotkeys(
+        service,
+        document,
+        TRANSLATE_INPUT_HOTKEY_CONFIG_KEY,
+        "translate_input",
+        &AppCommand::OpenTranslateInput,
+    )
+}
+
+/// 注册全部已接线的全局热键（截图 + 录屏 + 贴图剪贴板内容 + 输入框翻译）。
 ///
 /// # 参数
 /// - `service`：热键服务。
@@ -585,6 +636,7 @@ pub fn register_all_hotkeys(service: &HotkeyService, document: &ConfigDocument) 
     let mut result = register_capture_hotkeys(service, document);
     result.merge(register_recording_hotkeys(service, document));
     result.merge(register_pin_clipboard_hotkeys(service, document));
+    result.merge(register_translate_input_hotkeys(service, document));
     result
 }
 
@@ -619,6 +671,8 @@ pub struct AppState {
     settings: Option<ShellWindow>,
     /// 设置页视图（用于热键回滚后刷新界面）。
     settings_view: Option<Entity<SettingsView>>,
+    /// 输入框翻译浮窗（若已打开）与其视图。
+    translate_input: Option<(ShellWindow, Entity<TranslateInputView>)>,
     /// 收到的截图请求累计数。
     capture_requests: u64,
     /// 截图覆盖窗（若已打开）。
@@ -689,6 +743,7 @@ impl AppState {
             config,
             settings: None,
             settings_view: None,
+            translate_input: None,
             capture_requests: 0,
             overlay: None,
             capture_in_flight: false,
@@ -1396,6 +1451,90 @@ fn open_or_focus_settings(cx: &mut ShellContext, state: &mut AppState) {
     }
 }
 
+/// 光标所在显示器作为输入框翻译浮窗的落点；取不到光标或显示器时用主屏。
+///
+/// # 参数
+/// - `cx`：外壳上下文。
+fn translate_input_monitor(cx: &ShellContext) -> MonitorTarget {
+    let Ok(monitors) = cx.monitors() else {
+        return MonitorTarget::Primary;
+    };
+    pick_monitor(&monitors, cursor_screen_position().ok()).map_or(MonitorTarget::Primary, |m| MonitorTarget::Id(m.id))
+}
+
+/// 读取界面偏好（深浅色、语言、主色），与设置页同一套解析。
+///
+/// # 参数
+/// - `config`：共享配置。
+fn ui_prefs_from_config(config: &SharedConfig) -> UiPrefs {
+    let store = config.borrow();
+    let text = |key: &str| store.value(key).as_str().unwrap_or_default().to_string();
+    UiPrefs::resolve(&text(THEME_MODE_KEY), &text(LANGUAGE_KEY), &text(THEME_COLOR_KEY), &SystemPrefs::query())
+}
+
+/// 打开输入框翻译浮窗；已打开则只激活，不重复创建。
+///
+/// # 参数
+/// - `cx`：外壳上下文。
+/// - `state`：运行时状态。
+fn open_or_focus_translate_input(cx: &mut ShellContext, state: &mut AppState) {
+    if let Some((window, _)) = &state.translate_input
+        && cx.is_window_open(window)
+    {
+        cx.activate_window(window);
+        return;
+    }
+    let prefs = ui_prefs_from_config(&state.config);
+    let packs = {
+        let config = state.config.borrow();
+        let translate_config = TranslateConfig::from_document(config.document(), &system_ui_language());
+        crate::translate_input::installed_packs(&state.translator.scan(&translate_config).models)
+    };
+    let size = LogicalSize::new(TRANSLATE_INPUT_WIDTH, TRANSLATE_INPUT_HEIGHT);
+    let spec = WindowSpec {
+        title: String::new(),
+        placement: Placement::Centered { monitor: translate_input_monitor(cx), size },
+        transparent: false,
+        always_on_top: true,
+        decorations: false,
+        show_in_taskbar: false,
+        focus: true,
+        resizable: false,
+    };
+    let inbox = state.inbox.clone();
+    match cx.open_window(&spec, move |window, app| TranslateInputView::create(window, app, packs, prefs, inbox)) {
+        Ok((window, view)) => {
+            state.translate_input = Some((window, view));
+            tracing::info!("输入框翻译窗口已打开");
+        }
+        Err(e) => tracing::error!(error = %e, "打开输入框翻译窗口失败"),
+    }
+}
+
+/// 在后台线程翻译输入框里的文本，结果经收件箱回到主线程。
+///
+/// # 参数
+/// - `state`：运行时状态。
+/// - `serial`：请求序号。
+/// - `text`：原文。
+/// - `model_id`：下拉选中的包 ID（空串为自动）。
+fn spawn_translate_input(state: &AppState, serial: u64, text: String, model_id: String) {
+    let config = TranslateConfig::from_document(state.config.borrow().document(), &system_ui_language());
+    let translator = Arc::clone(&state.translator);
+    let inbox = state.inbox.clone();
+    let spawned = std::thread::Builder::new().name("snow-translate-input".into()).spawn(move || {
+        let result = translate_text(translator.as_ref(), &config, &model_id, &text);
+        inbox.push(UiEvent::TranslateInputFinished { serial, result });
+    });
+    if let Err(e) = spawned {
+        tracing::error!(error = %e, "无法创建输入框翻译线程");
+        state.inbox.push(UiEvent::TranslateInputFinished {
+            serial,
+            result: Err(InputError::Translate(snow_translate::TranslateError::Io(e.to_string()))),
+        });
+    }
+}
+
 /// 读取环境变量 `SNOW_SETTINGS_MONITOR`（设备名子串，如 `DISPLAY2`），选择设置窗所在显示器。
 ///
 /// # 参数
@@ -1470,6 +1609,7 @@ fn on_config_changed(cx: &mut ShellContext, state: &mut AppState, key: &str, pre
         SCREENSHOT_HOTKEY_CONFIG_KEY,
         RECORDING_HOTKEY_CONFIG_KEY,
         PIN_CLIPBOARD_HOTKEY_CONFIG_KEY,
+        TRANSLATE_INPUT_HOTKEY_CONFIG_KEY,
     ]
     .into_iter()
     .find(|k| *k == key)
@@ -1556,6 +1696,17 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
             tracing::error!(%reason, "屏幕采集失败，未打开覆盖窗");
         }
         UiEvent::OpenSettings => open_or_focus_settings(cx, state),
+        UiEvent::OpenTranslateInput => open_or_focus_translate_input(cx, state),
+        UiEvent::TranslateInputRequested { serial, text, model_id } => {
+            spawn_translate_input(state, serial, text, model_id)
+        }
+        UiEvent::TranslateInputFinished { serial, result } => {
+            if let Some((window, view)) = &state.translate_input
+                && cx.is_window_open(window)
+            {
+                view.update(cx.app(), |v, vcx| v.finish(serial, result, vcx));
+            }
+        }
         UiEvent::ConfigChanged { key, previous } => on_config_changed(cx, state, &key, previous),
         UiEvent::StartRecording => request_recording(cx, state),
         UiEvent::RecordingRegionChosen { region, monitor } => {
@@ -1832,6 +1983,27 @@ mod tests {
         let ctx = CommandContext::new(CommandSource::Hotkey);
         bus.emit(&ctx, AppCommand::PinSelection).unwrap();
         assert_eq!(inbox.try_recv(), Some(UiEvent::PinFromClipboard));
+    }
+
+    /// 总线上的 OpenTranslateInput 命令（热键 translate_input）变成“打开输入框翻译”事件。
+    #[test]
+    fn bus_open_translate_input_reaches_inbox() {
+        let bus = CommandBus::new();
+        let inbox = MainThreadInbox::new();
+        register_bus_handlers(&bus, &inbox);
+        bus.emit(&CommandContext::new(CommandSource::Hotkey), AppCommand::OpenTranslateInput).unwrap();
+        assert_eq!(inbox.try_recv(), Some(UiEvent::OpenTranslateInput));
+    }
+
+    /// 输入框翻译热键默认不绑定（因此不会注册）；绑定后能解析为合法热键。
+    #[test]
+    fn translate_input_hotkey_unbound_by_default() {
+        let mut doc = ConfigDocument::from_bytes(None);
+        assert!(shortcut_strings(&doc.value(TRANSLATE_INPUT_HOTKEY_CONFIG_KEY)).is_empty());
+        doc.set_value(TRANSLATE_INPUT_HOTKEY_CONFIG_KEY, serde_json::json!(["Ctrl+Alt+T"])).unwrap();
+        let list = shortcut_strings(&doc.value(TRANSLATE_INPUT_HOTKEY_CONFIG_KEY));
+        assert_eq!(list.len(), 1);
+        assert!(Hotkey::parse(&portable_to_hotkey_text(&list[0])).is_ok());
     }
 
     /// 贴图热键配置键与 schema 一致，默认值（F3）可解析为合法热键。

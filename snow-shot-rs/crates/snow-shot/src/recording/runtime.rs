@@ -224,6 +224,8 @@ impl ScreenRecordingSession {
             LinkEvent::Event(Event::Resumed) => self.set_paused(false),
             LinkEvent::Event(Event::Finished { path, .. }) => self.complete(path),
             LinkEvent::Event(Event::Error { reason }) => self.fail(reason),
+            // 视频编辑 / 探测事件由编辑流程消费，录制状态机不关心
+            LinkEvent::Event(Event::EditProgress { .. } | Event::EditFinished { .. } | Event::ProbeResult(_)) => {}
             LinkEvent::Exited { code } => {
                 if !self.state.is_terminal() && !matches!(self.state, RecordingState::Idle) {
                     self.fail(format!("录制进程意外退出（退出码 {code:?}）"));

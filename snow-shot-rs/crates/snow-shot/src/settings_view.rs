@@ -61,27 +61,27 @@ pub const AUTOTEST_STEP_INTERVAL: Duration = Duration::from_millis(350);
 
 /// 一套配色。
 #[derive(Clone, Copy)]
-struct Palette {
+pub(crate) struct Palette {
     /// 窗口底色。
-    bg: Rgba,
+    pub(crate) bg: Rgba,
     /// 侧栏底色。
-    sidebar: Rgba,
+    pub(crate) sidebar: Rgba,
     /// 分隔线。
-    border: Rgba,
+    pub(crate) border: Rgba,
     /// 正文。
-    text: Rgba,
+    pub(crate) text: Rgba,
     /// 次要文字。
-    dim: Rgba,
+    pub(crate) dim: Rgba,
     /// 控件底色。
-    control: Rgba,
+    pub(crate) control: Rgba,
     /// 主色。
-    accent: Rgba,
+    pub(crate) accent: Rgba,
     /// 主色上的文字。
-    on_accent: Rgba,
+    pub(crate) on_accent: Rgba,
     /// 错误色。
-    danger: Rgba,
+    pub(crate) danger: Rgba,
     /// 成功色。
-    ok: Rgba,
+    pub(crate) ok: Rgba,
 }
 
 /// 按深浅色与主色生成配色。
@@ -89,7 +89,7 @@ struct Palette {
 /// # 参数
 /// - `dark`：是否深色
 /// - `accent`：主色 RGBA
-fn palette(dark: bool, accent: [u8; 4]) -> Palette {
+pub(crate) fn palette(dark: bool, accent: [u8; 4]) -> Palette {
     let accent = rgba(u32::from_be_bytes(accent));
     if dark {
         Palette {

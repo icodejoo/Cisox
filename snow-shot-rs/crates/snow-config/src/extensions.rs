@@ -8,7 +8,7 @@ use crate::schema::{IntRange, SchemaEntry, ValueKind, entry};
 use serde_json::json;
 
 /// 扩展项数量（`schema::entries()` 在原 238 项之后追加的条目数）。
-pub const EXTENSION_ENTRY_COUNT: usize = 9;
+pub const EXTENSION_ENTRY_COUNT: usize = 10;
 
 /// 翻译后端：`local` 本地 NMT worker，`openai` OpenAI 兼容通道。
 pub const KEY_TRANSLATION_BACKEND: &str = "screenshot_translation/backend";
@@ -27,6 +27,9 @@ pub const KEY_LOCAL_LOW_MEMORY: &str = "screenshot_translation/local_low_memory"
 pub const KEY_LOCAL_ROUTE_MODE: &str = "screenshot_translation/local_route_mode";
 /// 本地最多同时常驻内存的翻译包个数（要加载新包时先卸载空闲的旧包）。
 pub const KEY_LOCAL_MAX_RESIDENT: &str = "screenshot_translation/local_max_resident_models";
+
+/// 输入框翻译浮窗的全局热键（默认不绑定，未绑定时不注册）。
+pub const KEY_TRANSLATE_INPUT_HOTKEY: &str = "global_shortcuts/translate_input";
 
 /// OCR 后端：`system` 系统原生 OCR，`local-model` 本地模型（snow-ocr-process）。
 pub const KEY_OCR_BACKEND: &str = "text_recognition/backend";
@@ -148,6 +151,7 @@ pub(crate) fn extension_entries() -> Vec<SchemaEntry> {
             None,
         ),
         entry(KEY_OCR_BACKEND, json!(default_ocr_backend()), ValueKind::String, None, OCR_BACKEND_VALUES, None),
+        entry(KEY_TRANSLATE_INPUT_HOTKEY, json!([]), ValueKind::StringList, None, &[], Some(2)),
     ]
 }
 
@@ -168,7 +172,9 @@ mod tests {
         for item in &entries()[CORE_ENTRY_COUNT..] {
             assert!(!core.contains(item.key), "{}", item.key);
             assert!(
-                item.key.starts_with("screenshot_translation/") || item.key == KEY_OCR_BACKEND,
+                item.key.starts_with("screenshot_translation/")
+                    || item.key == KEY_OCR_BACKEND
+                    || item.key == KEY_TRANSLATE_INPUT_HOTKEY,
                 "{}",
                 item.key
             );
@@ -300,5 +306,28 @@ mod tests {
         explicit["text_recognition"]["backend"] = json!(OCR_BACKEND_SYSTEM);
         let kept = ConfigDocument::from_bytes(Some(&serde_json::to_vec(&explicit).expect("序列化")));
         assert_eq!(kept.value(KEY_OCR_BACKEND), json!(OCR_BACKEND_SYSTEM));
+    }
+
+    /// 输入框翻译热键：默认未绑定，可写入并读回，超过 2 个绑定被拒绝；旧配置缺该键时补默认。
+    #[test]
+    fn translate_input_hotkey_default_and_round_trip() {
+        let mut doc = ConfigDocument::from_bytes(None);
+        assert_eq!(doc.value(KEY_TRANSLATE_INPUT_HOTKEY), json!([]));
+        assert!(crate::schema::is_extension_key(KEY_TRANSLATE_INPUT_HOTKEY));
+        doc.set_value(KEY_TRANSLATE_INPUT_HOTKEY, json!(["Ctrl+Alt+T"])).expect("合法热键");
+        let reloaded = ConfigDocument::from_bytes(Some(&doc.to_bytes()));
+        let shown = reloaded.value(KEY_TRANSLATE_INPUT_HOTKEY).to_string();
+        assert!(shown.contains("Ctrl+Alt+T"), "{shown}");
+        // 超过上限的绑定不会原样保留（拒绝或截断）
+        let _ = doc.set_value(KEY_TRANSLATE_INPUT_HOTKEY, json!(["F1", "F2", "F3"]));
+        let kept = doc.value(KEY_TRANSLATE_INPUT_HOTKEY);
+        assert!(kept.as_array().is_some_and(|a| a.len() <= 2), "{kept}");
+
+        // 旧配置（没有该键）读到默认的空绑定
+        let fresh = ConfigDocument::from_bytes(None);
+        let mut legacy: serde_json::Value = serde_json::from_slice(&fresh.to_bytes()).expect("json");
+        legacy["global_shortcuts"].as_object_mut().expect("分组").remove("translate_input");
+        let old = ConfigDocument::from_bytes(Some(&serde_json::to_vec(&legacy).expect("序列化")));
+        assert_eq!(old.value(KEY_TRANSLATE_INPUT_HOTKEY), json!([]));
     }
 }

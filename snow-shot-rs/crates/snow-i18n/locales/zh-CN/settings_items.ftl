@@ -45,6 +45,7 @@ setting-global-shortcuts-open-capture-history = 打开截图历史
 setting-global-shortcuts-open-pin-to-screen-management = 打开贴图管理
 setting-global-shortcuts-open-settings = 打开设置
 setting-global-shortcuts-translate-selected-text = 翻译选中文本
+setting-global-shortcuts-translate-input = 输入框翻译窗口
 setting-global-shortcuts-pin-clipboard-content = 贴图剪贴板内容
 setting-global-shortcuts-pin-selected-files = 贴图选中的文件
 setting-global-shortcuts-restore-last-closed-windows = 恢复上次关闭的窗口

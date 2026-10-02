@@ -45,6 +45,7 @@ setting-global-shortcuts-open-capture-history = Open screenshot history
 setting-global-shortcuts-open-pin-to-screen-management = Open pin management
 setting-global-shortcuts-open-settings = Open settings
 setting-global-shortcuts-translate-selected-text = Translate Selected Text
+setting-global-shortcuts-translate-input = Input translation window
 setting-global-shortcuts-pin-clipboard-content = Pin clipboard content
 setting-global-shortcuts-pin-selected-files = Pin selected files
 setting-global-shortcuts-restore-last-closed-windows = Restore last closed windows

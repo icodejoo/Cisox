@@ -534,6 +534,8 @@ pub enum AppCommand {
     RunOperation(OperationRequest),
     /// 开始录制（属 recording_pinned 域，不在 28 个截图 tool 内）。
     StartRecording(RecordingConfig),
+    /// 打开输入框翻译浮窗（全局热键触发，不在 MCP tool 内）。
+    OpenTranslateInput,
 }
 
 /// 生成 `CommandKind` 枚举与 `AppCommand::kind()`，保证两者变体同步。
@@ -596,6 +598,7 @@ command_kinds!(
     ExportRecognition(_),
     RunOperation(_),
     StartRecording(_),
+    OpenTranslateInput,
 );
 
 /// MCP 截图域 28 个 tool（去掉 `snow_shot_` 前缀）到命令种类的映射。
@@ -747,6 +750,20 @@ mod tests {
         assert_eq!(kind("screenshot_undo"), CommandKind::Undo);
         assert_eq!(kind("screenshot_copy"), CommandKind::Export);
         assert_eq!(kind("screenshot_cancel"), CommandKind::Cancel);
+    }
+
+    /// 输入框翻译命令不属于 MCP 截图域：映射表里没有它，且能还原为对应种类。
+    #[test]
+    fn open_translate_input_is_not_an_mcp_tool() {
+        assert!(
+            MCP_TOOL_MAP
+                .iter()
+                .all(|(_, k)| *k != CommandKind::OpenTranslateInput)
+        );
+        assert_eq!(
+            AppCommand::OpenTranslateInput.kind(),
+            CommandKind::OpenTranslateInput
+        );
     }
 
     /// 补齐的 schema 字段可构造，且占位请求不再带 `target`。
