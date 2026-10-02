@@ -42,3 +42,4 @@
 - [research/windows-hevc-support.md](research/windows-hevc-support.md) — Windows H.265 支持现状。已搁置，存档。
 - [research/adr5-local-nmt.md](research/adr5-local-nmt.md) — ADR-5 本地 NMT 推理后端选型。
 - [research/adr8-canvas-blob.md](research/adr8-canvas-blob.md) — ADR-8 canvas 历史/会话文件调研。
+- [research/speech-to-text-backends.md](research/speech-to-text-backends.md) — 实时语音转文字后端调研：sherpa-onnx 与 ort 共用 ORT、纯 ort 流式 Zipformer 实测（RTF≈0.12、~253MB）、Windows 系统语音、SendInput 键入、按住说话热键与分阶段计划。
