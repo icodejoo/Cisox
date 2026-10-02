@@ -192,7 +192,12 @@ struct Built {
     engine: Arc<dyn TranslationEngine>,
     /// 本地多包路由器（探针与策略热更新用）。
     router: Option<Arc<RoutedEngine>>,
+    /// 包 ID → 展示名（把路由器记录的实际用包翻成标签；OpenAI 通道为空）。
+    labels: LabelTable,
 }
+
+/// 包 ID → 展示名的对照表。
+type LabelTable = Vec<(String, String)>;
 
 /// 一次装配的结论：引擎展示名、解析出的源语言、目标语言。
 type Prepared = (String, Lang, Lang);
@@ -233,6 +238,32 @@ fn model_label(model: &ScannedModel) -> String {
     } else {
         model.manifest.display_name.clone()
     }
+}
+
+/// 混合拆分的预选标签：覆盖目标语言的包名，`default_eligible=false` 的可选包默认不参与，不列入；
+/// 只有可选包覆盖时才退回列它们（与选包逻辑一致）。没有任何包覆盖返回空。
+fn mixed_preselect_names(models: &[ScannedModel], target: Lang) -> Vec<String> {
+    let covering: Vec<&ScannedModel> = models.iter().filter(|m| m.manifest.supports(Lang::Auto, target)).collect();
+    let eligible: Vec<&ScannedModel> = covering.iter().copied().filter(|m| m.manifest.default_eligible).collect();
+    let pool = if eligible.is_empty() { covering } else { eligible };
+    pool.into_iter().map(model_label).collect()
+}
+
+/// 由实际参与翻译的包 ID 生成标签（去重保序，`" + "` 连接）；没有实际使用记录（缓存命中等）时用预选标签。
+///
+/// # 参数
+/// - `used_ids`：路由器记录的实际用包 ID。
+/// - `labels`：包 ID → 展示名。
+/// - `fallback`：预选标签。
+fn actual_label(used_ids: &[String], labels: &[(String, String)], fallback: &str) -> String {
+    let mut names: Vec<&str> = Vec::new();
+    for id in used_ids {
+        let name = labels.iter().find(|(k, _)| k == id).map_or(id.as_str(), |(_, v)| v.as_str());
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    if names.is_empty() { fallback.to_string() } else { names.join(LABEL_JOINER) }
 }
 
 /// 由数据根得到默认模型目录。
@@ -343,12 +374,7 @@ impl TranslateHost {
         }
         let (label, src) = match config.route_mode {
             RouteMode::MixedSplit => {
-                let names: Vec<String> = report
-                    .models
-                    .iter()
-                    .filter(|m| m.manifest.supports(Lang::Auto, config.target))
-                    .map(model_label)
-                    .collect();
+                let names = mixed_preselect_names(&report.models, config.target);
                 if names.is_empty() {
                     return Err(TranslateError::UnsupportedLanguagePair(config.source, config.target));
                 }
@@ -398,7 +424,8 @@ impl TranslateHost {
             .collect();
         let router = Arc::new(RoutedEngine::new(slots, config.route_policy()));
         let engine: Arc<dyn TranslationEngine> = router.clone();
-        Ok((Built { key, engine, router: Some(router) }, (label, src, config.target)))
+        let labels = report.models.iter().map(|m| (m.manifest.id.clone(), model_label(m))).collect();
+        Ok((Built { key, engine, router: Some(router), labels }, (label, src, config.target)))
     }
 
     /// 装配 OpenAI 兼容引擎：取配置里选中的自定义模型。
@@ -421,7 +448,7 @@ impl TranslateHost {
             api_key: model.api_key.clone(),
             model: model.model.clone(),
         }));
-        Ok((Built { key, engine, router: None }, (model.name.clone(), config.source, config.target)))
+        Ok((Built { key, engine, router: None, labels: Vec::new() }, (model.name.clone(), config.source, config.target)))
     }
 
     /// 按配置装配引擎；参数没变就复用，变了就换掉旧引擎（旧 worker 随之退出）。
@@ -457,6 +484,13 @@ impl TranslateHost {
     /// 当前路由器（没有本地装配时为 `None`）。
     fn router(&self) -> Option<Arc<RoutedEngine>> {
         self.built.lock().unwrap_or_else(PoisonError::into_inner).as_ref()?.router.clone()
+    }
+
+    /// 当前路由器与包展示名表（没有本地装配时为 `None`）。
+    fn routing(&self) -> Option<(Arc<RoutedEngine>, LabelTable)> {
+        let built = self.built.lock().unwrap_or_else(PoisonError::into_inner);
+        let current = built.as_ref()?;
+        Some((current.router.clone()?, current.labels.clone()))
     }
 
     /// 是否有本地 worker 正在运行（探针用）。
@@ -495,7 +529,16 @@ impl Translator for TranslateHost {
     /// 装配引擎后经缓存翻译。
     fn translate(&self, config: &TranslateConfig, texts: &[String]) -> Result<Translated, TranslateError> {
         let (label, src, tgt) = self.prepare(config)?;
+        let routing = self.routing();
+        if let Some((router, _)) = &routing {
+            router.reset_used();
+        }
         let texts = self.service.translate_batch(texts, src, tgt)?;
+        // 标签反映实际参与翻译的包；缓存命中等没有用包记录时沿用预选标签
+        let label = match routing {
+            Some((router, labels)) => actual_label(&router.used_ids(), &labels, &label),
+            None => label,
+        };
         Ok(Translated { texts, label })
     }
 }
@@ -748,6 +791,37 @@ mod tests {
         assert_eq!((label.as_str(), src, tgt), ("Model a-nllb + Model z-opus", Lang::Auto, Lang::ZhHans));
         cfg.target = Lang::Ko;
         assert!(matches!(host.prepare(&cfg), Err(TranslateError::UnsupportedLanguagePair(Lang::Auto, Lang::Ko))));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 实际标签：按实际用包去重保序；没有记录时用预选标签；未知 ID 退回 ID 本身。
+    #[test]
+    fn actual_label_dedups_and_falls_back() {
+        let labels = vec![("a".to_string(), "Model A".to_string()), ("b".to_string(), "Model B".to_string())];
+        let ids = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(actual_label(&ids(&["b", "a", "b"]), &labels, "pre"), "Model B + Model A");
+        assert_eq!(actual_label(&ids(&["b"]), &labels, "Model A"), "Model B", "预选 A 实际 B，显示 B");
+        assert_eq!(actual_label(&[], &labels, "pre"), "pre");
+        assert_eq!(actual_label(&ids(&["x"]), &labels, "pre"), "x");
+    }
+
+    /// 混合拆分预选标签：可选包（default_eligible=false）有别的包覆盖时不列入；只有它覆盖时才退回。
+    #[test]
+    fn mixed_preselect_skips_optional_packs() {
+        let root = temp_root("mixed-optional");
+        let (host, models) = host_with_files(&root);
+        write_general_model(&models, "a-nllb");
+        write_model(&models, "b-opt", r#"[["en","zh-CN"]]"#);
+        let manifest_path = models.join("b-opt").join("model.json");
+        let text = std::fs::read_to_string(&manifest_path).expect("读清单");
+        std::fs::write(&manifest_path, text.replacen("{\"schema_version\":1,", "{\"schema_version\":1,\"default_eligible\":false,", 1))
+            .expect("写清单");
+        let report = host.scan(&config());
+        assert_eq!(report.models.len(), 2, "{:?}", report.issues);
+        assert!(!report.models.iter().find(|m| m.manifest.id == "b-opt").unwrap().manifest.default_eligible);
+        assert_eq!(mixed_preselect_names(&report.models, Lang::ZhHans), ["Model a-nllb"]);
+        let only_opt: Vec<ScannedModel> = report.models.into_iter().filter(|m| m.manifest.id == "b-opt").collect();
+        assert_eq!(mixed_preselect_names(&only_opt, Lang::ZhHans), ["Model b-opt"]);
         let _ = std::fs::remove_dir_all(&root);
     }
 

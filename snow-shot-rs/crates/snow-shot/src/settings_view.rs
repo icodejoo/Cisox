@@ -14,7 +14,7 @@ use crate::settings_state::{
 use crate::ocr_backend::{OcrBackend, OcrNotice};
 use crate::settings_text::{Lang, Text, group_title, t};
 use crate::translate_settings::{
-    hymt2_download_notice, hymt2_panel, hymt2_selected, route_hint, route_mode_label,
+    hymt2_click, hymt2_view, route_hint, route_mode_label, Hymt2Button, Hymt2Click, Hymt2View,
 };
 use snow_config::extensions::{KEY_LOCAL_MODEL_ID, KEY_LOCAL_ROUTE_MODE, KEY_OCR_BACKEND};
 use serde_json::{Value, json};
@@ -836,29 +836,24 @@ impl SettingsView {
             return None;
         }
         let locale = self.state.prefs().locale;
-        let panel = hymt2_panel(locale);
-        let selected = self
+        let current = self
             .state
             .row_by_key(KEY_LOCAL_MODEL_ID)
-            .is_some_and(|row| hymt2_selected(row.value.as_str().unwrap_or_default()));
-        let use_button = if selected {
-            Self::button(panel.in_use_label, false, p)
-        } else {
-            Self::button(panel.use_label, true, p).on_mouse_down(
-                MouseButton::Left,
-                Self::click(
-                    cx,
-                    SettingsAction::Change {
-                        key: KEY_LOCAL_MODEL_ID,
-                        value: json!(crate::translate_settings::HYMT2_MODEL_ID),
-                    },
-                ),
-            )
+            .and_then(|row| row.value.as_str().map(str::to_owned))
+            .unwrap_or_default();
+        let Hymt2View { panel, in_use } = hymt2_view(locale, &current);
+        let use_button = match hymt2_click(Hymt2Button::Use, locale) {
+            _ if in_use => Self::button(panel.in_use_label, false, p),
+            Hymt2Click::SetConfig { key, value } => Self::button(panel.use_label, true, p)
+                .on_mouse_down(MouseButton::Left, Self::click(cx, SettingsAction::Change { key, value: json!(value) })),
+            Hymt2Click::ShowNotice(_) => Self::button(panel.use_label, true, p),
         };
         let download = Self::button(panel.download_label, true, p).on_mouse_down(
             MouseButton::Left,
             cx.listener(move |this, _event: &MouseDownEvent, _window, cx| {
-                this.hymt2_notice = Some(hymt2_download_notice(locale));
+                if let Hymt2Click::ShowNotice(text) = hymt2_click(Hymt2Button::Download, locale) {
+                    this.hymt2_notice = Some(text);
+                }
                 cx.stop_propagation();
                 cx.notify();
             }),

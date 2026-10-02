@@ -279,6 +279,8 @@ pub struct RoutedEngine {
     unload_done: Condvar,
     /// 关机时等待卸载的总时限。
     shutdown_timeout: Duration,
+    /// 自上次 [`RoutedEngine::reset_used`] 起实际占用过的包下标（按首次使用顺序，去重）。
+    used: Mutex<Vec<usize>>,
 }
 
 impl RoutedEngine {
@@ -303,6 +305,7 @@ impl RoutedEngine {
             }),
             unload_done: Condvar::new(),
             shutdown_timeout: DEFAULT_SHUTDOWN_TIMEOUT,
+            used: Mutex::new(Vec::new()),
         }
     }
 
@@ -351,6 +354,24 @@ impl RoutedEngine {
         let keep = policy.max_resident;
         *self.policy.write().unwrap_or_else(PoisonError::into_inner) = policy;
         self.evict_idle(keep, None);
+    }
+
+    /// 清空“实际参与翻译的包”记录（每次翻译前调用）。
+    pub fn reset_used(&self) {
+        self.used
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
+    }
+
+    /// 自上次 [`RoutedEngine::reset_used`] 起实际参与翻译的包 ID（按首次使用顺序，去重）。
+    ///
+    /// 缓存命中或全空白输入不会占用任何包，此时返回空。
+    pub fn used_ids(&self) -> Vec<String> {
+        let used = self.used.lock().unwrap_or_else(PoisonError::into_inner);
+        used.iter()
+            .map(|&i| self.slots[i].manifest.id.clone())
+            .collect()
     }
 
     /// 是否有任一包常驻内存。
@@ -458,6 +479,12 @@ impl RoutedEngine {
             pool.clock += 1;
             let now = pool.clock;
             pool.last_used[index] = now;
+        }
+        {
+            let mut used = self.used.lock().unwrap_or_else(PoisonError::into_inner);
+            if !used.contains(&index) {
+                used.push(index);
+            }
         }
         // 占用已登记：下面的状态查询与卸载都在池锁外，且本包不会被别人驱逐
         let lease = Lease {
@@ -1148,6 +1175,48 @@ mod tests {
         );
         // 缺省清单（不写字段）视为可参与默认选包
         assert!(general().default_eligible);
+    }
+
+    /// 实际参与记录：指定包时只列它；Auto 逐条路由到不同包时按首次使用顺序去重列出；reset 后清空。
+    #[test]
+    fn used_ids_lists_only_actual_packs() {
+        let (engine, _g, _s) = router(RoutePolicy {
+            mode: RouteMode::SpecializedFirst,
+            preferred_id: "nllb".into(),
+            max_resident: 2,
+        });
+        assert!(engine.used_ids().is_empty());
+        run(&engine, "hello", Lang::En, Lang::ZhHans).expect("翻译");
+        assert_eq!(engine.used_ids(), ["nllb"]);
+        engine.reset_used();
+        assert!(engine.used_ids().is_empty());
+        engine.set_policy(RoutePolicy {
+            mode: RouteMode::SpecializedFirst,
+            preferred_id: String::new(),
+            max_resident: 2,
+        });
+        engine
+            .translate_batch(
+                &[
+                    "hello world".into(),
+                    "こんにちは".into(),
+                    "hello again".into(),
+                ],
+                Lang::Auto,
+                Lang::ZhHans,
+            )
+            .expect("批量");
+        assert_eq!(engine.used_ids(), ["opus", "nllb"]);
+    }
+
+    /// 全空白输入不占用任何包。
+    #[test]
+    fn used_ids_empty_for_blank_input() {
+        let (engine, _g, _s) = router(mixed_policy(2));
+        engine
+            .translate_batch(&["  ".into()], Lang::Auto, Lang::ZhHans)
+            .expect("空白");
+        assert!(engine.used_ids().is_empty());
     }
 
     /// 专用包优先：英译中走专用包且不加载通用包；日译中走通用包。

@@ -2,8 +2,8 @@
 
 use crate::ocr_backend::i18n_for;
 use snow_config::extensions::{
-    KEY_LOCAL_MAX_RESIDENT, KEY_LOCAL_ROUTE_MODE, ROUTE_MIXED_SPLIT, ROUTE_SINGLE,
-    ROUTE_SPECIALIZED_FIRST,
+    KEY_LOCAL_MAX_RESIDENT, KEY_LOCAL_MODEL_ID, KEY_LOCAL_ROUTE_MODE, ROUTE_MIXED_SPLIT,
+    ROUTE_SINGLE, ROUTE_SPECIALIZED_FIRST,
 };
 use snow_i18n::Args;
 
@@ -150,6 +150,75 @@ pub fn hymt2_selected(model_id: &str) -> bool {
     model_id == HYMT2_MODEL_ID
 }
 
+/// 说明区里可点击的按钮。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hymt2Button {
+    /// 「使用该模型」。
+    Use,
+    /// 「下载」（占位）。
+    Download,
+}
+
+/// 点击按钮后要做的事（由视图层执行，本模块不碰配置与网络）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Hymt2Click {
+    /// 把某个配置项改成某个字符串值。
+    SetConfig {
+        /// 配置键。
+        key: &'static str,
+        /// 新值。
+        value: String,
+    },
+    /// 展示一条提示文本（不发起任何网络请求）。
+    ShowNotice(String),
+}
+
+/// 说明区当前的展示状态。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Hymt2View {
+    /// 文案。
+    pub panel: Hymt2Panel,
+    /// 是否已选中（选中时「使用该模型」显示为不可点的「使用中」）。
+    pub in_use: bool,
+}
+
+/// 由当前配置值生成说明区状态。
+///
+/// # 参数
+/// - `locale`：界面语言。
+/// - `model_id`：`local_model_id` 当前值。
+///
+/// # 示例
+/// ```ignore
+/// assert!(hymt2_view("en-US", HYMT2_MODEL_ID).in_use);
+/// ```
+pub fn hymt2_view(locale: &str, model_id: &str) -> Hymt2View {
+    Hymt2View {
+        panel: hymt2_panel(locale),
+        in_use: hymt2_selected(model_id),
+    }
+}
+
+/// 处理按钮点击：使用 → 把 `local_model_id` 设为 Hy-MT2；下载 → 只给提示。
+///
+/// # 参数
+/// - `button`：被点的按钮。
+/// - `locale`：界面语言。
+///
+/// # 示例
+/// ```ignore
+/// let click = hymt2_click(Hymt2Button::Use, "zh-CN");
+/// ```
+pub fn hymt2_click(button: Hymt2Button, locale: &str) -> Hymt2Click {
+    match button {
+        Hymt2Button::Use => Hymt2Click::SetConfig {
+            key: KEY_LOCAL_MODEL_ID,
+            value: HYMT2_MODEL_ID.to_string(),
+        },
+        Hymt2Button::Download => Hymt2Click::ShowNotice(hymt2_download_notice(locale)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -211,6 +280,46 @@ mod tests {
             );
             assert!(!note.contains("http"), "{locale}");
         }
+    }
+
+    /// 「使用该模型」：设置 local_model_id 为 Hy-MT2 的包 ID。
+    #[test]
+    fn use_click_sets_local_model_id() {
+        assert_eq!(
+            hymt2_click(Hymt2Button::Use, "zh-CN"),
+            Hymt2Click::SetConfig {
+                key: "screenshot_translation/local_model_id",
+                value: "hymt2-1.8b-int4".to_string()
+            }
+        );
+    }
+
+    /// 下载占位：只返回提示文本，不含网络地址，也不是配置修改。
+    #[test]
+    fn download_click_only_shows_notice() {
+        for locale in LOCALES {
+            let Hymt2Click::ShowNotice(text) = hymt2_click(Hymt2Button::Download, locale) else {
+                panic!("下载占位应只提示");
+            };
+            assert_eq!(text, hymt2_download_notice(locale));
+            assert!(!text.contains("http"));
+        }
+    }
+
+    /// 状态：选中 Hy-MT2 显示“使用中”，其它值（含空）显示可点的“使用该模型”；点击后再渲染即转为使用中。
+    #[test]
+    fn view_reflects_selection() {
+        for locale in LOCALES {
+            let idle = hymt2_view(locale, "opus");
+            assert!(!idle.in_use && !idle.panel.in_use_label.is_empty());
+            assert_ne!(idle.panel.use_label, idle.panel.in_use_label);
+            assert!(!hymt2_view(locale, "").in_use);
+            assert!(hymt2_view(locale, HYMT2_MODEL_ID).in_use);
+        }
+        let Hymt2Click::SetConfig { value, .. } = hymt2_click(Hymt2Button::Use, "en-US") else {
+            panic!("应为配置修改");
+        };
+        assert!(hymt2_view("en-US", &value).in_use);
     }
 
     #[test]
