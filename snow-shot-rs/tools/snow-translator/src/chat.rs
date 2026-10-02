@@ -13,7 +13,7 @@ use std::fmt;
 use std::path::Path;
 
 use ort::session::{Session, SessionInputValue};
-use ort::value::{DynValue, Tensor, ValueType};
+use ort::value::{DynValue, Tensor, TensorElementType, ValueType};
 use tokenizers::Tokenizer;
 
 use crate::engine::{
@@ -230,6 +230,62 @@ pub fn pack_segments(
     groups
 }
 
+/// 要求模型输出存在；缺失时返回 `DecodeFailed`，避免按索引取值 panic 或静默丢弃 KV。
+///
+/// # 参数
+/// - `value`：按名字取到的输出（可能缺失）。
+/// - `name`：输出名，用于错误信息。
+///
+/// # 返回
+/// 取到的值；缺失返回 `DecodeFailed`。
+fn require_output<T>(value: Option<T>, name: &str) -> Result<T, EngineError> {
+    value.ok_or_else(|| {
+        EngineError::new(
+            ErrorKind::DecodeFailed,
+            format!("model output `{name}` is missing"),
+        )
+    })
+}
+
+/// 加载期校验：`logits` 与全部 `present.*` 输出必须存在。
+///
+/// # 参数
+/// - `outputs`：模型声明的输出名。
+/// - `present_names`：由 KV 输入推出的 `present.*` 名。
+///
+/// # 返回
+/// 通过返回 `Ok`；缺失返回 `LoadFailed` 并点名。
+fn check_output_names(outputs: &[&str], present_names: &[String]) -> Result<(), EngineError> {
+    let missing = std::iter::once(OUTPUT_LOGITS)
+        .chain(present_names.iter().map(String::as_str))
+        .find(|n| !outputs.contains(n));
+    match missing {
+        Some(n) => Err(EngineError::new(
+            ErrorKind::LoadFailed,
+            format!("model has no `{n}` output"),
+        )),
+        None => Ok(()),
+    }
+}
+
+/// 校验 KV 元素类型：当前只支持 float32（f16 需额外依赖，暂不支持，明确报错）。
+///
+/// # 参数
+/// - `ty`：`past_key_values.*` 输入的元素类型。
+///
+/// # 返回
+/// f32 返回 `Ok`；其他返回 `LoadFailed`。
+fn check_kv_dtype(ty: TensorElementType) -> Result<(), EngineError> {
+    if ty == TensorElementType::Float32 {
+        Ok(())
+    } else {
+        Err(EngineError::new(
+            ErrorKind::LoadFailed,
+            format!("unsupported KV cache element type {ty:?} (only float32 is supported)"),
+        ))
+    }
+}
+
 /// ORT 会话封装：持有 KV cache 与 logits 缓冲，实现 [`LogitsSource`]。
 struct ChatSession {
     /// 解码会话（单图，预填充与逐 token 共用）。
@@ -304,9 +360,8 @@ impl LogitsSource for ChatSession {
         }
         let mut outputs = self.session.run(inputs).map_err(|e| fail(&e))?;
         {
-            let (shape, data) = outputs[OUTPUT_LOGITS]
-                .try_extract_tensor::<f32>()
-                .map_err(|e| fail(&e))?;
+            let logits = require_output(outputs.get(OUTPUT_LOGITS), OUTPUT_LOGITS)?;
+            let (shape, data) = logits.try_extract_tensor::<f32>().map_err(|e| fail(&e))?;
             let vocab = shape.last().copied().unwrap_or(0).max(0) as usize;
             if vocab == 0 || data.len() < vocab {
                 return Err(EngineError::new(
@@ -318,9 +373,7 @@ impl LogitsSource for ChatSession {
             self.logits.extend_from_slice(&data[data.len() - vocab..]);
         }
         for (present, slot) in self.present_names.iter().zip(self.past.iter_mut()) {
-            if let Some(v) = outputs.remove(present.as_str()) {
-                *slot = v;
-            }
+            *slot = require_output(outputs.remove(present.as_str()), present)?;
         }
         Ok(&self.logits)
     }
@@ -401,6 +454,19 @@ impl ChatEngine {
             .iter()
             .map(|n| n.replacen(PAST_PREFIX, PRESENT_PREFIX, 1))
             .collect();
+        let output_names: Vec<&str> = session.outputs().iter().map(|o| o.name()).collect();
+        check_output_names(&output_names, &present_names)?;
+        let kv_ty = session
+            .inputs()
+            .iter()
+            .find(|o| o.name().starts_with(PAST_PREFIX))
+            .and_then(|o| match o.dtype() {
+                ValueType::Tensor { ty, .. } => Some(*ty),
+                _ => None,
+            });
+        if let Some(ty) = kv_ty {
+            check_kv_dtype(ty)?;
+        }
         let dims = session
             .inputs()
             .iter()
@@ -614,6 +680,36 @@ mod tests {
             self.step += 1;
             Ok(&self.buf)
         }
+    }
+
+    /// 输出缺失返回 `DecodeFailed`，存在则原样返回。
+    #[test]
+    fn require_output_reports_missing() {
+        assert_eq!(require_output(Some(1), "logits").unwrap(), 1);
+        let e = require_output::<i32>(None, "present.0.key").unwrap_err();
+        assert_eq!(e.kind, ErrorKind::DecodeFailed);
+        assert!(e.message.contains("present.0.key"));
+    }
+
+    /// 加载期输出名校验：缺 logits 或缺某个 present 都点名报错。
+    #[test]
+    fn output_names_validated_at_load() {
+        let present = vec!["present.0.key".to_string()];
+        assert!(check_output_names(&["logits", "present.0.key"], &present).is_ok());
+        let e = check_output_names(&["present.0.key"], &present).unwrap_err();
+        assert!(e.message.contains("logits"));
+        let e = check_output_names(&["logits"], &present).unwrap_err();
+        assert!(e.message.contains("present.0.key"));
+        assert_eq!(e.kind, ErrorKind::LoadFailed);
+    }
+
+    /// KV 元素类型：f32 通过，f16 明确报错。
+    #[test]
+    fn kv_dtype_checked() {
+        assert!(check_kv_dtype(TensorElementType::Float32).is_ok());
+        let e = check_kv_dtype(TensorElementType::Float16).unwrap_err();
+        assert_eq!(e.kind, ErrorKind::LoadFailed);
+        assert!(e.message.contains("Float16"));
     }
 
     /// 缺省参数：eos 9，不惩罚。
