@@ -174,7 +174,7 @@ pub(crate) fn raw_entries() -> Vec<SchemaEntry> {
             ValueKind::String,
             None,
             &[
-                "ar", "de", "en", "es", "fr", "it", "ja", "pt", "ru", "tr", "zh-Hans", "zh-Hant",
+                "ar", "de", "en", "es", "fr", "it", "ja", "pt", "ru", "tr", "zh-Hans",
             ],
             None,
         ),

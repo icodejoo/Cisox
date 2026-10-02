@@ -162,6 +162,34 @@ impl Lang {
             _ => None,
         }
     }
+
+    /// 从系统/界面 locale 标记解析语言（`zh-CN`、`ja-JP`、`en_US` 等）；未知返回 `None`。
+    /// 繁体系（Hant/TW/HK/MO）按项目决定不支持，返回 `None`。
+    ///
+    /// # 参数
+    /// - `locale`: locale 字符串，分隔符 `-` 或 `_` 均可。
+    ///
+    /// # 示例
+    /// ```rust
+    /// use snow_translate::Lang;
+    /// assert_eq!(Lang::from_locale("zh-HK"), None);
+    /// assert_eq!(Lang::from_locale("ja-JP"), Some(Lang::Ja));
+    /// ```
+    pub fn from_locale(locale: &str) -> Option<Self> {
+        let lower = locale.trim().to_lowercase().replace('_', "-");
+        let primary = lower.split('-').next().unwrap_or("");
+        if primary == "zh" {
+            let hant = lower
+                .split('-')
+                .skip(1)
+                .any(|t| matches!(t, "hant" | "tw" | "hk" | "mo"));
+            return if hant { None } else { Some(Self::ZhHans) };
+        }
+        match Self::from_code(primary) {
+            Some(Self::Auto) | None => None,
+            other => other,
+        }
+    }
 }
 
 /// 翻译模块错误类型。
@@ -783,6 +811,23 @@ impl TranslationService {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// locale 映射：简繁中文、常见语言与未知值。
+    #[test]
+    fn lang_from_locale_cases() {
+        for l in ["zh-CN", "zh-Hans-CN", "zh", "zh_SG"] {
+            assert_eq!(Lang::from_locale(l), Some(Lang::ZhHans), "{l}");
+        }
+        for l in ["zh-TW", "zh-Hant-TW", "zh-HK", "zh_MO"] {
+            assert_eq!(Lang::from_locale(l), None, "{l} 繁体不支持");
+        }
+        assert_eq!(Lang::from_locale("en-US"), Some(Lang::En));
+        assert_eq!(Lang::from_locale("ja-JP"), Some(Lang::Ja));
+        assert_eq!(Lang::from_locale("pt-BR"), Some(Lang::Pt));
+        assert_eq!(Lang::from_locale("xx-YY"), None);
+        assert_eq!(Lang::from_locale("auto"), None);
+        assert_eq!(Lang::from_locale(""), None);
+    }
 
     /// 唯一临时目录。
     fn temp_dir(tag: &str) -> PathBuf {

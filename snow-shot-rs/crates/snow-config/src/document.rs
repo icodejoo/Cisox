@@ -782,6 +782,21 @@ mod tests {
         );
     }
 
+    /// 目标语言迁移：旧繁体值作废回落为默认空串（无已保存值），具体简体/其它值不变。
+    #[test]
+    fn target_language_drops_traditional() {
+        let key = "screenshot_translation/target_language";
+        let version = crate::schema::current_version();
+        let write = |v: Value| {
+            load(&json!({"storage": {"schema_version": version},
+                         "screenshot_translation": {"target_language": v}}).to_string())
+        };
+        assert_eq!(write(json!("zh-Hant")).value(key), json!(""));
+        assert_eq!(write(json!("")).value(key), json!(""));
+        assert_eq!(write(json!("ja")).value(key), json!("ja"));
+        assert_eq!(write(json!("zh-Hans")).value(key), json!("zh-Hans"));
+    }
+
     /// 托盘菜单：旧默认（缺 restore 项）升级；自定义顺序保持；旧命令名迁移并回写。
     #[test]
     fn tray_menu_migrations() {

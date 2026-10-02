@@ -40,8 +40,6 @@ pub const KEY_LAYOUT: &str = "screenshot_translation/layout_processing";
 pub const KEY_CUSTOM_MODEL: &str = "screenshot_translation/model";
 /// 配置键：自定义模型列表。
 pub const KEY_CUSTOM_MODELS: &str = "api_configuration/custom_models";
-/// 配置键：界面语言。
-pub const KEY_INTERFACE_LANGUAGE: &str = "interface/language";
 /// 环境变量：直接指定 `snow-translator.exe`（开发 / 自测用）。
 pub const ENV_TRANSLATOR_EXE: &str = "SNOW_TRANSLATOR_EXE";
 /// 模型根目录相对数据根的路径。
@@ -95,23 +93,75 @@ pub struct TranslateConfig {
     pub custom_models: Vec<CustomAiModel>,
 }
 
-/// 由界面语言得到默认目标语言：简体/繁体中文界面翻成对应中文，其它翻成英文。
+/// 设置页提供的具体目标语言及其配置值拼写（不含 `auto`、韩语与繁体）。
+const SUPPORTED_TARGETS: [(Lang, &str); 11] = [
+    (Lang::Ar, "ar"),
+    (Lang::De, "de"),
+    (Lang::En, "en"),
+    (Lang::Es, "es"),
+    (Lang::Fr, "fr"),
+    (Lang::It, "it"),
+    (Lang::Ja, "ja"),
+    (Lang::Pt, "pt"),
+    (Lang::Ru, "ru"),
+    (Lang::Tr, "tr"),
+    (Lang::ZhHans, "zh-Hans"),
+];
+
+/// 把语言映射到支持集合内的配置值拼写；不在集合内返回 `None`。
+fn target_code(lang: Lang) -> Option<&'static str> {
+    SUPPORTED_TARGETS.iter().find(|(l, _)| *l == lang).map(|(_, code)| *code)
+}
+
+/// 目标语言的生效值：已保存的具体值原样保留；缺失/空串时取系统语言，
+/// 映射不到或不在支持集合内则退英语。纯函数，不写回配置。
 ///
 /// # 参数
-/// - `configured`：配置里的界面语言（`system` / `en_US` / `zh_CN` / `zh_TW`）。
-/// - `system_language`：系统语言标记（如 `zh-CN`），仅在 `system` 时使用。
+/// - `config_value`：配置里已保存的目标语言；`None` 或空串表示用户没选过。
+/// - `system_locale`：系统界面语言标记（如 `ja-JP`）。
+///
+/// # 返回
+/// 目标语言配置值拼写（如 `zh-Hans`、`ja`），恒为设置页下拉里的合法项。
 ///
 /// ```ignore
-/// assert_eq!(default_target("zh_TW", "en-US"), Lang::ZhHant);
+/// assert_eq!(effective_target_language(None, "ja-JP"), "ja");
+/// assert_eq!(effective_target_language(Some("fr"), "ja-JP"), "fr");
 /// ```
-pub fn default_target(configured: &str, system_language: &str) -> Lang {
-    let value = if configured.trim().eq_ignore_ascii_case("system") { system_language } else { configured };
-    let lower = value.trim().to_lowercase();
-    if lower.starts_with("zh") {
-        if ["tw", "hk", "mo", "hant"].iter().any(|tag| lower.contains(tag)) { Lang::ZhHant } else { Lang::ZhHans }
-    } else {
-        Lang::En
-    }
+pub fn effective_target_language(config_value: Option<&str>, system_locale: &str) -> &'static str {
+    let saved = config_value.map(str::trim).filter(|v| !v.is_empty());
+    saved
+        .and_then(Lang::from_code)
+        .and_then(target_code)
+        .or_else(|| Lang::from_locale(system_locale).and_then(target_code))
+        .unwrap_or("en")
+}
+
+/// 界面语言的生效值：只支持 `en_US` / `zh_CN`。已保存的这两种值（拼写宽松）原样生效；
+/// 缺失、空串、`system`、`auto`、旧繁体 `zh_TW` / `zh-Hant` 等都视为没保存，
+/// 取系统语言映射，映射不到退 `en_US`。纯函数，不写回配置。
+///
+/// # 参数
+/// - `config_value`：`interface/language` 已保存的值，`None` 表示没有。
+/// - `system_locale`：系统界面语言标记（如 `zh-CN`）。
+///
+/// # 返回
+/// `"en_US"` 或 `"zh_CN"`。
+///
+/// ```ignore
+/// assert_eq!(effective_interface_language(None, "zh-CN"), "zh_CN");
+/// assert_eq!(effective_interface_language(Some("zh_TW"), "ja-JP"), "en_US");
+/// ```
+pub fn effective_interface_language(config_value: Option<&str>, system_locale: &str) -> &'static str {
+    let pick = |lang: Option<Lang>| match lang {
+        Some(Lang::ZhHans) => Some("zh_CN"),
+        Some(Lang::En) => Some("en_US"),
+        _ => None,
+    };
+    let saved = config_value.map(str::trim).filter(|v| !v.is_empty());
+    saved
+        .and_then(|v| pick(Lang::from_locale(v)))
+        .or_else(|| pick(Lang::from_locale(system_locale)))
+        .unwrap_or("en_US")
 }
 
 impl TranslateConfig {
@@ -133,9 +183,9 @@ impl TranslateConfig {
             document.value(key).as_i64().and_then(|n| i32::try_from(n).ok()).unwrap_or(default)
         };
         let models_dir = Some(text(KEY_LOCAL_MODELS_DIR)).filter(|d| !d.is_empty()).map(PathBuf::from);
-        let target = Lang::from_code(&text(KEY_TARGET_LANGUAGE))
-            .filter(|l| *l != Lang::Auto)
-            .unwrap_or_else(|| default_target(&text(KEY_INTERFACE_LANGUAGE), system_language));
+        let saved = text(KEY_TARGET_LANGUAGE);
+        let target = Lang::from_code(effective_target_language(Some(&saved), system_language))
+            .unwrap_or(Lang::En);
         let (custom_models, _) = custom_ai_models_from_json(&document.value(KEY_CUSTOM_MODELS));
         Self {
             backend: if text(KEY_TRANSLATION_BACKEND) == BACKEND_OPENAI { Backend::OpenAi } else { Backend::Local },
@@ -729,7 +779,7 @@ mod tests {
         doc.set_value(KEY_LOCAL_MODEL_ID, serde_json::json!("opus")).expect("模型");
         doc.set_value(KEY_LOCAL_IDLE_SECONDS, serde_json::json!(30)).expect("空闲");
         doc.set_value(KEY_LOCAL_NUM_BEAMS, serde_json::json!(2)).expect("束宽");
-        doc.set_value(KEY_TARGET_LANGUAGE, serde_json::json!("zh-Hant")).expect("目标");
+        doc.set_value(KEY_TARGET_LANGUAGE, serde_json::json!("ja")).expect("目标");
         doc.set_value(KEY_SOURCE_LANGUAGE, serde_json::json!("en")).expect("源");
         doc.set_value(KEY_LAYOUT, serde_json::json!("original")).expect("版式");
         doc.set_value(KEY_LOCAL_ROUTE_MODE, serde_json::json!(ROUTE_MIXED_SPLIT)).expect("路由");
@@ -739,7 +789,7 @@ mod tests {
         assert_eq!(cfg.route_policy().preferred_id, "opus");
         assert_eq!(cfg.models_dir, Some(PathBuf::from("D:/my models")));
         assert_eq!((cfg.model_id.as_str(), cfg.beams, cfg.idle), ("opus", 2, Duration::from_secs(30)));
-        assert_eq!((cfg.source, cfg.target, cfg.layout), (Lang::En, Lang::ZhHant, LayoutMode::Original));
+        assert_eq!((cfg.source, cfg.target, cfg.layout), (Lang::En, Lang::Ja, LayoutMode::Original));
         doc.set_value(KEY_LOCAL_LOW_MEMORY, serde_json::json!(true)).expect("低内存");
         assert_eq!(TranslateConfig::from_document(&doc, "en-US").effective_beams(), 1);
         doc.set_value(KEY_TRANSLATION_BACKEND, serde_json::json!("openai")).expect("后端");
@@ -857,15 +907,42 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// 默认目标语言：简/繁中文界面对应中文，system 时用系统语言，其它为英文。
+    /// 目标语言生效值：已保存值不变；缺失/空串走 系统→英语 回退链。
     #[test]
-    fn default_target_rules() {
-        assert_eq!(default_target("zh_CN", "en-US"), Lang::ZhHans);
-        assert_eq!(default_target("zh_TW", "en-US"), Lang::ZhHant);
-        assert_eq!(default_target("en_US", "zh-CN"), Lang::En);
-        assert_eq!(default_target("system", "zh-TW"), Lang::ZhHant);
-        assert_eq!(default_target("system", "zh-Hans-CN"), Lang::ZhHans);
-        assert_eq!(default_target("system", "ja-JP"), Lang::En);
+    fn effective_target_rules() {
+        assert_eq!(effective_target_language(None, "ja-JP"), "ja");
+        assert_eq!(effective_target_language(Some(""), "zh-Hant-TW"), "en");
+        assert_eq!(effective_target_language(Some("  "), "zh-CN"), "zh-Hans");
+        assert_eq!(effective_target_language(None, "ko-KR"), "en");
+        assert_eq!(effective_target_language(None, ""), "en");
+        assert_eq!(effective_target_language(None, "xx"), "en");
+        assert_eq!(effective_target_language(Some("fr"), "ja-JP"), "fr", "已保存值不变");
+        assert_eq!(effective_target_language(Some("zh-Hant"), "zh-CN"), "zh-Hans", "旧繁体值视同没保存");
+        assert_eq!(effective_target_language(Some("zh-Hans"), "ja-JP"), "zh-Hans");
+        assert_eq!(effective_target_language(Some("bogus"), "de-DE"), "de");
+    }
+
+    /// 界面语言生效值：旧 system/auto/空串/繁体视同没保存，en_US 与 zh_CN 不变，映射不到退 en_US。
+    #[test]
+    fn effective_interface_rules() {
+        for old in [None, Some(""), Some("system"), Some("AUTO"), Some("zh_TW"), Some("zh-Hant")] {
+            assert_eq!(effective_interface_language(old, "zh-CN"), "zh_CN", "{old:?}");
+            assert_eq!(effective_interface_language(old, "en-US"), "en_US", "{old:?}");
+            assert_eq!(effective_interface_language(old, "zh-Hant-TW"), "en_US", "{old:?} 繁体系统回退英语");
+            assert_eq!(effective_interface_language(old, "ja-JP"), "en_US");
+            assert_eq!(effective_interface_language(old, ""), "en_US");
+        }
+        assert_eq!(effective_interface_language(Some("zh_CN"), "en-US"), "zh_CN");
+        assert_eq!(effective_interface_language(Some("en_US"), "zh-CN"), "en_US");
+    }
+
+    /// 调用点：配置里没有保存目标语言（默认空串）时 TranslateConfig 取系统语言；已保存值不被覆盖。
+    #[test]
+    fn config_unset_target_uses_system_language() {
+        let mut doc = ConfigDocument::from_bytes(None);
+        assert_eq!(TranslateConfig::from_document(&doc, "ja-JP").target, Lang::Ja);
+        doc.set_value(KEY_TARGET_LANGUAGE, serde_json::json!("fr")).expect("目标");
+        assert_eq!(TranslateConfig::from_document(&doc, "de-DE").target, Lang::Fr);
     }
 
     /// 模型根目录：配置为空用数据根下的默认位置。

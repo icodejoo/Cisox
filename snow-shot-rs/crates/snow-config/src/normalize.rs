@@ -639,7 +639,9 @@ mod tests {
         let target = "screenshot_translation/target_language";
         check(source, json!(" AUTO "), json!("auto"), true);
         check(source, json!("zh-hans"), json!("zh-Hans"), true);
-        check(target, json!("ZH-HANT"), json!("zh-Hant"), true);
+        check(target, json!("ZH-HANS"), json!("zh-Hans"), true);
+        // 繁体已不支持：旧保存值判非法，回落默认（空串=无已保存值）
+        check_invalid(target, json!("zh-Hant"));
         check(target, json!("ja"), json!("ja"), false);
         check_invalid(target, json!("auto"));
         check_invalid(target, json!(""));
