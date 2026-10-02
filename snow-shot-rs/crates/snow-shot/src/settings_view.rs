@@ -13,7 +13,10 @@ use crate::settings_state::{
 };
 use crate::ocr_backend::{OcrBackend, OcrNotice};
 use crate::settings_text::{Lang, Text, group_title, t};
-use snow_config::extensions::KEY_OCR_BACKEND;
+use crate::translate_settings::{
+    hymt2_download_notice, hymt2_panel, hymt2_selected, route_hint, route_mode_label,
+};
+use snow_config::extensions::{KEY_LOCAL_MODEL_ID, KEY_LOCAL_ROUTE_MODE, KEY_OCR_BACKEND};
 use serde_json::{Value, json};
 use snow_ui::ui::*;
 use std::ops::Range;
@@ -219,7 +222,12 @@ pub struct SettingsView {
     list_scroll: UniformListScrollHandle,
     /// 渲染耗时探针。
     probe: RenderProbe,
+    /// Hy-MT2 下载入口点击后的提示（暂无发布地址，只给手动放置指引）。
+    hymt2_notice: Option<String>,
 }
+
+/// 翻译设置所在分组的 id。
+const TRANSLATION_GROUP_ID: &str = "screenshot_translation";
 
 impl SettingsView {
     /// 创建设置页并把键盘焦点交给它。
@@ -243,6 +251,7 @@ impl SettingsView {
             focus: cx.focus_handle(),
             list_scroll: UniformListScrollHandle::new(),
             probe: RenderProbe::default(),
+            hymt2_notice: None,
         });
         let handle = view.read(app).focus.clone();
         window.focus(&handle, app);
@@ -508,6 +517,8 @@ impl SettingsView {
                 for option in options {
                     let text = match OcrBackend::from_config_value(option).filter(|_| key == KEY_OCR_BACKEND) {
                         Some(backend) => backend.label(locale),
+                        None if key == KEY_LOCAL_ROUTE_MODE => route_mode_label(option, locale)
+                            .unwrap_or_else(|| (*option).to_string()),
                         None => (*option).to_string(),
                     };
                     chips = chips.child(Self::chip(text, current == *option, p).on_mouse_down(
@@ -645,10 +656,12 @@ impl SettingsView {
             }
         };
         let backend_notice = if key == KEY_OCR_BACKEND { OcrNotice::for_config_value(&row.value) } else { None };
-        let sub = match (&row.error, backend_notice) {
-            (Some(error), _) => div().text_color(p.danger).child(error.clone()),
-            (None, Some(notice)) => div().text_color(p.danger).child(notice.message(self.state.prefs().locale)),
-            (None, None) => div().text_color(p.dim).child(key),
+        let route_note = route_hint(key, &row.value, self.state.prefs().locale);
+        let sub = match (&row.error, backend_notice, route_note) {
+            (Some(error), _, _) => div().text_color(p.danger).child(error.clone()),
+            (None, Some(notice), _) => div().text_color(p.danger).child(notice.message(self.state.prefs().locale)),
+            (None, None, Some(note)) => div().text_color(p.dim).child(note),
+            (None, None, None) => div().text_color(p.dim).child(key),
         };
         let label = div()
             .w(px(LABEL_WIDTH))
@@ -816,6 +829,60 @@ impl SettingsView {
             .child(div().flex().items_center().gap_3().child(search).child(reset_group))
     }
 
+    /// 渲染翻译分组顶部的 Hy-MT2 可选包说明区；其它范围返回 `None`。
+    fn render_hymt2_panel(&self, p: &Palette, cx: &mut Context<Self>) -> Option<Div> {
+        let Scope::Group(index) = self.state.scope() else { return None };
+        if crate::settings_model::groups().get(index)?.id != TRANSLATION_GROUP_ID {
+            return None;
+        }
+        let locale = self.state.prefs().locale;
+        let panel = hymt2_panel(locale);
+        let selected = self
+            .state
+            .row_by_key(KEY_LOCAL_MODEL_ID)
+            .is_some_and(|row| hymt2_selected(row.value.as_str().unwrap_or_default()));
+        let use_button = if selected {
+            Self::button(panel.in_use_label, false, p)
+        } else {
+            Self::button(panel.use_label, true, p).on_mouse_down(
+                MouseButton::Left,
+                Self::click(
+                    cx,
+                    SettingsAction::Change {
+                        key: KEY_LOCAL_MODEL_ID,
+                        value: json!(crate::translate_settings::HYMT2_MODEL_ID),
+                    },
+                ),
+            )
+        };
+        let download = Self::button(panel.download_label, true, p).on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _event: &MouseDownEvent, _window, cx| {
+                this.hymt2_notice = Some(hymt2_download_notice(locale));
+                cx.stop_propagation();
+                cx.notify();
+            }),
+        );
+        let mut block = div()
+            .px_4()
+            .py_2()
+            .flex()
+            .flex_none()
+            .flex_col()
+            .gap_1()
+            .border_b_1()
+            .border_color(p.border)
+            .text_size(px(12.0))
+            .child(div().font_weight(FontWeight::BOLD).child(panel.title));
+        for line in panel.lines {
+            block = block.child(div().text_color(p.dim).child(line));
+        }
+        if let Some(notice) = &self.hymt2_notice {
+            block = block.child(div().text_color(p.danger).child(notice.clone()));
+        }
+        Some(block.child(div().flex().gap_2().child(use_button).child(download)))
+    }
+
     /// 渲染状态栏。
     fn render_status(&self, p: &Palette) -> impl IntoElement {
         let (text, color) = match self.state.status() {
@@ -927,6 +994,7 @@ impl Render for SettingsView {
                     .flex()
                     .flex_col()
                     .child(self.render_header(&p, lang, cx))
+                    .children(self.render_hymt2_panel(&p, cx))
                     .child(body)
                     .child(self.render_status(&p)),
             );

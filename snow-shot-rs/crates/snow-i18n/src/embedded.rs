@@ -12,6 +12,10 @@ pub const RESOURCES: &[(&str, &str)] = &[
     ("en-US", include_str!("../locales/en-US/recognition.ftl")),
     ("en-US", include_str!("../locales/en-US/recording.ftl")),
     ("en-US", include_str!("../locales/en-US/settings.ftl")),
+    (
+        "en-US",
+        include_str!("../locales/en-US/translate_settings.ftl"),
+    ),
     ("en-US", include_str!("../locales/en-US/translation.ftl")),
     ("en-US", include_str!("../locales/en-US/updates.ftl")),
     ("zh-CN", include_str!("../locales/zh-CN/annotation.ftl")),
@@ -24,6 +28,10 @@ pub const RESOURCES: &[(&str, &str)] = &[
     ("zh-CN", include_str!("../locales/zh-CN/recognition.ftl")),
     ("zh-CN", include_str!("../locales/zh-CN/recording.ftl")),
     ("zh-CN", include_str!("../locales/zh-CN/settings.ftl")),
+    (
+        "zh-CN",
+        include_str!("../locales/zh-CN/translate_settings.ftl"),
+    ),
     ("zh-CN", include_str!("../locales/zh-CN/translation.ftl")),
     ("zh-CN", include_str!("../locales/zh-CN/updates.ftl")),
     ("zh-TW", include_str!("../locales/zh-TW/annotation.ftl")),
@@ -36,6 +44,10 @@ pub const RESOURCES: &[(&str, &str)] = &[
     ("zh-TW", include_str!("../locales/zh-TW/recognition.ftl")),
     ("zh-TW", include_str!("../locales/zh-TW/recording.ftl")),
     ("zh-TW", include_str!("../locales/zh-TW/settings.ftl")),
+    (
+        "zh-TW",
+        include_str!("../locales/zh-TW/translate_settings.ftl"),
+    ),
     ("zh-TW", include_str!("../locales/zh-TW/translation.ftl")),
     ("zh-TW", include_str!("../locales/zh-TW/updates.ftl")),
 ];

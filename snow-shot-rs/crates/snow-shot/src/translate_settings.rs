@@ -1,0 +1,222 @@
+//! 翻译设置页的路由文案与可选包（Hy-MT2）说明：纯数据与文案，不依赖 GPUI，可离屏单测。
+
+use crate::ocr_backend::i18n_for;
+use snow_config::extensions::{
+    KEY_LOCAL_MAX_RESIDENT, KEY_LOCAL_ROUTE_MODE, ROUTE_MIXED_SPLIT, ROUTE_SINGLE,
+    ROUTE_SPECIALIZED_FIRST,
+};
+use snow_i18n::Args;
+
+/// Hy-MT2 可选包的模型 ID（与包清单一致）。
+pub const HYMT2_MODEL_ID: &str = "hymt2-1.8b-int4";
+
+/// 路由模式取值对应的标签消息 ID 与说明消息 ID。
+const ROUTE_MODE_MESSAGES: &[(&str, &str, &str)] = &[
+    (
+        ROUTE_SINGLE,
+        "translate-route-mode-single",
+        "translate-route-mode-single-hint",
+    ),
+    (
+        ROUTE_SPECIALIZED_FIRST,
+        "translate-route-mode-specialized-first",
+        "translate-route-mode-specialized-first-hint",
+    ),
+    (
+        ROUTE_MIXED_SPLIT,
+        "translate-route-mode-mixed-split",
+        "translate-route-mode-mixed-split-hint",
+    ),
+];
+
+/// 取路由模式取值的显示名。
+///
+/// # 参数
+/// - `mode`：配置取值（`single` / `specialized_first` / `mixed_split`）。
+/// - `locale`：界面语言（`en-US` / `zh-CN` / `zh-TW`）。
+///
+/// # 返回
+/// 显示名；未知取值返回 `None`。
+///
+/// # 示例
+/// ```ignore
+/// assert_eq!(route_mode_label("single", "zh-CN").as_deref(), Some("仅用指定模型"));
+/// ```
+pub fn route_mode_label(mode: &str, locale: &str) -> Option<String> {
+    let (_, label, _) = ROUTE_MODE_MESSAGES
+        .iter()
+        .find(|(value, _, _)| *value == mode)?;
+    Some(i18n_for(locale).tr(label))
+}
+
+/// 取路由相关配置项的一行说明（显示在设置行的副标题位置）。
+///
+/// # 参数
+/// - `key`：配置键。
+/// - `value`：该项当前值（路由模式时用来挑说明）。
+/// - `locale`：界面语言。
+///
+/// # 返回
+/// 说明文本；不属于路由设置的键返回 `None`。
+///
+/// # 示例
+/// ```ignore
+/// let hint = route_hint("screenshot_translation/local_max_resident_models", &json!(1), "en-US");
+/// ```
+pub fn route_hint(key: &str, value: &serde_json::Value, locale: &str) -> Option<String> {
+    if key == KEY_LOCAL_MAX_RESIDENT {
+        return Some(i18n_for(locale).tr("translate-route-resident-hint"));
+    }
+    if key == KEY_LOCAL_ROUTE_MODE {
+        let mode = value.as_str()?;
+        let (_, _, hint) = ROUTE_MODE_MESSAGES.iter().find(|(v, _, _)| *v == mode)?;
+        return Some(i18n_for(locale).tr(hint));
+    }
+    None
+}
+
+/// Hy-MT2 可选包的说明区内容。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Hymt2Panel {
+    /// 标题。
+    pub title: String,
+    /// 说明行（模型 ID、体积、内存、速度、适用、短板、许可）。
+    pub lines: Vec<String>,
+    /// 「使用该模型」按钮文案。
+    pub use_label: String,
+    /// 「使用中」文案。
+    pub in_use_label: String,
+    /// 「下载」按钮文案。
+    pub download_label: String,
+}
+
+/// 生成 Hy-MT2 说明区文案。
+///
+/// # 参数
+/// - `locale`：界面语言。
+///
+/// # 返回
+/// 已本地化的说明区内容。
+///
+/// # 示例
+/// ```ignore
+/// let panel = hymt2_panel("en-US");
+/// assert_eq!(panel.lines.len(), 7);
+/// ```
+pub fn hymt2_panel(locale: &str) -> Hymt2Panel {
+    let i18n = i18n_for(locale);
+    let id_line = i18n.tr_with(
+        "translate-hymt2-id",
+        &Args::new().named("id", HYMT2_MODEL_ID),
+    );
+    Hymt2Panel {
+        title: i18n.tr("translate-hymt2-title"),
+        lines: vec![
+            id_line,
+            i18n.tr("translate-hymt2-size"),
+            i18n.tr("translate-hymt2-memory"),
+            i18n.tr("translate-hymt2-latency"),
+            i18n.tr("translate-hymt2-fit"),
+            i18n.tr("translate-hymt2-weak"),
+            i18n.tr("translate-hymt2-license"),
+        ],
+        use_label: i18n.tr("translate-hymt2-use"),
+        in_use_label: i18n.tr("translate-hymt2-in-use"),
+        download_label: i18n.tr("translate-hymt2-download"),
+    }
+}
+
+/// 下载入口的占位行为：目前没有发布地址，只给出手动放置的指引，不发起任何网络请求。
+///
+/// # 参数
+/// - `locale`：界面语言。
+///
+/// # 返回
+/// 要展示给用户的提示文本。
+///
+/// # 示例
+/// ```ignore
+/// let note = hymt2_download_notice("zh-CN");
+/// ```
+pub fn hymt2_download_notice(locale: &str) -> String {
+    i18n_for(locale).tr("translate-hymt2-download-unavailable")
+}
+
+/// 当前模型 ID 配置是否已指向 Hy-MT2。
+///
+/// # 参数
+/// - `model_id`：`local_model_id` 配置值。
+pub fn hymt2_selected(model_id: &str) -> bool {
+    model_id == HYMT2_MODEL_ID
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// 全部语言的占位符都不应残留为缺失消息。
+    const LOCALES: [&str; 3] = ["en-US", "zh-CN", "zh-TW"];
+
+    #[test]
+    fn route_labels_cover_all_modes_and_locales() {
+        for locale in LOCALES {
+            for mode in [ROUTE_SINGLE, ROUTE_SPECIALIZED_FIRST, ROUTE_MIXED_SPLIT] {
+                let label = route_mode_label(mode, locale).expect("已知模式");
+                assert!(
+                    !label.is_empty() && !label.starts_with("translate-"),
+                    "{locale} {mode}: {label}"
+                );
+                let hint = route_hint(KEY_LOCAL_ROUTE_MODE, &json!(mode), locale).expect("说明");
+                assert!(!hint.starts_with("translate-"), "{locale} {mode}");
+            }
+        }
+        assert!(route_mode_label("auto", "en-US").is_none());
+        assert_eq!(
+            route_mode_label(ROUTE_SINGLE, "zh-CN").as_deref(),
+            Some("仅用指定模型")
+        );
+    }
+
+    #[test]
+    fn route_hint_only_for_route_keys() {
+        assert!(route_hint(KEY_LOCAL_MAX_RESIDENT, &json!(1), "en-US").is_some());
+        assert!(route_hint("screenshot_translation/local_model_id", &json!(""), "en-US").is_none());
+        assert!(route_hint(KEY_LOCAL_ROUTE_MODE, &json!("auto"), "en-US").is_none());
+    }
+
+    #[test]
+    fn hymt2_panel_lists_facts_without_product_name() {
+        for locale in LOCALES {
+            let panel = hymt2_panel(locale);
+            assert_eq!(panel.lines.len(), 7, "{locale}");
+            let all = format!("{} {}", panel.title, panel.lines.join(" "));
+            assert!(all.contains(HYMT2_MODEL_ID), "{locale}");
+            assert!(
+                all.contains("1.3 GiB") && all.contains("Apache-2.0"),
+                "{locale}"
+            );
+            assert!(!all.contains(snow_app_core::PRODUCT_NAME), "{locale}");
+            assert!(!all.contains("translate-"), "{locale}: 缺消息");
+        }
+    }
+
+    #[test]
+    fn download_placeholder_is_text_only() {
+        for locale in LOCALES {
+            let note = hymt2_download_notice(locale);
+            assert!(
+                !note.is_empty() && !note.starts_with("translate-"),
+                "{locale}"
+            );
+            assert!(!note.contains("http"), "{locale}");
+        }
+    }
+
+    #[test]
+    fn selected_matches_exact_id() {
+        assert!(hymt2_selected(HYMT2_MODEL_ID));
+        assert!(!hymt2_selected(""));
+        assert!(!hymt2_selected("opus"));
+    }
+}

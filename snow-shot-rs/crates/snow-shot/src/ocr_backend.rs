@@ -466,7 +466,7 @@ fn bundle(locale: &str) -> Option<&'static I18n> {
 }
 
 /// 语料句柄：语料构建失败时用空语料，`tr` 会返回降级文案而不会 panic。
-fn i18n_for(locale: &str) -> &'static I18n {
+pub(crate) fn i18n_for(locale: &str) -> &'static I18n {
     static EMPTY: OnceLock<I18n> = OnceLock::new();
     bundle(locale).unwrap_or_else(|| {
         EMPTY.get_or_init(|| {
