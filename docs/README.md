@@ -6,7 +6,7 @@
 - [principles.md](principles.md) — **总原则 / 第一原则 / 根本原则**（三词同义）及执行原则、红线、能力降级。唯一出处。
 
 ## 当前入口
-- [cisox-progress-handoff.md](cisox-progress-handoff.md) — 进度交接。文件开头是 09-29 暂停点，**最新待办清单在 §5.1（2026-10-01）**。
+- [cisox-progress-handoff.md](cisox-progress-handoff.md) — 进度交接。开头是 2026-10-03 暂停点真实状态，**最新待办清单在 §5.1**；功能对齐程度看 [research/qt-parity-audit.md](research/qt-parity-audit.md)。
 
 ## 方案与决策
 - [cisox-gpui-migration-plan.md](cisox-gpui-migration-plan.md) — Snow Shot → Rust + GPUI 改造方案（v2.0，含 ADR 与已拍板决策）。有效。
@@ -32,6 +32,7 @@
 - [guides/translation-hymt2-eval.md](guides/translation-hymt2-eval.md) — Hy-MT2-1.8B（Apache-2.0）int4 的 ONNX 导出与质量评测，对比 NLLB 14 语言 int4：核心 11 向 +2.4、英→中 +16.9，代价是体积 1.3 GiB、内存约 3 倍、延迟约 5 倍；含导出补丁与分词注意点。有效。
 - [guides/snow-stt-worker.md](guides/snow-stt-worker.md) — 语音转文字 worker（snow-stt）：行协议、构建（短 target、联网下载、DLL 同目录）、模型放置、wav 自检脚本、espeak-ng GPL 声明注意。P1 第一步，未接主程序。
 
+- [research/qt-parity-audit.md](research/qt-parity-audit.md) — **Qt 功能清单 vs Rust 实现对照审计（2026-10-03，读代码）**：82 项状态、配置键消费情况、缺口前十、真机验证清单。功能对齐程度以它为准。有效。
 ## 调研
 - [research/cross-monitor-recording-hw.md](research/cross-monitor-recording-hw.md) — 跨屏/双屏选区录屏硬编方案，含裁决记录。探针已实现，跨屏 16/20（单屏对照 18/20），接缝与光标已验证；跨适配器待验证。
 - [research/video-editor-backends.md](research/video-editor-backends.md) — 视频编辑器后端调研。

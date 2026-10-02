@@ -1,38 +1,37 @@
 # Cisox 进度交接（2026-10-03 暂停点）
 
-> 因 token 预算不足，所有任务已暂停。本文记录暂停时的真实状态与续做方法。方案主文档：`docs/cisox-gpui-migration-plan.md`。
+> 本文记录 2026-10-03 暂停时的真实状态与续做入口。方案主文档：`docs/cisox-gpui-migration-plan.md`。
+> **功能对齐程度以 [`research/qt-parity-audit.md`](research/qt-parity-audit.md)（2026-10-03，读代码得出）为准**；方案 P2~P7 与旧验收报告里的「已完成」没按现状重核，别直接引用。
+> 最新待办清单在 §5.1；§5 及之前的清单是 09-29 旧稿，仍有效的条目已在 §5 开头标出。
 
 ## 1. 一句话状态
 
-P0 验证基本完成，P1 地基完成，P2/P4/P5 已开工；**参考版（C++）构建卡在最后 2 个 vcpkg 包**，帧率对照数据尚未取得。代码复审只完成了"文档与调研结论"一份，**其余 5 份复审被中断，结论未收集**。
+Windows 主线已经能跑通「热键 / 托盘 / IPC → 截图覆盖窗（单屏）→ 8 个标注工具 → 复制 / 保存 PNG / 贴图 / OCR / 翻译 / 长截图 / 录屏」，另有 Rust 侧新增的输入翻译浮窗、语音转文字、视频编辑后端；底层 crate（配置、i18n、仓储、滤镜、录制 worker、本地翻译 worker）质量较扎实。但**距离全功能对齐还差很多**：按审计，82 项对照里 ✅ 24、🟡 25、🟥 5、⬜ 28；设置页 238 个键里只有 31 个被运行时读取；MCP / 更新 / 网络 crate 仍是骨架；智能选区、样式面板、PDF、截图历史界面、录屏音频与特效、QR / 表格识别均缺。真机验证清单见审计 §5，大多还没做。
 
-## 2. 已提交（本地分支 `rust-gpui`，未 push）
+## 2. 已提交（本地分支 `rust-gpui`，领先 `main` 92 个提交；领先 `origin/rust-gpui` 1 个：`d6396ea9`，未 push）
 
-| 提交 | 内容 |
-|---|---|
-| `2d267b81` | 方案文档 v1.5、P0 全部 spike、`tools/` 基线与帧计时埋点补丁 |
-| `294d20df` | `snow-shot-rs/` 骨架、gpui vendor（28 个 crate）、gpui 隔离守卫、三平台 CI |
-| `3be6791d` | `snow-config`、`snow-i18n`、`snow-ui-icons`、`snow-ui-theme`、`snow-capability`、`snow-app-core`（命令总线） |
-| `cccc6553` | 方案文档 v1.8、ADR-8 调研、调色黄金样本工具 |
+| 时间 | 提交（按主题归并） | 内容 |
+|---|---|---|
+| 09-29 | `2d267b81`、`294d20df`、`3be6791d`、`cccc6553`、`9e2f4125` | 方案文档、P0 spike、workspace 骨架、gpui vendor（28 个 crate）、守卫、三平台 CI；`snow-config`、`snow-i18n`、`snow-ui-icons`、`snow-ui-theme`、`snow-capability`、`snow-app-core` |
+| 09-29 | `f9d053d2`、`a6964c2e`、`0e34663c`、`7e692e9c`、`7c877155`、`039533e4`、`bed21e5d`、`2fa816f1`、`97f4fae0` | P1 收尾（复审 bug 修复、运行时引导）、自研组件（Checkerboard / Segmented / Popconfirm）、标注文本、`snow-ui` 聚合、选区几何 / 放大镜 / 工具栏、覆盖窗、贴图、OCR / 翻译 / 拼接服务（首版） |
+| 09-30 | `3fac3c8d`、`311a71fa`、`682498a0`~`096c86ee`、`16d272c2`、`d80ff719`、`5a6dfa4c` | 设置页、单实例 IPC、托盘；录制模型；**验收报告（已失实）**；「完整接线」提交（录制 worker、OCR / 翻译 worker 等）；换机接手指南 |
+| 10-01 | `8c6dcc8e`、`d05a61d2`、`a4bc9a8a`、`25bcc5c3`、`df03eba8`、`16017fff`、`3fb593bd`、… | 录屏 Media Foundation 后端与默认 Auto、跨屏硬编、夹具与逐帧追踪；AGENTS.md 重写；OCR 后端抽象、系统 OCR、对比工具与样片；翻译模型调研 / 量化评测 |
+| 10-02 | `227db5e5`~`57a2f308`、`55aab1f5`、`1d2ae5e1`、`72837e20`、`7d2eb8c0`、`07b5e518`、`e2a07adc`、`c04e41fb`、`cf0d6384` | 翻译路由与 Hy-MT2 可选包及设置页；i18n 设置页本地化、去掉 zh-TW；视频编辑协议与抽帧 / 降帧 / 缩放 / 裁剪；输入翻译浮窗；STT worker；MCP 载荷对齐 schema；capability 文案与 extract 门禁修复 |
+| 10-03 | `68529abb`、`75aa840a`、`3027b635`、`c54f16d6`、`d6396ea9` | 语音转文字接入主程序与 Windows 系统语音后端；视频编辑 Media Foundation 系统引擎；工具栏 ID 常量提取；文档同步 |
 
-## 3. 未提交（工作区里，**均未经独立复审**）
+## 3. 未提交（`git status` 实查，2026-10-03）
 
 | 内容 | 位置 | 备注 |
 |---|---|---|
-| `t!` 宏、源码提取与 CI 门禁 | `snow-i18n`（`runtime.rs`、`lib.rs`、`bin/snow-i18n-tool.rs`，新增 `extract.rs`、`tests/extract_gate.rs`）、`.github/workflows/snow-shot-rs-ci.yml` | 作者称测试全过；复审确认 i18n 各测试全绿 |
-| 滤镜内核 C++→Rust | `snow-canvas-filters`、`tools/p1-reference-baselines/canvas-filters/` | 作者称 1193 条黄金样本逐字节一致；智能擦除只有存根 |
-| 截图历史与贴图仓储容器层 | `snow-history` | 作者称 61 项测试过；agy 断线，作者自己重写 |
-| 日志与本地崩溃转储（T3） | `snow-app-core/src/logging.rs`、`snow-platform/src/crash*` | 作者称含真实崩溃验证；`main` 未接线 |
-| 窗口/托盘/热键/DPI | `snow-ui-shell` | **半成品，进度未知**，先 `cargo check -p snow-ui-shell` |
-| 光栅化器 | `snow-canvas-raster` | **半成品，进度未知**，先 `cargo check -p snow-canvas-raster` |
-| ADR-5 本地翻译调研 | `docs/research/adr5-local-nmt.md` | 未跟踪 |
-| 翻译 spike | `spikes/p5-nmt-ct2/` | 状态未知，可能只有构建残留 |
-| V6 证据 | `spikes/p0-v6-ime-text/evidence/` | 新增 |
-| 文档订正（按复审结论） | `docs/cisox-gpui-migration-plan.md` 等 | **一项都没做**（已核对与备份逐字节一致，文档没有改到一半）；订正清单见 §5 待办 2 |
+| fps 夹具改动（他人 / 另一会话） | `snow-shot-rs/tools/snow-fps-fixture/` 下 7 个文件（`analyze/*.py`、`scripts/run-fps-test.ps1`、`src/dual.rs`、`src/lib.rs`、`src/main.rs`） | 「序号条只由一个窗口绘制」的双窗口夹具改动，未验证、暂不提交（见 §5.1 跨屏待验证）。**不要碰，也不要顺手提交** |
+| 测试素材 | `materials/`（`ocr/`、`translate/`） | 未入库，OCR 样片与翻译素材；见 `docs/guides/ocr-samples.md` |
+| 审计文档与本次文档更新 | `docs/research/qt-parity-audit.md`、本文、方案、索引、验收报告 | 本次任务产物，待用户确认后提交 |
 
-**提交前必做**：复审员做过"变异实验"（临时改坏代码），暂停时已要求它们还原，但没有逐个确认。提交前先跑各 crate 的测试，并检查 `git diff` 有无可疑的小改动（改了常量、边界、断言的那种）。
+原 09-29 暂停时的「未提交」清单（i18n 门禁、滤镜、历史仓储、T3、shell、raster、调研、spike 等）**已全部随上面的提交入库，不再有未提交残留**；当时「均未经独立复审」的担忧见 §3.1，逐项处理情况已标注。「提交前必做：复审员变异实验残留检查」已随历次提交与全量测试过去，本次审计另跑 `snow-app-core / snow-config / snow-history / snow-canvas-filters` 共 260 项测试全过。
 
-## 3.1 已收集的复审发现（均 CONFIRMED，尚未修）
+## 3.1 已收集的复审发现（09-29 CONFIRMED；2026-10-03 起逐条标注处理情况）
+
+> 2026-10-03 审计核实已修复：`snow-ui-theme` 的 alpha 改为 16 位除以 257 取整（`color.rs`）；`snow-history::pinned::sweep_orphans` 清单有错误时拒绝清扫；`snow-config::paths` 增加 `is_upstream_location_resolved`（canonicalize + 末尾点 / 空格归一）；提交 `c04e41fb`（MCP 载荷）、`cf0d6384`（capability 文案、extract 门禁）。其余条目没有逐条复核，按「未确认」对待。
 
 **`snow-history`（复审员实测，临时探针在会话 scratchpad，未进仓库）**
 1. **高**：`pinned.rs::sweep_orphans()` 在清单损坏或版本不符（records 为 0）时会把全部 `pins/<id>` 目录当孤儿删掉，且 `index.json.corrupt.*` 备份只留清单不留 payload → 数据丢失。修法：清单有 `error` 时拒绝清扫。
@@ -69,6 +68,8 @@ P0 验证基本完成，P1 地基完成，P2/P4/P5 已开工；**参考版（C++
 
 ## 4. 参考版（C++）构建：续做方法
 
+> 2026-10-03 未复核：本节描述 09-29 的构建进度，本次审计没有检查 `E:\qt-static` 与 vcpkg 的当前状态，也没有取得参考版 P99；只可能让 V2 判据更宽松，不阻塞产品开发。方法本身仍有效。
+
 目的：取得 Qt 参考版的帧间隔 P99，用来定 V2 判据的松紧（**只可能让判据更宽松**，不阻塞产品开发）。
 
 - **已完成**：静态 Qt 6.11.1 已装到 `E:\qt-static\6.11.1`（`EXIT=0`）；vcpkg 主树已装完约 54 个包。
@@ -80,7 +81,15 @@ P0 验证基本完成，P1 地基完成，P2/P4/P5 已开工；**参考版（C++
 - **完成后清理**：`C:\Python314` 里为构建 crashpad 装了 `virtualenv`，可 `pip uninstall virtualenv`。
 - 静态 Qt 编译的关键提速：脚本默认并行 4，实际用了 `-Parallelism 16`。
 
-## 5. 待办与待决（下次会话先看这里）
+## 5. 待办与待决（09-29 旧清单，2026-10-03 已标注）
+
+> **读法**：本节各 P 阶段「✅ 已完成」是当时作者自述，已被 [审计](research/qt-parity-audit.md) 订正，下面逐条加了〔审计更正〕。最新待办看 §5.1 与审计 §4（缺口前十）、§5（真机清单）。
+> **本节里仍有效的待办（别丢）**：
+> - 复审未做项：`snow-config` 变异测试 / clippy；`snow-ui-theme` 的 icons 全量复审、令牌逐个对照、真 Qt 编原文的黄金生成器（`fast_color_lite` 改写版问题）；`snow-canvas-filters` 复审；T3 / shell / raster 复审；`snow-history` 的低优先级项（全零 UUID、`safe_file_name` 撞名、`format_version: 2.0`、嵌套深度）。
+> - V2 判据依赖的参考版 P99（§4）；V6 搜狗与 gpui-kit `Input` 的真人预编辑留档；T12。
+> - 命令总线 / MCP：约 70 个 tool 待建模（审计 A11、A12）。
+> - 滤镜 `cargo test --workspace` 曾编译失败的原因（后续全量通过，可视为已消除，但没人确认根因）。
+> - 已被 §5.1 取代或已完成：复审重派 5 份（部分已由 `c04e41fb`、`cf0d6384` 等修复）、文档订正（v1.9）、全量测试（09-29 通过）、守卫与视图层矛盾。
 
 **先做（成本低）**
 1. 收集/重派 5 份复审：config、theme+icons、i18n+capability+总线+守卫+vendor、canvas-filters、snow-history；再补 T3、shell、raster 的复审。
@@ -93,12 +102,12 @@ P0 验证基本完成，P1 地基完成，P2/P4/P5 已开工；**参考版（C++
 - **滤镜**：`cargo test --workspace` 曾在编译 `lyon_algorithms`/`strum_macros` 失败，原因未查，怀疑是并发改依赖。
 - **`snow-capability` & 运行时接线（✅ 已完成，2026-09-29）**：`snow-capability` 已补入 `Capability::CrashDump` 能力项；`snow-shot/src/main.rs` 已完成存储解析、按天滚动文件日志初始化、本地崩溃转储安装与能力表加载接线，可正常编译运行。
 - **守卫与视图层矛盾（✅ 已解决，2026-09-29）**：`snow-ui-widgets` 统一依赖 `snow-ui-shell` 门面（`use snow_ui_shell::ui::*`）而非直接声明 `gpui` 依赖，既满足了视图层开发需求，又严格遵守了 `workspace-guard` 隔离守卫。已落地自研缺口组件 `Checkerboard`（透明棋盘底纹）、`Segmented`（胶囊型分段选择器）与 `Popconfirm`（气泡确认框，缺口用量榜首 32 处），单元测试与 doctests 全过，通过 clippy 0 warning 检查。
-- **P2 `snow-canvas-text`（✅ 已完成，2026-09-29）**：完成标注文本草稿管理 `TextDraft`、样式模型 `CanvasTextStyle`、多行排版测量 `TextLayoutResult` 以及 GPUI `EntityInputHandler` 接入实体 `CanvasTextInput`，全套 10 个单元测试与 7 个文档测试全绿，通过 clippy 0 warning 与 workspace-guard 检查。
+- **P2 `snow-canvas-text`（✅ 已完成，2026-09-29）**〔审计更正：文本组件属实；P2 整体的「15 种标注工具」只接了 8 个，智能擦除未移植，见审计 D08、D12〕：完成标注文本草稿管理 `TextDraft`、样式模型 `CanvasTextStyle`、多行排版测量 `TextLayoutResult` 以及 GPUI `EntityInputHandler` 接入实体 `CanvasTextInput`，全套 10 个单元测试与 7 个文档测试全绿，通过 clippy 0 warning 与 workspace-guard 检查。
 - **P3 `snow-ui` 聚合器（✅ 已完成，2026-09-29）**：完成 `snow-ui` 总入口聚合（`shell`、`theme`、`icons`、`widgets` 与 `ui` 门面），验证通过单元测试、clippy 0 warning 与 `workspace-guard` 守卫检查。
 - **P3 选区几何与交互模型（✅ 已完成，2026-09-29）**：在 `snow-ui-shell::selection` 落地橡皮筋框选（Marquee）、八向手柄命中测试与外框生成、边界限制（`bounded_selection_rect`）、拖拽位移更新（`dragged_selection_rect`）、宽高比锁定处理以及选区状态机（`SelectionState`），并通过 46 个单测与 44 个文档测试。
 - **P3 放大镜与操作工具栏组件（✅ 已完成，2026-09-29）**：在 `snow-ui-widgets` 落地像素级采样放大网格与取色器 `Magnifier`（支持 HEX/RGB/HSL 循环切换与防遮挡自适应翻转定位）以及截图浮动操作工具栏 `ScreenshotToolbar`（支持标注工具切换、撤销/重做堆栈状态控制、导出动作按钮组以及智能摆放定位），单测与 doctest 全绿并通过 clippy 0 warning 检查。
-- **P3 全屏覆盖窗与屏幕采集/剪贴板主链路（✅ 已完成，2026-09-29）**：在 `snow-platform` 落地 Win32 原生 GDI 屏幕抓取（`capture_display`、内存位图与局部裁剪）与剪贴板图文直写；在 `snow-shot` 落地 `ScreenshotOverlayView` 全屏交互视图，统一承载全屏帧底图、四象限遮罩暗化、八向缩放手柄、浮动放大镜、浮动工具栏、鼠标事件交互状态机及动作分发。单元测试全过，workspace-guard 与 clippy 0 warning 保持全绿。
-- **P4 贴图（✅ 已完成，2026-09-29）**：
+- **P3 全屏覆盖窗与屏幕采集/剪贴板主链路（✅ 已完成，2026-09-29）**〔审计更正：单屏 + GDI 采集；智能选区、直接截图模式、PDF / 多格式导出、历史界面未做，见审计 D01~D20〕：在 `snow-platform` 落地 Win32 原生 GDI 屏幕抓取（`capture_display`、内存位图与局部裁剪）与剪贴板图文直写；在 `snow-shot` 落地 `ScreenshotOverlayView` 全屏交互视图，统一承载全屏帧底图、四象限遮罩暗化、八向缩放手柄、浮动放大镜、浮动工具栏、鼠标事件交互状态机及动作分发。单元测试全过，workspace-guard 与 clippy 0 warning 保持全绿。
+- **P4 贴图（✅ 已完成，2026-09-29）**〔审计更正：核心交互与持久化属实；分组、点击穿透、缩略图、快捷键、管理页、文件贴图未做，见审计 E06~E11〕：
   - 在 `snow-ui-shell::pinned_geometry` 落地等比拖动调整、瞄准锚点算法（保持鼠标相对点固定）、滚轮阶梯缩放与透明度调节算法；
   - 在 `snow-shot::pinned_view` 落地 `PinnedWindowView` 贴图浮动窗口视图组件与二次标注（矩形、椭圆、箭头、直线、画笔、文本、马赛克及撤销重做堆栈、PNG 编码与剪贴板复制）；
   - 在 `snow-shot::pinned_manager` 落地 `PinnedManager`，与 `snow_history::pinned::PinnedStore` 仓储进行崩溃安全持久化同步，支持多贴图生命周期调度与分组管理；
@@ -107,17 +116,17 @@ P0 验证基本完成，P1 地基完成，P2/P4/P5 已开工；**参考版（C++
 - **MCP** 共 101 个 tool，命令总线只覆盖 screenshot 域 28 个语义，其余约 70 个待建模。
 - **V2**：判据（稳态平均 ≥58fps 且稳态 P99 ≤ max(参考版 P99, 20ms)）是看到数据后修订的；前提是"安静环境重跑 + 参考版 P99"。长尾归因未定，需要 GPU 侧计时（PIX/ETW）才能区分上传还是调度。
 - **V6**：只有 raw 模式一份真人日志；gpui-kit `Input` 的真人预编辑与搜狗行为未留档。T12（搜狗无内联预编辑）已登记。
-- **P5 OCR / 翻译 / 拼接（✅ 已完成，2026-09-29）**：
+- **P5 OCR / 翻译 / 拼接（✅ 已完成，2026-09-29）**〔审计更正：主链路属实，`OfflineDictionaryEngine` 等已不存在；QR / 表格 / 转换 / 识别窗缺，见审计 G01~G09〕：
   - 在 `snow-translate` 落地语言枚举 `Lang`、`model.json` 模型清单扫描器 `ModelScanner`、`TranslationEngine` 抽象、离线词典 `OfflineDictionaryEngine`、OpenAI 兼容端点格式化 `OpenAiCompatibleConfig` 与 `TranslationService` 缓存调度器；
   - 在 `snow-shot::ocr_service` 落地 `OcrService`，支持外部 `snow-ocr-process` worker 调度与离线启发式分析兜底，结构化输出 `OcrTextBox` 与 `OcrResult`；
   - 在 `snow-shot::stitch_service` 落地 `StitchService` 滚动长图合成器，通过行级匹配动态计算位移重叠并拼接扩展画布，输出标准 `CapturedScreen`；
   - 联动 `overlay_view` 中 OCR（`ToolbarAction::Ocr`）与翻译（`ToolbarAction::Translate`）动作，自动提取、翻译并复制到系统剪贴板。全套测试与 clippy 0 warning 全绿。
-- **P6 屏幕录制（✅ 已完成，2026-09-29）**：
+- **P6 屏幕录制（✅ 已完成，2026-09-29）**〔审计更正：录制已改独立 worker；下面写的 `ClickRipple` / `KeystrokeDisplay` 代码中不存在，音频、特效缺，见审计 F07、F08〕：
   - 在 `snow-shot::recording::model` 落地 `RecordingFormat`（MP4、GIF、WebM）、`RecordingConfig` 与 `RecordingState` 状态机；
   - 在 `snow-shot::recording::runtime` 落地 `ScreenRecordingSession`，支持 3 秒倒计时、帧采样推进、暂停/恢复、元数据与产物导出，内置水波纹特效 `ClickRipple` 与键盘屏幕回显 `KeystrokeDisplay`；
   - 在 `snow-shot::recording::area_view` 落地 `RecordingAreaView`，提供录制框选高亮、中央倒计时大数字徽章、按键回显悬浮框与集成控制工具栏（暂停/恢复、停止完成、放弃取消）；
   - 联动 `overlay_view` 选区生成录制视图 `start_recording_from_selection`。全套 23 个测试全绿，通过 clippy 0 warning 检查。
-- **P7 外围收口、设置页、单实例与托盘（✅ 已完成，2026-09-30）**：
+- **P7 外围收口、设置页、单实例与托盘（✅ 已完成，2026-09-30）**〔审计更正：设置页只有 31 / 238 个键生效；托盘图标占位；MCP / 更新 / 网络仍是骨架，见审计 A05、A09、A10、A12、C03〕：
   - 在 `snow-shot::settings_view` 落地基于 `snow_config::schema` 驱动的 `SettingsView`，对齐 238 个配置项至 9 大导航分类，支持动态控件渲染与重置；
   - 在 `snow-platform::single_instance` 落地 Windows 原生 `CreateMutexW` 互斥保护与本地 IPC 端口监听（`IpcCommand` 指令派发）；
   - 在 `snow-platform::tray` 落地 `TrayAndHotkeyManager`，对接系统托盘菜单与全局快捷键注册；
@@ -130,11 +139,11 @@ P0 验证基本完成，P1 地基完成，P2/P4/P5 已开工；**参考版（C++
 - 可考虑 `rust-lld` 链接器与 `debug = "line-tables-only"`（Windows 上 `link.exe` 链接大型 debug 二进制很慢），统一写进 `.cargo/config`，别在多个任务进行中途改。
 - **agy（antigravity）MCP 已断线**，恢复前不要派给它；此前 agy 有编造 API 的前科，必须把真实源码整段贴进 prompt，产出必须独立复审。
 
-## 5.1 2026-10-01 待办清单（录屏 / OCR·翻译 / 视频编辑；上面 §5 是 09-29 旧清单，未逐条核对）
+## 5.1 2026-10-01 待办清单（录屏 / OCR·翻译 / 视频编辑；含 10-02、10-03 更新；上面 §5 是 09-29 旧清单）
 
 **收尾**
-- [ ] 工作区约 29 个文件未提交（录屏改动、夹具脚本、`docs/research/*`、台账）。提交前：diff 自查并做 simplify、确认范围；推送前先 `git status` 看有没有范围外的改动。本地领先远端 2 个提交（可用 `git rev-list --count origin/rust-gpui..HEAD` 查证）。
-- [ ] 根目录 `AGENTS.md` 仍是旧 Qt/C++ 版本，与本分支（纯 Rust+GPUI）不符，需改写或标注作废。
+- [x] ~~工作区约 29 个文件未提交~~ 已过时（2026-10-03）：当前仅剩 fps 夹具 7 个文件与 `materials/`（见 §3）。推送前先 `git status` 看有没有范围外的改动；本地领先远端 1 个提交（`git rev-list --count origin/rust-gpui..HEAD` 查证）。
+- [x] 根目录 `AGENTS.md` 已改写为 Rust+GPUI 版（提交 `25bcc5c3`）。
 
 **复审修复（2026-10-03）**
 - [x] MCP 命令载荷对齐 schema（提交 c04e41fb）：schema 必填字段补全。
@@ -196,7 +205,7 @@ P0 验证基本完成，P1 地基完成，P2/P4/P5 已开工；**参考版（C++
 - 已决定：编辑任务走 worker（`snow-recorder` + `snow-recorder-protocol` 扩展），两引擎联动取消，默认输出均 H.264。
 - [x] MVP 设计文档已写：`docs/research/video-editor-mvp-design.md`（协议扩展、引擎 trait、四功能、测试、P0~P4 计划）。
 - [x] 核心功能已实现（2026-10-03，提交 72837e20、7d2eb8c0）：协议扩展（EDIT/PROBE）、按时间戳精确 seek、抽帧（PNG/JPEG/无损 WebP）、YUV 直通；帧率降采、缩放、关键帧裁剪编辑操作，FFmpeg 引擎（libx264 软编、音频直通）。
-- [ ] 系统引擎（Media Foundation）、真实录屏样片基准与两引擎内存对比、合并操作（需改协议）仍缺。
+- [x] 系统引擎（Media Foundation）已加入（提交 `3027b635`，`tools/snow-recorder/src/edit/system/*`）。[ ] 真实录屏样片基准与两引擎内存对比、合并操作（需改协议）仍缺；**主程序没有任何视频编辑入口**（审计 §3.3）。
 - [ ] 需要用户提供有代表性的录屏样片。
 
 **已搁置（存档，可恢复）**

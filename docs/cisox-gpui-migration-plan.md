@@ -538,6 +538,9 @@ workspace 骨架 · `snow-ui-shell` 隔离层 · `snow-capability` 能力注册�
 - (l) 全量测试闭环：`cargo test --workspace` 纯测试及文档测试全绿通过。
 
 ### P2 · 画布与标注引擎 ★ 最大单块
+
+> **审计更正（2026-10-03）**：仅 `snow-canvas-text`、滤镜内核（C++ 黄金逐字节）、tiny-skia 光栅化（无 QPainter 黄金比对）属实；标注工具栏只接了 8 个工具（缺荧光笔、聚光灯、序号、水印、橡皮、自动滤镜、选择），无样式面板，智能擦除恒返回 false。详见[审计](research/qt-parity-audit.md) D08~D14。
+
 `snow-canvas-raster` patch 消费者 · 15 种工具的绘制对齐 · `snow-canvas-filters`（AVX2 → Rust SIMD）· `snow-canvas-text` 文本与 IME · 撤销重做接入 · 脏区与性能调优
 
 **进度（2026-09-29）**：
@@ -549,6 +552,9 @@ workspace 骨架 · `snow-ui-shell` 隔离层 · `snow-capability` 能力注册�
 
 
 ### P3 · 截图主链路
+
+> **审计更正（2026-10-03）**：下列「已完成」限于单显示器 + GDI 采集；智能元素选区、延迟 / 全屏 / 聚焦窗口截图、PDF 与多格式导出、截图历史界面、覆盖窗内快捷键配置均未做。详见[审计](research/qt-parity-audit.md) D01~D20。
+
 覆盖窗 · 选区交互与几何 · 放大镜 / 取色器 · 智能元素选区（接 `snow-ui-selector`）· 工具栏与浮动工具面板 · 导出 / 剪贴板 / 保存 / PDF · 历史记录
 
 **进度（2026-09-29）**：
@@ -560,6 +566,9 @@ workspace 骨架 · `snow-ui-shell` 隔离层 · `snow-capability` 能力注册�
 
 
 ### P4 · 贴图 ✅ **已完成（2026-09-29）**
+
+> **审计更正（2026-10-03）**：核心交互、二次标注、持久化与启动恢复属实；贴图分组 / 管理页、点击穿透、缩略图、隐藏到顶部、贴图快捷键、文件贴图、贴图上 OCR 未做。详见[审计](research/qt-parity-audit.md) E01~E11。
+
 浮动窗口 · 分组管理 · 持久化（接 ADR-8）· 贴图上的二次标注
 
 - (a) 贴图窗口几何与手柄交互算法 ✅ **已完成**（`snow-ui-shell::pinned_geometry`）：支持八向手柄等比拉伸、平移拖动、瞄准锚点计算（中心、四角与鼠标相对固定点 `ScaleAnchor::MousePoint`）、滚轮阶梯缩放与 Ctrl 滚轮透明度调节，单元测试与文档测试全绿。
@@ -569,6 +578,9 @@ workspace 骨架 · `snow-ui-shell` 隔离层 · `snow-capability` 能力注册�
 
 
 ### P5 · OCR / 翻译 / 拼接 ✅ **已完成（2026-09-29）**
+
+> **审计更正（2026-10-03）**：下文 `OfflineDictionaryEngine` 等已不存在；OCR（独立 worker）、本地翻译（路由 + worker）、长截图拼接主链路属实；二维码、表格 / 公式 / Markdown / HTML 转换、识别结果窗、选中文字翻译、翻译页、自定义模型设置界面缺失。详见[审计](research/qt-parity-audit.md) G01~G09。
+
 RapidOCR 接入与独立进程 worker · 表格/公式提取（走自定义模型通道）· **`snow-translate` 本地 NMT（ADR-5；落地时同步补 `screenshot_translation` 本地模型配置项）** · 滚动截长图
 
 - (a) `snow-translate` 本地 NMT 与多后端翻译引擎 ✅ **已完成**：落地标准语言枚举 `Lang`、`model.json` 模型清单扫描器 `ModelScanner`、`TranslationEngine` 后端统一抽象、离线词典引擎 `OfflineDictionaryEngine`、OpenAI 兼容端点协议格式化 `OpenAiCompatibleConfig` 以及带内存缓存的翻译服务 `TranslationService`，单测与文档测试全绿。真正的本地 NMT 推理改由独立 worker `tools/snow-translator` 承担，实现进行中。
@@ -578,6 +590,9 @@ RapidOCR 接入与独立进程 worker · 表格/公式提取（走自定义模�
 
 
 ### P6 · 录屏 ✅ **已完成（2026-09-29）**
+
+> **审计更正（2026-10-03）**：录制已改为独立 worker（硬编 Auto、跨屏拼接有实测）；下文 `ClickRipple` / `KeystrokeDisplay` 在代码中不存在，音频、鼠标 / 键盘特效、录屏快捷键缺失，覆盖窗只能单屏选区，WebM 已移除。详见[审计](research/qt-parity-audit.md) F01~F10。
+
 录制运行时 · 区域选择窗 · 工具栏与倒计时 · 键鼠特效 · 音频 · 导出与编辑
 
 - (a) 录制模型与生命周期规范 ✅ **已完成**（`snow-shot::recording::model`）：定义输出格式 `RecordingFormat`（MP4 视频、GIF 动图、APNG、动画 WebP）、参数配置 `RecordingConfig`、录制状态机 `RecordingState`（就绪、倒计时、活动录制、完成、错误）以及分秒格式化。WebM 录制选项已移除，登记待实现（`docs/cisox-todo-webm.md`）；录制改走独立进程 `tools/snow-recorder`。
@@ -589,6 +604,9 @@ RapidOCR 接入与独立进程 worker · 表格/公式提取（走自定义模�
 全功能对齐已全部完成，直接进入 P7 外围与收口。
 
 ### P7 · 外围与收口 ✅ **已完成（2026-09-30）**
+
+> **审计更正（2026-10-03）**：设置页 238 个键里只有 31 个被运行时读取；托盘图标为占位、菜单精简；热键接了 3 个原有动作；`snow-mcp`、`snow-update`、`snow-net` 仍是骨架，MCP 命令总线只有 5 类 handler；无主窗口、开机自启、配置归档。详见[审计](research/qt-parity-audit.md) A05~A18、B01~B06、C01~C06。
+
 设置页（schema 驱动生成）· 单实例 IPC · 托盘与热键 · 工作区守卫与全套单元测试通过
 
 - (a) Schema 驱动设置页视图组件 ✅ **已完成**（`snow-shot::settings_view`）：依据 `snow_config::schema::entries()` 自动归集 238 个配置项，映射为通用、快捷键、截图、贴图、画板标注、文字与翻译、屏幕录制、存储、高级等 9 大分类导航，支持动态控件渲染、即时修改与恢复默认，通过单元测试。

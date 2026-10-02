@@ -1,3 +1,5 @@
+> **⚠ 本报告已失实，不作验收依据**（2026-09-30 复审认定；2026-10-03 逐项对照见 [research/qt-parity-audit.md](research/qt-parity-audit.md)：例如「100% 交付」不成立，设置页 238 键仅 31 个生效，录屏音频 / 特效、智能选区等缺失）。待重写。
+
 # Cisox (Snow Shot) Rust+GPUI 架构迁移最终验收报告
 
 > **报告版本**：v1.0.0  
