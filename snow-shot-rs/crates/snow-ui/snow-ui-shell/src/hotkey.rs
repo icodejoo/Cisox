@@ -621,7 +621,7 @@ mod backend {
             let caps = CapabilityRegistry::for_platform(Platform::Windows);
             let mk = |s: &str| HotkeyBinding {
                 hotkey: Hotkey::parse(s).unwrap(),
-                command: AppCommand::Cancel,
+                command: AppCommand::Cancel(Default::default()),
             };
             {
                 let svc =
@@ -731,7 +731,7 @@ impl HotkeyService {
     /// let svc = HotkeyService::start(&caps, Dispatcher::from_bus(CommandBus::new())).unwrap();
     /// svc.register(HotkeyBinding {
     ///     hotkey: Hotkey::parse("Ctrl+Alt+S").unwrap(),
-    ///     command: AppCommand::Cancel,
+    ///     command: AppCommand::Cancel(Default::default()),
     /// }).unwrap();
     /// ```
     pub fn start(
@@ -856,19 +856,19 @@ mod tests {
             hotkey: Hotkey::parse(s).unwrap(),
             command: c,
         };
-        let h1 = t.insert(mk("Ctrl+Alt+S", AppCommand::Cancel)).unwrap();
-        let h2 = t.insert(mk("Ctrl+Alt+D", AppCommand::Undo)).unwrap();
+        let h1 = t.insert(mk("Ctrl+Alt+S", AppCommand::Cancel(Default::default()))).unwrap();
+        let h2 = t.insert(mk("Ctrl+Alt+D", AppCommand::Undo(Default::default()))).unwrap();
         assert_ne!(h1, h2);
         // 等价写法也要判为冲突
         assert!(matches!(
-            t.insert(mk("alt+ctrl+s", AppCommand::Redo)),
+            t.insert(mk("alt+ctrl+s", AppCommand::Redo(Default::default()))),
             Err(ShellError::HotkeyConflict(_))
         ));
-        assert_eq!(t.get(h2).unwrap().command, AppCommand::Undo);
+        assert_eq!(t.get(h2).unwrap().command, AppCommand::Undo(Default::default()));
         assert_eq!(t.list().len(), 2);
         assert!(t.remove(h1).is_some());
         assert!(t.remove(h1).is_none());
-        assert!(t.insert(mk("Ctrl+Alt+S", AppCommand::Redo)).is_ok());
+        assert!(t.insert(mk("Ctrl+Alt+S", AppCommand::Redo(Default::default()))).is_ok());
     }
 
     /// 能力不可用时启动直接降级为错误。

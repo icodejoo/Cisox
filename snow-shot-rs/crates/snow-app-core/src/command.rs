@@ -96,6 +96,14 @@ pub struct DirectCaptureRequest {
     pub automatic_path: Option<bool>,
     /// 输出格式。
     pub format: Option<Format>,
+    /// 编码质量。
+    pub quality: Option<u32>,
+    /// 压缩等级。
+    pub compression_level: Option<CompressionLevel>,
+    /// PDF 页面尺寸。
+    pub pdf_page_size: Option<PdfPageSize>,
+    /// PDF 标题（至多 1024 字符）。
+    pub pdf_title: Option<String>,
 }
 
 /// 选区合并方式。
@@ -202,6 +210,12 @@ pub struct SaveRequest {
     pub format: Option<Format>,
     /// 编码质量。
     pub quality: Option<u32>,
+    /// 压缩等级。
+    pub compression_level: Option<CompressionLevel>,
+    /// PDF 页面尺寸。
+    pub pdf_page_size: Option<PdfPageSize>,
+    /// PDF 标题（至多 1024 字符）。
+    pub pdf_title: Option<String>,
 }
 
 /// 导出去向（保存 / 复制到剪贴板）。
@@ -306,25 +320,139 @@ pub struct RecordingConfig {
     pub frame_rate: Option<u32>,
 }
 
-/// 生成一个仅含 `target` 的最小占位请求结构体（字段待后续补全）。
+/// 压缩等级。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CompressionLevel {
+    /// 低。
+    Low,
+    /// 中。
+    Medium,
+    /// 高。
+    High,
+}
+
+/// PDF 页面尺寸。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PdfPageSize {
+    /// 与图片同尺寸。
+    ImageSize,
+    /// A4 纵向。
+    A4Portrait,
+    /// A4 横向。
+    A4Landscape,
+}
+
+/// `finish` 的输出去向。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FinishOutput {
+    /// 不输出。
+    None,
+    /// 渲染并返回。
+    Render,
+    /// 保存文件。
+    Save,
+    /// 复制到剪贴板。
+    Copy,
+}
+
+/// 撤销/重做的作用对象。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum HistoryTarget {
+    /// 画布。
+    Canvas,
+    /// 文本识别结果。
+    Text,
+    /// 表格识别结果。
+    Table,
+}
+
+/// 单次滚动方向。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ScrollDirection {
+    /// 向上。
+    Up,
+    /// 向下。
+    Down,
+    /// 向左。
+    Left,
+    /// 向右。
+    Right,
+}
+
+/// 撤销/重做请求（对应 `screenshot_undo` / `screenshot_redo`）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HistoryRequest {
+    /// 作用对象，缺省为画布。
+    pub target: Option<HistoryTarget>,
+}
+
+/// 完成会话请求（对应 `screenshot_finish`）。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct FinishRequest {
+    /// 输出去向。
+    pub output: Option<FinishOutput>,
+    /// 缩放比例。
+    pub scale: Option<f64>,
+    /// 保存路径。
+    pub path: Option<String>,
+    /// 是否自动生成路径。
+    pub automatic_path: Option<bool>,
+    /// 输出格式。
+    pub format: Option<Format>,
+    /// 编码质量。
+    pub quality: Option<u32>,
+    /// 压缩等级。
+    pub compression_level: Option<CompressionLevel>,
+    /// PDF 页面尺寸。
+    pub pdf_page_size: Option<PdfPageSize>,
+    /// PDF 标题（至多 1024 字符）。
+    pub pdf_title: Option<String>,
+}
+
+/// 取消请求（对应 `screenshot_cancel`，三个 ID 均可选）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CancelRequest {
+    /// 要取消的操作 ID。
+    pub operation_id: Option<String>,
+    /// 会话 ID。
+    pub session_id: Option<String>,
+    /// 请求 ID。
+    pub request_id: Option<String>,
+}
+
+/// 单次滚动请求（对应 `screenshot_scroll_once`）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScrollOnceRequest {
+    /// 滚动方向（必填）。
+    pub direction: ScrollDirection,
+}
+
+/// 自动滤镜请求（对应 `screenshot_auto_filter`）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AutoFilterRequest {
+    /// 滤镜类别（必填）。
+    pub categories: Vec<String>,
+}
+
+/// 工具样式请求（对应 `screenshot_set_tool_style`，`target` 必填，`style` 待补全）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ToolStyleRequest {
+    /// 样式目标工具名。
+    pub target: Option<String>,
+}
+
+/// 生成一个无字段的最小占位请求结构体（字段待后续补全）。
 macro_rules! placeholder_request {
     ($(#[$meta:meta])* $name:ident) => {
         $(#[$meta])*
         #[derive(Debug, Clone, Default, PartialEq, Eq)]
-        pub struct $name {
-            /// 样式/编辑目标名（占位，字段待后续补全）。
-            pub target: Option<String>,
-        }
+        pub struct $name {}
     };
 }
 
 placeholder_request!(
     /// 选区样式请求（对应 `screenshot_set_selection_style`，占位）。
     SelectionStyleRequest
-);
-placeholder_request!(
-    /// 工具样式请求（对应 `screenshot_set_tool_style`，占位）。
-    ToolStyleRequest
 );
 placeholder_request!(
     /// 应用标注请求（对应 `screenshot_apply_annotations`，占位）。
@@ -337,10 +465,6 @@ placeholder_request!(
 placeholder_request!(
     /// 模板绘制请求（对应 `screenshot_draw_template`，占位）。
     DrawTemplateRequest
-);
-placeholder_request!(
-    /// 自动滤镜请求（对应 `screenshot_auto_filter`，占位）。
-    AutoFilterRequest
 );
 placeholder_request!(
     /// 识别结果编辑请求（对应 `screenshot_edit_recognition`，占位）。
@@ -379,9 +503,9 @@ pub enum AppCommand {
     /// 自动滤镜。
     AutoFilter(AutoFilterRequest),
     /// 撤销。
-    Undo,
+    Undo(HistoryRequest),
     /// 重做。
-    Redo,
+    Redo(HistoryRequest),
     /// 渲染。
     Render(RenderRequest),
     /// 导出（保存/复制）。
@@ -389,15 +513,15 @@ pub enum AppCommand {
     /// 将选区钉为贴图。
     PinSelection,
     /// 完成会话。
-    Finish,
+    Finish(FinishRequest),
     /// 取消会话。
-    Cancel,
+    Cancel(CancelRequest),
     /// 重新采集。
     Recapture,
     /// 滚动截图。
     Scrolling(ScrollingRequest),
     /// 单次滚动。
-    ScrollOnce,
+    ScrollOnce(ScrollOnceRequest),
     /// 运行识别。
     RunOcr(OcrRequest),
     /// 翻译。
@@ -432,7 +556,7 @@ macro_rules! command_kinds {
             ///
             /// ```rust
             /// use snow_app_core::command::{AppCommand, CommandKind};
-            /// assert_eq!(AppCommand::Undo.kind(), CommandKind::Undo);
+            /// assert_eq!(AppCommand::Undo(Default::default()).kind(), CommandKind::Undo);
             /// ```
             pub fn kind(&self) -> CommandKind {
                 match self {
@@ -456,16 +580,16 @@ command_kinds!(
     EditElements(_),
     DrawTemplate(_),
     AutoFilter(_),
-    Undo,
-    Redo,
+    Undo(_),
+    Redo(_),
     Render(_),
     Export(_),
     PinSelection,
-    Finish,
-    Cancel,
+    Finish(_),
+    Cancel(_),
     Recapture,
     Scrolling(_),
-    ScrollOnce,
+    ScrollOnce(_),
     RunOcr(_),
     Translate(_),
     EditRecognition(_),
@@ -580,10 +704,96 @@ mod tests {
         assert_eq!(names.len(), 28);
     }
 
+    /// 独立于映射表本身的 28 个 tool 名（来自旧 MCP schemas.rs 的 screenshot 域）。
+    const EXPECTED_TOOLS: [&str; 28] = [
+        "mcp_status",
+        "screenshot_begin",
+        "screenshot_state",
+        "screenshot_set_selection",
+        "screenshot_set_tool",
+        "screenshot_apply_annotations",
+        "screenshot_undo",
+        "screenshot_redo",
+        "screenshot_render",
+        "screenshot_save",
+        "screenshot_copy",
+        "screenshot_pin",
+        "screenshot_finish",
+        "screenshot_cancel",
+        "screenshot_direct_capture",
+        "screenshot_set_selection_style",
+        "screenshot_set_tool_style",
+        "screenshot_edit_elements",
+        "screenshot_recapture",
+        "screenshot_scrolling",
+        "screenshot_scroll_once",
+        "screenshot_recognize",
+        "screenshot_translate",
+        "screenshot_auto_filter",
+        "screenshot_operation",
+        "screenshot_edit_recognition",
+        "screenshot_export_recognition",
+        "screenshot_draw_template",
+    ];
+
+    /// 映射的名字集合与独立清单一致，且关键 tool 指向正确的命令种类。
+    #[test]
+    fn mcp_tool_map_matches_independent_list() {
+        let names: HashSet<_> = MCP_TOOL_MAP.iter().map(|(n, _)| *n).collect();
+        let expected: HashSet<_> = EXPECTED_TOOLS.iter().copied().collect();
+        assert_eq!(names, expected);
+        let kind = |n: &str| MCP_TOOL_MAP.iter().find(|(m, _)| *m == n).unwrap().1;
+        assert_eq!(kind("screenshot_scroll_once"), CommandKind::ScrollOnce);
+        assert_eq!(kind("screenshot_undo"), CommandKind::Undo);
+        assert_eq!(kind("screenshot_copy"), CommandKind::Export);
+        assert_eq!(kind("screenshot_cancel"), CommandKind::Cancel);
+    }
+
+    /// 补齐的 schema 字段可构造，且占位请求不再带 `target`。
+    #[test]
+    fn schema_fields_are_present() {
+        let save = SaveRequest {
+            compression_level: Some(CompressionLevel::High),
+            pdf_page_size: Some(PdfPageSize::A4Landscape),
+            pdf_title: Some("t".into()),
+            ..Default::default()
+        };
+        assert_eq!(save.pdf_title.as_deref(), Some("t"));
+        let finish = FinishRequest {
+            output: Some(FinishOutput::Save),
+            ..Default::default()
+        };
+        assert_eq!(finish.output, Some(FinishOutput::Save));
+        assert_eq!(
+            AppCommand::ScrollOnce(ScrollOnceRequest {
+                direction: ScrollDirection::Left
+            })
+            .kind(),
+            CommandKind::ScrollOnce
+        );
+        let undo = AppCommand::Undo(HistoryRequest {
+            target: Some(HistoryTarget::Table),
+        });
+        assert_eq!(undo.kind(), CommandKind::Undo);
+        let cancel = CancelRequest {
+            operation_id: Some("o".into()),
+            ..Default::default()
+        };
+        assert!(cancel.session_id.is_none() && cancel.request_id.is_none());
+        let af = AutoFilterRequest {
+            categories: vec!["email".into()],
+        };
+        assert_eq!(af.categories.len(), 1);
+        assert_eq!(EditElementsRequest::default(), EditElementsRequest {});
+    }
+
     /// 命令能还原为对应种类。
     #[test]
     fn command_kind_roundtrip() {
-        assert_eq!(AppCommand::Undo.kind(), CommandKind::Undo);
+        assert_eq!(
+            AppCommand::Undo(Default::default()).kind(),
+            CommandKind::Undo
+        );
         assert_eq!(
             AppCommand::SelectTool(ToolKind::Arrow).kind(),
             CommandKind::SelectTool

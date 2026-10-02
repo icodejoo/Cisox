@@ -476,7 +476,7 @@ impl TrayService {
     ///     tooltip: "Cisox".into(),
     ///     icon: TrayIconImage::solid(32, 32, [0, 120, 255, 255]).unwrap(),
     ///     menu: vec![
-    ///         TrayMenuEntry::Item { label: "取消".into(), enabled: true, action: TrayAction::Command(AppCommand::Cancel) },
+    ///         TrayMenuEntry::Item { label: "取消".into(), enabled: true, action: TrayAction::Command(AppCommand::Cancel(Default::default())) },
     ///         TrayMenuEntry::Separator,
     ///         TrayMenuEntry::Item { label: "退出".into(), enabled: true, action: TrayAction::Signal("quit".into()) },
     ///     ],
@@ -547,7 +547,7 @@ mod tests {
             TrayMenuEntry::Item {
                 label: "取消".into(),
                 enabled: true,
-                action: TrayAction::Command(AppCommand::Cancel),
+                action: TrayAction::Command(AppCommand::Cancel(Default::default())),
             },
             TrayMenuEntry::Separator,
             TrayMenuEntry::Item {
@@ -570,7 +570,7 @@ mod tests {
         assert_eq!(label2, "退出");
         assert_eq!(
             actions.resolve(id0),
-            Some(&TrayAction::Command(AppCommand::Cancel))
+            Some(&TrayAction::Command(AppCommand::Cancel(Default::default())))
         );
         assert_eq!(
             actions.resolve(id2),

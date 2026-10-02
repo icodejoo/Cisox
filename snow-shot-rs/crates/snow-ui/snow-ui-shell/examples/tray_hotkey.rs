@@ -55,7 +55,7 @@ fn demo_tray_spec() -> Result<TraySpec, ShellError> {
             TrayMenuEntry::Item {
                 label: "触发 Undo".into(),
                 enabled: true,
-                action: TrayAction::Command(AppCommand::Undo),
+                action: TrayAction::Command(AppCommand::Undo(Default::default())),
             },
             TrayMenuEntry::Separator,
             TrayMenuEntry::Item {
@@ -80,7 +80,7 @@ fn selfcheck(caps: &CapabilityRegistry) -> bool {
     // 自检用不常见组合，避免撞上用户已有热键
     let binding = |s: &str| HotkeyBinding {
         hotkey: Hotkey::parse(s).expect("自检热键应可解析"),
-        command: AppCommand::Cancel,
+        command: AppCommand::Cancel(Default::default()),
     };
     match HotkeyService::start(caps, dispatcher.clone()) {
         Ok(svc) => {
@@ -173,7 +173,7 @@ fn manual(caps: &CapabilityRegistry) -> bool {
     };
     let binding = HotkeyBinding {
         hotkey: Hotkey::parse(DEMO_HOTKEY).expect("演示热键可解析"),
-        command: AppCommand::Cancel,
+        command: AppCommand::Cancel(Default::default()),
     };
     if let Err(e) = hotkeys.register(binding) {
         log(&path, &format!("注册 {DEMO_HOTKEY} 失败: {e}"));

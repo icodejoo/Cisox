@@ -133,7 +133,7 @@ impl CommandBus {
     /// let bus = CommandBus::new();
     /// let ctx = CommandContext::new(CommandSource::Test);
     /// assert_eq!(
-    ///     bus.emit(&ctx, AppCommand::Cancel),
+    ///     bus.emit(&ctx, AppCommand::Cancel(Default::default())),
     ///     Err(CommandError::NoHandler(CommandKind::Cancel))
     /// );
     /// ```
@@ -162,7 +162,7 @@ impl CommandBus {
     /// ```rust
     /// use snow_app_core::bus::CommandBus;
     /// use snow_app_core::command::{AppCommand, CommandSource};
-    /// assert!(CommandBus::new().emit_from(CommandSource::Mcp, AppCommand::Undo).is_err());
+    /// assert!(CommandBus::new().emit_from(CommandSource::Mcp, AppCommand::Undo(Default::default())).is_err());
     /// ```
     pub fn emit_from(
         &self,
@@ -196,6 +196,10 @@ mod tests {
                 path: None,
                 automatic_path: None,
                 format: None,
+                quality: None,
+                compression_level: None,
+                pdf_page_size: None,
+                pdf_title: None,
             }),
             CommandKind::QueryState => AppCommand::QueryState,
             CommandKind::McpStatus => AppCommand::McpStatus,
@@ -216,13 +220,13 @@ mod tests {
             CommandKind::EditElements => AppCommand::EditElements(EditElementsRequest::default()),
             CommandKind::DrawTemplate => AppCommand::DrawTemplate(DrawTemplateRequest::default()),
             CommandKind::AutoFilter => AppCommand::AutoFilter(AutoFilterRequest::default()),
-            CommandKind::Undo => AppCommand::Undo,
-            CommandKind::Redo => AppCommand::Redo,
+            CommandKind::Undo => AppCommand::Undo(Default::default()),
+            CommandKind::Redo => AppCommand::Redo(Default::default()),
             CommandKind::Render => AppCommand::Render(RenderRequest::default()),
             CommandKind::Export => AppCommand::Export(ExportTarget::Copy),
             CommandKind::PinSelection => AppCommand::PinSelection,
-            CommandKind::Finish => AppCommand::Finish,
-            CommandKind::Cancel => AppCommand::Cancel,
+            CommandKind::Finish => AppCommand::Finish(Default::default()),
+            CommandKind::Cancel => AppCommand::Cancel(Default::default()),
             CommandKind::Recapture => AppCommand::Recapture,
             CommandKind::Scrolling => AppCommand::Scrolling(ScrollingRequest {
                 action: ScrollAction::Start,
@@ -232,7 +236,9 @@ mod tests {
                 start: None,
                 end: None,
             }),
-            CommandKind::ScrollOnce => AppCommand::ScrollOnce,
+            CommandKind::ScrollOnce => AppCommand::ScrollOnce(ScrollOnceRequest {
+                direction: ScrollDirection::Down,
+            }),
             CommandKind::RunOcr => AppCommand::RunOcr(OcrRequest {
                 kind: RecognitionKind::Text,
             }),
@@ -255,7 +261,7 @@ mod tests {
     fn emit_without_handler_errors() {
         let bus = CommandBus::new();
         let err = bus
-            .emit_from(CommandSource::Test, AppCommand::Cancel)
+            .emit_from(CommandSource::Test, AppCommand::Cancel(Default::default()))
             .unwrap_err();
         assert_eq!(err, CommandError::NoHandler(CommandKind::Cancel));
         assert!(!err.to_string().is_empty());
@@ -269,7 +275,7 @@ mod tests {
             CommandKind::Undo,
             Arc::new(|ctx, _| Ok(CommandOutcome::Message(format!("{:?}", ctx.source)))),
         );
-        let out = bus.emit_from(CommandSource::Hotkey, AppCommand::Undo);
+        let out = bus.emit_from(CommandSource::Hotkey, AppCommand::Undo(Default::default()));
         assert_eq!(out, Ok(CommandOutcome::Message("Hotkey".to_string())));
         assert!(bus.unregister(CommandKind::Undo));
         assert!(!bus.has_handler(CommandKind::Undo));
@@ -285,7 +291,7 @@ mod tests {
             Arc::new(|_, _| Err(CommandError::Rejected("x".into())))
         ));
         assert_eq!(
-            bus.emit_from(CommandSource::Test, AppCommand::Redo),
+            bus.emit_from(CommandSource::Test, AppCommand::Redo(Default::default())),
             Err(CommandError::Rejected("x".into()))
         );
     }
@@ -298,10 +304,10 @@ mod tests {
         bus.register(CommandKind::Redo, Arc::new(|_, _| Ok(CommandOutcome::Done)));
         bus.register(
             CommandKind::Undo,
-            Arc::new(move |ctx, _| inner.emit(ctx, AppCommand::Redo)),
+            Arc::new(move |ctx, _| inner.emit(ctx, AppCommand::Redo(Default::default()))),
         );
         assert_eq!(
-            bus.emit_from(CommandSource::Test, AppCommand::Undo),
+            bus.emit_from(CommandSource::Test, AppCommand::Undo(Default::default())),
             Ok(CommandOutcome::Done)
         );
     }
@@ -322,7 +328,9 @@ mod tests {
         let handles: Vec<_> = (0..16)
             .map(|_| {
                 let b = bus.clone();
-                std::thread::spawn(move || b.emit_from(CommandSource::Test, AppCommand::Finish))
+                std::thread::spawn(move || {
+                    b.emit_from(CommandSource::Test, AppCommand::Finish(Default::default()))
+                })
             })
             .collect();
         for h in handles {
@@ -360,7 +368,7 @@ mod tests {
             AppCommand::Capture(CaptureRequest::default()),
             AppCommand::SelectTool(ToolKind::Rectangle),
             AppCommand::Export(ExportTarget::Save(SaveRequest::default())),
-            AppCommand::Finish,
+            AppCommand::Finish(Default::default()),
         ];
         for cmd in cmds {
             bus.emit_from(CommandSource::Test, cmd).unwrap();

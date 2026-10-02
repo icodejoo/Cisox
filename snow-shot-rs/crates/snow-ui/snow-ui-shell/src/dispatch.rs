@@ -21,7 +21,7 @@ impl Dispatcher {
     /// ```rust
     /// use snow_ui_shell::dispatch::Dispatcher;
     /// let d = Dispatcher::from_fn(|_src, _cmd| {});
-    /// d.send(snow_app_core::command::CommandSource::Test, snow_app_core::command::AppCommand::Cancel);
+    /// d.send(snow_app_core::command::CommandSource::Test, snow_app_core::command::AppCommand::Cancel(Default::default()));
     /// ```
     pub fn from_fn(f: impl Fn(CommandSource, AppCommand) + Send + Sync + 'static) -> Self {
         Self { sink: Arc::new(f) }
@@ -92,7 +92,7 @@ mod tests {
             }),
         );
         let d = Dispatcher::from_bus(bus);
-        d.send(CommandSource::Hotkey, AppCommand::Cancel);
+        d.send(CommandSource::Hotkey, AppCommand::Cancel(Default::default()));
         let got = rx.recv_timeout(Duration::from_secs(2)).unwrap();
         assert_eq!(got, (CommandSource::Hotkey, CommandKind::Cancel));
     }
@@ -102,7 +102,7 @@ mod tests {
     fn missing_handler_does_not_kill_worker() {
         let bus = CommandBus::new();
         let d = Dispatcher::from_bus(bus.clone());
-        d.send(CommandSource::Tray, AppCommand::Undo);
+        d.send(CommandSource::Tray, AppCommand::Undo(Default::default()));
         let (tx, rx) = mpsc::channel();
         let tx = Mutex::new(tx);
         bus.register(
@@ -112,7 +112,7 @@ mod tests {
                 Ok(CommandOutcome::Done)
             }),
         );
-        d.send(CommandSource::Tray, AppCommand::Redo);
+        d.send(CommandSource::Tray, AppCommand::Redo(Default::default()));
         assert!(rx.recv_timeout(Duration::from_secs(2)).is_ok());
     }
 }
