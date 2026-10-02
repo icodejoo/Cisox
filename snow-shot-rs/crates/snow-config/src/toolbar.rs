@@ -7,6 +7,58 @@ use crate::value::{Normalization, json_eq};
 use serde_json::{Value, json};
 use std::collections::HashSet;
 
+/// 布局对象里分组列表的键名
+const POSITIONS_KEY: &str = "positions";
+/// 布局对象里隐藏项列表的键名
+const HIDDEN_KEY: &str = "hidden";
+/// 工具栏项标识 `shape`
+const ID_SHAPE: &str = "shape";
+/// 工具栏项标识 `arrow`
+const ID_ARROW: &str = "arrow";
+/// 工具栏项标识 `line`
+const ID_LINE: &str = "line";
+/// 工具栏项标识 `free-draw`
+const ID_FREE_DRAW: &str = "free-draw";
+/// 工具栏项标识 `highlighter`
+const ID_HIGHLIGHTER: &str = "highlighter";
+/// 工具栏项标识 `spotlight`
+const ID_SPOTLIGHT: &str = "spotlight";
+/// 工具栏项标识 `text`
+const ID_TEXT: &str = "text";
+/// 工具栏项标识 `serial-number`
+const ID_SERIAL_NUMBER: &str = "serial-number";
+/// 工具栏项标识 `filter`
+const ID_FILTER: &str = "filter";
+/// 工具栏项标识 `eraser`
+const ID_ERASER: &str = "eraser";
+/// 工具栏项标识 `watermark`
+const ID_WATERMARK: &str = "watermark";
+/// 工具栏项标识 `separator`
+const ID_SEPARATOR: &str = "separator";
+/// 工具栏项标识 `undo`
+const ID_UNDO: &str = "undo";
+/// 工具栏项标识 `redo`
+const ID_REDO: &str = "redo";
+/// 工具栏项标识 `barcode-recognition`
+const ID_BARCODE_RECOGNITION: &str = "barcode-recognition";
+/// 工具栏项标识 `table-recognition`
+const ID_TABLE_RECOGNITION: &str = "table-recognition";
+/// 工具栏项标识 `convert-to-markdown`
+const ID_CONVERT_TO_MARKDOWN: &str = "convert-to-markdown";
+/// 工具栏项标识 `convert-to-html`
+const ID_CONVERT_TO_HTML: &str = "convert-to-html";
+/// 工具栏项标识 `record-screen`
+const ID_RECORD_SCREEN: &str = "record-screen";
+/// 工具栏项标识 `pin-to-screen`
+const ID_PIN_TO_SCREEN: &str = "pin-to-screen";
+/// 工具栏项标识 `text-recognition`
+const ID_TEXT_RECOGNITION: &str = "text-recognition";
+/// 工具栏项标识 `text-translation`
+const ID_TEXT_TRANSLATION: &str = "text-translation";
+/// 工具栏项标识 `scrolling-screenshot`
+const ID_SCROLLING_SCREENSHOT: &str = "scrolling-screenshot";
+/// 工具栏项标识 `save-as-file`
+const ID_SAVE_AS_FILE: &str = "save-as-file";
 /// 快速保存功能标识符
 const QUICK_SAVE_ID: &str = "quick-save";
 /// LaTeX 公式识别功能标识符
@@ -14,124 +66,124 @@ const LATEX_RECOGNITION_ID: &str = "latex-recognition";
 
 /// 绘图工具的内部标识符列表（`kDrawingToolIds`）。
 pub const DRAWING_TOOL_IDS: &[&str] = &[
-    "shape",
-    "arrow",
-    "line",
-    "free-draw",
-    "highlighter",
-    "spotlight",
-    "text",
-    "serial-number",
-    "filter",
-    "eraser",
-    "watermark",
+    ID_SHAPE,
+    ID_ARROW,
+    ID_LINE,
+    ID_FREE_DRAW,
+    ID_HIGHLIGHTER,
+    ID_SPOTLIGHT,
+    ID_TEXT,
+    ID_SERIAL_NUMBER,
+    ID_FILTER,
+    ID_ERASER,
+    ID_WATERMARK,
 ];
 
 /// 绘图工具栏可用项（`kDrawingToolbarItemIds`，工具 + separator/undo/redo）。
 pub const DRAWING_TOOLBAR_ITEM_IDS: &[&str] = &[
-    "shape",
-    "arrow",
-    "line",
-    "free-draw",
-    "highlighter",
-    "spotlight",
-    "text",
-    "serial-number",
-    "filter",
-    "eraser",
-    "watermark",
-    "separator",
-    "undo",
-    "redo",
+    ID_SHAPE,
+    ID_ARROW,
+    ID_LINE,
+    ID_FREE_DRAW,
+    ID_HIGHLIGHTER,
+    ID_SPOTLIGHT,
+    ID_TEXT,
+    ID_SERIAL_NUMBER,
+    ID_FILTER,
+    ID_ERASER,
+    ID_WATERMARK,
+    ID_SEPARATOR,
+    ID_UNDO,
+    ID_REDO,
 ];
 
 /// 最近使用的绘图工具取值集合（`kLastDrawingToolIds`，首项为空串）。
 pub const LAST_DRAWING_TOOL_IDS: &[&str] = &[
     "",
-    "shape",
-    "arrow",
-    "line",
-    "free-draw",
-    "highlighter",
-    "spotlight",
-    "text",
-    "serial-number",
-    "filter",
-    "eraser",
-    "watermark",
+    ID_SHAPE,
+    ID_ARROW,
+    ID_LINE,
+    ID_FREE_DRAW,
+    ID_HIGHLIGHTER,
+    ID_SPOTLIGHT,
+    ID_TEXT,
+    ID_SERIAL_NUMBER,
+    ID_FILTER,
+    ID_ERASER,
+    ID_WATERMARK,
 ];
 
 /// 动作工具栏可用项（`kActionToolbarItemIds`）。
 pub const ACTION_TOOLBAR_ITEM_IDS: &[&str] = &[
-    "barcode-recognition",
-    "table-recognition",
-    "convert-to-markdown",
-    "latex-recognition",
-    "convert-to-html",
-    "record-screen",
-    "pin-to-screen",
-    "text-recognition",
-    "text-translation",
-    "scrolling-screenshot",
-    "quick-save",
-    "save-as-file",
+    ID_BARCODE_RECOGNITION,
+    ID_TABLE_RECOGNITION,
+    ID_CONVERT_TO_MARKDOWN,
+    LATEX_RECOGNITION_ID,
+    ID_CONVERT_TO_HTML,
+    ID_RECORD_SCREEN,
+    ID_PIN_TO_SCREEN,
+    ID_TEXT_RECOGNITION,
+    ID_TEXT_TRANSLATION,
+    ID_SCROLLING_SCREENSHOT,
+    QUICK_SAVE_ID,
+    ID_SAVE_AS_FILE,
 ];
 
 /// 贴图动作工具栏可用项（`kPinnedActionToolbarItemIds`）。
 pub const PINNED_ACTION_TOOLBAR_ITEM_IDS: &[&str] = &[
-    "barcode-recognition",
-    "table-recognition",
-    "convert-to-markdown",
-    "latex-recognition",
-    "convert-to-html",
-    "text-recognition",
-    "text-translation",
+    ID_BARCODE_RECOGNITION,
+    ID_TABLE_RECOGNITION,
+    ID_CONVERT_TO_MARKDOWN,
+    LATEX_RECOGNITION_ID,
+    ID_CONVERT_TO_HTML,
+    ID_TEXT_RECOGNITION,
+    ID_TEXT_TRANSLATION,
 ];
 
 /// 绘图工具栏默认分组（`defaultDrawingToolbarPositions`）。
 pub const DRAWING_DEFAULT_POSITIONS: &[&[&str]] = &[
-    &["shape"],
-    &["line", "arrow"],
-    &["free-draw"],
-    &["spotlight", "highlighter"],
-    &["text"],
-    &["serial-number"],
-    &["filter"],
-    &["eraser"],
-    &["watermark"],
-    &["separator"],
-    &["undo"],
-    &["redo"],
+    &[ID_SHAPE],
+    &[ID_LINE, ID_ARROW],
+    &[ID_FREE_DRAW],
+    &[ID_SPOTLIGHT, ID_HIGHLIGHTER],
+    &[ID_TEXT],
+    &[ID_SERIAL_NUMBER],
+    &[ID_FILTER],
+    &[ID_ERASER],
+    &[ID_WATERMARK],
+    &[ID_SEPARATOR],
+    &[ID_UNDO],
+    &[ID_REDO],
 ];
 
 /// 动作工具栏默认分组（`defaultActionToolbarPositions`）。
 pub const ACTION_DEFAULT_POSITIONS: &[&[&str]] = &[
     &[
-        "convert-to-html",
-        "convert-to-markdown",
-        "latex-recognition",
-        "barcode-recognition",
-        "table-recognition",
+        ID_CONVERT_TO_HTML,
+        ID_CONVERT_TO_MARKDOWN,
+        LATEX_RECOGNITION_ID,
+        ID_BARCODE_RECOGNITION,
+        ID_TABLE_RECOGNITION,
     ],
-    &["record-screen"],
-    &["pin-to-screen"],
-    &["text-recognition"],
-    &["text-translation"],
-    &["scrolling-screenshot"],
-    &["quick-save", "save-as-file"],
+    &[ID_RECORD_SCREEN],
+    &[ID_PIN_TO_SCREEN],
+    &[ID_TEXT_RECOGNITION],
+    &[ID_TEXT_TRANSLATION],
+    &[ID_SCROLLING_SCREENSHOT],
+    &[QUICK_SAVE_ID, ID_SAVE_AS_FILE],
 ];
 
 /// 贴图动作工具栏默认分组（`defaultPinnedActionToolbarPositions`）。
 pub const PINNED_DEFAULT_POSITIONS: &[&[&str]] = &[
     &[
-        "convert-to-html",
-        "convert-to-markdown",
-        "latex-recognition",
-        "barcode-recognition",
-        "table-recognition",
+        ID_CONVERT_TO_HTML,
+        ID_CONVERT_TO_MARKDOWN,
+        LATEX_RECOGNITION_ID,
+        ID_BARCODE_RECOGNITION,
+        ID_TABLE_RECOGNITION,
     ],
-    &["text-recognition"],
-    &["text-translation"],
+    &[ID_TEXT_RECOGNITION],
+    &[ID_TEXT_TRANSLATION],
 ];
 
 /// 生成默认工具栏布局对象 `{"positions": ..., "hidden": []}`。
@@ -152,8 +204,8 @@ pub const PINNED_DEFAULT_POSITIONS: &[&[&str]] = &[
 /// ```
 pub fn default_toolbar_layout(positions: &[&[&str]]) -> Value {
     json!({
-        "positions": positions,
-        "hidden": []
+        POSITIONS_KEY: positions,
+        HIDDEN_KEY: []
     })
 }
 
@@ -176,7 +228,7 @@ fn append_position(
     let mut position: Vec<String> = Vec::new();
     for id in ids {
         if known.contains(id.as_str()) && !positioned.contains(id) && !hidden_set.contains(id) {
-            if id == "separator" {
+            if id == ID_SEPARATOR {
                 if !position.is_empty() {
                     positions.push(std::mem::take(&mut position));
                 }
@@ -239,7 +291,7 @@ pub fn normalize_toolbar_layout(
     let mut hidden: Vec<String> = Vec::new();
     let mut hidden_set: HashSet<String> = HashSet::new();
 
-    let Some(position_groups) = object.get("positions").and_then(Value::as_array) else {
+    let Some(position_groups) = object.get(POSITIONS_KEY).and_then(Value::as_array) else {
         return Normalization::invalid();
     };
     for group in position_groups {
@@ -253,7 +305,7 @@ pub fn normalize_toolbar_layout(
             .collect();
         append_position(&known, &ids, &mut positions, &mut positioned, &hidden_set);
     }
-    if let Some(hidden_items) = object.get("hidden").and_then(Value::as_array) {
+    if let Some(hidden_items) = object.get(HIDDEN_KEY).and_then(Value::as_array) {
         for id in hidden_items.iter().filter_map(Value::as_str) {
             if known.contains(id) && !positioned.contains(id) && !hidden_set.contains(id) {
                 hidden.push(id.to_string());
@@ -267,31 +319,32 @@ pub fn normalize_toolbar_layout(
         && !hidden_set.contains(QUICK_SAVE_ID)
     {
         for position in &mut positions {
-            if let Some(save_index) = position.iter().position(|id| id == "save-as-file") {
+            if let Some(save_index) = position.iter().position(|id| id == ID_SAVE_AS_FILE) {
                 position.insert(save_index, QUICK_SAVE_ID.to_string());
                 positioned.insert(QUICK_SAVE_ID.to_string());
                 break;
             }
         }
-        if !positioned.contains(QUICK_SAVE_ID) && hidden_set.contains("save-as-file") {
+        if !positioned.contains(QUICK_SAVE_ID) && hidden_set.contains(ID_SAVE_AS_FILE) {
             hidden.push(QUICK_SAVE_ID.to_string());
             hidden_set.insert(QUICK_SAVE_ID.to_string());
         }
     }
 
-    if migrate_screenshot_layout && !positions.is_empty() && known.contains("convert-to-markdown") {
+    if migrate_screenshot_layout && !positions.is_empty() && known.contains(ID_CONVERT_TO_MARKDOWN)
+    {
         // 升级早期默认布局，不动用户自定义位置
         let mut previous_default = to_owned_positions(default_positions);
         previous_default[0] = vec![
-            "barcode-recognition".to_string(),
-            "table-recognition".into(),
+            ID_BARCODE_RECOGNITION.to_string(),
+            ID_TABLE_RECOGNITION.into(),
         ];
-        previous_default.insert(1, vec!["convert-to-markdown".to_string()]);
-        previous_default.insert(2, vec!["convert-to-html".to_string()]);
+        previous_default.insert(1, vec![ID_CONVERT_TO_MARKDOWN.to_string()]);
+        previous_default.insert(2, vec![ID_CONVERT_TO_HTML.to_string()]);
         let mut previous_grouped_default = to_owned_positions(default_positions);
-        previous_grouped_default[0] = ["table-recognition", "barcode-recognition"]
+        previous_grouped_default[0] = [ID_TABLE_RECOGNITION, ID_BARCODE_RECOGNITION]
             .iter()
-            .chain(["convert-to-markdown", "convert-to-html"].iter())
+            .chain([ID_CONVERT_TO_MARKDOWN, ID_CONVERT_TO_HTML].iter())
             .map(|id| (*id).to_string())
             .collect();
         if hidden.is_empty()
@@ -300,7 +353,7 @@ pub fn normalize_toolbar_layout(
             positions = to_owned_positions(default_positions);
         }
         let mut recognition_position: Option<usize> = None;
-        for anchor in ["barcode-recognition", "table-recognition"] {
+        for anchor in [ID_BARCODE_RECOGNITION, ID_TABLE_RECOGNITION] {
             if let Some(index) = positions
                 .iter()
                 .position(|group| group.iter().any(|id| id == anchor))
@@ -309,7 +362,7 @@ pub fn normalize_toolbar_layout(
                 break;
             }
         }
-        for id in ["convert-to-markdown", "convert-to-html"] {
+        for id in [ID_CONVERT_TO_MARKDOWN, ID_CONVERT_TO_HTML] {
             if let Some(index) = recognition_position
                 && !positioned.contains(id)
                 && !hidden_set.contains(id)
@@ -322,11 +375,11 @@ pub fn normalize_toolbar_layout(
 
     // 升级上一版默认识别分组，保留用户自定义排列
     let previous_recognition_group: Vec<String> = [
-        "convert-to-html",
-        "latex-recognition",
-        "convert-to-markdown",
-        "barcode-recognition",
-        "table-recognition",
+        ID_CONVERT_TO_HTML,
+        LATEX_RECOGNITION_ID,
+        ID_CONVERT_TO_MARKDOWN,
+        ID_BARCODE_RECOGNITION,
+        ID_TABLE_RECOGNITION,
     ]
     .iter()
     .map(|id| (*id).to_string())
@@ -345,14 +398,15 @@ pub fn normalize_toolbar_layout(
                 positioned.insert(LATEX_RECOGNITION_ID.to_string());
                 break;
             }
-            if let Some(index) = position.iter().position(|id| id == "convert-to-markdown") {
+            if let Some(index) = position.iter().position(|id| id == ID_CONVERT_TO_MARKDOWN) {
                 // 弹出按钮会反转保存的栈：插在 Markdown 之后才会显示在其左侧
                 position.insert(index + 1, LATEX_RECOGNITION_ID.to_string());
                 positioned.insert(LATEX_RECOGNITION_ID.to_string());
                 break;
             }
         }
-        if !positioned.contains(LATEX_RECOGNITION_ID) && hidden_set.contains("convert-to-markdown") {
+        if !positioned.contains(LATEX_RECOGNITION_ID) && hidden_set.contains(ID_CONVERT_TO_MARKDOWN)
+        {
             hidden.push(LATEX_RECOGNITION_ID.to_string());
             hidden_set.insert(LATEX_RECOGNITION_ID.to_string());
         }
@@ -372,7 +426,7 @@ pub fn normalize_toolbar_layout(
         );
     }
 
-    let normalized = json!({ "positions": positions, "hidden": hidden });
+    let normalized = json!({ POSITIONS_KEY: positions, HIDDEN_KEY: hidden });
     let changed = !json_eq(&normalized, value);
     Normalization::ok(normalized, changed)
 }

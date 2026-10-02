@@ -761,6 +761,53 @@ mod tests {
         assert_eq!(kind("screenshot_cancel"), CommandKind::Cancel);
     }
 
+    /// 逐项钉死 28 个 tool 指向的命令种类（独立手写，不引用映射表自身的 kind）。
+    #[test]
+    fn mcp_tool_map_pins_every_kind() {
+        use CommandKind as K;
+        let expected: [(&str, CommandKind); 28] = [
+            ("mcp_status", K::McpStatus),
+            ("screenshot_begin", K::Capture),
+            ("screenshot_state", K::QueryState),
+            ("screenshot_set_selection", K::SetSelection),
+            ("screenshot_set_tool", K::SelectTool),
+            ("screenshot_apply_annotations", K::ApplyAnnotations),
+            ("screenshot_undo", K::Undo),
+            ("screenshot_redo", K::Redo),
+            ("screenshot_render", K::Render),
+            ("screenshot_save", K::Export),
+            ("screenshot_copy", K::Export),
+            ("screenshot_pin", K::PinSelection),
+            ("screenshot_finish", K::Finish),
+            ("screenshot_cancel", K::Cancel),
+            ("screenshot_direct_capture", K::DirectCapture),
+            ("screenshot_set_selection_style", K::SetSelectionStyle),
+            ("screenshot_set_tool_style", K::SetToolStyle),
+            ("screenshot_edit_elements", K::EditElements),
+            ("screenshot_recapture", K::Recapture),
+            ("screenshot_scrolling", K::Scrolling),
+            ("screenshot_scroll_once", K::ScrollOnce),
+            ("screenshot_recognize", K::RunOcr),
+            ("screenshot_translate", K::Translate),
+            ("screenshot_auto_filter", K::AutoFilter),
+            ("screenshot_operation", K::RunOperation),
+            ("screenshot_edit_recognition", K::EditRecognition),
+            ("screenshot_export_recognition", K::ExportRecognition),
+            ("screenshot_draw_template", K::DrawTemplate),
+        ];
+        for (name, kind) in expected {
+            let found: Vec<_> = MCP_TOOL_MAP.iter().filter(|(n, _)| *n == name).collect();
+            assert_eq!(found.len(), 1, "{name} 应恰好出现一次");
+            assert_eq!(found[0].1, kind, "{name} 指向的命令种类不符");
+        }
+        // 与独立名字清单互相覆盖
+        assert!(
+            EXPECTED_TOOLS
+                .iter()
+                .all(|n| expected.iter().any(|(m, _)| m == n))
+        );
+    }
+
     /// 输入框翻译命令不属于 MCP 截图域：映射表里没有它，且能还原为对应种类。
     #[test]
     fn open_translate_input_is_not_an_mcp_tool() {

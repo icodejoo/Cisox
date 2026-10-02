@@ -136,6 +136,26 @@ fn unsupported_version_rejected() {
     assert!(load_index(text.as_bytes()).is_err());
 }
 
+/// 生成根级未知字段嵌套 `depth` 层数组的索引文本。
+fn index_with_nested_unknown(depth: usize) -> String {
+    format!(
+        r#"{{"format_version":2,"pending_deletions":[],"records":[],"future":{}{}{}}}"#,
+        "[".repeat(depth),
+        "0",
+        "]".repeat(depth)
+    )
+}
+
+/// 未知字段嵌套在 serde_json 深度上限（128）内可往返；超限整份索引作废但不 panic。
+///
+/// 注：C++ `QJsonDocument` 上限为 1024，此处差异属已知现状（见交接文档 §3.1）。
+#[test]
+fn nested_unknown_field_depth_limit() {
+    let ok = load_index(index_with_nested_unknown(100).as_bytes()).unwrap();
+    assert!(ok.extra.contains_key("future"));
+    assert!(load_index(index_with_nested_unknown(200).as_bytes()).is_err());
+}
+
 /// 缺少 pending_deletions 应解析失败，与 C++ 的 isArray 检查一致。
 #[test]
 fn missing_pending_deletions_rejected() {

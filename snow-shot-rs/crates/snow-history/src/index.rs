@@ -20,7 +20,7 @@ pub const CANVAS_FILE: &str = "canvas_history.json";
 /// 截图结果图片文件名。
 pub const RESULT_FILE: &str = "capture_result.png";
 
-// 新增的范围边界常量
+// 范围边界常量
 /// 1 MiB 字节数
 pub const MIB: i64 = 1024 * 1024;
 /// 单个画布历史记录的最大字节数 (16 MiB)
