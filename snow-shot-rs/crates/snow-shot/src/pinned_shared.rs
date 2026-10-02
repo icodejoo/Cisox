@@ -7,7 +7,6 @@ use crate::pinned_model::{
     parse_hex_color, parse_middle_click_action, record_created_ms, record_geometry,
     record_payload_bytes, select_evictions,
 };
-use crate::screenshot_output::{home_directory, resolve_save_directory};
 use crate::settings_state::SharedConfig;
 use image::ImageFormat;
 use snow_history::pin_id::new_unique_pin_id;
@@ -143,10 +142,18 @@ impl PinShared {
         }
     }
 
-    /// 图片保存目录（与截图保存共用配置）。
-    pub fn save_directory(&self) -> PathBuf {
+    /// 按截图保存配置（目录 / 文件名模板 / 格式）快速保存一张图。
+    ///
+    /// # 参数
+    /// - `width` / `height` / `rgba`：图像尺寸与像素。
+    ///
+    /// # 返回
+    /// 写入的路径；失败为按界面语言生成的提示。
+    pub fn quick_save(&self, width: u32, height: u32, rgba: &[u8]) -> Result<PathBuf, String> {
         let store = self.config.borrow();
-        resolve_save_directory(store.document(), home_directory().as_deref()).0
+        let locale = crate::app_runtime::interface_locale(store.document());
+        crate::screenshot_output::quick_save(store.document(), width, height, rgba)
+            .map_err(|e| e.manual_message(&locale))
     }
 
     /// 分配一个新的贴图 ID：随机 UUID，且不与仓储已有记录、本会话已发出的 ID 冲突。

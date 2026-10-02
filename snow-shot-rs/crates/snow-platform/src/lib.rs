@@ -7,6 +7,7 @@ pub mod clipboard;
 pub mod console;
 pub mod crash;
 pub mod dib;
+pub mod file_dialog;
 pub mod focus_probe;
 pub mod local_time;
 pub mod menu;
@@ -18,6 +19,7 @@ pub mod text_inject;
 pub mod text_raster;
 pub mod tray;
 pub mod win_ocr;
+pub mod window_rect;
 
 /// 本 crate 的阶段标记，用于骨架连通性测试。
 pub const PHASE: &str = "P1";

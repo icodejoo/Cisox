@@ -16,7 +16,7 @@ use crate::pinned_model::{
     swap_rb_in_place, wheel_anchor, wheel_steps,
 };
 use crate::pinned_shared::{PinInteraction, PinShared};
-use crate::screenshot_output::{encode_png, save_png};
+use crate::screenshot_output::encode_png;
 use serde::Deserialize;
 use snow_canvas_raster::TileKey;
 use snow_canvas_text::{CanvasTextInput, CanvasTextStyle, EditKeyOutcome};
@@ -768,13 +768,13 @@ impl PinnedWindowView {
         }
     }
 
-    /// 保存（含标注的）图像为 PNG 文件。
+    /// 保存（含标注的）图像为文件（格式、目录、文件名取自截图保存配置）。
     pub fn save_to_file(&mut self, cx: &mut Context<Self>) {
         let Some((w, h, rgba)) = self.composite_rgba() else {
             self.set_status("保存失败：无法导出图像", cx);
             return;
         };
-        match save_png(&self.shared.save_directory(), w, h, &rgba) {
+        match self.shared.quick_save(w, h, &rgba) {
             Ok(path) => {
                 tracing::info!(id = %self.id, path = %path.display(), "贴图已保存");
                 self.set_status(format!("已保存：{}", path.display()), cx);

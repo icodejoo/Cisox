@@ -14,8 +14,12 @@ use crate::ocr_service::OcrResult;
 use crate::translate_flow::{TranslateUiState, panel_lines as translate_panel_lines, stage_text};
 use crate::translate_service::{TranslateFlowError, TranslateOutcome, TranslateStage};
 use crate::overlay_probe::FrameProbe;
-use crate::screenshot_output;
+use crate::screenshot_output::{
+    self, ExportOverrides, ExportSettings, ManualSaveJob, SaveMode, SaveOutcome, home_directory,
+};
+use crate::settings_state::SharedConfig;
 use image::{Frame, RgbaImage};
+use snow_app_core::command::SaveRequest;
 use snow_canvas_raster::TileKey;
 use snow_canvas_text::{CanvasTextInput, CanvasTextStyle, EditKeyOutcome};
 use snow_platform::text_raster::DEFAULT_FONT_FAMILY;
@@ -124,6 +128,20 @@ pub enum OverlayOutcome {
     Close,
     /// 在给定底图物理坐标处开始文字输入（需要窗口上下文才能创建输入框）。
     BeginText(PhysicalPoint),
+    /// 手动保存任务已登记：需要在界面借用之外执行（对话框是模态的），完成后再决定去向。
+    AwaitSave,
+}
+
+/// 登记待执行的手动保存：任务与选区像素。
+struct PendingSave {
+    /// 保存任务。
+    job: ManualSaveJob,
+    /// 图像宽。
+    width: u32,
+    /// 图像高。
+    height: u32,
+    /// RGBA 像素。
+    rgba: Vec<u8>,
 }
 
 /// 屏幕上一块标注预览图（对应一个光栅分块）。
@@ -179,8 +197,46 @@ pub trait OutputSink {
     /// 把文本写入剪贴板。
     fn copy_text(&mut self, text: &str) -> Result<(), String>;
 
-    /// 把 RGBA 图像保存为文件，返回写入的路径。
+    /// 把 RGBA 图像快速保存为文件（按配置的目录 / 文件名 / 格式），返回写入的路径。
     fn save_image(&mut self, width: u32, height: u32, rgba: &[u8]) -> Result<PathBuf, String>;
+
+    /// 另存为：弹出保存对话框让用户选路径与格式；默认退化为快速保存。
+    ///
+    /// # 返回
+    /// 保存成功、用户取消，或已本地化的失败提示（直接显示给用户）。
+    fn save_image_as(
+        &mut self,
+        width: u32,
+        height: u32,
+        rgba: &[u8],
+    ) -> Result<SaveOutcome, String> {
+        self.save_image(width, height, rgba).map(SaveOutcome::Saved)
+    }
+
+    /// 准备一次手动保存任务（对话框会进入模态循环，必须在界面借用之外执行）。
+    ///
+    /// # 参数
+    /// - `request`：总线上的保存请求；`None` 表示用户点了“保存”。
+    ///
+    /// # 返回
+    /// 任务；返回 `None` 时调用方退化为同步的 [`OutputSink::save_image_as`]。
+    fn begin_manual_save(&mut self, _request: Option<&SaveRequest>) -> Option<ManualSaveJob> {
+        None
+    }
+
+    /// 手动保存成功后记住目录与格式（只有走了对话框才会被调用）。
+    fn remember_save(
+        &mut self,
+        _path: &std::path::Path,
+        _format: crate::export_format::ExportFormat,
+    ) {
+    }
+
+    /// 复制到剪贴板成功后的附加动作（配置开启时自动保存一份）；默认什么也不做。
+    fn after_copy(&mut self, _width: u32, _height: u32, _rgba: &[u8]) {}
+
+    /// 告知覆盖窗的原生句柄（`HWND` 整数值），供对话框当所有者；默认忽略。
+    fn set_owner_window(&mut self, _hwnd: isize) {}
 
     /// 以选区（底图物理坐标）启动屏幕录制；默认不支持。
     ///
@@ -247,8 +303,12 @@ pub trait OutputSink {
 
 /// 系统输出：真实剪贴板 + 保存目录。
 pub struct SystemOutput {
-    /// 图片保存目录。
+    /// 图片保存目录（没有配置存储时的后备目录）。
     save_directory: PathBuf,
+    /// 共享配置：每次导出时现读，设置页的改动立即生效；另存为后写回上次目录 / 格式。
+    config: Option<SharedConfig>,
+    /// 覆盖窗原生句柄，另存为对话框的所有者。
+    owner: Option<isize>,
     /// 选区确认录屏时的回调（参数为覆盖窗底图坐标下的选区）。
     on_record: Option<Box<dyn Fn(PhysicalRect)>>,
     /// 贴图回调：选区（覆盖窗底图坐标）、图像尺寸与不透明 RGBA 像素。
@@ -279,6 +339,8 @@ impl SystemOutput {
     pub fn new(save_directory: PathBuf) -> Self {
         Self {
             save_directory,
+            config: None,
+            owner: None,
             on_record: None,
             on_pin: None,
             on_ocr: None,
@@ -287,6 +349,41 @@ impl SystemOutput {
             on_translate_download: None,
             on_scroll: None,
         }
+    }
+
+    /// 接入共享配置：导出格式、质量、文件名模板等从中现读。
+    ///
+    /// # 参数
+    /// - `config`：共享配置存储。
+    pub fn with_config(mut self, config: SharedConfig) -> Self {
+        self.config = Some(config);
+        self
+    }
+
+    /// 当前导出配置快照；没有配置存储时用默认值 + 后备目录。
+    fn export_settings(&self) -> ExportSettings {
+        match &self.config {
+            Some(config) => ExportSettings::from_document(config.borrow().document()),
+            None => ExportSettings::from_document(
+                &snow_config::document::ConfigDocument::from_bytes(None),
+            )
+            .with_directory(&self.save_directory),
+        }
+    }
+
+    /// 当前界面语言代码：配置优先，没有则跟随系统。
+    fn locale(&self) -> String {
+        let saved = self
+            .config
+            .as_ref()
+            .and_then(|c| {
+                c.borrow()
+                    .value(crate::settings_model::LANGUAGE_KEY)
+                    .as_str()
+                    .map(str::to_string)
+            })
+            .filter(|v| !v.trim().is_empty());
+        saved.unwrap_or_else(crate::sys_prefs::system_ui_language)
     }
 
     /// 设置文字识别回调：用户点“OCR”时触发（识别在后台线程执行）。
@@ -358,9 +455,95 @@ impl OutputSink for SystemOutput {
         copy_text_to_clipboard(text)
     }
 
-    /// 保存为 PNG 文件。
+    /// 快速保存：按配置的目录、文件名模板与格式直接落盘。
     fn save_image(&mut self, width: u32, height: u32, rgba: &[u8]) -> Result<PathBuf, String> {
-        screenshot_output::save_png(&self.save_directory, width, height, rgba)
+        let settings = self.export_settings();
+        let locale = self.locale();
+        screenshot_output::save_automatic(
+            &settings,
+            &ExportOverrides::default(),
+            width,
+            height,
+            rgba,
+            home_directory().as_deref(),
+            snow_platform::local_time::now(),
+        )
+        .map_err(|e| e.manual_message(&locale))
+    }
+
+    /// 准备手动保存：给了路径直接写；要求自动路径则快速保存；否则弹系统对话框。
+    fn begin_manual_save(&mut self, request: Option<&SaveRequest>) -> Option<ManualSaveJob> {
+        let (overrides, mode) = match request {
+            None => (ExportOverrides::default(), SaveMode::Dialog),
+            Some(request) => {
+                if request
+                    .scale
+                    .is_some_and(|s| (s - 1.0).abs() > f64::EPSILON)
+                {
+                    tracing::warn!(scale = ?request.scale, "保存请求的缩放比例暂未支持，按原尺寸导出");
+                }
+                let mode = match request
+                    .path
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|p| !p.is_empty())
+                {
+                    Some(path) => SaveMode::Path(path.to_string()),
+                    None if request.automatic_path == Some(true) => SaveMode::Automatic,
+                    None => SaveMode::Dialog,
+                };
+                (ExportOverrides::from_save_request(request), mode)
+            }
+        };
+        Some(ManualSaveJob {
+            settings: self.export_settings(),
+            overrides,
+            mode,
+            locale: self.locale(),
+            owner: self.owner,
+            home: home_directory(),
+            now: snow_platform::local_time::now(),
+        })
+    }
+
+    /// 写回上次手动保存的目录与格式。
+    fn remember_save(
+        &mut self,
+        path: &std::path::Path,
+        format: crate::export_format::ExportFormat,
+    ) {
+        if let Some(config) = &self.config
+            && let Err(e) =
+                screenshot_output::remember_manual_save(&mut config.borrow_mut(), path, format)
+        {
+            tracing::warn!(error = %e, "记住上次保存位置失败");
+        }
+    }
+
+    /// 配置开启“复制后自动保存”时，再按自动保存规则落盘一份；失败只记日志。
+    fn after_copy(&mut self, width: u32, height: u32, rgba: &[u8]) {
+        let settings = self.export_settings();
+        if !settings.auto_save_after_copy {
+            return;
+        }
+        let locale = self.locale();
+        match screenshot_output::save_automatic(
+            &settings,
+            &ExportOverrides::default(),
+            width,
+            height,
+            rgba,
+            home_directory().as_deref(),
+            snow_platform::local_time::now(),
+        ) {
+            Ok(path) => tracing::info!(path = %path.display(), "复制后已自动保存"),
+            Err(e) => tracing::warn!(error = %e, message = %e.auto_message(&locale), "复制后自动保存失败"),
+        }
+    }
+
+    /// 记录覆盖窗句柄。
+    fn set_owner_window(&mut self, hwnd: isize) {
+        self.owner = Some(hwnd);
     }
 
     /// 触发录屏回调；未设置回调时报错。
@@ -500,6 +683,8 @@ pub struct ScreenshotOverlayView {
     color_format: ColorFormat,
     /// 状态提示文本（显示在底部提示条）。
     status_message: Option<String>,
+    /// 等待在借用之外执行的手动保存。
+    pending_save: Option<PendingSave>,
     /// 输出通道（剪贴板 / 文件）。
     output: Box<dyn OutputSink>,
     /// 键盘焦点句柄（测试环境为空）。
@@ -578,6 +763,7 @@ impl ScreenshotOverlayView {
             magnifier_grid: MagnifierGrid::new_solid(MAGNIFIER_DIMENSION, (0, 0, 0, 255)),
             color_format: ColorFormat::Hex,
             status_message: None,
+            pending_save: None,
             output,
             focus_handle: None,
             probe: FrameProbe::new(),
@@ -1156,6 +1342,7 @@ impl ScreenshotOverlayView {
         match self.output.copy_image(w, h, &rgba) {
             Ok(()) => {
                 tracing::info!(width = w, height = h, "截图已复制到剪贴板");
+                self.output.after_copy(w, h, &rgba);
                 OverlayOutcome::Close
             }
             Err(e) => {
@@ -1166,8 +1353,29 @@ impl ScreenshotOverlayView {
         }
     }
 
-    /// 保存选区为文件；成功后关闭覆盖窗，失败保留窗口并提示。
+    /// 保存选区为文件（用户点“保存”）。
     fn save_selection_and_close(&mut self) -> OverlayOutcome {
+        self.save_selection_with(None)
+    }
+
+    /// 导出命令入口（总线 / 热键）：复制或按请求保存当前选区。
+    ///
+    /// # 参数
+    /// - `target`：导出去向。
+    pub fn apply_export(
+        &mut self,
+        target: &snow_app_core::command::ExportTarget,
+    ) -> OverlayOutcome {
+        match target {
+            snow_app_core::command::ExportTarget::Copy => self.copy_selection_and_close(),
+            snow_app_core::command::ExportTarget::Save(request) => {
+                self.save_selection_with(Some(request))
+            }
+        }
+    }
+
+    /// 保存选区：输出通道给出任务时登记为异步（对话框不能在界面借用里弹），否则同步保存。
+    fn save_selection_with(&mut self, request: Option<&SaveRequest>) -> OverlayOutcome {
         if !self.has_committed_selection() {
             self.status_message = Some("请先框选一个区域".into());
             return OverlayOutcome::Stay;
@@ -1176,14 +1384,51 @@ impl ScreenshotOverlayView {
             self.status_message = Some("选区无效".into());
             return OverlayOutcome::Stay;
         };
-        match self.output.save_image(w, h, &rgba) {
-            Ok(path) => {
-                tracing::info!(path = %path.display(), width = w, height = h, "截图已保存");
-                OverlayOutcome::Close
+        if let Some(job) = self.output.begin_manual_save(request) {
+            self.pending_save = Some(PendingSave {
+                job,
+                width: w,
+                height: h,
+                rgba,
+            });
+            return OverlayOutcome::AwaitSave;
+        }
+        let result = self.output.save_image_as(w, h, &rgba).map(|outcome| {
+            screenshot_output::ManualSaveDone {
+                outcome,
+                format: crate::export_format::ExportFormat::Png,
+                remember: false,
             }
-            Err(e) => {
-                tracing::error!(error = %e, "保存截图失败");
-                self.status_message = Some(format!("保存失败: {e}"));
+        });
+        self.complete_save(result)
+    }
+
+    /// 处理保存结果：成功关闭覆盖窗，取消保持原样，失败保留窗口并提示。
+    ///
+    /// # 参数
+    /// - `result`：保存任务的结果；失败是已本地化的提示。
+    pub fn complete_save(
+        &mut self,
+        result: Result<screenshot_output::ManualSaveDone, String>,
+    ) -> OverlayOutcome {
+        match result {
+            Ok(done) => match done.outcome {
+                SaveOutcome::Saved(path) => {
+                    tracing::info!(path = %path.display(), "截图已保存");
+                    if done.remember {
+                        self.output.remember_save(&path, done.format);
+                    }
+                    OverlayOutcome::Close
+                }
+                SaveOutcome::Cancelled => {
+                    tracing::info!("用户取消了另存为");
+                    OverlayOutcome::Stay
+                }
+            },
+            Err(message) => {
+                tracing::error!(error = %message, "保存截图失败");
+                // 失败提示已由保存任务按界面语言生成
+                self.status_message = Some(message);
                 OverlayOutcome::Stay
             }
         }
@@ -1774,7 +2019,52 @@ impl ScreenshotOverlayView {
                 self.begin_text_edit(origin, window, cx);
                 cx.notify();
             }
+            OverlayOutcome::AwaitSave => self.run_pending_save(window, cx),
         }
+    }
+
+    /// 在界面借用之外执行登记的保存任务（系统对话框是模态循环，不能嵌在视图更新里），完成后回到视图收尾。
+    fn run_pending_save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(pending) = self.pending_save.take() else {
+            cx.notify();
+            return;
+        };
+        let entity = cx.entity();
+        let handle = window.window_handle();
+        cx.spawn(async move |_this, cx| {
+            let result = pending
+                .job
+                .run(pending.width, pending.height, &pending.rgba);
+            let _ = handle.update(cx, |_, window, app| {
+                entity.update(app, |view, cx| {
+                    let outcome = view.complete_save(result);
+                    view.finish(outcome, window, cx);
+                });
+            });
+        })
+        .detach();
+    }
+
+    /// 告知输出通道覆盖窗的原生句柄（另存为对话框以它为所有者）。
+    ///
+    /// # 参数
+    /// - `hwnd`：`HWND` 整数值。
+    pub fn set_owner_window(&mut self, hwnd: isize) {
+        self.output.set_owner_window(hwnd);
+    }
+
+    /// 外部导出命令（总线 / 热键）的窗口侧入口：执行导出并按结果收尾。
+    ///
+    /// # 参数
+    /// - `target`：导出去向。
+    pub fn run_export(
+        &mut self,
+        target: &snow_app_core::command::ExportTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let outcome = self.apply_export(target);
+        self.finish(outcome, window, cx);
     }
 
     /// 工具栏动作入口（由按钮点击回调）。
@@ -2540,7 +2830,7 @@ mod tests {
         assert_eq!(view.handle_key("enter", false, false), OverlayOutcome::Stay);
         assert!(view.status_message.as_deref().unwrap().contains("复制失败"));
         assert_eq!(view.apply_action(ToolbarAction::Save), OverlayOutcome::Stay);
-        assert!(view.status_message.as_deref().unwrap().contains("保存失败"));
+        assert!(view.status_message.as_deref().unwrap().contains("boom"));
     }
 
     /// 双击选区内部等同复制并关闭。

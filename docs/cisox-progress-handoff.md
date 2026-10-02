@@ -6,7 +6,7 @@
 
 ## 1. 一句话状态
 
-Windows 主线已经能跑通「热键 / 托盘 / IPC → 截图覆盖窗（单屏）→ 8 个标注工具 → 复制 / 保存 PNG / 贴图 / OCR / 翻译 / 长截图 / 录屏」，另有 Rust 侧新增的输入翻译浮窗、语音转文字、视频编辑后端；底层 crate（配置、i18n、仓储、滤镜、录制 worker、本地翻译 worker）质量较扎实。但**距离全功能对齐还差很多**：按审计，82 项对照里 ✅ 24、🟡 25、🟥 5、⬜ 28；设置页 238 个键里只有 31 个被运行时读取；MCP / 更新 / 网络 crate 仍是骨架；智能选区、样式面板、PDF、截图历史界面、录屏音频与特效、QR / 表格识别均缺。真机验证清单见审计 §5，大多还没做。
+Windows 主线已经能跑通「热键 / 托盘 / IPC → 截图覆盖窗（单屏）→ 8 个标注工具 → 复制 / 保存 PNG / 贴图 / OCR / 翻译 / 长截图 / 录屏」，另有 Rust 侧新增的输入翻译浮窗、语音转文字、视频编辑后端；底层 crate（配置、i18n、仓储、滤镜、录制 worker、本地翻译 worker）质量较扎实。但**距离全功能对齐还差很多**：按审计，82 项对照里 ✅ 24、🟡 27、🟥 5、⬜ 26；设置页 238 个键里只有 40 个被运行时读取；MCP / 更新 / 网络 crate 仍是骨架；智能选区、样式面板、截图历史界面、录屏音频与特效、QR / 表格识别均缺。真机验证清单见审计 §5，大多还没做。
 
 ## 2. 已提交（本地分支 `rust-gpui`，领先 `main` 92 个提交；领先 `origin/rust-gpui` 1 个：`d6396ea9`，未 push）
 
@@ -106,7 +106,7 @@ Windows 主线已经能跑通「热键 / 托盘 / IPC → 截图覆盖窗（单�
 - **P3 `snow-ui` 聚合器（✅ 已完成，2026-09-29）**：完成 `snow-ui` 总入口聚合（`shell`、`theme`、`icons`、`widgets` 与 `ui` 门面），验证通过单元测试、clippy 0 warning 与 `workspace-guard` 守卫检查。
 - **P3 选区几何与交互模型（✅ 已完成，2026-09-29）**：在 `snow-ui-shell::selection` 落地橡皮筋框选（Marquee）、八向手柄命中测试与外框生成、边界限制（`bounded_selection_rect`）、拖拽位移更新（`dragged_selection_rect`）、宽高比锁定处理以及选区状态机（`SelectionState`），并通过 46 个单测与 44 个文档测试。
 - **P3 放大镜与操作工具栏组件（✅ 已完成，2026-09-29）**：在 `snow-ui-widgets` 落地像素级采样放大网格与取色器 `Magnifier`（支持 HEX/RGB/HSL 循环切换与防遮挡自适应翻转定位）以及截图浮动操作工具栏 `ScreenshotToolbar`（支持标注工具切换、撤销/重做堆栈状态控制、导出动作按钮组以及智能摆放定位），单测与 doctest 全绿并通过 clippy 0 warning 检查。
-- **P3 全屏覆盖窗与屏幕采集/剪贴板主链路（✅ 已完成，2026-09-29）**〔审计更正：单屏 + GDI 采集；智能选区、直接截图模式、PDF / 多格式导出、历史界面未做，见审计 D01~D20〕：在 `snow-platform` 落地 Win32 原生 GDI 屏幕抓取（`capture_display`、内存位图与局部裁剪）与剪贴板图文直写；在 `snow-shot` 落地 `ScreenshotOverlayView` 全屏交互视图，统一承载全屏帧底图、四象限遮罩暗化、八向缩放手柄、浮动放大镜、浮动工具栏、鼠标事件交互状态机及动作分发。单元测试全过，workspace-guard 与 clippy 0 warning 保持全绿。
+- **P3 全屏覆盖窗与屏幕采集/剪贴板主链路（✅ 已完成，2026-09-29）**〔审计更正：单屏 + GDI 采集；智能选区、历史界面未做，见审计 D01~D20；PDF / 多格式导出与总线直接截图已于 2026-10-03 补齐，见下「导出块」〕：在 `snow-platform` 落地 Win32 原生 GDI 屏幕抓取（`capture_display`、内存位图与局部裁剪）与剪贴板图文直写；在 `snow-shot` 落地 `ScreenshotOverlayView` 全屏交互视图，统一承载全屏帧底图、四象限遮罩暗化、八向缩放手柄、浮动放大镜、浮动工具栏、鼠标事件交互状态机及动作分发。单元测试全过，workspace-guard 与 clippy 0 warning 保持全绿。
 - **P4 贴图（✅ 已完成，2026-09-29）**〔审计更正：核心交互与持久化属实；分组、点击穿透、缩略图、快捷键、管理页、文件贴图未做，见审计 E06~E11〕：
   - 在 `snow-ui-shell::pinned_geometry` 落地等比拖动调整、瞄准锚点算法（保持鼠标相对点固定）、滚轮阶梯缩放与透明度调节算法；
   - 在 `snow-shot::pinned_view` 落地 `PinnedWindowView` 贴图浮动窗口视图组件与二次标注（矩形、椭圆、箭头、直线、画笔、文本、马赛克及撤销重做堆栈、PNG 编码与剪贴板复制）；
@@ -207,6 +207,11 @@ Windows 主线已经能跑通「热键 / 托盘 / IPC → 截图覆盖窗（单�
 - [x] 核心功能已实现（2026-10-03，提交 72837e20、7d2eb8c0）：协议扩展（EDIT/PROBE）、按时间戳精确 seek、抽帧（PNG/JPEG/无损 WebP）、YUV 直通；帧率降采、缩放、关键帧裁剪编辑操作，FFmpeg 引擎（libx264 软编、音频直通）。
 - [x] 系统引擎（Media Foundation）已加入（提交 `3027b635`，`tools/snow-recorder/src/edit/system/*`）。[ ] 真实录屏样片基准与两引擎内存对比、合并操作（需改协议）仍缺；**主程序没有任何视频编辑入口**（审计 §3.3）。
 - [ ] 需要用户提供有代表性的录屏样片。
+
+**截图导出（迁移顺序 A 块，2026-10-03，未提交）**
+- [x] 另存为（系统 `IFileSaveDialog`）、快速保存、PNG / JPEG / BMP / WebP / PDF、文件名模板（Qt `QDateTime` 语法，默认含 `PRODUCT_NAME`）、重名 `_N`、目录回退；`Export` / `DirectCapture` 总线 handler；新接线 9 个 `screenshot/*` 配置键（见审计 §2）。
+- [ ] 仍缺：JXL / AVIF 编码、WebP 有损、自绘另存为对话框（`save_as_file_dialog = snow_shot`）、保存路径快捷项、缩放比例导出、保存后写历史、复制为文件、直接截图的 `render` 输出与对应全局热键。
+- [ ] 真机验证：对话框外观与置顶覆盖窗下的层级、PDF 在常见阅读器里打开、多屏 / 高 DPI 下焦点窗口直接截图。
 
 **已搁置（存档，可恢复）**
 - H.265：暂不支持，原因与恢复起点见 `docs/research/windows-hevc-support.md`。恢复前要补：干净 Windows（未装 HEVC 扩展）实测、Intel/AMD 实测、法务确认授权。

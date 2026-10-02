@@ -8,7 +8,7 @@ use crate::scroll_capture::{
     AUTO_SCROLL_DELTA, AutoScroller, CaptureOptions, CaptureTiming, CopyStatus, ScreenSource, ScrollControl,
     ScrollPhase, ScrollProgress, ScrollSink, SharedProgress, run_capture,
 };
-use crate::screenshot_output::{home_directory, resolve_save_directory, save_png};
+use crate::screenshot_output::{ExportOverrides, ExportSettings, home_directory, save_automatic};
 use crate::settings_state::SharedConfig;
 use snow_capability::CapabilityRegistry;
 use snow_platform::clipboard::copy_image_to_clipboard;
@@ -393,10 +393,12 @@ impl Render for ScrollAreaView {
     }
 }
 
-/// 输出通道：真实剪贴板 + PNG 文件。
+/// 输出通道：真实剪贴板 + 按截图保存配置落盘的文件。
 struct SystemScrollSink {
-    /// 保存目录。
-    dir: PathBuf,
+    /// 导出配置快照（目录 / 文件名模板 / 格式 / 质量）。
+    settings: ExportSettings,
+    /// 界面语言代码（失败提示用）。
+    locale: String,
 }
 
 impl ScrollSink for SystemScrollSink {
@@ -405,9 +407,18 @@ impl ScrollSink for SystemScrollSink {
         copy_image_to_clipboard(width, height, rgba)
     }
 
-    /// 保存为 PNG。
+    /// 按配置保存（长截图的图像不透明，直接交给自动保存）。
     fn save_png(&mut self, width: u32, height: u32, rgba: &[u8]) -> Result<PathBuf, String> {
-        save_png(&self.dir, width, height, rgba)
+        save_automatic(
+            &self.settings,
+            &ExportOverrides::default(),
+            width,
+            height,
+            rgba,
+            home_directory().as_deref(),
+            snow_platform::local_time::now(),
+        )
+        .map_err(|e| e.manual_message(&self.locale))
     }
 }
 
@@ -468,14 +479,23 @@ impl ScrollHost {
             tracing::info!("已有长截图在进行，忽略新的请求");
             return;
         }
-        let save_dir = match autotest.and_then(|_| std::env::var_os(ENV_SCROLL_AUTOTEST_DIR)).filter(|d| !d.is_empty()) {
-            Some(dir) => PathBuf::from(dir),
-            None => resolve_save_directory(self.config.borrow().document(), home_directory().as_deref()).0,
+        let (mut settings, locale) = {
+            let store = self.config.borrow();
+            (
+                ExportSettings::from_document(store.document()),
+                crate::app_runtime::interface_locale(store.document()),
+            )
         };
+        if let Some(dir) = autotest
+            .and_then(|_| std::env::var_os(ENV_SCROLL_AUTOTEST_DIR))
+            .filter(|d| !d.is_empty())
+        {
+            settings = settings.with_directory(&PathBuf::from(dir));
+        }
         let progress: SharedProgress = Arc::new(Mutex::new(ScrollProgress::new()));
         let control = Arc::new(ScrollControl::default());
         control.set_auto_scroll(autotest.is_some_and(|a| a.auto_scroll));
-        self.spawn_worker(region, Arc::clone(&progress), Arc::clone(&control), save_dir, autotest.and_then(|a| a.stop_after_secs));
+        self.spawn_worker(region, Arc::clone(&progress), Arc::clone(&control), settings, locale, autotest.and_then(|a| a.stop_after_secs));
 
         let bounds = monitor.bounds;
         let window_region = PhysicalRect::new(region.x - bounds.x, region.y - bounds.y, region.width, region.height);
@@ -504,7 +524,8 @@ impl ScrollHost {
         region: PhysicalRect,
         progress: SharedProgress,
         control: Arc<ScrollControl>,
-        save_dir: PathBuf,
+        settings: ExportSettings,
+        locale: String,
         stop_after: Option<u64>,
     ) {
         let inbox = self.inbox.clone();
@@ -518,7 +539,7 @@ impl ScrollHost {
                 });
             }
             let scroller: AutoScroller = Box::new(move || post_wheel(center, AUTO_SCROLL_DELTA));
-            let mut sink = SystemScrollSink { dir: save_dir };
+            let mut sink = SystemScrollSink { settings, locale };
             let wake_inbox = inbox.clone();
             run_capture(
                 ScreenSource::new((region.x, region.y, region.width.max(0) as u32, region.height.max(0) as u32)),

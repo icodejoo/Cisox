@@ -28,7 +28,7 @@ snow-translate = { path = "../snow-translate" }
 # 滚动截图拼接（主仓库 Apache-2.0 库；必须关默认特性，否则会拉入 avif/tiff/webp 等编解码）
 snow-stitch-images = { path = "../../../snow-crates/crates/snow-stitch-images", default-features = false }
 snow-ui = { path = "../snow-ui" }
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "bmp"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"

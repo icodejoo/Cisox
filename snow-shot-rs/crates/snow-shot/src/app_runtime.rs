@@ -30,7 +30,9 @@ use crate::recording_flow::{
     ENV_RECORDING_AUTOTEST, RecordingHost, monitor_for_region, parse_autotest,
 };
 use snow_ui::widgets::{AnnotationTool, ToolbarAction};
-use crate::screenshot_output::{configured_format, home_directory, resolve_save_directory};
+use crate::screenshot_output::{
+    ExportSettings, configured_format, export_direct, home_directory, resolve_save_directory,
+};
 use crate::scroll_view::{ENV_SCROLL_AUTOTEST, ScrollHost, parse_scroll_autotest};
 use crate::settings_model::portable_to_hotkey_text;
 use crate::settings_state::{ConfigChange, SharedConfig, SystemPrefs, UiPrefs, restore_value};
@@ -38,9 +40,10 @@ use crate::settings_model::{LANGUAGE_KEY, THEME_COLOR_KEY, THEME_MODE_KEY};
 use crate::settings_text::{Lang, window_title};
 use crate::settings_view::{AUTOTEST_STEP_INTERVAL, SettingsView, parse_autotest_ops};
 use serde_json::Value;
-use snow_app_core::bus::{CommandBus, CommandOutcome};
+use snow_app_core::bus::{CommandBus, CommandError, CommandOutcome};
 use snow_app_core::command::{
-    AppCommand, CaptureRequest, CommandKind, CommandSource, RecordingConfig as RecordingRequest,
+    AppCommand, CaptureRequest, CommandKind, CommandSource, DirectCaptureRequest, DirectOutput,
+    DirectTarget, ExportTarget, RecordingConfig as RecordingRequest,
 };
 use snow_capability::CapabilityRegistry;
 use snow_config::document::ConfigDocument;
@@ -161,6 +164,10 @@ pub enum UiEvent {
     OpenSettings,
     /// 请求录制：进入选区，确认后拉起独立的录制进程。
     StartRecording,
+    /// 导出命令（保存 / 复制），作用于当前覆盖窗里的选区。
+    Export(ExportTarget),
+    /// 直接截图：不进入选区，采集后直接复制或保存。
+    DirectCapture(DirectCaptureRequest),
     /// 打开（或激活）输入框翻译浮窗。
     OpenTranslateInput,
     /// 语音转文字命令（来自热键或总线）。
@@ -414,6 +421,32 @@ pub fn register_bus_handlers(bus: &CommandBus, inbox: &MainThreadInbox<UiEvent>)
         std::sync::Arc::new(move |_ctx, _cmd| {
             record_inbox.push(UiEvent::StartRecording);
             Ok(CommandOutcome::Done)
+        }),
+    );
+    let export_inbox = inbox.clone();
+    bus.register(
+        CommandKind::Export,
+        std::sync::Arc::new(move |_ctx, cmd| match cmd {
+            AppCommand::Export(target) => {
+                export_inbox.push(UiEvent::Export(target.clone()));
+                Ok(CommandOutcome::Done)
+            }
+            other => Err(CommandError::Rejected(format!(
+                "导出处理器收到非导出命令: {other:?}"
+            ))),
+        }),
+    );
+    let direct_inbox = inbox.clone();
+    bus.register(
+        CommandKind::DirectCapture,
+        std::sync::Arc::new(move |_ctx, cmd| match cmd {
+            AppCommand::DirectCapture(request) => {
+                direct_inbox.push(UiEvent::DirectCapture(request.clone()));
+                Ok(CommandOutcome::Done)
+            }
+            other => Err(CommandError::Rejected(format!(
+                "直接截图处理器收到非直接截图命令: {other:?}"
+            ))),
         }),
     );
     let translate_input_inbox = inbox.clone();
@@ -1168,6 +1201,7 @@ fn open_overlay(cx: &mut ShellContext, state: &mut AppState, payload: CapturePay
     let scroll_monitor = monitor.clone();
     let output = Box::new(
         SystemOutput::new(save_dir)
+            .with_config(state.config.clone())
             .with_recording(move |rect| {
                 // 覆盖窗坐标以显示器左上角为原点，换算成虚拟桌面坐标
                 record_inbox.push(UiEvent::RecordingRegionChosen {
@@ -1220,6 +1254,10 @@ fn open_overlay(cx: &mut ShellContext, state: &mut AppState, payload: CapturePay
                 hwnd = ?window.native_id().map(|id| id.0),
                 "screenshot overlay opened"
             );
+            // 另存为对话框要以覆盖窗为所有者，否则会被置顶的覆盖窗盖住
+            if let Some(id) = window.native_id() {
+                view.update(cx.app(), |v, _| v.set_owner_window(id.0));
+            }
             state.overlay = Some(window);
             state.overlay_view = Some(view.clone());
             if record_mode {
@@ -1250,6 +1288,117 @@ fn open_overlay(cx: &mut ShellContext, state: &mut AppState, payload: CapturePay
             }
         }
         Err(e) => tracing::error!(error = %e, "打开截图覆盖窗失败"),
+    }
+}
+
+/// 处理总线上的导出命令：交给当前打开的覆盖窗按选区复制 / 保存；没有覆盖窗时只记日志。
+///
+/// # 参数
+/// - `cx`：GPUI 外壳上下文。
+/// - `state`：运行时状态。
+/// - `target`：导出去向。
+fn export_from_overlay(cx: &mut ShellContext, state: &mut AppState, target: &ExportTarget) {
+    let (Some(window), Some(view)) = (state.overlay.as_ref(), state.overlay_view.clone()) else {
+        tracing::warn!("没有进行中的截图会话，导出命令被忽略");
+        return;
+    };
+    if !cx.is_window_open(window) {
+        tracing::warn!("截图覆盖窗已关闭，导出命令被忽略");
+        return;
+    }
+    let target = target.clone();
+    let _ = window.gpui_handle().update(cx.app(), |_, window, app| {
+        view.update(app, |v, vcx| v.run_export(&target, window, vcx));
+    });
+}
+
+/// 当前界面语言代码：配置优先，没有则跟随系统。
+///
+/// # 参数
+/// - `document`：配置文档。
+pub fn interface_locale(document: &ConfigDocument) -> String {
+    document
+        .value(crate::settings_model::LANGUAGE_KEY)
+        .as_str()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(system_ui_language)
+}
+
+/// 处理直接截图：在后台线程采集目标区域并直接复制 / 保存，结果只记日志（没有选区界面可提示）。
+///
+/// # 参数
+/// - `cx`：GPUI 外壳上下文。
+/// - `state`：运行时状态（读配置）。
+/// - `request`：直接截图请求。
+fn direct_capture(cx: &mut ShellContext, state: &mut AppState, request: DirectCaptureRequest) {
+    if request.output == DirectOutput::Render {
+        tracing::warn!("直接截图的 render 输出需要会话返回通道，暂未支持");
+        return;
+    }
+    if request.scale.is_some_and(|s| (s - 1.0).abs() > f64::EPSILON) || request.capture_cursor == Some(true) {
+        tracing::warn!(scale = ?request.scale, cursor = ?request.capture_cursor, "直接截图的缩放与光标采集暂未支持，已忽略");
+    }
+    let region = match request.target {
+        DirectTarget::CurrentMonitor => {
+            let monitors = match cx.monitors() {
+                Ok(m) => m,
+                Err(e) => {
+                    tracing::error!(error = %e, "枚举显示器失败，直接截图取消");
+                    return;
+                }
+            };
+            pick_monitor(&monitors, cursor_screen_position().ok())
+                .and_then(|m| crate::capture_flow::capture_region(&m))
+        }
+        DirectTarget::FocusedWindow => snow_platform::window_rect::foreground_window_rect(),
+    };
+    let Some(region) = region else {
+        tracing::error!(target = ?request.target, "没有可采集的区域，直接截图取消");
+        return;
+    };
+    let (settings, locale) = {
+        let store = state.config.borrow();
+        (
+            ExportSettings::from_document(store.document()),
+            interface_locale(store.document()),
+        )
+    };
+    let spawned = std::thread::Builder::new().name("direct-capture".into()).spawn(move || {
+        let screen = match snow_platform::capture::capture_display(Some(region)) {
+            Ok(screen) => screen,
+            Err(e) => {
+                tracing::error!(error = %e, "直接截图采集失败");
+                return;
+            }
+        };
+        let (width, height) = (screen.width, screen.height);
+        // GDI 采集的 alpha 不可靠，导出前一律置为不透明
+        let mut rgba = screen.to_rgba();
+        rgba.chunks_exact_mut(4).for_each(|px| px[3] = u8::MAX);
+        let result = export_direct(
+            &settings,
+            &request,
+            width,
+            height,
+            &rgba,
+            home_directory().as_deref(),
+            snow_platform::local_time::now(),
+            &mut |w, h, px| snow_platform::clipboard::copy_image_to_clipboard(w, h, px),
+        );
+        match result {
+            Ok(done) => {
+                if let Some(e) = &done.auto_save_error {
+                    tracing::warn!(error = %e, message = %e.auto_message(&locale), "直接截图复制后自动保存失败");
+                }
+                tracing::info!(copied = done.copied, saved = ?done.saved, width, height, "直接截图完成");
+            }
+            Err(e) => tracing::error!(error = %e, message = %e.manual_message(&locale), "直接截图导出失败"),
+        }
+    });
+    if let Err(e) = spawned {
+        tracing::error!(error = %e, "启动直接截图线程失败");
     }
 }
 
@@ -1837,6 +1986,8 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
             state.capture_mode = CaptureMode::Screenshot;
             tracing::error!(%reason, "屏幕采集失败，未打开覆盖窗");
         }
+        UiEvent::Export(target) => export_from_overlay(cx, state, &target),
+        UiEvent::DirectCapture(request) => direct_capture(cx, state, request),
         UiEvent::OpenSettings => open_or_focus_settings(cx, state),
         UiEvent::OpenTranslateInput => open_or_focus_translate_input(cx, state),
         UiEvent::Dictation(command) => state.dictation.command(cx, state.tray.as_ref(), command),
@@ -2122,6 +2273,41 @@ mod tests {
         bus.emit(&CommandContext::new(CommandSource::Tray), AppCommand::Capture(CaptureRequest::default()))
             .unwrap();
         assert_eq!(inbox.try_recv(), Some(UiEvent::Capture { origin: ORIGIN_TRAY }));
+    }
+
+    /// 总线上的导出与直接截图命令变成对应的收件箱事件。
+    #[test]
+    fn bus_export_and_direct_capture_reach_inbox() {
+        use snow_app_core::command::SaveRequest;
+        let bus = CommandBus::new();
+        let inbox = MainThreadInbox::new();
+        register_bus_handlers(&bus, &inbox);
+        let ctx = CommandContext::new(CommandSource::Hotkey);
+        let save = ExportTarget::Save(SaveRequest {
+            path: Some("a.png".into()),
+            ..SaveRequest::default()
+        });
+        bus.emit(&ctx, AppCommand::Export(save.clone())).unwrap();
+        assert_eq!(inbox.try_recv(), Some(UiEvent::Export(save)));
+        bus.emit(&ctx, AppCommand::Export(ExportTarget::Copy))
+            .unwrap();
+        assert_eq!(inbox.try_recv(), Some(UiEvent::Export(ExportTarget::Copy)));
+        let direct = DirectCaptureRequest {
+            target: DirectTarget::FocusedWindow,
+            output: DirectOutput::Save,
+            capture_cursor: None,
+            scale: None,
+            path: None,
+            automatic_path: Some(true),
+            format: None,
+            quality: Some(80),
+            compression_level: None,
+            pdf_page_size: None,
+            pdf_title: None,
+        };
+        bus.emit(&ctx, AppCommand::DirectCapture(direct.clone()))
+            .unwrap();
+        assert_eq!(inbox.try_recv(), Some(UiEvent::DirectCapture(direct)));
     }
 
     /// 总线上的 PinSelection 命令（热键 pin_clipboard_content）变成“从剪贴板贴图”事件。
