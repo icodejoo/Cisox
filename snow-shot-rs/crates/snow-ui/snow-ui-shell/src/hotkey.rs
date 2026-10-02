@@ -302,13 +302,74 @@ impl fmt::Display for Hotkey {
     }
 }
 
-/// 一条热键绑定：触发时派发 `command`。
+/// 热键的边沿：按下或松开。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HotkeyEdge {
+    /// 按下。
+    Pressed,
+    /// 松开（Windows 由 global-hotkey 轮询主键状态产生，最坏延迟约一个轮询周期）。
+    Released,
+}
+
+/// 一条热键绑定：按下时派发 `command`；若设置了 `on_release`，松开时再派发它（按住说话用）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct HotkeyBinding {
     /// 热键。
     pub hotkey: Hotkey,
-    /// 触发的命令。
+    /// 按下时触发的命令。
     pub command: AppCommand,
+    /// 松开时触发的命令；`None` 表示松开事件被忽略（现有热键的行为）。
+    pub on_release: Option<AppCommand>,
+}
+
+impl HotkeyBinding {
+    /// 只在按下时触发命令的普通绑定。
+    ///
+    /// # 参数
+    /// - `hotkey`：热键。
+    /// - `command`：按下时派发的命令。
+    ///
+    /// ```rust
+    /// use snow_app_core::command::AppCommand;
+    /// use snow_ui_shell::hotkey::{Hotkey, HotkeyBinding};
+    /// let b = HotkeyBinding::new(Hotkey::parse("F9").unwrap(), AppCommand::Recapture);
+    /// assert!(b.on_release.is_none());
+    /// ```
+    pub fn new(hotkey: Hotkey, command: AppCommand) -> Self {
+        Self {
+            hotkey,
+            command,
+            on_release: None,
+        }
+    }
+
+    /// 追加松开时派发的命令（按住说话：按下开始、松开结束）。
+    ///
+    /// # 参数
+    /// - `command`：松开时派发的命令。
+    ///
+    /// ```rust
+    /// use snow_app_core::command::AppCommand;
+    /// use snow_ui_shell::hotkey::{Hotkey, HotkeyBinding};
+    /// let b = HotkeyBinding::new(Hotkey::parse("F9").unwrap(), AppCommand::StartDictation)
+    ///     .with_release(AppCommand::StopDictation);
+    /// assert_eq!(b.on_release, Some(AppCommand::StopDictation));
+    /// ```
+    pub fn with_release(mut self, command: AppCommand) -> Self {
+        self.on_release = Some(command);
+        self
+    }
+
+    /// 取指定边沿应派发的命令；松开且未配置 `on_release` 时为 `None`。
+    ///
+    /// # 参数
+    /// - `edge`：按下或松开。
+    pub fn command_for(&self, edge: HotkeyEdge) -> Option<&AppCommand> {
+        match edge {
+            HotkeyEdge::Pressed => Some(&self.command),
+            HotkeyEdge::Released => self.on_release.as_ref(),
+        }
+    }
 }
 
 /// 已注册热键的句柄，用于注销。
@@ -381,7 +442,7 @@ mod backend {
     /// 发给后台线程的控制请求。
     enum Ctl {
         /// 注册热键。
-        Register(HotkeyBinding, Sender<Result<HotkeyHandle, ShellError>>),
+        Register(Box<HotkeyBinding>, Sender<Result<HotkeyHandle, ShellError>>),
         /// 注销热键。
         Unregister(HotkeyHandle, Sender<Result<(), ShellError>>),
         /// 列出已注册热键。
@@ -474,7 +535,7 @@ mod backend {
             while let Ok(req) = ctl.try_recv() {
                 match req {
                     Ctl::Register(b, reply) => {
-                        let _ = reply.send(self.register(b));
+                        let _ = reply.send(self.register(*b));
                     }
                     Ctl::Unregister(h, reply) => {
                         let _ = reply.send(self.unregister(h));
@@ -486,17 +547,19 @@ mod backend {
                 }
             }
             while let Ok(ev) = GlobalHotKeyEvent::receiver().try_recv() {
-                if ev.state() != HotKeyState::Pressed {
-                    continue;
-                }
+                let edge = match ev.state() {
+                    HotKeyState::Pressed => HotkeyEdge::Pressed,
+                    HotKeyState::Released => HotkeyEdge::Released,
+                };
                 let binding = self
                     .by_platform_id
                     .get(&ev.id())
                     .and_then(|h| self.table.get(*h));
-                if let Some(b) = binding {
-                    tracing::debug!(hotkey = %b.hotkey, "全局热键触发");
-                    self.dispatcher
-                        .send(CommandSource::Hotkey, b.command.clone());
+                if let Some(b) = binding
+                    && let Some(command) = b.command_for(edge)
+                {
+                    tracing::debug!(hotkey = %b.hotkey, ?edge, "全局热键触发");
+                    self.dispatcher.send(CommandSource::Hotkey, command.clone());
                 }
             }
             true
@@ -570,7 +633,7 @@ mod backend {
 
         /// 注册。
         pub(super) fn register(&self, b: HotkeyBinding) -> Result<HotkeyHandle, ShellError> {
-            self.call(|tx| Ctl::Register(b, tx))?
+            self.call(|tx| Ctl::Register(Box::new(b), tx))?
         }
 
         /// 注销。
@@ -619,9 +682,11 @@ mod backend {
         fn service_lifecycle_on_real_os() {
             use snow_capability::{CapabilityRegistry, Platform};
             let caps = CapabilityRegistry::for_platform(Platform::Windows);
-            let mk = |s: &str| HotkeyBinding {
-                hotkey: Hotkey::parse(s).unwrap(),
-                command: AppCommand::Cancel(Default::default()),
+            let mk = |s: &str| {
+                HotkeyBinding::new(
+                    Hotkey::parse(s).unwrap(),
+                    AppCommand::Cancel(Default::default()),
+                )
             };
             {
                 let svc =
@@ -729,10 +794,10 @@ impl HotkeyService {
     /// use snow_ui_shell::hotkey::{Hotkey, HotkeyBinding, HotkeyService};
     /// let caps = CapabilityRegistry::for_current_platform();
     /// let svc = HotkeyService::start(&caps, Dispatcher::from_bus(CommandBus::new())).unwrap();
-    /// svc.register(HotkeyBinding {
-    ///     hotkey: Hotkey::parse("Ctrl+Alt+S").unwrap(),
-    ///     command: AppCommand::Cancel(Default::default()),
-    /// }).unwrap();
+    /// svc.register(HotkeyBinding::new(
+    ///     Hotkey::parse("Ctrl+Alt+S").unwrap(),
+    ///     AppCommand::Cancel(Default::default()),
+    /// )).unwrap();
     /// ```
     pub fn start(
         caps: &snow_capability::CapabilityRegistry,
@@ -848,14 +913,36 @@ mod tests {
         assert!(matches!(err, ShellError::InvalidHotkey(_)));
     }
 
+    /// 边沿到命令：普通绑定只响应按下（松开被忽略，现有热键行为不变）；带 on_release 的松开才派发。
+    #[test]
+    fn edge_selects_command() {
+        let hotkey = Hotkey::parse("F9").unwrap();
+        let plain = HotkeyBinding::new(hotkey.clone(), AppCommand::StartDictation);
+        assert_eq!(
+            plain.command_for(HotkeyEdge::Pressed),
+            Some(&AppCommand::StartDictation)
+        );
+        assert_eq!(plain.command_for(HotkeyEdge::Released), None);
+        let hold = plain.with_release(AppCommand::StopDictation);
+        assert_eq!(
+            hold.command_for(HotkeyEdge::Pressed),
+            Some(&AppCommand::StartDictation)
+        );
+        assert_eq!(
+            hold.command_for(HotkeyEdge::Released),
+            Some(&AppCommand::StopDictation)
+        );
+        // 登记表照常保存松开命令
+        let mut table = HotkeyTable::default();
+        let handle = table.insert(hold.clone()).unwrap();
+        assert_eq!(table.get(handle), Some(&hold));
+    }
+
     /// 登记表：句柄自增、同热键冲突、注销后可重新登记。
     #[test]
     fn table_conflict_and_release() {
         let mut t = HotkeyTable::default();
-        let mk = |s: &str, c: AppCommand| HotkeyBinding {
-            hotkey: Hotkey::parse(s).unwrap(),
-            command: c,
-        };
+        let mk = |s: &str, c: AppCommand| HotkeyBinding::new(Hotkey::parse(s).unwrap(), c);
         let h1 = t.insert(mk("Ctrl+Alt+S", AppCommand::Cancel(Default::default()))).unwrap();
         let h2 = t.insert(mk("Ctrl+Alt+D", AppCommand::Undo(Default::default()))).unwrap();
         assert_ne!(h1, h2);

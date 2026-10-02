@@ -23,6 +23,7 @@ snow-history = { path = "../snow-history" }
 snow-ocr-protocol = { path = "../snow-ocr-protocol" }
 snow-platform = { path = "../snow-platform" }
 snow-recorder-protocol = { path = "../snow-recorder-protocol" }
+snow-stt-protocol = { path = "../snow-stt-protocol" }
 snow-translate = { path = "../snow-translate" }
 # 滚动截图拼接（主仓库 Apache-2.0 库；必须关默认特性，否则会拉入 avif/tiff/webp 等编解码）
 snow-stitch-images = { path = "../../../snow-crates/crates/snow-stitch-images", default-features = false }

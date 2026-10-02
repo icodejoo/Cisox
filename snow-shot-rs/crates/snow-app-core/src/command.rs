@@ -536,6 +536,12 @@ pub enum AppCommand {
     StartRecording(RecordingConfig),
     /// 打开输入框翻译浮窗（全局热键触发，不在 MCP tool 内）。
     OpenTranslateInput,
+    /// 切换式语音转文字：未在听则开始，在听则结束（全局热键触发，不在 MCP tool 内）。
+    ToggleDictation,
+    /// 开始语音转文字（按住说话：热键按下；已在进行中则忽略）。
+    StartDictation,
+    /// 结束语音转文字（按住说话：热键松开；未在进行中则忽略）。
+    StopDictation,
 }
 
 /// 生成 `CommandKind` 枚举与 `AppCommand::kind()`，保证两者变体同步。
@@ -599,6 +605,9 @@ command_kinds!(
     RunOperation(_),
     StartRecording(_),
     OpenTranslateInput,
+    ToggleDictation,
+    StartDictation,
+    StopDictation,
 );
 
 /// MCP 截图域 28 个 tool（去掉 `snow_shot_` 前缀）到命令种类的映射。
@@ -764,6 +773,19 @@ mod tests {
             AppCommand::OpenTranslateInput.kind(),
             CommandKind::OpenTranslateInput
         );
+    }
+
+    /// 语音转文字命令不属于 MCP 截图域：映射表里没有，且能还原为对应种类。
+    #[test]
+    fn dictation_commands_are_not_mcp_tools() {
+        for (cmd, kind) in [
+            (AppCommand::ToggleDictation, CommandKind::ToggleDictation),
+            (AppCommand::StartDictation, CommandKind::StartDictation),
+            (AppCommand::StopDictation, CommandKind::StopDictation),
+        ] {
+            assert!(MCP_TOOL_MAP.iter().all(|(_, k)| *k != kind));
+            assert_eq!(cmd.kind(), kind);
+        }
     }
 
     /// 补齐的 schema 字段可构造，且占位请求不再带 `target`。

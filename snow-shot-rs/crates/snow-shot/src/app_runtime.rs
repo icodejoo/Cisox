@@ -7,6 +7,9 @@
 //! 采集在后台线程完成，结果经收件箱回到主线程再建窗。
 
 use crate::capture_flow::{CapturePayload, pick_monitor, spawn_capture};
+use crate::dictation::config::DictationConfig;
+use crate::dictation::focus::Verdict;
+use crate::dictation::{DictationCommand, DictationHost};
 use crate::frozen_frame::FrozenFrame;
 use crate::ocr_assets::{ENV_OCR_ASSET_DIR, ocr_root};
 use crate::ocr_client::OcrError;
@@ -67,7 +70,7 @@ pub const ENV_SETTINGS_AUTOTEST: &str = "SNOW_SETTINGS_AUTOTEST";
 /// 设置窗所在显示器的设备名子串环境变量（如 `DISPLAY2`，验收用）。
 pub const ENV_SETTINGS_MONITOR: &str = "SNOW_SETTINGS_MONITOR";
 /// 托盘悬停提示。
-const TRAY_TOOLTIP: &str = "Cisox";
+pub(crate) const TRAY_TOOLTIP: &str = "Cisox";
 /// 托盘菜单：截图。
 const TRAY_LABEL_CAPTURE: &str = "截图";
 /// 托盘菜单：录屏。
@@ -100,7 +103,13 @@ pub const RECORDING_HOTKEY_CONFIG_KEY: &str = "global_shortcuts/screen_record";
 pub const PIN_CLIPBOARD_HOTKEY_CONFIG_KEY: &str = "global_shortcuts/pin_clipboard_content";
 /// “输入框翻译浮窗”全局热键的配置键。
 pub const TRANSLATE_INPUT_HOTKEY_CONFIG_KEY: &str = snow_config::extensions::KEY_TRANSLATE_INPUT_HOTKEY;
-/// 规范化热键对象中的文本字段名。
+/// “语音转文字·切换式”全局热键的配置键。
+pub const DICTATION_TOGGLE_HOTKEY_CONFIG_KEY: &str = snow_config::extensions::KEY_DICTATION_TOGGLE_HOTKEY;
+/// “语音转文字·按住说话”全局热键的配置键。
+pub const DICTATION_HOLD_HOTKEY_CONFIG_KEY: &str = snow_config::extensions::KEY_DICTATION_HOLD_HOTKEY;
+/// 语音转文字触发模式的配置键（决定上面两个热键哪个生效）。
+pub const DICTATION_TRIGGER_MODE_CONFIG_KEY: &str = snow_config::extensions::KEY_DICTATION_TRIGGER_MODE;
+/// “语音转文字·切换式”全局热键的配置键。
 const PORTABLE_FIELD: &str = "portable";
 /// 事件来源标签：全局热键。
 pub const ORIGIN_HOTKEY: &str = "hotkey";
@@ -154,6 +163,17 @@ pub enum UiEvent {
     StartRecording,
     /// 打开（或激活）输入框翻译浮窗。
     OpenTranslateInput,
+    /// 语音转文字命令（来自热键或总线）。
+    Dictation(DictationCommand),
+    /// 语音转文字：工作进程有新事件，或定时器到点（取事件、查超时、重试键入）。
+    DictationPoll,
+    /// 语音转文字：后台线程完成了前台焦点探测。
+    DictationProbed {
+        /// 探测所属轮次（过期结果会被丢弃）。
+        round: u64,
+        /// 能否键入的判定。
+        verdict: Verdict,
+    },
     /// 输入框翻译浮窗请求翻译（在后台线程执行）。
     TranslateInputRequested {
         /// 请求序号（回传结果时带回）。
@@ -404,6 +424,20 @@ pub fn register_bus_handlers(bus: &CommandBus, inbox: &MainThreadInbox<UiEvent>)
             Ok(CommandOutcome::Done)
         }),
     );
+    for (kind, command) in [
+        (CommandKind::ToggleDictation, DictationCommand::Toggle),
+        (CommandKind::StartDictation, DictationCommand::Start),
+        (CommandKind::StopDictation, DictationCommand::Stop),
+    ] {
+        let dictation_inbox = inbox.clone();
+        bus.register(
+            kind,
+            std::sync::Arc::new(move |_ctx, _cmd| {
+                dictation_inbox.push(UiEvent::Dictation(command));
+                Ok(CommandOutcome::Done)
+            }),
+        );
+    }
     // 全局热键 `pin_clipboard_content` 绑定的是 `PinSelection` 命令：没有进行中的截图会话，
     // 因此这里把它解释为“把剪贴板内容贴到屏幕”（避免为此新增命令变体波及 MCP 映射）
     let pin_inbox = inbox.clone();
@@ -494,7 +528,7 @@ impl HotkeyRegistration {
 /// - `document`：配置文档。
 /// - `key`：热键配置键。
 /// - `label`：日志里的功能名。
-/// - `command`：热键触发的命令。
+/// - `command`：热键按下时触发的命令。
 ///
 /// # 返回
 /// 成功句柄与失败列表。
@@ -504,6 +538,29 @@ fn register_hotkeys(
     key: &'static str,
     label: &str,
     command: &AppCommand,
+) -> HotkeyRegistration {
+    register_hotkeys_with_release(service, document, key, label, command, None)
+}
+
+/// 同 `register_hotkeys`，并可指定热键松开时触发的命令（按住说话用）。
+///
+/// # 参数
+/// - `service`：热键服务。
+/// - `document`：配置文档。
+/// - `key`：热键配置键。
+/// - `label`：日志里的功能名。
+/// - `command`：热键按下时触发的命令。
+/// - `on_release`：热键松开时触发的命令，`None` 表示忽略松开。
+///
+/// # 返回
+/// 成功句柄与失败列表。
+fn register_hotkeys_with_release(
+    service: &HotkeyService,
+    document: &ConfigDocument,
+    key: &'static str,
+    label: &str,
+    command: &AppCommand,
+    on_release: Option<&AppCommand>,
 ) -> HotkeyRegistration {
     let mut result = HotkeyRegistration::default();
     for text in shortcut_strings(&document.value(key)) {
@@ -522,6 +579,7 @@ fn register_hotkeys(
         let binding = HotkeyBinding {
             hotkey,
             command: command.clone(),
+            on_release: on_release.cloned(),
         };
         match service.register(binding) {
             Ok(handle) => {
@@ -627,7 +685,45 @@ pub fn register_translate_input_hotkeys(
     )
 }
 
-/// 注册全部已接线的全局热键（截图 + 录屏 + 贴图剪贴板内容 + 输入框翻译）。
+/// 按配置注册语音转文字的两个全局热键：切换式（按一下开始、再按一下结束）与按住说话（按下开始、松开结束）。
+///
+/// 触发模式（`dictation/trigger_mode`）决定哪个生效；未绑定的热键不注册。
+///
+/// # 参数
+/// - `service`：热键服务。
+/// - `document`：配置文档。
+///
+/// # 返回
+/// 成功句柄与失败列表。
+pub fn register_dictation_hotkeys(
+    service: &HotkeyService,
+    document: &ConfigDocument,
+) -> HotkeyRegistration {
+    let trigger = DictationConfig::from_document(document).trigger;
+    let mut result = HotkeyRegistration::default();
+    if trigger.toggle_enabled() {
+        result.merge(register_hotkeys(
+            service,
+            document,
+            DICTATION_TOGGLE_HOTKEY_CONFIG_KEY,
+            "dictation_toggle",
+            &AppCommand::ToggleDictation,
+        ));
+    }
+    if trigger.hold_enabled() {
+        result.merge(register_hotkeys_with_release(
+            service,
+            document,
+            DICTATION_HOLD_HOTKEY_CONFIG_KEY,
+            "dictation_hold",
+            &AppCommand::StartDictation,
+            Some(&AppCommand::StopDictation),
+        ));
+    }
+    result
+}
+
+/// 注册全部已接线的全局热键（截图 + 录屏 + 贴图剪贴板内容 + 输入框翻译 + 语音转文字）。
 ///
 /// # 参数
 /// - `service`：热键服务。
@@ -637,6 +733,7 @@ pub fn register_all_hotkeys(service: &HotkeyService, document: &ConfigDocument) 
     result.merge(register_recording_hotkeys(service, document));
     result.merge(register_pin_clipboard_hotkeys(service, document));
     result.merge(register_translate_input_hotkeys(service, document));
+    result.merge(register_dictation_hotkeys(service, document));
     result
 }
 
@@ -673,6 +770,8 @@ pub struct AppState {
     settings_view: Option<Entity<SettingsView>>,
     /// 输入框翻译浮窗（若已打开）与其视图。
     translate_input: Option<(ShellWindow, Entity<TranslateInputView>)>,
+    /// 语音转文字宿主（独立工作进程、键入与右下角浮窗的生命周期）。
+    dictation: DictationHost,
     /// 收到的截图请求累计数。
     capture_requests: u64,
     /// 截图覆盖窗（若已打开）。
@@ -740,6 +839,11 @@ impl AppState {
             overlay_view: None,
             scroll: ScrollHost::new(caps.clone(), inbox.clone(), Rc::clone(&config)),
             recording: RecordingHost::new(caps, inbox.clone(), Rc::clone(&config)),
+            dictation: DictationHost::new(
+                Rc::clone(&config),
+                inbox.clone(),
+                data_root.to_path_buf(),
+            ),
             config,
             settings: None,
             settings_view: None,
@@ -1466,7 +1570,7 @@ fn translate_input_monitor(cx: &ShellContext) -> MonitorTarget {
 ///
 /// # 参数
 /// - `config`：共享配置。
-fn ui_prefs_from_config(config: &SharedConfig) -> UiPrefs {
+pub(crate) fn ui_prefs_from_config(config: &SharedConfig) -> UiPrefs {
     let store = config.borrow();
     let text = |key: &str| store.value(key).as_str().unwrap_or_default().to_string();
     UiPrefs::resolve(&text(THEME_MODE_KEY), &text(LANGUAGE_KEY), &text(THEME_COLOR_KEY), &SystemPrefs::query())
@@ -1597,6 +1701,41 @@ fn spawn_settings_autotest(
         .detach();
 }
 
+/// 语音转文字的两个热键配置键（触发模式变更会影响它们是否注册）。
+const DICTATION_HOTKEY_KEYS: [&str; 2] = [DICTATION_TOGGLE_HOTKEY_CONFIG_KEY, DICTATION_HOLD_HOTKEY_CONFIG_KEY];
+
+/// 这次重新注册里，与变更的配置键相关的热键是否有失败；
+/// 触发模式键本身不是热键，它的失败看两个语音热键。
+///
+/// # 参数
+/// - `attempt`：注册结果。
+/// - `config_key`：变更的配置键。
+fn hotkey_attempt_failed(attempt: &HotkeyRegistration, config_key: &str) -> bool {
+    if config_key == DICTATION_TRIGGER_MODE_CONFIG_KEY {
+        DICTATION_HOTKEY_KEYS.iter().any(|k| attempt.failed_for(k))
+    } else {
+        attempt.failed_for(config_key)
+    }
+}
+
+/// 汇总与变更的配置键相关的热键失败原因（触发模式键汇总两个语音热键）。
+///
+/// # 参数
+/// - `attempt`：注册结果。
+/// - `config_key`：变更的配置键。
+fn describe_hotkey_failure(attempt: &HotkeyRegistration, config_key: &str) -> String {
+    if config_key == DICTATION_TRIGGER_MODE_CONFIG_KEY {
+        DICTATION_HOTKEY_KEYS
+            .iter()
+            .map(|k| attempt.describe_for(k))
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>()
+            .join("; ")
+    } else {
+        attempt.describe_for(config_key)
+    }
+}
+
 /// 设置页写入配置后的响应：全局热键类配置变更时重新注册并在失败时回滚。
 ///
 /// # 参数
@@ -1610,6 +1749,9 @@ fn on_config_changed(cx: &mut ShellContext, state: &mut AppState, key: &str, pre
         RECORDING_HOTKEY_CONFIG_KEY,
         PIN_CLIPBOARD_HOTKEY_CONFIG_KEY,
         TRANSLATE_INPUT_HOTKEY_CONFIG_KEY,
+        DICTATION_TOGGLE_HOTKEY_CONFIG_KEY,
+        DICTATION_HOLD_HOTKEY_CONFIG_KEY,
+        DICTATION_TRIGGER_MODE_CONFIG_KEY,
     ]
     .into_iter()
     .find(|k| *k == key)
@@ -1629,7 +1771,7 @@ fn on_config_changed(cx: &mut ShellContext, state: &mut AppState, key: &str, pre
         }
     }
     let attempt = register_all_hotkeys(service, state.config.borrow().document());
-    if !attempt.failed_for(config_key) {
+    if !hotkey_attempt_failed(&attempt, config_key) {
         let listing = service
             .registered()
             .map(|list| list.iter().map(|(_, h)| h.to_string()).collect::<Vec<_>>().join(", "))
@@ -1639,7 +1781,7 @@ fn on_config_changed(cx: &mut ShellContext, state: &mut AppState, key: &str, pre
         return;
     }
     // 新绑定注册失败（如系统返回 1409 热键已被占用）：注销本次已注册的、还原配置、恢复旧热键
-    let reason = attempt.describe_for(config_key);
+    let reason = describe_hotkey_failure(&attempt, config_key);
     tracing::warn!(key, reason = %reason, "全局热键重新注册失败，回滚配置");
     for handle in attempt.handles {
         let _ = service.unregister(handle);
@@ -1697,6 +1839,13 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
         }
         UiEvent::OpenSettings => open_or_focus_settings(cx, state),
         UiEvent::OpenTranslateInput => open_or_focus_translate_input(cx, state),
+        UiEvent::Dictation(command) => state.dictation.command(cx, state.tray.as_ref(), command),
+        UiEvent::DictationPoll => state.dictation.tick(cx, state.tray.as_ref()),
+        UiEvent::DictationProbed { round, verdict } => {
+            state
+                .dictation
+                .probed(cx, state.tray.as_ref(), round, verdict)
+        }
         UiEvent::TranslateInputRequested { serial, text, model_id } => {
             spawn_translate_input(state, serial, text, model_id)
         }
@@ -1827,6 +1976,7 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
             tracing::info!("quit requested, shutting down");
             state.ocr.shutdown();
             state.translator.shutdown();
+            state.dictation.shutdown();
             state.pins.persist_all(cx);
             state.shutdown_services();
             cx.quit();
@@ -2004,6 +2154,46 @@ mod tests {
         let list = shortcut_strings(&doc.value(TRANSLATE_INPUT_HOTKEY_CONFIG_KEY));
         assert_eq!(list.len(), 1);
         assert!(Hotkey::parse(&portable_to_hotkey_text(&list[0])).is_ok());
+    }
+
+    /// 总线上的三条听写命令分别变成对应的 UiEvent。
+    #[test]
+    fn bus_dictation_commands_reach_inbox() {
+        let bus = CommandBus::new();
+        let inbox = MainThreadInbox::new();
+        register_bus_handlers(&bus, &inbox);
+        for (command, expected) in [
+            (AppCommand::ToggleDictation, DictationCommand::Toggle),
+            (AppCommand::StartDictation, DictationCommand::Start),
+            (AppCommand::StopDictation, DictationCommand::Stop),
+        ] {
+            bus.emit(&CommandContext::new(CommandSource::Hotkey), command)
+                .unwrap();
+            assert_eq!(inbox.try_recv(), Some(UiEvent::Dictation(expected)));
+        }
+    }
+
+    /// 听写热键默认都不绑定；触发模式变更的失败判定只看两个听写热键。
+    #[test]
+    fn dictation_hotkeys_default_and_failure_attribution() {
+        let doc = ConfigDocument::from_bytes(None);
+        assert!(shortcut_strings(&doc.value(DICTATION_TOGGLE_HOTKEY_CONFIG_KEY)).is_empty());
+        assert!(shortcut_strings(&doc.value(DICTATION_HOLD_HOTKEY_CONFIG_KEY)).is_empty());
+        assert_eq!(
+            DictationConfig::from_document(&doc).trigger,
+            crate::dictation::config::TriggerMode::Both
+        );
+
+        let mut attempt = HotkeyRegistration::default();
+        attempt.failures.push(HotkeyFailure {
+            config_key: DICTATION_HOLD_HOTKEY_CONFIG_KEY,
+            shortcut: "F9".into(),
+            reason: "占用".into(),
+        });
+        assert!(hotkey_attempt_failed(&attempt, DICTATION_TRIGGER_MODE_CONFIG_KEY));
+        assert!(hotkey_attempt_failed(&attempt, DICTATION_HOLD_HOTKEY_CONFIG_KEY));
+        assert!(!hotkey_attempt_failed(&attempt, DICTATION_TOGGLE_HOTKEY_CONFIG_KEY));
+        assert!(describe_hotkey_failure(&attempt, DICTATION_TRIGGER_MODE_CONFIG_KEY).contains("F9"));
     }
 
     /// 贴图热键配置键与 schema 一致，默认值（F3）可解析为合法热键。

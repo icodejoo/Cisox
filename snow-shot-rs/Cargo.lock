@@ -6939,6 +6939,7 @@ dependencies = [
  "snow-platform",
  "snow-recorder-protocol",
  "snow-stitch-images",
+ "snow-stt-protocol",
  "snow-translate",
  "snow-ui",
  "tracing",

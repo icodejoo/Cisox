@@ -24,6 +24,7 @@ use std::process::ExitCode;
 pub mod annotation;
 pub mod app_runtime;
 pub mod capture_flow;
+pub mod dictation;
 pub mod frozen_frame;
 pub mod ocr_assets;
 pub mod ocr_backend;

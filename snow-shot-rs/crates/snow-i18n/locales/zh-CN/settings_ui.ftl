@@ -55,3 +55,4 @@ settings-group-screen-recording-shortcuts = 录制快捷键
 settings-group-api-configuration = 模型接口
 settings-group-extended-features = 扩展功能
 settings-group-storage = 存储
+settings-group-dictation = 语音转文字

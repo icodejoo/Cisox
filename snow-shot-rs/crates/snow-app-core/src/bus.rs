@@ -254,6 +254,9 @@ mod tests {
             }),
             CommandKind::StartRecording => AppCommand::StartRecording(RecordingConfig::default()),
             CommandKind::OpenTranslateInput => AppCommand::OpenTranslateInput,
+            CommandKind::ToggleDictation => AppCommand::ToggleDictation,
+            CommandKind::StartDictation => AppCommand::StartDictation,
+            CommandKind::StopDictation => AppCommand::StopDictation,
         }
     }
 
@@ -411,6 +414,33 @@ mod tests {
             bus.emit_from(CommandSource::Ui, sample(CommandKind::StartRecording)),
             Err(CommandError::NoHandler(CommandKind::StartRecording))
         );
+    }
+
+    /// 语音转文字三条命令未注册时返回明确错误，注册后可由热键来源派发。
+    #[test]
+    fn dictation_commands_dispatch() {
+        let bus = CommandBus::new();
+        for kind in [
+            CommandKind::ToggleDictation,
+            CommandKind::StartDictation,
+            CommandKind::StopDictation,
+        ] {
+            assert_eq!(
+                bus.emit_from(CommandSource::Hotkey, sample(kind)),
+                Err(CommandError::NoHandler(kind))
+            );
+            bus.register(
+                kind,
+                std::sync::Arc::new(|ctx, _| {
+                    assert_eq!(ctx.source, CommandSource::Hotkey);
+                    Ok(CommandOutcome::Done)
+                }),
+            );
+            assert_eq!(
+                bus.emit_from(CommandSource::Hotkey, sample(kind)),
+                Ok(CommandOutcome::Done)
+            );
+        }
     }
 
     /// OpenTranslateInput 未注册时返回明确错误，注册后可派发。

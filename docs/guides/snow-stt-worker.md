@@ -1,6 +1,6 @@
 # snow-stt 语音转文字工作进程
 
-> 状态：P1 第一步，只有 worker 与协议，尚未接入主程序。背景与选型见 [research/speech-to-text-backends.md](../research/speech-to-text-backends.md)（尤其 §8），原则见 [principles.md](../principles.md)。
+> 状态：P1 第二步，worker 与协议已接入主程序（热键触发、键入 / 右下角浮窗输出，见「主程序接入」「输出行为」两节；真机项尚未验证，见「已知限制与未验证」）。背景与选型见 [research/speech-to-text-backends.md](../research/speech-to-text-backends.md)（尤其 §8），原则见 [principles.md](../principles.md)。
 
 ## 组成
 - `snow-shot-rs/crates/snow-stt-protocol`：主 workspace 成员，零依赖的行文本协议，主程序与 worker 共用。
@@ -55,6 +55,95 @@ scripts\verify-snow-stt.ps1 -ModelDir <模型目录> -Wav <wav> [-PadMs 3000] [-
 
 ## 单测
 `scripts\build-snow-stt.ps1 -Test`（worker 16 个，含主循环 Fake 测试）与 `cargo test -p snow-stt-protocol`（协议往返与异常输入）。
+
+## 主程序接入
+入口代码在 `snow-shot-rs/crates/snow-shot/src/dictation/`，分层如下（纯逻辑层都有离屏单测）：
+
+| 文件 | 职责 |
+|---|---|
+| `engine.rs` | 工作进程生命周期状态机（纯逻辑，进程经 `SttLink` 抽象，时间由调用方传入） |
+| `client.rs` | 定位并拉起 `snow-stt`，读线程转发事件，结束进程只动自己持有的子进程句柄 |
+| `config.rs` | 读配置、启动前检查（后端、exe、模型目录） |
+| `text.rs` / `overlay_model.rs` | PARTIAL / FINAL 累积与句间空格；浮窗文本模型 |
+| `typing.rs` / `focus.rs` / `output.rs` | 键入差异与按键序列、可输入焦点判定、输出去向决策 |
+| `flow.rs` / `view.rs` | 宿主（串起以上各层、托盘提示）与右下角浮窗视图 |
+
+平台调用在 `snow-platform`：`text_inject.rs`（`SendInput`）与 `focus_probe.rs`（UI Automation 读数 + 令牌完整性级别）。
+
+### 触发
+- 命令：`ToggleDictation` / `StartDictation` / `StopDictation`（`snow-app-core`，不属于 MCP 截图域，不在 `MCP_TOOL_MAP`）。
+- 两个全局热键，默认都不绑定：`global_shortcuts/dictation_toggle`（按一下开始、再按一下结束，绑 `ToggleDictation`）与 `global_shortcuts/dictation_hold`（按住说话，按下发 `StartDictation`、松开发 `StopDictation`）。
+- `dictation/trigger_mode`：`both`（默认，两个都注册）/ `toggle` / `hold`，决定哪个热键被注册；改动后热键即时重新注册，注册失败会回滚配置并在设置页提示。
+- 松开事件：`snow-ui-shell` 的 `HotkeyBinding` 新增可选的 `on_release` 命令（`HotkeyBinding::new(..).with_release(..)`）。global-hotkey 0.8.0 在 Windows 上用 `MOD_NOREPEAT` 注册，`WM_HOTKEY` 之后每 50ms 轮询主键状态并发 `Released`，所以松开延迟最坏约 50ms；以主键松开为准，先松修饰键不触发。没有 `on_release` 的既有热键行为不变（松开仍被忽略）。
+- 重复触发：已有会话时再按 Start 被忽略；切换式在收尾阶段再按也被忽略。
+
+### 配置键（`dictation/` 分组）
+| 键 | 默认 | 说明 |
+|---|---|---|
+| `backend` | `local-model` | `local-model` 用 `snow-stt`；`system`（Windows 系统语音）只是占位：设置里可选，选中时设置页显示「尚未实现」，开始听写时给出同样的提示并不拉起任何进程，不 panic |
+| `trigger_mode` | `both` | 见上 |
+| `model_dir` | 空 | 空则用 `<数据根>/models/stt`；不存在时给出带路径的可读错误 |
+| `language` | `auto` | 传给 worker 的语言提示（单词） |
+| `threads` | 2 | 推理线程，1~8 |
+| `max_seconds` | 120 | 单次最长秒数，0 不限；由 worker 到点当作 STOP |
+| `output_mode` | `auto` | `auto` / `type` / `overlay`，见「输出行为」 |
+| `type_with_overlay` | 关 | 键入时是否同时显示浮窗 |
+
+旧配置缺这些键时补默认值（含两个热键的空绑定）。
+
+### 进程生命周期
+1. 定位 exe：环境变量 `SNOW_STT_EXE`（指向不存在的文件不再回退）→ 主程序同目录 → 沿目录向上的开发布局（`build/stt/{release,debug}/`、`snow-shot-rs/tools/snow-stt/target/release/`）。找不到时提示可读错误（放在主程序旁边或设环境变量）。
+2. 拉起后等 `READY`（上限 120s），随即发 `START`，**并紧跟一条 `PING`**：worker 只在会话主循环里应答 `PONG`，而主循环要等模型加载完、麦克风打开之后才开始，所以 `PONG`（或第一条 `PARTIAL`/`FINAL`，兼容旧 worker）就表示「已经在听」。从 `START` 到 `PONG` 同样给 120s（冷加载大模型可能很久），期间状态显示「加载中」。协议本身没有专门的「已就绪」事件，这是不改协议的做法。
+3. 结束：在听时发 `STOP`，等 `FINAL` + `STOPPED`（上限 10s）；超时改发 `CANCEL` 再等 3s；仍不退出则强制结束，并报错。还没开始听就要结束（按住说话点了一下），没有可冲刷的音频，直接结束进程。
+4. 异常：`ERROR`、进程意外退出（带退出码）、写命令失败都会结束会话并给出可读提示；`STOPPED` 之后给进程 2s 自行退出。
+5. 主程序退出：发 `CANCEL`、关闭 stdin（worker 视为中止），短宽限后强制结束。结束进程只用自己 `spawn` 得到的子进程句柄，不按进程名查杀。
+6. 状态提示：浮窗状态行 + 托盘悬停提示（进行中显示状态，结束后复原）。
+
+## 输出行为
+输出有两条去向，设置项 `dictation/output_mode`：
+- `auto`（默认）：开始识别时（拉起 worker 的同时）在后台线程探测一次前台焦点；能键入就键入，否则弹右下角浮窗。**判定一次，整轮不变**，识别过程中焦点变化不改变这一轮的去向。判定结果显示在状态里（「正在键入到当前输入框」或「当前无法键入（没有输入焦点），文字显示在这里」等）。探测超过 2.5s 没有结果按「不确定」处理，走浮窗。
+- `type`：只键入。若判定不能键入，**不静默丢字**：浮窗弹出，写明原因，文字留在浮窗里。
+- `overlay`：只弹浮窗，不探测焦点。
+- `type_with_overlay` 开启时，键入的同时也显示浮窗；键入模式下浮窗默认不弹。
+
+### 可输入焦点判定（`focus.rs`，纯函数 `classify`）
+读数由 `snow-platform::focus_probe` 采集：`GetForegroundWindow`、UI Automation `GetFocusedElement`（控件类型、是否启用、是否持有/可获键盘焦点、是否密码框、ValuePattern 只读状态、有无 TextPattern）、`GetGUIThreadInfo` 的系统插入符、令牌完整性级别。判定顺序，凡是「否」或「不确定」一律走浮窗：
+1. 无前台窗口 → 否。
+2. 目标进程完整性高于本进程（UIPI 会静默吞掉注入的按键，`SendInput` 不报错，所以必须主动探测）→ 否；读不出完整性（打不开进程等）→ 不确定。
+3. UIA 出错 → 不确定（即使有插入符也不冒险）。
+4. 没有焦点元素：有系统插入符才算能键入，否则否。
+5. 有焦点元素：禁用 / 密码框 / ValuePattern 只读 → 否；控件类型是 Edit 或 Document 且可获键盘焦点，并且 ValuePattern 可写，或（无 ValuePattern 的）Edit 带 TextPattern → 能；Document 只有 TextPattern 时要同时有系统插入符才算（否则可能是只读网页，判不确定）；其它类型（Pane / Custom 等自绘控件）只有「持有键盘焦点且有系统插入符」才算能。
+
+与最初设想的偏差：「ValuePattern 非只读或带 TextPattern」被收紧了一点——明确只读永远不可编辑，Document 仅凭 TextPattern 不放行，避免把只读网页页面当成输入框。
+
+### 键入（`typing.rs`）
+- `SendInput(KEYEVENTF_UNICODE)` 逐字符发送（补充平面字符拆成两个 UTF-16 码元），退格用 `VK_BACK`；回删与重打放进**同一次** `SendInput` 调用，不会被用户按键插进中间。
+- **稳定前缀法**：期望文本 = 已落定（各句 FINAL 拼接）+ 当前未落定（PARTIAL）。与已键入内容比较，公共前缀保持，只对不同的尾部回删重打。PARTIAL 修正最多回删 16 个字符，超出的差异等 FINAL 落定时再一次性修正；FINAL 和收尾不限。
+- 识别文本先清洗：换行、制表符变空格，其它控制字符丢弃（否则会按下回车提交表单）。句子之间：英文字母数字相接补一个空格，中日文相邻不补。
+- 发送前检查修饰键（Ctrl / Alt / Shift / Win）是否仍被物理按住：按住时延后，等放开后下一次同步补齐（按住说话常用带修饰键的热键，所以最终文字通常在松开后才打出来）。结束后补发最多等 3s，仍打不进去则把文字留在浮窗。
+- 目标窗口校验：首次键入时记下前台窗口，之后前台窗口变了就停止键入并把全部已识别文字铺到浮窗；`SendInput` 注入数不足也同样兜底到浮窗。
+- 退格按 Unicode 标量值计数；组合字符、ZWJ 表情序列在多数输入框里一次退格删得更多，属已知偏差。
+
+### 右下角浮窗（`view.rs`、`overlay_model.rs`）
+- 位置：光标所在显示器工作区的右下角，留 16 逻辑像素边距，不盖任务栏；按该显示器缩放比换算物理像素。以 `focus: false`（不激活）方式弹出，用户点击文本区才拿到键盘焦点。
+- 文本区（gpui-component `Textarea`）可编辑，里面只放「已落定 + 用户编辑过」的内容；**未落定的 PARTIAL 单独显示在文本区外**（灰色斜体带下划线），所以后续识别永远不会覆盖用户的编辑——落定的 FINAL 追加到文本区**当前内容**末尾。
+- 「复制」按钮把文本区当前内容 + 尚未落定的部分写入剪贴板，并提示「已复制」；失败显示原因。
+- 结束（`STOPPED`）后窗口保留，直到用户按 Esc / 点「关闭」/ 下一轮开始（下一轮清空）。用户关掉窗口后本轮不再自动重开；浮窗是唯一输出时关窗等于结束这一轮。
+- 状态行显示：加载中、正在听（含去向说明）、收尾中、已结束、错误原因。
+
+## 已知限制与未验证
+**以下都没有在真机上验证过，只有离屏单测覆盖了纯逻辑；不要当作已验证的能力。**
+- **热键松开事件实机**：`Released` 转发有单测（边沿选择命令），但真实的 `WM_HOTKEY` → 轮询 → 松开链路没有在真机跑过；全局热键无法在无人值守环境里模拟。
+- **键入到真实应用**：`SendInput` 注入、回删重打、修饰键延后在记事本 / 浏览器 / Office / 聊天软件里的表现都没测。
+- **IME 组合态**：中文输入法正处于拼音组合时，回删可能删到组合串而不是已上屏的文字；Unicode 事件是否绕过组合也没测。没有做组合态检测。
+- **游戏、全屏独占程序、远程桌面客户端、虚拟机、带反作弊的程序**：通常忽略合成输入，UIA 也多半查不到焦点——此时判定会走浮窗，但无法保证每种情形都被判成「不能键入」；判成「能键入」而实际键不进去时，没有办法发现（`SendInput` 不报错），文字会丢，需用户改用「只浮窗」。
+- **Chrome / Electron**：无障碍树可能首次没有唤醒，`GetFocusedElement` 判成无焦点或拿不到可编辑元素，此时走浮窗（宁可多弹窗）。网页 contenteditable / `<textarea>` 在无障碍被唤醒后通常能判成可编辑，未实测。
+- **UIPI / 权限探测**：对管理员窗口、UWP / `ApplicationFrameHost` 的完整性比较没有实机验证；打不开目标进程一律按「不确定」走浮窗。
+- **UIA 阻塞**：目标程序无响应时 `GetFocusedElement` 可能卡住。探测在后台线程执行、2.5s 无结果就按不确定处理，但该线程会一直挂到调用返回（不影响主线程）。
+- **浮窗**：位置（含多显示器、副屏负坐标、混合 DPI）、「不抢焦点」（依赖 gpui `focus: false` 与 PopUp 窗口样式，未确认不会触发窗口激活）、文本区更新时光标位置（每次落定都会重置选区，用户正在中间编辑时光标会跳到开头）、Esc 只在浮窗拿到焦点后才有效——都是真机项。
+- **「已就绪」判定依赖 PONG**：见「进程生命周期」第 2 点；用旧版没有 PING 应答的 worker 时，会一直显示「加载中」直到第一条识别文本出现。
+- **系统语音后端**：只有占位。
+- 打包：三个 DLL 与 `snow-stt.exe` 必须同目录，主程序旁的布局与安装包尚未做。
 
 ## 许可证注意
 - sherpa-onnx 与 sherpa-onnx-sys 为 Apache-2.0；传递依赖许可证已核对，无与 GPL-3.0-only 冲突者（见调研 §8.1）。

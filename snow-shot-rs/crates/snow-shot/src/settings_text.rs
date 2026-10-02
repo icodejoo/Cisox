@@ -183,7 +183,7 @@ pub fn t(lang: Lang, text: Text) -> String {
 }
 
 /// 分组 id 列表，顺序即侧栏顺序；标题在 `settings_ui.ftl` 的 `settings-group-<id>`。
-pub const GROUP_IDS: [&str; 27] = [
+pub const GROUP_IDS: [&str; 28] = [
     "interface",
     "system",
     "tray",
@@ -206,6 +206,7 @@ pub const GROUP_IDS: [&str; 27] = [
     "pinned_history",
     "capture_history",
     "text_recognition",
+    "dictation",
     "screen_recording",
     "screen_recording_shortcuts",
     "api_configuration",
@@ -388,7 +389,7 @@ mod tests {
         assert_eq!(t(Lang::new("en-US"), Text::Title), "Settings");
     }
 
-    /// 分组表 27 项、id 唯一，每组在每种语言下都有标题。
+    /// 分组表 28 项、id 唯一，每组在每种语言下都有标题。
     #[test]
     fn group_titles_complete() {
         let mut seen = std::collections::HashSet::new();

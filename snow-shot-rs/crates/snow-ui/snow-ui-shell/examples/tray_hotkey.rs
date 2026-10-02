@@ -78,9 +78,11 @@ fn selfcheck(caps: &CapabilityRegistry) -> bool {
     };
     let dispatcher = Dispatcher::from_fn(|_, _| {});
     // 自检用不常见组合，避免撞上用户已有热键
-    let binding = |s: &str| HotkeyBinding {
-        hotkey: Hotkey::parse(s).expect("自检热键应可解析"),
-        command: AppCommand::Cancel(Default::default()),
+    let binding = |s: &str| {
+        HotkeyBinding::new(
+            Hotkey::parse(s).expect("自检热键应可解析"),
+            AppCommand::Cancel(Default::default()),
+        )
     };
     match HotkeyService::start(caps, dispatcher.clone()) {
         Ok(svc) => {
@@ -171,10 +173,10 @@ fn manual(caps: &CapabilityRegistry) -> bool {
             return false;
         }
     };
-    let binding = HotkeyBinding {
-        hotkey: Hotkey::parse(DEMO_HOTKEY).expect("演示热键可解析"),
-        command: AppCommand::Cancel(Default::default()),
-    };
+    let binding = HotkeyBinding::new(
+        Hotkey::parse(DEMO_HOTKEY).expect("演示热键可解析"),
+        AppCommand::Cancel(Default::default()),
+    );
     if let Err(e) = hotkeys.register(binding) {
         log(&path, &format!("注册 {DEMO_HOTKEY} 失败: {e}"));
         return false;

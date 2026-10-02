@@ -398,12 +398,12 @@ mod tests {
         assert!(entry_for("screen_recording/animated_image_format").is_none());
     }
 
-    /// 完整默认文档含全部 27 个分组；默认值经规范化为不动点，仅有 C++ 同款的例外：
+    /// 完整默认文档含全部 28 个分组（含 Cisox 扩展的 dictation）；默认值经规范化为不动点，仅有 C++ 同款的例外：
     /// 三个全局鼠标默认的单元素数组会被规范化成字符串。
     #[test]
     fn default_document_fixed_points() {
         let doc = complete_default_document();
-        assert_eq!(doc.as_object().unwrap().len(), 27);
+        assert_eq!(doc.as_object().unwrap().len(), 28);
         let mut exceptions = Vec::new();
         for item in entries() {
             let out = crate::normalize::normalize(item.key, &item.default);

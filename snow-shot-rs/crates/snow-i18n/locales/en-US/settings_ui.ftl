@@ -55,3 +55,4 @@ settings-group-screen-recording-shortcuts = Recording shortcuts
 settings-group-api-configuration = AI models
 settings-group-extended-features = Extended features
 settings-group-storage = Storage
+settings-group-dictation = Dictation

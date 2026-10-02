@@ -3,6 +3,7 @@
 //! 渲染只读取 [`SettingsState`] 里预先构建好的行模型；列表使用定高虚拟滚动，
 //! 每帧只构建屏幕内可见的几行，与配置项总数无关。
 
+use crate::dictation::status::backend_notice as dictation_backend_notice;
 use crate::settings_model::{
     Control, SLIDER_CELLS, edit_text, parse_hex_color, preview_text,
     slider_active_cell, slider_cell_value, step_int, window_text,
@@ -18,7 +19,9 @@ use crate::translate_settings::{
     HYMT2_LINE_COUNT, Hymt2Button, Hymt2Click, Hymt2Row, Hymt2View, hymt2_click, hymt2_rows,
     hymt2_view, route_hint, route_mode_label, split_list_index,
 };
-use snow_config::extensions::{KEY_LOCAL_MODEL_ID, KEY_LOCAL_ROUTE_MODE, KEY_OCR_BACKEND};
+use snow_config::extensions::{
+    KEY_DICTATION_BACKEND, KEY_LOCAL_MODEL_ID, KEY_LOCAL_ROUTE_MODE, KEY_OCR_BACKEND,
+};
 use serde_json::{Value, json};
 use snow_ui::ui::component::button::Button;
 use snow_ui::ui::component::searchable_list::{SearchableListItem, SearchableVec};
@@ -818,11 +821,19 @@ impl SettingsView {
         };
         let backend_notice = if key == KEY_OCR_BACKEND { OcrNotice::for_config_value(&row.value) } else { None };
         let route_note = route_hint(key, &row.value, self.state.prefs().locale);
-        let sub = match (&row.error, backend_notice, route_note) {
-            (Some(error), _, _) => div().text_color(p.danger).child(error.clone()),
-            (None, Some(notice), _) => div().text_color(p.danger).child(notice.message(self.state.prefs().locale)),
-            (None, None, Some(note)) => div().text_color(p.dim).child(note),
-            (None, None, None) => div().text_color(p.dim).child(item_desc(lang, key).unwrap_or_else(|| key.to_string())),
+        let dictation_notice = if key == KEY_DICTATION_BACKEND {
+            dictation_backend_notice(&row.value, self.state.prefs().locale)
+        } else {
+            None
+        };
+        let sub = match (&row.error, backend_notice, dictation_notice, route_note) {
+            (Some(error), _, _, _) => div().text_color(p.danger).child(error.clone()),
+            (None, Some(notice), _, _) => div().text_color(p.danger).child(notice.message(self.state.prefs().locale)),
+            (None, None, Some(notice), _) => div().text_color(p.danger).child(notice),
+            (None, None, None, Some(note)) => div().text_color(p.dim).child(note),
+            (None, None, None, None) => div()
+                .text_color(p.dim)
+                .child(item_desc(lang, key).unwrap_or_else(|| key.to_string())),
         };
         let label = div()
             .w(px(LABEL_WIDTH))

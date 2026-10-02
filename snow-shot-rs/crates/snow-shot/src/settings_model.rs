@@ -745,7 +745,7 @@ mod tests {
         }
         assert_eq!(seen.len(), entries().len());
         assert_eq!(seen.len(), snow_config::schema::CORE_ENTRY_COUNT + snow_config::extensions::EXTENSION_ENTRY_COUNT);
-        assert_eq!(groups().len(), 27);
+        assert_eq!(groups().len(), 28);
         let schema_groups: HashSet<_> = entries().iter().map(|e| group_id_of(e.key)).collect();
         let table_groups: HashSet<_> = groups().iter().map(|g| g.id).collect();
         assert_eq!(schema_groups, table_groups);

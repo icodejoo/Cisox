@@ -1,14 +1,14 @@
 //! Cisox 扩展配置项：不属于 Qt 版 238 项 schema 的新增键。
 //!
 //! 现有 238 项与 C++ 逐项对齐、不得改动；本地翻译（NMT）相关的新增项集中在这里，放在
-//! `screenshot_translation/` 分组下；OCR 后端选择放在 `text_recognition/` 分组下。文档层对未知字段是“保留”的，因此 Qt 版读到这些键只会忽略，
+//! `screenshot_translation/` 分组下；OCR 后端选择放在 `text_recognition/` 分组下；语音转文字放在 `dictation/` 分组下。文档层对未知字段是“保留”的，因此 Qt 版读到这些键只会忽略，
 //! 不会破坏磁盘 JSON 的兼容性；Rust 侧则把它们当作正式配置项（有默认值、类型与范围校验）。
 
 use crate::schema::{IntRange, SchemaEntry, ValueKind, entry};
 use serde_json::json;
 
 /// 扩展项数量（`schema::entries()` 在原 238 项之后追加的条目数）。
-pub const EXTENSION_ENTRY_COUNT: usize = 10;
+pub const EXTENSION_ENTRY_COUNT: usize = 20;
 
 /// 翻译后端：`local` 本地 NMT worker，`openai` OpenAI 兼容通道。
 pub const KEY_TRANSLATION_BACKEND: &str = "screenshot_translation/backend";
@@ -30,6 +30,71 @@ pub const KEY_LOCAL_MAX_RESIDENT: &str = "screenshot_translation/local_max_resid
 
 /// 输入框翻译浮窗的全局热键（默认不绑定，未绑定时不注册）。
 pub const KEY_TRANSLATE_INPUT_HOTKEY: &str = "global_shortcuts/translate_input";
+
+/// 语音转文字「切换式」全局热键（按一下开始、再按一下结束；默认不绑定）。
+pub const KEY_DICTATION_TOGGLE_HOTKEY: &str = "global_shortcuts/dictation_toggle";
+/// 语音转文字「按住说话」全局热键（按下开始、松开结束；默认不绑定）。
+pub const KEY_DICTATION_HOLD_HOTKEY: &str = "global_shortcuts/dictation_hold";
+/// 语音转文字引擎后端：`local-model` 本地模型（snow-stt），`system` 系统语音（尚未实现）。
+pub const KEY_DICTATION_BACKEND: &str = "dictation/backend";
+/// 语音转文字触发模式：`both` 两个热键都生效，`toggle` 只切换式，`hold` 只按住说话。
+pub const KEY_DICTATION_TRIGGER_MODE: &str = "dictation/trigger_mode";
+/// 语音转文字模型目录；空串表示 `<数据根>/models/stt`。
+pub const KEY_DICTATION_MODEL_DIR: &str = "dictation/model_dir";
+/// 语音转文字的语言提示（单词，如 `auto`、`zh-en`）。
+pub const KEY_DICTATION_LANGUAGE: &str = "dictation/language";
+/// 语音转文字推理线程数。
+pub const KEY_DICTATION_THREADS: &str = "dictation/threads";
+/// 语音转文字输出方式：`auto` 有可输入焦点就键入、否则弹浮窗，`type` 只键入，`overlay` 只浮窗。
+pub const KEY_DICTATION_OUTPUT_MODE: &str = "dictation/output_mode";
+/// 键入时是否同时显示浮窗。
+pub const KEY_DICTATION_TYPE_WITH_OVERLAY: &str = "dictation/type_with_overlay";
+/// 单次语音转文字最长秒数（0 为不限），超时自动结束。
+pub const KEY_DICTATION_MAX_SECONDS: &str = "dictation/max_seconds";
+
+/// 语音转文字后端取值：本地模型。
+pub const DICTATION_BACKEND_LOCAL_MODEL: &str = "local-model";
+/// 语音转文字后端取值：系统语音（占位，尚未实现）。
+pub const DICTATION_BACKEND_SYSTEM: &str = "system";
+/// 语音转文字后端白名单。
+const DICTATION_BACKEND_VALUES: &[&str] =
+    &[DICTATION_BACKEND_LOCAL_MODEL, DICTATION_BACKEND_SYSTEM];
+/// 触发模式取值：两个热键都生效。
+pub const DICTATION_MODE_BOTH: &str = "both";
+/// 触发模式取值：只启用切换式热键。
+pub const DICTATION_MODE_TOGGLE: &str = "toggle";
+/// 触发模式取值：只启用按住说话热键。
+pub const DICTATION_MODE_HOLD: &str = "hold";
+/// 触发模式白名单。
+const DICTATION_MODE_VALUES: &[&str] = &[
+    DICTATION_MODE_BOTH,
+    DICTATION_MODE_TOGGLE,
+    DICTATION_MODE_HOLD,
+];
+/// 输出方式取值：自动。
+pub const DICTATION_OUTPUT_AUTO: &str = "auto";
+/// 输出方式取值：只键入。
+pub const DICTATION_OUTPUT_TYPE: &str = "type";
+/// 输出方式取值：只浮窗。
+pub const DICTATION_OUTPUT_OVERLAY: &str = "overlay";
+/// 输出方式白名单。
+const DICTATION_OUTPUT_VALUES: &[&str] = &[
+    DICTATION_OUTPUT_AUTO,
+    DICTATION_OUTPUT_TYPE,
+    DICTATION_OUTPUT_OVERLAY,
+];
+/// 语音语言提示默认值。
+pub const DEFAULT_DICTATION_LANGUAGE: &str = "auto";
+/// 推理线程数默认值（低占用优先）。
+pub const DEFAULT_DICTATION_THREADS: i32 = 2;
+/// 推理线程数上限。
+pub const MAX_DICTATION_THREADS: i32 = 8;
+/// 单次最长秒数默认值。
+pub const DEFAULT_DICTATION_MAX_SECONDS: i32 = 120;
+/// 单次最长秒数上限（1 小时）。
+pub const MAX_DICTATION_MAX_SECONDS: i32 = 3600;
+/// 单次最长秒数的界面步长。
+const DICTATION_MAX_SECONDS_STEP: i32 = 10;
 
 /// OCR 后端：`system` 系统原生 OCR，`local-model` 本地模型（snow-ocr-process）。
 pub const KEY_OCR_BACKEND: &str = "text_recognition/backend";
@@ -152,6 +217,30 @@ pub(crate) fn extension_entries() -> Vec<SchemaEntry> {
         ),
         entry(KEY_OCR_BACKEND, json!(default_ocr_backend()), ValueKind::String, None, OCR_BACKEND_VALUES, None),
         entry(KEY_TRANSLATE_INPUT_HOTKEY, json!([]), ValueKind::StringList, None, &[], Some(2)),
+        entry(KEY_DICTATION_TOGGLE_HOTKEY, json!([]), ValueKind::StringList, None, &[], Some(2)),
+        entry(KEY_DICTATION_HOLD_HOTKEY, json!([]), ValueKind::StringList, None, &[], Some(2)),
+        entry(KEY_DICTATION_BACKEND, json!(DICTATION_BACKEND_LOCAL_MODEL), ValueKind::String, None, DICTATION_BACKEND_VALUES, None),
+        entry(KEY_DICTATION_TRIGGER_MODE, json!(DICTATION_MODE_BOTH), ValueKind::String, None, DICTATION_MODE_VALUES, None),
+        entry(KEY_DICTATION_MODEL_DIR, json!(""), ValueKind::String, None, &[], None),
+        entry(KEY_DICTATION_LANGUAGE, json!(DEFAULT_DICTATION_LANGUAGE), ValueKind::String, None, &[], None),
+        entry(
+            KEY_DICTATION_THREADS,
+            json!(DEFAULT_DICTATION_THREADS),
+            ValueKind::Integer,
+            Some(IntRange { min: 1, max: MAX_DICTATION_THREADS, step: 1 }),
+            &[],
+            None,
+        ),
+        entry(KEY_DICTATION_OUTPUT_MODE, json!(DICTATION_OUTPUT_AUTO), ValueKind::String, None, DICTATION_OUTPUT_VALUES, None),
+        entry(KEY_DICTATION_TYPE_WITH_OVERLAY, json!(false), ValueKind::Boolean, None, &[], None),
+        entry(
+            KEY_DICTATION_MAX_SECONDS,
+            json!(DEFAULT_DICTATION_MAX_SECONDS),
+            ValueKind::Integer,
+            Some(IntRange { min: 0, max: MAX_DICTATION_MAX_SECONDS, step: DICTATION_MAX_SECONDS_STEP }),
+            &[],
+            None,
+        ),
     ]
 }
 
@@ -174,7 +263,10 @@ mod tests {
             assert!(
                 item.key.starts_with("screenshot_translation/")
                     || item.key == KEY_OCR_BACKEND
-                    || item.key == KEY_TRANSLATE_INPUT_HOTKEY,
+                    || item.key == KEY_TRANSLATE_INPUT_HOTKEY
+                    || item.key == KEY_DICTATION_TOGGLE_HOTKEY
+                    || item.key == KEY_DICTATION_HOLD_HOTKEY
+                    || item.key.starts_with("dictation/"),
                 "{}",
                 item.key
             );
@@ -329,5 +421,62 @@ mod tests {
         legacy["global_shortcuts"].as_object_mut().expect("分组").remove("translate_input");
         let old = ConfigDocument::from_bytes(Some(&serde_json::to_vec(&legacy).expect("序列化")));
         assert_eq!(old.value(KEY_TRANSLATE_INPUT_HOTKEY), json!([]));
+    }
+
+    /// 语音转文字：默认值、白名单与范围校验；两个热键默认不绑定。
+    #[test]
+    fn dictation_defaults_and_validation() {
+        let doc = ConfigDocument::from_bytes(None);
+        assert_eq!(doc.value(KEY_DICTATION_TOGGLE_HOTKEY), json!([]));
+        assert_eq!(doc.value(KEY_DICTATION_HOLD_HOTKEY), json!([]));
+        assert_eq!(doc.value(KEY_DICTATION_BACKEND), json!(DICTATION_BACKEND_LOCAL_MODEL));
+        assert_eq!(doc.value(KEY_DICTATION_TRIGGER_MODE), json!(DICTATION_MODE_BOTH));
+        assert_eq!(doc.value(KEY_DICTATION_OUTPUT_MODE), json!(DICTATION_OUTPUT_AUTO));
+        assert_eq!(doc.value(KEY_DICTATION_TYPE_WITH_OVERLAY), json!(false));
+        assert_eq!(doc.value(KEY_DICTATION_MODEL_DIR), json!(""));
+        assert_eq!(doc.value(KEY_DICTATION_THREADS), json!(DEFAULT_DICTATION_THREADS));
+        assert_eq!(doc.value(KEY_DICTATION_MAX_SECONDS), json!(DEFAULT_DICTATION_MAX_SECONDS));
+        for (key, good, bad) in [
+            (KEY_DICTATION_BACKEND, DICTATION_BACKEND_SYSTEM, "cloud"),
+            (KEY_DICTATION_TRIGGER_MODE, DICTATION_MODE_HOLD, "double"),
+            (KEY_DICTATION_OUTPUT_MODE, DICTATION_OUTPUT_OVERLAY, "paste"),
+        ] {
+            assert!(normalize(key, &json!(good)).valid, "{key}");
+            assert!(!normalize(key, &json!(bad)).valid, "{key}");
+            assert!(!normalize(key, &json!(1)).valid, "{key}");
+        }
+        assert!(normalize(KEY_DICTATION_THREADS, &json!(1)).valid);
+        assert!(normalize(KEY_DICTATION_THREADS, &json!(MAX_DICTATION_THREADS)).valid);
+        assert!(!normalize(KEY_DICTATION_THREADS, &json!(0)).valid);
+        assert!(!normalize(KEY_DICTATION_THREADS, &json!(MAX_DICTATION_THREADS + 1)).valid);
+        assert!(normalize(KEY_DICTATION_MAX_SECONDS, &json!(0)).valid);
+        assert!(!normalize(KEY_DICTATION_MAX_SECONDS, &json!(MAX_DICTATION_MAX_SECONDS + 1)).valid);
+        assert!(!normalize(KEY_DICTATION_TYPE_WITH_OVERLAY, &json!("yes")).valid);
+    }
+
+    /// 语音转文字：热键可读写；旧配置（没有 dictation 分组与这两个热键）读到默认值。
+    #[test]
+    fn dictation_round_trip_and_legacy_fill() {
+        let mut doc = ConfigDocument::from_bytes(None);
+        doc.set_value(KEY_DICTATION_TOGGLE_HOTKEY, json!(["Ctrl+Alt+D"])).expect("合法热键");
+        doc.set_value(KEY_DICTATION_HOLD_HOTKEY, json!(["F9"])).expect("合法热键");
+        doc.set_value(KEY_DICTATION_OUTPUT_MODE, json!(DICTATION_OUTPUT_TYPE)).expect("合法输出方式");
+        doc.set_value(KEY_DICTATION_MODEL_DIR, json!("D:/models/stt")).expect("目录");
+        let reloaded = ConfigDocument::from_bytes(Some(&doc.to_bytes()));
+        assert!(reloaded.value(KEY_DICTATION_TOGGLE_HOTKEY).to_string().contains("Ctrl+Alt+D"));
+        assert!(reloaded.value(KEY_DICTATION_HOLD_HOTKEY).to_string().contains("F9"));
+        assert_eq!(reloaded.value(KEY_DICTATION_OUTPUT_MODE), json!(DICTATION_OUTPUT_TYPE));
+        assert_eq!(reloaded.value(KEY_DICTATION_MODEL_DIR), json!("D:/models/stt"));
+
+        let fresh = ConfigDocument::from_bytes(None);
+        let mut legacy: serde_json::Value = serde_json::from_slice(&fresh.to_bytes()).expect("json");
+        legacy.as_object_mut().expect("根").remove("dictation");
+        legacy["global_shortcuts"].as_object_mut().expect("分组").remove("dictation_toggle");
+        legacy["global_shortcuts"].as_object_mut().expect("分组").remove("dictation_hold");
+        let old = ConfigDocument::from_bytes(Some(&serde_json::to_vec(&legacy).expect("序列化")));
+        assert_eq!(old.value(KEY_DICTATION_TOGGLE_HOTKEY), json!([]));
+        assert_eq!(old.value(KEY_DICTATION_HOLD_HOTKEY), json!([]));
+        assert_eq!(old.value(KEY_DICTATION_BACKEND), json!(DICTATION_BACKEND_LOCAL_MODEL));
+        assert_eq!(old.value(KEY_DICTATION_THREADS), json!(DEFAULT_DICTATION_THREADS));
     }
 }
