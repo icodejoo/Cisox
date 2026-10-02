@@ -4,7 +4,7 @@ use snow_capability::{Capability, CapabilityRegistry, CapabilityStatus};
 use std::fmt;
 
 /// 能力探测/初始化失败时使用的原因文案 key。
-pub const REASON_INIT_FAILED: &str = "capability.reason.init_failed";
+pub const REASON_INIT_FAILED: &str = "capability-reason-init-failed";
 
 /// 适配层错误。所有平台调用失败都走这里，不 panic。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,7 +107,10 @@ mod tests {
         let win = CapabilityRegistry::for_platform(Platform::Windows);
         assert!(require_capability(&win, Capability::GlobalHotkey).is_ok());
         let linux = CapabilityRegistry::for_platform(Platform::Linux);
-        assert!(require_capability(&linux, Capability::OverlayClickThrough).is_ok());
+        assert!(matches!(
+            require_capability(&linux, Capability::OverlayClickThrough),
+            Err(ShellError::Unsupported { .. })
+        ));
         assert!(matches!(
             require_capability(&linux, Capability::Tray),
             Err(ShellError::Unsupported { .. })

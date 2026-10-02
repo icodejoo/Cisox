@@ -88,7 +88,11 @@ fn lex(src: &str) -> Vec<(Tok, usize)> {
             }
             out.push((Tok::Ident(c[s..i].iter().collect()), line));
         } else if ch.is_ascii_digit() {
-            while i < c.len() && (c[i].is_alphanumeric() || c[i] == '_' || c[i] == '.') {
+            while i < c.len()
+                && (c[i].is_alphanumeric()
+                    || c[i] == '_'
+                    || (c[i] == '.' && c.get(i + 1).is_some_and(|n| n.is_ascii_digit())))
+            {
                 i += 1;
             }
             out.push((Tok::Other, line));
@@ -208,9 +212,32 @@ fn skip_first_arg(toks: &[(Tok, usize)], mut p: usize) -> Option<usize> {
     None
 }
 
+/// 跳过函数名后可选的 `::<...>`，返回其后的位置；尖括号未配平返回 `None`。
+fn skip_turbofish(toks: &[(Tok, usize)], p: usize) -> Option<usize> {
+    if !(is_punct(toks, p, ':') && is_punct(toks, p + 1, ':') && is_punct(toks, p + 2, '<')) {
+        return Some(p);
+    }
+    let mut depth = 0i32;
+    let mut i = p + 2;
+    while let Some((t, _)) = toks.get(i) {
+        match t {
+            Tok::Punct('<') => depth += 1,
+            Tok::Punct('>') => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i + 1);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
 /// 从源码提取 id 引用。
 ///
-/// 识别 `t!(expr, "id" ...)` 与 `.tr("id")` / `tr_with("id", ..)` / `tr_checked("id", ..)`；
+/// 识别 `t!(expr, "id" ...)`（含 `t![..]`、`t!{..}`）与 `.tr("id")` / `tr_with("id", ..)` / `tr_checked("id", ..)`；
 /// 忽略注释与字符串内的假匹配。
 ///
 /// # 参数
@@ -238,18 +265,26 @@ pub fn extract_refs(src: &str) -> Vec<IdRef> {
     let mut refs = Vec::new();
     for (k, (tok, _)) in toks.iter().enumerate() {
         let Tok::Ident(name) = tok else { continue };
-        let start = if name == "t" && is_punct(&toks, k + 1, '!') && is_punct(&toks, k + 2, '(') {
+        let is_macro_open = |i: usize| {
+            is_punct(&toks, i, '(') || is_punct(&toks, i, '[') || is_punct(&toks, i, '{')
+        };
+        let start = if name == "t" && is_punct(&toks, k + 1, '!') && is_macro_open(k + 2) {
             match skip_first_arg(&toks, k + 3) {
                 Some(p) => p,
                 None => continue,
             }
-        } else if FN_NAMES.contains(&name.as_str()) && is_punct(&toks, k + 1, '(') {
-            k + 2
+        } else if FN_NAMES.contains(&name.as_str()) {
+            match skip_turbofish(&toks, k + 1) {
+                Some(p) if is_punct(&toks, p, '(') => p + 1,
+                _ => continue,
+            }
         } else {
             continue;
         };
         if let Some((Tok::Str(Some(id)), line)) = toks.get(start)
-            && (is_punct(&toks, start + 1, ',') || is_punct(&toks, start + 1, ')'))
+            && [',', ')', ']', '}']
+                .iter()
+                .any(|&p| is_punct(&toks, start + 1, p))
             && valid_id(id)
         {
             refs.push(IdRef {
@@ -415,6 +450,18 @@ let g = t!(i18n, r#\"g-seven\"#);
         );
         assert_eq!(refs[4].line, 7);
         assert_eq!(refs[5].line, 12);
+    }
+
+    /// 方括号/花括号宏、turbofish 与 `self.0.tr` 写法也要识别。
+    #[test]
+    fn recognizes_extra_forms() {
+        let src = "
+let a = t![i18n, \"a-one\"];
+let b = t!{i18n, \"b-two\"};
+let c = self.0.tr(\"c-three\");
+let d = i.tr::<Vec<u8>>(\"d-four\");
+";
+        assert_eq!(ids(src), ["a-one", "b-two", "c-three", "d-four"]);
     }
 
     /// 注释与字符串里的假匹配不算。

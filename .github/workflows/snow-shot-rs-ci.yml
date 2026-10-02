@@ -75,4 +75,4 @@ jobs:
       - name: i18n alignment gate
         run: |
           cargo run -q -p snow-i18n --bin snow-i18n-tool -- check crates/snow-i18n/locales
-          cargo run -q -p snow-i18n --bin snow-i18n-tool -- extract crates --exclude crates/snow-i18n --strict-refs
+          cargo run -q -p snow-i18n --bin snow-i18n-tool -- extract crates --exclude crates/snow-i18n --strict-refs --min-refs 10

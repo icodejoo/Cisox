@@ -8,10 +8,10 @@ use std::collections::HashMap;
 pub const PHASE: &str = "P1";
 
 /// 原因文案 key：功能尚未在该平台实现。
-pub const REASON_NOT_IMPLEMENTED: &str = "capability.reason.not_implemented";
+pub const REASON_NOT_IMPLEMENTED: &str = "capability-reason-not-implemented";
 
 /// 原因文案 key：Wayland 下能力受限。
-pub const REASON_WAYLAND_LIMITED: &str = "capability.reason.wayland_limited";
+pub const REASON_WAYLAND_LIMITED: &str = "capability-reason-wayland-limited";
 
 /// 运行平台。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -206,7 +206,7 @@ impl CapabilityRegistry {
     ///
     /// ```rust
     /// use snow_capability::{Capability, CapabilityRegistry, Platform};
-    /// let reg = CapabilityRegistry::for_platform(Platform::Linux);
+    /// let reg = CapabilityRegistry::for_platform(Platform::Windows);
     /// assert!(reg.query(Capability::OverlayClickThrough).is_usable());
     /// ```
     pub fn query(&self, cap: Capability) -> CapabilityStatus {
@@ -234,13 +234,10 @@ impl CapabilityRegistry {
         self.table.insert(cap, status);
     }
 
-    /// ADR-7 矩阵的默认状态：Windows 全支持；macOS 全未实现；Linux 仅覆盖窗降级。
+    /// ADR-7 矩阵的默认状态：Windows 全支持；macOS 与 Linux 整列待实现（Unsupported）。
     fn default_status(platform: Platform, cap: Capability) -> CapabilityStatus {
         match (platform, cap) {
             (Platform::Windows, _) => CapabilityStatus::Supported,
-            (Platform::Linux, Capability::OverlayClickThrough) => CapabilityStatus::Degraded {
-                reason: REASON_WAYLAND_LIMITED,
-            },
             _ => CapabilityStatus::Unsupported {
                 reason: REASON_NOT_IMPLEMENTED,
             },
@@ -279,21 +276,28 @@ mod tests {
         }
     }
 
-    /// Linux 查询不 panic，覆盖窗降级可用，其余不可用。
+    /// Linux 整列待实现（ADR-7）：查询不 panic，全部不可用且带统一原因。
     #[test]
-    fn linux_degrades_without_panic() {
+    fn linux_all_unsupported_without_panic() {
         let reg = CapabilityRegistry::for_platform(Platform::Linux);
-        let overlay = reg.query(Capability::OverlayClickThrough);
-        assert_eq!(
-            overlay,
-            CapabilityStatus::Degraded {
-                reason: REASON_WAYLAND_LIMITED
-            }
-        );
-        assert!(overlay.is_usable());
         for cap in Capability::ALL {
-            if cap != Capability::OverlayClickThrough {
-                assert!(!reg.query(cap).is_usable());
+            let s = reg.query(cap);
+            assert!(!s.is_usable());
+            assert_eq!(s.reason(), Some(REASON_NOT_IMPLEMENTED));
+        }
+    }
+
+    /// 原因 key 必须是合法 Fluent id，且在 en-US / zh-CN 目录里都有定义。
+    #[test]
+    fn reason_keys_are_valid_fluent_ids_with_messages() {
+        let catalogs = [
+            include_str!("../../snow-i18n/locales/en-US/capability.ftl"),
+            include_str!("../../snow-i18n/locales/zh-CN/capability.ftl"),
+        ];
+        for key in [REASON_NOT_IMPLEMENTED, REASON_WAYLAND_LIMITED] {
+            assert!(key.chars().all(|c| c.is_ascii_lowercase() || c == '-'));
+            for text in catalogs {
+                assert!(text.lines().any(|l| l.starts_with(&format!("{key} = "))));
             }
         }
     }
