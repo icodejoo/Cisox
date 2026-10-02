@@ -1,7 +1,14 @@
-//! Marian（opus-mt）ONNX 推理引擎：encoder 一次 + merged decoder（KV cache）贪心解码。
+//! Marian（opus-mt）与 M2M100（NLLB）ONNX 推理引擎：encoder 一次 + merged decoder（KV cache）解码。
 //!
 //! 输入输出名以运行时 `session.inputs()/outputs()` 探测为准，不硬编码层数。
 //! 默认贪心；束宽 >1 时走束搜索（batch 维 = 束宽，自注意力 KV 每步按父束重排，交叉注意力 KV 只在首步产生）。
+//!
+//! M2M100 族（NLLB，optimum 导出的 merged decoder）与 Marian 共用同一套张量名：
+//! 编码器 `input_ids`/`attention_mask` → `last_hidden_state`；解码器输入 `input_ids`、`encoder_attention_mask`、
+//! `encoder_hidden_states`、`use_cache_branch` 与 `past_key_values.{层}.{decoder|encoder}.{key|value}`
+//! （形状 `[批, 16, 序列, 64]`），输出 `logits` 与 `present.*`。区别只在流程：
+//! 编码器输入为 `[源语言码] + 词 + </s>`；解码器以 `</s>`（id 2）起步，第一个生成的 token 强制为目标语言码；
+//! 译文解码前剔除特殊符号与语言码。
 
 use std::fmt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -17,13 +24,15 @@ use tokenizers::Tokenizer;
 use crate::beam::{Advance, BeamSearch, Candidate, gather_rows, top_k_log_softmax};
 use crate::manifest::{
     DEFAULT_LENGTH_PENALTY, DEFAULT_NO_REPEAT_NGRAM, ExecutionOptions, FILE_DECODER, FILE_ENCODER,
-    FILE_TOKENIZER, MAX_BEAMS, Manifest, ManifestError,
+    FILE_TOKENIZER, M2M100_DEFAULT_LENGTH_PENALTY, M2M100_DEFAULT_MIN_LENGTH_RATIO,
+    M2M100_DEFAULT_NUM_BEAMS, MAX_BEAMS, Manifest, ManifestError,
 };
 use crate::protocol::ErrorKind;
 use crate::text::{
     argmax_masked, chunk_ids, is_cjk_lang, join_translated, output_token_budget, split_sentences,
     tidy_cjk_spacing, trim_tail_repeat,
 };
+use crate::zh_punct::to_fullwidth_stateful;
 
 /// 环境变量：显式指定 onnxruntime 动态库路径（优先）。
 pub const ENV_ORT_DYLIB: &str = "SNOW_ORT_DYLIB";
@@ -50,6 +59,8 @@ const OOM_MARKERS: [&str; 6] = [
 const ARENA_SHRINK_KEY: &str = "memory.enable_memory_arena_shrinkage";
 /// 收缩的设备与 ID（`cpu:0`）。
 const ARENA_SHRINK_VALUE: &str = "cpu:0";
+/// M2M100 词表里的四个基础特殊符号。
+const M2M_SPECIAL_TOKENS: [&str; 4] = ["<s>", "<pad>", "</s>", "<unk>"];
 /// 束搜索每束取的候选数倍率（HF 取 2×束宽）。
 const BEAM_CANDIDATE_FACTOR: usize = 2;
 /// 判定内存不足的中文关键词（Windows 中文系统错误信息）。
@@ -66,7 +77,7 @@ pub struct EngineError {
 
 impl EngineError {
     /// 构造错误。
-    fn new(kind: ErrorKind, message: impl Into<String>) -> Self {
+    pub(crate) fn new(kind: ErrorKind, message: impl Into<String>) -> Self {
         Self {
             kind,
             message: message.into(),
@@ -280,6 +291,165 @@ pub struct GenParams {
     pub length_penalty: f32,
     /// 束搜索禁止重复的 n-gram 长度（0 关闭）。
     pub no_repeat_ngram: usize,
+    /// 最小输出长度占输入 token 数的比例（0 关闭，仅 M2M100 族使用）。
+    pub min_length_ratio: f32,
+}
+
+/// M2M100 族的语言配置（由清单 `lang_tokens` 与分词器词表解析而来）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct M2mConfig {
+    /// 第一个生成位强制输出的 token（目标语言码 id）。
+    pub forced_first: u32,
+    /// 目标语言的 FLORES 码（如 `zho_Hans`），用于选择译文后处理。
+    pub tgt_code: String,
+    /// 译文解码前剔除的 id：`<s>`、`<pad>`、`</s>`、`<unk>` 与全部语言码。
+    pub drop_ids: Vec<u32>,
+}
+
+/// 解析 M2M100 的语言 id：源语言码前缀、强制的目标语言码、需剔除的特殊 id。
+///
+/// # 参数
+/// - `manifest`：模型清单（`lang_tokens`：应用语言码 → FLORES 码）。
+/// - `tokenizer`：词表里必须直接含有这些语言码 token。
+/// - `src`/`tgt`：源、目标语言码（应用侧写法，如 `zh-CN`）。
+///
+/// # 返回
+/// `(源文本前缀 id 列表, M2mConfig)`；清单缺项返回 `UnsupportedPair`，词表缺 token 返回 `ManifestInvalid`。
+///
+/// # 示例
+/// ```ignore
+/// let (prefix, cfg) = resolve_m2m_langs(&manifest, &tokenizer, "zh-CN", "en")?;
+/// ```
+pub fn resolve_m2m_langs(
+    manifest: &Manifest,
+    tokenizer: &Tokenizer,
+    src: &str,
+    tgt: &str,
+) -> Result<(Vec<u32>, M2mConfig), EngineError> {
+    let id_of = |lang: &str| -> Result<u32, EngineError> {
+        let token = manifest
+            .lang_token_for(lang)
+            .map_err(|m| EngineError::new(ErrorKind::UnsupportedPair, m))?;
+        tokenizer.token_to_id(token).ok_or_else(|| {
+            EngineError::new(
+                ErrorKind::ManifestInvalid,
+                format!("language token `{token}` is not in the tokenizer vocabulary"),
+            )
+        })
+    };
+    let src_id = id_of(src)?;
+    let forced_first = id_of(tgt)?;
+    let tgt_code = manifest
+        .lang_token_for(tgt)
+        .map_err(|m| EngineError::new(ErrorKind::UnsupportedPair, m))?
+        .to_string();
+    let mut drop_ids: Vec<u32> = M2M_SPECIAL_TOKENS
+        .iter()
+        .filter_map(|t| tokenizer.token_to_id(t))
+        .chain(
+            manifest
+                .lang_tokens
+                .values()
+                .filter_map(|t| tokenizer.token_to_id(t)),
+        )
+        .collect();
+    drop_ids.sort_unstable();
+    drop_ids.dedup();
+    Ok((
+        vec![src_id],
+        M2mConfig {
+            forced_first,
+            tgt_code,
+            drop_ids,
+        },
+    ))
+}
+
+/// NLLB 译文片段的标点后处理：目标为 zho_Hans/zho_Hant/jpn_Jpan 时半角标点转全角，其余目标原样。
+///
+/// # 参数
+/// - `text`：片段译文。
+/// - `cfg`：M2M100 配置（取目标语言码）。
+/// - `quotes`：跨片段共享的引号计数，首个片段传 0。
+///
+/// # 返回
+/// 处理后的译文。
+///
+/// # 示例
+/// ```ignore
+/// let mut q = 0;
+/// assert_eq!(postprocess_m2m("你好,世界.", &cfg_zho_hans, &mut q), "你好，世界。");
+/// ```
+pub fn postprocess_m2m(text: &str, cfg: &M2mConfig, quotes: &mut usize) -> String {
+    to_fullwidth_stateful(text, &cfg.tgt_code, quotes)
+}
+
+/// 最小输出长度：`ceil(比例 × 输入 token 数)`，比例 ≤ 0 时为 0。
+///
+/// # 参数
+/// - `ratio`：比例。
+/// - `input_len`：编码器输入 token 数（含语言码与结束符）。
+///
+/// # 返回
+/// 生成步数（含强制的语言码）不足该值时禁止结束符。
+///
+/// # 示例
+/// ```ignore
+/// assert_eq!(min_output_len(0.5, 11), 6);
+/// ```
+pub fn min_output_len(ratio: f32, input_len: usize) -> usize {
+    if ratio <= 0.0 {
+        return 0;
+    }
+    (ratio * input_len as f32).ceil() as usize
+}
+
+/// 强制位的候选：每条存活束只有指定 token，对数概率 0（与 HF 的 `forced_bos_token_id` 一致）。
+///
+/// # 参数
+/// - `alive`：存活束数量。
+/// - `token`：强制输出的 token（目标语言码 id）。
+///
+/// # 返回
+/// 与存活束等长的候选表，可直接交给 `BeamSearch::advance`。
+///
+/// # 示例
+/// ```ignore
+/// let cands = forced_candidates(1, 101233);
+/// ```
+pub fn forced_candidates(alive: usize, token: u32) -> Vec<Vec<Candidate>> {
+    (0..alive).map(|_| vec![(token, 0.0)]).collect()
+}
+
+/// 取一行 logits 的前 `k` 个候选；`block_eos` 给出结束符时把它从候选里剔除
+/// （归一化仍含它，与 HF 先 log-softmax 再屏蔽的顺序一致）。
+///
+/// # 参数
+/// - `row`：一行词表 logits。
+/// - `banned`：禁止的 token。
+/// - `k`：保留候选数。
+/// - `block_eos`：需要屏蔽的结束符 id。
+///
+/// # 返回
+/// 最多 `k` 项的 `(token, 对数概率)`，降序。
+///
+/// # 示例
+/// ```ignore
+/// let c = masked_top_k(&logits, &[], 4, Some(2));
+/// ```
+pub fn masked_top_k(
+    row: &[f32],
+    banned: &[i64],
+    k: usize,
+    block_eos: Option<u32>,
+) -> Vec<Candidate> {
+    let extra = usize::from(block_eos.is_some());
+    let mut c = top_k_log_softmax(row, banned, k + extra);
+    if let Some(eos) = block_eos {
+        c.retain(|&(t, _)| t != eos);
+        c.truncate(k);
+    }
+    c
 }
 
 /// 解析生效的束宽：请求值优先，其次模型缺省；必须落在 `1..=MAX_BEAMS`。
@@ -308,12 +478,12 @@ pub fn resolve_beams(requested: Option<usize>, default: usize) -> Result<usize, 
 }
 
 /// 从 JSON 里取整数字段。
-fn json_i64(v: &Option<Value>, key: &str) -> Option<i64> {
+pub(crate) fn json_i64(v: &Option<Value>, key: &str) -> Option<i64> {
     v.as_ref()?.get(key)?.as_i64()
 }
 
 /// 读取可选 JSON 文件。
-fn read_json_opt(path: &Path) -> Option<Value> {
+pub(crate) fn read_json_opt(path: &Path) -> Option<Value> {
     serde_json::from_slice(&std::fs::read(path).ok()?).ok()
 }
 
@@ -334,6 +504,7 @@ pub fn resolve_gen_params(manifest: &Manifest, dir: &Path) -> Result<GenParams, 
     let gen_cfg = read_json_opt(&dir.join("generation_config.json"));
     let cfg = read_json_opt(&dir.join("config.json"));
     let g = &manifest.generation;
+    let m2m = manifest.is_m2m100();
     let pick = |own: Option<i64>, key: &str| {
         own.or_else(|| json_i64(&gen_cfg, key))
             .or_else(|| json_i64(&cfg, key))
@@ -369,9 +540,21 @@ pub fn resolve_gen_params(manifest: &Manifest, dir: &Path) -> Result<GenParams, 
         eos,
         banned,
         max_new: g.max_new_tokens.unwrap_or(DEFAULT_MAX_NEW_TOKENS),
-        num_beams: g.num_beams.unwrap_or(1),
-        length_penalty: g.length_penalty.unwrap_or(DEFAULT_LENGTH_PENALTY),
+        num_beams: g
+            .num_beams
+            .unwrap_or(if m2m { M2M100_DEFAULT_NUM_BEAMS } else { 1 }),
+        length_penalty: g.length_penalty.unwrap_or(if m2m {
+            M2M100_DEFAULT_LENGTH_PENALTY
+        } else {
+            DEFAULT_LENGTH_PENALTY
+        }),
         no_repeat_ngram: g.no_repeat_ngram_size.unwrap_or(DEFAULT_NO_REPEAT_NGRAM),
+        // 缺省值只对 m2m100 生效；Marian 仍缺省 0（关闭），旧清单行为不变
+        min_length_ratio: g.min_length_ratio.unwrap_or(if m2m {
+            M2M100_DEFAULT_MIN_LENGTH_RATIO
+        } else {
+            0.0
+        }),
     })
 }
 
@@ -385,8 +568,10 @@ pub struct Engine {
     tokenizer: Tokenizer,
     /// 解码参数。
     gen_params: GenParams,
-    /// 每个源文本片段前置的语言 token id。
+    /// 每个源文本片段前置的语言 token id（Marian：目标语言；M2M100：源语言）。
     prefix_ids: Vec<u32>,
+    /// M2M100 族的语言配置，`None` 表示 Marian。
+    m2m: Option<M2mConfig>,
     /// 解码器的 `past_key_values.*` 输入名（保持模型顺序）。
     past_names: Vec<String>,
     /// KV 头数。
@@ -443,7 +628,12 @@ impl Engine {
         init_runtime()?;
         let gen_params = resolve_gen_params(&manifest, dir)?;
         let tokenizer = load_tokenizer(&manifest.resolve_file(dir, FILE_TOKENIZER)?)?;
-        let prefix_ids = resolve_prefix_ids(&manifest, &tokenizer, tgt)?;
+        let (prefix_ids, m2m) = if manifest.is_m2m100() {
+            let (prefix, cfg) = resolve_m2m_langs(&manifest, &tokenizer, src, tgt)?;
+            (prefix, Some(cfg))
+        } else {
+            (resolve_prefix_ids(&manifest, &tokenizer, tgt)?, None)
+        };
         let encoder = build_session(
             &manifest.resolve_file(dir, FILE_ENCODER)?,
             &manifest.execution,
@@ -504,6 +694,7 @@ impl Engine {
             tokenizer,
             gen_params,
             prefix_ids,
+            m2m,
             past_names,
             kv_heads,
             kv_head_dim,
@@ -640,8 +831,14 @@ impl Engine {
         }
         let cap = opts.max_len.unwrap_or(self.gen_params.max_new).max(1);
         let mut parts = Vec::with_capacity(segments.len());
+        // 全角标点后处理在片段间共享引号计数，跨句的引号才能成对
+        let mut quotes = 0usize;
         for seg in segments {
             let translated = self.translate_segment(&seg.text, cap, beams)?;
+            let translated = match &self.m2m {
+                Some(cfg) => postprocess_m2m(&translated, cfg, &mut quotes),
+                None => translated,
+            };
             parts.push((translated, seg.sep));
         }
         Ok(join_translated(&parts, self.cjk_target))
@@ -682,17 +879,17 @@ impl Engine {
             let mut input = self.prefix_ids.clone();
             input.extend_from_slice(&chunk);
             input.push(eos);
-            let budget = output_token_budget(chunk.len(), cap);
+            // M2M100 的强制语言码占第一个生成步
+            let budget = output_token_budget(chunk.len(), cap) + usize::from(self.m2m.is_some());
             let out = if beams > 1 {
                 self.generate_beam(&input, budget, beams)?
             } else {
                 self.generate(&input, budget)?
             };
-            let decoded = self.tokenizer.decode(&out, true).map_err(|e| {
-                EngineError::new(ErrorKind::DecodeFailed, format!("detokenize failed: {e}"))
-            })?;
+            let decoded = self.detokenize(&out)?;
             let decoded = decoded.trim();
-            pieces.push(if self.cjk_target {
+            // NLLB 的标点后处理放在整条文本层面（见 `translate`）；Marian 做空格/标点整理
+            pieces.push(if self.cjk_target && self.m2m.is_none() {
                 tidy_cjk_spacing(decoded)
             } else {
                 decoded.to_string()
@@ -700,6 +897,24 @@ impl Engine {
         }
         let joiner = if self.cjk_target { "" } else { " " };
         Ok(pieces.join(joiner))
+    }
+
+    /// 把生成的 id 还原成文本：M2M100 先剔除特殊符号与语言码，Marian 由分词器跳过特殊符号。
+    fn detokenize(&self, ids: &[u32]) -> Result<String, EngineError> {
+        let fail = |e: tokenizers::Error| {
+            EngineError::new(ErrorKind::DecodeFailed, format!("detokenize failed: {e}"))
+        };
+        match &self.m2m {
+            Some(cfg) => {
+                let kept: Vec<u32> = ids
+                    .iter()
+                    .copied()
+                    .filter(|id| !cfg.drop_ids.contains(id))
+                    .collect();
+                self.tokenizer.decode(&kept, false).map_err(fail)
+            }
+            None => self.tokenizer.decode(ids, true).map_err(fail),
+        }
     }
 
     /// 运行编码器，返回展平的 `hidden[src_len * hidden_dim]` 与隐层维度。
@@ -757,6 +972,8 @@ impl Engine {
         }
 
         let gp = &self.gen_params;
+        let forced = self.m2m.as_ref().map(|c| c.forced_first);
+        let min_len = min_output_len(gp.min_length_ratio, src_len).min(max_new.saturating_sub(1));
         let mut search = BeamSearch::new(
             width,
             gp.eos as u32,
@@ -789,7 +1006,11 @@ impl Engine {
             }
             let mut outputs = self.decoder.run(inputs).map_err(|e| fail(&e))?;
 
-            let cands: Vec<Vec<Candidate>> = {
+            let cands: Vec<Vec<Candidate>> = if let (0, Some(tok)) = (step, forced) {
+                // 首个生成位强制为目标语言码，本步 logits 不参与选择
+                forced_candidates(search.alive_len(), tok)
+            } else {
+                let block_eos = (step < min_len).then_some(gp.eos as u32);
                 let (shape, logits) = outputs["logits"]
                     .try_extract_tensor::<f32>()
                     .map_err(|e| fail(&e))?;
@@ -805,10 +1026,11 @@ impl Engine {
                 (0..search.alive_len())
                     .map(|b| {
                         let row = &logits[b * row_stride..(b + 1) * row_stride];
-                        top_k_log_softmax(
+                        masked_top_k(
                             &row[row.len() - vocab..],
                             &gp.banned,
                             BEAM_CANDIDATE_FACTOR * width,
+                            block_eos,
                         )
                     })
                     .collect()
@@ -865,6 +1087,8 @@ impl Engine {
         }
 
         let gp = &self.gen_params;
+        let forced = self.m2m.as_ref().map(|c| c.forced_first);
+        let min_len = min_output_len(gp.min_length_ratio, src_len).min(max_new.saturating_sub(1));
         let mut generated: Vec<u32> = Vec::new();
         let mut current = gp.start;
         for step in 0..max_new {
@@ -891,7 +1115,10 @@ impl Engine {
             }
 
             let mut outputs = self.decoder.run(inputs).map_err(|e| fail(&e))?;
-            let next = {
+            let next = if let (0, Some(tok)) = (step, forced) {
+                // 首个生成位强制为目标语言码
+                tok as i64
+            } else {
                 let (shape, logits) = outputs["logits"]
                     .try_extract_tensor::<f32>()
                     .map_err(|e| fail(&e))?;
@@ -903,7 +1130,11 @@ impl Engine {
                     ));
                 }
                 let last = &logits[logits.len() - vocab..];
-                argmax_masked(last, &gp.banned).ok_or_else(|| {
+                let mut banned = gp.banned.clone();
+                if step < min_len {
+                    banned.push(gp.eos);
+                }
+                argmax_masked(last, &banned).ok_or_else(|| {
                     EngineError::new(ErrorKind::DecodeFailed, "no selectable token in logits")
                 })? as i64
             };
@@ -987,7 +1218,7 @@ fn opt_level(level: u8) -> GraphOptimizationLevel {
 }
 
 /// 构建 ORT 会话（CPU，Level3 优化，线程/arena/内存模式按清单）。
-fn build_session(path: &Path, exec: &ExecutionOptions) -> Result<Session, EngineError> {
+pub(crate) fn build_session(path: &Path, exec: &ExecutionOptions) -> Result<Session, EngineError> {
     let fail = |e: &dyn fmt::Display| classify_error(&e.to_string(), ErrorKind::LoadFailed);
     let mut builder = Session::builder()
         .map_err(|e| fail(&e))?
@@ -1037,6 +1268,8 @@ mod tests {
             source_prefix: String::new(),
             generation: gen_override,
             execution: Default::default(),
+            prompt: None,
+            default_eligible: true,
         }
     }
 
@@ -1222,6 +1455,252 @@ mod tests {
         assert_eq!(e.kind, ErrorKind::ChecksumMismatch);
         assert!(e.message.contains("sha256 mismatch"), "{}", e.message);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 极小的 BPE 分词器：含 4 个特殊符号与两个语言码，用于语言 id 解析测试。
+    fn tiny_m2m_tokenizer() -> Tokenizer {
+        let json = r#"{"version":"1.0","truncation":null,"padding":null,"added_tokens":[],
+            "normalizer":null,"pre_tokenizer":null,"post_processor":null,"decoder":null,
+            "model":{"type":"BPE","unk_token":"<unk>","vocab":{"<s>":0,"<pad>":1,"</s>":2,"<unk>":3,
+            "a":4,"eng_Latn":5,"zho_Hans":6},"merges":[]}}"#;
+        Tokenizer::from_bytes(json.as_bytes()).unwrap()
+    }
+
+    /// 构造带 `lang_tokens` 的 m2m100 清单。
+    fn m2m_manifest() -> Manifest {
+        let mut m = manifest_with(GenerationOverride::default());
+        m.family = "m2m100".into();
+        m.lang_tokens = HashMap::from([
+            ("zh-CN".to_string(), "zho_Hans".to_string()),
+            ("en".to_string(), "eng_Latn".to_string()),
+            ("fr".to_string(), "fra_Latn".to_string()),
+        ]);
+        m
+    }
+
+    /// 语言码映射：源语言 id 作前缀、目标语言 id 作强制位，特殊符号与语言码都进剔除表；缺项分别报错。
+    #[test]
+    fn m2m_language_resolution() {
+        let tk = tiny_m2m_tokenizer();
+        let m = m2m_manifest();
+        let (prefix, cfg) = resolve_m2m_langs(&m, &tk, "zh-cn", "en").unwrap();
+        assert_eq!(prefix, vec![6]);
+        assert_eq!(cfg.forced_first, 5);
+        assert_eq!(cfg.tgt_code, "eng_Latn");
+        assert_eq!(cfg.drop_ids, vec![0, 1, 2, 3, 5, 6]);
+        // 清单没有该语言
+        let e = resolve_m2m_langs(&m, &tk, "de", "en").unwrap_err();
+        assert_eq!(e.kind, ErrorKind::UnsupportedPair);
+        // 清单有但词表里没有该 token
+        let e = resolve_m2m_langs(&m, &tk, "en", "fr").unwrap_err();
+        assert_eq!(e.kind, ErrorKind::ManifestInvalid);
+        assert!(e.message.contains("fra_Latn"), "{}", e.message);
+    }
+
+    /// 强制位：束搜索首步只能选目标语言码，随后自由生成直到结束符；最终序列首项是语言码。
+    #[test]
+    fn forced_bos_is_first_token() {
+        let mut bs = BeamSearch::new(2, 2, 1.0, 8, 0);
+        let adv = bs.advance(&forced_candidates(bs.alive_len(), 5));
+        assert_eq!(
+            adv,
+            Advance::Continue {
+                parents: vec![0],
+                tokens: vec![5]
+            }
+        );
+        // 第二步：词 4 比结束符更好；第三步：结束符
+        let adv = bs.advance(&[vec![(4, -0.1), (2, -2.0)]]);
+        assert!(matches!(adv, Advance::Continue { .. }));
+        let _ = bs.advance(&[vec![(2, -0.1), (4, -3.0)]]);
+        assert_eq!(bs.best(), vec![5, 4]);
+    }
+
+    /// 最小输出长度：按输入长度取上整；比例为 0 关闭；屏蔽结束符后候选数仍满额。
+    #[test]
+    fn min_length_and_eos_blocking() {
+        assert_eq!(min_output_len(0.0, 11), 0);
+        assert_eq!(min_output_len(0.5, 11), 6);
+        assert_eq!(min_output_len(1.0, 4), 4);
+        let logits = [0.0, 0.0, 5.0, 1.0, 3.0, 2.0];
+        let plain = masked_top_k(&logits, &[], 2, None);
+        assert_eq!(plain.iter().map(|c| c.0).collect::<Vec<_>>(), vec![2, 4]);
+        let blocked = masked_top_k(&logits, &[], 2, Some(2));
+        assert_eq!(blocked.iter().map(|c| c.0).collect::<Vec<_>>(), vec![4, 5]);
+        // 归一化仍包含被屏蔽的结束符：同一 token 的对数概率与未屏蔽时相同
+        let p4 = plain.iter().find(|c| c.0 == 4).unwrap().1;
+        assert_eq!(blocked[0].1, p4);
+    }
+
+    /// 清单里的 min_length_ratio 进入解码参数；缺省为 0。
+    #[test]
+    fn gen_params_min_length_ratio() {
+        let dir = temp_dir_with(
+            "gen-min",
+            &[(
+                "config.json",
+                r#"{"decoder_start_token_id":2,"eos_token_id":2,"pad_token_id":1}"#,
+            )],
+        );
+        let g = resolve_gen_params(&manifest_with(GenerationOverride::default()), &dir).unwrap();
+        assert_eq!(g.min_length_ratio, 0.0);
+        let over = GenerationOverride {
+            min_length_ratio: Some(0.4),
+            bad_token_ids: Some(vec![]),
+            ..Default::default()
+        };
+        let g = resolve_gen_params(&manifest_with(over), &dir).unwrap();
+        assert_eq!((g.min_length_ratio, g.banned), (0.4, vec![]));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// m2m100 族缺省解码配置：beam=2、lp=2.0、min_ratio=0.7；清单可覆盖，Marian 与旧清单不变。
+    #[test]
+    fn m2m100_decode_defaults_and_marian_unchanged() {
+        let dir = temp_dir_with(
+            "gen-m2m-defaults",
+            &[(
+                "config.json",
+                r#"{"decoder_start_token_id":2,"eos_token_id":2,"pad_token_id":1}"#,
+            )],
+        );
+        let g = resolve_gen_params(&m2m_manifest(), &dir).unwrap();
+        assert_eq!(
+            (g.num_beams, g.length_penalty, g.min_length_ratio),
+            (2, 2.0, 0.7)
+        );
+        // 清单显式值优先（含显式关闭最小长度）
+        let mut m = m2m_manifest();
+        m.generation = GenerationOverride {
+            num_beams: Some(4),
+            length_penalty: Some(1.0),
+            min_length_ratio: Some(0.0),
+            ..Default::default()
+        };
+        let g = resolve_gen_params(&m, &dir).unwrap();
+        assert_eq!(
+            (g.num_beams, g.length_penalty, g.min_length_ratio),
+            (4, 1.0, 0.0)
+        );
+        // Marian 缺省保持旧行为
+        let g = resolve_gen_params(&manifest_with(GenerationOverride::default()), &dir).unwrap();
+        assert_eq!(
+            (g.num_beams, g.length_penalty, g.min_length_ratio),
+            (1, 1.0, 0.0)
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 最小长度屏蔽接到束搜索：到长度前结束符不可选，到长度后可选；强制语言码计入长度。
+    #[test]
+    fn min_length_gates_eos_in_beam_search() {
+        // 输入 5 个 token，比例 0.7 -> 最小长度 4：第 0 步强制语言码，第 1..=3 步屏蔽 eos
+        let min_len = min_output_len(0.7, 5);
+        assert_eq!(min_len, 4);
+        let eos = 2u32;
+        let logits = [0.0, 0.0, 9.0, 1.0, 0.5];
+        let mut bs = BeamSearch::new(2, eos, 2.0, 16, 0);
+        let _ = bs.advance(&forced_candidates(bs.alive_len(), 5));
+        for step in 1..32usize {
+            let block = (step < min_len).then_some(eos);
+            let cand = masked_top_k(&logits, &[], 4, block);
+            let has_eos = cand.iter().any(|c| c.0 == eos);
+            assert_eq!(has_eos, step >= min_len, "step {step}");
+            let rows = vec![cand; bs.alive_len()];
+            if bs.advance(&rows) == Advance::Done {
+                // 结束只能发生在允许结束符之后，结果长度（含语言码）不小于最小长度
+                assert!(step >= min_len);
+                assert!(bs.best().len() >= min_len, "{:?}", bs.best());
+                return;
+            }
+        }
+        panic!("beam search did not finish");
+    }
+
+    /// 译文后处理：NLLB 中日目标转全角、引号跨片段成对，其它目标原样。
+    #[test]
+    fn postprocess_by_target() {
+        let cfg = |tgt: &str| M2mConfig {
+            forced_first: 0,
+            tgt_code: tgt.into(),
+            drop_ids: vec![],
+        };
+        let mut q = 0;
+        assert_eq!(
+            postprocess_m2m("你好,世界.", &cfg("zho_Hans"), &mut q),
+            "你好，世界。"
+        );
+        assert_eq!(
+            postprocess_m2m("彼は言った,行こう.", &cfg("jpn_Jpan"), &mut q),
+            "彼は言った、行こう。"
+        );
+        assert_eq!(
+            postprocess_m2m("Bonjour, le monde.", &cfg("fra_Latn"), &mut q),
+            "Bonjour, le monde."
+        );
+        // 引号计数在片段间延续
+        let mut q = 0;
+        let zh = cfg("zho_Hans");
+        assert_eq!(
+            postprocess_m2m("他说:\"不行.", &zh, &mut q),
+            "他说：“不行。"
+        );
+        assert_eq!(postprocess_m2m("真的.\"", &zh, &mut q), "真的。”");
+    }
+
+    /// 环境变量：NLLB 模型包目录（含 tokenizer.json）。
+    const ENV_NLLB_DIR: &str = "SNOW_TRANSLATOR_NLLB_DIR";
+    /// 缺省的 NLLB 模型包目录（评测机）。
+    const DEFAULT_NLLB_DIR: &str = "E:/models/translate-eval/nllb600m-main14-ccm-int4-ext";
+
+    /// 分词金标准对拍：20 句 FLORES（中日阿俄英法）。
+    /// 必须与裁剪版 sentencepiece 的重新分词逐 id 一致；与评测用的 remap 分词只允许在含 `<unk>` 的句子上不同。
+    /// 缺少模型包目录时跳过。
+    #[test]
+    fn nllb_tokenizer_matches_python_gold() {
+        let dir = std::env::var_os(ENV_NLLB_DIR)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_NLLB_DIR));
+        let path = dir.join("tokenizer.json");
+        if !path.is_file() {
+            eprintln!("skip: {} not found (set {ENV_NLLB_DIR})", path.display());
+            return;
+        }
+        let tk = load_tokenizer(&path).unwrap();
+        let gold: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/nllb_tokenizer_gold.json"))
+                .unwrap();
+        let cases = gold["cases"].as_array().unwrap();
+        assert_eq!(cases.len(), 20);
+        let ids_of = |v: &Value| -> Vec<u32> {
+            v.as_array()
+                .unwrap()
+                .iter()
+                .map(|x| x.as_u64().unwrap() as u32)
+                .collect()
+        };
+        let (mut same_remap, mut diff_with_unk) = (0, 0);
+        for case in cases {
+            let lang = case["lang"].as_str().unwrap();
+            let text = case["text"].as_str().unwrap();
+            let mut ids = vec![tk.token_to_id(lang).expect("lang token")];
+            ids.extend_from_slice(tk.encode(text, false).unwrap().get_ids());
+            ids.push(2);
+            assert_eq!(ids, ids_of(&case["reseg_ids"]), "{lang}: {text}");
+            let remap = ids_of(&case["remap_ids"]);
+            if ids == remap {
+                same_remap += 1;
+            } else {
+                assert!(
+                    remap.contains(&3),
+                    "{lang}: 与 remap 不同却不含 <unk>: {text}"
+                );
+                diff_with_unk += 1;
+            }
+        }
+        eprintln!(
+            "tokenizer gold: 20/20 == reseg, {same_remap} == remap, {diff_with_unk} differ (unk only)"
+        );
     }
 
     /// KV 维度推断：正常 4 维取头数与维度，动态维返回 None。

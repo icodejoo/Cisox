@@ -9,6 +9,9 @@
 
 pub mod openai;
 pub mod protocol;
+pub mod router;
+pub mod script_split;
+pub mod segment;
 pub mod worker;
 
 pub use openai::{OpenAiCompatibleConfig, OpenAiEngine};
@@ -266,11 +269,20 @@ pub struct ModelManifest {
     /// 最大允许输入 token 数量。
     #[serde(default = "default_max_input_tokens")]
     pub max_input_tokens: usize,
+    /// 是否参与默认选包：`false` 的包（如 Hy-MT2 可选包）只在用户显式指定时使用，
+    /// 且只有在没有任何可默认选用的包支持该语言对时才作为兜底。缺省 `true`。
+    #[serde(default = "default_true")]
+    pub default_eligible: bool,
 }
 
 /// serde 缺省值：最大输入 token 数。
 fn default_max_input_tokens() -> usize {
     DEFAULT_MAX_INPUT_TOKENS
+}
+
+/// serde 缺省值：`true`。
+fn default_true() -> bool {
+    true
 }
 
 impl ModelManifest {
@@ -364,6 +376,23 @@ impl ModelManifest {
             }
         }
         out
+    }
+
+    /// 是否专用包：清单用 `pairs` 显式声明了有向语言对（通用多语包只写 `languages`）。
+    ///
+    /// # 示例
+    /// ```rust
+    /// use snow_translate::ModelManifest;
+    /// let opus: ModelManifest = serde_json::from_str(
+    ///     r#"{"schema_version":1,"id":"o","family":"marian","pairs":[["en","zh-CN"]]}"#,
+    /// ).unwrap();
+    /// let nllb: ModelManifest = serde_json::from_str(
+    ///     r#"{"schema_version":1,"id":"n","family":"m2m100","languages":["en","zh-CN"]}"#,
+    /// ).unwrap();
+    /// assert!(opus.is_specialized() && !nllb.is_specialized());
+    /// ```
+    pub fn is_specialized(&self) -> bool {
+        !self.pairs.is_empty()
     }
 
     /// 是否支持该语言对；源语言为 `Auto` 时只要有任何源语言能翻到目标即可。
@@ -500,10 +529,10 @@ impl ModelScanner {
     }
 }
 
-/// 在已扫描的模型里选出适合某语言对的一个，并把 `Auto` 源语言解析为具体语言。
+/// 在已扫描的模型里选出适合某语言对的一个，并把 `Auto` 源语言解析为具体语言（指定包模式）。
 ///
 /// 优先用 `preferred_id`（配置里的默认模型）；它不存在或不支持该语言对时，退回到
-/// 第一个（按 id 排序）支持该语言对的模型。
+/// 第一个（按 id 排序）支持该语言对的模型。需要“专用包优先”时用 [`pick_model_routed`]。
 ///
 /// # 参数
 /// - `models`：扫描到的可用模型。
@@ -526,25 +555,43 @@ pub fn pick_model<'a>(
     src: Lang,
     tgt: Lang,
 ) -> Result<(&'a ScannedModel, Lang), TranslateError> {
+    pick_model_routed(models, preferred_id, src, tgt, router::RouteMode::Single)
+}
+
+/// 按路由模式选包：`Single` 同 [`pick_model`]；`SpecializedFirst` / `MixedSplit` 在未指定包
+/// （或指定包不支持）时优先选显式声明语言对的专用包，规则见 [`router::pick_index`]。
+///
+/// # 参数
+/// - `models`：扫描到的可用模型。
+/// - `preferred_id`：指定的模型 ID，空串表示无偏好。
+/// - `src` / `tgt`：语言对（`src` 可为 `Auto`）。
+/// - `mode`：路由模式。
+///
+/// # 返回
+/// `(模型, 具体源语言)`；错误同 [`pick_model`]。
+///
+/// # 示例
+/// ```rust
+/// use snow_translate::router::RouteMode;
+/// use snow_translate::{Lang, pick_model_routed};
+/// let err = pick_model_routed(&[], "", Lang::En, Lang::ZhHans, RouteMode::SpecializedFirst).unwrap_err();
+/// assert!(matches!(err, snow_translate::TranslateError::NoModelFound(_)));
+/// ```
+pub fn pick_model_routed<'a>(
+    models: &'a [ScannedModel],
+    preferred_id: &str,
+    src: Lang,
+    tgt: Lang,
+    mode: router::RouteMode,
+) -> Result<(&'a ScannedModel, Lang), TranslateError> {
     if models.is_empty() {
         return Err(TranslateError::NoModelFound("模型目录里没有可用的模型".into()));
     }
-    let preferred = preferred_id.trim();
-    let mut candidates = models.iter().filter(|m| m.manifest.supports(src, tgt));
-    let chosen = if preferred.is_empty() {
-        candidates.next()
-    } else {
-        let mut all: Vec<&ScannedModel> = candidates.collect();
-        match all.iter().position(|m| m.manifest.id == preferred) {
-            Some(index) => Some(all.swap_remove(index)),
-            None => all.into_iter().next(),
-        }
-    };
-    let model = chosen.ok_or(TranslateError::UnsupportedLanguagePair(src, tgt))?;
-    let resolved = model
-        .manifest
-        .resolve_source(src, tgt)
+    let manifests: Vec<&ModelManifest> = models.iter().map(|m| &m.manifest).collect();
+    let index = router::pick_index(&manifests, preferred_id, src, tgt, mode)
         .ok_or(TranslateError::UnsupportedLanguagePair(src, tgt))?;
+    let model = &models[index];
+    let resolved = model.manifest.resolve_source(src, tgt).ok_or(TranslateError::UnsupportedLanguagePair(src, tgt))?;
     Ok((model, resolved))
 }
 
@@ -853,6 +900,30 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
+    /// NLLB（m2m100）模型包清单：带外部数据文件与 generation/execution 扩展字段仍可解析，
+    /// 外部数据文件缺失会被扫描报告；暂无枚举的语言（vi/id）被忽略而不报错。
+    #[test]
+    fn m2m100_pack_manifest_scans() {
+        let text = r#"{"schema_version":1,"id":"nllb","family":"m2m100","quantization":"int4",
+            "files":{"encoder":"encoder.onnx","encoder_data":"encoder.onnx_data","decoder":"decoder.onnx","decoder_data":"decoder.onnx_data","tokenizer":"tokenizer.json"},
+            "languages":["zh-CN","en","vi"],"lang_tokens":{"zh-CN":"zho_Hans","en":"eng_Latn","vi":"vie_Latn"},
+            "generation":{"num_beams":2,"bad_token_ids":[],"min_length_ratio":0.5},
+            "execution":{"prepacking":true}}"#;
+        let manifest: ModelManifest = serde_json::from_str(text).expect("m2m100 清单");
+        assert!(manifest.validate().is_ok());
+        assert_eq!(manifest.supported_pairs(), vec![(Lang::ZhHans, Lang::En), (Lang::En, Lang::ZhHans)]);
+        let root = temp_dir("m2m100");
+        let all = ["encoder.onnx", "encoder.onnx_data", "decoder.onnx", "decoder.onnx_data", "tokenizer.json"];
+        write_model(&root, "full", text, &all);
+        write_model(&root, "no-data", text, &["encoder.onnx", "decoder.onnx", "tokenizer.json"]);
+        let report = ModelScanner::new(&root).scan();
+        assert_eq!(report.models.len(), 1);
+        assert_eq!(report.models[0].manifest.family, "m2m100");
+        assert_eq!(report.issues.len(), 1);
+        assert_eq!(report.issues[0].dir_name, "no-data");
+        let _ = fs::remove_dir_all(&root);
+    }
+
     /// 扫描：可用模型与问题清单分开报告，无清单目录被忽略，结果排序稳定。
     #[test]
     fn scanner_reports_models_and_issues() {
@@ -908,6 +979,33 @@ mod tests {
             Err(TranslateError::UnsupportedLanguagePair(Lang::En, Lang::Ja))
         ));
         assert!(matches!(pick_model(&[], "", Lang::En, Lang::ZhHans), Err(TranslateError::NoModelFound(_))));
+    }
+
+    /// 按路由模式选包：专用包（显式 pairs）优先于通用多语包；指定包仍被尊重；single 同旧行为。
+    #[test]
+    fn pick_model_routed_prefers_specialized() {
+        let general: ModelManifest =
+            serde_json::from_str(&manifest_text("a-general", "")).expect("清单");
+        let opus: ModelManifest =
+            serde_json::from_str(&manifest_text("z-opus", r#","pairs":[["en","zh-CN"]]"#)).expect("清单");
+        let models: Vec<ScannedModel> = [general, opus]
+            .into_iter()
+            .map(|manifest| ScannedModel { manifest, dir: PathBuf::from("d") })
+            .collect();
+        let id = |mode, preferred: &str, src, tgt| {
+            pick_model_routed(&models, preferred, src, tgt, mode).map(|(m, s)| (m.manifest.id.clone(), s))
+        };
+        use router::RouteMode::{MixedSplit, Single, SpecializedFirst};
+        assert_eq!(id(Single, "", Lang::En, Lang::ZhHans).unwrap().0, "a-general");
+        assert_eq!(id(SpecializedFirst, "", Lang::En, Lang::ZhHans).unwrap(), ("z-opus".into(), Lang::En));
+        assert_eq!(id(SpecializedFirst, "", Lang::Auto, Lang::ZhHans).unwrap(), ("z-opus".into(), Lang::En));
+        assert_eq!(id(SpecializedFirst, "a-general", Lang::En, Lang::ZhHans).unwrap().0, "a-general");
+        assert_eq!(id(MixedSplit, "a-general", Lang::En, Lang::ZhHans).unwrap().0, "z-opus");
+        assert_eq!(id(SpecializedFirst, "", Lang::ZhHans, Lang::En).unwrap().0, "a-general", "专用包不覆盖时用通用包");
+        assert!(matches!(
+            id(SpecializedFirst, "", Lang::En, Lang::Ja),
+            Err(TranslateError::UnsupportedLanguagePair(Lang::En, Lang::Ja))
+        ));
     }
 
     /// 计数用假引擎：把文本加前缀返回。

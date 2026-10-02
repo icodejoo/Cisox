@@ -189,12 +189,14 @@ impl BeamSearch {
             self.done = true;
             return Advance::Done;
         }
-        // 早停：已有 width 条完成，且最差完成假设不劣于最优存活束的当前归一化得分
+        // 早停：已有 width 条完成，且最差完成假设不劣于最优存活束的当前归一化得分。
+        // 存活束按「已生成长度」归一化（不含结束位的 +1），与 purebeam.py 的 `max(ns)/(step+1)**lp` 一致；
+        // 完成假设仍按「长度+1」归一化（结束位计入长度）。
         if self.finished.len() >= self.width {
             let worst_finished = self.finished.last().map_or(f32::MIN, |f| f.0);
             let best_alive = new_alive
                 .iter()
-                .map(|h| self.normalized(h.score, h.tokens.len()))
+                .map(|h| h.score / (h.tokens.len() as f32).powf(self.length_penalty))
                 .fold(f32::MIN, f32::max);
             if worst_finished >= best_alive {
                 self.done = true;
@@ -469,5 +471,34 @@ mod tests {
         assert!(matches!(adv, Advance::Continue { .. }));
         // tokens=[5,6,5]；候选 6 会重复 (5,6)，被剔除后无候选 -> 结束
         assert_eq!(bs.advance(&[vec![c(6, 0.9)]]), Advance::Done);
+    }
+
+    /// 长度惩罚归一化：得分 / (长度+1)^lp，lp 越大越偏向长句（HF 约定）。
+    #[test]
+    fn length_penalty_normalization() {
+        let bs = BeamSearch::new(2, 2, 2.0, 8, 0);
+        // 已生成 3 个 token（含结束位共 4）：-8 / 4^2 = -0.5
+        assert!((bs.normalized(-8.0, 3) + 0.5).abs() < 1e-6);
+        let flat = BeamSearch::new(2, 2, 1.0, 8, 0);
+        assert!((flat.normalized(-8.0, 3) + 2.0).abs() < 1e-6);
+        // lp=1 偏向短假设，lp=2 让较长但总分更低的假设反超
+        assert!(flat.normalized(-5.0, 7) < flat.normalized(-1.0, 1));
+        assert!(bs.normalized(-5.0, 7) > bs.normalized(-1.0, 1));
+    }
+
+    /// 早停比较与 purebeam.py 一致：存活束按已生成长度（无结束位 +1）归一化，lp>1 时更早收束。
+    #[test]
+    fn early_stop_matches_purebeam_normalization() {
+        let mut bs = BeamSearch::new(1, 2, 2.0, 16, 0);
+        let _ = bs.advance(&forced_like(5));
+        // 结束符 -2.0 完成（归一化 -2/2^2 = -0.5）；存活束 -2.5，按 2^2 归一化为 -0.625，已不优于完成假设
+        let adv = bs.advance(&[vec![(2, -2.0), (4, -2.5)]]);
+        assert_eq!(adv, Advance::Done);
+        assert_eq!(bs.best(), vec![5]);
+    }
+
+    /// 测试辅助：强制位候选，只有一条存活束。
+    fn forced_like(token: u32) -> Vec<Vec<Candidate>> {
+        vec![vec![(token, 0.0)]]
     }
 }

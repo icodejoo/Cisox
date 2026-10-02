@@ -3,7 +3,9 @@
 use std::path::Path;
 use std::time::Instant;
 
+use crate::chat::ChatEngine;
 use crate::engine::{Engine, EngineError, TranslateOptions};
+use crate::manifest::Manifest;
 use crate::protocol::{Command, ErrorKind, Event};
 use crate::sysmem;
 
@@ -19,45 +21,73 @@ pub trait Backend {
     fn set_trim(&mut self, _on: bool) {}
 }
 
-impl Backend for Engine {
-    /// 转发到引擎。
-    fn model_id(&self) -> &str {
-        Engine::model_id(self)
-    }
-
-    /// 转发到引擎。
-    fn translate(&mut self, text: &str, opts: &TranslateOptions) -> Result<String, EngineError> {
-        Engine::translate(self, text, opts)
-    }
-
-    /// 转发到引擎。
-    fn trim(&mut self) {
-        Engine::trim_memory(self);
-    }
-
-    /// 转发到引擎。
-    fn set_trim(&mut self, on: bool) {
-        Engine::set_trim_after_request(self, on);
-    }
-}
-
 /// 后端加载函数：`(模型目录, 源语言, 目标语言) -> 后端`。
 pub type Loader<B> = fn(&Path, &str, &str) -> Result<B, EngineError>;
 
-/// 真实加载函数。
+/// 真实后端：编解码族（marian、m2m100）或对话式 decoder-only 族（hunyuan_chat）。
+pub enum AnyEngine {
+    /// 编码器 + 合并解码器引擎。
+    Seq2Seq(Box<Engine>),
+    /// 对话式 decoder-only 引擎。
+    Chat(Box<ChatEngine>),
+}
+
+impl Backend for AnyEngine {
+    /// 转发到具体引擎。
+    fn model_id(&self) -> &str {
+        match self {
+            Self::Seq2Seq(e) => e.model_id(),
+            Self::Chat(e) => e.model_id(),
+        }
+    }
+
+    /// 转发到具体引擎。
+    fn translate(&mut self, text: &str, opts: &TranslateOptions) -> Result<String, EngineError> {
+        match self {
+            Self::Seq2Seq(e) => e.translate(text, opts),
+            Self::Chat(e) => e.translate(text, opts),
+        }
+    }
+
+    /// 只有编解码族有 arena 收缩；对话式引擎什么都不做。
+    fn trim(&mut self) {
+        if let Self::Seq2Seq(e) = self {
+            e.trim_memory();
+        }
+    }
+
+    /// 只有编解码族有 arena 收缩开关。
+    fn set_trim(&mut self, on: bool) {
+        if let Self::Seq2Seq(e) = self {
+            e.set_trim_after_request(on);
+        }
+    }
+}
+
+/// 真实加载函数：按清单 `family` 选引擎。
 ///
 /// # 参数
 /// - `dir`/`src`/`tgt`：模型目录与语言对。
 ///
 /// # 返回
-/// 加载好的 [`Engine`]。
+/// 加载好的 [`AnyEngine`]。
 ///
 /// # 示例
 /// ```ignore
 /// let mut worker = Worker::new(load_engine);
 /// ```
-pub fn load_engine(dir: &Path, src: &str, tgt: &str) -> Result<Engine, EngineError> {
-    Engine::load(dir, src, tgt)
+pub fn load_engine(dir: &Path, src: &str, tgt: &str) -> Result<AnyEngine, EngineError> {
+    let manifest = Manifest::load(dir)?;
+    if manifest.is_hunyuan_chat() {
+        if !manifest.supports_pair(src, tgt) {
+            return Err(EngineError {
+                kind: ErrorKind::UnsupportedPair,
+                message: format!("model `{}` does not support {src} -> {tgt}", manifest.id),
+            });
+        }
+        return ChatEngine::load(&manifest, dir, tgt).map(|e| AnyEngine::Chat(Box::new(e)));
+    }
+    Engine::load(dir, src, tgt).map(|e| AnyEngine::Seq2Seq(Box::new(e)))
 }
 
 /// 一次命令处理的结果。

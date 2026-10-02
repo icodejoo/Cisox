@@ -1,6 +1,7 @@
 //! Snow Shot 翻译工作进程：stdin/stdout JSON 行协议，空闲卸载 = 进程退出。
 
 mod beam;
+mod chat;
 mod checksum;
 mod engine;
 mod manifest;
@@ -8,6 +9,7 @@ mod protocol;
 mod sysmem;
 mod text;
 mod worker;
+mod zh_punct;
 
 use std::io::{self, BufReader, Write};
 

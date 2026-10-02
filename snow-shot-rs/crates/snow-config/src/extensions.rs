@@ -8,7 +8,7 @@ use crate::schema::{IntRange, SchemaEntry, ValueKind, entry};
 use serde_json::json;
 
 /// 扩展项数量（`schema::entries()` 在原 238 项之后追加的条目数）。
-pub const EXTENSION_ENTRY_COUNT: usize = 7;
+pub const EXTENSION_ENTRY_COUNT: usize = 9;
 
 /// 翻译后端：`local` 本地 NMT worker，`openai` OpenAI 兼容通道。
 pub const KEY_TRANSLATION_BACKEND: &str = "screenshot_translation/backend";
@@ -22,6 +22,11 @@ pub const KEY_LOCAL_IDLE_SECONDS: &str = "screenshot_translation/local_idle_unlo
 pub const KEY_LOCAL_NUM_BEAMS: &str = "screenshot_translation/local_num_beams";
 /// 本地低内存模式：强制贪心解码，并在每次请求后收缩内存。
 pub const KEY_LOCAL_LOW_MEMORY: &str = "screenshot_translation/local_low_memory";
+
+/// 本地多包路由模式：`single` 指定包、`specialized_first` 专用包优先、`mixed_split` 混合拆分。
+pub const KEY_LOCAL_ROUTE_MODE: &str = "screenshot_translation/local_route_mode";
+/// 本地最多同时常驻内存的翻译包个数（要加载新包时先卸载空闲的旧包）。
+pub const KEY_LOCAL_MAX_RESIDENT: &str = "screenshot_translation/local_max_resident_models";
 
 /// OCR 后端：`system` 系统原生 OCR，`local-model` 本地模型（snow-ocr-process）。
 pub const KEY_OCR_BACKEND: &str = "text_recognition/backend";
@@ -63,10 +68,23 @@ pub const MIN_IDLE_SECONDS: i32 = 10;
 pub const MAX_IDLE_SECONDS: i32 = 3600;
 /// 空闲卸载秒数的界面步长。
 const IDLE_SECONDS_STEP: i32 = 10;
-/// 束宽默认值（模型卡推荐 4）。
-pub const DEFAULT_NUM_BEAMS: i32 = 4;
+/// 束宽默认值（评测推荐 2：与清单 `m2m100` 缺省一致，应用侧默认值不再覆盖清单）。
+pub const DEFAULT_NUM_BEAMS: i32 = 2;
 /// 束宽上限（与 worker 的 `MAX_BEAMS` 一致）。
 pub const MAX_NUM_BEAMS: i32 = 8;
+
+/// 路由模式取值：用户指定的包一律照用。
+pub const ROUTE_SINGLE: &str = "single";
+/// 路由模式取值：未指定包时，优先选显式声明语言对的专用包（默认）。
+pub const ROUTE_SPECIALIZED_FIRST: &str = "specialized_first";
+/// 路由模式取值：文本拆成单语片段，英文走专用包、其余走通用包。
+pub const ROUTE_MIXED_SPLIT: &str = "mixed_split";
+/// 路由模式白名单。
+const ROUTE_MODE_VALUES: &[&str] = &[ROUTE_SINGLE, ROUTE_SPECIALIZED_FIRST, ROUTE_MIXED_SPLIT];
+/// 最大同时常驻包数默认值（低内存优先：同一时刻只留一个模型在内存）。
+pub const DEFAULT_MAX_RESIDENT: i32 = 1;
+/// 最大同时常驻包数上限。
+pub const MAX_MAX_RESIDENT: i32 = 4;
 
 /// 返回全部扩展条目（追加在原 238 项之后）。
 pub(crate) fn extension_entries() -> Vec<SchemaEntry> {
@@ -119,22 +137,17 @@ pub(crate) fn extension_entries() -> Vec<SchemaEntry> {
             &[],
             None,
         ),
+        entry(KEY_LOCAL_LOW_MEMORY, json!(false), ValueKind::Boolean, None, &[], None),
+        entry(KEY_LOCAL_ROUTE_MODE, json!(ROUTE_SPECIALIZED_FIRST), ValueKind::String, None, ROUTE_MODE_VALUES, None),
         entry(
-            KEY_LOCAL_LOW_MEMORY,
-            json!(false),
-            ValueKind::Boolean,
-            None,
+            KEY_LOCAL_MAX_RESIDENT,
+            json!(DEFAULT_MAX_RESIDENT),
+            ValueKind::Integer,
+            Some(IntRange { min: DEFAULT_MAX_RESIDENT, max: MAX_MAX_RESIDENT, step: 1 }),
             &[],
             None,
         ),
-        entry(
-            KEY_OCR_BACKEND,
-            json!(default_ocr_backend()),
-            ValueKind::String,
-            None,
-            OCR_BACKEND_VALUES,
-            None,
-        ),
+        entry(KEY_OCR_BACKEND, json!(default_ocr_backend()), ValueKind::String, None, OCR_BACKEND_VALUES, None),
     ]
 }
 
@@ -183,6 +196,7 @@ mod tests {
         for (key, low, high) in [
             (KEY_LOCAL_IDLE_SECONDS, MIN_IDLE_SECONDS, MAX_IDLE_SECONDS),
             (KEY_LOCAL_NUM_BEAMS, 1, MAX_NUM_BEAMS),
+            (KEY_LOCAL_MAX_RESIDENT, 1, MAX_MAX_RESIDENT),
         ] {
             assert!(normalize(key, &json!(low)).valid, "{key}");
             assert!(normalize(key, &json!(high)).valid, "{key}");
@@ -196,11 +210,32 @@ mod tests {
         assert!(!normalize(KEY_LOCAL_MODEL_ID, &json!(3)).valid);
     }
 
+    /// 路由模式：默认专用包优先；三个合法值通过，未知值与非字符串被拒绝，写入后可读回。
+    #[test]
+    fn route_mode_whitelist_and_default() {
+        let mut doc = ConfigDocument::from_bytes(None);
+        assert_eq!(doc.value(KEY_LOCAL_ROUTE_MODE), json!(ROUTE_SPECIALIZED_FIRST));
+        assert_eq!(doc.value(KEY_LOCAL_MAX_RESIDENT), json!(DEFAULT_MAX_RESIDENT));
+        for mode in [ROUTE_SINGLE, ROUTE_SPECIALIZED_FIRST, ROUTE_MIXED_SPLIT] {
+            assert!(normalize(KEY_LOCAL_ROUTE_MODE, &json!(mode)).valid, "{mode}");
+        }
+        assert!(!normalize(KEY_LOCAL_ROUTE_MODE, &json!("auto")).valid);
+        assert!(!normalize(KEY_LOCAL_ROUTE_MODE, &json!(2)).valid);
+        assert!(doc.set_value(KEY_LOCAL_ROUTE_MODE, json!("auto")).is_err());
+        doc.set_value(KEY_LOCAL_ROUTE_MODE, json!(ROUTE_MIXED_SPLIT)).expect("合法模式");
+        doc.set_value(KEY_LOCAL_MAX_RESIDENT, json!(2)).expect("合法常驻数");
+        let reloaded = ConfigDocument::from_bytes(Some(&doc.to_bytes()));
+        assert_eq!(reloaded.value(KEY_LOCAL_ROUTE_MODE), json!(ROUTE_MIXED_SPLIT));
+        assert_eq!(reloaded.value(KEY_LOCAL_MAX_RESIDENT), json!(2));
+    }
+
     /// 缺失时补默认；文档写入非法值被拒绝；合法值落盘后可读回。
     #[test]
     fn document_round_trip() {
         let mut doc = ConfigDocument::from_bytes(None);
         assert_eq!(doc.value(KEY_LOCAL_NUM_BEAMS), json!(DEFAULT_NUM_BEAMS));
+        // 默认束宽与清单 m2m100 缺省一致，应用侧不再用 4 覆盖清单
+        assert_eq!(DEFAULT_NUM_BEAMS, 2);
         assert_eq!(doc.value(KEY_TRANSLATION_BACKEND), json!(BACKEND_LOCAL));
         assert!(doc.set_value(KEY_LOCAL_NUM_BEAMS, json!(99)).is_err());
         doc.set_value(KEY_LOCAL_NUM_BEAMS, json!(2)).expect("合法束宽");

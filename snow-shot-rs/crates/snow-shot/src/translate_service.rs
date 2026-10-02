@@ -12,14 +12,17 @@ use serde_json::Value;
 use snow_config::custom_models::{CustomAiModel, custom_ai_models_from_json};
 use snow_config::document::ConfigDocument;
 use snow_config::extensions::{
-    BACKEND_OPENAI, DEFAULT_IDLE_SECONDS, DEFAULT_NUM_BEAMS, KEY_LOCAL_IDLE_SECONDS, KEY_LOCAL_LOW_MEMORY,
-    KEY_LOCAL_MODEL_ID, KEY_LOCAL_MODELS_DIR, KEY_LOCAL_NUM_BEAMS, KEY_TRANSLATION_BACKEND, MAX_NUM_BEAMS,
+    BACKEND_OPENAI, DEFAULT_IDLE_SECONDS, DEFAULT_MAX_RESIDENT, DEFAULT_NUM_BEAMS, KEY_LOCAL_IDLE_SECONDS,
+    KEY_LOCAL_LOW_MEMORY, KEY_LOCAL_MAX_RESIDENT, KEY_LOCAL_MODEL_ID, KEY_LOCAL_MODELS_DIR, KEY_LOCAL_NUM_BEAMS,
+    KEY_LOCAL_ROUTE_MODE, KEY_TRANSLATION_BACKEND, MAX_MAX_RESIDENT, MAX_NUM_BEAMS,
 };
 use snow_translate::openai::{OpenAiCompatibleConfig, OpenAiEngine};
 use snow_translate::protocol::MAX_BEAMS;
+use snow_translate::router::{PooledEngine, RouteMode, RoutePolicy, RoutedEngine, RoutedSlot};
 use snow_translate::worker::{MemorySnapshot, Timeouts, WORKER_EXE_NAME, WorkerConfig, WorkerEngine};
 use snow_translate::{
-    Lang, ManifestIssue, ModelScanner, ScanReport, TranslateError, TranslationEngine, TranslationService, pick_model,
+    Lang, ManifestIssue, ModelScanner, ScanReport, ScannedModel, TranslateError, TranslationEngine, TranslationService,
+    pick_model_routed,
 };
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -45,6 +48,8 @@ pub const ENV_TRANSLATOR_EXE: &str = "SNOW_TRANSLATOR_EXE";
 const MODELS_SUBDIR: [&str; 2] = ["models", "translate"];
 /// 说明里最多列出的问题清单条数。
 const MAX_ISSUES_SHOWN: usize = 3;
+/// 混合拆分时多个包展示名之间的连接符。
+const LABEL_JOINER: &str = " + ";
 /// 判定“原文已是中文”的汉字占比阈值。
 const CJK_MAJORITY: f32 = 0.6;
 /// 常见汉字区间。
@@ -74,6 +79,10 @@ pub struct TranslateConfig {
     pub beams: usize,
     /// 低内存模式（强制贪心 + 请求后收缩）。
     pub low_memory: bool,
+    /// 本地多包路由模式。
+    pub route_mode: RouteMode,
+    /// 最多同时常驻内存的翻译包数。
+    pub max_resident: usize,
     /// 源语言（可为 `Auto`）。
     pub source: Lang,
     /// 目标语言。
@@ -135,12 +144,19 @@ impl TranslateConfig {
             idle: Duration::from_secs(number(KEY_LOCAL_IDLE_SECONDS, DEFAULT_IDLE_SECONDS).max(1) as u64),
             beams: number(KEY_LOCAL_NUM_BEAMS, DEFAULT_NUM_BEAMS).clamp(1, MAX_NUM_BEAMS) as usize,
             low_memory: document.value(KEY_LOCAL_LOW_MEMORY).as_bool().unwrap_or(false),
+            route_mode: RouteMode::from_code(&text(KEY_LOCAL_ROUTE_MODE)).unwrap_or_default(),
+            max_resident: number(KEY_LOCAL_MAX_RESIDENT, DEFAULT_MAX_RESIDENT).clamp(1, MAX_MAX_RESIDENT) as usize,
             source: Lang::from_code(&text(KEY_SOURCE_LANGUAGE)).unwrap_or(Lang::Auto),
             target,
             layout: LayoutMode::from_config(&text(KEY_LAYOUT)),
             custom_model_id: text(KEY_CUSTOM_MODEL),
             custom_models,
         }
+    }
+
+    /// 路由策略（模式、指定包、常驻上限），变化时不需要重建引擎。
+    pub fn route_policy(&self) -> RoutePolicy {
+        RoutePolicy { mode: self.route_mode, preferred_id: self.model_id.clone(), max_resident: self.max_resident }
     }
 
     /// 实际使用的束宽：低内存模式强制贪心。
@@ -170,19 +186,16 @@ pub trait Translator {
 
 /// 已装配好的引擎。
 struct Built {
-    /// 装配参数指纹，变化则重建。
+    /// 装配参数指纹，变化则重建（不含路由模式、指定包、常驻上限：它们由路由器热更新）。
     key: String,
     /// 引擎。
     engine: Arc<dyn TranslationEngine>,
-    /// 本地 worker 引擎（探针用）。
-    worker: Option<Arc<WorkerEngine>>,
-    /// 展示名。
-    label: String,
-    /// 解析出的源语言。
-    src: Lang,
-    /// 目标语言。
-    tgt: Lang,
+    /// 本地多包路由器（探针与策略热更新用）。
+    router: Option<Arc<RoutedEngine>>,
 }
+
+/// 一次装配的结论：引擎展示名、解析出的源语言、目标语言。
+type Prepared = (String, Lang, Lang);
 
 /// 翻译宿主：持有当前引擎与结果缓存。
 pub struct TranslateHost {
@@ -211,6 +224,15 @@ fn no_model_message(dir: &Path, issues: &[ManifestIssue]) -> String {
         text.push_str(&format!("；另有 {} 个模型无法使用", issues.len() - MAX_ISSUES_SHOWN));
     }
     text
+}
+
+/// 模型包的展示名：清单里的 `display_name`，缺省用 id。
+fn model_label(model: &ScannedModel) -> String {
+    if model.manifest.display_name.trim().is_empty() {
+        model.manifest.id.clone()
+    } else {
+        model.manifest.display_name.clone()
+    }
 }
 
 /// 由数据根得到默认模型目录。
@@ -312,55 +334,74 @@ impl TranslateHost {
         ModelScanner::new(&self.models_dir(config)).scan()
     }
 
-    /// 装配本地 NMT 引擎：选模型 → 找 worker → 找 onnxruntime → 构造（不拉起进程）。
-    fn build_local(&self, config: &TranslateConfig) -> Result<(String, Built), TranslateError> {
+    /// 装配本地 NMT 路由器：校验语言对 → 找 worker → 找 onnxruntime → 每个包建一个懒加载引擎（不拉起进程）。
+    fn build_local(&self, config: &TranslateConfig) -> Result<(Built, Prepared), TranslateError> {
         let dir = self.models_dir(config);
         let report = ModelScanner::new(&dir).scan();
         if report.models.is_empty() {
             return Err(TranslateError::NoModelFound(no_model_message(&dir, &report.issues)));
         }
-        let (model, src) = pick_model(&report.models, &config.model_id, config.source, config.target)?;
+        let (label, src) = match config.route_mode {
+            RouteMode::MixedSplit => {
+                let names: Vec<String> = report
+                    .models
+                    .iter()
+                    .filter(|m| m.manifest.supports(Lang::Auto, config.target))
+                    .map(model_label)
+                    .collect();
+                if names.is_empty() {
+                    return Err(TranslateError::UnsupportedLanguagePair(config.source, config.target));
+                }
+                (names.join(LABEL_JOINER), config.source)
+            }
+            mode => {
+                let (model, src) =
+                    pick_model_routed(&report.models, &config.model_id, config.source, config.target, mode)?;
+                (model_label(model), src)
+            }
+        };
         let exe = locate_worker_exe(self.exe_env.as_deref())?;
         let dylib = resolve_ort_dylib(&self.data_root, self.ort_env.as_deref()).map_err(|e| match e {
             OrtUnavailable::NotInstalled => TranslateError::RuntimeMissing(e.message()),
             other => TranslateError::WorkerUnavailable(other.message()),
         })?;
         let beams = config.effective_beams();
+        let models_fingerprint: Vec<String> =
+            report.models.iter().map(|m| format!("{}@{}", m.manifest.id, m.dir.display())).collect();
         let key = format!(
-            "local|{}|{}|{}|{}|{beams}|{}|{}",
+            "local|{}|{}|{}|{beams}|{}|{}",
             exe.display(),
-            model.dir.display(),
-            model.manifest.id,
+            models_fingerprint.join(","),
             dylib.display(),
             config.low_memory,
             config.idle.as_secs()
         );
-        let label = if model.manifest.display_name.trim().is_empty() {
-            model.manifest.id.clone()
-        } else {
-            model.manifest.display_name.clone()
-        };
-        let worker_config = WorkerConfig {
-            exe,
-            model_dir: model.dir.clone(),
-            model_id: model.manifest.id.clone(),
-            pairs: model.manifest.supported_pairs(),
-            ort_dylib: Some(dylib),
-            num_beams: beams,
-            trim_after_request: true,
-            idle_timeout: config.idle,
-            timeouts: Timeouts::default(),
-        };
-        let worker = Arc::new(WorkerEngine::new(worker_config));
-        let engine: Arc<dyn TranslationEngine> = worker.clone();
-        Ok((
-            key.clone(),
-            Built { key, engine, worker: Some(worker), label, src, tgt: config.target },
-        ))
+        let slots: Vec<RoutedSlot> = report
+            .models
+            .iter()
+            .map(|model| {
+                let worker = WorkerEngine::new(WorkerConfig {
+                    exe: exe.clone(),
+                    model_dir: model.dir.clone(),
+                    model_id: model.manifest.id.clone(),
+                    pairs: model.manifest.supported_pairs(),
+                    ort_dylib: Some(dylib.clone()),
+                    num_beams: beams,
+                    trim_after_request: true,
+                    idle_timeout: config.idle,
+                    timeouts: Timeouts::default(),
+                });
+                let engine: Arc<dyn PooledEngine> = Arc::new(worker);
+                RoutedSlot { manifest: model.manifest.clone(), engine }
+            })
+            .collect();
+        let router = Arc::new(RoutedEngine::new(slots, config.route_policy()));
+        let engine: Arc<dyn TranslationEngine> = router.clone();
+        Ok((Built { key, engine, router: Some(router) }, (label, src, config.target)))
     }
 
     /// 装配 OpenAI 兼容引擎：取配置里选中的自定义模型。
-    fn build_openai(&self, config: &TranslateConfig) -> Result<(String, Built), TranslateError> {
+    fn build_openai(&self, config: &TranslateConfig) -> Result<(Built, Prepared), TranslateError> {
         if config.custom_models.is_empty() {
             return Err(TranslateError::NoModelFound(
                 "尚未配置自定义 AI 模型，请先在“自定义模型”里添加一个 OpenAI 兼容的端点".into(),
@@ -379,13 +420,12 @@ impl TranslateHost {
             api_key: model.api_key.clone(),
             model: model.model.clone(),
         }));
-        Ok((
-            key.clone(),
-            Built { key, engine, worker: None, label: model.name.clone(), src: config.source, tgt: config.target },
-        ))
+        Ok((Built { key, engine, router: None }, (model.name.clone(), config.source, config.target)))
     }
 
     /// 按配置装配引擎；参数没变就复用，变了就换掉旧引擎（旧 worker 随之退出）。
+    ///
+    /// 路由模式、指定包、常驻上限不属于装配参数：它们热更新到现有路由器上，不会重启已加载的 worker。
     ///
     /// # 参数
     /// - `config`：翻译配置。
@@ -393,61 +433,58 @@ impl TranslateHost {
     /// # 返回
     /// `(引擎标签, 解析出的源语言, 目标语言)`。
     pub fn prepare(&self, config: &TranslateConfig) -> Result<(String, Lang, Lang), TranslateError> {
-        let (key, fresh) = match config.backend {
+        let (fresh, prepared) = match config.backend {
             Backend::Local => self.build_local(config)?,
             Backend::OpenAi => self.build_openai(config)?,
         };
         let mut built = self.built.lock().unwrap_or_else(PoisonError::into_inner);
-        let (label, src, tgt) = match built.as_mut() {
-            Some(current) if current.key == key => {
-                // 同参数：沿用已有引擎（丢弃刚构造的、尚未启动的新引擎）；语言对可能变化
-                current.src = fresh.src;
-                current.tgt = fresh.tgt;
-                (current.label.clone(), current.src, current.tgt)
+        match built.as_mut() {
+            Some(current) if current.key == fresh.key => {
+                // 同参数：沿用已有引擎（丢弃刚构造的、尚未启动的新引擎），只热更新路由策略
+                if let (Some(current_router), Some(fresh_router)) = (&current.router, &fresh.router) {
+                    current_router.set_policy(fresh_router.policy());
+                }
             }
             _ => {
-                let summary = (fresh.label.clone(), fresh.src, fresh.tgt);
                 self.service.set_engine(Some(Arc::clone(&fresh.engine)));
                 *built = Some(fresh);
-                summary
             }
-        };
-        Ok((label, src, tgt))
+        }
+        Ok(prepared)
     }
 
-    /// 本地 worker 是否正在运行（探针用）。
+    /// 当前路由器（没有本地装配时为 `None`）。
+    fn router(&self) -> Option<Arc<RoutedEngine>> {
+        self.built.lock().unwrap_or_else(PoisonError::into_inner).as_ref()?.router.clone()
+    }
+
+    /// 是否有本地 worker 正在运行（探针用）。
     pub fn worker_running(&self) -> bool {
-        self.built
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .as_ref()
-            .and_then(|b| b.worker.as_ref().map(|w| w.is_running()))
-            .unwrap_or(false)
+        self.router().is_some_and(|r| r.any_resident())
     }
 
-    /// 向本地 worker 取内存快照（探针用）。
+    /// 当前常驻内存的翻译包 ID（探针 / 诊断用）。
+    pub fn resident_models(&self) -> Vec<String> {
+        self.router().map(|r| r.resident_ids()).unwrap_or_default()
+    }
+
+    /// 向运行中的本地 worker 取内存快照（探针用）。
     pub fn worker_memory(&self) -> Option<MemorySnapshot> {
-        let worker = self.built.lock().unwrap_or_else(PoisonError::into_inner).as_ref()?.worker.clone()?;
-        worker.memory_snapshot()
+        self.router()?.memory_snapshot()
     }
 
     /// 本地 worker 累计拉起次数（探针用）。
     pub fn worker_launches(&self) -> u32 {
-        self.built
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .as_ref()
-            .and_then(|b| b.worker.as_ref().map(|w| w.launch_count()))
-            .unwrap_or(0)
+        self.router().map_or(0, |r| r.launch_total())
     }
 
-    /// 结束 worker 并丢弃引擎（应用退出时调用）。
+    /// 结束全部 worker 并丢弃引擎（应用退出时调用）。
     pub fn shutdown(&self) {
         let taken = self.built.lock().unwrap_or_else(PoisonError::into_inner).take();
         if let Some(built) = taken
-            && let Some(worker) = &built.worker
+            && let Some(router) = &built.router
         {
-            worker.shutdown();
+            router.shutdown();
         }
         self.service.set_engine(None);
     }
@@ -571,6 +608,7 @@ mod tests {
     use super::*;
     use crate::ocr_assets::OcrUnavailable;
     use crate::ocr_service::OcrTextBox;
+    use snow_config::extensions::{ROUTE_MIXED_SPLIT, ROUTE_SINGLE, ROUTE_SPECIALIZED_FIRST};
     use snow_ui::shell::geometry::PhysicalRect;
 
     /// 唯一临时目录。
@@ -587,6 +625,19 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("建模型目录");
         let manifest = format!(
             r#"{{"schema_version":1,"id":"{id}","display_name":"Model {id}","family":"marian","files":{{"encoder":"e.onnx","decoder":"d.onnx","tokenizer":"t.json"}},"languages":["en","zh-CN"],"pairs":{pairs}}}"#
+        );
+        std::fs::write(dir.join("model.json"), manifest).expect("写清单");
+        for f in ["e.onnx", "d.onnx", "t.json"] {
+            std::fs::write(dir.join(f), b"x").expect("写文件");
+        }
+    }
+
+    /// 在模型根下写一份通用多语包（只写 `languages`，不写 `pairs`）。
+    fn write_general_model(models: &Path, id: &str) {
+        let dir = models.join(id);
+        std::fs::create_dir_all(&dir).expect("建模型目录");
+        let manifest = format!(
+            r#"{{"schema_version":1,"id":"{id}","display_name":"Model {id}","family":"m2m100","files":{{"encoder":"e.onnx","decoder":"d.onnx","tokenizer":"t.json"}},"languages":["en","zh-CN","ja"]}}"#
         );
         std::fs::write(dir.join("model.json"), manifest).expect("写清单");
         for f in ["e.onnx", "d.onnx", "t.json"] {
@@ -614,13 +665,14 @@ mod tests {
     fn config_defaults() {
         let cfg = config();
         assert_eq!(cfg.backend, Backend::Local);
-        assert_eq!(cfg.beams, 4);
-        assert_eq!(cfg.effective_beams(), 4);
+        assert_eq!(cfg.beams, 2);
+        assert_eq!(cfg.effective_beams(), 2);
         assert_eq!(cfg.idle, Duration::from_secs(120));
         assert_eq!(cfg.source, Lang::Auto);
         assert_eq!(cfg.target, Lang::En, "英文系统默认翻成英文");
         assert!(cfg.models_dir.is_none() && cfg.model_id.is_empty() && !cfg.low_memory);
         assert_eq!(cfg.layout, LayoutMode::SmartMerge);
+        assert_eq!((cfg.route_mode, cfg.max_resident), (RouteMode::SpecializedFirst, 1));
         let zh = TranslateConfig::from_document(&ConfigDocument::from_bytes(None), "zh-CN");
         assert_eq!(zh.target, Lang::ZhHans);
     }
@@ -636,7 +688,11 @@ mod tests {
         doc.set_value(KEY_TARGET_LANGUAGE, serde_json::json!("zh-Hant")).expect("目标");
         doc.set_value(KEY_SOURCE_LANGUAGE, serde_json::json!("en")).expect("源");
         doc.set_value(KEY_LAYOUT, serde_json::json!("original")).expect("版式");
+        doc.set_value(KEY_LOCAL_ROUTE_MODE, serde_json::json!(ROUTE_MIXED_SPLIT)).expect("路由");
+        doc.set_value(KEY_LOCAL_MAX_RESIDENT, serde_json::json!(2)).expect("常驻数");
         let cfg = TranslateConfig::from_document(&doc, "en-US");
+        assert_eq!((cfg.route_mode, cfg.max_resident), (RouteMode::MixedSplit, 2));
+        assert_eq!(cfg.route_policy().preferred_id, "opus");
         assert_eq!(cfg.models_dir, Some(PathBuf::from("D:/my models")));
         assert_eq!((cfg.model_id.as_str(), cfg.beams, cfg.idle), ("opus", 2, Duration::from_secs(30)));
         assert_eq!((cfg.source, cfg.target, cfg.layout), (Lang::En, Lang::ZhHant, LayoutMode::Original));
@@ -644,6 +700,86 @@ mod tests {
         assert_eq!(TranslateConfig::from_document(&doc, "en-US").effective_beams(), 1);
         doc.set_value(KEY_TRANSLATION_BACKEND, serde_json::json!("openai")).expect("后端");
         assert_eq!(TranslateConfig::from_document(&doc, "en-US").backend, Backend::OpenAi);
+    }
+
+    /// 配置里的路由模式取值与路由器认的代号一一对应（两个 crate 各写一份字面量，这里守住一致）。
+    #[test]
+    fn route_mode_codes_match_config_values() {
+        assert_eq!(RouteMode::from_code(ROUTE_SINGLE), Some(RouteMode::Single));
+        assert_eq!(RouteMode::from_code(ROUTE_SPECIALIZED_FIRST), Some(RouteMode::SpecializedFirst));
+        assert_eq!(RouteMode::from_code(ROUTE_MIXED_SPLIT), Some(RouteMode::MixedSplit));
+    }
+
+    /// 专用包优先：同时有通用包与显式声明语言对的专用包时，未指定包选专用包；指定通用包仍尊重；
+    /// single 模式按顺序取第一个（通用包）。
+    #[test]
+    fn specialized_pack_wins_unless_pinned() {
+        let root = temp_root("special");
+        let (host, models) = host_with_files(&root);
+        write_general_model(&models, "a-nllb");
+        write_model(&models, "z-opus", r#"[["en","zh-CN"]]"#);
+        let mut cfg = config();
+        cfg.target = Lang::ZhHans;
+        let (label, src, _) = host.prepare(&cfg).expect("默认专用包优先");
+        assert_eq!((label.as_str(), src), ("Model z-opus", Lang::En));
+        cfg.model_id = "a-nllb".into();
+        assert_eq!(host.prepare(&cfg).expect("指定通用包").0, "Model a-nllb");
+        cfg.model_id = String::new();
+        cfg.route_mode = RouteMode::Single;
+        assert_eq!(host.prepare(&cfg).expect("single").0, "Model a-nllb");
+        cfg.source = Lang::Ja;
+        cfg.route_mode = RouteMode::SpecializedFirst;
+        assert_eq!(host.prepare(&cfg).expect("日译中只有通用包").0, "Model a-nllb");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 混合拆分：标签列出所有覆盖目标语言的包；没有任何包覆盖目标语言时报不支持。
+    #[test]
+    fn mixed_split_label_and_unsupported_target() {
+        let root = temp_root("mixed");
+        let (host, models) = host_with_files(&root);
+        write_general_model(&models, "a-nllb");
+        write_model(&models, "z-opus", r#"[["en","zh-CN"]]"#);
+        let mut cfg = config();
+        cfg.target = Lang::ZhHans;
+        cfg.route_mode = RouteMode::MixedSplit;
+        let (label, src, tgt) = host.prepare(&cfg).expect("混合拆分");
+        assert_eq!((label.as_str(), src, tgt), ("Model a-nllb + Model z-opus", Lang::Auto, Lang::ZhHans));
+        cfg.target = Lang::Ko;
+        assert!(matches!(host.prepare(&cfg), Err(TranslateError::UnsupportedLanguagePair(Lang::Auto, Lang::Ko))));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 换路由模式 / 指定包 / 常驻上限不会重建引擎（不误杀已加载的 worker）；换束宽才重建。
+    #[test]
+    fn policy_changes_do_not_rebuild_engine() {
+        let root = temp_root("policy");
+        let (host, models) = host_with_files(&root);
+        write_general_model(&models, "a-nllb");
+        write_model(&models, "z-opus", r#"[["en","zh-CN"]]"#);
+        let engine_ptr = |host: &TranslateHost| {
+            host.built.lock().unwrap().as_ref().map(|b| Arc::as_ptr(&b.engine) as *const () as usize)
+        };
+        let mut cfg = config();
+        cfg.target = Lang::ZhHans;
+        host.prepare(&cfg).expect("装配");
+        let first = engine_ptr(&host);
+        cfg.route_mode = RouteMode::MixedSplit;
+        cfg.model_id = "a-nllb".into();
+        cfg.max_resident = 2;
+        host.prepare(&cfg).expect("换策略");
+        assert_eq!(first, engine_ptr(&host), "策略变化应热更新而不是重建");
+        let policy = host.router().expect("路由器").policy();
+        assert_eq!(
+            (policy.mode, policy.preferred_id.as_str(), policy.max_resident),
+            (RouteMode::MixedSplit, "a-nllb", 2)
+        );
+        cfg.beams = 3;
+        host.prepare(&cfg).expect("换束宽");
+        assert_ne!(first, engine_ptr(&host), "束宽变化应重建");
+        assert!(host.resident_models().is_empty() && host.worker_launches() == 0);
+        host.shutdown();
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// 默认目标语言：简/繁中文界面对应中文，system 时用系统语言，其它为英文。
