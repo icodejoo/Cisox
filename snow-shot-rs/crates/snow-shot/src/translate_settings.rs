@@ -255,6 +255,21 @@ mod tests {
     }
 
     #[test]
+    fn route_hints_fit_two_lines() {
+        // 说明在 300px 宽、11px 字号下最多两行：拉丁约 55 字符/行，中文约 27 字/行。
+        for locale in LOCALES {
+            let budget = if locale == "en-US" { 100 } else { 50 };
+            let mut hints = vec![route_hint(KEY_LOCAL_MAX_RESIDENT, &json!(1), locale).unwrap()];
+            for mode in [ROUTE_SINGLE, ROUTE_SPECIALIZED_FIRST, ROUTE_MIXED_SPLIT] {
+                hints.push(route_hint(KEY_LOCAL_ROUTE_MODE, &json!(mode), locale).unwrap());
+            }
+            for hint in hints {
+                assert!(hint.chars().count() <= budget, "{locale}: {hint}");
+            }
+        }
+    }
+
+    #[test]
     fn hymt2_panel_lists_facts_without_product_name() {
         for locale in LOCALES {
             let panel = hymt2_panel(locale);

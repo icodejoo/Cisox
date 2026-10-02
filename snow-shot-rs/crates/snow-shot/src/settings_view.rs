@@ -29,6 +29,8 @@ const ROW_HEIGHT: f32 = 60.0;
 const SIDEBAR_WIDTH: f32 = 220.0;
 /// 行左侧标签列宽度。
 const LABEL_WIDTH: f32 = 300.0;
+/// 行说明最大高度，容纳两行 11px 文字（行高约 18px），保证定高行不被撑开。
+const SUB_MAX_HEIGHT: f32 = 36.0;
 /// 文本输入框宽度。
 const FIELD_WIDTH: f32 = 300.0;
 /// 搜索框宽度。
@@ -675,7 +677,7 @@ impl SettingsView {
                     .whitespace_nowrap()
                     .child(row.label.clone()),
             )
-            .child(div().text_size(px(11.0)).whitespace_nowrap().text_ellipsis().child(sub));
+            .child(div().text_size(px(11.0)).max_h(px(SUB_MAX_HEIGHT)).overflow_hidden().child(sub));
         div()
             .h(px(ROW_HEIGHT))
             .w_full()
@@ -872,10 +874,12 @@ impl SettingsView {
         for line in panel.lines {
             block = block.child(div().text_color(p.dim).child(line));
         }
+        block = block.child(div().flex().gap_2().child(use_button).child(download));
+        // 提示放在按钮下方并用中性色，出现时不挤动按钮。
         if let Some(notice) = &self.hymt2_notice {
-            block = block.child(div().text_color(p.danger).child(notice.clone()));
+            block = block.child(div().text_color(p.text).child(notice.clone()));
         }
-        Some(block.child(div().flex().gap_2().child(use_button).child(download)))
+        Some(block)
     }
 
     /// 渲染状态栏。

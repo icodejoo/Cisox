@@ -6,13 +6,13 @@ translate-route-mode-specialized-first = Specialized first
 
 translate-route-mode-mixed-split = Mixed split
 
-translate-route-mode-single-hint = Always use the model you picked; the first suitable model when none is picked.
+translate-route-mode-single-hint = Always use the picked model; the first suitable one if none is picked.
 
-translate-route-mode-specialized-first-hint = Prefer a narrow specialized model that covers the language pair, otherwise the general model.
+translate-route-mode-specialized-first-hint = Prefer a specialized model that covers the language pair, else the general one.
 
-translate-route-mode-mixed-split-hint = Split text by script: English parts go to the specialized model, the rest to the general model.
+translate-route-mode-mixed-split-hint = Split by script: English goes to the specialized model, the rest to the general one.
 
-translate-route-resident-hint = How many models may stay in memory at once (1 to 4). More models switch faster but use more memory.
+translate-route-resident-hint = Models kept in memory at once (1 to 4). More switch faster but use more memory.
 
 translate-hymt2-title = Optional model pack: Hy-MT2 1.8B (int4)
 
