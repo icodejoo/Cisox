@@ -166,12 +166,14 @@ const TOOLBAR_ACTIONS: [(&str, ToolbarAction); 8] = [
 ];
 
 /// 可选标注工具的显示顺序。
-const TOOLBAR_TOOLS: [AnnotationTool; 8] = [
+const TOOLBAR_TOOLS: [AnnotationTool; 10] = [
     AnnotationTool::Rectangle,
     AnnotationTool::Ellipse,
     AnnotationTool::Arrow,
     AnnotationTool::Line,
     AnnotationTool::Pencil,
+    AnnotationTool::Highlighter,
+    AnnotationTool::Counter,
     AnnotationTool::Text,
     AnnotationTool::Mosaic,
     AnnotationTool::Blur,
@@ -450,6 +452,8 @@ mod tests {
         assert!(TOOLBAR_TOOLS.iter().all(|t| seen.insert(*t)));
         assert!(TOOLBAR_TOOLS.contains(&AnnotationTool::Mosaic));
         assert!(TOOLBAR_TOOLS.contains(&AnnotationTool::Blur));
+        assert!(TOOLBAR_TOOLS.contains(&AnnotationTool::Highlighter));
+        assert!(TOOLBAR_TOOLS.contains(&AnnotationTool::Counter));
     }
 
     /// 验证工具栏定位算法。

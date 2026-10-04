@@ -10,7 +10,7 @@ use super::translate::TranslationState;
 use crate::settings_state::UiPrefs;
 use crate::settings_view::{Palette, palette};
 use snow_platform::clipboard::copy_text_to_clipboard;
-use snow_ui::ui::component::button::Button;
+use snow_ui::ui::component::button::{Button, ButtonVariants};
 use snow_ui::ui::component::input::{Textarea, TextareaState};
 use snow_ui::ui::component::{Sizable, Size as ComponentSize, Theme, ThemeMode};
 use snow_ui::ui::*;
@@ -18,7 +18,7 @@ use snow_ui::ui::*;
 /// 浮窗逻辑宽度。
 pub const WINDOW_WIDTH: f32 = 380.0;
 /// 浮窗逻辑高度。
-pub const WINDOW_HEIGHT: f32 = 270.0;
+pub const WINDOW_HEIGHT: f32 = 234.0;
 /// 浮窗距工作区右、下边缘的逻辑边距。
 pub const WINDOW_MARGIN: f32 = 16.0;
 /// 文本区最少行数。
@@ -228,12 +228,21 @@ impl Render for DictationView {
                     .items_start()
                     .gap(px(GAP))
                     .text_size(px(STATUS_SIZE))
-                    .child(div().flex_1().text_color(status_color).child(status_text)),
+                    .child(div().flex_1().text_color(status_color).child(status_text))
+                    .child(
+                        Button::new("dictation-close")
+                            .ghost()
+                            .with_size(ComponentSize::XSmall)
+                            .label("✕")
+                            .on_click(cx.listener(|_this, _event: &ClickEvent, window, _cx| {
+                                window.remove_window()
+                            })),
+                    ),
             )
             .child(Textarea::new(&self.input))
             .child(
                 div()
-                    .min_h(px(TEXT_SIZE * 1.6))
+                    .min_h(px(TEXT_SIZE * 0.8))
                     .text_size(px(TEXT_SIZE))
                     .text_color(p.dim)
                     .italic()
@@ -251,7 +260,6 @@ impl Render for DictationView {
                         .children(translation_lines),
                 )
             })
-            .child(div().flex_1())
             .child(
                 div()
                     .flex()
@@ -271,14 +279,6 @@ impl Render for DictationView {
                             .on_click(
                                 cx.listener(|this, _event: &ClickEvent, _window, cx| this.copy(cx)),
                             ),
-                    )
-                    .child(
-                        Button::new("dictation-close")
-                            .with_size(ComponentSize::Small)
-                            .label(i18n.tr("dictation-overlay-close"))
-                            .on_click(cx.listener(|_this, _event: &ClickEvent, window, _cx| {
-                                window.remove_window()
-                            })),
                     ),
             )
     }

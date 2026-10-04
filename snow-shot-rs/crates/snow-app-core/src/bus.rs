@@ -257,6 +257,7 @@ mod tests {
             CommandKind::ToggleDictation => AppCommand::ToggleDictation,
             CommandKind::StartDictation => AppCommand::StartDictation,
             CommandKind::StopDictation => AppCommand::StopDictation,
+            CommandKind::QuickAction => AppCommand::QuickAction(QuickAction::OpenSettings),
         }
     }
 

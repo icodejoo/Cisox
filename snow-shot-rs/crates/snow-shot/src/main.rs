@@ -22,10 +22,14 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 pub mod annotation;
+pub mod annotation_style;
 pub mod app_runtime;
 pub mod capture_flow;
 pub mod dictation;
+pub mod direct_capture;
 pub mod frozen_frame;
+pub mod history_store;
+pub mod history_view;
 pub mod ocr_assets;
 pub mod ocr_backend;
 pub mod ocr_client;
@@ -39,6 +43,7 @@ pub mod pinned_manager;
 pub mod pinned_model;
 pub mod pinned_shared;
 pub mod pinned_view;
+pub mod quick_actions;
 pub mod recording;
 pub mod recording_flow;
 pub mod screenshot_output;
@@ -62,6 +67,7 @@ pub mod translate_layout;
 pub mod translate_service;
 pub mod language_names;
 pub mod translate_settings;
+pub mod window_pick;
 
 /// 单实例互斥体 / 管道名使用的应用标识。
 pub const SINGLE_INSTANCE_APP_ID: &str = "cisox.snow_shot.single_instance";
