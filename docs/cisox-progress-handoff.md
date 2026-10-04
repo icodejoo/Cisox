@@ -184,8 +184,21 @@ P0 验证基本完成，P1 地基完成，P2/P4/P5 已开工；**参考版（C++
 **语音转文字（speech-to-text）**
 - [x] 调研完成（2026-10-02，提交 fb4ae46a、766e678e）：sherpa-onnx 与 ort 共用 ORT、纯 ort 流式 Zipformer（RTF≈0.12、~253MB）、Windows 系统语音、SendInput 键入；详见 `docs/research/speech-to-text-backends.md`。
 - [x] worker 已实现（2026-10-03，提交 e2a07adc）：`snow-stt` + `snow-stt-protocol`（sherpa-onnx shared 链接；espeak-ng 随包库 GPL-3.0-or-later，需补第三方声明；打包脚本不覆盖独立 workspace）。
-- [x] 主程序接入（2026-10-03，提交 68529abb）：切换/按住两种触发、键入+右下角浮窗两套输出、输出方式 自动/只键入/只浮窗、UIA 焦点检测+UIPI 探测，system 后端仍占位。
-- [ ] 未做真机验证：热键 Released 实机、键入到真实应用/IME/游戏/远程桌面/Chrome、管理员窗口、浮窗位置与不抢焦点与多屏 DPI、麦克风实录识别质量。
+- [x] 主程序接入（2026-10-03，提交 68529abb）：切换/按住两种触发、键入+右下角浮窗两套输出、输出方式 自动/只键入/只浮窗、UIA 焦点检测+UIPI 探测。
+- [x] Windows 系统语音后端（2026-10-03，提交 75aa840a）：`backend=system`；联机开关打开后的真实听写没有测过。
+- [x] 协议扩展（2026-10-03，未提交，在工作区）：START 新增可选前缀键 `mode` / `kind` / `vad` / `itn`，旧格式字节不变，FINAL/PARTIAL 与协议版本不变；`StartRequest`/`Command` 不再派生 `Eq`。
+- [x] 离线整句后端（2026-10-03，未提交）：Silero VAD 切句 + 后台线程解码，只产出 FINAL；覆盖 transducer / Paraformer / SenseVoice / Whisper / Zipformer-CTC / NeMo-CTC / Moonshine 共 8 种 kind。
+- [x] 模型清单、按需下载与设置页（2026-10-03，未提交）：`stt-model-manifest.json`（13 个模型 + 共享 VAD，角色 default/alternate/legacy）、curl 下载 + certutil 校验 + 系统 tar 解压、识别模式/语言维度/模型三个下拉与下载面板、旧版平铺布局兼容。
+- [x] 语音翻译级联（2026-10-03，未提交）：定稿句 → 后台线程 → `snow-translate`，`(round,seq)` 对位，浮窗文本区下方独立译文列表显示最近 2 句，译文不进键入与复制。翻译设置界面（开关、目标语言下拉、可用性提示行）已接线，设置页部分已截图验证，翻译联调与浮窗译文未验证。
+- [x] 模型选型与评测（2026-10-03）：流式/离线两个独立维度、各组默认与备选、语音翻译端到端不可行改用级联，详见 `docs/research/stt-model-selection.md`。
+- [x] 设置页与下载真机截图验证（2026-10-04，本机 Windows 11、2560x1600、缩放 1.5）：模式/维度/模型联动、置灰、itn 显隐、中英文、真实下载与取消续传均已验证；顺带修了六处界面问题（英文说明截断、模型下拉标签截断、下载行显示长 id、中文标点孤立成行、分组数量与侧栏徽标不一致、取消下载记 WARN），并加固了 `settings_state` 测试夹具（临时目录改为唯一名并自动清理）。浮窗按工作区定位无误（本机被搜狗输入法悬浮条遮挡，非定位问题）。
+- [ ] 仍未做真机验证：热键 Released 实机、键入到真实应用/IME/游戏/远程桌面/Chrome、管理员窗口、浮窗不抢焦点与多屏 DPI、麦克风实录识别质量、翻译级联浮窗与翻译模型联调。
+- [ ] VAD 参数复测：默认 threshold 0.5 / 静音 500ms / 最短 250ms / 最长 20000ms 未经评测，会把中文长句切成两段。
+- [ ] 许可证：清单里 5 个模型标 `unverified`（x-asr 流式 480ms/160ms、x-asr 离线、paraformer-zh-small、paraformer-trilingual），SenseVoice 为 FunASR 模型许可，未逐条核对；评测过但未入清单的模型也没核。此前记录为「7 个未核实」，以清单现状为准。
+- [ ] sha256 固定：7 个模型压缩包 sha256 为空（GitHub 未返回 digest），下载器放行并提示，发布前必须固定。
+- [ ] 翻译上下文：首版每句独立翻译，`snow-translate` 接口不支持上下文。
+- [ ] 打包脚本与 CI 不覆盖独立 workspace `snow-stt`（需要后续处理）。
+- [ ] 第三方声明：espeak-ng GPL 声明沿用原有记录；`collect-third-party-licenses.ps1` 是否覆盖 sherpa 预编译库与各模型许可证未确认。
 
 **文本输入翻译浮窗**
 - [x] 快捷键唤起的文本输入翻译浮窗（2026-10-03，提交 07b5e518）：配置键 `global_shortcuts/translate_input`、`AppCommand::OpenTranslateInput`、模型下拉=已装包+自动、点击译文复制。

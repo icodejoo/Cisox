@@ -1,5 +1,7 @@
 # 实时语音转文字（STT）后端调研
 
+> **后续（2026-10-03）**：本文 §3 的候选模型与 §7 的首期推荐已被实测取代：模型选型、评测方法与结论见 [stt-model-selection.md](stt-model-selection.md)（流式双语默认已定为 x-asr 480ms，另有离线整句维度），worker 与主程序接入现状见 [../guides/snow-stt-worker.md](../guides/snow-stt-worker.md)。下面的正文保持调研当时的原貌，不再修改。
+
 调研日期 2026-10-02。范围：只调研与设计，不含仓库实现。需求（用户已定）：快捷键激活独立进程，实时语音转文字，结束即退出；触发支持「切换式」与「按住说话」；输出实时键入当前焦点输入框；引擎同时支持 Windows 系统语音 API 与本地模型，架构参考翻译/OCR 的 backend 抽象（见 [system-ocr-translate-backends.md](system-ocr-translate-backends.md)）。裁决依据 [principles.md](../principles.md)。
 
 标记约定：【实测】= 本机跑出的数据；【已核实】= 读到一手来源（官方文档/源码/发布包）；【二手】= 非官方来源；【未验证】= 推断或没有证据，不能当事实。仅验证了 Windows，其他平台不在范围（红线）。

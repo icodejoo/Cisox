@@ -49,6 +49,9 @@ pub mod settings_state;
 pub mod settings_text;
 pub mod settings_view;
 pub mod stitch_service;
+pub mod stt_download;
+pub mod stt_models;
+pub mod stt_settings;
 #[cfg(test)]
 mod stitch_audit_tests;
 pub mod sys_prefs;

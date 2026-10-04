@@ -130,7 +130,7 @@ pub fn parse_certutil_sha256(output: &str) -> Option<String> {
 }
 
 /// 系统工具路径：优先 `%SystemRoot%\System32\<name>`，否则直接用名字走 PATH。
-fn system_tool(name: &str) -> PathBuf {
+pub(crate) fn system_tool(name: &str) -> PathBuf {
     std::env::var_os("SystemRoot")
         .map(|root| PathBuf::from(root).join("System32").join(name))
         .filter(|p| p.is_file())
@@ -138,7 +138,7 @@ fn system_tool(name: &str) -> PathBuf {
 }
 
 /// 构造不弹窗的子进程命令。
-fn quiet_command(program: &Path) -> Command {
+pub(crate) fn quiet_command(program: &Path) -> Command {
     let mut command = Command::new(program);
     command.stdin(Stdio::null());
     #[cfg(windows)]
@@ -187,14 +187,21 @@ pub fn verify_file(path: &Path, file: &AssetFile) -> Result<(), String> {
     Ok(())
 }
 
-/// 用 curl 下载到 `dest`（先写 `.part`，支持续传，成功后由调用方校验并改名）。
-fn curl_download(url: &str, part: &Path) -> Result<(), String> {
-    let status = quiet_command(&system_tool("curl.exe"))
+/// 构造 curl 下载命令（写 `part`，支持续传、重试，带 `--ssl-no-revoke`）；OCR 与语音模型下载共用。
+pub(crate) fn curl_command(url: &str, part: &Path) -> Command {
+    let mut command = quiet_command(&system_tool("curl.exe"));
+    command
         .args(["--fail", "--location", "--silent", "--show-error", "--ssl-no-revoke"])
         .args(["--connect-timeout", CURL_CONNECT_TIMEOUT])
         .args(["--retry", CURL_RETRIES, "-C", "-", "-o"])
         .arg(part)
-        .arg(url)
+        .arg(url);
+    command
+}
+
+/// 用 curl 下载到 `dest`（先写 `.part`，支持续传，成功后由调用方校验并改名）。
+fn curl_download(url: &str, part: &Path) -> Result<(), String> {
+    let status = curl_command(url, part)
         .stderr(Stdio::piped())
         .output()
         .map_err(|e| format!("无法运行 curl: {e}"))?;

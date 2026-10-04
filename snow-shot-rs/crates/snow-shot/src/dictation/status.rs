@@ -2,10 +2,12 @@
 
 use super::focus::NoTypeReason;
 use super::output::RouteNote;
+use super::translate::TranslateIssue;
 use crate::ocr_backend::i18n_for;
 use snow_config::extensions::DICTATION_BACKEND_SYSTEM;
 use snow_i18n::Args;
 use snow_stt_protocol::SystemError;
+use snow_translate::Lang;
 
 /// 失败原因。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,6 +20,12 @@ pub enum Failure {
     Spawn(String),
     /// 模型目录不存在。
     ModelDirMissing(String),
+    /// 所选语音模型（或离线模式的 VAD 文件）尚未下载安装，携带 ID / 文件名。
+    ModelNotInstalled(String),
+    /// 手动指定的模型目录只能配合流式模式使用（离线模型类型无法由目录推断）。
+    ManualDirNeedsStreaming,
+    /// 清单里找不到所选组合的模型（清单异常），携带说明。
+    ModelUnavailable(String),
     /// 等待工作进程就绪 / 模型加载超时。
     StartTimeout,
     /// 等待结束超时，已强制结束。
@@ -37,6 +45,8 @@ pub enum Status {
     Loading,
     /// 正在听；携带输出去向说明。
     Listening(RouteNote),
+    /// 正在听，并提示本轮翻译不可用的原因。
+    ListeningNotice(RouteNote, TranslateIssue),
     /// 已发出结束，等待收尾。
     Finishing,
     /// 已结束。
@@ -49,6 +59,11 @@ impl Status {
     /// 是否为失败态。
     pub fn is_failed(&self) -> bool {
         matches!(self, Status::Failed(_))
+    }
+
+    /// 是否在听（含带翻译提示的听）。
+    pub fn is_listening(&self) -> bool {
+        matches!(self, Status::Listening(_) | Status::ListeningNotice(..))
     }
 
     /// 按界面语言生成提示文案。
@@ -72,10 +87,43 @@ impl Status {
                 .trim()
                 .to_string()
             }
+            Status::ListeningNotice(note, issue) => {
+                let listening = Status::Listening(note.clone()).message(locale);
+                format!("{listening} {}", issue_message(issue, locale))
+            }
             Status::Finishing => i18n.tr("dictation-status-finishing"),
             Status::Done => i18n.tr("dictation-status-done"),
             Status::Failed(failure) => failure_message(failure, locale),
         }
+    }
+}
+
+/// 语言的展示名（取自 `dictation.ftl`；没有专门词条的语言用其内置名称）。
+fn lang_name(lang: Lang, locale: &str) -> String {
+    let id = match lang {
+        Lang::ZhHans => "dictation-lang-zh-hans",
+        Lang::En => "dictation-lang-en",
+        other => return other.display_name().to_string(),
+    };
+    i18n_for(locale).tr(id)
+}
+
+/// 翻译不可用原因的文案。
+///
+/// # 参数
+/// - `issue`：不可用原因。
+/// - `locale`：界面语言代码。
+pub fn issue_message(issue: &TranslateIssue, locale: &str) -> String {
+    let i18n = i18n_for(locale);
+    match issue {
+        TranslateIssue::NoModel => i18n.tr("dictation-translate-no-model"),
+        TranslateIssue::UnsupportedPair { src, tgt } => i18n.tr_with(
+            "dictation-translate-unsupported",
+            &Args::new()
+                .named("src", lang_name(*src, locale).as_str())
+                .named("tgt", lang_name(*tgt, locale).as_str()),
+        ),
+        TranslateIssue::SameLanguage => i18n.tr("dictation-translate-same-language"),
     }
 }
 
@@ -142,6 +190,15 @@ fn failure_message(failure: &Failure, locale: &str) -> String {
             "dictation-error-model-dir",
             &Args::new().named("path", path.as_str()),
         ),
+        Failure::ModelNotInstalled(id) => i18n.tr_with(
+            "dictation-error-model-not-installed",
+            &Args::new().named("model", id.as_str()),
+        ),
+        Failure::ManualDirNeedsStreaming => i18n.tr("dictation-error-manual-dir-streaming"),
+        Failure::ModelUnavailable(detail) => i18n.tr_with(
+            "dictation-error-model-unavailable",
+            &Args::new().named("detail", detail.as_str()),
+        ),
         Failure::StartTimeout => i18n.tr("dictation-error-start-timeout"),
         Failure::StopTimeout => i18n.tr("dictation-error-stop-timeout"),
         Failure::Crashed(code) => {
@@ -187,6 +244,9 @@ mod tests {
             Failure::WorkerMissing,
             Failure::Spawn("x".into()),
             Failure::ModelDirMissing("D:/m".into()),
+            Failure::ModelNotInstalled("m".into()),
+            Failure::ManualDirNeedsStreaming,
+            Failure::ModelUnavailable("x".into()),
             Failure::StartTimeout,
             Failure::StopTimeout,
             Failure::Crashed(Some(3)),
@@ -221,6 +281,16 @@ mod tests {
         ] {
             statuses.push(Status::Listening(note));
         }
+        for issue in [
+            TranslateIssue::NoModel,
+            TranslateIssue::SameLanguage,
+            TranslateIssue::UnsupportedPair {
+                src: Lang::ZhHans,
+                tgt: Lang::En,
+            },
+        ] {
+            statuses.push(Status::ListeningNotice(RouteNote::Typing, issue));
+        }
         for reason in reasons {
             statuses.push(Status::Listening(RouteNote::Fallback(reason)));
             statuses.push(Status::Listening(RouteNote::Blocked(reason)));
@@ -243,6 +313,8 @@ mod tests {
     fn details_are_interpolated() {
         let text = Status::Failed(Failure::ModelDirMissing("D:/models".into())).message("en-US");
         assert!(text.contains("D:/models"), "{text}");
+        let text = Status::Failed(Failure::ModelNotInstalled("m-id".into())).message("en-US");
+        assert!(text.contains("m-id"), "{text}");
         let text = Status::Failed(Failure::Crashed(None)).message("en-US");
         assert!(text.contains('?'), "{text}");
         assert!(Status::Failed(Failure::StartTimeout).is_failed());
@@ -282,6 +354,22 @@ mod tests {
             assert!(backend_notice(&serde_json::json!("local-model"), info.code).is_none());
         }
         assert!(backend_notice(&serde_json::json!(1), "en-US").is_none());
+    }
+
+    /// 翻译不可用提示：带上语言名，接在听写状态之后。
+    #[test]
+    fn translate_issue_in_status() {
+        let issue = TranslateIssue::UnsupportedPair {
+            src: Lang::ZhHans,
+            tgt: Lang::En,
+        };
+        let status = Status::ListeningNotice(RouteNote::Typing, issue);
+        assert!(status.is_listening() && !status.is_failed());
+        let en = status.message("en-US");
+        assert!(en.contains("Chinese") && en.contains("English"), "{en}");
+        let zh = status.message("zh-CN");
+        assert!(zh.contains("中文") && zh.contains("英文"), "{zh}");
+        assert!(en.contains(&Status::Listening(RouteNote::Typing).message("en-US")));
     }
 
     /// 键入去向与兜底去向有不同文案；判定中没有文案。

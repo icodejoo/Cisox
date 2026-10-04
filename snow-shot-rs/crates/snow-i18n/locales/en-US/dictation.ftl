@@ -69,3 +69,95 @@ dictation-overlay-copied = Copied
 dictation-overlay-copy-failed = Copy failed: { $reason }
 
 dictation-overlay-close = Close
+
+dictation-error-model-not-installed = The speech model { $model } is not downloaded yet. Open Settings, go to Dictation and download it first.
+
+dictation-error-manual-dir-streaming = A manually chosen model folder only works with streaming recognition. Clear the model folder to use the built-in offline models, or switch back to streaming.
+
+dictation-error-model-unavailable = No speech model is available for this combination: { $detail }
+
+stt-note-low-latency = Lowest delay, slightly less accurate than the default
+
+stt-note-multilingual = Also recognizes Cantonese and English, large download
+
+stt-note-high-memory = Most accurate, but uses a lot of memory (about 670 MiB while running)
+
+stt-note-itn = Adds punctuation and formats numbers; also supports Japanese, Korean and Cantonese
+
+stt-ui-label-recommended = { $name } (Recommended)
+
+stt-ui-label-alternate = { $name }
+
+stt-ui-label-legacy = { $name } (Older)
+
+stt-ui-state-installed = Installed
+
+stt-ui-state-missing = Not installed
+
+stt-ui-no-models = No model for this language and mode
+
+stt-ui-row-installed = Installed, { $size } on disk
+
+stt-ui-row-missing = Not installed, download about { $archive }
+
+stt-ui-panel-title = Current model: { $name }
+
+stt-ui-line-installed = Installed. { $size } on disk, about { $mem } MiB of memory while running (benchmark figure, for reference only).
+
+stt-ui-line-missing = Not installed. Download is about { $archive }, { $size } on disk, about { $mem } MiB of memory while running (benchmark figure, for reference only).
+
+stt-ui-line-license = License: { $license }
+
+stt-ui-license-unverified = not verified yet
+
+stt-ui-line-vad-ok = Offline mode also uses the shared voice activity file: installed
+
+stt-ui-line-vad-missing = Offline mode also needs the shared voice activity file ({ $size }); it is downloaded together with the model
+
+stt-ui-line-unpinned = Checksum not pinned yet: downloads are only checked by size
+
+stt-ui-action-download = Download
+
+stt-ui-action-cancel = Cancel
+
+stt-ui-action-installed = Installed
+
+stt-ui-action-busy = Another model is downloading
+
+stt-ui-stage-downloading = Downloading
+
+stt-ui-stage-verifying = Verifying
+
+stt-ui-stage-extracting = Extracting
+
+stt-ui-progress = { $stage } { $asset } { $percent }%
+
+stt-ui-progress-no-total = { $stage } { $asset }
+
+stt-ui-download-failed = Download failed: { $detail }
+
+stt-ui-download-cancelled = Download cancelled
+
+stt-ui-download-done = Download finished
+
+stt-ui-lock-system = The system speech engine does not use these models
+
+stt-ui-lock-manual-dir = A manual model folder is set, so this option is off
+
+stt-ui-manual-dir-offline = A manual model folder only works with streaming recognition
+
+dictation-translate-no-model = Translation is on, but no translation model was found. Download one in the translation settings first.
+
+dictation-translate-unsupported = Translation is on, but no installed translation model supports { $src } to { $tgt }. Download one in the translation settings first.
+
+dictation-translate-same-language = Translation is on, but the source and target language are the same, so nothing is translated.
+
+dictation-translate-failed = (translation failed)
+
+dictation-lang-zh-hans = Chinese
+
+dictation-lang-en = English
+
+stt-ui-translate-preview = Will translate: { $pairs }
+
+stt-ui-translate-pair = { $src } to { $tgt }

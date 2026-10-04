@@ -8,12 +8,16 @@
 
 use crate::capture_flow::{CapturePayload, pick_monitor, spawn_capture};
 use crate::dictation::config::DictationConfig;
+use crate::dictation::translate::TranslationOutcome;
 use crate::dictation::focus::Verdict;
 use crate::dictation::{DictationCommand, DictationHost};
 use crate::frozen_frame::FrozenFrame;
 use crate::ocr_assets::{ENV_OCR_ASSET_DIR, ocr_root};
 use crate::ocr_client::OcrError;
 use crate::ocr_download;
+use crate::stt_download::{self, Progress as SttProgress};
+use crate::stt_models;
+use crate::stt_settings::{CancelFlag, SttHooks};
 use crate::ocr_backend::{OcrInput, select_from_document};
 use crate::ocr_service::{OcrRequestConfig, OcrResult, OcrService};
 use crate::ort_runtime;
@@ -174,6 +178,15 @@ pub enum UiEvent {
         /// 能否键入的判定。
         verdict: Verdict,
     },
+    /// 语音转文字：后台翻译线程完成了一句定稿的翻译。
+    DictationTranslated {
+        /// 所属轮次（过期结果会被丢弃）。
+        round: u64,
+        /// 句序号。
+        seq: usize,
+        /// 翻译结果。
+        outcome: TranslationOutcome,
+    },
     /// 输入框翻译浮窗请求翻译（在后台线程执行）。
     TranslateInputRequested {
         /// 请求序号（回传结果时带回）。
@@ -294,6 +307,22 @@ pub enum UiEvent {
     OcrDownloadProgress(String),
     /// OCR 组件下载结束。
     OcrDownloadFinished(Result<(), String>),
+    /// 设置页请求下载语音模型（携带取消标记）。
+    SttDownloadRequested {
+        /// 模型 ID。
+        model_id: String,
+        /// 取消标记。
+        cancel: CancelFlag,
+    },
+    /// 语音模型下载进度。
+    SttDownloadProgress(SttProgress),
+    /// 语音模型下载结束。
+    SttDownloadFinished {
+        /// 模型 ID。
+        model_id: String,
+        /// 结果。
+        result: Result<(), String>,
+    },
     /// 退出应用。
     Quit,
 }
@@ -831,10 +860,11 @@ impl AppState {
                 closed_inbox.push(UiEvent::PinClosed { id: id.to_string() });
             }),
         );
+        let translator = Arc::new(TranslateHost::new(data_root));
         Self {
             pins,
             ocr: Arc::new(OcrService::new(data_root)),
-            translator: Arc::new(TranslateHost::new(data_root)),
+            translator: Arc::clone(&translator),
             data_root: data_root.to_path_buf(),
             overlay_view: None,
             scroll: ScrollHost::new(caps.clone(), inbox.clone(), Rc::clone(&config)),
@@ -843,6 +873,7 @@ impl AppState {
                 Rc::clone(&config),
                 inbox.clone(),
                 data_root.to_path_buf(),
+                translator,
             ),
             config,
             settings: None,
@@ -1373,6 +1404,38 @@ fn spawn_ocr_download(state: &AppState) {
     }
 }
 
+/// 在后台线程安装语音模型（含离线模式缺的共享 VAD），进度与结果经收件箱回到主线程。
+///
+/// # 参数
+/// - `state`：运行时状态。
+/// - `model_id`：模型 ID。
+/// - `cancel`：取消标记。
+fn spawn_stt_download(state: &AppState, model_id: String, cancel: CancelFlag) {
+    let data_root = state.data_root.clone();
+    let inbox = state.inbox.clone();
+    let id = model_id.clone();
+    let spawned = std::thread::Builder::new().name("snow-stt-download".into()).spawn(move || {
+        let result = match stt_models::find(&id) {
+            None => Err(format!("unknown speech model: {id}")),
+            Some(spec) => {
+                let progress_inbox = inbox.clone();
+                stt_download::install(spec, &data_root, &cancel.0, |p| {
+                    progress_inbox.push(UiEvent::SttDownloadProgress(p.clone()));
+                })
+                .map(|report| {
+                    if !report.unpinned.is_empty() {
+                        tracing::warn!(assets = ?report.unpinned, "语音模型资产未固定校验值，仅校验了大小");
+                    }
+                })
+            }
+        };
+        inbox.push(UiEvent::SttDownloadFinished { model_id: id, result });
+    });
+    if let Err(e) = spawned {
+        state.inbox.push(UiEvent::SttDownloadFinished { model_id, result: Err(e.to_string()) });
+    }
+}
+
 /// 启动覆盖窗性能基准：约 60Hz 驱动模拟框选（或指定工具的标注绘制），结束后关闭窗口（探针汇总写入日志）。
 ///
 /// 这是直接驱动视图状态，不经过操作系统输入，不属于输入模拟。
@@ -1546,6 +1609,14 @@ fn open_or_focus_settings(cx: &mut ShellContext, state: &mut AppState) {
         Ok((window, view)) => {
             state.settings = Some(window);
             state.settings_view = Some(view.clone());
+            let stt_inbox = state.inbox.clone();
+            let stt_hooks = SttHooks {
+                data_root: state.data_root.clone(),
+                request: std::sync::Arc::new(move |model_id, cancel| {
+                    stt_inbox.push(UiEvent::SttDownloadRequested { model_id, cancel });
+                }),
+            };
+            view.update(cx.app(), |v, _| v.set_stt_hooks(stt_hooks));
             tracing::info!("settings window opened");
             if let Ok(path) = std::env::var(ENV_SETTINGS_AUTOTEST) {
                 spawn_settings_autotest(cx, window, view, &path);
@@ -1846,6 +1917,9 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
                 .dictation
                 .probed(cx, state.tray.as_ref(), round, verdict)
         }
+        UiEvent::DictationTranslated { round, seq, outcome } => {
+            state.dictation.translated(cx, round, seq, outcome)
+        }
         UiEvent::TranslateInputRequested { serial, text, model_id } => {
             spawn_translate_input(state, serial, text, model_id)
         }
@@ -1965,6 +2039,25 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
                     v.finish_ocr_download(result);
                     vcx.notify();
                 });
+            }
+        }
+        UiEvent::SttDownloadRequested { model_id, cancel } => spawn_stt_download(state, model_id, cancel),
+        UiEvent::SttDownloadProgress(progress) => {
+            if let Some(view) = &state.settings_view {
+                view.update(cx.app(), |v, vcx| v.update_stt_download(progress, vcx));
+            }
+        }
+        UiEvent::SttDownloadFinished { model_id, result } => {
+            match (stt_download::classify(&result), &result) {
+                (stt_download::Outcome::Done, _) => tracing::info!(model = %model_id, "语音模型下载完成"),
+                (stt_download::Outcome::Cancelled, _) => tracing::info!(model = %model_id, "用户取消下载"),
+                (stt_download::Outcome::Failed, Err(e)) => {
+                    tracing::warn!(model = %model_id, error = %e, "语音模型下载失败")
+                }
+                (stt_download::Outcome::Failed, Ok(())) => {}
+            }
+            if let Some(view) = &state.settings_view {
+                view.update(cx.app(), |v, vcx| v.finish_stt_download(model_id, result, vcx));
             }
         }
         UiEvent::StartScrollCapture => request_scroll_capture(cx, state),

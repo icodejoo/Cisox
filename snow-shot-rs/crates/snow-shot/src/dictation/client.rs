@@ -334,6 +334,7 @@ mod tests {
             endpoint: EndpointRules::default(),
             max_seconds: 0,
             model_dir: var("SNOW_STT_TEST_MODEL_DIR"),
+            ..Default::default()
         };
         let args = vec![
             "--wav".to_string(),

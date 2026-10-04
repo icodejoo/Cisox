@@ -15,12 +15,22 @@ use crate::settings_state::{
 use crate::language_names::{is_language_key, language_option_label};
 use crate::ocr_backend::{OcrBackend, OcrNotice};
 use crate::settings_text::{Lang, Text, group_title, item_desc, item_label, option_text, t};
+use crate::stt_download::{self, Progress};
+use crate::stt_models::{self, mode_as_str};
+use crate::stt_settings::{
+    CancelFlag, DICTATION_GROUP_ID, DownloadState, PanelAction, PanelModel, SttHooks, SttInputs,
+    build_panel, is_selector_key, is_translate_note_key, model_row_status,
+    option_label as stt_option_label, option_value, rescans_translate_support,
+    scan_translate_support, selector_note, translate_note,
+};
+use crate::dictation::translate::ModelSupport;
 use crate::translate_settings::{
     HYMT2_LINE_COUNT, Hymt2Button, Hymt2Click, Hymt2Row, Hymt2View, hymt2_click, hymt2_rows,
     hymt2_view, route_hint, route_mode_label, split_list_index,
 };
 use snow_config::extensions::{
-    KEY_DICTATION_BACKEND, KEY_LOCAL_MODEL_ID, KEY_LOCAL_ROUTE_MODE, KEY_OCR_BACKEND,
+    KEY_DICTATION_BACKEND, KEY_DICTATION_MODEL_ID, KEY_LOCAL_MODEL_ID, KEY_LOCAL_ROUTE_MODE,
+    KEY_OCR_BACKEND,
 };
 use serde_json::{Value, json};
 use snow_ui::ui::component::button::Button;
@@ -28,7 +38,7 @@ use snow_ui::ui::component::searchable_list::{SearchableListItem, SearchableVec}
 use snow_ui::ui::component::select::{Select, SelectEvent, SelectState};
 use snow_ui::ui::component::{Disableable, IndexPath, Sizable, Size as ComponentSize, Theme, ThemeMode};
 use snow_ui::ui::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -43,6 +53,8 @@ const LABEL_WIDTH: f32 = 300.0;
 const SUB_MAX_HEIGHT: f32 = 36.0;
 /// 下拉选择器触发器宽度。
 const DROPDOWN_WIDTH: f32 = 200.0;
+/// 语音模型下拉触发器宽度（需完整容纳最长的「名称（推荐）」标签，约 66 个英文字符）。
+const MODEL_DROPDOWN_WIDTH: f32 = 540.0;
 /// 下拉选择器触发器高度。
 const DROPDOWN_HEIGHT: f32 = 28.0;
 /// 下拉浮层最大高度（超出后浮层内滚动）。
@@ -284,6 +296,20 @@ pub struct SettingsView {
     titled_locale: Option<&'static str>,
     /// 上一帧列表的纵向滚动偏移（逻辑像素），变化即视为滚动。
     last_scroll_y: f32,
+    /// 语音模型下载入口与数据根（未接入时为 `None`，面板按钮不可用）。
+    stt_hooks: Option<SttHooks>,
+    /// 语音模型下载任务的界面状态。
+    stt_download: DownloadState,
+    /// 进行中下载的取消标记。
+    stt_cancel: Option<CancelFlag>,
+    /// 已安装的语音模型 ID 缓存（避免每帧访问磁盘）。
+    stt_installed: HashSet<String>,
+    /// 共享 VAD 是否已安装（缓存）。
+    stt_vad_installed: bool,
+    /// 翻译后端能力缓存（避免每帧扫盘）；未扫描为 `None`。
+    translate_support: Option<ModelSupport>,
+    /// 模型下拉当前选项的签名，变化时重建选项。
+    model_signature: String,
 }
 
 /// 选项的显示标签：OCR 后端与本地路由模式有专用本地化，语言类选项固定显示各语言自称，其余原样显示。
@@ -354,6 +380,13 @@ impl SettingsView {
             themed_dark: None,
             titled_locale: None,
             last_scroll_y: 0.0,
+            stt_hooks: None,
+            stt_download: DownloadState::Idle,
+            stt_cancel: None,
+            stt_installed: HashSet::new(),
+            stt_vad_installed: false,
+            translate_support: None,
+            model_signature: String::new(),
         });
         let handle = view.read(app).focus.clone();
         window.focus(&handle, app);
@@ -428,12 +461,194 @@ impl SettingsView {
         }
     }
 
+    /// 读取语音转文字相关的当前配置值。
+    fn stt_inputs(&self) -> SttInputs {
+        SttInputs::from_lookup(|key| {
+            self.state
+                .row_by_key(key)
+                .map_or(Value::Null, |row| row.value.clone())
+        })
+    }
+
+    /// 接入语音模型下载入口与数据根目录，并刷新安装状态缓存。
+    ///
+    /// # 参数
+    /// - `hooks`：下载入口与数据根
+    pub fn set_stt_hooks(&mut self, hooks: SttHooks) {
+        self.stt_hooks = Some(hooks);
+        self.refresh_stt_cache();
+    }
+
+    /// 重新检查各模型与共享 VAD 的安装状态（访问磁盘，只在用户操作或下载结束时调用）。
+    fn refresh_stt_cache(&mut self) {
+        let Some(hooks) = &self.stt_hooks else { return };
+        self.stt_installed = stt_models::manifest()
+            .models
+            .iter()
+            .filter(|spec| stt_download::is_installed(spec, &hooks.data_root))
+            .map(|spec| spec.id.clone())
+            .collect();
+        self.stt_vad_installed = stt_download::is_vad_installed(&hooks.data_root);
+        self.refresh_translate_support();
+    }
+
+    /// 重新扫描翻译模型（访问磁盘）；翻译开关关闭或未接入数据根时清空缓存。
+    fn refresh_translate_support(&mut self) {
+        let (config, tcfg) = self.state.translate_snapshot();
+        self.translate_support = match &self.stt_hooks {
+            Some(hooks) if config.translate_enabled => {
+                Some(scan_translate_support(&tcfg, &hooks.data_root))
+            }
+            _ => None,
+        };
+    }
+
+    /// 当前语音模型面板；被联动置灰或清单无模型时为 `None`。
+    fn stt_panel(&self) -> Option<PanelModel> {
+        build_panel(
+            &self.stt_inputs(),
+            |spec| self.stt_installed.contains(&spec.id),
+            self.stt_vad_installed,
+            &self.stt_download,
+            self.state.prefs().locale,
+        )
+    }
+
+    /// 开始下载模型（含离线模式缺的共享 VAD，由安装流程一并补齐）。
+    fn start_stt_download(&mut self, model_id: String) {
+        let Some(hooks) = &self.stt_hooks else { return };
+        let cancel = CancelFlag::default();
+        self.stt_cancel = Some(cancel.clone());
+        self.stt_download = DownloadState::Running {
+            model_id: model_id.clone(),
+            progress: None,
+        };
+        (hooks.request)(model_id, cancel);
+    }
+
+    /// 取消进行中的下载。
+    fn cancel_stt_download(&mut self) {
+        if let Some(cancel) = &self.stt_cancel {
+            cancel.cancel();
+        }
+    }
+
+    /// 下载线程上报进度（经主线程收件箱转入）。
+    ///
+    /// # 参数
+    /// - `progress`：进度快照
+    /// - `cx`：视图上下文
+    pub fn update_stt_download(&mut self, progress: Progress, cx: &mut Context<Self>) {
+        if let DownloadState::Running { progress: slot, .. } = &mut self.stt_download {
+            *slot = Some(progress);
+            cx.notify();
+        }
+    }
+
+    /// 下载结束（成功、失败或用户取消）。
+    ///
+    /// # 参数
+    /// - `model_id`：模型 ID
+    /// - `result`：结果，失败带错误说明
+    /// - `cx`：视图上下文
+    pub fn finish_stt_download(
+        &mut self,
+        model_id: String,
+        result: Result<(), String>,
+        cx: &mut Context<Self>,
+    ) {
+        let cancelled = self.stt_cancel.take().is_some_and(|c| c.is_cancelled());
+        self.stt_download = match result {
+            Ok(()) => DownloadState::Done { model_id },
+            Err(_) if cancelled => DownloadState::Failed { model_id, message: None },
+            Err(message) => DownloadState::Failed { model_id, message: Some(message) },
+        };
+        self.refresh_stt_cache();
+        cx.notify();
+    }
+
+    /// 确保模型下拉存在，选项与标签随维度、模式、安装状态与界面语言同步。
+    fn ensure_model_dropdown(
+        &mut self,
+        inputs: &SttInputs,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let locale = self.state.prefs().locale;
+        let specs = inputs.options();
+        if specs.is_empty() {
+            return;
+        }
+        let items: Vec<DropdownItem> = specs
+            .iter()
+            .map(|spec| DropdownItem {
+                value: option_value(spec),
+                label: stt_option_label(spec, locale).into(),
+            })
+            .collect();
+        let signature = format!(
+            "{locale}|{}|{}|{}",
+            inputs.dimension.as_str(),
+            mode_as_str(inputs.mode),
+            items
+                .iter()
+                .map(|item| format!("{}={}", item.value, item.label))
+                .collect::<Vec<_>>()
+                .join(";"),
+        );
+        let want = inputs.selected_value();
+        let index = items
+            .iter()
+            .position(|item| Some(item.value) == want)
+            .map(|row| IndexPath::default().row(row));
+        let key = KEY_DICTATION_MODEL_ID;
+        let Some(existing) = self.dropdowns.get(key) else {
+            let state = cx.new(|cx| SelectState::new(SearchableVec::new(items), index, window, cx));
+            cx.subscribe_in(
+                &state,
+                window,
+                move |this,
+                      _state,
+                      event: &SelectEvent<SearchableVec<DropdownItem>>,
+                      window,
+                      cx| {
+                    if let SelectEvent::Confirm(Some(value)) = event {
+                        this.act(SettingsAction::Change { key, value: json!(value) }, window, cx);
+                    }
+                },
+            )
+            .detach();
+            self.dropdowns.insert(key, Dropdown { state, locale });
+            self.model_signature = signature;
+            return;
+        };
+        let state = existing.state.clone();
+        let changed = self.model_signature != signature;
+        let stale = state.read(cx).selected_value().copied() != want;
+        if changed {
+            state.update(cx, |select, cx| {
+                select.set_items(SearchableVec::new(items), window, cx)
+            });
+            self.model_signature = signature;
+        }
+        if changed || stale {
+            state.update(cx, |select, cx| match want {
+                Some(value) => select.set_selected_value(&value, window, cx),
+                None => select.set_selected_index(index, window, cx),
+            });
+        }
+    }
+
     /// 执行动作：抢焦点、更新状态、转发变更、重绘。
     fn act(&mut self, action: SettingsAction, window: &mut Window, cx: &mut Context<Self>) {
         cx.stop_propagation();
         window.focus(&self.focus, cx);
         let switched = matches!(action, SettingsAction::SwitchGroup(_) | SettingsAction::SetSearch(_));
+        let recheck = matches!(&action, SettingsAction::SwitchGroup(_));
         self.state.dispatch(action);
+        if recheck {
+            self.refresh_stt_cache();
+        }
         if switched {
             self.scroll_to_top();
         }
@@ -444,13 +659,16 @@ impl SettingsView {
     /// 把状态机积累的变更交给上层。
     fn flush_changes(&mut self) {
         for change in self.state.take_pending() {
+            if rescans_translate_support(change.key) {
+                self.refresh_translate_support();
+            }
             (self.notify)(change);
         }
     }
 
     /// 列表滚回顶部。
     fn scroll_to_top(&self) {
-        if self.state.visible_len() + self.hymt2_header_len() > 0 {
+        if self.state.visible_len() + self.header_len() > 0 {
             self.list_scroll.scroll_to_item_strict(0, ScrollStrategy::Top);
         }
     }
@@ -522,7 +740,7 @@ impl SettingsView {
             }
             AutotestOp::Scroll(index) => {
                 if *index < self.state.visible_len() {
-                    let target = self.hymt2_header_len() + *index;
+                    let target = self.header_len() + *index;
                     self.list_scroll.scroll_to_item_strict(target, ScrollStrategy::Top);
                     cx.notify();
                 }
@@ -611,6 +829,9 @@ impl SettingsView {
     fn render_control(&self, row: &RowModel, p: &Palette, lang: Lang, cx: &mut Context<Self>) -> Div {
         let key = row.key;
         let row_div = div().flex().items_center().gap_2();
+        if key == KEY_DICTATION_MODEL_ID {
+            return self.model_control(row_div, p, lang.locale());
+        }
         match row.control {
             Control::Switch => {
                 let on = row.value.as_bool().unwrap_or(false);
@@ -682,11 +903,13 @@ impl SettingsView {
                     .child(self.text_field(row, FIELD_WIDTH - 30.0, p, lang, cx))
             }
             Control::Choice(_) => {
+                let locked = is_selector_key(key) && self.stt_inputs().lock_reason().is_some();
                 let select = self.dropdowns.get(key).map(|dropdown| {
                     div().w(px(DROPDOWN_WIDTH)).h(px(DROPDOWN_HEIGHT)).child(
                         Select::new(&dropdown.state)
                             .with_size(ComponentSize::Small)
-                            .menu_max_h(px(DROPDOWN_MENU_MAX_HEIGHT)),
+                            .menu_max_h(px(DROPDOWN_MENU_MAX_HEIGHT))
+                            .disabled(locked),
                     )
                 });
                 row_div.children(select)
@@ -709,6 +932,28 @@ impl SettingsView {
                         .child(format!("{preview}[{}: {note}]", t(lang, Text::ReadOnly))),
                 )
             }
+        }
+    }
+
+    /// 语音模型行的控件：下拉（候选来自清单）；被联动置灰时禁用，无候选时给占位文案。
+    fn model_control(&self, row_div: Div, p: &Palette, locale: &'static str) -> Div {
+        let inputs = self.stt_inputs();
+        let locked = inputs.lock_reason().is_some();
+        match self.dropdowns.get(KEY_DICTATION_MODEL_ID) {
+            Some(dropdown) if !inputs.options().is_empty() => row_div.child(
+                div().w(px(MODEL_DROPDOWN_WIDTH)).h(px(DROPDOWN_HEIGHT)).child(
+                    Select::new(&dropdown.state)
+                        .with_size(ComponentSize::Small)
+                        .menu_max_h(px(DROPDOWN_MENU_MAX_HEIGHT))
+                        .disabled(locked),
+                ),
+            ),
+            _ => row_div.child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(p.dim)
+                    .child(crate::ocr_backend::i18n_for(locale).tr("stt-ui-no-models")),
+            ),
         }
     }
 
@@ -805,6 +1050,10 @@ impl SettingsView {
         if let Some((key, options, current)) = cycle {
             self.ensure_dropdown(key, options, &current, window, cx);
         }
+        if self.state.visible_row(position).is_some_and(|row| row.key == KEY_DICTATION_MODEL_ID) {
+            let inputs = self.stt_inputs();
+            self.ensure_model_dropdown(&inputs, window, cx);
+        }
         let Some(row) = self.state.visible_row(position) else {
             return div().into_any_element();
         };
@@ -826,12 +1075,18 @@ impl SettingsView {
         } else {
             None
         };
-        let sub = match (&row.error, backend_notice, dictation_notice, route_note) {
-            (Some(error), _, _, _) => div().text_color(p.danger).child(error.clone()),
-            (None, Some(notice), _, _) => div().text_color(p.danger).child(notice.message(self.state.prefs().locale)),
-            (None, None, Some(notice), _) => div().text_color(p.danger).child(notice),
-            (None, None, None, Some(note)) => div().text_color(p.dim).child(note),
-            (None, None, None, None) => div()
+        let stt_note = self.stt_row_note(key);
+        let sub = match (&row.error, stt_note, backend_notice, dictation_notice, route_note) {
+            (Some(error), ..) => div().text_color(p.danger).child(error.clone()),
+            (None, Some((text, danger)), ..) => {
+                div().text_color(if danger { p.danger } else { p.dim }).child(text)
+            }
+            (None, None, Some(notice), ..) => {
+                div().text_color(p.danger).child(notice.message(self.state.prefs().locale))
+            }
+            (None, None, None, Some(notice), _) => div().text_color(p.danger).child(notice),
+            (None, None, None, None, Some(note)) => div().text_color(p.dim).child(note),
+            (None, None, None, None, None) => div()
                 .text_color(p.dim)
                 .child(item_desc(lang, key).unwrap_or_else(|| key.to_string())),
         };
@@ -884,6 +1139,7 @@ impl SettingsView {
             .flex_col()
             .gap_1();
         for (index, group) in crate::settings_model::groups().iter().enumerate() {
+            let item_count = self.state.group_item_count(index);
             let is_active = active == Some(index);
             list = list.child(
                 div()
@@ -903,7 +1159,7 @@ impl SettingsView {
                         div()
                             .text_size(px(11.0))
                             .text_color(if is_active { p.on_accent } else { p.dim })
-                            .child(group.entries.len().to_string()),
+                            .child(item_count.to_string()),
                     )
                     .on_mouse_down(MouseButton::Left, Self::click(cx, SettingsAction::SwitchGroup(index))),
             );
@@ -1001,6 +1257,23 @@ impl SettingsView {
             .child(div().flex().items_center().gap_3().child(search).child(reset_group))
     }
 
+    /// 当前分组顶部说明区占的列表行数（翻译分组的 Hy-MT2 说明、语音分组的模型面板）；其它范围为 0。
+    fn header_len(&self) -> usize {
+        match self.current_group_id() {
+            Some(TRANSLATION_GROUP_ID) => self.hymt2_header_len(),
+            Some(DICTATION_GROUP_ID) => self
+                .stt_panel()
+                .map_or(0, |panel| hymt2_rows(panel.lines.len()).len()),
+            _ => 0,
+        }
+    }
+
+    /// 当前所在分组 id；搜索范围为 `None`。
+    fn current_group_id(&self) -> Option<&'static str> {
+        let Scope::Group(index) = self.state.scope() else { return None };
+        crate::settings_model::groups().get(index).map(|group| group.id)
+    }
+
     /// 翻译分组下说明区占的列表行数；其它范围为 0。
     fn hymt2_header_len(&self) -> usize {
         let Scope::Group(index) = self.state.scope() else { return 0 };
@@ -1082,6 +1355,111 @@ impl SettingsView {
         }
     }
 
+    /// 语音三项选择行的说明：置灰原因、无效组合提示，模型行未置灰时显示安装状态。
+    ///
+    /// # 返回
+    /// `(文案, 是否为警示)`；与语音转文字无关的键返回 `None`。
+    fn stt_row_note(&self, key: &str) -> Option<(String, bool)> {
+        if is_translate_note_key(key) {
+            let (config, _) = self.state.translate_snapshot();
+            return translate_note(&config, self.translate_support.as_ref(), self.state.prefs().locale);
+        }
+        if !is_selector_key(key) {
+            return None;
+        }
+        let locale = self.state.prefs().locale;
+        let inputs = self.stt_inputs();
+        if let Some(note) = selector_note(&inputs, key, locale) {
+            return Some(note);
+        }
+        if key != KEY_DICTATION_MODEL_ID {
+            return None;
+        }
+        if let DownloadState::Running { model_id, progress } = &self.stt_download
+            && inputs.selected().is_some_and(|spec| &spec.id == model_id)
+        {
+            let text = progress
+                .as_ref()
+                .map(|p| crate::stt_settings::progress_text(p, locale))
+                .unwrap_or_default();
+            return Some((text, false));
+        }
+        let spec = inputs.selected()?;
+        Some((model_row_status(spec, self.stt_installed.contains(&spec.id), locale), false))
+    }
+
+    /// 渲染说明区的第 `row_index` 个定高行：翻译分组走 Hy-MT2 说明，语音分组走模型面板。
+    fn render_header_row(&self, row_index: usize, p: &Palette, cx: &mut Context<Self>) -> AnyElement {
+        match self.current_group_id() {
+            Some(DICTATION_GROUP_ID) => self.render_stt_row(row_index, p, cx),
+            _ => self.render_hymt2_row(row_index, p, cx),
+        }
+    }
+
+    /// 渲染语音模型面板的第 `row_index` 个定高行（详情文本行与下载按钮行）。
+    fn render_stt_row(&self, row_index: usize, p: &Palette, cx: &mut Context<Self>) -> AnyElement {
+        let frame = div()
+            .h(px(ROW_HEIGHT))
+            .w_full()
+            .px_4()
+            .py_1()
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .text_size(px(12.0))
+            .line_height(px(16.0));
+        let Some(panel) = self.stt_panel() else { return frame.into_any_element() };
+        let rows = hymt2_rows(panel.lines.len());
+        let Some(row) = rows.get(row_index) else { return frame.into_any_element() };
+        match row {
+            Hymt2Row::Text { title, lines } => {
+                let mut block = frame;
+                if *title {
+                    block = block.child(div().font_weight(FontWeight::BOLD).child(panel.title.clone()));
+                }
+                for line in &panel.lines[lines.clone()] {
+                    block = block.child(div().text_color(p.dim).whitespace_nowrap().child(line.clone()));
+                }
+                block.into_any_element()
+            }
+            Hymt2Row::Actions => {
+                let action = panel.action;
+                let model_id = panel.model_id.clone();
+                let mut button = Button::new("stt-action").small().label(panel.action_label.clone());
+                button = match action {
+                    PanelAction::Download => button.on_click(cx.listener(
+                        move |this, _event: &ClickEvent, _window, cx| {
+                            this.start_stt_download(model_id.clone());
+                            cx.notify();
+                        },
+                    )),
+                    PanelAction::Cancel => button.outline().on_click(cx.listener(
+                        |this, _event: &ClickEvent, _window, cx| {
+                            this.cancel_stt_download();
+                            cx.notify();
+                        },
+                    )),
+                    PanelAction::Installed | PanelAction::Busy => button.disabled(true),
+                };
+                let button = button.disabled(action == PanelAction::Download && self.stt_hooks.is_none());
+                let notice = panel.notice.map(|(text, danger)| {
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(if danger { p.danger } else { p.dim })
+                        .whitespace_nowrap()
+                        .child(text)
+                });
+                frame
+                    .py_0()
+                    .pt(px(2.0))
+                    .border_b_1()
+                    .border_color(p.border)
+                    .child(div().flex().items_center().gap_3().child(button).children(notice))
+                    .into_any_element()
+            }
+        }
+    }
+
     /// 渲染状态栏。
     fn render_status(&self, p: &Palette) -> impl IntoElement {
         let (text, color) = match self.state.status() {
@@ -1131,7 +1509,7 @@ impl Render for SettingsView {
         }
         let p = palette(prefs.dark, prefs.accent);
         let lang = prefs.lang;
-        let header = self.hymt2_header_len();
+        let header = self.header_len();
         let visible = self.state.visible_len();
         let total = header + visible;
 
@@ -1153,7 +1531,7 @@ impl Render for SettingsView {
                     let rows: Vec<AnyElement> = range
                         .clone()
                         .map(|position| match split_list_index(position, header) {
-                            Err(row) => this.render_hymt2_row(row, &p, cx),
+                            Err(row) => this.render_header_row(row, &p, cx),
                             Ok(row) => this.render_row(row, &p, lang, window, cx),
                         })
                         .collect();

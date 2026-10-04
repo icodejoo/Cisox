@@ -11,7 +11,9 @@ use crate::settings_model::{
     shortcut_texts, with_shortcut, without_shortcut, GLOBAL_SHORTCUT_GROUP,
 };
 use crate::settings_text::{Lang, Text, group_title, item_label, t};
-use serde_json::Value;
+use crate::stt_settings::{SttInputs, affects_layout, resets_model_id};
+use serde_json::{Value, json};
+use snow_config::extensions::{KEY_DICTATION_MODEL_ID, KEY_DICTATION_SENSEVOICE_ITN};
 use snow_config::schema::{self, entries};
 use snow_config::store::ConfigStore;
 use snow_config::value::json_eq;
@@ -338,6 +340,23 @@ impl SettingsState {
         self.visible.get(position).map(|i| &self.all_rows[*i])
     }
 
+    /// 当前配置下的听写配置与翻译配置快照（供翻译提示行使用）。
+    pub fn translate_snapshot(
+        &self,
+    ) -> (
+        crate::dictation::config::DictationConfig,
+        crate::translate_service::TranslateConfig,
+    ) {
+        let store = self.store.borrow();
+        (
+            crate::dictation::config::DictationConfig::from_document(store.document()),
+            crate::translate_service::TranslateConfig::from_document(
+                store.document(),
+                &self.system.language,
+            ),
+        )
+    }
+
     /// 按键取行模型。
     pub fn row_by_key(&self, key: &str) -> Option<&RowModel> {
         self.all_rows.iter().find(|r| r.key == key)
@@ -461,8 +480,49 @@ impl SettingsState {
 
     /// 重建当前分组的可见列表。
     fn rebuild_group_rows(&mut self) {
-        self.visible = groups()[self.group].entries.clone();
+        self.visible = self.group_visible_entries(self.group);
         self.scope = Scope::Group(self.group);
+    }
+
+    /// 分组里当前可见的条目下标（扣除被隐藏的 itn 开关）。
+    fn group_visible_entries(&self, group: usize) -> Vec<usize> {
+        let itn_hidden = self.itn_hidden();
+        groups()[group]
+            .entries
+            .iter()
+            .copied()
+            .filter(|i| !(itn_hidden && self.all_rows[*i].key == KEY_DICTATION_SENSEVOICE_ITN))
+            .collect()
+    }
+
+    /// 分组当前可见的条目数；侧栏徽标与分组标题共用此口径。
+    ///
+    /// # 参数
+    /// - `group`：分组下标。
+    ///
+    /// # 返回
+    /// 可见条目数（被隐藏的条目不计）。
+    pub fn group_item_count(&self, group: usize) -> usize {
+        self.group_visible_entries(group).len()
+    }
+
+    /// 语音转文字的 itn 开关当前是否应隐藏（只有选中 SenseVoice 才显示）。
+    fn itn_hidden(&self) -> bool {
+        let store = self.store.borrow();
+        !SttInputs::from_lookup(|key| store.value(key)).itn_visible()
+    }
+
+    /// 写入影响条目显隐的键之后，按当前范围重建可见列表。
+    fn relayout_visible(&mut self) {
+        match self.scope {
+            Scope::Group(_) => self.rebuild_group_rows(),
+            Scope::Search => {
+                // 搜索结果需整体重算（增量过滤会漏掉刚显示出来的行）
+                let text = self.search.clone();
+                self.scope = Scope::Group(self.group);
+                self.set_search(&text);
+            }
+        }
     }
 
     /// 设置搜索文本：新查询以旧查询为前缀时，只在上次结果里增量过滤。
@@ -484,8 +544,10 @@ impl SettingsState {
             } else {
                 (0..self.all_rows.len()).collect()
             };
+            let itn_hidden = self.itn_hidden();
             self.visible = base
                 .into_iter()
+                .filter(|i| !(itn_hidden && self.all_rows[*i].key == KEY_DICTATION_SENSEVOICE_ITN))
                 .filter(|i| self.all_rows[*i].haystack.contains(&query))
                 .collect();
             self.scope = Scope::Search;
@@ -544,6 +606,13 @@ impl SettingsState {
 
     /// 写入成功后的收尾：偏好刷新、待处理变更、状态栏提示。
     fn after_write(&mut self, key: &'static str, previous: Value) {
+        if resets_model_id(key) {
+            // 切换识别模式 / 语言维度后，旧的备选模型 ID 已不属于新组合，清空回到默认
+            let _ = self.apply(KEY_DICTATION_MODEL_ID, json!(""));
+        }
+        if affects_layout(key) {
+            self.relayout_visible();
+        }
         if matches!(key, THEME_MODE_KEY | LANGUAGE_KEY | THEME_COLOR_KEY) {
             if self.system_follow_needed(key) {
                 self.system = SystemPrefs::query();
@@ -943,14 +1012,61 @@ mod tests {
         }
     }
 
-    /// 在临时目录里建一个状态，返回状态、共享存储与配置文件路径。
-    fn fixture() -> (SettingsState, SharedConfig, PathBuf) {
-        let dir = std::env::temp_dir().join(format!(
-            "snow-settings-state-{}-{}",
+    /// 夹具临时目录的清理守卫：测试线程结束时只删除自己创建的目录。
+    struct FixtureDir(PathBuf);
+
+    impl Drop for FixtureDir {
+        /// 删除夹具目录（忽略失败）。
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    thread_local! {
+        /// 当前测试线程创建的夹具目录，线程退出时统一清理。
+        static FIXTURE_DIRS: RefCell<Vec<FixtureDir>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// 生成唯一的夹具目录路径（进程号 + 纳秒时间 + 原子计数），避免进程号复用读到旧配置。
+    fn unique_fixture_dir() -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        std::env::temp_dir().join(format!(
+            "snow-settings-state-{}-{nanos}-{}",
             std::process::id(),
             COUNTER.fetch_add(1, Ordering::SeqCst)
-        ));
+        ))
+    }
+
+    /// 夹具目录名两次生成互不相同，且带进程号与时间戳。
+    #[test]
+    fn fixture_dirs_are_unique() {
+        let a = unique_fixture_dir();
+        let b = unique_fixture_dir();
+        assert_ne!(a, b);
+        assert!(a.to_string_lossy().contains(&std::process::id().to_string()));
+    }
+
+    /// 侧栏徽标与分组标题的条目数以可见条目为准：itn 开关隐藏时不计入，显示后加一。
+    #[test]
+    fn group_item_count_excludes_hidden_itn() {
+        let (mut state, _, _) = fixture();
+        let group = groups().iter().position(|g| g.id == "dictation").unwrap();
+        state.dispatch(SettingsAction::SwitchGroup(group));
+        assert_eq!(state.group_item_count(group), state.visible_len());
+        assert_eq!(state.group_item_count(group) + 1, groups()[group].entries.len());
+        state.apply("dictation/mode", json!("offline")).unwrap();
+        state.apply(KEY_DICTATION_MODEL_ID, json!("sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17")).unwrap();
+        assert_eq!(state.group_item_count(group), groups()[group].entries.len());
+        assert_eq!(state.group_item_count(group), state.visible_len());
+    }
+
+    /// 在临时目录里建一个状态，返回状态、共享存储与配置文件路径。
+    fn fixture() -> (SettingsState, SharedConfig, PathBuf) {
+        let dir = unique_fixture_dir();
         let path = dir.join("config.json");
+        FIXTURE_DIRS.with(|dirs| dirs.borrow_mut().push(FixtureDir(dir)));
         let store: SharedConfig = Rc::new(RefCell::new(ConfigStore::open(&path)));
         let state = SettingsState::new(Rc::clone(&store), fake_system());
         (state, store, path)
@@ -969,12 +1085,20 @@ mod tests {
         let total = entries().len();
         assert_eq!(state.total_rows(), total);
         let mut seen = 0;
+        let mut hidden = 0;
         for (index, group) in groups().iter().enumerate() {
             state.dispatch(SettingsAction::SwitchGroup(index));
-            assert_eq!(state.visible_len(), group.entries.len());
+            // 默认未选 SenseVoice 时，itn 开关按联动规则隐藏
+            let group_hidden = group
+                .entries
+                .iter()
+                .filter(|i| entries()[**i].key == KEY_DICTATION_SENSEVOICE_ITN)
+                .count();
+            assert_eq!(state.visible_len(), group.entries.len() - group_hidden);
             seen += state.visible_len();
+            hidden += group_hidden;
         }
-        assert_eq!(seen, total);
+        assert_eq!(seen + hidden, total);
         assert!(state.visible_row(0).is_some());
     }
 
@@ -1068,6 +1192,56 @@ mod tests {
         // 只读项不可重置
         state.reset("storage/schema_version");
         assert_eq!(state.row_by_key("storage/schema_version").unwrap().value, json!(3));
+    }
+
+    /// 语音分组可见行里是否含 itn 开关。
+    fn itn_visible_in(state: &SettingsState) -> bool {
+        (0..state.visible_len())
+            .any(|i| state.visible_row(i).is_some_and(|r| r.key == KEY_DICTATION_SENSEVOICE_ITN))
+    }
+
+    /// 切换识别模式或语言维度会清空模型 ID；写入模型 ID 本身不会连锁清空。
+    #[test]
+    fn switching_mode_or_dimension_resets_model_id() {
+        let (mut state, _, path) = fixture();
+        state.apply(KEY_DICTATION_MODEL_ID, json!("some-alt")).unwrap();
+        assert_eq!(disk_value(&path, KEY_DICTATION_MODEL_ID), Some(json!("some-alt")));
+        state.apply("dictation/mode", json!("offline")).unwrap();
+        assert_eq!(disk_value(&path, KEY_DICTATION_MODEL_ID), Some(json!("")));
+        state.apply(KEY_DICTATION_MODEL_ID, json!("some-alt")).unwrap();
+        state.apply("dictation/language_dimension", json!("zh")).unwrap();
+        assert_eq!(disk_value(&path, KEY_DICTATION_MODEL_ID), Some(json!("")));
+        // 模式值未变时不应清空
+        state.apply(KEY_DICTATION_MODEL_ID, json!("keep")).unwrap();
+        state.apply("dictation/mode", json!("offline")).unwrap();
+        assert_eq!(disk_value(&path, KEY_DICTATION_MODEL_ID), Some(json!("keep")));
+        // 重置单项同样触发联动
+        state.reset("dictation/mode");
+        assert_eq!(disk_value(&path, KEY_DICTATION_MODEL_ID), Some(json!("")));
+    }
+
+    /// itn 开关只在选中 SenseVoice 时出现在语音分组里，切换后随之显隐，搜索结果同理。
+    #[test]
+    fn itn_row_follows_selected_model() {
+        let (mut state, _, _) = fixture();
+        let group = groups().iter().position(|g| g.id == "dictation").unwrap();
+        state.dispatch(SettingsAction::SwitchGroup(group));
+        assert!(!itn_visible_in(&state));
+        let before = state.visible_len();
+        state.apply("dictation/mode", json!("offline")).unwrap();
+        state.apply(KEY_DICTATION_MODEL_ID, json!("sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17")).unwrap();
+        assert!(itn_visible_in(&state));
+        assert_eq!(state.visible_len(), before + 1);
+        // 手动目录会让三项失效，itn 随之隐藏
+        state.apply("dictation/model_dir", json!("D:/m")).unwrap();
+        assert!(!itn_visible_in(&state));
+        state.apply("dictation/model_dir", json!("")).unwrap();
+        assert!(itn_visible_in(&state));
+        // 搜索范围：显示出来的行能被搜到，隐藏后不再出现
+        state.set_search("punctuation");
+        assert!(itn_visible_in(&state));
+        state.apply("dictation/language_dimension", json!("zh")).unwrap();
+        assert!(!itn_visible_in(&state));
     }
 
     /// 文本编辑：非法整数留在编辑态，合法后落盘。

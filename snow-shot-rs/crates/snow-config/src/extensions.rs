@@ -8,7 +8,7 @@ use crate::schema::{IntRange, SchemaEntry, ValueKind, entry};
 use serde_json::json;
 
 /// 扩展项数量（`schema::entries()` 在原 238 项之后追加的条目数）。
-pub const EXTENSION_ENTRY_COUNT: usize = 20;
+pub const EXTENSION_ENTRY_COUNT: usize = 26;
 
 /// 翻译后端：`local` 本地 NMT worker，`openai` OpenAI 兼容通道。
 pub const KEY_TRANSLATION_BACKEND: &str = "screenshot_translation/backend";
@@ -45,6 +45,18 @@ pub const KEY_DICTATION_MODEL_DIR: &str = "dictation/model_dir";
 pub const KEY_DICTATION_LANGUAGE: &str = "dictation/language";
 /// 语音转文字推理线程数。
 pub const KEY_DICTATION_THREADS: &str = "dictation/threads";
+/// 语音转文字识别模式：`streaming` 边说边出字，`offline` 按 VAD 切句后整句识别（更准、延迟更高）。
+pub const KEY_DICTATION_RECOGNITION_MODE: &str = "dictation/mode";
+/// 语音转文字语言维度：`zh` 中文、`en` 英文、`bilingual` 中英混合。
+pub const KEY_DICTATION_LANGUAGE_DIMENSION: &str = "dictation/language_dimension";
+/// 语音转文字所选模型 ID；空串表示该维度与模式的默认模型，非空表示用户选了备选。
+pub const KEY_DICTATION_MODEL_ID: &str = "dictation/model_id";
+/// SenseVoice 是否启用逆文本规整（带标点与数字格式化），仅对该模型生效。
+pub const KEY_DICTATION_SENSEVOICE_ITN: &str = "dictation/sensevoice_itn";
+/// 语音转文字定稿句是否同时翻译（级联已接入，见 `dictation/translate.rs`）。
+pub const KEY_DICTATION_TRANSLATE_ENABLED: &str = "dictation/translate_enabled";
+/// 语音转文字翻译目标语言：`auto` 自动取另一语种，`zh-Hans` 简体中文，`en` 英文。
+pub const KEY_DICTATION_TRANSLATE_TARGET: &str = "dictation/translate_target";
 /// 语音转文字输出方式：`auto` 有可输入焦点就键入、否则弹浮窗，`type` 只键入，`overlay` 只浮窗。
 pub const KEY_DICTATION_OUTPUT_MODE: &str = "dictation/output_mode";
 /// 键入时是否同时显示浮窗。
@@ -70,6 +82,39 @@ const DICTATION_MODE_VALUES: &[&str] = &[
     DICTATION_MODE_BOTH,
     DICTATION_MODE_TOGGLE,
     DICTATION_MODE_HOLD,
+];
+/// 识别模式取值：流式。
+pub const DICTATION_RECOGNITION_STREAMING: &str = "streaming";
+/// 识别模式取值：离线（VAD 切句）。
+pub const DICTATION_RECOGNITION_OFFLINE: &str = "offline";
+/// 识别模式白名单。
+const DICTATION_RECOGNITION_VALUES: &[&str] = &[
+    DICTATION_RECOGNITION_STREAMING,
+    DICTATION_RECOGNITION_OFFLINE,
+];
+/// 语言维度取值：中文。
+pub const DICTATION_DIMENSION_ZH: &str = "zh";
+/// 语言维度取值：英文。
+pub const DICTATION_DIMENSION_EN: &str = "en";
+/// 语言维度取值：中英混合。
+pub const DICTATION_DIMENSION_BILINGUAL: &str = "bilingual";
+/// 语言维度白名单。
+const DICTATION_DIMENSION_VALUES: &[&str] = &[
+    DICTATION_DIMENSION_ZH,
+    DICTATION_DIMENSION_EN,
+    DICTATION_DIMENSION_BILINGUAL,
+];
+/// 翻译目标取值：自动。
+pub const DICTATION_TARGET_AUTO: &str = "auto";
+/// 翻译目标取值：简体中文。
+pub const DICTATION_TARGET_ZH_HANS: &str = "zh-Hans";
+/// 翻译目标取值：英文。
+pub const DICTATION_TARGET_EN: &str = "en";
+/// 翻译目标白名单。
+const DICTATION_TARGET_VALUES: &[&str] = &[
+    DICTATION_TARGET_AUTO,
+    DICTATION_TARGET_ZH_HANS,
+    DICTATION_TARGET_EN,
 ];
 /// 输出方式取值：自动。
 pub const DICTATION_OUTPUT_AUTO: &str = "auto";
@@ -221,6 +266,12 @@ pub(crate) fn extension_entries() -> Vec<SchemaEntry> {
         entry(KEY_DICTATION_HOLD_HOTKEY, json!([]), ValueKind::StringList, None, &[], Some(2)),
         entry(KEY_DICTATION_BACKEND, json!(DICTATION_BACKEND_LOCAL_MODEL), ValueKind::String, None, DICTATION_BACKEND_VALUES, None),
         entry(KEY_DICTATION_TRIGGER_MODE, json!(DICTATION_MODE_BOTH), ValueKind::String, None, DICTATION_MODE_VALUES, None),
+        entry(KEY_DICTATION_RECOGNITION_MODE, json!(DICTATION_RECOGNITION_STREAMING), ValueKind::String, None, DICTATION_RECOGNITION_VALUES, None),
+        entry(KEY_DICTATION_LANGUAGE_DIMENSION, json!(DICTATION_DIMENSION_BILINGUAL), ValueKind::String, None, DICTATION_DIMENSION_VALUES, None),
+        entry(KEY_DICTATION_MODEL_ID, json!(""), ValueKind::String, None, &[], None),
+        entry(KEY_DICTATION_SENSEVOICE_ITN, json!(true), ValueKind::Boolean, None, &[], None),
+        entry(KEY_DICTATION_TRANSLATE_ENABLED, json!(false), ValueKind::Boolean, None, &[], None),
+        entry(KEY_DICTATION_TRANSLATE_TARGET, json!(DICTATION_TARGET_AUTO), ValueKind::String, None, DICTATION_TARGET_VALUES, None),
         entry(KEY_DICTATION_MODEL_DIR, json!(""), ValueKind::String, None, &[], None),
         entry(KEY_DICTATION_LANGUAGE, json!(DEFAULT_DICTATION_LANGUAGE), ValueKind::String, None, &[], None),
         entry(
