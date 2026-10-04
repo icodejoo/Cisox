@@ -15,6 +15,10 @@ cargo test --workspace
 
 ## 目录与后续任务对应
 
+`snow-shot` 新增模块：
+- `window_pick.rs` — 截图选区智能窗口识别（悬停高亮、单击选中、手动框选；设置项"智能选择"，默认开）
+- `annotation_style.rs` — 标注样式面板（颜色、线宽、字号、填充、箭头头型；按工具记忆）
+
 | crate | 职责 | 阶段 / 填充任务 |
 |---|---|---|
 | `snow-shot` | bin 入口、子模式分发、单实例 | P1 单实例与入口 |
@@ -37,6 +41,27 @@ cargo test --workspace
 | `tools/workspace-guard` | 守卫：shell 之外出现 `gpui::` 或 gpui 依赖即测试失败 | P1 |
 
 日志与崩溃转储、CI 属 P1 后续任务，尚未建 crate / 流水线。
+
+## 新增依赖与功能
+
+- `snow-shot` 依赖 `snow-crates` 中的 `snow-ui-selector`（path，仅 Windows，Apache-2.0 许可，传递 `rstar`、`crossbeam-channel`）用于窗口识别。
+- `snow-ui-shell` 的 `windows` crate 新增 feature：`Win32_Graphics_Dwm`、`Win32_System_LibraryLoader`（标题栏深浅色、弹出菜单主题接口）。
+- i18n 新增 `.ftl` 文件：
+  - `locales/en-US/tray.ftl` / `locales/zh-CN/tray.ftl` — 托盘菜单文本（支持中英文并随语言设置即时刷新）
+  - `locales/en-US/annotation_style.ftl` / `locales/zh-CN/annotation_style.ftl` — 标注样式面板文本
+
+## 功能现状快照
+
+当前已落地功能：
+- **截图选区**：智能窗口识别（悬停高亮顶层窗口、单击选中、拖动转手动框选；设置项默认开启），控件级识别未做。
+- **标注工具**：新增样式面板（颜色、线宽、字号、填充、箭头头型，按工具记忆）与荧光笔、序号球。
+- **听写（实时语音转文字）**：可用（浮窗输出；键入到其它应用的真机验证未完成）。
+- **托盘菜单**：支持中英文并随语言设置即时刷新。
+- **深浅主题**：设置窗口标题栏与托盘菜单跟随 Windows 深浅主题。
+
+## 尚未完成
+
+缺口清单（简述）：7 个全局热键动作仍为占位（直接截图类已接线，无真机验证）、贴图管理页、OCR 结果窗、二维码、快捷键录入控件。MCP、更新、网络 crate 仅占位。macOS/Linux 推迟（ADR-7）。详见 `../docs/cisox-progress-handoff.md` 的「迁移差距盘点」。
 
 ## 可选下载的翻译模型与授权声明 / Optional translation models and license notice
 

@@ -4,6 +4,19 @@ Snow Apps repository, providing source code for Snow Shot and Snow Image Viewer.
 
 <div style="font-size: 128px">🏗️🚧🦺</div>
 
+## Current Feature Status
+
+**Cisox** — the pure Rust + GPUI port of Snow Shot, in active development on branch `rust-gpui`. Windows only for now.
+
+**Landed features:**
+- Screenshot region selection with smart window recognition (hover highlight, click select, drag to manual frame; setting "Smart Select" enabled by default; UI-element recognition not yet implemented).
+- Annotation tools: new style panel (color, line width, font size, fill, arrow head type, remembered per tool) plus highlighter and number markers.
+- Live speech-to-text (dictation) with floating output window; typing into other applications under real-device verification.
+- Tray menu supporting English and Chinese with instant refresh on language change.
+- Dark/light theme support for settings window title bar and tray menu on Windows.
+
+**Not yet implemented:** seven global hotkey actions that are still placeholders (history page, pin management page, selected-text translation and others), pin management page, OCR result window, QR code, keyboard shortcut input widget. MCP, update, and network crates are placeholder stubs. macOS and Linux deferred (ADR-7). See `docs/cisox-progress-handoff.md` "Migration gaps" for details.
+
 ## Install Snow Shot on Windows
 
 Download the installer from [Snow Shot releases](https://github.com/mg-chao/snow-apps/releases).

@@ -212,6 +212,30 @@ P0 验证基本完成，P1 地基完成，P2/P4/P5 已开工；**参考版（C++
 - [ ] 系统引擎（Media Foundation）、真实录屏样片基准与两引擎内存对比、合并操作（需改协议）仍缺。
 - [ ] 需要用户提供有代表性的录屏样片。
 
+**2026-10-04 界面与截图补齐（未提交，在工作区）**
+- [x] 听写浮窗：右上角 ✕ 关闭按钮（原底部关闭按钮移除）；去掉撑高空白，窗口高度 270→234，复制按钮上下留白减半。
+- [x] 托盘菜单文案走 i18n（新增 `tray.ftl`、en-US/zh-CN），设置里切换语言后托盘菜单即时刷新（新增 `TrayService::set_menu`）。
+- [x] 设置窗口标题栏与托盘弹出菜单跟随主题深浅（`snow-ui-shell` 新增 `ShellWindow::set_dark_title`、`ui::set_popup_menu_dark`；后者用 uxtheme 未公开序号 135/136，系统不生效时需换做法；windows crate 新增 feature `Win32_Graphics_Dwm`、`Win32_System_LibraryLoader`，无新依赖）。
+- [x] 截图智能选区阶段 1（窗口级）：悬停高亮顶层窗口、单击选中、位移超约 10 逻辑像素转手动框选；复用配置键 `screenshot_selection`/`smart_selection`（默认开，文案"智能选择"）；新增 `window_pick.rs`；依赖 `snow-ui-selector`（path，仅 Windows，Apache-2.0）及其传递的 `rstar`、`crossbeam-channel`、`heapless` 0.8，Cargo.lock 带入 macOS 专用包（Windows 不编译）；第三方许可证脚本未跑，需确认是否覆盖 `snow-shot-rs`。多显示器/负坐标/DPI 仅纯函数单测，无真机验证。[ ] 阶段 2 控件级（UIA、滚轮切换层级）未做。
+- [x] 标注样式面板最小闭环：选中工具弹出样式条（颜色预设+最近 8 色、线宽/字号/箭头头型下拉、矩形椭圆填充开关），按工具记忆并持久化到旧键 `drawing/*_style`（子字段名 `color`/`width`/`font_size`/`fill`/`arrowhead` 为自定，旧版无金样本；`recent_colors` 放在 `shape_style` 内）；荧光笔（`PenHighlight`）与序号球（`SerialNumber`）接通，工具栏新增"高亮""序号"。未做：独立填充色、选择工具（已画标注无法选中改样式）、工具栏按钮文字仍硬编码中文未迁 `.ftl`、面板首次显示会调用一次 `Theme::change(Dark)`。
+- [x] 截图工具栏右侧溢出修复：改为按右边缘锚定，估算宽度 790→890；[ ] 仍是估算值，根治需测量真实宽度。
+- [ ] 听写有焦点场景（`output_mode=auto/type`）的真机验证仍未做。
+- [x] 全局热键补全与直接截图（未提交）：新增 `quick_actions.rs`（键表、延迟状态机、输出方案）、`direct_capture.rs`、`AppCommand::QuickAction`。已接线：`screenshot_full_screen`、`screenshot_focused_window`（新增 `foreground_window_rect()`，snow-platform 的 windows 依赖加 `Win32_Graphics_Dwm`）、`screenshot_delay`（只用于该动作，普通 F1 不延迟）、`screenshot_fixed` / `screenshot_copy`（Ctrl+F1）/ `screenshot_ocr` / `screenshot_translation`（覆盖层框选后自动确认，对应旧版 `captureAndPinSelection` 等）、`open_settings`、`toggle_global_hotkeys`、`open_screen_recording_folder`。直接截图始终复制到剪贴板，开 `screenshot/auto_save_after_copy` 或 `copy_image_file_to_clipboard` 时再落盘。
+- [ ] 占位（触发后只给本地化提示，提示走托盘悬停与日志，无弹窗）：`screen_record_copy`、`open_capture_history`、`open_pin_to_screen_management`、`translate_selected_text`、`pin_selected_files`、`restore_last_closed_windows`、`toggle_disable_on_focused_fullscreen_window`。
+- [x] 截图历史（未提交）：新增 `history_store.rs`（后台写入、去重 10 秒、上限裁剪、分页、缩略图）、`history_view.rs`（历史窗口：虚拟滚动、每页 20 条、复制/贴图/定位文件/删除、清空二次确认）；写入点覆盖普通截图复制/保存/贴图与直接截图；入口为托盘"截图历史"与热键 `open_capture_history`（已从占位改为真实动作）；复用旧键 `capture_history/*` 与 `snow-history` 的 `index.json` v2 存储，未新增依赖。
+- [ ] 历史遗留：仅靠 `snow-history` 往返测试验证兼容，未用旧版真实数据对照；`canvas_history.json` 写 `{}`（旧版"再编辑"不可用）；`displays[0]` 与 `result` 为同一份 PNG（每条占两份）；Popconfirm 颜色写死浅色，深色主题下气泡为浅色卡片；保留天数清理只在打开历史页时触发；无筛选/批量删除；无真机验证。
+- [x] 录屏音频阶段 1（未提交）：MP4 单轨混音（系统声 WASAPI loopback + 麦克风）。协议 `START` 加可选前缀 `mic=`/`sys=`/`mvol=`/`svol=`/`mdev=`/`sdev=`（旧格式字节不变）与事件 `AUDIO_STATE`；worker 新增 `audio.rs`（混音器：10ms 槽、100ms 抖动窗口、增益、补零、暂停丢包）与 `win/aacsink.rs`；Media Foundation 路径加 AAC 流、FFmpeg 硬编路径加原生 `aac` 流（128 kbps、48k 立体声）、软件路径透传开关；无新增依赖（`snow-audio-recorder` 为 path 依赖，已在依赖树内）。主程序读旧键 `screen_recording/enable_microphone`、`enable_system_audio`，非 MP4 强制关闭；录制控制条显示降级提示（不可用/中断/本次没有声音）；`verify-snow-recorder.ps1` 加 `-Audio`。真屏自检：三条路径音视频时长差 ≤0.05s，暂停场景正确，GIF 无音轨。
+- [ ] 录屏音频遗留：开关只在设置页，录制工具栏没有（延迟为 0 时来不及用）；非 MP4 时设置页只改说明文字，开关未置灰；软件路径不支持音量/设备/AUDIO_STATE；麦克风真实内容未验证（本机麦克风阵列近乎静音）；设备选择、音量滑块、双轨属阶段 2；偶发风险：带音频放音 + MF 路径下出现过 3 次停止耗时约 90 秒（捕获更新数异常高），之后 4 次未复现，未定位，建议长录制多测，必要时给 Finalize 加超时。
+
+**迁移差距盘点（2026-10-04）**
+
+核心项目进度与已知偏差：
+
+- **P0**：标注样式面板（已补最小闭环，见上）、截图历史（已补，见上）、全局热键原先仅接 5 组，现已补接直接截图等 9 个动作（见上，无真机验证），仍有 7 个为占位、录屏音频（阶段 1 已补，见上）。
+- **P1**：延迟截图（`screenshot/delay_seconds` 采集流程未读）、快捷键录入控件（仍是通用文本框）、贴图管理页/分组/隐藏到顶部/从文件贴图、OCR 结果窗与二维码识别、选中文本翻译、视频编辑 UI、`snow-mcp`/`snow-update`/`snow-net` 仅占位、托盘缺历史/更新等入口且图标为纯色占位、聚光灯/橡皮擦/水印/自动滤镜工具缺失。
+- **文档与代码不一致**：`docs/cisox-migration-acceptance-report.md` 写"核心功能已 100% 交付"、迁移方案 P6/handoff §5 写 `ClickRipple`、`KeystrokeDisplay` 已落地，但 crates 内无这两个符号，录屏也无音频/点击特效/按键回显；报告写"15 种标注工具"而 `AnnotationTool` 只有 12 个变体（本轮已补荧光笔与序号球可用）；handoff 说根 `AGENTS.md` 仍是旧 Qt 版的待办已过期（现已是 Rust 版）。
+- **已明确推迟/允许占位**：macOS/Linux（ADR-7）、自动更新/崩溃上报/表格公式识别/安装包/旧数据导入（迁移方案 §10）、H.265/AV1/WebM。
+
 **已搁置（存档，可恢复）**
 - H.265：暂不支持，原因与恢复起点见 `docs/research/windows-hevc-support.md`。恢复前要补：干净 Windows（未装 HEVC 扩展）实测、Intel/AMD 实测、法务确认授权。
 - AV1：仅作设想，未调研落地；需驱动升级后才能验证本机 `av1_nvenc`。
