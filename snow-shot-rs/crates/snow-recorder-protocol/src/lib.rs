@@ -83,6 +83,24 @@ const EVT_EDIT_PROGRESS: &str = "EDIT_PROGRESS";
 const EVT_EDIT_FINISHED: &str = "EDIT_FINISHED";
 /// 事件字：探测结果。
 const EVT_PROBE_RESULT: &str = "PROBE_RESULT";
+/// 事件字：音频源状态变化。
+const EVT_AUDIO_STATE: &str = "AUDIO_STATE";
+/// START 前缀令牌：启用麦克风。
+const START_MIC_KEY: &str = "mic";
+/// START 前缀令牌：启用系统声。
+const START_SYS_KEY: &str = "sys";
+/// START 前缀令牌：麦克风音量。
+const START_MIC_VOL_KEY: &str = "mvol";
+/// START 前缀令牌：系统声音量。
+const START_SYS_VOL_KEY: &str = "svol";
+/// START 前缀令牌：麦克风设备 ID。
+const START_MIC_DEV_KEY: &str = "mdev";
+/// START 前缀令牌：系统声（渲染）设备 ID。
+const START_SYS_DEV_KEY: &str = "sdev";
+/// 音量默认值（百分比，100 为原始电平）。
+pub const AUDIO_VOLUME_DEFAULT: u16 = 100;
+/// 音量上限（百分比）。
+pub const AUDIO_VOLUME_MAX: u16 = 200;
 /// 编辑命令里输入与输出路径之间的分隔符（Windows 路径不会含制表符）。
 const PATH_SEP: char = '\t';
 
@@ -147,6 +165,112 @@ impl MediaFormat {
     }
 }
 
+/// 录音请求：仅 MP4 生效，GIF/APNG/WebP 忽略。
+///
+/// # 示例
+/// ```
+/// use snow_recorder_protocol::AudioRequest;
+/// let a = AudioRequest { system: true, ..AudioRequest::default() };
+/// assert!(a.enabled());
+/// assert_eq!(a.mic_volume, 100);
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AudioRequest {
+    /// 是否录麦克风。
+    pub microphone: bool,
+    /// 是否录系统声（WASAPI loopback）。
+    pub system: bool,
+    /// 麦克风音量，0..=200（百分比）。
+    pub mic_volume: u16,
+    /// 系统声音量，0..=200（百分比）。
+    pub system_volume: u16,
+    /// 麦克风设备 ID；`None` 用系统默认。
+    pub mic_device: Option<String>,
+    /// 系统声所用渲染设备 ID；`None` 用系统默认。
+    pub system_device: Option<String>,
+}
+
+impl Default for AudioRequest {
+    /// 全关，音量 100，设备取系统默认。
+    fn default() -> Self {
+        Self {
+            microphone: false,
+            system: false,
+            mic_volume: AUDIO_VOLUME_DEFAULT,
+            system_volume: AUDIO_VOLUME_DEFAULT,
+            mic_device: None,
+            system_device: None,
+        }
+    }
+}
+
+impl AudioRequest {
+    /// 是否至少启用一路音频。
+    pub fn enabled(&self) -> bool {
+        self.microphone || self.system
+    }
+}
+
+/// 音频源类别。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioSource {
+    /// 麦克风。
+    Microphone,
+    /// 系统声。
+    System,
+}
+
+impl AudioSource {
+    /// 协议中的名字（`mic` / `sys`）。
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Microphone => "mic",
+            Self::System => "sys",
+        }
+    }
+
+    /// 从协议名解析。
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "mic" => Some(Self::Microphone),
+            "sys" => Some(Self::System),
+            _ => None,
+        }
+    }
+}
+
+/// 音频源状态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioStatus {
+    /// 正常采集。
+    Ok,
+    /// 中途丢失（设备拔出等），该路之后为静音。
+    Lost,
+    /// 启动时就不可用（无设备或被拒绝），该路被跳过。
+    Unavailable,
+}
+
+impl AudioStatus {
+    /// 协议中的名字（`ok` / `lost` / `unavailable`）。
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Lost => "lost",
+            Self::Unavailable => "unavailable",
+        }
+    }
+
+    /// 从协议名解析。
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "ok" => Some(Self::Ok),
+            "lost" => Some(Self::Lost),
+            "unavailable" => Some(Self::Unavailable),
+            _ => None,
+        }
+    }
+}
+
 /// 开始录制请求。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StartRequest {
@@ -166,6 +290,8 @@ pub struct StartRequest {
     pub show_cursor: bool,
     /// 最终输出路径（扩展名须与格式一致）。
     pub output: PathBuf,
+    /// 录音请求（默认全关）。
+    pub audio: AudioRequest,
 }
 
 /// 编辑引擎选择。
@@ -506,6 +632,13 @@ pub enum Event {
     },
     /// 探测结果。
     ProbeResult(ProbeInfo),
+    /// 音频源状态变化（可选事件，旧版主程序会忽略）。
+    AudioState {
+        /// 音频源。
+        source: AudioSource,
+        /// 新状态。
+        status: AudioStatus,
+    },
 }
 
 /// 协议解析错误。
@@ -552,6 +685,78 @@ fn number<T: std::str::FromStr>(field: Option<&str>, name: &str) -> Result<T, Pa
     }
 }
 
+/// 设备 ID 编码为不含空白的单行记号：字母数字与 `-_.` 原样，其余按字节转 `%XX`。
+fn encode_token(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for b in text.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.') {
+            out.push(char::from(b));
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+/// [`encode_token`] 的逆运算；非法转义返回 `None`。
+fn decode_token(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = text.get(i + 1..i + 3)?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+/// START 的可选前缀令牌（每个后跟一个空格）；缺省值不输出，旧格式字节不变。
+fn start_prefix(a: &AudioRequest) -> String {
+    let mut out = String::new();
+    if a.microphone {
+        out.push_str(&format!("{START_MIC_KEY}=1 "));
+    }
+    if a.system {
+        out.push_str(&format!("{START_SYS_KEY}=1 "));
+    }
+    if a.mic_volume != AUDIO_VOLUME_DEFAULT {
+        out.push_str(&format!("{START_MIC_VOL_KEY}={} ", a.mic_volume));
+    }
+    if a.system_volume != AUDIO_VOLUME_DEFAULT {
+        out.push_str(&format!("{START_SYS_VOL_KEY}={} ", a.system_volume));
+    }
+    if let Some(d) = a.mic_device.as_deref().filter(|d| !d.is_empty()) {
+        out.push_str(&format!("{START_MIC_DEV_KEY}={} ", encode_token(d)));
+    }
+    if let Some(d) = a.system_device.as_deref().filter(|d| !d.is_empty()) {
+        out.push_str(&format!("{START_SYS_DEV_KEY}={} ", encode_token(d)));
+    }
+    out
+}
+
+/// 把一个前缀令牌应用到录音请求；未知键忽略（向前兼容）。
+fn apply_prefix_token(a: &mut AudioRequest, token: &str) {
+    let Some((key, value)) = token.split_once('=') else {
+        return;
+    };
+    let volume = || value.parse::<u16>().ok().map(|v| v.min(AUDIO_VOLUME_MAX));
+    match key {
+        START_MIC_KEY => a.microphone = value == "1",
+        START_SYS_KEY => a.system = value == "1",
+        START_MIC_VOL_KEY => a.mic_volume = volume().unwrap_or(AUDIO_VOLUME_DEFAULT),
+        START_SYS_VOL_KEY => a.system_volume = volume().unwrap_or(AUDIO_VOLUME_DEFAULT),
+        START_MIC_DEV_KEY => a.mic_device = decode_token(value).filter(|d| !d.is_empty()),
+        START_SYS_DEV_KEY => a.system_device = decode_token(value).filter(|d| !d.is_empty()),
+        _ => {}
+    }
+}
+
 impl Command {
     /// 序列化为一行文本（不含换行符）。
     ///
@@ -566,7 +771,8 @@ impl Command {
     pub fn to_line(&self) -> String {
         match self {
             Self::Start(r) => format!(
-                "{CMD_START} {} {} {} {} {} {} {} {}",
+                "{CMD_START} {}{} {} {} {} {} {} {} {}",
+                start_prefix(&r.audio),
                 r.x,
                 r.y,
                 r.width,
@@ -615,6 +821,15 @@ impl Command {
             CMD_STOP => Ok(Self::Stop),
             CMD_CANCEL => Ok(Self::Cancel),
             CMD_START => {
+                let mut audio = AudioRequest::default();
+                let mut rest = rest;
+                while let Some((token, after)) = rest
+                    .split_once(' ')
+                    .filter(|(token, _)| token.contains('='))
+                {
+                    apply_prefix_token(&mut audio, token);
+                    rest = after;
+                }
                 let mut it = rest.splitn(8, ' ');
                 let x = number(it.next(), "x")?;
                 let y = number(it.next(), "y")?;
@@ -637,6 +852,7 @@ impl Command {
                     fps,
                     show_cursor: cursor != 0,
                     output: PathBuf::from(path),
+                    audio,
                 }))
             }
             CMD_EDIT => {
@@ -718,6 +934,9 @@ impl Event {
                 "{EVT_PROBE_RESULT} {} {} {} {} {} {}",
                 p.width, p.height, p.duration_ms, p.fps_milli, p.frames, p.keyframes
             ),
+            Self::AudioState { source, status } => {
+                format!("{EVT_AUDIO_STATE} {} {}", source.as_str(), status.as_str())
+            }
         }
     }
 
@@ -805,6 +1024,16 @@ impl Event {
                     keyframes: number(it.next(), "keyframes")?,
                 }))
             }
+            EVT_AUDIO_STATE => {
+                let mut it = rest.split(' ');
+                let Some(source) = it.next().and_then(AudioSource::parse) else {
+                    return err("字段 source 缺失或不受支持");
+                };
+                let Some(status) = it.next().and_then(AudioStatus::parse) else {
+                    return err("字段 status 缺失或不受支持");
+                };
+                Ok(Self::AudioState { source, status })
+            }
             other => err(format!("未知事件: {other}")),
         }
     }
@@ -825,7 +1054,71 @@ mod tests {
             fps: 30,
             show_cursor: true,
             output: PathBuf::from("C:\\My Videos\\a b.gif"),
+            audio: AudioRequest::default(),
         }
+    }
+
+    /// 全字段录音请求（设备 ID 含空格、花括号与中文）。
+    fn full_audio() -> AudioRequest {
+        AudioRequest {
+            microphone: true,
+            system: true,
+            mic_volume: 150,
+            system_volume: 0,
+            mic_device: Some("{0.0.1.00000000}.{abc-1} 麦克风".into()),
+            system_device: Some("扬声器 (Realtek)".into()),
+        }
+    }
+
+    /// 默认录音请求的 START 行与旧格式字节完全一致。
+    #[test]
+    fn default_audio_keeps_legacy_bytes() {
+        assert_eq!(
+            Command::Start(sample_start()).to_line(),
+            "START -1920 10 2560 1440 gif 30 1 C:\\My Videos\\a b.gif"
+        );
+    }
+
+    /// 录音请求往返：含设备 ID 编码，路径含空格。
+    #[test]
+    fn audio_start_round_trip() {
+        let mut req = sample_start();
+        req.audio = full_audio();
+        let line = Command::Start(req.clone()).to_line();
+        assert!(line.starts_with("START mic=1 sys=1 mvol=150 svol=0 mdev="));
+        assert_eq!(Command::parse(&line).unwrap(), Command::Start(req));
+        // 仅部分字段
+        let mut req = sample_start();
+        req.audio.system = true;
+        let line = Command::Start(req.clone()).to_line();
+        assert!(line.starts_with("START sys=1 -1920"));
+        assert_eq!(Command::parse(&line).unwrap(), Command::Start(req));
+    }
+
+    /// 未知前缀键被忽略，音量超限被截断。
+    #[test]
+    fn audio_prefix_is_lenient() {
+        let Command::Start(r) =
+            Command::parse("START mic=1 future=9 mvol=999 1 2 3 4 mp4 30 0 a b.mp4").unwrap()
+        else {
+            panic!("应为 START");
+        };
+        assert!(r.audio.microphone);
+        assert_eq!(r.audio.mic_volume, AUDIO_VOLUME_MAX);
+        assert_eq!(r.output, PathBuf::from("a b.mp4"));
+    }
+
+    /// 音频状态事件往返；非法值被拒绝。
+    #[test]
+    fn audio_state_event_round_trip() {
+        for source in [AudioSource::Microphone, AudioSource::System] {
+            for status in [AudioStatus::Ok, AudioStatus::Lost, AudioStatus::Unavailable] {
+                let evt = Event::AudioState { source, status };
+                assert_eq!(Event::parse(&evt.to_line()).unwrap(), evt);
+            }
+        }
+        assert!(Event::parse("AUDIO_STATE mic").is_err());
+        assert!(Event::parse("AUDIO_STATE cam ok").is_err());
     }
 
     /// 命令往返：含空格路径与负坐标。

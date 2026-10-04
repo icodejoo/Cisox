@@ -17,6 +17,12 @@ const BORDER_LOGICAL: f32 = 2.0;
 const TOOLBAR_LOGICAL_WIDTH: f32 = 400.0;
 /// 控制条逻辑高度。
 const TOOLBAR_LOGICAL_HEIGHT: f32 = 40.0;
+/// 音频降级提示行的逻辑高度。
+const NOTICE_LOGICAL_HEIGHT: f32 = 22.0;
+/// 音频降级提示的文字颜色（警示黄）。
+const COLOR_NOTICE: u32 = 0xFAAD14FF;
+/// 多条音频提示之间的分隔。
+const NOTICE_SEPARATOR: &str = " · ";
 /// 控制条与选区的逻辑间距。
 const TOOLBAR_LOGICAL_MARGIN: f32 = 8.0;
 /// 倒计时数字框的逻辑边长。
@@ -95,13 +101,14 @@ impl AreaLayout {
 /// - `window`：窗口矩形（原点 0,0，物理像素）。
 /// - `scale`：显示器缩放比（物理 / 逻辑）。
 /// - `countdown`：是否处于倒计时（需要数字框）。
+/// - `notice`：控制条是否多带一行音频降级提示（增高）。
 ///
 /// # 返回
 /// 布局；边框条画在选区**外侧**，不会进入被录制的画面。
 ///
 /// # 示例
 /// ```ignore
-/// let l = compute_layout(PhysicalRect::new(100, 100, 400, 300), PhysicalRect::new(0, 0, 1920, 1080), 1.0, false);
+/// let l = compute_layout(PhysicalRect::new(100, 100, 400, 300), PhysicalRect::new(0, 0, 1920, 1080), 1.0, false, false);
 /// assert_eq!(l.border.len(), 4);
 /// ```
 pub fn compute_layout(
@@ -109,6 +116,7 @@ pub fn compute_layout(
     window: PhysicalRect,
     scale: f32,
     countdown: bool,
+    notice: bool,
 ) -> AreaLayout {
     let t = (BORDER_LOGICAL * scale).ceil() as i32;
     let strips = [
@@ -123,7 +131,7 @@ pub fn compute_layout(
         .collect();
     let size = PhysicalPoint::new(
         (TOOLBAR_LOGICAL_WIDTH * scale).round() as i32,
-        (TOOLBAR_LOGICAL_HEIGHT * scale).round() as i32,
+        ((TOOLBAR_LOGICAL_HEIGHT + if notice { NOTICE_LOGICAL_HEIGHT } else { 0.0 }) * scale).round() as i32,
     );
     let margin = (TOOLBAR_LOGICAL_MARGIN * scale).round() as i32;
     let pos = calculate_toolbar_placement(region, size, window, margin);
@@ -177,6 +185,8 @@ pub struct RecordingAreaView {
     error_since: Option<Instant>,
     /// 自动化计划。
     auto: Option<AutoState>,
+    /// 界面语言代码（提示文案用）。
+    locale: &'static str,
 }
 
 impl RecordingAreaView {
@@ -198,7 +208,33 @@ impl RecordingAreaView {
             countdown_tick_at: Instant::now(),
             error_since: None,
             auto: None,
+            locale: snow_i18n::FALLBACK_LOCALE,
         }
+    }
+
+    /// 设置界面语言（影响音频降级提示文案）。
+    ///
+    /// # 参数
+    /// - `locale`：语料语言代码，如 `zh-CN`。
+    pub fn set_locale(&mut self, locale: &'static str) {
+        self.locale = locale;
+    }
+
+    /// 音频降级提示文本：仅倒计时 / 录制 / 保存期间显示，无降级时为 `None`。
+    pub fn audio_notice_text(&self) -> Option<String> {
+        if !matches!(
+            self.session.state(),
+            RecordingState::Countdown { .. } | RecordingState::Recording { .. } | RecordingState::Saving
+        ) {
+            return None;
+        }
+        let notices = self.session.audio_notices();
+        if notices.is_empty() {
+            return None;
+        }
+        let i18n = crate::ocr_backend::i18n_for(self.locale);
+        let texts: Vec<String> = notices.iter().map(|n| i18n.tr(n.message_id())).collect();
+        Some(texts.join(NOTICE_SEPARATOR))
     }
 
     /// 启用自动化验证计划（仅测试 / 验收用）。
@@ -230,7 +266,13 @@ impl RecordingAreaView {
     pub fn layout(&self) -> AreaLayout {
         let window = PhysicalRect::new(0, 0, self.window_size.0, self.window_size.1);
         let countdown = matches!(self.session.state(), RecordingState::Countdown { .. });
-        compute_layout(self.region_in_window(), window, self.scale, countdown)
+        compute_layout(
+            self.region_in_window(),
+            window,
+            self.scale,
+            countdown,
+            self.audio_notice_text().is_some(),
+        )
     }
 
     /// 处理外部操作动作。
@@ -417,20 +459,14 @@ impl Render for RecordingAreaView {
         }
 
         let (l, t, w, h) = self.logical(layout.toolbar);
+        let notice_text = self.audio_notice_text();
         let mut bar = div()
-            .absolute()
-            .left(l)
-            .top(t)
-            .w(w)
-            .h(h)
+            .w_full()
+            .h(px(TOOLBAR_LOGICAL_HEIGHT))
             .flex()
             .items_center()
             .gap_2()
             .px_3()
-            .rounded_lg()
-            .bg(rgba(0x1F1F1FEE))
-            .border_1()
-            .border_color(rgba(0xFFFFFF26))
             .child(div().w(px(10.0)).h(px(10.0)).rounded_full().bg(rgba(accent)));
         let label_style = |text: String| {
             div()
@@ -478,7 +514,33 @@ impl Render for RecordingAreaView {
             }
             RecordingState::Idle | RecordingState::Finished { .. } => {}
         }
-        root.child(bar)
+        let mut outer = div()
+            .absolute()
+            .left(l)
+            .top(t)
+            .w(w)
+            .h(h)
+            .flex()
+            .flex_col()
+            .rounded_lg()
+            .bg(rgba(0x1F1F1FEE))
+            .border_1()
+            .border_color(rgba(0xFFFFFF26))
+            .child(bar);
+        if let Some(text) = notice_text {
+            outer = outer.child(
+                div()
+                    .w_full()
+                    .h(px(NOTICE_LOGICAL_HEIGHT))
+                    .px_3()
+                    .flex()
+                    .items_center()
+                    .text_size(px(11.0))
+                    .text_color(rgba(COLOR_NOTICE))
+                    .child(text),
+            );
+        }
+        root.child(outer)
     }
 }
 
@@ -523,11 +585,38 @@ mod tests {
         (v, shared)
     }
 
+    /// 音频降级提示：只在录制期间出现，随语言切换，并让控制条增高一行。
+    #[test]
+    fn audio_notice_shows_and_grows_toolbar() {
+        use snow_recorder_protocol::{AudioRequest, AudioSource, AudioStatus};
+        let shared = Rc::new(RefCell::new((Vec::new(), Vec::new())));
+        let config = RecordingConfig {
+            region: PhysicalRect::new(100, 100, 800, 600),
+            audio: AudioRequest { microphone: true, system: true, ..AudioRequest::default() },
+            ..RecordingConfig::default()
+        };
+        let mut v = RecordingAreaView::new(config, PhysicalRect::new(0, 0, 1920, 1080), 1.0);
+        v.set_locale("zh-CN");
+        v.session.begin(Box::new(Link(shared.clone())), 0);
+        let plain_h = v.layout().toolbar.height;
+        assert_eq!(v.audio_notice_text(), None);
+        let event = |source, status| LinkEvent::Event(Event::AudioState { source, status });
+        shared.borrow_mut().1.push(event(AudioSource::Microphone, AudioStatus::Unavailable));
+        assert!(v.advance(Instant::now()));
+        assert_eq!(v.audio_notice_text().as_deref(), Some("麦克风不可用"));
+        assert!(v.layout().toolbar.height > plain_h);
+        shared.borrow_mut().1.push(event(AudioSource::System, AudioStatus::Unavailable));
+        v.advance(Instant::now());
+        assert_eq!(v.audio_notice_text().as_deref(), Some("本次录制没有声音"));
+        v.set_locale("en-US");
+        assert_eq!(v.audio_notice_text().as_deref(), Some("This recording has no sound"));
+    }
+
     /// 边框画在选区外侧且不与选区相交（不会进入被录制画面）。
     #[test]
     fn border_stays_outside_region() {
         let region = PhysicalRect::new(100, 100, 400, 300);
-        let l = compute_layout(region, PhysicalRect::new(0, 0, 1920, 1080), 1.0, false);
+        let l = compute_layout(region, PhysicalRect::new(0, 0, 1920, 1080), 1.0, false, false);
         assert_eq!(l.border.len(), 4);
         for strip in &l.border {
             assert!(strip.intersect(&region).is_none(), "{strip:?} 侵入选区");
@@ -538,9 +627,9 @@ mod tests {
     #[test]
     fn border_clipped_at_screen_edge() {
         let win = PhysicalRect::new(0, 0, 1920, 1080);
-        let l = compute_layout(PhysicalRect::new(0, 0, 1920, 1080), win, 1.0, false);
+        let l = compute_layout(PhysicalRect::new(0, 0, 1920, 1080), win, 1.0, false, false);
         assert!(l.border.is_empty());
-        let l = compute_layout(PhysicalRect::new(0, 50, 500, 400), win, 1.0, false);
+        let l = compute_layout(PhysicalRect::new(0, 50, 500, 400), win, 1.0, false, false);
         assert!(l.border.iter().all(|s| win.intersect(s) == Some(*s)));
     }
 
@@ -549,11 +638,11 @@ mod tests {
     fn toolbar_and_countdown_box() {
         let win = PhysicalRect::new(0, 0, 1920, 1080);
         let region = PhysicalRect::new(200, 200, 600, 400);
-        let l = compute_layout(region, win, 1.5, true);
+        let l = compute_layout(region, win, 1.5, true, false);
         assert_eq!(win.intersect(&l.toolbar), Some(l.toolbar));
         let b = l.countdown_box.unwrap();
         assert_eq!(b.x + b.width / 2, region.x + region.width / 2);
-        assert!(compute_layout(region, win, 1.0, false).countdown_box.is_none());
+        assert!(compute_layout(region, win, 1.0, false, false).countdown_box.is_none());
         assert_eq!(l.hit_rects().len(), l.border.len() + 2);
     }
 

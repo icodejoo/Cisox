@@ -200,6 +200,7 @@ fn windows_spec(request: &StartRequest, partial: &std::path::Path) -> Result<cra
     if let Ok(p) = std::env::var(settings::ENV_QSV_PRESET) {
         spec.preset = p;
     }
+    spec.audio = request.audio.clone();
     match settings::parse_encoder_preference(std::env::var(settings::ENV_ENCODER).ok().as_deref()) {
         Ok(preference) => spec.encoder = preference,
         Err(reason) => eprintln!("{reason}"),
@@ -250,7 +251,7 @@ mod tests {
 
     /// 构造测试请求。
     fn request(format: MediaFormat) -> StartRequest {
-        StartRequest { x: 0, y: 0, width: 64, height: 64, format, fps: 30, show_cursor: true, output: PathBuf::from("o.mp4") }
+        StartRequest { x: 0, y: 0, width: 64, height: 64, format, fps: 30, show_cursor: true, output: PathBuf::from("o.mp4"), audio: Default::default() }
     }
 
     /// 首个装配成功就不再尝试后面的。

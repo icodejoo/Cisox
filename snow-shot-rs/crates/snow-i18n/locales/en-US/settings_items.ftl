@@ -305,3 +305,5 @@ setting-dictation-model-id-desc = Recommended model is the default; pick another
 setting-dictation-sensevoice-itn-desc = Adds punctuation and converts spoken numbers to digits; SenseVoice only
 setting-dictation-translate-enabled-desc = Shows a translation under each sentence; needs a model from translation settings
 setting-dictation-translate-target-desc = Auto: Chinese is translated to English, anything else to Simplified Chinese
+setting-screen-recording-enable-microphone-desc = Mix the microphone into MP4 recordings
+setting-screen-recording-enable-system-audio-desc = Mix system sound into MP4 recordings

@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 
 use snow_cursor::AttachedCursorSample;
 
+use crate::audio::AudioRecorder;
 use crate::frametrace::{self, Thread, TraceBuf, code};
 use crate::os::{TimerGuard, apply_capture_sched_from_env};
 use crate::timeline::{NANOS_PER_SEC, PhaseTracker, TickClock, TimedQueue, Timeline, slot_of};
@@ -340,6 +341,8 @@ pub struct Running {
     fps: u32,
     /// 启动耗时分解（毫秒）。
     startup_ms: (f32, f32, f32),
+    /// 音频录制（没有音频时为 `None`）；停止时先于视频收尾。
+    audio: Option<AudioRecorder>,
     /// 计时器精度守卫（随录制结束释放）。
     _timer: TimerGuard,
 }
@@ -689,7 +692,30 @@ where
 ///
 /// # 返回
 /// 运行中的流水线句柄；首帧探测失败返回原因。
-pub fn start<C, P, E>(config: PipelineConfig, backend: &str, capture: C, mut composer: P, mut encoder: E) -> Result<Running, String>
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn start<C, P, E>(config: PipelineConfig, backend: &str, capture: C, composer: P, encoder: E) -> Result<Running, String>
+where
+    C: CaptureSource,
+    P: FrameComposer<Frame = C::Frame, Surface = E::Surface>,
+    E: VideoEncoder,
+{
+    start_with_audio(config, backend, capture, composer, encoder, None)
+}
+
+/// 启动流水线，并带上音频录制：视频时间线起点会同步给音频，暂停、恢复、停止也随之转发。
+///
+/// # 参数
+/// - `audio`：已绑定封装后端的音频录制句柄；`None` 等同 [`start`]。
+///
+/// 其余参数与返回同 [`start`]；出错时音频句柄随之丢弃（线程自行退出）。
+pub fn start_with_audio<C, P, E>(
+    config: PipelineConfig,
+    backend: &str,
+    capture: C,
+    mut composer: P,
+    mut encoder: E,
+    audio: Option<AudioRecorder>,
+) -> Result<Running, String>
 where
     C: CaptureSource,
     P: FrameComposer<Frame = C::Frame, Surface = E::Surface>,
@@ -720,6 +746,9 @@ where
     };
     // 时间线从首帧呈现时刻起算：探测期间已呈现的帧也能落到正确的槽，不会被并进同一个槽
     let start = first.present.min(Instant::now());
+    if let Some(a) = &audio {
+        a.set_origin(start);
+    }
     let waited = wait_started.elapsed();
     let mut compose_took = Duration::ZERO;
     let mut probe_trace = TraceBuf::new(Thread::Compose);
@@ -788,6 +817,7 @@ where
         backend: backend.to_string(),
         fps: config.fps,
         startup_ms,
+        audio,
         _timer: timer,
     })
 }
@@ -800,13 +830,21 @@ impl Running {
 
     /// 暂停录制（暂停期间的时间不计入时长）。
     pub fn pause(&self) {
+        let now = Instant::now();
         self.shared.paused.store(true, Ordering::Release);
-        let _ = self.control.send(Control::Pause(Instant::now()));
+        if let Some(a) = &self.audio {
+            a.pause(now);
+        }
+        let _ = self.control.send(Control::Pause(now));
     }
 
     /// 恢复录制。
     pub fn resume(&self) {
-        let _ = self.control.send(Control::Resume(Instant::now()));
+        let now = Instant::now();
+        if let Some(a) = &self.audio {
+            a.resume(now);
+        }
+        let _ = self.control.send(Control::Resume(now));
         self.shared.paused.store(false, Ordering::Release);
     }
 
@@ -815,7 +853,12 @@ impl Running {
     /// # 返回
     /// 录制报告；合成或编码阶段出错返回原因。
     pub fn stop(mut self) -> Result<PipelineReport, String> {
-        let _ = self.control.send(Control::Stop(Instant::now()));
+        let now = Instant::now();
+        // 音频先收尾：容器收尾（Finalize / 写尾）之前，音轨必须已写完
+        if let Some(report) = self.audio.take().and_then(|a| a.stop(now)) {
+            eprintln!("音频: 写入 {} 个 10ms 槽，丢弃 {} 帧{}", report.slots, report.dropped_frames, report.error.map_or(String::new(), |e| format!("，收尾错误: {e}")));
+        }
+        let _ = self.control.send(Control::Stop(now));
         let compose = self.compose.take().ok_or("录制已结束")?.join().map_err(|_| "合成线程崩溃".to_string())?;
         self.shared.stop.store(true, Ordering::Release);
         let diag = self.capture.take().and_then(|t| t.join().ok()).unwrap_or_default();

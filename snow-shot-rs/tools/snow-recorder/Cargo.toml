@@ -19,6 +19,8 @@ path = "src/main.rs"
 [dependencies]
 snow-recorder-protocol = { path = "../../crates/snow-recorder-protocol" }
 snow-screen-recorder = { path = "../../../snow-crates/crates/snow-screen-recorder" }
+# 音频采集（系统声 loopback + 麦克风）；已在上游依赖树内，不是新增 crate
+snow-audio-recorder = { path = "../../../snow-crates/crates/snow-audio-recorder" }
 # 仅为启用转换线程 / 异步编码这两个旋钮（上游把它们放在该 feature 之后）
 snow-recording-runtime = { path = "../../../snow-crates/crates/snow-recording-runtime", features = ["bench-synthetic-input"] }
 

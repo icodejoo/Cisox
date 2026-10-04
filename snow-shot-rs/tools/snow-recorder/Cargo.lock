@@ -1087,6 +1087,7 @@ name = "snow-recorder"
 version = "0.1.0"
 dependencies = [
  "ffmpeg-next",
+ "snow-audio-recorder",
  "snow-cursor",
  "snow-d3d11",
  "snow-recorder-protocol",

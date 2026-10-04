@@ -4,6 +4,7 @@
 //! 会话通过 [`RecorderLink`] 与它按行协议通信，并把回报的事件折算成 [`RecordingState`]。
 //! 录制进程崩溃 / 被杀 / 失联时，会话转入 `Error` 并清理，不会卡在“录制中”。
 
+use crate::recording::audio::{AudioBoard, AudioNotice};
 use crate::recording::model::{RecordingConfig, RecordingState};
 use snow_recorder_protocol::{Command, Event, StartRequest};
 use std::path::PathBuf;
@@ -54,6 +55,8 @@ pub struct ScreenRecordingSession {
     awaiting_first_event: Option<Instant>,
     /// 等待文件写完的起点（`STOP` 发出后）。
     saving_since: Option<Instant>,
+    /// 各音频源状态（用于降级提示）。
+    audio: AudioBoard,
 }
 
 impl ScreenRecordingSession {
@@ -62,8 +65,10 @@ impl ScreenRecordingSession {
     /// # 参数
     /// - `config`：录制配置。
     pub fn new(config: RecordingConfig) -> Self {
+        let audio = AudioBoard::new(&config.audio);
         Self {
             config,
+            audio,
             state: RecordingState::Idle,
             link: None,
             last_elapsed_ms: 0,
@@ -75,6 +80,11 @@ impl ScreenRecordingSession {
     /// 获取当前录制配置引用。
     pub const fn config(&self) -> &RecordingConfig {
         &self.config
+    }
+
+    /// 当前应显示的音频降级提示（无降级时为空）。
+    pub fn audio_notices(&self) -> Vec<AudioNotice> {
+        self.audio.notices()
     }
 
     /// 获取当前录制状态引用。
@@ -123,6 +133,7 @@ impl ScreenRecordingSession {
             fps: self.config.fps,
             show_cursor: self.config.show_cursor,
             output: self.config.output_path.clone(),
+            audio: self.config.audio.clone(),
         };
         self.state = RecordingState::Recording {
             elapsed_secs: 0,
@@ -189,6 +200,7 @@ impl ScreenRecordingSession {
     /// 状态是否发生变化。
     pub fn poll(&mut self, now: Instant) -> bool {
         let before = self.state.clone();
+        let before_audio = self.audio.clone();
         let events = match self.link.as_mut() {
             Some(link) => link.poll(),
             None => Vec::new(),
@@ -197,7 +209,7 @@ impl ScreenRecordingSession {
             self.apply(event);
         }
         self.check_timeouts(now);
-        self.state != before
+        self.state != before || self.audio != before_audio
     }
 
     /// 是否仍需要继续轮询（有通道且未到终态）。
@@ -226,6 +238,8 @@ impl ScreenRecordingSession {
             LinkEvent::Event(Event::Error { reason }) => self.fail(reason),
             // 视频编辑 / 探测事件由编辑流程消费，录制状态机不关心
             LinkEvent::Event(Event::EditProgress { .. } | Event::EditFinished { .. } | Event::ProbeResult(_)) => {}
+            // 音频源状态只影响降级提示，不改变录制状态机
+            LinkEvent::Event(Event::AudioState { source, status }) => self.audio.record(source, status),
             LinkEvent::Exited { code } => {
                 if !self.state.is_terminal() && !matches!(self.state, RecordingState::Idle) {
                     self.fail(format!("录制进程意外退出（退出码 {code:?}）"));
@@ -392,6 +406,28 @@ mod tests {
             }
             other => panic!("期望单条 START，实际 {other:?}"),
         }
+    }
+
+    /// START 带上配置里的音频请求；音频状态事件折算成降级提示且不影响录制状态。
+    #[test]
+    fn audio_request_sent_and_states_become_notices() {
+        use snow_recorder_protocol::{AudioRequest, AudioSource, AudioStatus};
+        let probe = Rc::new(RefCell::new(Probe::default()));
+        let audio = AudioRequest { microphone: true, system: true, ..AudioRequest::default() };
+        let mut s = ScreenRecordingSession::new(RecordingConfig { audio: audio.clone(), ..RecordingConfig::default() });
+        s.begin(Box::new(FakeLink(probe.clone())), 0);
+        match &probe.borrow().sent[..] {
+            [Command::Start(r)] => assert_eq!(r.audio, audio),
+            other => panic!("期望单条 START，实际 {other:?}"),
+        }
+        assert!(s.audio_notices().is_empty());
+        push(&probe, LinkEvent::Event(Event::AudioState { source: AudioSource::Microphone, status: AudioStatus::Unavailable }));
+        assert!(s.poll(Instant::now()), "提示变化应触发重绘");
+        assert_eq!(s.audio_notices(), vec![AudioNotice::MicUnavailable]);
+        push(&probe, LinkEvent::Event(Event::AudioState { source: AudioSource::System, status: AudioStatus::Unavailable }));
+        s.poll(Instant::now());
+        assert_eq!(s.audio_notices(), vec![AudioNotice::NoSound]);
+        assert!(s.state().is_active());
     }
 
     /// 无倒计时立即发送 START。

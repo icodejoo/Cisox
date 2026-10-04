@@ -9,7 +9,7 @@
 use std::ffi::c_void;
 use std::path::PathBuf;
 use std::ptr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ffmpeg::ffi::*;
@@ -21,7 +21,9 @@ use windows::core::Interface;
 /// 结果类型：错误为单行原因文本。
 pub type HwResult<T> = Result<T, String>;
 
+use crate::audio::AudioSink;
 use crate::pipeline::{EncoderStats, VideoEncoder};
+use crate::win::aacsink::{AacEncoder, AacSink};
 use crate::settings::HwCodec;
 
 /// 帧池默认容量（送编中 2~3 帧 + 编码器驱动引用 + 正在合成 1 帧，再留出吸收编码耗时尖峰的余量）。
@@ -423,8 +425,10 @@ pub struct HwEncoder {
     ctx: Arc<HwContext>,
     /// 已打开的编码器。
     encoder: ffmpeg::encoder::video::Encoder,
-    /// 输出封装。
-    output: ffmpeg::format::context::Output,
+    /// 输出封装（与音频线程共享，写包时短暂持锁）。
+    output: Arc<Mutex<ffmpeg::format::context::Output>>,
+    /// 音频轨（尚未被取走时存在）。
+    audio: Option<AacSink>,
     /// 视频流序号。
     stream_index: usize,
     /// 封装层时间基。
@@ -509,7 +513,21 @@ impl HwEncoder {
     ///
     /// # 返回
     /// 编码器；编码器缺失/打开失败返回原因。
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn open(ctx: Arc<HwContext>, cfg: &HwConfig) -> HwResult<Self> {
+        Self::open_with_audio(ctx, cfg, false)
+    }
+
+    /// 打开编码器并写 MP4 头；`audio` 为真时同时添加一条 AAC 音轨（经 [`HwEncoder::take_audio_sink`] 取走后驱动）。
+    ///
+    /// # 参数
+    /// - `ctx`：硬件上下文（决定编码器厂商）。
+    /// - `cfg`：编码配置。
+    /// - `audio`：是否添加音轨。
+    ///
+    /// # 返回
+    /// 编码器；编码器缺失/打开失败（含 AAC）返回原因。
+    pub fn open_with_audio(ctx: Arc<HwContext>, cfg: &HwConfig, audio: bool) -> HwResult<Self> {
         ffmpeg::init().map_err(|e| e.to_string())?;
         let codec = ffmpeg::encoder::find_by_name(ctx.codec_name()).ok_or_else(|| format!("FFmpeg 缺少 {}", ctx.codec_name()))?;
         let mut output = ffmpeg::format::output(&cfg.path).map_err(|e| format!("创建输出失败 {}: {e}", cfg.path.display()))?;
@@ -550,12 +568,32 @@ impl HwEncoder {
             stream.set_parameters(&encoder);
             stream.index()
         };
+        let aac = if audio {
+            let aac = AacEncoder::open(global_header)?;
+            let codec = aac.codec().ok_or("AAC 编码器缺少编解码器信息")?;
+            let index = {
+                let mut stream = output.add_stream(codec).map_err(|e| format!("添加音频轨失败: {e}"))?;
+                stream.set_time_base(ffmpeg::Rational(1, crate::audio::SAMPLE_RATE as i32));
+                stream.set_parameters(aac.encoder());
+                stream.index()
+            };
+            Some((aac, index))
+        } else {
+            None
+        };
         output.write_header().map_err(|e| format!("写文件头失败: {e}"))?;
         let stream_time_base = output.stream(stream_index).map(|s| s.time_base()).ok_or("写头后视频轨丢失")?;
+        let audio_time_base = match &aac {
+            Some((_, index)) => Some(output.stream(*index).map(|s| s.time_base()).ok_or("写头后音频轨丢失")?),
+            None => None,
+        };
+        let output = Arc::new(Mutex::new(output));
+        let audio = aac.zip(audio_time_base).map(|((enc, index), tb)| AacSink::new(enc, Arc::clone(&output), index, tb));
         Ok(Self {
             ctx,
             encoder,
             output,
+            audio,
             stream_index,
             stream_time_base,
             stitcher: DurationStitcher::default(),
@@ -618,7 +656,8 @@ impl HwEncoder {
         packet.set_duration(duration);
         packet.set_stream(self.stream_index);
         packet.rescale_ts(self.encoder.time_base(), self.stream_time_base);
-        packet.write_interleaved(&mut self.output).map_err(|e| format!("写包失败: {e}"))?;
+        let mut output = self.output.lock().map_err(|_| "封装锁已损坏".to_string())?;
+        packet.write_interleaved(&mut output).map_err(|e| format!("写包失败: {e}"))?;
         self.stats.packets += 1;
         Ok(())
     }
@@ -633,8 +672,15 @@ impl HwEncoder {
         if let Some((last, duration)) = self.stitcher.finish(end_pts) {
             self.write(last, duration)?;
         }
-        self.output.write_trailer().map_err(|e| format!("写文件尾失败: {e}"))?;
+        self.output.lock().map_err(|_| "封装锁已损坏".to_string())?.write_trailer().map_err(|e| format!("写文件尾失败: {e}"))?;
         Ok(self.stats)
+    }
+
+    /// 取走音频轨（交给音频线程驱动）；没有音轨或已取走返回 `None`。
+    ///
+    /// 音轨必须在 [`HwEncoder::finish_stream`] 之前完成 `finish`。
+    pub fn take_audio_sink(&mut self) -> Option<Box<dyn AudioSink>> {
+        self.audio.take().map(|a| Box::new(a) as Box<dyn AudioSink>)
     }
 }
 

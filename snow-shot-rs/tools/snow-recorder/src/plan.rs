@@ -75,8 +75,9 @@ pub fn build_config(
         codec: VideoCodec::H264,
         preset: VideoEncodingSpeed::SuperFast,
         prefer_hardware_encoder: prefer_hardware,
-        enable_microphone: false,
-        enable_system_audio: false,
+        // 音频只在 MP4 启用；软件路径用上游会话自带的混音，音量与设备选择由自建路径支持
+        enable_microphone: request.audio.microphone && request.format == MediaFormat::Mp4,
+        enable_system_audio: request.audio.system && request.format == MediaFormat::Mp4,
         show_cursor: request.show_cursor,
         keyboard: None,
         mouse_trail_rgba: EFFECT_OFF_RGBA,
@@ -105,6 +106,7 @@ mod tests {
             fps: 30,
             show_cursor: true,
             output: PathBuf::from(output),
+            audio: Default::default(),
         }
     }
 
@@ -119,6 +121,20 @@ mod tests {
             assert_eq!(config.region.width, 640);
             assert!(config.show_cursor);
         }
+    }
+
+    /// 音频开关只在 MP4 透传，动图格式一律关闭。
+    #[test]
+    fn audio_flags_follow_request_and_format() {
+        for (format, expect) in [(MediaFormat::Mp4, true), (MediaFormat::Gif, false), (MediaFormat::Apng, false), (MediaFormat::Webp, false)] {
+            let mut req = request(format, "o.mp4");
+            req.audio.microphone = true;
+            req.audio.system = true;
+            let config = build_config(&req, scratch_file(&req.output, 1), false, None);
+            assert_eq!((config.enable_microphone, config.enable_system_audio), (expect, expect), "格式 {format:?}");
+        }
+        let config = build_config(&request(MediaFormat::Mp4, "o.mp4"), scratch_file(std::path::Path::new("o.mp4"), 1), false, None);
+        assert!(!config.enable_microphone && !config.enable_system_audio);
     }
 
     /// 预设名解析。

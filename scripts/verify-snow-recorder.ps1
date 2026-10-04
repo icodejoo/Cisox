@@ -4,6 +4,8 @@
 #   scripts/verify-snow-recorder.ps1 -Scenario pause  -Format mp4 -Seconds 6
 #   scripts/verify-snow-recorder.ps1 -Scenario kill
 #   scripts/verify-snow-recorder.ps1 -Scenario record -Region 0,0,2560,1440 -Fps 60 -Seconds 10 -Sample
+#   scripts/verify-snow-recorder.ps1 -Scenario pause  -Format mp4 -Seconds 6 -Audio both   # 录音：none|sys|mic|both
+# 注意：脚本只做被动屏幕捕获，不创建任何窗口；录音时请不要播放大音量内容。
 param(
     [ValidateSet("record", "pause", "kill", "eof")][string]$Scenario = "record",
     [ValidateSet("mp4", "gif", "apng", "webp")][string]$Format = "mp4",
@@ -11,6 +13,8 @@ param(
     [int]$Fps = 30,
     [string]$Region = "0,0,1280,720",
     [switch]$Sample,
+    [ValidateSet("none", "sys", "mic", "both")][string]$Audio = "none",
+    [double]$AudioToleranceSec = 0.35,
     [string]$OutDir = (Join-Path $env:TEMP "snow-recorder-verify"),
     [string]$Exe = ""
 )
@@ -57,7 +61,13 @@ function Wait-Active([double]$secs) {
 }
 
 Start-Sleep -Milliseconds 800
-Send ("START $x $y $w $h $Format $Fps 1 $out")
+# 录音请求：START 后的可选 key=value 前缀令牌（见 snow-recorder-protocol）
+$audioPrefix = ""
+if ($Audio -in @("sys", "both")) { $audioPrefix += "sys=1 " }
+if ($Audio -in @("mic", "both")) { $audioPrefix += "mic=1 " }
+$startLine = "START $audioPrefix$x $y $w $h $Format $Fps 1 $out"
+"command: $startLine"
+Send $startLine
 switch ($Scenario) {
     "record" { Wait-Active $Seconds; Send "STOP" }
     "pause" {
@@ -101,6 +111,34 @@ function Inspect-AnimatedWebp([string]$path) {
     }
     "webp: riff=$riff/$webp animated=$anim canvas=${cw}x${ch} frames=$frames total_duration_ms=$durMs size=$($b.Length)"
 }
+# 音轨校验：数量与编码、时长与视频一致；动图格式必须没有音轨
+$script:audioFailed = $false
+function Check-Audio([string]$path) {
+    $json = ffprobe -v error -show_entries "stream=codec_type,codec_name,duration" -of json $path | ConvertFrom-Json
+    $audioTracks = @($json.streams | Where-Object { $_.codec_type -eq "audio" })
+    $videoTrack = @($json.streams | Where-Object { $_.codec_type -eq "video" }) | Select-Object -First 1
+    $expectAudio = ($Audio -ne "none") -and ($Format -eq "mp4")
+    "--- audio check (Audio=$Audio) ---"
+    "audio tracks: $($audioTracks.Count)  $(($audioTracks | ForEach-Object { "$($_.codec_name)/$($_.duration)s" }) -join ', ')"
+    if (-not $expectAudio) {
+        if ($audioTracks.Count -ne 0) { "FAIL: 不应有音轨"; $script:audioFailed = $true } else { "PASS: 无音轨（符合预期）" }
+        return
+    }
+    if ($audioTracks.Count -eq 0) {
+        "WARN: 没有音轨（设备不可用时会降级为无音轨；见上面的 AUDIO_STATE 事件）"
+        if (-not ($events.ToArray() -match "AUDIO_STATE .* unavailable")) { "FAIL: 没有音轨也没有 unavailable 事件"; $script:audioFailed = $true }
+        return
+    }
+    if ($audioTracks.Count -ne 1) { "FAIL: 期望单条混音轨"; $script:audioFailed = $true }
+    if ($audioTracks[0].codec_name -ne "aac") { "FAIL: 音轨不是 aac"; $script:audioFailed = $true }
+    $audioSec = [double]$audioTracks[0].duration
+    $videoSec = [double]$videoTrack.duration
+    $diff = [Math]::Abs($audioSec - $videoSec)
+    "audio=${audioSec}s video=${videoSec}s diff=${diff}s (容差 ${AudioToleranceSec}s)"
+    if ($diff -gt $AudioToleranceSec) { "FAIL: 音视频时长相差过大"; $script:audioFailed = $true }
+    if ($Scenario -eq "pause" -and [Math]::Abs($audioSec - $Seconds) -gt 1.0) { "FAIL: pause 场景音频时长应约等于有效时长 ${Seconds}s"; $script:audioFailed = $true }
+    if (-not $script:audioFailed) { "PASS: 音轨数量、编码与时长均符合" }
+}
 if (Test-Path $out) {
     if ($Format -eq "webp") { "--- webp container ---"; Inspect-AnimatedWebp $out }
     else {
@@ -109,5 +147,7 @@ if (Test-Path $out) {
         "--- decode check ---"
         ffmpeg -v error -i $out -f null - 2>&1
         "decode exit=$LASTEXITCODE"
+        Check-Audio $out
     }
 }
+if ($script:audioFailed) { "AUDIO CHECK FAILED"; exit 1 }

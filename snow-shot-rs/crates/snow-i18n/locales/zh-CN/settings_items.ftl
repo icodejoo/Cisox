@@ -305,3 +305,5 @@ setting-dictation-model-id-desc = 默认使用推荐模型；想在体积、速�
 setting-dictation-sensevoice-itn-desc = 带标点，中文数字会转为阿拉伯数字；仅对 SenseVoice 生效
 setting-dictation-translate-enabled-desc = 每句定稿后翻译，显示在原文下方；需翻译模型，可在翻译设置下载
 setting-dictation-translate-target-desc = 自动：中文译成英文，其它语言译成简体中文
+setting-screen-recording-enable-microphone-desc = 把麦克风录进 MP4 视频
+setting-screen-recording-enable-system-audio-desc = 把系统播放的声音录进 MP4 视频

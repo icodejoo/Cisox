@@ -1076,6 +1076,12 @@ impl SettingsView {
             None
         };
         let stt_note = self.stt_row_note(key);
+        let audio_note = self
+            .state
+            .row_by_key(crate::recording::output::KEY_FORMAT)
+            .and_then(|format| crate::recording::audio::mp4_only_note(key, &format.value))
+            .map(|id| crate::ocr_backend::i18n_for(lang.locale()).tr(id));
+        let route_note = route_note.or(audio_note);
         let sub = match (&row.error, stt_note, backend_notice, dictation_notice, route_note) {
             (Some(error), ..) => div().text_color(p.danger).child(error.clone()),
             (None, Some((text, danger)), ..) => {

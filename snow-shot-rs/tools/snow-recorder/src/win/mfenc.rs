@@ -22,6 +22,7 @@ use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoTaskMe
 use windows::Win32::System::Variant::VARIANT;
 use windows::core::{GUID, IUnknown, Interface, PCWSTR, implement};
 
+use crate::audio::{AudioSink, CHANNELS, SAMPLE_RATE};
 use crate::frametrace::{self, Tracer};
 use crate::pipeline::{EncoderStats, VideoEncoder};
 use crate::win::hwenc::{HwContext, HwResult, STAT_SAMPLE_LIMIT, Surface};
@@ -42,6 +43,12 @@ pub const ENV_MF_BPP: &str = "SNOW_RECORDER_MF_BPP";
 pub const ENV_MF_DISABLE: &str = "SNOW_RECORDER_MF_DISABLE";
 /// 环境变量：非空时测端到端延迟（送帧到成品文件写入）并在结束时打印。
 pub const ENV_MF_LATENCY: &str = "SNOW_RECORDER_MF_LATENCY";
+/// AAC 码率（bps）。
+const AAC_BITRATE: u32 = 128_000;
+/// AAC 档次与级别指示（AAC LC，Level 2）。
+const AAC_PROFILE_LEVEL: u32 = 0x29;
+/// 每 10ms 音频槽的时长（100ns）。
+const AUDIO_SLOT_HNS: i64 = HNS_PER_SECOND / 100;
 /// 挂在样本上的表面持有者属性键（任意唯一 GUID）。
 const HOLDER_KEY: GUID = GUID::from_u128(0x5a0e_7c31_94d2_4b6f_8a11_2c7d_90e3_b4f1);
 /// MF 路径的帧池容量：MFT 会积压十几帧输入才吐出第一批输出（NVIDIA 实测约 18 帧），
@@ -203,6 +210,82 @@ impl LatencyProbe {
     }
 }
 
+/// 给 SinkWriter 添加 AAC 音轨（输入 48k 立体声 16 位 PCM，由系统 AAC 编码 MFT 编码）。
+///
+/// # 返回
+/// 音轨流序号；系统缺少 AAC 编码器或类型被拒绝返回原因。
+fn add_audio_stream(writer: &IMFSinkWriter) -> Result<u32, String> {
+    let channels = CHANNELS as u32;
+    // SAFETY: 都是 Media Foundation 对象创建与属性设置，参数为局部有效值。
+    unsafe {
+        let output = MFCreateMediaType().map_err(|e| e.to_string())?;
+        output.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio).map_err(|e| e.to_string())?;
+        output.SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_AAC).map_err(|e| e.to_string())?;
+        output.SetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE, 16).map_err(|e| e.to_string())?;
+        output.SetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND, SAMPLE_RATE).map_err(|e| e.to_string())?;
+        output.SetUINT32(&MF_MT_AUDIO_NUM_CHANNELS, channels).map_err(|e| e.to_string())?;
+        output.SetUINT32(&MF_MT_AUDIO_AVG_BYTES_PER_SECOND, AAC_BITRATE / 8).map_err(|e| e.to_string())?;
+        output.SetUINT32(&MF_MT_AAC_PAYLOAD_TYPE, 0).map_err(|e| e.to_string())?;
+        output.SetUINT32(&MF_MT_AAC_AUDIO_PROFILE_LEVEL_INDICATION, AAC_PROFILE_LEVEL).map_err(|e| e.to_string())?;
+        let stream = writer.AddStream(&output).map_err(|e| fail("添加音频流(AAC)", e))?;
+        let input = MFCreateMediaType().map_err(|e| e.to_string())?;
+        input.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio).map_err(|e| e.to_string())?;
+        input.SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_PCM).map_err(|e| e.to_string())?;
+        input.SetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE, 16).map_err(|e| e.to_string())?;
+        input.SetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND, SAMPLE_RATE).map_err(|e| e.to_string())?;
+        input.SetUINT32(&MF_MT_AUDIO_NUM_CHANNELS, channels).map_err(|e| e.to_string())?;
+        input.SetUINT32(&MF_MT_AUDIO_BLOCK_ALIGNMENT, channels * 2).map_err(|e| e.to_string())?;
+        input.SetUINT32(&MF_MT_AUDIO_AVG_BYTES_PER_SECOND, SAMPLE_RATE * channels * 2).map_err(|e| e.to_string())?;
+        writer.SetInputMediaType(stream, &input, None).map_err(|e| fail("设置音频输入类型(PCM)", e))?;
+        Ok(stream)
+    }
+}
+
+/// MF 音轨：由音频线程把 PCM 写进同一个 SinkWriter 的第二条流。
+pub struct MfAudioSink {
+    /// 与视频共用的 SinkWriter（自由线程对象，COM 引用计数）。
+    writer: IMFSinkWriter,
+    /// 音频流序号。
+    stream: u32,
+    /// 当前线程是否已初始化 COM。
+    com_ready: bool,
+}
+
+// SAFETY: SinkWriter 是自由线程（MTA）对象；本音轨只交给唯一的音频线程使用，且在视频 Finalize 之前结束。
+unsafe impl Send for MfAudioSink {}
+
+impl AudioSink for MfAudioSink {
+    /// 把一批槽的 PCM 包成样本写入音频流（时间戳 = 槽号 × 10ms）。
+    fn write(&mut self, first_slot: u64, pcm: &[i16]) -> Result<(), String> {
+        if !self.com_ready {
+            init_com();
+            self.com_ready = true;
+        }
+        let bytes = u32::try_from(std::mem::size_of_val(pcm)).map_err(|e| e.to_string())?;
+        let slots = i64::try_from(pcm.len() / (CHANNELS * crate::audio::SLOT_FRAMES as usize)).map_err(|e| e.to_string())?;
+        let time = i64::try_from(first_slot).map_err(|e| e.to_string())? * AUDIO_SLOT_HNS;
+        // SAFETY: 缓冲按字节数分配并在 Lock 期间拷贝，样本与缓冲都是局部对象。
+        unsafe {
+            let buffer = MFCreateMemoryBuffer(bytes).map_err(|e| fail("创建音频缓冲", e))?;
+            let mut data: *mut u8 = std::ptr::null_mut();
+            buffer.Lock(&mut data, None, None).map_err(|e| fail("锁定音频缓冲", e))?;
+            std::ptr::copy_nonoverlapping(pcm.as_ptr().cast::<u8>(), data, bytes as usize);
+            buffer.Unlock().map_err(|e| e.to_string())?;
+            buffer.SetCurrentLength(bytes).map_err(|e| e.to_string())?;
+            let sample = MFCreateSample().map_err(|e| e.to_string())?;
+            sample.AddBuffer(&buffer).map_err(|e| e.to_string())?;
+            sample.SetSampleTime(time).map_err(|e| e.to_string())?;
+            sample.SetSampleDuration(slots * AUDIO_SLOT_HNS).map_err(|e| e.to_string())?;
+            self.writer.WriteSample(self.stream, &sample).map_err(|e| fail("写音频样本", e))
+        }
+    }
+
+    /// 音轨收尾：编码器的残余由视频侧 Finalize 一并冲刷，这里无需额外动作。
+    fn finish(self: Box<Self>) -> Result<(), String> {
+        Ok(())
+    }
+}
+
 /// Media Foundation 编码器：只在编码线程内使用。
 pub struct MfEncoder {
     /// 帧池（保持存活）。
@@ -213,6 +296,8 @@ pub struct MfEncoder {
     writer: IMFSinkWriter,
     /// 视频流序号。
     stream: u32,
+    /// 音频流序号（有音轨时）。
+    audio_stream: Option<u32>,
     /// 帧率。
     fps: u32,
     /// 送入的帧数。
@@ -352,7 +437,13 @@ impl MfEncoder {
     ///
     /// # 返回
     /// 编码器；系统没有匹配适配器的硬件 H.264 MFT、选中了软件 MFT 或初始化失败返回原因。
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn open(ctx: Arc<HwContext>, path: &std::path::Path, size: (u32, u32), fps: u32, rate_control: RateControl) -> HwResult<Self> {
+        Self::open_with_audio(ctx, path, size, fps, rate_control, false)
+    }
+
+    /// 同 [`MfEncoder::open`]；`audio` 为真时额外添加 AAC 音轨（经 [`MfEncoder::take_audio_sink`] 取走后驱动）。
+    pub fn open_with_audio(ctx: Arc<HwContext>, path: &std::path::Path, size: (u32, u32), fps: u32, rate_control: RateControl, audio: bool) -> HwResult<Self> {
         if std::env::var_os(ENV_MF_DISABLE).is_some() {
             return Err(format!("{ENV_MF_DISABLE} 已禁用 Media Foundation 编码"));
         }
@@ -415,6 +506,7 @@ impl MfEncoder {
                     Err(e) => eprintln!("MF 恒定质量不可用，沿用平均码率: {e}"),
                 }
             }
+            let audio_stream = if audio { Some(add_audio_stream(&writer)?) } else { None };
             writer.BeginWriting().map_err(|e| fail("BeginWriting", e))?;
             let probe = std::env::var_os(ENV_MF_LATENCY).is_some().then(|| LatencyProbe::start(path.to_path_buf()));
             Ok(Self {
@@ -422,6 +514,7 @@ impl MfEncoder {
                 _manager: manager,
                 writer,
                 stream,
+                audio_stream,
                 fps,
                 frames: 0,
                 frame_bytes: size.0 * size.1 * 3 / 2,
@@ -457,6 +550,12 @@ impl MfEncoder {
             Some(m) if m == mode => Ok(()),
             other => Err(format!("MFT 接受了设置但码率控制读回为 {other:?}（不是质量模式）")),
         }
+    }
+
+    /// 取走音频轨（交给音频线程驱动）；没有音轨返回 `None`。音轨须在 `finish` 之前结束。
+    pub fn take_audio_sink(&mut self) -> Option<Box<dyn AudioSink>> {
+        let stream = self.audio_stream.take()?;
+        Some(Box::new(MfAudioSink { writer: self.writer.clone(), stream, com_ready: false }))
     }
 
     /// 把表面包成样本写入 SinkWriter；表面随样本释放才归还帧池。

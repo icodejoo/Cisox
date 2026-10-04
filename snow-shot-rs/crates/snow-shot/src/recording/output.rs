@@ -1,5 +1,6 @@
 //! 录制输出：从配置文档解析保存目录、文件名与录制参数。
 
+use crate::recording::audio::audio_request;
 use crate::recording::model::{DEFAULT_FPS, RecordingConfig, RecordingFormat};
 use serde_json::Value;
 use snow_config::document::ConfigDocument;
@@ -178,6 +179,7 @@ pub fn build_recording_config(
         format,
         output_path,
         countdown_secs: document.value(KEY_START_DELAY).as_u64().and_then(|n| u32::try_from(n).ok()).unwrap_or(0),
+        audio: audio_request(document, format),
     })
 }
 
@@ -246,5 +248,22 @@ mod tests {
         assert_eq!(cfg.region, PhysicalRect::new(1, 2, 300, 200));
         assert_eq!(cfg.output_path.extension().and_then(|e| e.to_str()), Some("gif"));
         assert!(cfg.fps > 0);
+        // 动图格式强制不录音频
+        assert!(!cfg.audio.enabled());
+    }
+
+    /// MP4 时音频请求来自两个旧键，且每次构造都读最新值。
+    #[test]
+    fn config_audio_follows_latest_switches() {
+        let dir = std::env::temp_dir().join(format!("snow-rec-aud-{}", std::process::id()));
+        let mut doc = ConfigDocument::from_bytes(None);
+        doc.set_value(KEY_SAVE_DIR, Value::String(dir.to_string_lossy().into_owned())).unwrap();
+        let region = PhysicalRect::new(0, 0, 100, 100);
+        let first = build_recording_config(&doc, region, None, t()).unwrap();
+        assert!(!first.audio.microphone && first.audio.system);
+        doc.set_value("screen_recording/enable_microphone", serde_json::json!(true)).unwrap();
+        doc.set_value("screen_recording/enable_system_audio", serde_json::json!(false)).unwrap();
+        let second = build_recording_config(&doc, region, None, t()).unwrap();
+        assert!(second.audio.microphone && !second.audio.system);
     }
 }
