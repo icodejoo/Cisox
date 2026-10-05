@@ -1,4 +1,4 @@
-# 构建录制工作进程 snow-recorder（独立 workspace，静态 CRT + 静态 FFmpeg）。
+# 构建录制工作进程 snow-recorder（独立 workspace，静态 CRT + 静态 FFmpeg，默认无 x265 版）。
 # 用法: scripts/build-snow-recorder.ps1 [-Profile release|debug] [-Test] [-Clippy]
 # 产物: snow-shot-rs/tools/snow-recorder/target/<profile>/snow-recorder.exe
 param(
@@ -10,9 +10,17 @@ $ErrorActionPreference = "Continue"
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $manifest = Join-Path $repoRoot "snow-shot-rs/tools/snow-recorder/Cargo.toml"
 
-# FFmpeg：默认使用仓库 vcpkg 的静态三元组（/MT）
+# FFmpeg：默认用不含 x265 的静态版（scripts/build-ffmpeg-recorder.ps1 生成，省约 5 MB；H.265 已搁置）。
+# 该目录不存在时回退到旧的完整版（installed/static，含 x265）。FFMPEG_DIR 环境变量优先。
 if ([string]::IsNullOrWhiteSpace($env:FFMPEG_DIR)) {
-    $env:FFMPEG_DIR = Join-Path $repoRoot ".tools/vcpkg/installed/static/x64-windows-static"
+    $noX265 = Join-Path $repoRoot ".tools/vcpkg/installed/static-nox265/x64-windows-static"
+    if (Test-Path (Join-Path $noX265 "lib/avcodec.lib")) {
+        $env:FFMPEG_DIR = $noX265
+    }
+    else {
+        Write-Host "未找到无 x265 的 FFmpeg，回退旧路径（可先运行 scripts/build-ffmpeg-recorder.ps1）"
+        $env:FFMPEG_DIR = Join-Path $repoRoot ".tools/vcpkg/installed/static/x64-windows-static"
+    }
 }
 if (-not (Test-Path (Join-Path $env:FFMPEG_DIR "lib/avcodec.lib"))) {
     throw "FFMPEG_DIR 下缺少 lib/avcodec.lib: $($env:FFMPEG_DIR)"

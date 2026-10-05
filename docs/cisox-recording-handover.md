@@ -30,7 +30,11 @@ git clone https://github.com/icodejoo/Cisox.git   # 分支 rust-gpui
 cd Cisox
 git checkout rust-gpui
 
+# 0) (可选,首次)准备不含 x265 的静态 FFmpeg,装到 .tools\vcpkg\installed\static-nox265\x64-windows-static
+scripts\build-ffmpeg-recorder.ps1
+
 # 1) 构建录制进程(产物 snow-shot-rs\tools\snow-recorder\target\release\snow-recorder.exe)
+#    FFMPEG_DIR 默认优先用上面的 static-nox265,不存在则回退旧的 installed\static(含 x265)
 scripts\build-snow-recorder.ps1
 # 可选:单测(57 个应全过)
 scripts\build-snow-recorder.ps1 -Test
@@ -46,6 +50,8 @@ scripts\run-matrix.ps1 -RecorderExe <recorder.exe> -Name hw -Repeats 3 -EnvPairs
 # 4) 软编对照
 scripts\run-matrix.ps1 -RecorderExe <recorder.exe> -Name sw -Repeats 3 -EnvPairs "SNOW_RECORDER_HARDWARE=0"
 ```
+
+**为什么用无 x265 的 FFmpeg**:x265 静态库约 5 MB,而 H.265 已搁置(见 `docs/research/windows-hevc-support.md`),worker 只用 libx264/MF/厂商硬编。overlay 副本在 `snow-shot-rs/tools/snow-recorder/vcpkg-overlay/ffmpeg/`(与上游只差两处,见其 README.md),上游 `cmake/` 不动。恢复 H.265 时删掉 overlay 里的这两处改动并重装即可。
 
 - 每轮占用副屏约 10 秒;桌面不可复制会自动中止。结果落在 `%TEMP%\snow-fps-matrix`、`%TEMP%\snow-fps-test`。
 - 诊断:`SNOW_RECORDER_TRACE=1`(采集慢取帧、DXGI 合并事件、分段耗时)。

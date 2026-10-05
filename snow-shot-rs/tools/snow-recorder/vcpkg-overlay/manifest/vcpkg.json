@@ -1,0 +1,19 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "snow-recorder-ffmpeg",
+  "version-semver": "0.1.0",
+  "dependencies": [
+    {
+      "name": "ffmpeg",
+      "default-features": false,
+      "features": [
+        "snow-shot-minimal"
+      ],
+      "platform": "windows"
+    }
+  ],
+  "overrides": [
+    { "name": "ffmpeg", "version": "9.0" },
+    { "name": "ffmpeg-bin2c", "version": "9.0" }
+  ]
+}
