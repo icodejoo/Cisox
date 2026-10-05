@@ -262,7 +262,7 @@ Windows 主线已经能跑通「热键 / 托盘 / IPC → 截图覆盖窗（单�
 ## 6. 环境速查
 
 - 编译目录：主工作区在 `build/cargo`；各 worker 是独立 workspace，产物在各自的 `target/`（`tools/snow-recorder/target` 等），都可随时删除重建。2026-10-05 已清掉 `build/`、`E:\cargo-targets`、各 worker 的 `target/`，下次编译要完整重编（录屏 worker 约 14 分钟）。
-- 模型：翻译模型放 `E:\models\translate\`（仓库外，应用已装的 OPUS-MT 包）；我们转换 / 量化的 5 个成品包托管在 GitHub Release `models`（地址见 `snow-shot-rs/README.md`「模型下载地址」）；OCR 模型与运行时在 `%LOCALAPPDATA%\Cisox\assets\ocr`。
+- 模型：应用从 `<数据根>/models/translate/<模型 ID>/` 读取翻译模型（数据根默认 `%LOCALAPPDATA%\Cisox`），模型都在仓库外；我们转换 / 量化的 5 个成品包托管在 GitHub Release `models`（地址见 `snow-shot-rs/README.md`「模型下载地址」），下载后解压到该目录即可；OCR 模型与运行时在 `%LOCALAPPDATA%\Cisox\assets\ocr`。早期手动放置的 `E:\models\translate\`（上游 OPUS-MT int8 旧包）已于 2026-10-05 删除。
 - 全局工具：aria2 在 `E:\software\aria2`（已加用户 PATH），下载规则已写进 `~/.claude/CLAUDE.md`。
 - 机器：20 逻辑核、内存 31.7GB（长期紧张）、磁盘 SSD；本机无 winget，`choco` 需管理员。
 - 网络：单连接约 0.2–0.6MB/s，多连接可叠加；curl 需 `--ssl-no-revoke`；**PowerShell 5.1 的 `>`/`>>` 会破坏二进制**。
@@ -270,9 +270,9 @@ Windows 主线已经能跑通「热键 / 托盘 / IPC → 截图覆盖窗（单�
 
 ## 6.1 资源清理记录与复现（2026-10-05）
 
-已删除：`E:\models\translate-eval`（70.5 GB，评测模型、fp32 导出、原版 HF 模型、成品包本地副本）、`build/`（95 GB，含 `mt-quant`、`flores`、`nllb-corpus`、`stt`、`recorder-diag`、各轮录屏实验目录等调研数据）、`E:\cargo-targets`（69 GB）、`E:\qt-static`（25 GB）、三个 worker 的 `target/`、`.tools/vcpkg/downloads` 与旧的含 x265 的 `installed/static`、`materials/`。共释放约 316 GB。
+已删除：`E:\models\translate-eval`（70.5 GB，评测模型、fp32 导出、原版 HF 模型、成品包本地副本）、`E:\models\translate`（1.2 GB，早期手动放置的上游 OPUS-MT int8 旧包，应用并不读取这里）、`build/`（95 GB，含 `mt-quant`、`flores`、`nllb-corpus`、`stt`、`recorder-diag`、各轮录屏实验目录等调研数据）、`E:\cargo-targets`（69 GB）、`E:\qt-static`（25 GB）、三个 worker 的 `target/`、`.tools/vcpkg/downloads` 与旧的含 x265 的 `installed/static`、`materials/`。共释放约 317 GB。`E:\cargo-target\termy`（15 GB）不属于本项目，未处理。
 
-保留：`.tools/vcpkg/installed/static-nox265`（无 x265 的 FFmpeg，录屏 worker 默认用它）、`E:\models\translate`、`.cache`（含 onnxruntime 动态库）、aria2 与 vcpkg 工具本身。
+保留：`.tools/vcpkg/installed/static-nox265`（无 x265 的 FFmpeg，录屏 worker 默认用它）、`.cache`（含 onnxruntime 动态库）、aria2 与 vcpkg 工具本身。
 
 复现提示：
 - 翻译成品包：直接从 Release `models` 下载；要重新生成，先下载原版 `facebook/nllb-200-distilled-600M`、`tencent/Hy-MT2-1.8B`、`Helsinki-NLP/opus-mt-*`，再用 `snow-shot-rs/tools/snow-translator/{eval,scripts}` 下的脚本导出、量化、打包（流程见 `docs/guides/translation-model-release.md`）；评测用的 CCMatrix 词频与 FLORES 数据需重新取得。

@@ -83,7 +83,7 @@ cargo test --release --test e2e real_nllb -- --ignored --nocapture
 ```
 
 真实 Hy-MT2 对拍（只 2 句 x 2 向，BelowNormal，4 线程；参考由 `eval/hymt/ort_gen.py --version hymt2-pack-check --limit 2` 生成）：
-`cargo test --release --test e2e real_hymt2 -- --ignored --nocapture`，环境变量 `SNOW_TRANSLATOR_HYMT_DIR`（缺省 `E:/models/translate-eval/hymt2-1.8b-int4-pack`）。
+`cargo test --release --test e2e real_hymt2 -- --ignored --nocapture`，环境变量 `SNOW_TRANSLATOR_HYMT_DIR`（缺省 `E:/models/translate-eval/hymt2-1.8b-int4-pack`，该目录已于 2026-10-05 清理，请从 Release `models` 下载 `hymt2-1.8b-int4.zip` 解压后用该变量指定）。
 
-环境变量：`SNOW_TRANSLATOR_NLLB_DIR`（NLLB 模型包目录，缺省 `E:/models/translate-eval/nllb600m-main14-ccm-int4-ext`）、
+环境变量：`SNOW_TRANSLATOR_NLLB_DIR`（NLLB 模型包目录，缺省 `E:/models/translate-eval/nllb600m-main14-ccm-int4-ext`，该目录已于 2026-10-05 清理，请从 Release `models` 下载 `nllb600m-main14-ccm-int4.zip` 解压后用该变量指定）、
 `SNOW_ORT_DYLIB`（缺省回落到评测机的 ORT 1.28.0）、`SNOW_TRANSLATOR_TEST_MODEL_DIR`（Marian 真实模型用例）。
