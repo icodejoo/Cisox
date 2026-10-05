@@ -1,14 +1,14 @@
 //! 双窗口跨屏模式：每块显示器一个窗口、一个线程、一套交换链，各自按所在屏的 vsync 出帧。
 //!
 //! 同步方案：第一个（最左）窗口是主节拍，递增序号并写入 [`Shared`]，只有它记录帧日志；
-//! 其余窗口每个 vsync 读取最新序号重画，不记日志。序号条按整个区域宽度切段，各窗口只画自己那段。
+//! 其余窗口每个 vsync 读取最新序号重画，不记日志。序号条只由主节拍窗口绘制（避免两窗口相位不同拼出混杂序号），其余窗口不画，分析只读主窗口那段。
 
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use snow_fps_fixture::content::{Load, build_scene_at};
-use snow_fps_fixture::{FrameRecord, MAX_SECONDS, Options, Rect};
+use snow_fps_fixture::{FrameRecord, bar_segment_for, MAX_SECONDS, Options, Rect};
 
 use crate::{gpu, win};
 
@@ -36,17 +36,18 @@ pub struct Shared {
 /// 单个窗口线程：创建窗口与渲染器，等起跑信号后按角色出帧。
 fn worker(
     piece: Rect,
-    region: Rect,
     options: &Options,
     shared: &Shared,
-    leader: bool,
+    index: usize,
     init: &mpsc::Sender<Result<(), String>>,
 ) -> Result<Vec<FrameRecord>, String> {
+    let leader = index == 0;
     let setup = || -> Result<(win::FixtureWindow, gpu::Renderer), String> {
         let window = win::FixtureWindow::create(piece).map_err(|e| format!("创建窗口失败: {e}"))?;
         let mut renderer = gpu::Renderer::new(&window, piece.w, piece.h, options.load == Load::Noise)
             .map_err(|e| format!("初始化 GPU 失败: {e}"))?;
-        renderer.set_bar_segment((piece.x - region.x) as u32, region.w);
+        let (offset, total) = bar_segment_for(index, piece);
+        renderer.set_bar_segment(offset, total);
         Ok((window, renderer))
     };
     let (window, mut renderer) = match setup() {
@@ -97,12 +98,12 @@ fn worker(
 ///
 /// # 参数
 /// - `pieces`：按 x 升序的子矩形，每块一个窗口，第一个为主节拍（至少一个）。
-/// - `region`：完整跨屏区域（序号条按它的宽度切段）。
+/// - `_region`：完整跨屏区域（保留以便调用方一致传参）。
 /// - `options`：命令行选项。
 ///
 /// # 返回
 /// 主节拍的帧记录（序号单调、统计语义与单窗口一致）；任一窗口失败返回原因。
-pub fn run_dual(pieces: &[Rect], region: Rect, options: &Options) -> Result<Vec<FrameRecord>, String> {
+pub fn run_dual(pieces: &[Rect], _region: Rect, options: &Options) -> Result<Vec<FrameRecord>, String> {
     let shared = Shared { seq: AtomicU32::new(0), stop: AtomicBool::new(false), go: AtomicU8::new(GO_WAIT) };
     let (tx, rx) = mpsc::channel();
     std::thread::scope(|scope| {
@@ -111,7 +112,7 @@ pub fn run_dual(pieces: &[Rect], region: Rect, options: &Options) -> Result<Vec<
             .enumerate()
             .map(|(i, &piece)| {
                 let (shared, tx) = (&shared, tx.clone());
-                scope.spawn(move || worker(piece, region, options, shared, i == 0, &tx))
+                scope.spawn(move || worker(piece, options, shared, i, &tx))
             })
             .collect();
         drop(tx);

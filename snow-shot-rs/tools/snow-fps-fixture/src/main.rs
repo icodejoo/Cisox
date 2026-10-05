@@ -152,6 +152,9 @@ fn main() {
         match split_region_by_monitors(&monitors, rect) {
             Ok(p) => {
                 println!("dual pieces={p:?}");
+                if let Some((x, w, total)) = snow_fps_fixture::bar_crop(&p, rect) {
+                    println!("bar_crop={x},{w},{total}");
+                }
                 p
             }
             Err(e) => {

@@ -7,14 +7,14 @@
 //! 采集在后台线程完成，结果经收件箱回到主线程再建窗。
 
 use crate::capture_flow::{CapturePayload, pick_monitor, spawn_capture};
-use crate::dictation::config::DictationConfig;
 use crate::dictation::focus::Verdict;
 use crate::dictation::{DictationCommand, DictationHost};
 use crate::frozen_frame::FrozenFrame;
+use crate::global_actions::{self, HotkeyGate};
 use crate::ocr_assets::{ENV_OCR_ASSET_DIR, ocr_root};
 use crate::ocr_client::OcrError;
 use crate::ocr_download;
-use crate::ocr_backend::{OcrInput, select_from_document};
+use crate::ocr_backend::{OcrInput, i18n_for, select_from_document};
 use crate::ocr_service::{OcrRequestConfig, OcrResult, OcrService};
 use crate::ort_runtime;
 use crate::sys_prefs::system_ui_language;
@@ -43,7 +43,7 @@ use serde_json::Value;
 use snow_app_core::bus::{CommandBus, CommandError, CommandOutcome};
 use snow_app_core::command::{
     AppCommand, CaptureRequest, CommandKind, CommandSource, DirectCaptureRequest, DirectOutput,
-    DirectTarget, ExportTarget, RecordingConfig as RecordingRequest,
+    DirectTarget, ExportTarget, GlobalAction, RecordingConfig as RecordingRequest,
 };
 use snow_capability::CapabilityRegistry;
 use snow_config::document::ConfigDocument;
@@ -65,7 +65,7 @@ use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 /// 设置页自动化脚本路径环境变量（JSON 操作数组，验收用）。
@@ -170,6 +170,12 @@ pub enum UiEvent {
     DirectCapture(DirectCaptureRequest),
     /// 打开（或激活）输入框翻译浮窗。
     OpenTranslateInput,
+    /// 全局快捷键动作（来自热键 / 总线）。
+    Global(GlobalAction),
+    /// 全局热键提示到期（携带提示序号，过期的忽略），用来复原托盘提示。
+    HintExpired(u64),
+    /// 延时截图到点（携带发起序号，被新一次触发取代的忽略）。
+    DelayedCaptureDue(u64),
     /// 语音转文字命令（来自热键或总线）。
     Dictation(DictationCommand),
     /// 语音转文字：工作进程有新事件，或定时器到点（取事件、查超时、重试键入）。
@@ -471,6 +477,19 @@ pub fn register_bus_handlers(bus: &CommandBus, inbox: &MainThreadInbox<UiEvent>)
             }),
         );
     }
+    let global_inbox = inbox.clone();
+    bus.register(
+        CommandKind::Global,
+        std::sync::Arc::new(move |_ctx, cmd| match cmd {
+            AppCommand::Global(action) => {
+                global_inbox.push(UiEvent::Global(*action));
+                Ok(CommandOutcome::Done)
+            }
+            other => Err(CommandError::Rejected(format!(
+                "全局动作处理器收到非全局动作命令: {other:?}"
+            ))),
+        }),
+    );
     // 全局热键 `pin_clipboard_content` 绑定的是 `PinSelection` 命令：没有进行中的截图会话，
     // 因此这里把它解释为“把剪贴板内容贴到屏幕”（避免为此新增命令变体波及 MCP 映射）
     let pin_inbox = inbox.clone();
@@ -554,49 +573,23 @@ impl HotkeyRegistration {
     }
 }
 
-/// 按配置键注册一类全局热键；单个失败只记日志并收集，不影响其余。
+/// 注册一条热键动作的全部快捷键；单个失败只记日志并收集，不影响其余。
 ///
 /// # 参数
 /// - `service`：热键服务。
 /// - `document`：配置文档。
-/// - `key`：热键配置键。
-/// - `label`：日志里的功能名。
-/// - `command`：热键按下时触发的命令。
+/// - `entry`：动作表里的一行。
 ///
 /// # 返回
 /// 成功句柄与失败列表。
-fn register_hotkeys(
+fn register_entry(
     service: &HotkeyService,
     document: &ConfigDocument,
-    key: &'static str,
-    label: &str,
-    command: &AppCommand,
+    entry: &crate::global_actions::HotkeyEntry,
 ) -> HotkeyRegistration {
-    register_hotkeys_with_release(service, document, key, label, command, None)
-}
-
-/// 同 `register_hotkeys`，并可指定热键松开时触发的命令（按住说话用）。
-///
-/// # 参数
-/// - `service`：热键服务。
-/// - `document`：配置文档。
-/// - `key`：热键配置键。
-/// - `label`：日志里的功能名。
-/// - `command`：热键按下时触发的命令。
-/// - `on_release`：热键松开时触发的命令，`None` 表示忽略松开。
-///
-/// # 返回
-/// 成功句柄与失败列表。
-fn register_hotkeys_with_release(
-    service: &HotkeyService,
-    document: &ConfigDocument,
-    key: &'static str,
-    label: &str,
-    command: &AppCommand,
-    on_release: Option<&AppCommand>,
-) -> HotkeyRegistration {
+    let (key, label) = (entry.config_key, entry.label);
     let mut result = HotkeyRegistration::default();
-    for text in shortcut_strings(&document.value(key)) {
+    for text in crate::global_actions::effective_shortcuts(&document.value(key)) {
         let hotkey = match Hotkey::parse(&portable_to_hotkey_text(&text)) {
             Ok(h) => h,
             Err(e) => {
@@ -611,8 +604,8 @@ fn register_hotkeys_with_release(
         };
         let binding = HotkeyBinding {
             hotkey,
-            command: command.clone(),
-            on_release: on_release.cloned(),
+            command: entry.command.clone(),
+            on_release: entry.on_release.clone(),
         };
         match service.register(binding) {
             Ok(handle) => {
@@ -632,142 +625,35 @@ fn register_hotkeys_with_release(
     result
 }
 
-/// 按配置注册截图全局热键；单个失败只记日志，不影响其余。
+/// 注册全部全局热键；`last_keys` 里的配置键排到最后注册。
+///
+/// 改键后让被改的键最后注册：它与别的动作冲突时失败的是它（可回滚），而不是原本正常的那个。
 ///
 /// # 参数
 /// - `service`：热键服务。
 /// - `document`：配置文档。
-///
-/// # 返回
-/// 成功句柄与失败列表。
-///
-/// ```ignore
-/// let result = register_capture_hotkeys(&service, &document);
-/// ```
-pub fn register_capture_hotkeys(service: &HotkeyService, document: &ConfigDocument) -> HotkeyRegistration {
-    register_hotkeys(
-        service,
-        document,
-        SCREENSHOT_HOTKEY_CONFIG_KEY,
-        "screenshot",
-        &AppCommand::Capture(CaptureRequest::default()),
-    )
-}
-
-/// 按配置注册录屏全局热键（`global_shortcuts/screen_record`，默认未绑定）。
-///
-/// # 参数
-/// - `service`：热键服务。
-/// - `document`：配置文档。
-///
-/// # 返回
-/// 成功句柄与失败列表。
-///
-/// ```ignore
-/// let result = register_recording_hotkeys(&service, &document);
-/// ```
-pub fn register_recording_hotkeys(service: &HotkeyService, document: &ConfigDocument) -> HotkeyRegistration {
-    register_hotkeys(
-        service,
-        document,
-        RECORDING_HOTKEY_CONFIG_KEY,
-        "recording",
-        &AppCommand::StartRecording(RecordingRequest::default()),
-    )
-}
-
-/// 按配置注册“贴图剪贴板内容”全局热键（`global_shortcuts/pin_clipboard_content`，默认未绑定）。
-///
-/// # 参数
-/// - `service`：热键服务。
-/// - `document`：配置文档。
-///
-/// # 返回
-/// 成功句柄与失败列表。
-pub fn register_pin_clipboard_hotkeys(
+/// - `last_keys`：最后注册的配置键，可为空。
+pub fn register_hotkeys_ordered(
     service: &HotkeyService,
     document: &ConfigDocument,
+    last_keys: &[&str],
 ) -> HotkeyRegistration {
-    register_hotkeys(
-        service,
-        document,
-        PIN_CLIPBOARD_HOTKEY_CONFIG_KEY,
-        "pin_clipboard",
-        &AppCommand::PinSelection,
-    )
-}
-
-/// 按配置注册“输入框翻译浮窗”全局热键（`global_shortcuts/translate_input`，默认未绑定，未绑定时不注册）。
-///
-/// # 参数
-/// - `service`：热键服务。
-/// - `document`：配置文档。
-///
-/// # 返回
-/// 成功句柄与失败列表。
-pub fn register_translate_input_hotkeys(
-    service: &HotkeyService,
-    document: &ConfigDocument,
-) -> HotkeyRegistration {
-    register_hotkeys(
-        service,
-        document,
-        TRANSLATE_INPUT_HOTKEY_CONFIG_KEY,
-        "translate_input",
-        &AppCommand::OpenTranslateInput,
-    )
-}
-
-/// 按配置注册语音转文字的两个全局热键：切换式（按一下开始、再按一下结束）与按住说话（按下开始、松开结束）。
-///
-/// 触发模式（`dictation/trigger_mode`）决定哪个生效；未绑定的热键不注册。
-///
-/// # 参数
-/// - `service`：热键服务。
-/// - `document`：配置文档。
-///
-/// # 返回
-/// 成功句柄与失败列表。
-pub fn register_dictation_hotkeys(
-    service: &HotkeyService,
-    document: &ConfigDocument,
-) -> HotkeyRegistration {
-    let trigger = DictationConfig::from_document(document).trigger;
+    let mut entries = crate::global_actions::hotkey_entries(document);
+    entries.sort_by_key(|e| last_keys.contains(&e.config_key));
     let mut result = HotkeyRegistration::default();
-    if trigger.toggle_enabled() {
-        result.merge(register_hotkeys(
-            service,
-            document,
-            DICTATION_TOGGLE_HOTKEY_CONFIG_KEY,
-            "dictation_toggle",
-            &AppCommand::ToggleDictation,
-        ));
-    }
-    if trigger.hold_enabled() {
-        result.merge(register_hotkeys_with_release(
-            service,
-            document,
-            DICTATION_HOLD_HOTKEY_CONFIG_KEY,
-            "dictation_hold",
-            &AppCommand::StartDictation,
-            Some(&AppCommand::StopDictation),
-        ));
+    for entry in &entries {
+        result.merge(register_entry(service, document, entry));
     }
     result
 }
 
-/// 注册全部已接线的全局热键（截图 + 录屏 + 贴图剪贴板内容 + 输入框翻译 + 语音转文字）。
+/// 注册全部已接线的全局热键（动作表见 `global_actions`）。
 ///
 /// # 参数
 /// - `service`：热键服务。
 /// - `document`：配置文档。
 pub fn register_all_hotkeys(service: &HotkeyService, document: &ConfigDocument) -> HotkeyRegistration {
-    let mut result = register_capture_hotkeys(service, document);
-    result.merge(register_recording_hotkeys(service, document));
-    result.merge(register_pin_clipboard_hotkeys(service, document));
-    result.merge(register_translate_input_hotkeys(service, document));
-    result.merge(register_dictation_hotkeys(service, document));
-    result
+    register_hotkeys_ordered(service, document, &[])
 }
 
 /// 打开数据根下的配置存储（损坏留档、缺失用默认值），全程序共享同一份。
@@ -791,6 +677,8 @@ pub enum CaptureMode {
     Record,
     /// 长截图选区（确认后交给滚动采集）。
     Scroll,
+    /// 普通截图，选区确认后自动执行一个动作（复制 / 贴图 / 识别 / 翻译）。
+    Action(ToolbarAction),
 }
 
 /// 常驻运行时状态：随主线程事件循环存活。
@@ -835,6 +723,12 @@ pub struct AppState {
     hotkeys: Option<HotkeyService>,
     /// 当前已注册热键的句柄（重新注册时先注销）。
     hotkey_handles: Vec<HotkeyHandle>,
+    /// 热键闸门（整体开关 / 前台全屏抑制），与热键出口共享。
+    hotkey_gate: HotkeyGate,
+    /// 最近一次托盘提示的序号（到期事件按它判断是否过期）。
+    hint_serial: u64,
+    /// 最近一次延时截图的发起序号（新一次触发取消旧的）。
+    delay_serial: Arc<AtomicU64>,
 }
 
 impl AppState {
@@ -889,7 +783,18 @@ impl AppState {
             tray,
             hotkeys,
             hotkey_handles,
+            hotkey_gate: HotkeyGate::default(),
+            hint_serial: 0,
+            delay_serial: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// 换上与热键出口共享的闸门（启动时由 `main` 调用）。
+    ///
+    /// # 参数
+    /// - `gate`：`start_services` 用的同一个闸门。
+    pub fn set_hotkey_gate(&mut self, gate: HotkeyGate) {
+        self.hotkey_gate = gate;
     }
 
     /// 已收到的截图请求数。
@@ -1258,6 +1163,20 @@ fn open_overlay(cx: &mut ShellContext, state: &mut AppState, payload: CapturePay
             if let Some(id) = window.native_id() {
                 view.update(cx.app(), |v, _| v.set_owner_window(id.0));
             }
+            let (keymap, locale) = {
+                let store = state.config.borrow();
+                (
+                    crate::overlay_keymap::OverlayKeymap::from_document(store.document()),
+                    interface_locale(store.document()),
+                )
+            };
+            view.update(cx.app(), |v, _| {
+                v.set_keymap(keymap);
+                v.set_locale(&locale);
+                if let CaptureMode::Action(action) = mode {
+                    v.set_pending_action(Some(action));
+                }
+            });
             state.overlay = Some(window);
             state.overlay_view = Some(view.clone());
             if record_mode {
@@ -1893,22 +1812,19 @@ fn describe_hotkey_failure(attempt: &HotkeyRegistration, config_key: &str) -> St
 /// - `key`：变更的配置键。
 /// - `previous`：变更前的值。
 fn on_config_changed(cx: &mut ShellContext, state: &mut AppState, key: &str, previous: Value) {
-    let Some(config_key) = [
-        SCREENSHOT_HOTKEY_CONFIG_KEY,
-        RECORDING_HOTKEY_CONFIG_KEY,
-        PIN_CLIPBOARD_HOTKEY_CONFIG_KEY,
-        TRANSLATE_INPUT_HOTKEY_CONFIG_KEY,
-        DICTATION_TOGGLE_HOTKEY_CONFIG_KEY,
-        DICTATION_HOLD_HOTKEY_CONFIG_KEY,
-        DICTATION_TRIGGER_MODE_CONFIG_KEY,
-    ]
-    .into_iter()
-    .find(|k| *k == key)
-    else {
-        if key.starts_with("global_shortcuts/") {
-            tracing::info!(key, "该全局快捷键的动作尚未接线，配置已保存但不会注册热键");
-        }
+    if key == global_actions::FULLSCREEN_SUPPRESSION_KEY {
+        let on = state.config.borrow().value(key).as_bool().unwrap_or(false);
+        state.hotkey_gate.set_suppress_fullscreen(on);
         return;
+    }
+    let Some(config_key) = global_actions::static_hotkey_key(key) else {
+        return;
+    };
+    // 被改的键最后注册：与别的动作冲突时失败的是它，才能回滚
+    let last_keys: &[&str] = if key == DICTATION_TRIGGER_MODE_CONFIG_KEY {
+        &DICTATION_HOTKEY_KEYS
+    } else {
+        &[key]
     };
     let Some(service) = state.hotkeys.as_ref() else {
         tracing::warn!(key, "热键服务未运行，无法重新注册");
@@ -1919,7 +1835,7 @@ fn on_config_changed(cx: &mut ShellContext, state: &mut AppState, key: &str, pre
             tracing::warn!(error = %e, "注销旧热键失败");
         }
     }
-    let attempt = register_all_hotkeys(service, state.config.borrow().document());
+    let attempt = register_hotkeys_ordered(service, state.config.borrow().document(), last_keys);
     if !hotkey_attempt_failed(&attempt, config_key) {
         let listing = service
             .registered()
@@ -1968,6 +1884,138 @@ fn monitor_local_to_desktop(rect: PhysicalRect, bounds: PhysicalRect) -> Physica
     PhysicalRect::new(rect.x + bounds.x, rect.y + bounds.y, rect.width, rect.height)
 }
 
+/// 托盘提示停留秒数，到点复原。
+const HINT_SECONDS: u64 = 5;
+
+/// 在托盘悬停提示里显示一条状态提示，过几秒自动复原（没有托盘时只记日志）。
+///
+/// # 参数
+/// - `state`：运行时状态。
+/// - `text`：提示文字（已本地化）。
+fn show_hint(state: &mut AppState, text: &str) {
+    tracing::info!(hint = %text, "全局热键状态提示");
+    state.hint_serial += 1;
+    let serial = state.hint_serial;
+    if let Some(tray) = state.tray.as_ref()
+        && let Err(e) = tray.set_tooltip(format!("{TRAY_TOOLTIP} - {text}"))
+    {
+        tracing::debug!(error = %e, "更新托盘提示失败");
+    }
+    let inbox = state.inbox.clone();
+    let spawned = std::thread::Builder::new().name("hint-expire".into()).spawn(move || {
+        std::thread::sleep(Duration::from_secs(HINT_SECONDS));
+        inbox.push(UiEvent::HintExpired(serial));
+    });
+    if let Err(e) = spawned {
+        tracing::warn!(error = %e, "无法安排提示复原");
+    }
+}
+
+/// 当前界面语言代码。
+///
+/// # 参数
+/// - `state`：运行时状态。
+fn state_locale(state: &AppState) -> String {
+    interface_locale(state.config.borrow().document())
+}
+
+/// 延时截图：按 `screenshot/delay_seconds` 等待后发起一次截图；新触发会取消还在等的旧触发。
+///
+/// # 参数
+/// - `state`：运行时状态。
+fn schedule_delayed_capture(state: &mut AppState) {
+    let seconds = global_actions::delay_seconds(state.config.borrow().document());
+    let serial = state.delay_serial.fetch_add(1, Ordering::SeqCst) + 1;
+    let latest = Arc::clone(&state.delay_serial);
+    let inbox = state.inbox.clone();
+    let spawned = std::thread::Builder::new().name("delayed-capture".into()).spawn(move || {
+        std::thread::sleep(Duration::from_secs(seconds));
+        if latest.load(Ordering::SeqCst) == serial {
+            inbox.push(UiEvent::DelayedCaptureDue(serial));
+        }
+    });
+    if let Err(e) = spawned {
+        tracing::error!(error = %e, "无法安排延时截图");
+    }
+}
+
+/// 打开录屏保存目录；失败时给出提示。
+///
+/// # 参数
+/// - `state`：运行时状态。
+fn open_recording_folder(state: &mut AppState) {
+    let dir = crate::recording::output::resolve_video_directory(
+        state.config.borrow().document(),
+        home_directory().as_deref(),
+    );
+    if let Err(reason) = snow_platform::shell::open_directory(&dir) {
+        let locale = state_locale(state);
+        let text = i18n_for(&locale).tr_with(
+            "global-hotkey-open-folder-failed",
+            &snow_i18n::Args::new().named("reason", reason),
+        );
+        show_hint(state, &text);
+    }
+}
+
+/// 翻转“前台全屏窗口时禁用热键”：写配置、同步闸门并提示。
+///
+/// # 参数
+/// - `state`：运行时状态。
+fn toggle_fullscreen_suppression(state: &mut AppState) {
+    let next = !state.hotkey_gate.suppress_fullscreen();
+    if let Err(e) = restore_value(&state.config, global_actions::FULLSCREEN_SUPPRESSION_KEY, Value::Bool(next)) {
+        tracing::error!(error = %e, "写入全屏抑制开关失败");
+        return;
+    }
+    state.hotkey_gate.set_suppress_fullscreen(next);
+    let id = if next {
+        "global-hotkey-fullscreen-suppression-on"
+    } else {
+        "global-hotkey-fullscreen-suppression-off"
+    };
+    let text = i18n_for(&state_locale(state)).tr(id);
+    show_hint(state, &text);
+}
+
+/// 执行全局快捷键动作；功能未实现的给出提示，不报错。
+///
+/// # 参数
+/// - `cx`：外壳上下文。
+/// - `state`：运行时状态。
+/// - `action`：动作。
+fn run_global_action(cx: &mut ShellContext, state: &mut AppState, action: GlobalAction) {
+    let quick = |tool| CaptureMode::Action(tool);
+    match action {
+        GlobalAction::DelayedCapture => schedule_delayed_capture(state),
+        GlobalAction::CaptureAndPin => request_capture(cx, state, ORIGIN_HOTKEY, quick(ToolbarAction::Pin)),
+        GlobalAction::CaptureAndOcr => request_capture(cx, state, ORIGIN_HOTKEY, quick(ToolbarAction::Ocr)),
+        GlobalAction::CaptureAndTranslate => {
+            request_capture(cx, state, ORIGIN_HOTKEY, quick(ToolbarAction::Translate))
+        }
+        GlobalAction::CaptureAndCopy => request_capture(cx, state, ORIGIN_HOTKEY, quick(ToolbarAction::Copy)),
+        GlobalAction::OpenRecordingFolder => open_recording_folder(state),
+        GlobalAction::OpenSettings => open_or_focus_settings(cx, state),
+        GlobalAction::ToggleGlobalHotkeys => {
+            let on = state.hotkey_gate.toggle_enabled();
+            let id = if on { "global-hotkeys-turned-on" } else { "global-hotkeys-turned-off" };
+            let text = i18n_for(&state_locale(state)).tr(id);
+            show_hint(state, &text);
+        }
+        GlobalAction::ToggleFullscreenSuppression => toggle_fullscreen_suppression(state),
+        GlobalAction::RecordAndCopy if !state.recording.is_busy(cx) => request_recording(cx, state),
+        GlobalAction::RecordAndCopy
+        | GlobalAction::OpenCaptureHistory
+        | GlobalAction::OpenPinManagement
+        | GlobalAction::TranslateSelectedText
+        | GlobalAction::PinSelectedFiles
+        | GlobalAction::RestoreClosedPin => {
+            let text = global_actions::placeholder_hint(action, &state_locale(state));
+            show_hint(state, &text);
+        }
+    }
+}
+
 /// 主线程事件分发（由 GPUI 主线程调用）。
 ///
 /// # 参数
@@ -1990,6 +2038,16 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
         UiEvent::DirectCapture(request) => direct_capture(cx, state, request),
         UiEvent::OpenSettings => open_or_focus_settings(cx, state),
         UiEvent::OpenTranslateInput => open_or_focus_translate_input(cx, state),
+        UiEvent::Global(action) => run_global_action(cx, state, action),
+        UiEvent::HintExpired(serial) => {
+            if serial == state.hint_serial
+                && let Some(tray) = state.tray.as_ref()
+                && let Err(e) = tray.set_tooltip(TRAY_TOOLTIP)
+            {
+                tracing::debug!(error = %e, "复原托盘提示失败");
+            }
+        }
+        UiEvent::DelayedCaptureDue(_) => request_capture(cx, state, ORIGIN_HOTKEY, CaptureMode::Screenshot),
         UiEvent::Dictation(command) => state.dictation.command(cx, state.tray.as_ref(), command),
         UiEvent::DictationPoll => state.dictation.tick(cx, state.tray.as_ref()),
         UiEvent::DictationProbed { round, verdict } => {
@@ -2142,18 +2200,20 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
 /// - `bus`：命令总线（热键 / 托盘命令的出口）。
 /// - `inbox`：主线程收件箱（托盘信号的出口）。
 /// - `document`：配置文档（读取热键）。
+/// - `gate`：热键闸门（与主线程状态共享；这里按配置初始化“全屏抑制”）。
 ///
 /// # 返回
 /// `(托盘服务, 热键服务, 已注册的热键句柄)`，失败项为 `None`。
 ///
 /// ```ignore
-/// let (tray, hotkeys, handles) = start_services(&caps, &bus, &inbox, &document);
+/// let (tray, hotkeys, handles) = start_services(&caps, &bus, &inbox, &document, &HotkeyGate::default());
 /// ```
 pub fn start_services(
     caps: &CapabilityRegistry,
     bus: &CommandBus,
     inbox: &MainThreadInbox<UiEvent>,
     document: &ConfigDocument,
+    gate: &HotkeyGate,
 ) -> (Option<TrayService>, Option<HotkeyService>, Vec<HotkeyHandle>) {
     let tray = match build_tray_spec()
         .and_then(|spec| TrayService::start(caps, spec, Dispatcher::from_bus(bus.clone())).map_err(|e| e.to_string()))
@@ -2178,7 +2238,13 @@ pub fn start_services(
         }
     };
     let mut handles = Vec::new();
-    let hotkeys = match HotkeyService::start(caps, Dispatcher::from_bus(bus.clone())) {
+    gate.set_suppress_fullscreen(document.value(global_actions::FULLSCREEN_SUPPRESSION_KEY).as_bool().unwrap_or(false));
+    let gated = global_actions::gated_dispatcher(
+        Dispatcher::from_bus(bus.clone()),
+        gate.clone(),
+        snow_platform::window_rect::focused_fullscreen_window_exists,
+    );
+    let hotkeys = match HotkeyService::start(caps, gated) {
         Ok(service) => {
             let registration = register_all_hotkeys(&service, document);
             tracing::info!(

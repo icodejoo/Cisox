@@ -92,6 +92,9 @@ $check = & $FixtureExe @checkArgs
 if ($LASTEXITCODE -ne 0) { throw "夹具校验目标显示器失败，中止: $check" }
 $mon = [regex]::Match($check, "primary=(true|false) monitor=Rect \{ x: (-?\d+), y: (-?\d+), w: (\d+), h: (\d+) \}")
 if (-not $mon.Success) { throw "无法解析显示器矩形: $check" }
+$barArgs = @()   # 双窗口：序号条只在主节拍窗口，分析只读这一段
+$bc = [regex]::Match($check, "bar_crop=(\d+),(\d+),(\d+)")
+if ($Dual -and $bc.Success) { $barArgs = @("--bar-crop", ($bc.Groups[1].Value + "," + $bc.Groups[2].Value + "," + $bc.Groups[3].Value)) }
 $isPrimary = $mon.Groups[1].Value -eq "true"
 $mx, $my, $mw, $mh = 2..5 | ForEach-Object { [int]$mon.Groups[$_].Value }
 # 二次防线：未传 -AllowPrimary 时，主屏（Primary=true 或坐标 (0,0)）立刻中止；期望值取自夹具实测 bounds，不写死分辨率
@@ -392,11 +395,11 @@ finally {
 if (Test-Path $outFile) {
     "--- analysis ($outFile) ---"
     if ($Trace) {
-        $analysisText = python (Join-Path $toolRoot "analyze/fps_analyze.py") $outFile --refresh $Refresh --log $logFile --ffmpeg-dir $FfmpegDir | Out-String
+        $analysisText = python (Join-Path $toolRoot "analyze/fps_analyze.py") $outFile --refresh $Refresh --log $logFile --ffmpeg-dir $FfmpegDir @barArgs | Out-String
         $analysisText
         $analysisText | Set-Content -Encoding UTF8 (Join-Path $runDir "analysis.txt")
     } else {
-        python (Join-Path $toolRoot "analyze/fps_analyze.py") $outFile --refresh $Refresh --log $logFile --ffmpeg-dir $FfmpegDir
+        python (Join-Path $toolRoot "analyze/fps_analyze.py") $outFile --refresh $Refresh --log $logFile --ffmpeg-dir $FfmpegDir @barArgs
     }
     "--- ffprobe ---"
     & (Join-Path $FfmpegDir "ffprobe.exe") -v error -select_streams v:0 -show_entries "stream=codec_name,width,height,avg_frame_rate,nb_frames:format=duration,size" -of default=nw=1 $outFile
@@ -404,7 +407,7 @@ if (Test-Path $outFile) {
 if ($Trace) {
     "--- trace_join ---"
     if ((Test-Path $outFile) -and (Test-Path $traceCsv)) {
-        python (Join-Path $toolRoot "analyze/trace_join.py") --fixture $logFile --trace $traceCsv --video $outFile --fps $Fps --refresh $Refresh --ffmpeg-dir $FfmpegDir --env (Join-Path $runDir "env.json") --report (Join-Path $runDir "trace_join.txt") --json (Join-Path $runDir "trace_join.json")
+        python (Join-Path $toolRoot "analyze/trace_join.py") --fixture $logFile --trace $traceCsv --video $outFile --fps $Fps --refresh $Refresh --ffmpeg-dir $FfmpegDir @barArgs --env (Join-Path $runDir "env.json") --report (Join-Path $runDir "trace_join.txt") --json (Join-Path $runDir "trace_join.json")
     } else { "!! 缺少追踪 csv 或成品，跳过 trace_join: $traceCsv" }
 }
 if ($PollTrace) {

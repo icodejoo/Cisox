@@ -475,6 +475,60 @@ placeholder_request!(
     ExportRecognitionRequest
 );
 
+/// 全局快捷键动作：只有热键 / 托盘等本地入口发射，不在 MCP tool 内。
+///
+/// 能直接落到已有命令的热键（截图、录屏、贴图剪贴板、全屏 / 窗口直接截图）不走这里，
+/// 这里只放需要专门处理或暂未实现的动作。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GlobalAction {
+    /// 延时截图（延时秒数读 `screenshot/delay_seconds`）。
+    DelayedCapture,
+    /// 截图，选区确认后直接贴图。
+    CaptureAndPin,
+    /// 截图，选区确认后直接识别文字。
+    CaptureAndOcr,
+    /// 截图，选区确认后直接翻译。
+    CaptureAndTranslate,
+    /// 截图，选区确认后直接复制。
+    CaptureAndCopy,
+    /// 录制并在结束时复制（占位：未在录制时等同开始录屏）。
+    RecordAndCopy,
+    /// 打开录屏保存目录。
+    OpenRecordingFolder,
+    /// 打开截图历史（占位）。
+    OpenCaptureHistory,
+    /// 打开贴图管理（占位）。
+    OpenPinManagement,
+    /// 打开设置。
+    OpenSettings,
+    /// 翻译选中的文字（占位）。
+    TranslateSelectedText,
+    /// 贴图选中的文件（占位）。
+    PinSelectedFiles,
+    /// 恢复最近关闭的贴图窗口（占位）。
+    RestoreClosedPin,
+    /// 开 / 关全局热键（本次运行有效，不落盘）。
+    ToggleGlobalHotkeys,
+    /// 开 / 关“前台全屏窗口时禁用热键”。
+    ToggleFullscreenSuppression,
+}
+
+impl GlobalAction {
+    /// 是否是“闸门控制”动作：它们在热键被整体禁用或被全屏抑制时仍然放行，用来自己解除禁用。
+    ///
+    /// ```rust
+    /// use snow_app_core::command::GlobalAction;
+    /// assert!(GlobalAction::ToggleGlobalHotkeys.controls_gate());
+    /// assert!(!GlobalAction::OpenSettings.controls_gate());
+    /// ```
+    pub const fn controls_gate(self) -> bool {
+        matches!(
+            self,
+            Self::ToggleGlobalHotkeys | Self::ToggleFullscreenSuppression
+        )
+    }
+}
+
 /// 应用命令：所有发射端共用的命令集合。
 #[derive(Debug, Clone, PartialEq)]
 pub enum AppCommand {
@@ -542,6 +596,8 @@ pub enum AppCommand {
     StartDictation,
     /// 结束语音转文字（按住说话：热键松开；未在进行中则忽略）。
     StopDictation,
+    /// 全局快捷键动作（热键 / 托盘触发，不在 MCP tool 内）。
+    Global(GlobalAction),
 }
 
 /// 生成 `CommandKind` 枚举与 `AppCommand::kind()`，保证两者变体同步。
@@ -608,6 +664,7 @@ command_kinds!(
     ToggleDictation,
     StartDictation,
     StopDictation,
+    Global(_),
 );
 
 /// MCP 截图域 28 个 tool（去掉 `snow_shot_` 前缀）到命令种类的映射。

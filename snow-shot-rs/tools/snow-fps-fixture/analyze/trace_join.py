@@ -1036,6 +1036,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--report", help="文本报告输出路径（缺省只打印）")
     ap.add_argument("--json", help="JSON 摘要输出路径")
     ap.add_argument("--env", help="可选：run-fps-test.ps1 -Trace 产出的 env.json，其 tier/interfered 并入摘要")
+    ap.add_argument("--bar-crop", help="双窗口时序号条所在段 x,w,total（见 fps_analyze --bar-crop）")
     ap.add_argument("--stall-ratio", type=float, default=Params.stall_ratio)
     ap.add_argument("--margin-ms", type=float, default=Params.margin_us / 1000)
     args = ap.parse_args(argv)
@@ -1050,7 +1051,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return 2
         ffmpeg, ffprobe = fa.find_tool("ffmpeg", args.ffmpeg_dir), fa.find_tool("ffprobe", args.ffmpeg_dir)
         pts, duration = fa.probe_frames(ffprobe, args.video)
-        seqs = fa.decode_video(ffmpeg, args.video)
+        seqs = fa.decode_video(ffmpeg, args.video, fa.parse_bar_crop(args.bar_crop) if args.bar_crop else None)
     except (OSError, ValueError) as e:
         print(f"错误: {e}", file=sys.stderr)
         return 2

@@ -29,6 +29,7 @@ pub mod export_format;
 pub mod export_naming;
 pub mod export_pdf;
 pub mod frozen_frame;
+pub mod global_actions;
 pub mod ocr_assets;
 pub mod ocr_backend;
 pub mod ocr_client;
@@ -36,6 +37,7 @@ pub mod ocr_download;
 pub mod ocr_flow;
 pub mod ocr_service;
 pub mod ort_runtime;
+pub mod overlay_keymap;
 pub mod overlay_probe;
 pub mod overlay_view;
 pub mod pinned_manager;
@@ -246,8 +248,9 @@ fn run_primary(ctx: &AppBootstrap, guard: &SingleInstanceGuard) -> ExitCode {
         let state_inbox = inbox.clone();
         let restore_inbox = inbox.clone();
         let config = app_runtime::open_shared_config(&data_root);
+        let gate = global_actions::HotkeyGate::default();
         let (tray, hotkeys, hotkey_handles) =
-            app_runtime::start_services(&caps, &bus, &inbox, config.borrow().document());
+            app_runtime::start_services(&caps, &bus, &inbox, config.borrow().document(), &gate);
         let mut state = app_runtime::AppState::new(
             config,
             state_inbox,
@@ -257,6 +260,7 @@ fn run_primary(ctx: &AppBootstrap, guard: &SingleInstanceGuard) -> ExitCode {
             hotkey_handles,
             &data_root,
         );
+        state.set_hotkey_gate(gate);
         tracing::info!("event loop started (resident, QuitMode::Explicit)");
         cx.run_inbox(inbox, move |cx, event| {
             app_runtime::handle_event(cx, &mut state, event);

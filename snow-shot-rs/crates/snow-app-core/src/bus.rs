@@ -257,6 +257,7 @@ mod tests {
             CommandKind::ToggleDictation => AppCommand::ToggleDictation,
             CommandKind::StartDictation => AppCommand::StartDictation,
             CommandKind::StopDictation => AppCommand::StopDictation,
+            CommandKind::Global => AppCommand::Global(GlobalAction::OpenSettings),
         }
     }
 
@@ -468,5 +469,29 @@ mod tests {
             ),
             Ok(CommandOutcome::Done)
         );
+    }
+
+    /// 全局快捷键动作命令未注册时返回明确错误，注册后可由热键来源派发；闸门控制动作有标记。
+    #[test]
+    fn global_action_dispatch() {
+        let bus = CommandBus::new();
+        let command = AppCommand::Global(GlobalAction::ToggleGlobalHotkeys);
+        assert_eq!(
+            bus.emit_from(CommandSource::Hotkey, command.clone()),
+            Err(CommandError::NoHandler(CommandKind::Global))
+        );
+        bus.register(
+            CommandKind::Global,
+            std::sync::Arc::new(|ctx, cmd| {
+                assert_eq!(ctx.source, CommandSource::Hotkey);
+                assert!(matches!(cmd, AppCommand::Global(a) if a.controls_gate()));
+                Ok(CommandOutcome::Done)
+            }),
+        );
+        assert_eq!(
+            bus.emit_from(CommandSource::Hotkey, command),
+            Ok(CommandOutcome::Done)
+        );
+        assert!(!GlobalAction::OpenSettings.controls_gate());
     }
 }

@@ -34,6 +34,40 @@ OUTLIER_SEQ_SPAN = 1_000_000
 BAR_FILTER = f"crop=iw:ih/32:0:ih/64,scale={SEQ_BITS}:1:flags=area,format=gray"
 
 
+def bar_filter(bar_crop: Optional[Tuple[int, int, int]] = None) -> str:
+    """构造抽序号条的 ffmpeg 滤镜；双窗口时只裁主窗口那段（按比例，缩放后的成品同样适用）。
+
+    参数:
+        bar_crop: (x 偏移, 宽, 区域总宽)，即夹具 --check 输出的 bar_crop；None 表示整宽。
+    返回:
+        滤镜字符串。
+    示例:
+        >>> bar_filter((0, 1280, 2560)).startswith("crop=iw*1280/2560:")
+        True
+    """
+    if bar_crop is None:
+        return BAR_FILTER
+    x, w, total = bar_crop
+    return f"crop=iw*{w}/{total}:ih/32:iw*{x}/{total}:ih/64,scale={SEQ_BITS}:1:flags=area,format=gray"
+
+
+def parse_bar_crop(text: str) -> Tuple[int, int, int]:
+    """解析 "x,w,total"。
+
+    参数:
+        text: 逗号分隔的三个整数（w、total 须大于 0 且 x+w 不超过 total）。
+    返回:
+        (x, w, total)。
+    示例:
+        >>> parse_bar_crop("0,1280,2560")
+        (0, 1280, 2560)
+    """
+    x, w, total = (int(v) for v in text.split(","))
+    if x < 0 or w <= 0 or total <= 0 or x + w > total:
+        raise ValueError(f"bar_crop 非法: {text}")
+    return x, w, total
+
+
 def decode_seq(samples: Sequence[int]) -> Optional[int]:
     """把 32 个灰度采样（高位在前）还原成序号；不足 32 个返回 None。
 
@@ -280,16 +314,17 @@ def probe_frames(ffprobe: str, path: str) -> Tuple[List[float], float]:
     return pts, dur
 
 
-def decode_video(ffmpeg: str, path: str) -> List[Optional[int]]:
+def decode_video(ffmpeg: str, path: str, bar_crop: Optional[Tuple[int, int, int]] = None) -> List[Optional[int]]:
     """用 ffmpeg 抽出每帧序号条并解码。
 
     参数:
         ffmpeg: ffmpeg 路径。
         path: 成品路径。
+        bar_crop: 双窗口时序号条所在段，见 bar_filter。
     返回:
         每帧序号（解码失败为 None）。
     """
-    cmd = [ffmpeg, "-v", "error", "-i", path, "-vf", BAR_FILTER, "-fps_mode", "passthrough", "-f", "rawvideo", "-pix_fmt", "gray", "-"]
+    cmd = [ffmpeg, "-v", "error", "-i", path, "-vf", bar_filter(bar_crop), "-fps_mode", "passthrough", "-f", "rawvideo", "-pix_fmt", "gray", "-"]
     raw = subprocess.run(cmd, capture_output=True, check=True).stdout
     return decode_raw_frames(raw)
 
@@ -331,14 +366,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--log", help="夹具帧日志 CSV（可选，用于漂移和序号校验）")
     ap.add_argument("--ffmpeg-dir", help="ffmpeg/ffprobe 所在目录")
     ap.add_argument("--json", action="store_true", help="输出 JSON")
+    ap.add_argument("--bar-crop", help="双窗口时序号条所在段 x,w,total（取自夹具 --check 的 bar_crop）")
     args = ap.parse_args(argv)
     try:
         ffmpeg = find_tool("ffmpeg", args.ffmpeg_dir)
         ffprobe = find_tool("ffprobe", args.ffmpeg_dir)
         pts, dur = probe_frames(ffprobe, args.video)
-        seqs = decode_video(ffmpeg, args.video)
+        seqs = decode_video(ffmpeg, args.video, parse_bar_crop(args.bar_crop) if args.bar_crop else None)
         log = load_fixture_log(args.log) if args.log else None
-    except (OSError, subprocess.CalledProcessError) as e:
+    except (OSError, ValueError, subprocess.CalledProcessError) as e:
         print(f"错误: {e}", file=sys.stderr)
         return 2
     n = min(len(pts), len(seqs))

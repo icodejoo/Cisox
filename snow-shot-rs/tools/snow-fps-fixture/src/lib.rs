@@ -353,6 +353,39 @@ pub fn split_region_by_monitors(monitors: &[MonitorInfo], region: Rect) -> Resul
     Ok(pieces)
 }
 
+/// 序号条在整个区域中的位置：只由第一块（主节拍）窗口绘制，其余窗口不画。
+///
+/// # 参数
+/// - `pieces`：[`split_region_by_monitors`] 的切分结果（按 x 升序）。
+/// - `region`：完整跨屏区域。
+///
+/// # 返回
+/// `(相对区域左边缘的横向偏移, 序号条宽度, 区域总宽)`，单位像素；`pieces` 为空返回 `None`。
+///
+/// # 示例
+/// ```
+/// use snow_fps_fixture::{bar_crop, Rect};
+/// let region = Rect { x: 1280, y: 0, w: 2560, h: 1440 };
+/// let pieces = [Rect { x: 1280, y: 0, w: 1280, h: 1440 }, Rect { x: 2560, y: 0, w: 1280, h: 1440 }];
+/// assert_eq!(bar_crop(&pieces, region), Some((0, 1280, 2560)));
+/// ```
+pub fn bar_crop(pieces: &[Rect], region: Rect) -> Option<(u32, u32, u32)> {
+    let lead = pieces.first()?;
+    Some(((lead.x - region.x) as u32, lead.w, region.w))
+}
+
+/// 双窗口模式下第 `index` 个窗口绘制序号条的范围。
+///
+/// # 参数
+/// - `index`：窗口下标（0 为主节拍）。
+/// - `piece`：该窗口的矩形。
+///
+/// # 返回
+/// `(段偏移, 序号条总宽)`；非主节拍窗口返回总宽 0（不画序号条）。
+pub fn bar_segment_for(index: usize, piece: Rect) -> (u32, u32) {
+    if index == 0 { (0, piece.w) } else { (0, 0) }
+}
+
 /// 一帧的提交记录。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FrameRecord {
@@ -505,6 +538,20 @@ mod tests {
         assert!(split_region_by_monitors(&[at(0, 0)], Rect { x: 5000, y: 0, w: 10, h: 10 }).is_err());
         assert!(parse_args(&args("--span --dual --allow-primary --region 0,0,10,10")).unwrap().dual);
         assert!(parse_args(&args("--dual --allow-primary --region 0,0,10,10")).is_err());
+    }
+
+    /// 序号条只由主节拍窗口绘制：分析区域落在主窗口内，其余窗口总宽为 0 不画。
+    #[test]
+    fn bar_drawn_by_leader_only() {
+        let region = Rect { x: 1280, y: 0, w: 2560, h: 1440 };
+        let pieces = [Rect { x: 1280, y: 0, w: 1280, h: 1440 }, Rect { x: 2560, y: 0, w: 1280, h: 1440 }];
+        assert_eq!(bar_crop(&pieces, region), Some((0, 1280, 2560)));
+        assert_eq!(bar_segment_for(0, pieces[0]), (0, 1280));
+        assert_eq!(bar_segment_for(1, pieces[1]).1, 0);
+        // 分析区域不越出主窗口，也不与其它窗口重叠
+        let (x, w, _) = bar_crop(&pieces, region).unwrap();
+        assert!(x + w <= (pieces[1].x - region.x) as u32);
+        assert_eq!(bar_crop(&[], region), None);
     }
 
     /// 区域必须落在目标屏内；默认整屏；size 锚定左上角。

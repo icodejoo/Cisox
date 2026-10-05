@@ -14,6 +14,7 @@ use crate::ocr_service::OcrResult;
 use crate::translate_flow::{TranslateUiState, panel_lines as translate_panel_lines, stage_text};
 use crate::translate_service::{TranslateFlowError, TranslateOutcome, TranslateStage};
 use crate::overlay_probe::FrameProbe;
+use crate::overlay_keymap::{DrawingKey, OverlayKeyAction, OverlayKeymap};
 use crate::screenshot_output::{
     self, ExportOverrides, ExportSettings, ManualSaveJob, SaveMode, SaveOutcome, home_directory,
 };
@@ -709,6 +710,12 @@ pub struct ScreenshotOverlayView {
     record_mode: bool,
     /// 长截图选区模式（确认后交给滚动采集）。
     scroll_mode: bool,
+    /// 选区确认后自动执行的动作（全局热键“截图并复制 / 贴图 / 识别 / 翻译”）。
+    pending_action: Option<ToolbarAction>,
+    /// 覆盖窗键位表（读 `screenshot_shortcuts/*` 与 `drawing_shortcuts/*`）。
+    keymap: OverlayKeymap,
+    /// 界面语言代码（提示文案用）。
+    locale: String,
     /// OCR 交互状态。
     ocr: OcrUiState,
     /// 最近一次 OCR 请求序号（过期结果据此丢弃）。
@@ -776,6 +783,9 @@ impl ScreenshotOverlayView {
             text_edit: None,
             record_mode: false,
             scroll_mode: false,
+            pending_action: None,
+            keymap: OverlayKeymap::default(),
+            locale: snow_i18n::FALLBACK_LOCALE.to_string(),
             ocr: OcrUiState::Idle,
             ocr_serial: 0,
             translate: TranslateUiState::Idle,
@@ -1018,12 +1028,15 @@ impl ScreenshotOverlayView {
     ///
     /// # 参数
     /// - `point`：底图物理坐标。
-    pub fn handle_mouse_up(&mut self, point: PhysicalPoint) {
+    ///
+    /// # 返回
+    /// 这次释放是否确认了一个选区（框选或调整结束且尺寸有效）；标注拖动与无效选区为 `false`。
+    pub fn handle_mouse_up(&mut self, point: PhysicalPoint) -> bool {
         let point = self.clamp_point(point);
         self.cursor_pos = point;
         if self.annotating {
             self.finish_annotation(point);
-            return;
+            return false;
         }
         match self.state {
             SelectionState::MarqueeDragging { start, .. } => {
@@ -1035,6 +1048,7 @@ impl ScreenshotOverlayView {
                 } else {
                     SelectionState::Idle
                 };
+                return matches!(self.state, SelectionState::Selected { .. });
             }
             SelectionState::Reshaping {
                 mode,
@@ -1053,9 +1067,11 @@ impl ScreenshotOverlayView {
                 );
                 self.state = SelectionState::Selected { rect };
                 self.hover_mode = SelectionDragMode::None;
+                return true;
             }
             _ => {}
         }
+        false
     }
 
     /// 处理鼠标右键：有选区时先撤销选区，没有选区则关闭覆盖窗。
@@ -1084,17 +1100,19 @@ impl ScreenshotOverlayView {
     /// assert_eq!(view.handle_key("escape", false, false), OverlayOutcome::Close);
     /// ```
     pub fn handle_key(&mut self, key: &str, control: bool, shift: bool) -> OverlayOutcome {
+        self.handle_keystroke(key, control, shift, false)
+    }
+
+    /// 处理带 Alt 状态的键盘按键：先处理翻译 / OCR 界面里的固定键，再查配置键位表。
+    ///
+    /// # 参数
+    /// - `key`：GPUI 按键名（小写）。
+    /// - `control` / `shift` / `alt`：修饰键状态。
+    ///
+    /// # 返回
+    /// 窗口去向。Enter 固定为确认（复制 / 录屏 / 长截图）；Ctrl+Shift+Z 固定为重做；其余按键位表。
+    pub fn handle_keystroke(&mut self, key: &str, control: bool, shift: bool, alt: bool) -> OverlayOutcome {
         match (key, control) {
-            // 翻译 / OCR 界面打开时，Esc 先退出该界面（回到框选状态），再按一次才关闭覆盖窗
-            ("escape", _) if self.translate.is_visible() => {
-                self.dismiss_translate();
-                OverlayOutcome::Stay
-            }
-            ("escape", _) if self.ocr.is_visible() => {
-                self.dismiss_ocr();
-                OverlayOutcome::Stay
-            }
-            ("escape", _) => OverlayOutcome::Close,
             ("enter", _) if matches!(self.ocr, OcrUiState::Done { .. }) => self.copy_ocr_text_and_close(),
             ("enter", _) if matches!(self.translate, TranslateUiState::Done { .. }) => {
                 self.copy_translation_and_close()
@@ -1109,28 +1127,158 @@ impl ScreenshotOverlayView {
             }
             ("enter", _) if self.record_mode => self.start_recording_and_close(),
             ("enter", _) if self.scroll_mode => self.start_scroll_capture_and_close(),
-            // 录屏选区模式下没有复制 / 保存
-            ("c", true) | ("s", true) if self.record_mode || self.scroll_mode => OverlayOutcome::Stay,
-            ("enter", _) | ("c", true) => self.copy_selection_and_close(),
-            ("s", true) => self.save_selection_and_close(),
-            ("z", true) if shift => {
-                self.redo_annotation();
+            ("enter", _) => self.copy_selection_and_close(),
+            _ => match self.keymap.resolve(key, control, shift, alt) {
+                Some(action) => self.run_key_action(action),
+                // 固定后备：Ctrl+Shift+Z 重做
+                None if key == "z" && control && shift => {
+                    self.redo_annotation();
+                    OverlayOutcome::Stay
+                }
+                None => OverlayOutcome::Stay,
+            },
+        }
+    }
+
+    /// 执行键位动作。
+    ///
+    /// # 参数
+    /// - `action`：键位表解析出的动作。
+    fn run_key_action(&mut self, action: OverlayKeyAction) -> OverlayOutcome {
+        let selecting_mode = self.record_mode || self.scroll_mode;
+        let tools_ready = self.current_selection().is_some();
+        match action {
+            // 翻译 / OCR 界面打开时，取消键先退出该界面，再按一次才关闭覆盖窗
+            OverlayKeyAction::Cancel if self.translate.is_visible() => {
+                self.dismiss_translate();
                 OverlayOutcome::Stay
             }
-            ("z", true) => {
+            OverlayKeyAction::Cancel if self.ocr.is_visible() => {
+                self.dismiss_ocr();
+                OverlayOutcome::Stay
+            }
+            OverlayKeyAction::Cancel => OverlayOutcome::Close,
+            // 录屏 / 长截图选区模式下没有复制 / 保存
+            OverlayKeyAction::CopyToClipboard | OverlayKeyAction::SaveAsFile if selecting_mode => {
+                OverlayOutcome::Stay
+            }
+            OverlayKeyAction::CopyToClipboard => self.copy_selection_and_close(),
+            OverlayKeyAction::SaveAsFile => self.save_selection_and_close(),
+            OverlayKeyAction::PinToScreen => self.apply_action(ToolbarAction::Pin),
+            OverlayKeyAction::VideoRecording => self.apply_action(ToolbarAction::Record),
+            OverlayKeyAction::TextRecognition => self.apply_action(ToolbarAction::Ocr),
+            OverlayKeyAction::TextTranslation => self.apply_action(ToolbarAction::Translate),
+            OverlayKeyAction::ScrollingScreenshot => self.apply_action(ToolbarAction::ScrollCapture),
+            OverlayKeyAction::Undo => {
                 self.undo_annotation();
                 OverlayOutcome::Stay
             }
-            ("y", true) => {
+            OverlayKeyAction::Redo => {
                 self.redo_annotation();
                 OverlayOutcome::Stay
             }
-            ("c", false) => {
+            OverlayKeyAction::CopyColor => {
                 self.copy_current_color();
                 OverlayOutcome::Stay
             }
-            _ => OverlayOutcome::Stay,
+            OverlayKeyAction::MoveTool if tools_ready && !selecting_mode => {
+                if self.tool != AnnotationTool::None {
+                    self.select_tool(self.tool);
+                }
+                OverlayOutcome::Stay
+            }
+            OverlayKeyAction::Tool(tool) if tools_ready && !selecting_mode => self.apply_drawing_key(tool),
+            OverlayKeyAction::MoveTool | OverlayKeyAction::Tool(_) => OverlayOutcome::Stay,
+            OverlayKeyAction::MoveCursor(dir) => {
+                let (dx, dy) = dir.delta();
+                self.cursor_pos = self.clamp_point(PhysicalPoint::new(self.cursor_pos.x + dx, self.cursor_pos.y + dy));
+                OverlayOutcome::Stay
+            }
+            OverlayKeyAction::Unimplemented(config_key) => {
+                self.show_not_implemented(config_key);
+                OverlayOutcome::Stay
+            }
         }
+    }
+
+    /// 绘制工具快捷键：能映射到已有标注工具的切换，橡皮擦 / 水印尚未实现给出提示。
+    ///
+    /// # 参数
+    /// - `key`：绘制键位。
+    fn apply_drawing_key(&mut self, key: DrawingKey) -> OverlayOutcome {
+        let tool = match key {
+            DrawingKey::Select => AnnotationTool::None,
+            DrawingKey::Shape => AnnotationTool::Rectangle,
+            DrawingKey::Arrow => AnnotationTool::Arrow,
+            DrawingKey::Brush => AnnotationTool::Pencil,
+            DrawingKey::Highlight => AnnotationTool::Highlighter,
+            DrawingKey::Text => AnnotationTool::Text,
+            DrawingKey::SerialNumber => AnnotationTool::Counter,
+            DrawingKey::Filter => AnnotationTool::Mosaic,
+            DrawingKey::Eraser => return self.not_implemented_outcome("drawing_shortcuts/eraser"),
+            DrawingKey::Watermark => return self.not_implemented_outcome("drawing_shortcuts/watermark"),
+        };
+        // 再按同一个键不取消工具（与点工具栏不同），只在工具变化时切换
+        if tool == self.tool {
+            return OverlayOutcome::Stay;
+        }
+        if tool == AnnotationTool::None {
+            self.select_tool(self.tool);
+        } else {
+            self.select_tool(tool);
+        }
+        OverlayOutcome::Stay
+    }
+
+    /// 在状态栏提示某个键位动作尚未实现。
+    ///
+    /// # 参数
+    /// - `config_key`：键位的配置键（取设置页里的动作名）。
+    fn show_not_implemented(&mut self, config_key: &str) {
+        let name = crate::settings_text::item_label(crate::settings_text::Lang::new(&self.locale), config_key);
+        self.status_message = Some(crate::ocr_backend::i18n_for(&self.locale).tr_with(
+            "overlay-key-not-implemented",
+            &snow_i18n::Args::new().named("action", name),
+        ));
+    }
+
+    /// 提示未实现并返回“留在覆盖窗”。
+    fn not_implemented_outcome(&mut self, config_key: &str) -> OverlayOutcome {
+        self.show_not_implemented(config_key);
+        OverlayOutcome::Stay
+    }
+
+    /// 换上覆盖窗键位表。
+    ///
+    /// # 参数
+    /// - `keymap`：由配置构造的键位表。
+    pub fn set_keymap(&mut self, keymap: OverlayKeymap) {
+        self.keymap = keymap;
+    }
+
+    /// 设置界面语言（提示文案用）。
+    ///
+    /// # 参数
+    /// - `locale`：语言代码。
+    pub fn set_locale(&mut self, locale: &str) {
+        self.locale = locale.to_string();
+    }
+
+    /// 登记选区确认后自动执行的动作（全局热键“截图并复制 / 贴图 / 识别 / 翻译”）。
+    ///
+    /// # 参数
+    /// - `action`：动作；`None` 清除。
+    pub fn set_pending_action(&mut self, action: Option<ToolbarAction>) {
+        self.pending_action = action;
+    }
+
+    /// 选区刚被确认时取出并执行登记的动作；没有选区或没有登记返回 `None`。
+    pub fn take_pending_action_outcome(&mut self) -> Option<OverlayOutcome> {
+        if self.current_selection().is_none() {
+            return None;
+        }
+        let action = self.pending_action.take()?;
+        Some(self.apply_action(action))
     }
 
     /// 执行工具栏动作。
@@ -2247,8 +2395,12 @@ impl Render for ScreenshotOverlayView {
                 cx.listener(|this, ev: &MouseUpEvent, window, cx| {
                     this.scale = this.scale_override.unwrap_or(window.scale_factor());
                     let p = this.physical_point(ev.position);
-                    this.handle_mouse_up(p);
-                    cx.notify();
+                    let confirmed = this.handle_mouse_up(p);
+                    // 热键“截图并复制 / 贴图 / 识别 / 翻译”：选区一确认就执行登记的动作
+                    match confirmed.then(|| this.take_pending_action_outcome()).flatten() {
+                        Some(outcome) => this.finish(outcome, window, cx),
+                        None => cx.notify(),
+                    }
                 }),
             )
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
@@ -2258,7 +2410,7 @@ impl Render for ScreenshotOverlayView {
                     cx.stop_propagation();
                     return;
                 }
-                let outcome = this.handle_key(&ev.keystroke.key, mods.control, mods.shift);
+                let outcome = this.handle_keystroke(&ev.keystroke.key, mods.control, mods.shift, mods.alt);
                 this.finish(outcome, window, cx);
             }));
         if let Some(handle) = &self.focus_handle {

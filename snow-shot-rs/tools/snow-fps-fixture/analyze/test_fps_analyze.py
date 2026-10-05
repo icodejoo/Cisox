@@ -44,3 +44,19 @@ class SteadyDropTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BarCropTest(unittest.TestCase):
+    """双窗口序号条裁剪参数。"""
+
+    def test_filter_crops_leader_segment(self):
+        """不带参数整宽；带参数按比例裁主窗口那段。"""
+        self.assertEqual(fa.bar_filter(), fa.BAR_FILTER)
+        self.assertTrue(fa.bar_filter((0, 1280, 2560)).startswith("crop=iw*1280/2560:ih/32:iw*0/2560:"))
+
+    def test_parse_rejects_bad_values(self):
+        """合法值通过，越界或非正宽度报错。"""
+        self.assertEqual(fa.parse_bar_crop("0,1280,2560"), (0, 1280, 2560))
+        for bad in ("0,0,10", "5,10,10", "-1,5,10", "1,2"):
+            with self.assertRaises(ValueError):
+                fa.parse_bar_crop(bad)
