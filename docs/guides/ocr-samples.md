@@ -1,9 +1,11 @@
 ---
 title: OCR 真实样片与同图对比用法
 status: active
-updated: 2026-10-01
+updated: 2026-10-05
 summary: 本地真实样片（materials/ocr）的位置、格式、核对稿的来源与局限、如何跑 system 与 local-model 的同图对比、当前结果
 ---
+
+> **2026-10-05 资源已清理**：本文提到的样片目录 `materials/`（含 `materials/ocr`）和 `build/ocr-*` 已删除，样片也不在本机，下文的路径与结果是当时的记录。复跑需要自行准备样片，脚本与流程仍然有效。
 ## TL;DR
 - 样片在 `materials/ocr/`（**不入库**：含真实票据、发票、健康宝页面，已有部分打码）；我读图写的核对稿在 `materials/ocr/truth/`。
 - 一条命令复跑：`snow-shot-rs/tools/snow-ocr-compare/scripts/run-materials.ps1`（需先 `cargo build --release`，产物在 `build/cargo/release/`）。

@@ -1,9 +1,11 @@
 ---
 title: 翻译模型发布与授权方案
 status: active
-updated: 2026-10-02
+updated: 2026-10-05
 summary: 本地翻译模型的最终选型（含 Hy-MT2 可选包 §9）、release 发布方式（A 直接发布现成文件 + B 提供自行生成脚本）、CC-BY-NC 授权声明与应用内提示要求、产物规格与待办
 ---
+
+> **2026-10-05 资源已清理**：本文提到的 `E:\models\translate-eval\`（评测模型、fp32 导出、中间产物）和 `build/` 下的 `mt-quant`、`mt-venv`、`nllb-corpus`、`flores`、`hymt-eval` 等本地目录都已删除，下文的路径与数据是当时的记录。我们转换 / 量化的 5 个成品包已发布在 GitHub Release `models`（精确地址见 `snow-shot-rs/README.md`「模型下载地址」）；要复现实验，需按文中脚本重新下载原版模型再导出、量化。
 ## 结论先行（用户已拍板，2026-10-02）
 - **模型**：NLLB-200-distilled-600M + 用 NLLB 自己的训练数据（CCMatrix 开头切片）选词表裁剪 + 对称 RTN int4（MatMulNBits，块 32）。实测依据见 `translation-quantization-benchmark.md`（相对原版 fp32 仅掉约 1.3 分，int8/int2/HQQ/mul-mul 均不如它）。
 - **两个语言集都做**：联合国六语版（un6：中、英、法、西、俄、阿拉伯，V≈6.2 万，磁盘约 383MiB）与 14 语言版（main14：再加德、日、韩、葡、意、土、越、印尼，V≈10.1 万，约 484MiB）。内存优化验证后数字可能变化。

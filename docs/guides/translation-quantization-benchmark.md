@@ -1,9 +1,11 @@
 ---
 title: 本地翻译模型量化实测（int8 / int4 性价比）
 status: active
-updated: 2026-10-01
+updated: 2026-10-05
 summary: 含解码调优与标点后处理（NLLB 中日文目标的提前截断：beam=2、length_penalty=2.0、最小长度 0.7 倍源长，核心 11 向 +1.04，叠加全角标点后处理 +1.55）、内存优化验证（外部数据内存映射 + beam=2 把 14 语言 int4 的加载后内存从 540 降到 279 MiB、峰值从 775 降到 461 MiB）、int2（2 位）探针与 HQQ int4 对照：2 位在 ORT 1.28 上质量崩溃且极慢，HQQ 4 位无收益。把 mul-mul 与 NLLB-600M 词表裁剪版（6 语言 / 14 语言，多种选词表方式）导出 ONNX 并量化为 int8 与 int4，在同一批 FLORES 句子上测质量、体积、内存、延迟，给出性价比拐点；结论是 CCMatrix 词表 + int4 在质量、体积、内存上全面优于 int8，mul-mul 的中日文输出不可用
 ---
+
+> **2026-10-05 资源已清理**：本文提到的 `E:\models\translate-eval\`（评测模型、fp32 导出、中间产物）和 `build/` 下的 `mt-quant`、`mt-venv`、`nllb-corpus`、`flores`、`hymt-eval` 等本地目录都已删除，下文的路径与数据是当时的记录。我们转换 / 量化的 5 个成品包已发布在 GitHub Release `models`（精确地址见 `snow-shot-rs/README.md`「模型下载地址」）；要复现实验，需按文中脚本重新下载原版模型再导出、量化。
 ## 结论先行
 
 数据来自 FLORES-200 devtest 前 30 句、beam=4、ORT 1.28.0 CPU（Intel i5-13500，Windows 10）。**30 句是小样本，差 1 分以内视为噪声**；中日文目标用字符级 chrF，其余用官方 chrF++，跨语向的绝对分数不可比，下文"质量"一律指在同一批语向上的均值差。
@@ -314,7 +316,7 @@ llb600m-pruned-un6-ccm-int4-hqq-b32` 里只有这 5 个语向，也没有性能�
 - **int2 不值得进入候选**：质量崩溃（最好的 HQQ 块 16 也掉 15 分以上）、速度慢 20 倍以上、只省约 50 到 60 MiB。HQQ 4 位同样不值得（无质量收益，慢，更大）。
 - 若还想探 2 位，唯一合理的方向（**只是建议，没有做**）是混合精度：对敏感层（注意力投影、输出层、前几层 / 最后几层）保持 4 或 8 位，只把 FFN 压到 2 位。但 FFN 权重约 2 亿参数，即使全部 2 位也只比 4 位省约 50 MiB，而且需要自带 2 位快速核或换更新的 ORT；相比之下嵌入去重（§4，预计省约 200 MiB）和嵌入 4 位化的收益大得多，建议先做那两件事。
 
-耗时：2 位 RTN 每个量化约 15 分（3 个并行），2 位 HQQ 块 32 约 16 分、块 16 与 4 位 HQQ 约 44 分（HQQ 需要迭代优化，用 torch，CPU 上慢）；快速检查每个版本 10 到 17 分；HQQ 4 位质量遍 5 个语向约 50 分钟。产物：`E:\models	ranslate-eval
+耗时：2 位 RTN 每个量化约 15 分（3 个并行），2 位 HQQ 块 32 约 16 分、块 16 与 4 位 HQQ 约 44 分（HQQ 需要迭代优化，用 torch，CPU 上慢）；快速检查每个版本 10 到 17 分；HQQ 4 位质量遍 5 个语向约 50 分钟。产物：`E:\models\translate-eval
 llb600m-pruned-un6-ccm-int2-{rtn,hqq}-b{32,16}\` 与 `...-int4-hqq-b32\`；译文在 `materials	ranslate
 esults` 下同名目录（int2 只有 2 个语向各前 8 句，`max_new_tokens=96`）。
 

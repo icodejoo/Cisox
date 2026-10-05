@@ -1,9 +1,11 @@
 ---
 title: Hy-MT2-1.8B 译文质量评测（int4，对比 NLLB-600M 14 语言 int4）
 status: active
-updated: 2026-10-02
+updated: 2026-10-05
 summary: 腾讯 Hy-MT2-1.8B（Apache-2.0，不裁剪词表）经 optimum 补丁导出 ONNX、MatMulNBits 对称 RTN int4 后，在 FLORES devtest 前 30 句、核心 11 向上主指标 53.84，比 NLLB main14-ccm-int4 高 2.4 分，英→中高 16.9 分；代价是体积 1.3 GiB、内存约 3 倍、延迟约 5 倍
 ---
+
+> **2026-10-05 资源已清理**：本文提到的 `E:\models\translate-eval\`（评测模型、fp32 导出、中间产物）和 `build/` 下的 `mt-quant`、`mt-venv`、`nllb-corpus`、`flores`、`hymt-eval` 等本地目录都已删除，下文的路径与数据是当时的记录。我们转换 / 量化的 5 个成品包已发布在 GitHub Release `models`（精确地址见 `snow-shot-rs/README.md`「模型下载地址」）；要复现实验，需按文中脚本重新下载原版模型再导出、量化。
 ## 结论先行
 
 数据：FLORES-200 devtest 前 30 句，核心 11 向，口径与 NLLB 评测完全一致（`eval/chrf.py`，CJK 目标用字符级 chrF，其余官方 chrF++；**30 句是小样本，差 1 分以内视为噪声**）。贪心解码，repetition_penalty 1.05，官方英文提示词，不调提示词。只评了 int4（我们自己的导出与量化流程）；**没有 BF16/fp32 基线、没有 GGUF**（用户决定不做），所以"int4 相对原版的损失"无法实测。

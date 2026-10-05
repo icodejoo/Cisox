@@ -24,7 +24,7 @@ Windows 主线已经能跑通「热键 / 托盘 / IPC → 截图覆盖窗（单�
 | 内容 | 位置 | 备注 |
 |---|---|---|
 | fps 夹具改动（他人 / 另一会话） | `snow-shot-rs/tools/snow-fps-fixture/` 下 7 个文件（`analyze/*.py`、`scripts/run-fps-test.ps1`、`src/dual.rs`、`src/lib.rs`、`src/main.rs`） | 「序号条只由一个窗口绘制」的双窗口夹具改动，未验证、暂不提交（见 §5.1 跨屏待验证）。**不要碰，也不要顺手提交** |
-| 测试素材 | `materials/`（`ocr/`、`translate/`） | 未入库，OCR 样片与翻译素材；见 `docs/guides/ocr-samples.md` |
+| 测试素材 | `materials/`（`ocr/`、`translate/`） | **已于 2026-10-05 删除**（原本就未入库）；OCR 样片与翻译素材不在本机，见 `docs/guides/ocr-samples.md` |
 | 审计文档与本次文档更新 | `docs/research/qt-parity-audit.md`、本文、方案、索引、验收报告 | 本次任务产物，待用户确认后提交 |
 
 原 09-29 暂停时的「未提交」清单（i18n 门禁、滤镜、历史仓储、T3、shell、raster、调研、spike 等）**已全部随上面的提交入库，不再有未提交残留**；当时「均未经独立复审」的担忧见 §3.1，逐项处理情况已标注。「提交前必做：复审员变异实验残留检查」已随历次提交与全量测试过去，本次审计另跑 `snow-app-core / snow-config / snow-history / snow-canvas-filters` 共 260 项测试全过。
@@ -56,7 +56,7 @@ Windows 主线已经能跑通「热键 / 托盘 / IPC → 截图覆盖窗（单�
 2. **低**：`paths.rs:17` 写死 `.cisox-write-test`（应由 `APP_ID` 派生）；`custom_models.rs:123` 端口为空的地址（`http://host:/v1`）被拒，Qt 的 `QUrl` 接受；`toolbar.rs` 里 `"latex-recognition"` 出现 15 次、`"quick-save"` 10 次未抽常量；快捷键具名键表只覆盖基本键。
 - **未做**：变异测试、clippy。
 
-**`snow-ui-theme`**（复审员用本机静态 Qt `E:\qt-static\6.11.1` 编了小程序直接对照真 Qt；小程序在会话 scratchpad `qt\q.cpp`、`b.bat`，可复用）
+**`snow-ui-theme`**（复审员用静态 Qt `E:\qt-static\6.11.1`（2026-10-05 已删除）编了小程序直接对照真 Qt；小程序在会话 scratchpad `qt\q.cpp`、`b.bat`，可复用）
 1. **高**：`src/color.rs` 的 `alpha()` 语义与真实 Qt 6.11.1 不符。作者按"8 位读取 = `>>8`"手工推导，真 Qt：`setAlphaF(0.88)`→224（Rust 225）、0.95→242（Rust 243），其余抽样值一致。推断真实规则是"16 位值除以 257 四舍五入"（复审员未读 Qt 源码）。`tests/tokens.rs::alpha_tokens_follow_qt_semantics` 里断言 `light.color_text` 为 225、`raw16 == 57671` 的黄金依据不成立；受影响的是 colorText（alpha 0.88）。修法：8 位读取改成除以 257 取整，测试改用真 Qt 输出。
 2. **中**：`tools/p1-reference-baselines/palette-gen/fast_color_lite.cpp` **不是 `ant_design_qt` 原文**，是 std::string/std::regex 改写版，与原文有 3 处行为差异（无 `input.trimmed()`、`parseHex` 重写、`parseRgb` 重写并多了非法数字返回 false 的分支）；黄金样本 20 个解析输入里没有带空白的用例，Rust 的 trim 行为没被对拍。复审员对真 Qt 编原文测边界：`#+f0000` 原文有效 Rust 无效（作者已注明）；`#ff 000` 原文有效（#ff0000）、`rgb(1,\n2,3)` 原文无效，Rust 的行为是读代码推断（未实跑）。修法：黄金生成器改为链接真 Qt 编译原文，补带空白/换行的解析样例。
 - 已复现：MSVC 重编黄金生成器输出 423 行与 `tests/golden/palette_golden.txt` 完全相同（说明黄金样本确由 C++ 可执行文件产生，但等价的是改写版，不是 Qt 原文）；`palette_generate.rs`、`fast_color.rs` 的 HSV/HSL/mix/darken/lighten 与 C++ 逐行一致。
@@ -68,7 +68,7 @@ Windows 主线已经能跑通「热键 / 托盘 / IPC → 截图覆盖窗（单�
 
 ## 4. 参考版（C++）构建：续做方法
 
-> 2026-10-03 未复核：本节描述 09-29 的构建进度，本次审计没有检查 `E:\qt-static` 与 vcpkg 的当前状态，也没有取得参考版 P99；只可能让 V2 判据更宽松，不阻塞产品开发。方法本身仍有效。
+> **2026-10-05：`E:\qt-static`（静态 Qt 6.11.1、覆盖端口、日志与脚本）已整体删除，以下为历史记录；要取参考版 P99 须重新构建 Qt 与 vcpkg 依赖。** 2026-10-03 未复核：本节描述 09-29 的构建进度，本次审计没有检查 `E:\qt-static` 与 vcpkg 的当前状态，也没有取得参考版 P99；只可能让 V2 判据更宽松，不阻塞产品开发。方法本身仍有效。
 
 目的：取得 Qt 参考版的帧间隔 P99，用来定 V2 判据的松紧（**只可能让判据更宽松**，不阻塞产品开发）。
 
@@ -188,7 +188,7 @@ Windows 主线已经能跑通「热键 / 托盘 / IPC → 截图覆盖窗（单�
 - [ ] 设置页真机渲染验证、端到端 label 显示测试。
 - [ ] `pairs` 扩到韩、德、意、葡、土：先评测。
 - [x] 只支持 en-US 与 zh-CN：zh-TW 已于 2026-10-02 全工程移除（语料、枚举、schema 繁体取值；旧配置里的繁体值按没有已保存值处理）。
-- [ ] `materials/` 未入库。
+- [x] `materials/` 未入库，且已于 2026-10-05 从本机删除。
 
 **语音转文字（speech-to-text）**
 - [x] 调研完成（2026-10-02，提交 fb4ae46a、766e678e）：sherpa-onnx 与 ort 共用 ORT、纯 ort 流式 Zipformer（RTF≈0.12、~253MB）、Windows 系统语音、SendInput 键入；详见 `docs/research/speech-to-text-backends.md`。
@@ -261,8 +261,20 @@ Windows 主线已经能跑通「热键 / 托盘 / IPC → 截图覆盖窗（单�
 
 ## 6. 环境速查
 
-- 编译目录 `E:\cargo-targets\*`（每个任务一个，占空间大，可清理）；Qt 与 vcpkg 相关在 `E:\qt-static`；模型放 `E:\models\translate\`（仓库外）。
+- 编译目录：主工作区在 `build/cargo`；各 worker 是独立 workspace，产物在各自的 `target/`（`tools/snow-recorder/target` 等），都可随时删除重建。2026-10-05 已清掉 `build/`、`E:\cargo-targets`、各 worker 的 `target/`，下次编译要完整重编（录屏 worker 约 14 分钟）。
+- 模型：翻译模型放 `E:\models\translate\`（仓库外，应用已装的 OPUS-MT 包）；我们转换 / 量化的 5 个成品包托管在 GitHub Release `models`（地址见 `snow-shot-rs/README.md`「模型下载地址」）；OCR 模型与运行时在 `%LOCALAPPDATA%\Cisox\assets\ocr`。
 - 全局工具：aria2 在 `E:\software\aria2`（已加用户 PATH），下载规则已写进 `~/.claude/CLAUDE.md`。
 - 机器：20 逻辑核、内存 31.7GB（长期紧张）、磁盘 SSD；本机无 winget，`choco` 需管理员。
 - 网络：单连接约 0.2–0.6MB/s，多连接可叠加；curl 需 `--ssl-no-revoke`；**PowerShell 5.1 的 `>`/`>>` 会破坏二进制**。
 - 不要往 upstream 数据目录（`%LOCALAPPDATA%\SnowShot\`、`%APPDATA%\SnowShot\`）写任何东西。
+
+## 6.1 资源清理记录与复现（2026-10-05）
+
+已删除：`E:\models\translate-eval`（70.5 GB，评测模型、fp32 导出、原版 HF 模型、成品包本地副本）、`build/`（95 GB，含 `mt-quant`、`flores`、`nllb-corpus`、`stt`、`recorder-diag`、各轮录屏实验目录等调研数据）、`E:\cargo-targets`（69 GB）、`E:\qt-static`（25 GB）、三个 worker 的 `target/`、`.tools/vcpkg/downloads` 与旧的含 x265 的 `installed/static`、`materials/`。共释放约 316 GB。
+
+保留：`.tools/vcpkg/installed/static-nox265`（无 x265 的 FFmpeg，录屏 worker 默认用它）、`E:\models\translate`、`.cache`（含 onnxruntime 动态库）、aria2 与 vcpkg 工具本身。
+
+复现提示：
+- 翻译成品包：直接从 Release `models` 下载；要重新生成，先下载原版 `facebook/nllb-200-distilled-600M`、`tencent/Hy-MT2-1.8B`、`Helsinki-NLP/opus-mt-*`，再用 `snow-shot-rs/tools/snow-translator/{eval,scripts}` 下的脚本导出、量化、打包（流程见 `docs/guides/translation-model-release.md`）；评测用的 CCMatrix 词频与 FLORES 数据需重新取得。
+- 在本机重装 FFmpeg（`scripts/build-ffmpeg-recorder.ps1`）前先设 `X_VCPKG_ASSET_SOURCES='x-script,E:\workspaces\Cisox\.tools\vcpkg-fetch.cmd {url} {dst}'`：vcpkg 自带 curl 在本机连 msys2 镜像会报 SSL 错误 35，该钩子走 aria2 绕开（钩子脚本放在 `.tools/`，不入库）。下载缓存已清，会重新下载 msys2 工具包与 cmake 等。
+- Qt 参考版（V2 判据所需的参考版 P99）：见 §4，需从零重新构建。

@@ -1,9 +1,11 @@
 ---
 title: 本地 OCR 七档模型同图实测
 status: active
-updated: 2026-10-01
+updated: 2026-10-05
 summary: 清单内 7 档本地 OCR 模型在 7 张真实样片上的 CER、耗时、worker 内存实测，含 DirectML 对比、examples 街景图观察、样片局限与复现命令
 ---
+
+> **2026-10-05 资源已清理**：本文提到的样片目录 `materials/`（含 `materials/ocr`）和 `build/ocr-*` 已删除，样片也不在本机，下文的路径与结果是当时的记录。复跑需要自行准备样片，脚本与流程仍然有效。
 ## TL;DR
 - 按 [principles.md](../principles.md) 的「高性能 > 低内存 > 识别率」：**medium 及以上三档（medium / medium_v5 / medium_v4）CPU 单张 11 到 90 秒、内存 1.2 到 2 GiB 以上，性能与内存两项都不可接受**；这是数据，不是推测。
 - 剩下四档里，**small（默认）、small_v5、small_v4 的耗时几乎相同（中位约 0.68s）、内存 0.39 到 0.50 GiB**；`extra_small` 快约 2.7 倍、内存 0.35 GiB，但 CER 明显差（平均 22.2%）。
