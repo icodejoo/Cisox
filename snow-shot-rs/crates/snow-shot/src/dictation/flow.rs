@@ -12,11 +12,17 @@ use super::focus::{SystemProbe, Verdict, probe_verdict};
 use super::output::{OutputMode, OutputPlan, RouteNote, decide};
 use super::status::{Failure, Status};
 use super::text::Transcript;
+use super::translate::{
+    HostTranslator, ModelSupport, OnTranslated, TranslationOutcome, TranslationState,
+    TranslationTracker,
+};
 use super::typing::{KeySink, SyncOutcome, SystemKeySink, Typer};
 use super::view::{DictationView, WINDOW_HEIGHT, WINDOW_WIDTH, bottom_right_rect};
 use crate::app_runtime::{TRAY_TOOLTIP, UiEvent, ui_prefs_from_config};
 use crate::capture_flow::pick_monitor;
 use crate::settings_state::SharedConfig;
+use crate::sys_prefs::system_ui_language;
+use crate::translate_service::{TranslateConfig, TranslateHost};
 use snow_ui::shell::inbox::MainThreadInbox;
 use snow_ui::shell::overlay::cursor_screen_position;
 use snow_ui::shell::tray::TrayService;
@@ -72,6 +78,10 @@ pub struct DictationHost {
     inbox: MainThreadInbox<UiEvent>,
     /// 应用数据根目录（默认模型目录所在）。
     data_root: PathBuf,
+    /// 应用共享的翻译宿主（语音翻译复用其引擎与结果缓存）。
+    translator: Arc<TranslateHost>,
+    /// 本轮按句译文跟踪（翻译线程、句序号、轮次过滤）。
+    translation: TranslationTracker,
 }
 
 impl DictationHost {
@@ -81,7 +91,13 @@ impl DictationHost {
     /// - `config`：共享配置。
     /// - `inbox`：主线程收件箱。
     /// - `data_root`：应用数据根目录。
-    pub fn new(config: SharedConfig, inbox: MainThreadInbox<UiEvent>, data_root: PathBuf) -> Self {
+    /// - `translator`：应用共享的翻译宿主。
+    pub fn new(
+        config: SharedConfig,
+        inbox: MainThreadInbox<UiEvent>,
+        data_root: PathBuf,
+        translator: Arc<TranslateHost>,
+    ) -> Self {
         Self {
             engine: Engine::default(),
             transcript: Transcript::default(),
@@ -101,6 +117,8 @@ impl DictationHost {
             config,
             inbox,
             data_root,
+            translator,
+            translation: TranslationTracker::default(),
         }
     }
 
@@ -175,8 +193,28 @@ impl DictationHost {
         }
     }
 
+    /// 翻译线程回传了一句的译文（经收件箱回到主线程）。
+    ///
+    /// # 参数
+    /// - `cx`：外壳上下文。
+    /// - `round`：结果所属轮次；过期的结果被丢弃。
+    /// - `seq`：句序号，译文按它对位（乱序到达也不会错位）。
+    /// - `outcome`：译文或失败。
+    pub fn translated(
+        &mut self,
+        cx: &mut ShellContext,
+        round: u64,
+        seq: usize,
+        outcome: TranslationOutcome,
+    ) {
+        if let Some((seq, state)) = self.translation.on_result(round, seq, outcome) {
+            self.with_view(cx, |v, vcx| v.set_translation(seq, state, vcx));
+        }
+    }
+
     /// 应用退出：尽力结束工作进程（不按名查杀，只动自己拉起的那个）。
     pub fn shutdown(&mut self) {
+        self.translation.shutdown();
         self.stop_ticker();
         self.engine.shutdown();
     }
@@ -202,6 +240,7 @@ impl DictationHost {
         } else {
             OutputPlan::pending()
         };
+        self.begin_translation(&config);
         let launch = self.make_launch(&config);
         let launched = launch.is_ok();
         let effects = self.engine.start(now, launch);
@@ -213,6 +252,37 @@ impl DictationHost {
             self.start_ticker();
         }
         self.apply(cx, tray, effects, now);
+    }
+
+    /// 每轮开始时算一次翻译可用性并装配本轮翻译线程；不可用时只留原因，供状态提示。
+    fn begin_translation(&mut self, config: &DictationConfig) {
+        let tcfg =
+            TranslateConfig::from_document(self.config.borrow().document(), &system_ui_language());
+        let support = if config.translate_enabled {
+            ModelSupport::from_config(&tcfg, || self.translator.scan(&tcfg))
+        } else {
+            ModelSupport::Unavailable
+        };
+        let inbox = self.inbox.clone();
+        let on_done: OnTranslated = Arc::new(move |round, seq, outcome| {
+            inbox.push(UiEvent::DictationTranslated {
+                round,
+                seq,
+                outcome,
+            });
+        });
+        let translator = Arc::new(HostTranslator::new(Arc::clone(&self.translator), tcfg));
+        self.translation
+            .begin(self.round, config, support, translator, on_done);
+    }
+
+    /// 本轮听写状态：翻译不可用时在去向说明后带上原因。
+    fn listening_status(&self) -> Status {
+        let note = self.plan.note.clone();
+        match self.translation.issue() {
+            Some(issue) => Status::ListeningNotice(note, issue.clone()),
+            None => Status::Listening(note),
+        }
     }
 
     /// 请求结束当前一轮。
@@ -299,7 +369,7 @@ impl DictationHost {
                 Effect::Begin => self.on_begin(cx),
                 Effect::Loading => self.set_status(cx, tray, Status::Loading),
                 Effect::Listening => {
-                    let status = Status::Listening(self.plan.note.clone());
+                    let status = self.listening_status();
                     self.set_status(cx, tray, status);
                 }
                 Effect::Partial(text) => {
@@ -310,6 +380,12 @@ impl DictationHost {
                 Effect::Final(text) => {
                     self.transcript.push_final(&text);
                     self.with_view(cx, |v, vcx| v.push_final(&text, vcx));
+                    // 只有定稿句送翻译；译文不进键入输出
+                    if let Some((seq, true)) = self.translation.on_final(&text) {
+                        self.with_view(cx, |v, vcx| {
+                            v.set_translation(seq, TranslationState::Pending, vcx)
+                        });
+                    }
                     self.type_sync(cx, tray, true);
                 }
                 Effect::Finishing => self.set_status(cx, tray, Status::Finishing),
@@ -340,6 +416,8 @@ impl DictationHost {
         if !leftover.is_empty() {
             self.transcript.push_final(&leftover);
             self.with_view(cx, |v, vcx| v.push_final(&leftover, vcx));
+            // 收尾并入的残余文字占一个句位，但不翻译
+            self.translation.register(&leftover);
         }
         if self.plan_pending() {
             // 焦点判定还没回来就结束了：按不确定处理，保证文字有去处
@@ -369,8 +447,9 @@ impl DictationHost {
     ) {
         self.probe_deadline = None;
         self.plan = decide(self.mode, self.with_overlay, verdict);
-        if let Status::Listening(_) = self.status {
-            self.set_status(cx, tray, Status::Listening(self.plan.note.clone()));
+        if self.status.is_listening() {
+            let status = self.listening_status();
+            self.set_status(cx, tray, status);
         }
         if self.plan.overlay {
             self.ensure_overlay(cx);
@@ -397,8 +476,9 @@ impl DictationHost {
     fn fall_back(&mut self, cx: &mut ShellContext, tray: Option<&TrayService>, note: RouteNote) {
         tracing::warn!(?note, "键入中断，文字改在浮窗保留");
         self.plan.fall_back(note);
-        if let Status::Listening(_) = self.status {
-            self.set_status(cx, tray, Status::Listening(self.plan.note.clone()));
+        if self.status.is_listening() {
+            let status = self.listening_status();
+            self.set_status(cx, tray, status);
         }
         // 浮窗已开（键入时同时显示）就不重铺，免得冲掉用户的编辑；没开则打开并铺上全部转写
         self.ensure_overlay(cx);
@@ -410,8 +490,9 @@ impl DictationHost {
         let finals = self.transcript.finals().to_string();
         let partial = self.transcript.partial().to_string();
         let status = self.status.clone();
+        let translations = self.translation.entries().to_vec();
         self.with_view(cx, |v, vcx| {
-            v.seed(&finals, &partial, vcx);
+            v.seed(&finals, &partial, &translations, vcx);
             v.set_status(status, vcx);
         });
     }

@@ -2,6 +2,7 @@
 //!
 //! 三个阶段各自实现 `pipeline` 里的 trait，由 [`assemble`] 在会话初始化时一次装配好。
 
+pub mod aacsink;
 pub mod assemble;
 pub mod compose;
 pub mod dda;

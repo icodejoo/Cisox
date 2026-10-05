@@ -5,6 +5,7 @@
 use crate::app_runtime::UiEvent;
 use crate::settings_state::SharedConfig;
 use crate::recording::client::{ProcessRecorderLink, locate_recorder_exe};
+use crate::recording::audio::restrict_to_format;
 use crate::recording::output::build_recording_config;
 use crate::recording::{AutoPlan, RecordingAreaView, RecordingFormat, RecordingState};
 use crate::screenshot_output::home_directory;
@@ -181,6 +182,7 @@ impl RecordingHost {
             // 自动化指定格式时，扩展名跟随格式
             config.format = format;
             config.output_path.set_extension(format.extension());
+            config.audio = restrict_to_format(std::mem::take(&mut config.audio), format);
         }
         if autotest.is_some()
             && let Some(dir) = std::env::var_os(ENV_RECORDING_AUTOTEST_DIR).filter(|d| !d.is_empty())
@@ -198,6 +200,7 @@ impl RecordingHost {
         );
         let countdown = config.countdown_secs;
         let mut view = RecordingAreaView::new(config, monitor.bounds, monitor.scale.value());
+        view.set_locale(crate::app_runtime::ui_prefs_from_document(self.config.borrow().document()).locale);
         if let Some(a) = autotest {
             view.set_auto_plan(a.plan);
         }

@@ -185,6 +185,8 @@ mod backend {
         SetTooltip(String),
         /// 设置信号出口（设置后信号不再进入 `signals()` 通道）。
         SetSignalSink(SignalSink),
+        /// 整体替换右键菜单。
+        SetMenu(Vec<TrayMenuEntry>),
         /// 停止线程。
         Shutdown,
     }
@@ -201,8 +203,8 @@ mod backend {
         signals: Receiver<String>,
     }
 
-    /// 在线程内创建托盘及其菜单。
-    fn build_tray(spec: &TraySpec, plan: &[MenuPlan]) -> Result<(TrayIcon, Menu), ShellError> {
+    /// 按构建计划创建菜单。
+    fn build_menu(plan: &[MenuPlan]) -> Result<Menu, ShellError> {
         let plat =
             |what: &str, e: &dyn std::fmt::Display| ShellError::Platform(format!("{what}: {e}"));
         let menu = Menu::new();
@@ -216,6 +218,14 @@ mod backend {
                     .map_err(|e| plat("追加菜单项", &e))?,
             }
         }
+        Ok(menu)
+    }
+
+    /// 在线程内创建托盘及其菜单。
+    fn build_tray(spec: &TraySpec, plan: &[MenuPlan]) -> Result<(TrayIcon, Menu), ShellError> {
+        let plat =
+            |what: &str, e: &dyn std::fmt::Display| ShellError::Platform(format!("{what}: {e}"));
+        let menu = build_menu(plan)?;
         let (w, h) = spec.icon.size();
         let icon = Icon::from_rgba(spec.icon.rgba.clone(), w, h).map_err(|e| plat("图标", &e))?;
         let tray = TrayIconBuilder::new()
@@ -233,7 +243,7 @@ mod backend {
         /// 托盘对象（必须留在创建线程）。
         tray: TrayIcon,
         /// 菜单，随托盘存活。
-        _menu: Menu,
+        menu: Menu,
         /// 菜单动作表。
         actions: TrayActions,
         /// 左键动作。
@@ -272,6 +282,17 @@ mod backend {
                         }
                     }
                     Ctl::SetSignalSink(sink) => self.sink = Some(sink),
+                    Ctl::SetMenu(entries) => {
+                        let (plan, actions) = TrayActions::plan(&entries);
+                        match build_menu(&plan) {
+                            Ok(menu) => {
+                                self.tray.set_menu(Some(Box::new(menu.clone())));
+                                self.menu = menu;
+                                self.actions = actions;
+                            }
+                            Err(e) => tracing::warn!(%e, "更新托盘菜单失败"),
+                        }
+                    }
                     Ctl::Shutdown => return false,
                 }
             }
@@ -324,7 +345,7 @@ mod backend {
                     let waker = native::current_thread_waker();
                     let mut worker = Worker {
                         tray,
-                        _menu: menu,
+                        menu,
                         actions,
                         on_left: spec.on_left_click,
                         on_double: spec.on_double_click,
@@ -365,6 +386,15 @@ mod backend {
         pub(super) fn set_tooltip(&self, text: String) -> Result<(), ShellError> {
             self.ctl
                 .send(Ctl::SetTooltip(text))
+                .map_err(|_| ShellError::ServiceClosed)?;
+            self.waker.wake();
+            Ok(())
+        }
+
+        /// 整体替换右键菜单。
+        pub(super) fn set_menu(&self, entries: Vec<TrayMenuEntry>) -> Result<(), ShellError> {
+            self.ctl
+                .send(Ctl::SetMenu(entries))
                 .map_err(|_| ShellError::ServiceClosed)?;
             self.waker.wake();
             Ok(())
@@ -430,6 +460,11 @@ mod backend {
 
         /// 更新提示：不支持。
         pub(super) fn set_tooltip(&self, _text: String) -> Result<(), ShellError> {
+            Err(unsupported())
+        }
+
+        /// 替换菜单：不支持。
+        pub(super) fn set_menu(&self, _entries: Vec<TrayMenuEntry>) -> Result<(), ShellError> {
             Err(unsupported())
         }
 
@@ -501,6 +536,23 @@ impl TrayService {
     /// 更新悬停提示文字。
     pub fn set_tooltip(&self, text: impl Into<String>) -> Result<(), ShellError> {
         self.inner.set_tooltip(text.into())
+    }
+
+    /// 整体替换右键菜单（例如界面语言切换后刷新文案）。
+    ///
+    /// # 参数
+    /// - `entries`：新的菜单项，沿用 `TraySpec::menu` 的格式。
+    ///
+    /// # 返回
+    /// 服务已关闭返回 `ServiceClosed`。
+    ///
+    /// ```no_run
+    /// # fn demo(tray: &snow_ui_shell::tray::TrayService) {
+    /// tray.set_menu(vec![]).unwrap();
+    /// # }
+    /// ```
+    pub fn set_menu(&self, entries: Vec<TrayMenuEntry>) -> Result<(), ShellError> {
+        self.inner.set_menu(entries)
     }
 
     /// 设置自定义信号出口：此后 `TrayAction::Signal` 直接回调 `sink`，不再进入 `signals()` 通道。

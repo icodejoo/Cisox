@@ -70,3 +70,13 @@ pub(crate) fn force_foreground(_hwnd: isize) -> Result<(), ShellError> {
 pub(crate) fn set_capture_excluded(_hwnd: isize, _excluded: bool) -> Result<(), ShellError> {
     Err(unsupported(Capability::OverlayClickThrough))
 }
+
+/// 设置窗口标题栏深浅色：桩返回不支持。
+pub(crate) fn set_window_dark_title(_hwnd: isize, _dark: bool) -> Result<(), ShellError> {
+    Err(unsupported(Capability::OverlayClickThrough))
+}
+
+/// 设置弹出菜单深浅色：桩返回不支持。
+pub(crate) fn set_popup_menu_dark(_dark: Option<bool>) -> Result<(), ShellError> {
+    Err(unsupported(Capability::OverlayClickThrough))
+}

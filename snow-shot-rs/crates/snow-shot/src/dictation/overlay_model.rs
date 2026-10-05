@@ -6,6 +6,7 @@
 
 use super::status::Status;
 use super::text::{join, sanitize};
+use super::translate::TranslationState;
 
 /// 对文本区的待办改动，在下一次渲染时按文本区**当时的内容**折叠应用。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,6 +39,8 @@ pub struct OverlayModel {
     status: Option<Status>,
     /// 复制结果。
     copy: CopyState,
+    /// 按句译文，与定稿句序对位（`None` 为该句没有翻译）；只用于显示，不进键入与复制。
+    translations: Vec<Option<TranslationState>>,
 }
 
 impl Default for OverlayModel {
@@ -48,6 +51,7 @@ impl Default for OverlayModel {
             partial: String::new(),
             status: None,
             copy: CopyState::Idle,
+            translations: Vec::new(),
         }
     }
 }
@@ -60,6 +64,7 @@ impl OverlayModel {
         self.partial.clear();
         self.status = None;
         self.copy = CopyState::Idle;
+        self.translations.clear();
     }
 
     /// 更新未落定文本（整句替换）。
@@ -80,8 +85,39 @@ impl OverlayModel {
         let clean = sanitize(text);
         if !clean.is_empty() {
             self.pending.push(TextOp::AppendFinal(clean));
+            self.translations.push(None);
             self.copy = CopyState::Idle;
         }
+    }
+
+    /// 更新某一句的译文状态；序号超出已登记句数时补齐（乱序到达也能对位）。
+    ///
+    /// # 参数
+    /// - `seq`：句序号（清洗后非空的定稿句依次编号，从 0 起）。
+    /// - `state`：新状态。
+    pub fn set_translation(&mut self, seq: usize, state: TranslationState) {
+        if self.translations.len() <= seq {
+            self.translations.resize(seq + 1, None);
+        }
+        self.translations[seq] = Some(state);
+    }
+
+    /// 整体替换按句译文（兜底铺底时带上已有译文）。
+    ///
+    /// # 参数
+    /// - `translations`：与定稿句序对位的译文状态。
+    pub fn set_translations(&mut self, translations: &[Option<TranslationState>]) {
+        self.translations = translations.to_vec();
+    }
+
+    /// 按句译文（与定稿句序对位）。
+    pub fn translations(&self) -> &[Option<TranslationState>] {
+        &self.translations
+    }
+
+    /// 是否有任何一句参与了翻译（没有时视图不多画任何东西）。
+    pub fn has_translations(&self) -> bool {
+        self.translations.iter().any(Option::is_some)
     }
 
     /// 用已有的转写内容整体铺底（键入中途兜底到浮窗时用）：清空后放入已落定文本，并带上未落定部分。
@@ -97,6 +133,7 @@ impl OverlayModel {
         }
         self.partial = sanitize(partial);
         self.copy = CopyState::Idle;
+        self.translations.clear();
     }
 
     /// 设置状态。
@@ -284,6 +321,39 @@ mod tests {
         assert_eq!(m.take_text("乱七八糟").as_deref(), Some("已经说的话"));
         assert_eq!(m.partial(), "还在说");
         assert_eq!(m.copy_payload("已经说的话"), "已经说的话还在说");
+    }
+
+    /// 译文登记：定稿句各占一个位置；更新按序号对位（含乱序）；begin_round / seed 清理；不影响复制与文本。
+    #[test]
+    fn translations_track_sentences() {
+        let mut m = OverlayModel::default();
+        assert!(!m.has_translations());
+        m.push_final("你好");
+        m.push_final("  ");
+        m.push_final("世界");
+        assert_eq!(m.translations(), &[None, None]);
+        m.set_translation(1, TranslationState::Done("world".into()));
+        assert!(m.has_translations());
+        m.set_translation(0, TranslationState::Failed);
+        assert_eq!(
+            m.translations(),
+            &[
+                Some(TranslationState::Failed),
+                Some(TranslationState::Done("world".into()))
+            ]
+        );
+        // 译文先于句子到达也能补位
+        m.set_translation(3, TranslationState::Pending);
+        assert_eq!(m.translations().len(), 4);
+        // 译文不进文本区与复制
+        assert_eq!(m.take_text("").as_deref(), Some("你好世界"));
+        assert_eq!(m.copy_payload("你好世界"), "你好世界");
+        m.seed("已有", "");
+        assert!(m.translations().is_empty());
+        m.set_translations(&[Some(TranslationState::Pending)]);
+        assert_eq!(m.translations().len(), 1);
+        m.begin_round();
+        assert!(m.translations().is_empty() && !m.has_translations());
     }
 
     /// 状态可更新与读取。

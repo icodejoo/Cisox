@@ -17,7 +17,7 @@ const SOURCE_POLL: Duration = Duration::from_millis(50);
 const SAMPLE_RATE: u64 = 16_000;
 
 /// 命令通道上的消息。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Ctl {
     /// 解析成功的命令。
     Cmd(Command),
@@ -486,6 +486,7 @@ mod tests {
             endpoint: EndpointRules::default(),
             max_seconds: 0,
             model_dir: "m".into(),
+            ..Default::default()
         };
         let (tx, rx) = mpsc::channel();
         tx.send(Ctl::Cmd(Command::Ping)).unwrap();

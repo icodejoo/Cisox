@@ -22,14 +22,17 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 pub mod annotation;
+pub mod annotation_style;
 pub mod app_runtime;
 pub mod capture_flow;
 pub mod dictation;
+pub mod direct_capture;
 pub mod export_format;
 pub mod export_naming;
 pub mod export_pdf;
 pub mod frozen_frame;
-pub mod global_actions;
+pub mod history_store;
+pub mod history_view;
 pub mod ocr_assets;
 pub mod ocr_backend;
 pub mod ocr_client;
@@ -44,6 +47,7 @@ pub mod pinned_manager;
 pub mod pinned_model;
 pub mod pinned_shared;
 pub mod pinned_view;
+pub mod quick_actions;
 pub mod recording;
 pub mod recording_flow;
 pub mod screenshot_output;
@@ -54,6 +58,9 @@ pub mod settings_state;
 pub mod settings_text;
 pub mod settings_view;
 pub mod stitch_service;
+pub mod stt_download;
+pub mod stt_models;
+pub mod stt_settings;
 #[cfg(test)]
 mod stitch_audit_tests;
 pub mod sys_prefs;
@@ -64,6 +71,7 @@ pub mod translate_layout;
 pub mod translate_service;
 pub mod language_names;
 pub mod translate_settings;
+pub mod window_pick;
 
 /// 单实例互斥体 / 管道名使用的应用标识。
 pub const SINGLE_INSTANCE_APP_ID: &str = "cisox.snow_shot.single_instance";
@@ -248,9 +256,8 @@ fn run_primary(ctx: &AppBootstrap, guard: &SingleInstanceGuard) -> ExitCode {
         let state_inbox = inbox.clone();
         let restore_inbox = inbox.clone();
         let config = app_runtime::open_shared_config(&data_root);
-        let gate = global_actions::HotkeyGate::default();
         let (tray, hotkeys, hotkey_handles) =
-            app_runtime::start_services(&caps, &bus, &inbox, config.borrow().document(), &gate);
+            app_runtime::start_services(&caps, &bus, &inbox, config.borrow().document());
         let mut state = app_runtime::AppState::new(
             config,
             state_inbox,
@@ -260,7 +267,6 @@ fn run_primary(ctx: &AppBootstrap, guard: &SingleInstanceGuard) -> ExitCode {
             hotkey_handles,
             &data_root,
         );
-        state.set_hotkey_gate(gate);
         tracing::info!("event loop started (resident, QuitMode::Explicit)");
         cx.run_inbox(inbox, move |cx, event| {
             app_runtime::handle_event(cx, &mut state, event);

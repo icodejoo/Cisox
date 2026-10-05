@@ -7,7 +7,12 @@
 //! 绘制时统一除以窗口缩放比换算成 GPUI 的逻辑像素。
 
 use crate::annotation::{AnnotationLayer, LayerUpdate, TileImage};
+use crate::annotation_style::{
+    ArrowheadChoice, FONT_PRESETS, PALETTE, Rgba, ToolStyle, ToolStyleStore, WIDTH_PRESETS,
+    config_key, nearest_index, panel_placement, style_fields,
+};
 use crate::frozen_frame::FrozenFrame;
+use crate::history_store::HistorySource;
 use crate::ocr_client::OcrError;
 use crate::ocr_flow::{OcrUiState, panel_lines};
 use crate::ocr_service::OcrResult;
@@ -19,13 +24,20 @@ use crate::screenshot_output::{
     self, ExportOverrides, ExportSettings, ManualSaveJob, SaveMode, SaveOutcome, home_directory,
 };
 use crate::settings_state::SharedConfig;
+use crate::window_pick::{DRAG_THRESHOLD_LOGICAL, WindowHover, exceeds_drag_threshold};
 use image::{Frame, RgbaImage};
 use snow_app_core::command::SaveRequest;
 use snow_canvas_raster::TileKey;
+use snow_config::store::ConfigStore;
+use snow_i18n::{Args, I18n};
 use snow_canvas_text::{CanvasTextInput, CanvasTextStyle, EditKeyOutcome};
 use snow_platform::text_raster::DEFAULT_FONT_FAMILY;
 use snow_platform::clipboard::{copy_image_to_clipboard, copy_text_to_clipboard};
 use snow_ui::shell::geometry::{PhysicalPoint, PhysicalRect};
+use snow_ui::ui::component::checkbox::Checkbox;
+use snow_ui::ui::component::searchable_list::{SearchableListItem, SearchableVec};
+use snow_ui::ui::component::select::{Select, SelectEvent, SelectState};
+use snow_ui::ui::component::{IndexPath, Sizable, Size as ComponentSize, Theme, ThemeMode};
 use snow_ui::shell::selection::{
     DEFAULT_EDGE_TOLERANCE, DEFAULT_HANDLE_SIZE, DEFAULT_MINIMUM_SELECTION_SIZE,
     SelectionDragMode, SelectionState, dragged_selection_rect, handle_rects, hit_test_drag_mode,
@@ -36,8 +48,10 @@ use snow_ui::widgets::{
     AnnotationTool, ColorFormat, Magnifier, MagnifierGrid, ScreenshotToolbar, ToolbarAction,
     calculate_magnifier_placement, calculate_toolbar_placement,
 };
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -48,7 +62,25 @@ const MAGNIFIER_LOGICAL_SIZE: (i32, i32) = (109, 178);
 /// 放大镜距光标的逻辑偏移。
 const MAGNIFIER_OFFSET: i32 = 16;
 /// 工具栏的逻辑尺寸（宽, 高），仅用于定位与命中避让。
-const TOOLBAR_LOGICAL_SIZE: (i32, i32) = (700, 36);
+const TOOLBAR_LOGICAL_SIZE: (i32, i32) = (890, 36);
+/// 样式面板的逻辑尺寸（宽, 高），仅用于定位与命中避让。
+const STYLE_PANEL_SIZE: (i32, i32) = (560, 84);
+/// 样式面板与工具栏的间距。
+const STYLE_PANEL_GAP: i32 = 6;
+/// 样式面板背景色。
+const STYLE_PANEL_BG: u32 = 0x1F1F1FE6;
+/// 样式面板边框色。
+const STYLE_PANEL_BORDER: u32 = 0x00000080;
+/// 样式面板里小标题的文字色。
+const STYLE_LABEL_COLOR: u32 = 0xCCCCCCFF;
+/// 色块边长（逻辑像素）。
+const SWATCH_SIZE: f32 = 18.0;
+/// 样式下拉的宽度。
+const STYLE_SELECT_WIDTH: f32 = 96.0;
+/// 样式下拉的高度。
+const STYLE_SELECT_HEIGHT: f32 = 28.0;
+/// 样式下拉浮层的最大高度。
+const STYLE_SELECT_MENU_MAX_HEIGHT: f32 = 220.0;
 /// 工具栏距选区的逻辑间距。
 const TOOLBAR_MARGIN: i32 = 8;
 /// 手柄的逻辑边长。
@@ -63,6 +95,8 @@ const IDLE_MASK_COLOR: u32 = 0x00000040;
 const ACCENT_COLOR: u32 = 0x1677FF;
 /// 尺寸标签背景色。
 const LABEL_BG_COLOR: u32 = 0x000000CC;
+/// 悬停窗口高亮的半透明填充色（强调色 + 低 alpha）。
+const HOVER_FILL_COLOR: u32 = 0x1677FF22;
 /// 底部提示条背景色。
 const HINT_BG_COLOR: u32 = 0x000000B3;
 /// 底部提示条文字色。
@@ -145,6 +179,31 @@ struct PendingSave {
     rgba: Vec<u8>,
 }
 
+/// 框选完成后自动执行的动作（快捷截图用：框选一松手就复制 / 贴图 / 识别 / 翻译）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutoConfirm {
+    /// 复制选区到剪贴板并关闭。
+    Copy,
+    /// 把选区贴到屏幕并关闭。
+    Pin,
+    /// 对选区做文字识别。
+    Ocr,
+    /// 对选区做识别 + 翻译。
+    Translate,
+}
+
+impl AutoConfirm {
+    /// 对应的工具栏动作。
+    pub fn toolbar_action(self) -> ToolbarAction {
+        match self {
+            Self::Copy => ToolbarAction::Copy,
+            Self::Pin => ToolbarAction::Pin,
+            Self::Ocr => ToolbarAction::Ocr,
+            Self::Translate => ToolbarAction::Translate,
+        }
+    }
+}
+
 /// 屏幕上一块标注预览图（对应一个光栅分块）。
 pub(crate) struct TileSprite {
     /// 块图像资源。
@@ -176,6 +235,53 @@ impl TileSprite {
         let image = Arc::new(RenderImage::new(vec![Frame::new(buffer)]));
         Some((key, Self { image, x, y, w, h }))
     }
+}
+
+/// 样式下拉里的一个选项：取值（数字或头型标识）加本地化标签。
+#[derive(Clone)]
+struct StyleItem {
+    /// 选项取值。
+    value: String,
+    /// 界面显示的标签。
+    label: SharedString,
+}
+
+impl SearchableListItem for StyleItem {
+    type Value = String;
+
+    /// 下拉与触发器显示的标签。
+    fn title(&self) -> SharedString {
+        self.label.clone()
+    }
+
+    /// 选项取值。
+    fn value(&self) -> &Self::Value {
+        &self.value
+    }
+}
+
+/// 样式下拉的状态实体类型。
+type StyleSelect = SelectState<SearchableVec<StyleItem>>;
+
+/// 样式面板里会触发变更的下拉种类。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StyleSelectKind {
+    /// 线宽。
+    Width,
+    /// 字号。
+    FontSize,
+    /// 箭头头型。
+    Arrowhead,
+}
+
+/// 样式面板用到的三个下拉实体（首次显示面板时创建）。
+struct StyleUi {
+    /// 线宽下拉。
+    width: Entity<StyleSelect>,
+    /// 字号下拉。
+    font: Entity<StyleSelect>,
+    /// 箭头头型下拉。
+    arrowhead: Entity<StyleSelect>,
 }
 
 /// 正在进行的文字输入会话。
@@ -324,7 +430,12 @@ pub struct SystemOutput {
     on_translate_download: Option<Box<dyn Fn()>>,
     /// 长截图回调（参数为覆盖窗底图坐标下的选区）。
     on_scroll: Option<Box<dyn Fn(PhysicalRect)>>,
+    /// 截图历史回调：复制 / 保存 / 贴图成功后触发。
+    on_history: Option<HistoryCallback>,
 }
+
+/// 截图历史回调类型：`(来源, 宽, 高, RGBA)`。
+type HistoryCallback = Box<dyn Fn(HistorySource, u32, u32, &[u8])>;
 
 /// 文字识别回调类型：`(序号, 宽, 高, RGBA)`。
 type OcrCallback = Box<dyn Fn(u64, u32, u32, Vec<u8>)>;
@@ -349,6 +460,23 @@ impl SystemOutput {
             on_translate: None,
             on_translate_download: None,
             on_scroll: None,
+            on_history: None,
+        }
+    }
+
+    /// 设置截图历史回调：复制 / 保存 / 贴图成功后触发（回调应只做投递，不阻塞）。
+    ///
+    /// # 参数
+    /// - `callback`：接收来源、图像尺寸与 RGBA 像素。
+    pub fn with_history(mut self, callback: impl Fn(HistorySource, u32, u32, &[u8]) + 'static) -> Self {
+        self.on_history = Some(Box::new(callback));
+        self
+    }
+
+    /// 成功输出后通知历史回调（未设置则忽略）。
+    fn note_history(&self, source: HistorySource, width: u32, height: u32, rgba: &[u8]) {
+        if let Some(callback) = &self.on_history {
+            callback(source, width, height, rgba);
         }
     }
 
@@ -448,7 +576,9 @@ impl SystemOutput {
 impl OutputSink for SystemOutput {
     /// 写入系统剪贴板（CF_DIB）。
     fn copy_image(&mut self, width: u32, height: u32, rgba: &[u8]) -> Result<(), String> {
-        copy_image_to_clipboard(width, height, rgba)
+        copy_image_to_clipboard(width, height, rgba)?;
+        self.note_history(HistorySource::Copied, width, height, rgba);
+        Ok(())
     }
 
     /// 写入系统剪贴板（Unicode 文本）。
@@ -460,7 +590,7 @@ impl OutputSink for SystemOutput {
     fn save_image(&mut self, width: u32, height: u32, rgba: &[u8]) -> Result<PathBuf, String> {
         let settings = self.export_settings();
         let locale = self.locale();
-        screenshot_output::save_automatic(
+        let path = screenshot_output::save_automatic(
             &settings,
             &ExportOverrides::default(),
             width,
@@ -469,7 +599,9 @@ impl OutputSink for SystemOutput {
             home_directory().as_deref(),
             snow_platform::local_time::now(),
         )
-        .map_err(|e| e.manual_message(&locale))
+        .map_err(|e| e.manual_message(&locale))?;
+        self.note_history(HistorySource::Saved, width, height, rgba);
+        Ok(path)
     }
 
     /// 准备手动保存：给了路径直接写；要求自动路径则快速保存；否则弹系统对话框。
@@ -568,6 +700,7 @@ impl OutputSink for SystemOutput {
     ) -> Result<(), String> {
         match &self.on_pin {
             Some(callback) => {
+                self.note_history(HistorySource::Pinned, width, height, &rgba);
                 callback(region, width, height, rgba);
                 Ok(())
             }
@@ -696,6 +829,14 @@ pub struct ScreenshotOverlayView {
     annotations: Option<AnnotationLayer>,
     /// 当前标注工具（与工具栏高亮同步）。
     tool: AnnotationTool,
+    /// 每工具独立的样式与最近使用颜色。
+    styles: ToolStyleStore,
+    /// 样式持久化用的配置存储（测试与未注入时为空，此时样式只在本次截图内有效）。
+    style_config: Option<Rc<RefCell<ConfigStore>>>,
+    /// 样式面板文案所用的语料。
+    i18n: &'static I18n,
+    /// 样式面板的下拉实体。
+    style_ui: Option<StyleUi>,
     /// 标注预览分块（只保留非空块）。
     tile_sprites: HashMap<TileKey, TileSprite>,
     /// 已被替换、等待在下一次渲染时从 GPU 图集释放的图像。
@@ -710,8 +851,8 @@ pub struct ScreenshotOverlayView {
     record_mode: bool,
     /// 长截图选区模式（确认后交给滚动采集）。
     scroll_mode: bool,
-    /// 选区确认后自动执行的动作（全局热键“截图并复制 / 贴图 / 识别 / 翻译”）。
-    pending_action: Option<ToolbarAction>,
+    /// 框选完成后自动执行的动作（只触发一次）。
+    auto_confirm: Option<AutoConfirm>,
     /// 覆盖窗键位表（读 `screenshot_shortcuts/*` 与 `drawing_shortcuts/*`）。
     keymap: OverlayKeymap,
     /// 界面语言代码（提示文案用）。
@@ -724,6 +865,12 @@ pub struct ScreenshotOverlayView {
     translate: TranslateUiState,
     /// 最近一次翻译请求序号（过期结果据此丢弃）。
     translate_serial: u64,
+    /// 窗口悬停来源（智能选区开启时才有）。
+    window_hover: Option<Box<dyn WindowHover>>,
+    /// 悬停窗口的底图矩形（仅 Idle 时更新并高亮）。
+    hover_window: Option<PhysicalRect>,
+    /// 按下时锁定的窗口矩形：位移未超阈值就松开则直接作为选区，超过则作废转手动框选。
+    click_window: Option<PhysicalRect>,
 }
 
 impl ScreenshotOverlayView {
@@ -776,6 +923,10 @@ impl ScreenshotOverlayView {
             probe: FrameProbe::new(),
             annotations,
             tool: AnnotationTool::None,
+            styles: ToolStyleStore::new(),
+            style_config: None,
+            i18n: crate::ocr_backend::i18n_for(snow_i18n::FALLBACK_LOCALE),
+            style_ui: None,
             tile_sprites: HashMap::new(),
             pending_drops: Vec::new(),
             annotating: false,
@@ -783,13 +934,16 @@ impl ScreenshotOverlayView {
             text_edit: None,
             record_mode: false,
             scroll_mode: false,
-            pending_action: None,
+            auto_confirm: None,
             keymap: OverlayKeymap::default(),
             locale: snow_i18n::FALLBACK_LOCALE.to_string(),
             ocr: OcrUiState::Idle,
             ocr_serial: 0,
             translate: TranslateUiState::Idle,
             translate_serial: 0,
+            window_hover: None,
+            hover_window: None,
+            click_window: None,
         };
         let start = view.clamp_point(initial_cursor);
         view.cursor_pos = start;
@@ -827,6 +981,41 @@ impl ScreenshotOverlayView {
         if let Some(s) = self.scale_override {
             self.scale = s;
         }
+    }
+
+    /// 接入窗口悬停来源，开启窗口级智能选区。
+    ///
+    /// # 参数
+    /// - `source`：悬停来源；传 `None` 关闭该功能。
+    ///
+    /// ```ignore
+    /// view.set_window_hover(Some(Box::new(picker)));
+    /// ```
+    pub fn set_window_hover(&mut self, source: Option<Box<dyn WindowHover>>) {
+        self.window_hover = source;
+        self.hover_window = None;
+        self.click_window = None;
+    }
+
+    /// 当前应高亮的窗口矩形：空闲时是悬停窗口，按下未超阈值时是锁定窗口。
+    fn window_highlight(&self) -> Option<PhysicalRect> {
+        match self.state {
+            SelectionState::Idle => self.hover_window,
+            SelectionState::MarqueeDragging { .. } => self.click_window,
+            _ => None,
+        }
+    }
+
+    /// 向悬停来源查询指定点下的窗口并更新高亮。
+    fn refresh_window_hover(&mut self, point: PhysicalPoint) {
+        if let Some(source) = self.window_hover.as_mut() {
+            self.hover_window = source.hover(point);
+        }
+    }
+
+    /// 拖拽阈值（物理像素，随缩放比放大）。
+    fn drag_threshold(&self) -> i32 {
+        (DRAG_THRESHOLD_LOGICAL * self.scale).round() as i32
     }
 
     /// 底图物理尺寸。
@@ -928,6 +1117,9 @@ impl ScreenshotOverlayView {
         self.cursor_pos = point;
         match self.state {
             SelectionState::Idle => {
+                // 按下点处的窗口先锁定，松开时若位移很小就直接选中该窗口
+                self.refresh_window_hover(point);
+                self.click_window = self.hover_window;
                 self.state = SelectionState::MarqueeDragging {
                     start: point,
                     current: point,
@@ -992,6 +1184,11 @@ impl ScreenshotOverlayView {
         }
         match self.state {
             SelectionState::MarqueeDragging { start, .. } => {
+                if self.click_window.is_some() && exceeds_drag_threshold(start, point, self.drag_threshold()) {
+                    // 位移超过阈值：放弃窗口选区，转为手动框选
+                    self.click_window = None;
+                    self.hover_window = None;
+                }
                 self.state = SelectionState::MarqueeDragging {
                     start,
                     current: point,
@@ -1020,7 +1217,10 @@ impl ScreenshotOverlayView {
                     DEFAULT_MINIMUM_SELECTION_SIZE,
                 );
             }
-            SelectionState::Idle => self.hover_mode = SelectionDragMode::None,
+            SelectionState::Idle => {
+                self.hover_mode = SelectionDragMode::None;
+                self.refresh_window_hover(point);
+            }
         }
     }
 
@@ -1040,6 +1240,16 @@ impl ScreenshotOverlayView {
         }
         match self.state {
             SelectionState::MarqueeDragging { start, .. } => {
+                let window = self.click_window.take();
+                self.hover_window = None;
+                if let Some(rect) = window
+                    && !exceeds_drag_threshold(start, point, self.drag_threshold())
+                    && rect.width >= DEFAULT_MINIMUM_SELECTION_SIZE
+                    && rect.height >= DEFAULT_MINIMUM_SELECTION_SIZE
+                {
+                    self.state = SelectionState::Selected { rect };
+                    return true;
+                }
                 let r = marquee_selection_rect(start, point);
                 self.state = if r.width >= DEFAULT_MINIMUM_SELECTION_SIZE
                     && r.height >= DEFAULT_MINIMUM_SELECTION_SIZE
@@ -1081,6 +1291,8 @@ impl ScreenshotOverlayView {
         }
         self.state = SelectionState::Idle;
         self.hover_mode = SelectionDragMode::None;
+        self.hover_window = None;
+        self.click_window = None;
         self.reset_annotations();
         OverlayOutcome::Stay
     }
@@ -1264,23 +1476,6 @@ impl ScreenshotOverlayView {
         self.locale = locale.to_string();
     }
 
-    /// 登记选区确认后自动执行的动作（全局热键“截图并复制 / 贴图 / 识别 / 翻译”）。
-    ///
-    /// # 参数
-    /// - `action`：动作；`None` 清除。
-    pub fn set_pending_action(&mut self, action: Option<ToolbarAction>) {
-        self.pending_action = action;
-    }
-
-    /// 选区刚被确认时取出并执行登记的动作；没有选区或没有登记返回 `None`。
-    pub fn take_pending_action_outcome(&mut self) -> Option<OverlayOutcome> {
-        if self.current_selection().is_none() {
-            return None;
-        }
-        let action = self.pending_action.take()?;
-        Some(self.apply_action(action))
-    }
-
     /// 执行工具栏动作。
     ///
     /// # 参数
@@ -1333,12 +1528,299 @@ impl ScreenshotOverlayView {
             Ok(()) => {
                 self.tool = next;
                 self.status_message = None;
+                self.apply_stored_style(next);
             }
             Err(e) => {
                 tracing::error!(error = %e, tool = ?next, "切换标注工具失败");
                 self.status_message = Some(format!("切换工具失败: {e}"));
             }
         }
+    }
+
+    /// 注入样式持久化所用的配置存储与界面语言，并读取已保存的各工具样式。
+    ///
+    /// # 参数
+    /// - `config`：应用共享的配置存储。
+    /// - `locale`：界面语料语言代码（如 `zh-CN`）。
+    ///
+    /// ```ignore
+    /// view.set_style_config(state.config.clone(), "zh-CN");
+    /// ```
+    pub fn set_style_config(&mut self, config: Rc<RefCell<ConfigStore>>, locale: &str) {
+        self.styles = ToolStyleStore::load(|key| config.borrow().value(key));
+        self.style_config = Some(config);
+        self.i18n = crate::ocr_backend::i18n_for(locale);
+    }
+
+    /// 工具当前样式。
+    ///
+    /// # 参数
+    /// - `tool`：工具栏工具。
+    pub fn tool_style(&self, tool: AnnotationTool) -> ToolStyle {
+        self.styles.style(tool)
+    }
+
+    /// 把工具已记忆的样式下发给标注层（切换工具时调用；没有样式的工具忽略）。
+    fn apply_stored_style(&mut self, tool: AnnotationTool) {
+        if config_key(tool).is_none() {
+            return;
+        }
+        let style = self.styles.style(tool);
+        self.run_layer(|layer, base| layer.apply_style(tool, &style, base));
+    }
+
+    /// 修改工具样式：记忆、即时作用于标注层（含选中的同类对象）并写回配置。
+    ///
+    /// # 参数
+    /// - `tool`：被修改的工具。
+    /// - `edit`：对样式的修改；结果与原样式相同则什么也不做。
+    ///
+    /// ```ignore
+    /// view.update_tool_style(AnnotationTool::Line, |s| s.width = 8);
+    /// ```
+    pub fn update_tool_style(&mut self, tool: AnnotationTool, edit: impl FnOnce(&mut ToolStyle)) {
+        let before = self.styles.style(tool);
+        let mut after = before;
+        edit(&mut after);
+        if !self.styles.set_style(tool, after) {
+            return;
+        }
+        if after.color != before.color {
+            self.styles.push_recent(after.color);
+        }
+        self.run_layer(|layer, base| layer.apply_style(tool, &after, base));
+        self.persist_style(tool);
+    }
+
+    /// 把工具样式（及最近颜色）写回配置并落盘；失败只记日志，不打断标注。
+    fn persist_style(&self, tool: AnnotationTool) {
+        let Some(config) = &self.style_config else {
+            return;
+        };
+        let mut store = config.borrow_mut();
+        for (key, value) in self.styles.persist_entries(tool) {
+            if let Err(e) = store.set_value(key, value) {
+                tracing::warn!(key, error = %e, "写入标注样式配置失败");
+            }
+        }
+        if let Err(e) = store.flush() {
+            tracing::warn!(error = %e, "标注样式落盘失败");
+        }
+    }
+
+    /// 构造样式下拉的选项（档位取值 + 本地化标签）。
+    fn width_items(&self, presets: &[u32]) -> Vec<StyleItem> {
+        presets
+            .iter()
+            .map(|v| StyleItem {
+                value: v.to_string(),
+                label: self.i18n.tr_with("annot-size-px", &Args::new().arg(1, v)).into(),
+            })
+            .collect()
+    }
+
+    /// 首次显示样式面板时创建三个下拉并订阅选中事件。
+    fn ensure_style_ui(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.style_ui.is_some() {
+            return;
+        }
+        // 覆盖窗始终是深色界面，下拉组件跟随深色主题
+        Theme::change(ThemeMode::Dark, None, cx);
+        let arrow_items: Vec<StyleItem> = ArrowheadChoice::ALL
+            .iter()
+            .map(|c| StyleItem {
+                value: c.id().to_string(),
+                label: self.i18n.tr(c.text_id()).into(),
+            })
+            .collect();
+        let sets = [
+            (StyleSelectKind::Width, self.width_items(&WIDTH_PRESETS)),
+            (StyleSelectKind::FontSize, self.width_items(&FONT_PRESETS)),
+            (StyleSelectKind::Arrowhead, arrow_items),
+        ];
+        let mut made: Vec<Entity<StyleSelect>> = Vec::new();
+        for (kind, items) in sets {
+            let state = cx.new(|cx| SelectState::new(SearchableVec::new(items), None, window, cx));
+            cx.subscribe_in(
+                &state,
+                window,
+                move |this, _state, event: &SelectEvent<SearchableVec<StyleItem>>, window, cx| {
+                    if let SelectEvent::Confirm(Some(value)) = event {
+                        this.on_style_select(kind, value, window, cx);
+                    }
+                },
+            )
+            .detach();
+            made.push(state);
+        }
+        let mut made = made.into_iter();
+        if let (Some(width), Some(font), Some(arrowhead)) = (made.next(), made.next(), made.next()) {
+            self.style_ui = Some(StyleUi { width, font, arrowhead });
+        }
+        self.sync_style_selects(window, cx);
+    }
+
+    /// 让三个下拉的选中项与当前工具的样式一致（切换工具后调用）。
+    fn sync_style_selects(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(ui) = &self.style_ui else {
+            return;
+        };
+        let style = self.styles.style(self.tool);
+        let pick = |index: usize| Some(IndexPath::default().row(index));
+        let width = pick(nearest_index(&WIDTH_PRESETS, style.width));
+        let font = pick(nearest_index(&FONT_PRESETS, style.font_size));
+        let head = ArrowheadChoice::ALL.iter().position(|c| *c == style.arrowhead);
+        ui.width.update(cx, |s, cx| s.set_selected_index(width, window, cx));
+        ui.font.update(cx, |s, cx| s.set_selected_index(font, window, cx));
+        ui.arrowhead
+            .update(cx, |s, cx| s.set_selected_index(head.and_then(pick), window, cx));
+    }
+
+    /// 样式下拉选中：先提交进行中的文字输入，再改当前工具样式。
+    fn on_style_select(&mut self, kind: StyleSelectKind, value: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.commit_text_edit(window, cx);
+        let tool = self.tool;
+        match kind {
+            StyleSelectKind::Width => {
+                if let Ok(v) = value.parse::<u32>() {
+                    self.update_tool_style(tool, |s| s.width = v);
+                }
+            }
+            StyleSelectKind::FontSize => {
+                if let Ok(v) = value.parse::<u32>() {
+                    self.update_tool_style(tool, |s| s.font_size = v);
+                }
+            }
+            StyleSelectKind::Arrowhead => {
+                if let Some(head) = ArrowheadChoice::from_id(value) {
+                    self.update_tool_style(tool, |s| s.arrowhead = head);
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// 色块被点击。
+    fn on_style_color(&mut self, color: Rgba, window: &mut Window, cx: &mut Context<Self>) {
+        self.commit_text_edit(window, cx);
+        let tool = self.tool;
+        self.update_tool_style(tool, |s| s.color = color);
+        cx.notify();
+    }
+
+    /// 填充开关被点击。
+    fn on_style_fill(&mut self, fill: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.commit_text_edit(window, cx);
+        let tool = self.tool;
+        self.update_tool_style(tool, |s| s.fill = fill);
+        cx.notify();
+    }
+
+    /// 一排可点击的色块；当前色带高亮边框。
+    fn swatch_row(&self, id: &'static str, colors: &[Rgba], current: Rgba, cx: &mut Context<Self>) -> Div {
+        let mut row = div().flex().flex_row().items_center().gap_1();
+        for (index, color) in colors.iter().copied().enumerate() {
+            let picked = color == current;
+            row = row.child(
+                div()
+                    .id(SharedString::from(format!("{id}-{index}")))
+                    .size(px(SWATCH_SIZE))
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .border_1()
+                    .border_color(if picked { rgb(0xFFFFFF) } else { rgba(0xFFFFFF40) })
+                    .bg(rgba(u32::from_be_bytes(color)))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.on_style_color(color, window, cx);
+                    })),
+            );
+        }
+        row
+    }
+
+    /// 样式面板：按当前工具展示颜色 / 线宽 / 字号 / 填充 / 箭头头型，点击不穿透到选区。
+    ///
+    /// # 参数
+    /// - `origin`：面板左上角（逻辑像素）。
+    fn render_style_panel(&self, origin: (i32, i32), cx: &mut Context<Self>) -> Div {
+        let tool = self.tool;
+        let fields = style_fields(tool);
+        let style = self.styles.style(tool);
+        let i18n = self.i18n;
+        let label = move |id: &str| div().text_xs().text_color(rgba(STYLE_LABEL_COLOR)).child(i18n.tr(id));
+        let select = |state: &Entity<StyleSelect>| {
+            div().w(px(STYLE_SELECT_WIDTH)).h(px(STYLE_SELECT_HEIGHT)).child(
+                Select::new(state)
+                    .with_size(ComponentSize::Small)
+                    .menu_max_h(px(STYLE_SELECT_MENU_MAX_HEIGHT)),
+            )
+        };
+        let mut panel = div()
+            .absolute()
+            .top(px(origin.1 as f32))
+            .left(px(origin.0 as f32))
+            .w(px(STYLE_PANEL_SIZE.0 as f32))
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .items_center()
+            .gap_2()
+            .px_3()
+            .py_2()
+            .rounded_md()
+            .bg(rgba(STYLE_PANEL_BG))
+            .shadow_lg()
+            .border_1()
+            .border_color(rgba(STYLE_PANEL_BORDER))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation());
+        if fields.color {
+            panel = panel
+                .child(label("annot-style-color"))
+                .child(self.swatch_row("style-color", &PALETTE, style.color, cx));
+            if !self.styles.recent().is_empty() {
+                let recent = self.styles.recent().to_vec();
+                panel = panel
+                    .child(label("annot-style-recent"))
+                    .child(self.swatch_row("style-recent", &recent, style.color, cx));
+            }
+        }
+        if let Some(ui) = &self.style_ui {
+            if fields.width {
+                panel = panel.child(label("annot-style-width")).child(select(&ui.width));
+            }
+            if fields.font_size {
+                panel = panel.child(label("annot-style-font-size")).child(select(&ui.font));
+            }
+            if fields.arrowhead {
+                panel = panel.child(label("annot-style-arrowhead")).child(select(&ui.arrowhead));
+            }
+        }
+        if fields.fill {
+            let entity = cx.entity();
+            panel = panel.child(
+                Checkbox::new("style-fill")
+                    .label(SharedString::from(i18n.tr("annot-style-fill")))
+                    .checked(style.fill)
+                    .on_click(move |checked, window, app| {
+                        let checked = *checked;
+                        entity.update(app, |this, cx| this.on_style_fill(checked, window, cx));
+                    }),
+            );
+        }
+        panel
+    }
+
+    /// 样式面板的左上角；当前工具没有样式或处于录屏 / 长图模式时不显示。
+    ///
+    /// # 参数
+    /// - `toolbar`：工具栏左上角（逻辑像素）。
+    /// - `screen`：屏幕逻辑尺寸。
+    fn style_panel_origin(&self, toolbar: (i32, i32), screen: (i32, i32)) -> Option<(i32, i32)> {
+        if style_fields(self.tool).is_empty() || self.record_mode || self.scroll_mode {
+            return None;
+        }
+        Some(panel_placement(toolbar, TOOLBAR_LOGICAL_SIZE.1, STYLE_PANEL_SIZE, screen, STYLE_PANEL_GAP))
     }
 
     /// 把选区限制后的点夹进选区矩形，返回浮点画布坐标。
@@ -2027,6 +2509,28 @@ impl ScreenshotOverlayView {
         self.scroll_mode = enabled;
     }
 
+    /// 设置框选完成后自动执行的动作。
+    ///
+    /// # 参数
+    /// - `action`：自动动作；`None` 表示不自动执行。
+    pub fn set_auto_confirm(&mut self, action: Option<AutoConfirm>) {
+        self.auto_confirm = action;
+    }
+
+    /// 鼠标松开后调用：若已有选区且设置了自动动作，则执行一次（之后恢复为普通编辑）。
+    ///
+    /// # 返回
+    /// 窗口去向；未触发时为 `Stay`。
+    pub fn auto_confirm_outcome(&mut self) -> OverlayOutcome {
+        if self.annotating || !self.has_committed_selection() {
+            return OverlayOutcome::Stay;
+        }
+        match self.auto_confirm.take() {
+            Some(action) => self.apply_action(action.toolbar_action()),
+            None => OverlayOutcome::Stay,
+        }
+    }
+
     /// 以当前选区开始录屏；成功后关闭覆盖窗，失败保留窗口并提示。
     fn start_recording_and_close(&mut self) -> OverlayOutcome {
         if !self.has_committed_selection() {
@@ -2231,6 +2735,10 @@ impl ScreenshotOverlayView {
     fn on_tool_selected(&mut self, tool: AnnotationTool, window: &mut Window, cx: &mut Context<Self>) {
         self.commit_text_edit(window, cx);
         self.select_tool(tool);
+        if !style_fields(self.tool).is_empty() {
+            self.ensure_style_ui(window, cx);
+            self.sync_style_selects(window, cx);
+        }
         cx.notify();
     }
 
@@ -2328,6 +2836,19 @@ impl ScreenshotOverlayView {
         }
     }
 
+    /// 鼠标是否在样式面板范围内（用于避免放大镜遮挡面板）。
+    fn cursor_over_style_panel(&self, panel_pos: Option<PhysicalPoint>) -> bool {
+        let Some(pos) = panel_pos else {
+            return false;
+        };
+        let cursor = logical_rect(
+            PhysicalRect::new(self.cursor_pos.x, self.cursor_pos.y, 1, 1),
+            self.scale,
+        );
+        PhysicalRect::new(pos.x, pos.y, STYLE_PANEL_SIZE.0, STYLE_PANEL_SIZE.1)
+            .contains(PhysicalPoint::new(cursor.x, cursor.y))
+    }
+
     /// 选区与鼠标是否在工具栏范围内（用于避免放大镜遮挡工具栏）。
     fn cursor_over_toolbar(&self, toolbar_pos: Option<PhysicalPoint>) -> bool {
         let Some(pos) = toolbar_pos else {
@@ -2352,7 +2873,9 @@ impl Render for ScreenshotOverlayView {
             self.scale = window.scale_factor();
         }
         let scale = self.scale;
-        let sel = self.current_selection();
+        // 窗口点击候选期间不画框选遮罩，改画窗口高亮
+        let sel = if self.click_window.is_some() { None } else { self.current_selection() };
+        let highlight = self.window_highlight();
         let (frame_w, frame_h) = self.frame.size();
         let screen_w = frame_w as f32 / scale;
         let screen_h = frame_h as f32 / scale;
@@ -2395,12 +2918,9 @@ impl Render for ScreenshotOverlayView {
                 cx.listener(|this, ev: &MouseUpEvent, window, cx| {
                     this.scale = this.scale_override.unwrap_or(window.scale_factor());
                     let p = this.physical_point(ev.position);
-                    let confirmed = this.handle_mouse_up(p);
-                    // 热键“截图并复制 / 贴图 / 识别 / 翻译”：选区一确认就执行登记的动作
-                    match confirmed.then(|| this.take_pending_action_outcome()).flatten() {
-                        Some(outcome) => this.finish(outcome, window, cx),
-                        None => cx.notify(),
-                    }
+                    this.handle_mouse_up(p);
+                    let outcome = this.auto_confirm_outcome();
+                    this.finish(outcome, window, cx);
                 }),
             )
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
@@ -2441,7 +2961,39 @@ impl Render for ScreenshotOverlayView {
             );
         }
 
+        // 智能选区：悬停窗口的描边与尺寸标签
+        if let Some(w) = highlight {
+            let (wx, wy) = (w.x as f32 / scale, w.y as f32 / scale);
+            let (ww, wh) = (w.width as f32 / scale, w.height as f32 / scale);
+            root = root.child(
+                div()
+                    .absolute()
+                    .top(px(wy))
+                    .left(px(wx))
+                    .w(px(ww))
+                    .h(px(wh))
+                    .bg(rgba(HOVER_FILL_COLOR))
+                    .border_2()
+                    .border_color(rgb(ACCENT_COLOR)),
+            );
+            let label_top = if wy >= LABEL_OFFSET { wy - LABEL_OFFSET } else { wy + 4.0 };
+            root = root.child(
+                div()
+                    .absolute()
+                    .top(px(label_top))
+                    .left(px(wx.max(4.0)))
+                    .px_2()
+                    .py_0p5()
+                    .rounded_xs()
+                    .bg(rgba(LABEL_BG_COLOR))
+                    .text_color(rgba(0xFFFFFFFF))
+                    .text_xs()
+                    .child(selection_size_label(w)),
+            );
+        }
+
         let mut toolbar_pos: Option<PhysicalPoint> = None;
+        let mut panel_pos: Option<PhysicalPoint> = None;
         if let Some(s) = sel {
             let (sx, sy) = (s.x as f32 / scale, s.y as f32 / scale);
             let (sw, sh) = (s.width as f32 / scale, s.height as f32 / scale);
@@ -2544,13 +3096,21 @@ impl Render for ScreenshotOverlayView {
                     .on_action(move |action, window, app| {
                         entity.update(app, |this, cx| this.on_toolbar_action(action, window, cx));
                     });
+                // 按右边缘锚定：真实宽度与估算不符时也不会溢出屏幕右侧
+                let right_gap = (screen_w - (pos.x + TOOLBAR_LOGICAL_SIZE.0) as f32).max(0.0);
                 root = root.child(
                     div()
                         .absolute()
                         .top(px(pos.y as f32))
-                        .left(px(pos.x as f32))
+                        .right(px(right_gap))
                         .child(tb),
                 );
+                if let Some(origin) =
+                    self.style_panel_origin((pos.x, pos.y), (screen_w as i32, screen_h as i32))
+                {
+                    panel_pos = Some(PhysicalPoint::new(origin.0, origin.1));
+                    root = root.child(self.render_style_panel(origin, cx));
+                }
             }
         } else {
             // 未选区时整屏薄遮罩
@@ -2589,7 +3149,7 @@ impl Render for ScreenshotOverlayView {
         }
 
         // 放大镜：跟随光标，光标压在工具栏上时隐藏
-        if !self.cursor_over_toolbar(toolbar_pos) {
+        if !self.cursor_over_toolbar(toolbar_pos) && !self.cursor_over_style_panel(panel_pos) {
             let screen_logical = PhysicalRect::new(0, 0, screen_w as i32, screen_h as i32);
             let cursor_logical = logical_rect(
                 PhysicalRect::new(self.cursor_pos.x, self.cursor_pos.y, 1, 1),
@@ -2788,6 +3348,94 @@ mod tests {
         view.handle_mouse_down(PhysicalPoint::new(from.0, from.1), 1);
         view.handle_mouse_move(PhysicalPoint::new(to.0, to.1));
         view.handle_mouse_up(PhysicalPoint::new(to.0, to.1));
+    }
+
+    /// 测试用窗口悬停来源：点落在固定矩形内就返回该矩形。
+    struct FakeHover(PhysicalRect);
+
+    impl WindowHover for FakeHover {
+        /// 点在矩形内返回矩形，否则无窗口。
+        fn hover(&mut self, point: PhysicalPoint) -> Option<PhysicalRect> {
+            let r = self.0;
+            (point.x >= r.x && point.x < r.right() && point.y >= r.y && point.y < r.bottom()).then_some(r)
+        }
+    }
+
+    /// 带假窗口来源（窗口 40,30 100x80）的视图。
+    fn hover_view(scale: f32) -> ScreenshotOverlayView {
+        let (mut view, _) = view_with(300, 200, scale, false);
+        view.set_window_hover(Some(Box::new(FakeHover(PhysicalRect::new(40, 30, 100, 80)))));
+        view
+    }
+
+    /// 空闲时悬停高亮窗口，移出窗口后高亮消失。
+    #[test]
+    fn idle_hover_highlights_window() {
+        let mut view = hover_view(1.0);
+        view.handle_mouse_move(PhysicalPoint::new(60, 50));
+        assert_eq!(view.window_highlight(), Some(PhysicalRect::new(40, 30, 100, 80)));
+        view.handle_mouse_move(PhysicalPoint::new(250, 150));
+        assert_eq!(view.window_highlight(), None);
+    }
+
+    /// 单击（位移小于阈值）直接把窗口矩形作为选区。
+    #[test]
+    fn click_selects_hovered_window() {
+        let mut view = hover_view(1.0);
+        view.handle_mouse_move(PhysicalPoint::new(60, 50));
+        drag(&mut view, (60, 50), (64, 53));
+        assert_eq!(view.state, SelectionState::Selected { rect: PhysicalRect::new(40, 30, 100, 80) });
+        assert_eq!(view.window_highlight(), None);
+    }
+
+    /// 位移超过阈值转为手动框选，行为与原来一致。
+    #[test]
+    fn drag_past_threshold_falls_back_to_marquee() {
+        let mut view = hover_view(1.0);
+        drag(&mut view, (60, 50), (120, 100));
+        assert_eq!(view.state, SelectionState::Selected { rect: PhysicalRect::new(60, 50, 61, 51) });
+    }
+
+    /// 拖出阈值后又回到起点附近，仍按手动框选处理（不再变回窗口选区）。
+    #[test]
+    fn leaving_threshold_is_sticky() {
+        let mut view = hover_view(1.0);
+        view.handle_mouse_down(PhysicalPoint::new(60, 50), 1);
+        view.handle_mouse_move(PhysicalPoint::new(90, 50));
+        view.handle_mouse_move(PhysicalPoint::new(61, 50));
+        view.handle_mouse_up(PhysicalPoint::new(61, 50));
+        assert_eq!(view.state, SelectionState::Idle);
+    }
+
+    /// 阈值随缩放比放大：2x 下位移 15 物理像素仍算单击。
+    #[test]
+    fn drag_threshold_scales_with_dpi() {
+        let mut view = hover_view(2.0);
+        drag(&mut view, (60, 50), (75, 50));
+        assert!(matches!(view.state, SelectionState::Selected { .. }));
+        let mut view = hover_view(2.0);
+        drag(&mut view, (60, 50), (80, 50));
+        assert_eq!(view.state, SelectionState::Idle);
+    }
+
+    /// 窗口外单击没有窗口可选，沿用原来的微小框选丢弃逻辑。
+    #[test]
+    fn click_without_window_is_discarded() {
+        let mut view = hover_view(1.0);
+        drag(&mut view, (250, 150), (251, 150));
+        assert_eq!(view.state, SelectionState::Idle);
+    }
+
+    /// 窗口选区后右键先撤销选区，再右键关闭（取消行为不变）。
+    #[test]
+    fn right_click_cancels_window_selection() {
+        let mut view = hover_view(1.0);
+        drag(&mut view, (60, 50), (60, 50));
+        assert!(matches!(view.state, SelectionState::Selected { .. }));
+        assert_eq!(view.handle_right_click(), OverlayOutcome::Stay);
+        assert_eq!(view.state, SelectionState::Idle);
+        assert_eq!(view.window_highlight(), None);
+        assert_eq!(view.handle_right_click(), OverlayOutcome::Close);
     }
 
     /// 框选状态流转：按下、移动、松开后得到固定选区。
@@ -3082,6 +3730,31 @@ mod tests {
         }
         assert!(matches!(view.state, SelectionState::Selected { .. }) || view.state == SelectionState::Idle);
         assert_eq!(view.probe.summary().2.count, 50);
+    }
+
+    /// 自动动作：框选松手后只触发一次；未设置或无选区时不触发。
+    #[test]
+    fn auto_confirm_copies_once_after_selection() {
+        let (mut view, rec) = view_with(255, 200, 1.0, false);
+        view.set_auto_confirm(Some(AutoConfirm::Copy));
+        assert_eq!(view.auto_confirm_outcome(), OverlayOutcome::Stay, "无选区不触发");
+        drag(&mut view, (50, 50), (150, 120));
+        assert_eq!(view.auto_confirm_outcome(), OverlayOutcome::Close);
+        assert_eq!(rec.borrow().images.len(), 1);
+        assert_eq!(view.auto_confirm_outcome(), OverlayOutcome::Stay, "只触发一次");
+        let (mut plain, rec) = view_with(255, 200, 1.0, false);
+        drag(&mut plain, (50, 50), (150, 120));
+        assert_eq!(plain.auto_confirm_outcome(), OverlayOutcome::Stay);
+        assert!(rec.borrow().images.is_empty());
+    }
+
+    /// 自动动作与工具栏动作一一对应。
+    #[test]
+    fn auto_confirm_maps_to_toolbar_actions() {
+        assert_eq!(AutoConfirm::Copy.toolbar_action(), ToolbarAction::Copy);
+        assert_eq!(AutoConfirm::Pin.toolbar_action(), ToolbarAction::Pin);
+        assert_eq!(AutoConfirm::Ocr.toolbar_action(), ToolbarAction::Ocr);
+        assert_eq!(AutoConfirm::Translate.toolbar_action(), ToolbarAction::Translate);
     }
 
     /// 录屏选区模式：Enter 把选区交给录制流程并关闭；复制 / 保存快捷键不起作用。
@@ -3650,5 +4323,111 @@ mod tests {
         let (mut view, _) = view_with(100, 80, 1.0, false);
         view.set_scroll_mode(true);
         assert_eq!(view.handle_key("escape", false, false), OverlayOutcome::Close);
+    }
+
+    /// 改色 / 线宽后画的矩形按新样式出图（复制结果里左边线为蓝色）。
+    #[test]
+    fn style_change_recolors_next_annotation() {
+        let (mut view, rec) = view_with(300, 200, 1.0, false);
+        drag(&mut view, (20, 20), (219, 149));
+        view.select_tool(AnnotationTool::Rectangle);
+        view.update_tool_style(AnnotationTool::Rectangle, |s| {
+            s.color = [0x16, 0x77, 0xFF, 0xFF];
+            s.width = 6;
+        });
+        annotate(&mut view, (60, 50), (160, 110));
+        assert_eq!(view.handle_key("enter", false, false), OverlayOutcome::Close);
+        let r = rec.borrow();
+        let (w, _, rgba) = &r.images[0];
+        let o = ((60 * *w + 40) * 4) as usize;
+        let p = &rgba[o..o + 4];
+        assert!(p[2] > 200 && p[0] < 60, "左边线应为蓝色: {p:?}");
+    }
+
+    /// 每个工具记住自己的样式：改了直线不影响箭头，切回直线仍是改后的样式。
+    #[test]
+    fn style_is_remembered_per_tool() {
+        let (mut view, rec) = view_with(300, 200, 1.0, false);
+        drag(&mut view, (20, 20), (219, 149));
+        view.select_tool(AnnotationTool::Line);
+        view.update_tool_style(AnnotationTool::Line, |s| s.color = [0x16, 0x77, 0xFF, 0xFF]);
+        view.select_tool(AnnotationTool::Arrow);
+        assert_eq!(view.tool_style(AnnotationTool::Arrow), crate::annotation_style::default_style(AnnotationTool::Arrow));
+        // 再切回直线（选箭头会取消；再选直线）
+        view.select_tool(AnnotationTool::Line);
+        assert_eq!(view.tool_style(AnnotationTool::Line).color, [0x16, 0x77, 0xFF, 0xFF]);
+        annotate(&mut view, (40, 80), (180, 80));
+        view.handle_key("enter", false, false);
+        let r = rec.borrow();
+        let (w, _, rgba) = &r.images[0];
+        // 直线在底图 y=80 -> 裁切图 y=60，取 x=100 -> 80
+        let o = ((60 * *w + 80) * 4) as usize;
+        let p = &rgba[o..o + 4];
+        assert!(p[2] > 200 && p[0] < 60, "直线应为蓝色: {p:?}");
+    }
+
+    /// 样式写回配置并能被新的覆盖窗读回（键沿用旧版 `drawing/*_style`）。
+    #[test]
+    fn style_persists_and_reloads() {
+        let dir = std::env::temp_dir().join(format!(
+            "cisox-style-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        let (mut first, _) = view_with(100, 80, 1.0, false);
+        first.set_style_config(Rc::new(RefCell::new(ConfigStore::open(&path))), "en-US");
+        first.update_tool_style(AnnotationTool::Arrow, |s| {
+            s.width = 12;
+            s.color = [1, 2, 3, 255];
+            s.arrowhead = ArrowheadChoice::Dot;
+        });
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("arrow_style") && raw.contains("#010203FF"), "配置应含箭头样式: {raw}");
+
+        let (mut second, _) = view_with(100, 80, 1.0, false);
+        second.set_style_config(Rc::new(RefCell::new(ConfigStore::open(&path))), "en-US");
+        let arrow = second.tool_style(AnnotationTool::Arrow);
+        assert_eq!((arrow.width, arrow.color, arrow.arrowhead), (12, [1, 2, 3, 255], ArrowheadChoice::Dot));
+        assert_eq!(second.styles.recent(), &[[1, 2, 3, 255]]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 荧光笔与序号球现在是可用工具：能画、能撤销。
+    #[test]
+    fn highlighter_and_counter_annotate_and_undo() {
+        for tool in [AnnotationTool::Highlighter, AnnotationTool::Counter] {
+            let (mut view, _) = view_with(300, 200, 1.0, false);
+            drag(&mut view, (20, 20), (219, 149));
+            view.select_tool(tool);
+            assert_eq!(view.current_tool(), tool);
+            if tool == AnnotationTool::Counter {
+                // 序号球是单击落点
+                annotate(&mut view, (80, 80), (80, 80));
+            } else {
+                annotate(&mut view, (60, 80), (160, 80));
+            }
+            assert!(view.tile_sprite_count() > 0, "{tool:?} 应产生预览分块");
+            assert!(view.history_state().0, "{tool:?} 应可撤销");
+            view.apply_action(ToolbarAction::Undo);
+            assert_eq!(view.tile_sprite_count(), 0);
+        }
+    }
+
+    /// 样式面板：滤镜工具与录屏 / 长图模式不显示，其余工具显示。
+    #[test]
+    fn style_panel_visibility_rules() {
+        let (mut view, _) = view_with(300, 200, 1.0, false);
+        drag(&mut view, (20, 20), (219, 149));
+        assert_eq!(view.style_panel_origin((10, 10), (300, 200)), None);
+        view.select_tool(AnnotationTool::Mosaic);
+        assert_eq!(view.style_panel_origin((10, 10), (300, 200)), None);
+        view.select_tool(AnnotationTool::Text);
+        assert!(view.style_panel_origin((10, 10), (300, 200)).is_some());
+        view.set_record_mode(true);
+        assert_eq!(view.style_panel_origin((10, 10), (300, 200)), None);
     }
 }

@@ -124,12 +124,42 @@ impl ShellWindow {
         native::bring_to_top(self.native_hwnd()?, topmost)
     }
 
+    /// 设置窗口原生标题栏的深浅色（不影响窗口内容）。
+    ///
+    /// # 参数
+    /// - `dark`：`true` 深色标题栏，`false` 浅色。
+    ///
+    /// # 返回
+    /// 取不到原生句柄或平台调用失败返回错误。
+    ///
+    /// ```ignore
+    /// window.set_dark_title(true)?;
+    /// ```
+    pub fn set_dark_title(&self, dark: bool) -> Result<(), ShellError> {
+        native::set_window_dark_title(self.native_hwnd()?, dark)
+    }
+
     /// 原生窗口句柄整数值；取不到返回 `Platform` 错误。
     fn native_hwnd(&self) -> Result<isize, ShellError> {
         self.native
             .map(|id| id.0)
             .ok_or_else(|| ShellError::Platform("无法获取原生窗口句柄".into()))
     }
+}
+
+/// 设置进程内弹出菜单（托盘右键菜单等）的深浅色，下次弹出时生效。
+///
+/// # 参数
+/// - `dark`：`Some(true)` 深色、`Some(false)` 浅色、`None` 跟随系统。
+///
+/// # 返回
+/// 平台不支持或调用失败返回错误。
+///
+/// ```ignore
+/// set_popup_menu_dark(Some(true))?;
+/// ```
+pub fn set_popup_menu_dark(dark: Option<bool>) -> Result<(), ShellError> {
+    native::set_popup_menu_dark(dark)
 }
 
 /// 启动期上下文：在 [`run`] 的回调里创建窗口、启动服务。

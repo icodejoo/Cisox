@@ -7,14 +7,28 @@
 //! 采集在后台线程完成，结果经收件箱回到主线程再建窗。
 
 use crate::capture_flow::{CapturePayload, pick_monitor, spawn_capture};
+use crate::direct_capture::{DirectHistory, DirectResult, spawn_direct_capture};
+use crate::history_store::{
+    HistoryRecorder, HistorySource, HistoryStore, Thumbnail, policy_from_document,
+};
+use crate::history_view::{HistoryAction, HistoryView};
+use crate::quick_actions::{
+    DelayGate, DirectKind, QUICK_ACTION_KEYS, QuickPlan, clip_to_monitor, delay_seconds,
+    direct_output_plan_from, full_monitor_region, plan_for, recording_directory, stays_registered_when_paused,
+};
+use crate::window_pick::{WindowHover, start_window_hover};
+use crate::dictation::config::DictationConfig;
+use crate::dictation::translate::TranslationOutcome;
 use crate::dictation::focus::Verdict;
 use crate::dictation::{DictationCommand, DictationHost};
 use crate::frozen_frame::FrozenFrame;
-use crate::global_actions::{self, HotkeyGate};
 use crate::ocr_assets::{ENV_OCR_ASSET_DIR, ocr_root};
 use crate::ocr_client::OcrError;
 use crate::ocr_download;
-use crate::ocr_backend::{OcrInput, i18n_for, select_from_document};
+use crate::stt_download::{self, Progress as SttProgress};
+use crate::stt_models;
+use crate::stt_settings::{CancelFlag, SttHooks};
+use crate::ocr_backend::{OcrInput, select_from_document};
 use crate::ocr_service::{OcrRequestConfig, OcrResult, OcrService};
 use crate::ort_runtime;
 use crate::sys_prefs::system_ui_language;
@@ -24,7 +38,7 @@ use crate::translate_input_view::{TranslateInputView, WINDOW_HEIGHT as TRANSLATE
 use crate::translate_service::{
     TranslateConfig, TranslateFlowError, TranslateHost, TranslateOutcome, TranslateStage, Translated, run_flow,
 };
-use crate::overlay_view::{OverlayOutcome, ScreenshotOverlayView, SystemOutput};
+use crate::overlay_view::{AutoConfirm, OverlayOutcome, ScreenshotOverlayView, SystemOutput};
 use crate::pinned_manager::PinnedManager;
 use crate::recording_flow::{
     ENV_RECORDING_AUTOTEST, RecordingHost, monitor_for_region, parse_autotest,
@@ -43,8 +57,9 @@ use serde_json::Value;
 use snow_app_core::bus::{CommandBus, CommandError, CommandOutcome};
 use snow_app_core::command::{
     AppCommand, CaptureRequest, CommandKind, CommandSource, DirectCaptureRequest, DirectOutput,
-    DirectTarget, ExportTarget, GlobalAction, RecordingConfig as RecordingRequest,
+    DirectTarget, ExportTarget, QuickAction, RecordingConfig as RecordingRequest,
 };
+use snow_i18n::Args;
 use snow_capability::CapabilityRegistry;
 use snow_config::document::ConfigDocument;
 use snow_config::paths::config_file_path;
@@ -65,7 +80,7 @@ use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 /// 设置页自动化脚本路径环境变量（JSON 操作数组，验收用）。
@@ -74,18 +89,10 @@ pub const ENV_SETTINGS_AUTOTEST: &str = "SNOW_SETTINGS_AUTOTEST";
 pub const ENV_SETTINGS_MONITOR: &str = "SNOW_SETTINGS_MONITOR";
 /// 托盘悬停提示。
 pub(crate) const TRAY_TOOLTIP: &str = "Cisox";
-/// 托盘菜单：截图。
-const TRAY_LABEL_CAPTURE: &str = "截图";
-/// 托盘菜单：录屏。
-const TRAY_LABEL_RECORD: &str = "录屏";
-/// 托盘菜单：从剪贴板贴图。
-const TRAY_LABEL_PIN_CLIPBOARD: &str = "从剪贴板贴图";
-/// 托盘菜单：设置。
-const TRAY_LABEL_SETTINGS: &str = "设置";
-/// 托盘菜单：退出。
-const TRAY_LABEL_QUIT: &str = "退出";
 /// 托盘信号：从剪贴板贴图。
 pub const TRAY_SIGNAL_PIN_CLIPBOARD: &str = "pin_clipboard";
+/// 托盘信号：打开截图历史。
+pub const TRAY_SIGNAL_HISTORY: &str = "history";
 /// 托盘信号：打开设置。
 pub const TRAY_SIGNAL_SETTINGS: &str = "settings";
 /// 托盘信号：退出。
@@ -170,12 +177,6 @@ pub enum UiEvent {
     DirectCapture(DirectCaptureRequest),
     /// 打开（或激活）输入框翻译浮窗。
     OpenTranslateInput,
-    /// 全局快捷键动作（来自热键 / 总线）。
-    Global(GlobalAction),
-    /// 全局热键提示到期（携带提示序号，过期的忽略），用来复原托盘提示。
-    HintExpired(u64),
-    /// 延时截图到点（携带发起序号，被新一次触发取代的忽略）。
-    DelayedCaptureDue(u64),
     /// 语音转文字命令（来自热键或总线）。
     Dictation(DictationCommand),
     /// 语音转文字：工作进程有新事件，或定时器到点（取事件、查超时、重试键入）。
@@ -186,6 +187,15 @@ pub enum UiEvent {
         round: u64,
         /// 能否键入的判定。
         verdict: Verdict,
+    },
+    /// 语音转文字：后台翻译线程完成了一句定稿的翻译。
+    DictationTranslated {
+        /// 所属轮次（过期结果会被丢弃）。
+        round: u64,
+        /// 句序号。
+        seq: usize,
+        /// 翻译结果。
+        outcome: TranslationOutcome,
     },
     /// 输入框翻译浮窗请求翻译（在后台线程执行）。
     TranslateInputRequested {
@@ -238,6 +248,33 @@ pub enum UiEvent {
     },
     /// 把剪贴板里的图像贴到屏幕上。
     PinFromClipboard,
+    /// 打开（或激活）截图历史窗口。
+    OpenHistory,
+    /// 截图历史有新记录写入（刷新已打开的历史窗口）。
+    HistoryChanged,
+    /// 历史窗口的一张缩略图就绪（`None` 表示解码失败）。
+    HistoryThumb {
+        /// 记录 ID。
+        id: String,
+        /// 缩略图。
+        thumb: Option<Thumbnail>,
+    },
+    /// 历史窗口的异步动作（复制 / 贴图）完成。
+    HistoryActionDone {
+        /// 动作。
+        action: HistoryAction,
+        /// 失败原因；成功为 `None`。
+        error: Option<String>,
+    },
+    /// 历史窗口请求再次贴图（像素已解码）。
+    HistoryPin {
+        /// 图像宽。
+        width: u32,
+        /// 图像高。
+        height: u32,
+        /// 不透明 RGBA 像素。
+        rgba: Vec<u8>,
+    },
     /// 启动时恢复已持久化的贴图窗口。
     RestorePins,
     /// 某张贴图窗口已关闭（回收其句柄）。
@@ -307,6 +344,31 @@ pub enum UiEvent {
     OcrDownloadProgress(String),
     /// OCR 组件下载结束。
     OcrDownloadFinished(Result<(), String>),
+    /// 设置页请求下载语音模型（携带取消标记）。
+    SttDownloadRequested {
+        /// 模型 ID。
+        model_id: String,
+        /// 取消标记。
+        cancel: CancelFlag,
+    },
+    /// 语音模型下载进度。
+    SttDownloadProgress(SttProgress),
+    /// 语音模型下载结束。
+    SttDownloadFinished {
+        /// 模型 ID。
+        model_id: String,
+        /// 结果。
+        result: Result<(), String>,
+    },
+    /// 快捷动作（来自全局热键 / 总线）。
+    QuickAction(QuickAction),
+    /// 延迟截图的倒计时到点（携带倒计时序号，过期序号会被丢弃）。
+    DelayElapsed {
+        /// 倒计时序号。
+        serial: u64,
+    },
+    /// 直接截图完成（成功的输出结果或失败原因）。
+    DirectCaptureDone(Result<DirectResult, String>),
     /// 退出应用。
     Quit,
 }
@@ -353,6 +415,7 @@ pub fn map_ipc_command(cmd: &IpcCommand) -> Option<UiEvent> {
 pub fn map_tray_signal(signal: &str) -> Option<UiEvent> {
     match signal {
         TRAY_SIGNAL_PIN_CLIPBOARD => Some(UiEvent::PinFromClipboard),
+        TRAY_SIGNAL_HISTORY => Some(UiEvent::OpenHistory),
         TRAY_SIGNAL_SETTINGS => Some(UiEvent::OpenSettings),
         TRAY_SIGNAL_QUIT => Some(UiEvent::Quit),
         _ => None,
@@ -361,18 +424,22 @@ pub fn map_tray_signal(signal: &str) -> Option<UiEvent> {
 
 /// 构造托盘描述：截图 / 录屏（命令）、剪贴板贴图 / 设置 / 退出（信号）。
 ///
+/// # 参数
+/// - `locale`：界面语料语言代码（如 `zh-CN`）。
+///
 /// # 返回
 /// 托盘描述；图标数据非法返回错误文本（占位图标恒合法）。
 ///
 /// ```ignore
-/// let spec = build_tray_spec().unwrap();
-/// assert_eq!(spec.menu.len(), 6);
+/// let spec = build_tray_spec("zh-CN").unwrap();
+/// assert_eq!(spec.menu.len(), 7);
 /// ```
-pub fn build_tray_spec() -> Result<TraySpec, String> {
+pub fn build_tray_spec(locale: &str) -> Result<TraySpec, String> {
+    let i18n = crate::ocr_backend::i18n_for(locale);
     let icon = TrayIconImage::solid(TRAY_ICON_SIZE, TRAY_ICON_SIZE, TRAY_ICON_RGBA)
         .map_err(|e| e.to_string())?;
-    let item = |label: &str, action: TrayAction| TrayMenuEntry::Item {
-        label: label.to_string(),
+    let item = |key: &str, action: TrayAction| TrayMenuEntry::Item {
+        label: i18n.tr(key),
         enabled: true,
         action,
     };
@@ -381,24 +448,67 @@ pub fn build_tray_spec() -> Result<TraySpec, String> {
         icon,
         menu: vec![
             item(
-                TRAY_LABEL_CAPTURE,
+                "tray-capture",
                 TrayAction::Command(AppCommand::Capture(CaptureRequest::default())),
             ),
             item(
-                TRAY_LABEL_RECORD,
+                "tray-record",
                 TrayAction::Command(AppCommand::StartRecording(RecordingRequest::default())),
             ),
             item(
-                TRAY_LABEL_PIN_CLIPBOARD,
+                "tray-pin-clipboard",
                 TrayAction::Signal(TRAY_SIGNAL_PIN_CLIPBOARD.into()),
             ),
-            item(TRAY_LABEL_SETTINGS, TrayAction::Signal(TRAY_SIGNAL_SETTINGS.into())),
+            item("tray-history", TrayAction::Signal(TRAY_SIGNAL_HISTORY.into())),
+            item("tray-settings", TrayAction::Signal(TRAY_SIGNAL_SETTINGS.into())),
             TrayMenuEntry::Separator,
-            item(TRAY_LABEL_QUIT, TrayAction::Signal(TRAY_SIGNAL_QUIT.into())),
+            item("tray-quit", TrayAction::Signal(TRAY_SIGNAL_QUIT.into())),
         ],
         on_left_click: None,
         on_double_click: Some(TrayAction::Signal(TRAY_SIGNAL_SETTINGS.into())),
     })
+}
+
+/// 由配置文档解析界面偏好（深浅色、语言、主色）。
+///
+/// # 参数
+/// - `document`：配置文档。
+pub(crate) fn ui_prefs_from_document(document: &ConfigDocument) -> UiPrefs {
+    UiPrefs::resolve(
+        document.value(THEME_MODE_KEY).as_str().unwrap_or_default(),
+        document.value(LANGUAGE_KEY).as_str().unwrap_or_default(),
+        document.value(THEME_COLOR_KEY).as_str().unwrap_or_default(),
+        &SystemPrefs::query(),
+    )
+}
+
+/// 按界面深浅色设置弹出菜单（托盘右键菜单）主题。
+///
+/// # 参数
+/// - `dark`：是否深色。
+fn apply_popup_menu_theme(dark: bool) {
+    if let Err(e) = snow_ui::ui::set_popup_menu_dark(Some(dark)) {
+        tracing::warn!(error = %e, "设置托盘菜单主题失败");
+    }
+}
+
+/// 把当前界面深浅色应用到设置 / 历史窗口标题栏与托盘菜单。
+///
+/// # 参数
+/// - `state`：运行时状态。
+fn apply_chrome_theme(state: &AppState) {
+    let dark = ui_prefs_from_document(state.config.borrow().document()).dark;
+    apply_popup_menu_theme(dark);
+    let windows = state
+        .settings
+        .as_ref()
+        .into_iter()
+        .chain(state.history_window.as_ref().map(|(window, _)| window));
+    for window in windows {
+        if let Err(e) = window.set_dark_title(dark) {
+            tracing::warn!(error = %e, "设置标题栏主题失败");
+        }
+    }
 }
 
 /// 在命令总线上注册截图 / 录制命令：handler 只把事件投递进收件箱（运行在派发线程）。
@@ -477,19 +587,6 @@ pub fn register_bus_handlers(bus: &CommandBus, inbox: &MainThreadInbox<UiEvent>)
             }),
         );
     }
-    let global_inbox = inbox.clone();
-    bus.register(
-        CommandKind::Global,
-        std::sync::Arc::new(move |_ctx, cmd| match cmd {
-            AppCommand::Global(action) => {
-                global_inbox.push(UiEvent::Global(*action));
-                Ok(CommandOutcome::Done)
-            }
-            other => Err(CommandError::Rejected(format!(
-                "全局动作处理器收到非全局动作命令: {other:?}"
-            ))),
-        }),
-    );
     // 全局热键 `pin_clipboard_content` 绑定的是 `PinSelection` 命令：没有进行中的截图会话，
     // 因此这里把它解释为“把剪贴板内容贴到屏幕”（避免为此新增命令变体波及 MCP 映射）
     let pin_inbox = inbox.clone();
@@ -497,6 +594,17 @@ pub fn register_bus_handlers(bus: &CommandBus, inbox: &MainThreadInbox<UiEvent>)
         CommandKind::PinSelection,
         std::sync::Arc::new(move |_ctx, _cmd| {
             pin_inbox.push(UiEvent::PinFromClipboard);
+            Ok(CommandOutcome::Done)
+        }),
+    );
+    // 其余全局热键动作统一走 QuickAction，由主线程按执行方案解释
+    let quick_inbox = inbox.clone();
+    bus.register(
+        CommandKind::QuickAction,
+        std::sync::Arc::new(move |_ctx, cmd| {
+            if let AppCommand::QuickAction(action) = cmd {
+                quick_inbox.push(UiEvent::QuickAction(*action));
+            }
             Ok(CommandOutcome::Done)
         }),
     );
@@ -573,23 +681,49 @@ impl HotkeyRegistration {
     }
 }
 
-/// 注册一条热键动作的全部快捷键；单个失败只记日志并收集，不影响其余。
+/// 按配置键注册一类全局热键；单个失败只记日志并收集，不影响其余。
 ///
 /// # 参数
 /// - `service`：热键服务。
 /// - `document`：配置文档。
-/// - `entry`：动作表里的一行。
+/// - `key`：热键配置键。
+/// - `label`：日志里的功能名。
+/// - `command`：热键按下时触发的命令。
 ///
 /// # 返回
 /// 成功句柄与失败列表。
-fn register_entry(
+fn register_hotkeys(
     service: &HotkeyService,
     document: &ConfigDocument,
-    entry: &crate::global_actions::HotkeyEntry,
+    key: &'static str,
+    label: &str,
+    command: &AppCommand,
 ) -> HotkeyRegistration {
-    let (key, label) = (entry.config_key, entry.label);
+    register_hotkeys_with_release(service, document, key, label, command, None)
+}
+
+/// 同 `register_hotkeys`，并可指定热键松开时触发的命令（按住说话用）。
+///
+/// # 参数
+/// - `service`：热键服务。
+/// - `document`：配置文档。
+/// - `key`：热键配置键。
+/// - `label`：日志里的功能名。
+/// - `command`：热键按下时触发的命令。
+/// - `on_release`：热键松开时触发的命令，`None` 表示忽略松开。
+///
+/// # 返回
+/// 成功句柄与失败列表。
+fn register_hotkeys_with_release(
+    service: &HotkeyService,
+    document: &ConfigDocument,
+    key: &'static str,
+    label: &str,
+    command: &AppCommand,
+    on_release: Option<&AppCommand>,
+) -> HotkeyRegistration {
     let mut result = HotkeyRegistration::default();
-    for text in crate::global_actions::effective_shortcuts(&document.value(key)) {
+    for text in shortcut_strings(&document.value(key)) {
         let hotkey = match Hotkey::parse(&portable_to_hotkey_text(&text)) {
             Ok(h) => h,
             Err(e) => {
@@ -604,8 +738,8 @@ fn register_entry(
         };
         let binding = HotkeyBinding {
             hotkey,
-            command: entry.command.clone(),
-            on_release: entry.on_release.clone(),
+            command: command.clone(),
+            on_release: on_release.cloned(),
         };
         match service.register(binding) {
             Ok(handle) => {
@@ -625,35 +759,190 @@ fn register_entry(
     result
 }
 
-/// 注册全部全局热键；`last_keys` 里的配置键排到最后注册。
-///
-/// 改键后让被改的键最后注册：它与别的动作冲突时失败的是它（可回滚），而不是原本正常的那个。
+/// 按配置注册截图全局热键；单个失败只记日志，不影响其余。
 ///
 /// # 参数
 /// - `service`：热键服务。
 /// - `document`：配置文档。
-/// - `last_keys`：最后注册的配置键，可为空。
-pub fn register_hotkeys_ordered(
+///
+/// # 返回
+/// 成功句柄与失败列表。
+///
+/// ```ignore
+/// let result = register_capture_hotkeys(&service, &document);
+/// ```
+pub fn register_capture_hotkeys(service: &HotkeyService, document: &ConfigDocument) -> HotkeyRegistration {
+    register_hotkeys(
+        service,
+        document,
+        SCREENSHOT_HOTKEY_CONFIG_KEY,
+        "screenshot",
+        &AppCommand::Capture(CaptureRequest::default()),
+    )
+}
+
+/// 按配置注册录屏全局热键（`global_shortcuts/screen_record`，默认未绑定）。
+///
+/// # 参数
+/// - `service`：热键服务。
+/// - `document`：配置文档。
+///
+/// # 返回
+/// 成功句柄与失败列表。
+///
+/// ```ignore
+/// let result = register_recording_hotkeys(&service, &document);
+/// ```
+pub fn register_recording_hotkeys(service: &HotkeyService, document: &ConfigDocument) -> HotkeyRegistration {
+    register_hotkeys(
+        service,
+        document,
+        RECORDING_HOTKEY_CONFIG_KEY,
+        "recording",
+        &AppCommand::StartRecording(RecordingRequest::default()),
+    )
+}
+
+/// 按配置注册“贴图剪贴板内容”全局热键（`global_shortcuts/pin_clipboard_content`，默认未绑定）。
+///
+/// # 参数
+/// - `service`：热键服务。
+/// - `document`：配置文档。
+///
+/// # 返回
+/// 成功句柄与失败列表。
+pub fn register_pin_clipboard_hotkeys(
     service: &HotkeyService,
     document: &ConfigDocument,
-    last_keys: &[&str],
 ) -> HotkeyRegistration {
-    let mut entries = crate::global_actions::hotkey_entries(document);
-    entries.sort_by_key(|e| last_keys.contains(&e.config_key));
+    register_hotkeys(
+        service,
+        document,
+        PIN_CLIPBOARD_HOTKEY_CONFIG_KEY,
+        "pin_clipboard",
+        &AppCommand::PinSelection,
+    )
+}
+
+/// 按配置注册“输入框翻译浮窗”全局热键（`global_shortcuts/translate_input`，默认未绑定，未绑定时不注册）。
+///
+/// # 参数
+/// - `service`：热键服务。
+/// - `document`：配置文档。
+///
+/// # 返回
+/// 成功句柄与失败列表。
+pub fn register_translate_input_hotkeys(
+    service: &HotkeyService,
+    document: &ConfigDocument,
+) -> HotkeyRegistration {
+    register_hotkeys(
+        service,
+        document,
+        TRANSLATE_INPUT_HOTKEY_CONFIG_KEY,
+        "translate_input",
+        &AppCommand::OpenTranslateInput,
+    )
+}
+
+/// 按配置注册语音转文字的两个全局热键：切换式（按一下开始、再按一下结束）与按住说话（按下开始、松开结束）。
+///
+/// 触发模式（`dictation/trigger_mode`）决定哪个生效；未绑定的热键不注册。
+///
+/// # 参数
+/// - `service`：热键服务。
+/// - `document`：配置文档。
+///
+/// # 返回
+/// 成功句柄与失败列表。
+pub fn register_dictation_hotkeys(
+    service: &HotkeyService,
+    document: &ConfigDocument,
+) -> HotkeyRegistration {
+    let trigger = DictationConfig::from_document(document).trigger;
     let mut result = HotkeyRegistration::default();
-    for entry in &entries {
-        result.merge(register_entry(service, document, entry));
+    if trigger.toggle_enabled() {
+        result.merge(register_hotkeys(
+            service,
+            document,
+            DICTATION_TOGGLE_HOTKEY_CONFIG_KEY,
+            "dictation_toggle",
+            &AppCommand::ToggleDictation,
+        ));
+    }
+    if trigger.hold_enabled() {
+        result.merge(register_hotkeys_with_release(
+            service,
+            document,
+            DICTATION_HOLD_HOTKEY_CONFIG_KEY,
+            "dictation_hold",
+            &AppCommand::StartDictation,
+            Some(&AppCommand::StopDictation),
+        ));
     }
     result
 }
 
-/// 注册全部已接线的全局热键（动作表见 `global_actions`）。
+/// 按配置注册全部“快捷动作”热键（直接截图、延迟截图、打开设置、暂停热键等）；未绑定的不注册。
+///
+/// # 参数
+/// - `service`：热键服务。
+/// - `document`：配置文档。
+/// - `paused`：热键是否处于暂停状态；暂停时只注册“暂停 / 恢复”开关本身。
+///
+/// # 返回
+/// 成功句柄与失败列表。
+pub fn register_quick_action_hotkeys(
+    service: &HotkeyService,
+    document: &ConfigDocument,
+    paused: bool,
+) -> HotkeyRegistration {
+    let mut result = HotkeyRegistration::default();
+    for (key, action) in QUICK_ACTION_KEYS {
+        if paused && !stays_registered_when_paused(key) {
+            continue;
+        }
+        result.merge(register_hotkeys(
+            service,
+            document,
+            key,
+            "quick_action",
+            &AppCommand::QuickAction(*action),
+        ));
+    }
+    result
+}
+
+/// 注册全部已接线的全局热键（截图 + 录屏 + 贴图剪贴板内容 + 输入框翻译 + 语音转文字 + 快捷动作）。
 ///
 /// # 参数
 /// - `service`：热键服务。
 /// - `document`：配置文档。
 pub fn register_all_hotkeys(service: &HotkeyService, document: &ConfigDocument) -> HotkeyRegistration {
-    register_hotkeys_ordered(service, document, &[])
+    register_all_hotkeys_gated(service, document, false)
+}
+
+/// 同 [`register_all_hotkeys`]，并支持“暂停全部热键”：暂停时只保留暂停 / 恢复开关。
+///
+/// # 参数
+/// - `service`：热键服务。
+/// - `document`：配置文档。
+/// - `paused`：是否处于暂停状态。
+pub fn register_all_hotkeys_gated(
+    service: &HotkeyService,
+    document: &ConfigDocument,
+    paused: bool,
+) -> HotkeyRegistration {
+    if paused {
+        return register_quick_action_hotkeys(service, document, true);
+    }
+    let mut result = register_capture_hotkeys(service, document);
+    result.merge(register_recording_hotkeys(service, document));
+    result.merge(register_pin_clipboard_hotkeys(service, document));
+    result.merge(register_translate_input_hotkeys(service, document));
+    result.merge(register_dictation_hotkeys(service, document));
+    result.merge(register_quick_action_hotkeys(service, document, false));
+    result
 }
 
 /// 打开数据根下的配置存储（损坏留档、缺失用默认值），全程序共享同一份。
@@ -677,8 +966,8 @@ pub enum CaptureMode {
     Record,
     /// 长截图选区（确认后交给滚动采集）。
     Scroll,
-    /// 普通截图，选区确认后自动执行一个动作（复制 / 贴图 / 识别 / 翻译）。
-    Action(ToolbarAction),
+    /// 快捷截图：框选完成后自动执行指定动作（复制 / 贴图 / 识别 / 翻译）。
+    Quick(AutoConfirm),
 }
 
 /// 常驻运行时状态：随主线程事件循环存活。
@@ -691,6 +980,10 @@ pub struct AppState {
     settings_view: Option<Entity<SettingsView>>,
     /// 输入框翻译浮窗（若已打开）与其视图。
     translate_input: Option<(ShellWindow, Entity<TranslateInputView>)>,
+    /// 截图历史后台写入器（启动失败时为 `None`，历史功能降级）。
+    history: Option<Arc<HistoryRecorder>>,
+    /// 截图历史窗口（若已打开）与其视图。
+    history_window: Option<(ShellWindow, Entity<HistoryView>)>,
     /// 语音转文字宿主（独立工作进程、键入与右下角浮窗的生命周期）。
     dictation: DictationHost,
     /// 收到的截图请求累计数。
@@ -715,6 +1008,8 @@ pub struct AppState {
     data_root: PathBuf,
     /// 当前覆盖窗的视图（OCR 结果回写用）。
     overlay_view: Option<Entity<ScreenshotOverlayView>>,
+    /// 为即将打开的覆盖窗预先启动的窗口悬停来源（采集开始时抓窗口快照，覆盖窗打开时交给视图）。
+    window_hover: Option<Box<dyn WindowHover>>,
     /// 主线程收件箱（采集线程完成后经它回到主线程）。
     inbox: MainThreadInbox<UiEvent>,
     /// 托盘服务（丢弃即移除图标）。
@@ -723,12 +1018,12 @@ pub struct AppState {
     hotkeys: Option<HotkeyService>,
     /// 当前已注册热键的句柄（重新注册时先注销）。
     hotkey_handles: Vec<HotkeyHandle>,
-    /// 热键闸门（整体开关 / 前台全屏抑制），与热键出口共享。
-    hotkey_gate: HotkeyGate,
-    /// 最近一次托盘提示的序号（到期事件按它判断是否过期）。
-    hint_serial: u64,
-    /// 最近一次延时截图的发起序号（新一次触发取消旧的）。
-    delay_serial: Arc<AtomicU64>,
+    /// 全局热键是否被用户暂停（只保留暂停 / 恢复开关）。
+    hotkeys_paused: bool,
+    /// 延迟截图倒计时状态机。
+    delay: DelayGate,
+    /// 直接截图是否正在进行（进行中忽略新的直接截图）。
+    direct_in_flight: bool,
 }
 
 impl AppState {
@@ -751,6 +1046,16 @@ impl AppState {
         data_root: &std::path::Path,
     ) -> Self {
         let closed_inbox = inbox.clone();
+        let history_inbox = inbox.clone();
+        let history = match HistoryRecorder::start(data_root, move || {
+            history_inbox.push(UiEvent::HistoryChanged);
+        }) {
+            Ok(recorder) => Some(Arc::new(recorder)),
+            Err(e) => {
+                tracing::warn!(error = %e, "启动截图历史写入线程失败，历史功能不可用");
+                None
+            }
+        };
         let pins = PinnedManager::new(
             data_root,
             Rc::clone(&config),
@@ -758,23 +1063,28 @@ impl AppState {
                 closed_inbox.push(UiEvent::PinClosed { id: id.to_string() });
             }),
         );
+        let translator = Arc::new(TranslateHost::new(data_root));
         Self {
             pins,
             ocr: Arc::new(OcrService::new(data_root)),
-            translator: Arc::new(TranslateHost::new(data_root)),
+            translator: Arc::clone(&translator),
             data_root: data_root.to_path_buf(),
             overlay_view: None,
+            window_hover: None,
             scroll: ScrollHost::new(caps.clone(), inbox.clone(), Rc::clone(&config)),
             recording: RecordingHost::new(caps, inbox.clone(), Rc::clone(&config)),
             dictation: DictationHost::new(
                 Rc::clone(&config),
                 inbox.clone(),
                 data_root.to_path_buf(),
+                translator,
             ),
             config,
             settings: None,
             settings_view: None,
             translate_input: None,
+            history,
+            history_window: None,
             capture_requests: 0,
             overlay: None,
             capture_in_flight: false,
@@ -783,18 +1093,10 @@ impl AppState {
             tray,
             hotkeys,
             hotkey_handles,
-            hotkey_gate: HotkeyGate::default(),
-            hint_serial: 0,
-            delay_serial: Arc::new(AtomicU64::new(0)),
+            hotkeys_paused: false,
+            delay: DelayGate::default(),
+            direct_in_flight: false,
         }
-    }
-
-    /// 换上与热键出口共享的闸门（启动时由 `main` 调用）。
-    ///
-    /// # 参数
-    /// - `gate`：`start_services` 用的同一个闸门。
-    pub fn set_hotkey_gate(&mut self, gate: HotkeyGate) {
-        self.hotkey_gate = gate;
     }
 
     /// 已收到的截图请求数。
@@ -994,6 +1296,8 @@ fn request_capture(
     );
     state.capture_in_flight = true;
     state.capture_mode = mode;
+    // 此刻覆盖窗尚未出现：先抓窗口快照，保证与冻结帧一致且不含 Cisox 自己的覆盖窗
+    state.window_hover = start_window_hover(state.config.borrow().document(), monitor.bounds);
     let inbox = state.inbox.clone();
     // 基准合成底图模式：底图由 open_overlay 用合成渐变替换，不需要真实屏幕采集
     // （锁屏 / 屏保期间 GDI 采集必失败，此模式仍可跑标注性能基准）
@@ -1046,6 +1350,10 @@ fn open_overlay(cx: &mut ShellContext, state: &mut AppState, payload: CapturePay
     let mode = std::mem::replace(&mut state.capture_mode, CaptureMode::Screenshot);
     let record_mode = mode == CaptureMode::Record;
     let scroll_mode = mode == CaptureMode::Scroll;
+    let auto_confirm = match mode {
+        CaptureMode::Quick(action) => Some(action),
+        _ => None,
+    };
     let CapturePayload {
         monitor,
         mut screen,
@@ -1104,9 +1412,17 @@ fn open_overlay(cx: &mut ShellContext, state: &mut AppState, payload: CapturePay
     let translate_download_inbox = state.inbox.clone();
     let scroll_inbox = state.inbox.clone();
     let scroll_monitor = monitor.clone();
+    let history_sink = state.history.clone();
+    let history_config = Rc::clone(&state.config);
     let output = Box::new(
         SystemOutput::new(save_dir)
             .with_config(state.config.clone())
+            .with_history(move |source, width, height, rgba| {
+                if let Some(recorder) = &history_sink {
+                    let policy = policy_from_document(history_config.borrow().document());
+                    recorder.submit(policy, source, width, height, rgba);
+                }
+            })
             .with_recording(move |rect| {
                 // 覆盖窗坐标以显示器左上角为原点，换算成虚拟桌面坐标
                 record_inbox.push(UiEvent::RecordingRegionChosen {
@@ -1173,17 +1489,24 @@ fn open_overlay(cx: &mut ShellContext, state: &mut AppState, payload: CapturePay
             view.update(cx.app(), |v, _| {
                 v.set_keymap(keymap);
                 v.set_locale(&locale);
-                if let CaptureMode::Action(action) = mode {
-                    v.set_pending_action(Some(action));
-                }
             });
             state.overlay = Some(window);
             state.overlay_view = Some(view.clone());
+            // 标注样式：读取已保存的各工具样式，之后的修改写回同一份配置
+            let style_locale = ui_prefs_from_document(state.config.borrow().document()).locale;
+            let style_config = state.config.clone();
+            view.update(cx.app(), |v, _| v.set_style_config(style_config, style_locale));
+            if let Some(hover) = state.window_hover.take() {
+                view.update(cx.app(), |v, _| v.set_window_hover(Some(hover)));
+            }
             if record_mode {
                 view.update(cx.app(), |v, _| v.set_record_mode(true));
             }
             if scroll_mode {
                 view.update(cx.app(), |v, _| v.set_scroll_mode(true));
+            }
+            if auto_confirm.is_some() {
+                view.update(cx.app(), |v, _| v.set_auto_confirm(auto_confirm));
             }
             if let Some(s) = scale_override {
                 view.update(cx.app(), |v, _| v.set_scale_override(Some(s)));
@@ -1441,6 +1764,38 @@ fn spawn_ocr_download(state: &AppState) {
     }
 }
 
+/// 在后台线程安装语音模型（含离线模式缺的共享 VAD），进度与结果经收件箱回到主线程。
+///
+/// # 参数
+/// - `state`：运行时状态。
+/// - `model_id`：模型 ID。
+/// - `cancel`：取消标记。
+fn spawn_stt_download(state: &AppState, model_id: String, cancel: CancelFlag) {
+    let data_root = state.data_root.clone();
+    let inbox = state.inbox.clone();
+    let id = model_id.clone();
+    let spawned = std::thread::Builder::new().name("snow-stt-download".into()).spawn(move || {
+        let result = match stt_models::find(&id) {
+            None => Err(format!("unknown speech model: {id}")),
+            Some(spec) => {
+                let progress_inbox = inbox.clone();
+                stt_download::install(spec, &data_root, &cancel.0, |p| {
+                    progress_inbox.push(UiEvent::SttDownloadProgress(p.clone()));
+                })
+                .map(|report| {
+                    if !report.unpinned.is_empty() {
+                        tracing::warn!(assets = ?report.unpinned, "语音模型资产未固定校验值，仅校验了大小");
+                    }
+                })
+            }
+        };
+        inbox.push(UiEvent::SttDownloadFinished { model_id: id, result });
+    });
+    if let Err(e) = spawned {
+        state.inbox.push(UiEvent::SttDownloadFinished { model_id, result: Err(e.to_string()) });
+    }
+}
+
 /// 启动覆盖窗性能基准：约 60Hz 驱动模拟框选（或指定工具的标注绘制），结束后关闭窗口（探针汇总写入日志）。
 ///
 /// 这是直接驱动视图状态，不经过操作系统输入，不属于输入模拟。
@@ -1614,12 +1969,55 @@ fn open_or_focus_settings(cx: &mut ShellContext, state: &mut AppState) {
         Ok((window, view)) => {
             state.settings = Some(window);
             state.settings_view = Some(view.clone());
+            apply_chrome_theme(state);
+            let stt_inbox = state.inbox.clone();
+            let stt_hooks = SttHooks {
+                data_root: state.data_root.clone(),
+                request: std::sync::Arc::new(move |model_id, cancel| {
+                    stt_inbox.push(UiEvent::SttDownloadRequested { model_id, cancel });
+                }),
+            };
+            view.update(cx.app(), |v, _| v.set_stt_hooks(stt_hooks));
             tracing::info!("settings window opened");
             if let Ok(path) = std::env::var(ENV_SETTINGS_AUTOTEST) {
                 spawn_settings_autotest(cx, window, view, &path);
             }
         }
         Err(e) => tracing::error!(error = %e, "打开设置窗口失败"),
+    }
+}
+
+/// 打开截图历史窗口；已打开则激活到前台。
+///
+/// # 参数
+/// - `cx`：外壳上下文。
+/// - `state`：运行时状态。
+fn open_or_focus_history(cx: &mut ShellContext, state: &mut AppState) {
+    if let Some((window, _)) = &state.history_window
+        && cx.is_window_open(window)
+    {
+        cx.activate_window(window);
+        return;
+    }
+    let prefs = ui_prefs_from_config(&state.config);
+    let policy = policy_from_document(state.config.borrow().document());
+    let enabled = policy.enabled;
+    let store = HistoryStore::new(&state.data_root, policy);
+    let title = crate::ocr_backend::i18n_for(prefs.locale).tr("history-window-title");
+    let spec = WindowSpec::normal(
+        title,
+        LogicalSize::new(crate::history_view::WINDOW_WIDTH, crate::history_view::WINDOW_HEIGHT),
+    );
+    let inbox = state.inbox.clone();
+    match cx.open_window(&spec, move |window, app| {
+        HistoryView::create(window, app, store, enabled, prefs, inbox)
+    }) {
+        Ok((window, view)) => {
+            state.history_window = Some((window, view));
+            apply_chrome_theme(state);
+            tracing::info!("截图历史窗口已打开");
+        }
+        Err(e) => tracing::error!(error = %e, "打开截图历史窗口失败"),
     }
 }
 
@@ -1804,6 +2202,44 @@ fn describe_hotkey_failure(attempt: &HotkeyRegistration, config_key: &str) -> St
     }
 }
 
+/// 按当前界面语言重建托盘菜单文案。
+///
+/// # 参数
+/// - `state`：运行时状态。
+fn refresh_tray_menu(state: &AppState) {
+    let Some(tray) = state.tray.as_ref() else {
+        return;
+    };
+    let locale = ui_prefs_from_document(state.config.borrow().document()).locale;
+    match build_tray_spec(locale).and_then(|spec| tray.set_menu(spec.menu).map_err(|e| e.to_string())) {
+        Ok(()) => tracing::info!(locale, "托盘菜单已按界面语言刷新"),
+        Err(e) => tracing::warn!(error = %e, "刷新托盘菜单失败"),
+    }
+}
+
+/// 判断配置键是否属于会影响热键注册的键，并返回其 `'static` 形式。
+///
+/// # 参数
+/// - `key`：配置键。
+///
+/// ```ignore
+/// assert!(hotkey_config_key("global_shortcuts/open_settings").is_some());
+/// ```
+fn hotkey_config_key(key: &str) -> Option<&'static str> {
+    [
+        SCREENSHOT_HOTKEY_CONFIG_KEY,
+        RECORDING_HOTKEY_CONFIG_KEY,
+        PIN_CLIPBOARD_HOTKEY_CONFIG_KEY,
+        TRANSLATE_INPUT_HOTKEY_CONFIG_KEY,
+        DICTATION_TOGGLE_HOTKEY_CONFIG_KEY,
+        DICTATION_HOLD_HOTKEY_CONFIG_KEY,
+        DICTATION_TRIGGER_MODE_CONFIG_KEY,
+    ]
+    .into_iter()
+    .chain(QUICK_ACTION_KEYS.iter().map(|(k, _)| *k))
+    .find(|k| *k == key)
+}
+
 /// 设置页写入配置后的响应：全局热键类配置变更时重新注册并在失败时回滚。
 ///
 /// # 参数
@@ -1812,19 +2248,19 @@ fn describe_hotkey_failure(attempt: &HotkeyRegistration, config_key: &str) -> St
 /// - `key`：变更的配置键。
 /// - `previous`：变更前的值。
 fn on_config_changed(cx: &mut ShellContext, state: &mut AppState, key: &str, previous: Value) {
-    if key == global_actions::FULLSCREEN_SUPPRESSION_KEY {
-        let on = state.config.borrow().value(key).as_bool().unwrap_or(false);
-        state.hotkey_gate.set_suppress_fullscreen(on);
+    if key == LANGUAGE_KEY {
+        refresh_tray_menu(state);
         return;
     }
-    let Some(config_key) = global_actions::static_hotkey_key(key) else {
+    if key == THEME_MODE_KEY {
+        apply_chrome_theme(state);
         return;
-    };
-    // 被改的键最后注册：与别的动作冲突时失败的是它，才能回滚
-    let last_keys: &[&str] = if key == DICTATION_TRIGGER_MODE_CONFIG_KEY {
-        &DICTATION_HOTKEY_KEYS
-    } else {
-        &[key]
+    }
+    let Some(config_key) = hotkey_config_key(key) else {
+        if key.starts_with("global_shortcuts/") {
+            tracing::info!(key, "该全局快捷键的动作尚未接线，配置已保存但不会注册热键");
+        }
+        return;
     };
     let Some(service) = state.hotkeys.as_ref() else {
         tracing::warn!(key, "热键服务未运行，无法重新注册");
@@ -1835,7 +2271,7 @@ fn on_config_changed(cx: &mut ShellContext, state: &mut AppState, key: &str, pre
             tracing::warn!(error = %e, "注销旧热键失败");
         }
     }
-    let attempt = register_hotkeys_ordered(service, state.config.borrow().document(), last_keys);
+    let attempt = register_all_hotkeys_gated(service, state.config.borrow().document(), state.hotkeys_paused);
     if !hotkey_attempt_failed(&attempt, config_key) {
         let listing = service
             .registered()
@@ -1854,7 +2290,7 @@ fn on_config_changed(cx: &mut ShellContext, state: &mut AppState, key: &str, pre
     if let Err(e) = restore_value(&state.config, key, previous) {
         tracing::error!(key, error = %e, "回滚配置失败");
     }
-    let restored = register_all_hotkeys(service, state.config.borrow().document());
+    let restored = register_all_hotkeys_gated(service, state.config.borrow().document(), state.hotkeys_paused);
     tracing::info!(key, registered = restored.handles.len(), "已恢复回滚后的全局热键");
     state.hotkey_handles = restored.handles;
     if let Some(view) = state.settings_view.clone() {
@@ -1884,134 +2320,256 @@ fn monitor_local_to_desktop(rect: PhysicalRect, bounds: PhysicalRect) -> Physica
     PhysicalRect::new(rect.x + bounds.x, rect.y + bounds.y, rect.width, rect.height)
 }
 
-/// 托盘提示停留秒数，到点复原。
-const HINT_SECONDS: u64 = 5;
+/// 托盘悬停提示的最大字符数（系统限制 127 个 UTF-16 单元，留出余量）。
+const NOTICE_TOOLTIP_MAX_CHARS: usize = 100;
 
-/// 在托盘悬停提示里显示一条状态提示，过几秒自动复原（没有托盘时只记日志）。
+/// 取当前界面语言下的提示文案。
 ///
 /// # 参数
-/// - `state`：运行时状态。
-/// - `text`：提示文字（已本地化）。
-fn show_hint(state: &mut AppState, text: &str) {
-    tracing::info!(hint = %text, "全局热键状态提示");
-    state.hint_serial += 1;
-    let serial = state.hint_serial;
-    if let Some(tray) = state.tray.as_ref()
-        && let Err(e) = tray.set_tooltip(format!("{TRAY_TOOLTIP} - {text}"))
-    {
-        tracing::debug!(error = %e, "更新托盘提示失败");
-    }
-    let inbox = state.inbox.clone();
-    let spawned = std::thread::Builder::new().name("hint-expire".into()).spawn(move || {
-        std::thread::sleep(Duration::from_secs(HINT_SECONDS));
-        inbox.push(UiEvent::HintExpired(serial));
-    });
-    if let Err(e) = spawned {
-        tracing::warn!(error = %e, "无法安排提示复原");
-    }
+/// - `state`：运行时状态（读取界面语言）。
+/// - `id`：消息 id。
+/// - `args`：消息参数。
+fn notice_text(state: &AppState, id: &str, args: Args) -> String {
+    let locale = ui_prefs_from_document(state.config.borrow().document()).locale;
+    crate::ocr_backend::i18n_for(locale).tr_with(id, &args)
 }
 
-/// 当前界面语言代码。
+/// 显示一条轻量提示：写日志，并放到托盘悬停提示里（下次状态变化时被覆盖）。
 ///
 /// # 参数
 /// - `state`：运行时状态。
-fn state_locale(state: &AppState) -> String {
-    interface_locale(state.config.borrow().document())
-}
-
-/// 延时截图：按 `screenshot/delay_seconds` 等待后发起一次截图；新触发会取消还在等的旧触发。
-///
-/// # 参数
-/// - `state`：运行时状态。
-fn schedule_delayed_capture(state: &mut AppState) {
-    let seconds = global_actions::delay_seconds(state.config.borrow().document());
-    let serial = state.delay_serial.fetch_add(1, Ordering::SeqCst) + 1;
-    let latest = Arc::clone(&state.delay_serial);
-    let inbox = state.inbox.clone();
-    let spawned = std::thread::Builder::new().name("delayed-capture".into()).spawn(move || {
-        std::thread::sleep(Duration::from_secs(seconds));
-        if latest.load(Ordering::SeqCst) == serial {
-            inbox.push(UiEvent::DelayedCaptureDue(serial));
+/// - `text`：已本地化的提示文案。
+fn show_notice(state: &AppState, text: &str) {
+    tracing::info!(notice = %text, "快捷动作提示");
+    if let Some(tray) = state.tray.as_ref() {
+        let tip: String = format!("{TRAY_TOOLTIP}: {text}")
+            .chars()
+            .take(NOTICE_TOOLTIP_MAX_CHARS)
+            .collect();
+        if let Err(e) = tray.set_tooltip(tip) {
+            tracing::warn!(error = %e, "更新托盘提示失败");
         }
-    });
-    if let Err(e) = spawned {
-        tracing::error!(error = %e, "无法安排延时截图");
     }
 }
 
-/// 打开录屏保存目录；失败时给出提示。
-///
-/// # 参数
-/// - `state`：运行时状态。
-fn open_recording_folder(state: &mut AppState) {
-    let dir = crate::recording::output::resolve_video_directory(
-        state.config.borrow().document(),
-        home_directory().as_deref(),
-    );
-    if let Err(reason) = snow_platform::shell::open_directory(&dir) {
-        let locale = state_locale(state);
-        let text = i18n_for(&locale).tr_with(
-            "global-hotkey-open-folder-failed",
-            &snow_i18n::Args::new().named("reason", reason),
-        );
-        show_hint(state, &text);
-    }
-}
-
-/// 翻转“前台全屏窗口时禁用热键”：写配置、同步闸门并提示。
-///
-/// # 参数
-/// - `state`：运行时状态。
-fn toggle_fullscreen_suppression(state: &mut AppState) {
-    let next = !state.hotkey_gate.suppress_fullscreen();
-    if let Err(e) = restore_value(&state.config, global_actions::FULLSCREEN_SUPPRESSION_KEY, Value::Bool(next)) {
-        tracing::error!(error = %e, "写入全屏抑制开关失败");
-        return;
-    }
-    state.hotkey_gate.set_suppress_fullscreen(next);
-    let id = if next {
-        "global-hotkey-fullscreen-suppression-on"
-    } else {
-        "global-hotkey-fullscreen-suppression-off"
-    };
-    let text = i18n_for(&state_locale(state)).tr(id);
-    show_hint(state, &text);
-}
-
-/// 执行全局快捷键动作；功能未实现的给出提示，不报错。
+/// 执行一个快捷动作：按 [`plan_for`] 的方案分派，未实现的动作给出本地化提示。
 ///
 /// # 参数
 /// - `cx`：外壳上下文。
 /// - `state`：运行时状态。
-/// - `action`：动作。
-fn run_global_action(cx: &mut ShellContext, state: &mut AppState, action: GlobalAction) {
-    let quick = |tool| CaptureMode::Action(tool);
-    match action {
-        GlobalAction::DelayedCapture => schedule_delayed_capture(state),
-        GlobalAction::CaptureAndPin => request_capture(cx, state, ORIGIN_HOTKEY, quick(ToolbarAction::Pin)),
-        GlobalAction::CaptureAndOcr => request_capture(cx, state, ORIGIN_HOTKEY, quick(ToolbarAction::Ocr)),
-        GlobalAction::CaptureAndTranslate => {
-            request_capture(cx, state, ORIGIN_HOTKEY, quick(ToolbarAction::Translate))
+/// - `action`：快捷动作。
+fn run_quick_action(cx: &mut ShellContext, state: &mut AppState, action: QuickAction) {
+    tracing::info!(?action, "快捷动作触发");
+    match plan_for(action) {
+        QuickPlan::Direct(kind) => request_direct_capture(cx, state, kind),
+        QuickPlan::Overlay(auto) => request_capture(cx, state, ORIGIN_HOTKEY, CaptureMode::Quick(auto)),
+        QuickPlan::Delayed => begin_delayed_capture(state),
+        QuickPlan::OpenSettings => open_or_focus_settings(cx, state),
+        QuickPlan::OpenHistory => open_or_focus_history(cx, state),
+        QuickPlan::ToggleHotkeys => toggle_global_hotkeys(state),
+        QuickPlan::OpenRecordingFolder => open_recording_folder(state),
+        QuickPlan::Placeholder(id) => {
+            let text = notice_text(state, id, Args::new());
+            show_notice(state, &text);
         }
-        GlobalAction::CaptureAndCopy => request_capture(cx, state, ORIGIN_HOTKEY, quick(ToolbarAction::Copy)),
-        GlobalAction::OpenRecordingFolder => open_recording_folder(state),
-        GlobalAction::OpenSettings => open_or_focus_settings(cx, state),
-        GlobalAction::ToggleGlobalHotkeys => {
-            let on = state.hotkey_gate.toggle_enabled();
-            let id = if on { "global-hotkeys-turned-on" } else { "global-hotkeys-turned-off" };
-            let text = i18n_for(&state_locale(state)).tr(id);
-            show_hint(state, &text);
+    }
+}
+
+/// 开始延迟截图倒计时：到点后由 [`UiEvent::DelayElapsed`] 触发普通截图。
+///
+/// 倒计时期间不创建任何窗口，所以不会进入画面；秒数读取 `screenshot/delay_seconds`。
+///
+/// # 参数
+/// - `state`：运行时状态。
+fn begin_delayed_capture(state: &mut AppState) {
+    let seconds = delay_seconds(state.config.borrow().document());
+    let Some(serial) = state.delay.begin() else {
+        let text = notice_text(state, "quick-notice-delay-busy", Args::new());
+        show_notice(state, &text);
+        return;
+    };
+    let inbox = state.inbox.clone();
+    let spawned = std::thread::Builder::new()
+        .name("snow-delay-capture".into())
+        .spawn(move || {
+            std::thread::sleep(Duration::from_secs(seconds));
+            inbox.push(UiEvent::DelayElapsed { serial });
+        });
+    match spawned {
+        Ok(_) => {
+            tracing::info!(seconds, serial, "延迟截图开始倒计时");
+            let text = notice_text(state, "quick-notice-delay-started", Args::new().arg(1, seconds));
+            show_notice(state, &text);
         }
-        GlobalAction::ToggleFullscreenSuppression => toggle_fullscreen_suppression(state),
-        GlobalAction::RecordAndCopy if !state.recording.is_busy(cx) => request_recording(cx, state),
-        GlobalAction::RecordAndCopy
-        | GlobalAction::OpenCaptureHistory
-        | GlobalAction::OpenPinManagement
-        | GlobalAction::TranslateSelectedText
-        | GlobalAction::PinSelectedFiles
-        | GlobalAction::RestoreClosedPin => {
-            let text = global_actions::placeholder_hint(action, &state_locale(state));
-            show_hint(state, &text);
+        Err(e) => {
+            state.delay.cancel();
+            tracing::error!(error = %e, "启动延迟截图计时线程失败");
+        }
+    }
+}
+
+/// 直接截图：不进覆盖层，抓取整屏或前台窗口后按设置复制 / 保存。
+///
+/// # 参数
+/// - `cx`：外壳上下文（枚举显示器）。
+/// - `state`：运行时状态。
+/// - `kind`：截图目标。
+fn request_direct_capture(cx: &mut ShellContext, state: &mut AppState, kind: DirectKind) {
+    let overlay_open = state
+        .overlay
+        .as_ref()
+        .is_some_and(|window| cx.is_window_open(window));
+    if state.direct_in_flight || capture_gate(state.capture_in_flight, overlay_open) != CaptureGate::Proceed {
+        tracing::info!(?kind, "直接截图被忽略：已有截图在进行");
+        let text = notice_text(state, "quick-notice-capture-busy", Args::new());
+        show_notice(state, &text);
+        return;
+    }
+    let monitors = match cx.monitors() {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::error!(error = %e, "枚举显示器失败，无法直接截图");
+            return;
+        }
+    };
+    let region = match kind {
+        DirectKind::FullScreen => {
+            pick_monitor(&monitors, cursor_screen_position().ok()).and_then(|m| full_monitor_region(&m))
+        }
+        DirectKind::FocusedWindow => snow_platform::text_inject::foreground_window_rect()
+            .and_then(|rect| clip_to_monitor(rect, &monitors)),
+    };
+    let Some((monitor, region)) = region else {
+        let text = notice_text(state, "quick-notice-no-focused-window", Args::new());
+        show_notice(state, &text);
+        return;
+    };
+    let (plan, dir, policy) = {
+        let store = state.config.borrow();
+        let document = store.document();
+        let (dir, _) = resolve_save_directory(document, home_directory().as_deref());
+        (direct_output_plan_from(document), dir, policy_from_document(document))
+    };
+    let history = state.history.clone().map(|recorder| DirectHistory {
+        recorder,
+        policy,
+        source: match kind {
+            DirectKind::FullScreen => HistorySource::CurrentMonitor,
+            DirectKind::FocusedWindow => HistorySource::FocusedWindow,
+        },
+    });
+    tracing::info!(?kind, monitor = monitor.id.0, ?region, ?plan, "开始直接截图");
+    state.direct_in_flight = true;
+    let inbox = state.inbox.clone();
+    let spawned = spawn_direct_capture(region, plan, dir, history, move |result| {
+        inbox.push(UiEvent::DirectCaptureDone(result));
+    });
+    if let Err(e) = spawned {
+        state.direct_in_flight = false;
+        tracing::error!(error = %e, "启动直接截图线程失败");
+    }
+}
+
+/// 直接截图完成后的收尾：记录日志并给出提示（历史已在采集线程里提交写入）。
+///
+/// # 参数
+/// - `state`：运行时状态。
+/// - `result`：采集与输出结果。
+fn on_direct_capture_done(state: &mut AppState, result: Result<DirectResult, String>) {
+    state.direct_in_flight = false;
+    let text = match result {
+        Err(reason) => {
+            tracing::error!(%reason, "直接截图采集失败");
+            notice_text(state, "quick-notice-direct-failed", Args::new().arg(1, reason))
+        }
+        Ok(r) if r.has_failure() => {
+            let reason = r.failure_reason().unwrap_or_default();
+            tracing::error!(%reason, "直接截图输出失败");
+            notice_text(state, "quick-notice-direct-failed", Args::new().arg(1, reason))
+        }
+        Ok(r) => {
+            match &r.saved {
+                Some(Ok(path)) => {
+                    let name = path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    notice_text(state, "quick-notice-direct-saved", Args::new().arg(1, name))
+                }
+                _ => notice_text(
+                    state,
+                    "quick-notice-direct-copied",
+                    Args::new().arg(1, r.width).arg(2, r.height),
+                ),
+            }
+        }
+    };
+    show_notice(state, &text);
+}
+
+/// 暂停 / 恢复全部全局热键：暂停时只保留开关本身，并在托盘悬停提示与日志里体现。
+///
+/// # 参数
+/// - `state`：运行时状态。
+fn toggle_global_hotkeys(state: &mut AppState) {
+    let Some(service) = state.hotkeys.as_ref() else {
+        tracing::warn!("热键服务未运行，无法暂停 / 恢复热键");
+        return;
+    };
+    for handle in state.hotkey_handles.drain(..) {
+        if let Err(e) = service.unregister(handle) {
+            tracing::warn!(error = %e, "注销旧热键失败");
+        }
+    }
+    let paused = !state.hotkeys_paused;
+    let attempt = register_all_hotkeys_gated(service, state.config.borrow().document(), paused);
+    state.hotkeys_paused = paused;
+    state.hotkey_handles = attempt.handles;
+    tracing::info!(paused, registered = state.hotkey_handles.len(), "全局热键暂停状态已切换");
+    let text = if paused {
+        notice_text(state, "quick-notice-hotkeys-paused", Args::new())
+    } else if attempt.failures.is_empty() {
+        notice_text(state, "quick-notice-hotkeys-resumed", Args::new())
+    } else {
+        let reasons = attempt
+            .failures
+            .iter()
+            .map(|f| format!("{}: {}", f.shortcut, f.reason))
+            .collect::<Vec<_>>()
+            .join("; ");
+        notice_text(state, "quick-notice-hotkeys-resume-failed", Args::new().arg(1, reasons))
+    };
+    show_notice(state, &text);
+    if paused && let Some(tray) = state.tray.as_ref() {
+        // 暂停状态要常驻可见：把悬停提示固定为“热键已暂停”
+        let tip = notice_text(state, "tray-tooltip-paused", Args::new());
+        if let Err(e) = tray.set_tooltip(tip) {
+            tracing::warn!(error = %e, "更新托盘提示失败");
+        }
+    }
+}
+
+/// 在资源管理器里打开录屏保存目录（不存在则先创建）。
+///
+/// # 参数
+/// - `state`：运行时状态。
+fn open_recording_folder(state: &AppState) {
+    let dir = recording_directory(state.config.borrow().document(), home_directory().as_deref());
+    let opened = std::fs::create_dir_all(&dir)
+        .map_err(|e| e.to_string())
+        .and_then(|()| {
+            std::process::Command::new("explorer.exe")
+                .arg(&dir)
+                .spawn()
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        });
+    match opened {
+        Ok(()) => tracing::info!(dir = %dir.display(), "已打开录屏保存目录"),
+        Err(reason) => {
+            tracing::warn!(dir = %dir.display(), %reason, "打开录屏保存目录失败");
+            let text = notice_text(state, "quick-notice-folder-failed", Args::new().arg(1, reason));
+            show_notice(state, &text);
         }
     }
 }
@@ -2037,23 +2595,43 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
         UiEvent::Export(target) => export_from_overlay(cx, state, &target),
         UiEvent::DirectCapture(request) => direct_capture(cx, state, request),
         UiEvent::OpenSettings => open_or_focus_settings(cx, state),
-        UiEvent::OpenTranslateInput => open_or_focus_translate_input(cx, state),
-        UiEvent::Global(action) => run_global_action(cx, state, action),
-        UiEvent::HintExpired(serial) => {
-            if serial == state.hint_serial
-                && let Some(tray) = state.tray.as_ref()
-                && let Err(e) = tray.set_tooltip(TRAY_TOOLTIP)
-            {
-                tracing::debug!(error = %e, "复原托盘提示失败");
+        UiEvent::OpenHistory => open_or_focus_history(cx, state),
+        UiEvent::HistoryChanged => {
+            if let Some((_, view)) = &state.history_window {
+                view.update(cx.app(), |v, cx| v.refresh(cx));
             }
         }
-        UiEvent::DelayedCaptureDue(_) => request_capture(cx, state, ORIGIN_HOTKEY, CaptureMode::Screenshot),
+        UiEvent::HistoryThumb { id, thumb } => {
+            if let Some((_, view)) = &state.history_window {
+                view.update(cx.app(), |v, cx| v.set_thumb(&id, thumb, cx));
+            }
+        }
+        UiEvent::HistoryActionDone { action, error } => {
+            if let Some((_, view)) = &state.history_window {
+                view.update(cx.app(), |v, cx| v.show_result(action, error, cx));
+            }
+        }
+        UiEvent::HistoryPin { width, height, rgba } => {
+            let result = state.pins.create_from_image(cx, width, height, rgba);
+            if let Err(e) = &result {
+                tracing::warn!(error = %e, "从截图历史贴图失败");
+            }
+            if let Some((_, view)) = &state.history_window {
+                view.update(cx.app(), |v, cx| {
+                    v.show_result(HistoryAction::Pin, result.err(), cx)
+                });
+            }
+        }
+        UiEvent::OpenTranslateInput => open_or_focus_translate_input(cx, state),
         UiEvent::Dictation(command) => state.dictation.command(cx, state.tray.as_ref(), command),
         UiEvent::DictationPoll => state.dictation.tick(cx, state.tray.as_ref()),
         UiEvent::DictationProbed { round, verdict } => {
             state
                 .dictation
                 .probed(cx, state.tray.as_ref(), round, verdict)
+        }
+        UiEvent::DictationTranslated { round, seq, outcome } => {
+            state.dictation.translated(cx, round, seq, outcome)
         }
         UiEvent::TranslateInputRequested { serial, text, model_id } => {
             spawn_translate_input(state, serial, text, model_id)
@@ -2176,11 +2754,39 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
                 });
             }
         }
+        UiEvent::SttDownloadRequested { model_id, cancel } => spawn_stt_download(state, model_id, cancel),
+        UiEvent::SttDownloadProgress(progress) => {
+            if let Some(view) = &state.settings_view {
+                view.update(cx.app(), |v, vcx| v.update_stt_download(progress, vcx));
+            }
+        }
+        UiEvent::SttDownloadFinished { model_id, result } => {
+            match (stt_download::classify(&result), &result) {
+                (stt_download::Outcome::Done, _) => tracing::info!(model = %model_id, "语音模型下载完成"),
+                (stt_download::Outcome::Cancelled, _) => tracing::info!(model = %model_id, "用户取消下载"),
+                (stt_download::Outcome::Failed, Err(e)) => {
+                    tracing::warn!(model = %model_id, error = %e, "语音模型下载失败")
+                }
+                (stt_download::Outcome::Failed, Ok(())) => {}
+            }
+            if let Some(view) = &state.settings_view {
+                view.update(cx.app(), |v, vcx| v.finish_stt_download(model_id, result, vcx));
+            }
+        }
         UiEvent::StartScrollCapture => request_scroll_capture(cx, state),
         UiEvent::ScrollRegionChosen { region, monitor } => {
             state.scroll.begin(cx, region, &monitor, None);
         }
         UiEvent::ScrollTick => state.scroll.sync(cx),
+        UiEvent::QuickAction(action) => run_quick_action(cx, state, action),
+        UiEvent::DelayElapsed { serial } => {
+            if state.delay.fire(serial) {
+                request_capture(cx, state, ORIGIN_HOTKEY, CaptureMode::Screenshot);
+            } else {
+                tracing::debug!(serial, "过期的延迟截图回调，已丢弃");
+            }
+        }
+        UiEvent::DirectCaptureDone(result) => on_direct_capture_done(state, result),
         UiEvent::Quit => {
             tracing::info!("quit requested, shutting down");
             state.ocr.shutdown();
@@ -2200,22 +2806,23 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
 /// - `bus`：命令总线（热键 / 托盘命令的出口）。
 /// - `inbox`：主线程收件箱（托盘信号的出口）。
 /// - `document`：配置文档（读取热键）。
-/// - `gate`：热键闸门（与主线程状态共享；这里按配置初始化“全屏抑制”）。
 ///
 /// # 返回
 /// `(托盘服务, 热键服务, 已注册的热键句柄)`，失败项为 `None`。
 ///
 /// ```ignore
-/// let (tray, hotkeys, handles) = start_services(&caps, &bus, &inbox, &document, &HotkeyGate::default());
+/// let (tray, hotkeys, handles) = start_services(&caps, &bus, &inbox, &document);
 /// ```
 pub fn start_services(
     caps: &CapabilityRegistry,
     bus: &CommandBus,
     inbox: &MainThreadInbox<UiEvent>,
     document: &ConfigDocument,
-    gate: &HotkeyGate,
 ) -> (Option<TrayService>, Option<HotkeyService>, Vec<HotkeyHandle>) {
-    let tray = match build_tray_spec()
+    let prefs = ui_prefs_from_document(document);
+    let locale = prefs.locale;
+    apply_popup_menu_theme(prefs.dark);
+    let tray = match build_tray_spec(locale)
         .and_then(|spec| TrayService::start(caps, spec, Dispatcher::from_bus(bus.clone())).map_err(|e| e.to_string()))
     {
         Ok(tray) => {
@@ -2238,13 +2845,7 @@ pub fn start_services(
         }
     };
     let mut handles = Vec::new();
-    gate.set_suppress_fullscreen(document.value(global_actions::FULLSCREEN_SUPPRESSION_KEY).as_bool().unwrap_or(false));
-    let gated = global_actions::gated_dispatcher(
-        Dispatcher::from_bus(bus.clone()),
-        gate.clone(),
-        snow_platform::window_rect::focused_fullscreen_window_exists,
-    );
-    let hotkeys = match HotkeyService::start(caps, gated) {
+    let hotkeys = match HotkeyService::start(caps, Dispatcher::from_bus(bus.clone())) {
         Ok(service) => {
             let registration = register_all_hotkeys(&service, document);
             tracing::info!(
@@ -2298,6 +2899,7 @@ mod tests {
     #[test]
     fn tray_signal_mapping() {
         assert_eq!(map_tray_signal("settings"), Some(UiEvent::OpenSettings));
+        assert_eq!(map_tray_signal("history"), Some(UiEvent::OpenHistory));
         assert_eq!(map_tray_signal("quit"), Some(UiEvent::Quit));
         assert_eq!(map_tray_signal("pin_clipboard"), Some(UiEvent::PinFromClipboard));
         assert_eq!(map_tray_signal("rm -rf"), None);
@@ -2306,8 +2908,8 @@ mod tests {
     /// 托盘菜单：截图为命令，设置/退出为信号，退出前有分隔线。
     #[test]
     fn tray_spec_shape() {
-        let spec = build_tray_spec().unwrap();
-        assert_eq!(spec.menu.len(), 6);
+        let spec = build_tray_spec("zh-CN").unwrap();
+        assert_eq!(spec.menu.len(), 7);
         assert!(matches!(
             &spec.menu[0],
             TrayMenuEntry::Item { action: TrayAction::Command(AppCommand::Capture(_)), .. }
@@ -2320,9 +2922,17 @@ mod tests {
             &spec.menu[2],
             TrayMenuEntry::Item { action: TrayAction::Signal(s), .. } if s == TRAY_SIGNAL_PIN_CLIPBOARD
         ));
-        assert!(matches!(&spec.menu[4], TrayMenuEntry::Separator));
         assert!(matches!(
-            &spec.menu[5],
+            &spec.menu[3],
+            TrayMenuEntry::Item { action: TrayAction::Signal(s), .. } if s == TRAY_SIGNAL_HISTORY
+        ));
+        assert!(matches!(
+            &spec.menu[4],
+            TrayMenuEntry::Item { action: TrayAction::Signal(s), .. } if s == TRAY_SIGNAL_SETTINGS
+        ));
+        assert!(matches!(&spec.menu[5], TrayMenuEntry::Separator));
+        assert!(matches!(
+            &spec.menu[6],
             TrayMenuEntry::Item { action: TrayAction::Signal(s), .. } if s == TRAY_SIGNAL_QUIT
         ));
     }
@@ -2395,6 +3005,41 @@ mod tests {
         register_bus_handlers(&bus, &inbox);
         bus.emit(&CommandContext::new(CommandSource::Hotkey), AppCommand::OpenTranslateInput).unwrap();
         assert_eq!(inbox.try_recv(), Some(UiEvent::OpenTranslateInput));
+    }
+
+    /// 总线上的 QuickAction 命令变成对应的快捷动作事件，且携带的动作原样保留。
+    #[test]
+    fn bus_quick_action_reaches_inbox() {
+        let bus = CommandBus::new();
+        let inbox = MainThreadInbox::new();
+        register_bus_handlers(&bus, &inbox);
+        for action in [QuickAction::ScreenshotFullScreen, QuickAction::ToggleGlobalHotkeys] {
+            bus.emit(&CommandContext::new(CommandSource::Hotkey), AppCommand::QuickAction(action))
+                .unwrap();
+            assert_eq!(inbox.try_recv(), Some(UiEvent::QuickAction(action)));
+        }
+    }
+
+    /// 新增的快捷动作键都被识别为热键配置键（变更后会重新注册），非热键的 global_shortcuts 键不会。
+    #[test]
+    fn quick_action_keys_trigger_reregistration() {
+        for (key, _) in QUICK_ACTION_KEYS {
+            assert_eq!(hotkey_config_key(key), Some(*key));
+        }
+        assert_eq!(hotkey_config_key(SCREENSHOT_HOTKEY_CONFIG_KEY), Some(SCREENSHOT_HOTKEY_CONFIG_KEY));
+        assert_eq!(hotkey_config_key("global_shortcuts/disable_on_focused_fullscreen_window"), None);
+        assert_eq!(hotkey_config_key("screenshot/delay_seconds"), None);
+    }
+
+    /// 快捷动作的默认热键都能被解析（默认未绑定的为空列表，不会注册）。
+    #[test]
+    fn quick_action_default_hotkeys_parse() {
+        let doc = ConfigDocument::from_bytes(None);
+        for (key, _) in QUICK_ACTION_KEYS {
+            for text in shortcut_strings(&doc.value(key)) {
+                assert!(Hotkey::parse(&portable_to_hotkey_text(&text)).is_ok(), "{key}: {text}");
+            }
+        }
     }
 
     /// 输入框翻译热键默认不绑定（因此不会注册）；绑定后能解析为合法热键。

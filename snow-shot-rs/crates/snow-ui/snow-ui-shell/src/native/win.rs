@@ -372,3 +372,56 @@ pub(crate) fn force_foreground(hwnd: isize) -> Result<(), ShellError> {
         }
     }
 }
+
+/// `DWMWA_USE_IMMERSIVE_DARK_MODE` 属性号（Win10 20H1+ 为 20）。
+const DWMWA_USE_IMMERSIVE_DARK_MODE_ATTR: i32 = 20;
+
+/// 设置窗口原生标题栏的深浅色。
+pub(crate) fn set_window_dark_title(hwnd: isize, dark: bool) -> Result<(), ShellError> {
+    use windows::Win32::Graphics::Dwm::{DWMWINDOWATTRIBUTE, DwmSetWindowAttribute};
+    let value: i32 = dark.into();
+    // SAFETY: 指针指向栈上 4 字节整数，长度与之相符。
+    unsafe {
+        DwmSetWindowAttribute(
+            to_hwnd(hwnd),
+            DWMWINDOWATTRIBUTE(DWMWA_USE_IMMERSIVE_DARK_MODE_ATTR),
+            &value as *const i32 as *const c_void,
+            std::mem::size_of::<i32>() as u32,
+        )
+    }
+    .map_err(|e| platform_err("DwmSetWindowAttribute(dark)", e))
+}
+
+/// 设置进程内弹出菜单（托盘右键菜单等）的深浅色：`Some(true)` 深色、`Some(false)` 浅色、`None` 跟随系统。
+pub(crate) fn set_popup_menu_dark(dark: Option<bool>) -> Result<(), ShellError> {
+    use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+    use windows::core::{PCSTR, w};
+    /// `SetPreferredAppMode` 的 uxtheme 序号。
+    const SET_PREFERRED_APP_MODE: usize = 135;
+    /// `FlushMenuThemes` 的 uxtheme 序号。
+    const FLUSH_MENU_THEMES: usize = 136;
+    /// 跟随系统（AllowDark）。
+    const MODE_ALLOW_DARK: i32 = 1;
+    /// 强制深色。
+    const MODE_FORCE_DARK: i32 = 2;
+    /// 强制浅色。
+    const MODE_FORCE_LIGHT: i32 = 3;
+    let mode = match dark {
+        Some(true) => MODE_FORCE_DARK,
+        Some(false) => MODE_FORCE_LIGHT,
+        None => MODE_ALLOW_DARK,
+    };
+    // SAFETY: 序号函数签名固定（`int(int)` / `void()`），加载失败时直接返回错误。
+    unsafe {
+        let lib = LoadLibraryW(w!("uxtheme.dll")).map_err(|e| platform_err("LoadLibrary(uxtheme)", e))?;
+        let set = GetProcAddress(lib, PCSTR(SET_PREFERRED_APP_MODE as *const u8))
+            .ok_or_else(|| ShellError::Platform("缺少 SetPreferredAppMode".into()))?;
+        let set: unsafe extern "system" fn(i32) -> i32 = std::mem::transmute(set);
+        set(mode);
+        if let Some(flush) = GetProcAddress(lib, PCSTR(FLUSH_MENU_THEMES as *const u8)) {
+            let flush: unsafe extern "system" fn() = std::mem::transmute(flush);
+            flush();
+        }
+    }
+    Ok(())
+}

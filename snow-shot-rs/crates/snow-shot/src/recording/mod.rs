@@ -4,6 +4,7 @@
 //! 进程客户端、输出路径解析以及区域视图与悬浮控制条。
 
 pub mod area_view;
+pub mod audio;
 pub mod client;
 pub mod model;
 pub mod output;

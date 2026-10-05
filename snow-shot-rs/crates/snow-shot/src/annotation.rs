@@ -24,7 +24,12 @@ use snow_draw_engine::{
     RectangleShapeStyle, RuntimeConfig, SceneDisplayItem, StrokeStyle, StyleDefaults,
     TextDisplayItem, TextLayoutSize, ViewportConfig, ViewportId,
 };
+use snow_draw_engine::{DisplayFillStyle, DisplaySerialNumberType, SerialNumberDisplayItem, SerialNumberType};
 use snow_draw_engine::{HighlightShape, ShapeStyle, TextStyle};
+use snow_draw_engine_editor::{TEXT_STYLE_MIXED_COLOR, TEXT_STYLE_MIXED_FONT_SIZE};
+use crate::annotation_style::{
+    COUNTER_DIGIT_COLOR, ToolStyle, engine_color, physical_px, shape_patch,
+};
 use snow_platform::text_raster::{self, DEFAULT_FONT_FAMILY, TextBitmap};
 use snow_ui::widgets::AnnotationTool;
 use std::collections::HashMap;
@@ -45,6 +50,8 @@ const DEFAULT_COLOR: ColorRgba8 = ColorRgba8 {
 const DEFAULT_STROKE_LOGICAL: f64 = 3.0;
 /// 逻辑像素下的默认文字字号。
 const DEFAULT_FONT_LOGICAL: f64 = 20.0;
+/// 序号球外圈宽度（逻辑像素）。
+const COUNTER_RING_LOGICAL: u32 = 2;
 /// 马赛克强度（0..=1，越大块越粗）。
 const MOSAIC_STRENGTH: f64 = 1.0;
 /// 模糊强度（0..=1）。
@@ -155,7 +162,9 @@ pub fn engine_tool(tool: AnnotationTool) -> Option<ActiveTool> {
         AnnotationTool::Pencil => Some(ActiveTool::FreeDraw),
         AnnotationTool::Text => Some(ActiveTool::Text),
         AnnotationTool::Mosaic | AnnotationTool::Blur => Some(ActiveTool::RectangleFilter),
-        AnnotationTool::None | AnnotationTool::Highlighter | AnnotationTool::Counter => None,
+        AnnotationTool::Highlighter => Some(ActiveTool::PenHighlight),
+        AnnotationTool::Counter => Some(ActiveTool::SerialNumber),
+        AnnotationTool::None => None,
     }
 }
 
@@ -439,6 +448,36 @@ fn draw_text(
     }
 }
 
+/// 把序号球的数字转成居中的文字元素（实心球用白字，描边球用球本身的颜色）。
+fn serial_digit_item(item: &SerialNumberDisplayItem) -> TextDisplayItem {
+    let solid = matches!(
+        item.serial_number_type,
+        DisplaySerialNumberType::SolidCircle | DisplaySerialNumberType::SolidSquare
+    );
+    TextDisplayItem {
+        id: item.id,
+        center_x: item.center_x,
+        center_y: item.center_y,
+        width: item.diameter,
+        height: item.diameter,
+        rotation: item.rotation,
+        content_width: item.diameter,
+        content_height: item.diameter,
+        text: item.number.to_string(),
+        color: if solid { engine_color(COUNTER_DIGIT_COLOR) } else { item.color },
+        font_size: item.font_size,
+        font_family: item.font_family.clone(),
+        fill: ColorRgba8::default(),
+        fill_style: DisplayFillStyle::Solid,
+        stroke: item.color,
+        stroke_width: 0.0,
+        corner_radii: item.corner_radii,
+        horizontal_align: DisplayTextHorizontalAlign::Center,
+        vertical_align: DisplayTextVerticalAlign::Center,
+        opacity: item.opacity,
+    }
+}
+
 /// 一个场景元素是否为需要外部绘制的（文字 / 滤镜）且包围盒与 `rect` 相交。
 fn deferred_hits(item: &SceneDisplayItem, rect: IntRect) -> bool {
     let bounds = match item {
@@ -446,6 +485,9 @@ fn deferred_hits(item: &SceneDisplayItem, rect: IntRect) -> bool {
             aabb(f.center_x, f.center_y, f.width, f.height, f.rotation)
         }
         SceneDisplayItem::Text(t) => aabb(t.center_x, t.center_y, t.content_width.max(t.width), t.content_height.max(t.height), t.rotation),
+        SceneDisplayItem::SerialNumber(n) if n.serial_number_type != DisplaySerialNumberType::Circle => {
+            aabb(n.center_x, n.center_y, n.diameter, n.diameter, n.rotation)
+        }
         _ => return false,
     };
     intersect(rect, bounds).is_some()
@@ -699,6 +741,65 @@ impl AnnotationLayer {
         Ok(())
     }
 
+    /// 把工具样式下发给引擎：作用于该工具后续的绘制，也作用于当前选中的同类对象。
+    ///
+    /// # 参数
+    /// - `tool`：样式所属工具；没有样式的工具直接返回空更新。
+    /// - `style`：该工具的样式（逻辑像素，内部乘设备像素比）。
+    /// - `base`：冻结底图。
+    ///
+    /// # 返回
+    /// 预览层增量更新（作用到已有对象时才会有内容）。
+    ///
+    /// ```ignore
+    /// let update = layer.apply_style(AnnotationTool::Line, &default_style(AnnotationTool::Line), base)?;
+    /// ```
+    pub fn apply_style(
+        &mut self,
+        tool: AnnotationTool,
+        style: &ToolStyle,
+        base: BaseView,
+    ) -> Result<LayerUpdate, String> {
+        let err = |e| format!("应用标注样式失败: {e:?}");
+        let state = self.engine.viewport_style_toolbar_state(self.viewport).map_err(err)?;
+        if let Some(patch) = shape_patch(tool, style, self.dpr, state.shape_style) {
+            self.engine
+                .set_viewport_shape_style_patch(self.viewport, patch)
+                .map_err(err)?;
+        } else if tool == AnnotationTool::Text {
+            let font_px = physical_px(style.font_size, self.dpr);
+            self.style.color = engine_color(style.color);
+            self.style.font_px = font_px;
+            let text = TextStyle {
+                color: engine_color(style.color),
+                font_size: font_px,
+                ..state.text_style
+            };
+            self.engine
+                .set_viewport_text_style_patch(
+                    self.viewport,
+                    text,
+                    TEXT_STYLE_MIXED_COLOR | TEXT_STYLE_MIXED_FONT_SIZE,
+                    &[],
+                )
+                .map_err(err)?;
+        } else if tool == AnnotationTool::Counter {
+            let serial = snow_draw_engine::SerialNumberStyle {
+                serial_number_type: SerialNumberType::SolidCircle,
+                color: engine_color(style.color),
+                font_size: physical_px(style.font_size, self.dpr),
+                stroke_width: physical_px(COUNTER_RING_LOGICAL, self.dpr),
+                ..state.serial_number_style
+            };
+            self.engine
+                .set_viewport_serial_number_style(self.viewport, serial)
+                .map_err(err)?;
+        } else {
+            return Ok(LayerUpdate::default());
+        }
+        self.sync(base)
+    }
+
     /// 底图视图转合成用参数。
     fn base_ok(&self, base: BaseView) -> bool {
         base.width == self.width
@@ -772,7 +873,7 @@ impl AnnotationLayer {
     pub fn accepts_pointer(&self) -> bool {
         !matches!(
             self.tool,
-            AnnotationTool::None | AnnotationTool::Text | AnnotationTool::Highlighter | AnnotationTool::Counter
+            AnnotationTool::None | AnnotationTool::Text
         ) && engine_tool(self.tool).is_some()
     }
 
@@ -1032,8 +1133,12 @@ fn finish_layer(
         source_over(&mut layer, vector);
     }
     for &index in &deferred {
-        if let SceneDisplayItem::Text(item) = &items[index] {
-            draw_text(&mut layer, rect, item, text_cache);
+        match &items[index] {
+            SceneDisplayItem::Text(item) => draw_text(&mut layer, rect, item, text_cache),
+            SceneDisplayItem::SerialNumber(item) => {
+                draw_text(&mut layer, rect, &serial_digit_item(item), text_cache);
+            }
+            _ => {}
         }
     }
     (!all_transparent(&layer)).then_some(layer)
@@ -1042,6 +1147,7 @@ fn finish_layer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::annotation_style::{ArrowheadChoice, default_style};
 
     /// 构造渐变底图（BGRA 不透明）。
     fn gradient(w: u32, h: u32) -> Vec<u8> {
@@ -1426,5 +1532,196 @@ mod tests {
         layer.set_tool(AnnotationTool::Text).unwrap();
         assert!(!layer.accepts_pointer());
         assert!(layer.pointer_down(10.0, 10.0, base).unwrap().is_empty());
+    }
+
+    /// 白底画布像素缓冲（BGRA 全 255）。
+    fn white(w: u32, h: u32) -> Vec<u8> {
+        vec![255u8; (w * h * 4) as usize]
+    }
+
+    /// 荧光笔与序号球映射到引擎的对应工具。
+    #[test]
+    fn highlighter_and_counter_map_to_engine_tools() {
+        assert_eq!(engine_tool(AnnotationTool::Highlighter), Some(ActiveTool::PenHighlight));
+        assert_eq!(engine_tool(AnnotationTool::Counter), Some(ActiveTool::SerialNumber));
+    }
+
+    /// 改色与线宽后，后续绘制按新样式出图（颜色为蓝，线宽约 12）。
+    #[test]
+    fn style_color_and_width_apply_to_next_drawing() {
+        let (w, h) = (300, 200);
+        let data = white(w, h);
+        let base = BaseView { width: w, height: h, bgra: &data };
+        let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
+        layer.set_tool(AnnotationTool::Line).unwrap();
+        let mut style = default_style(AnnotationTool::Line);
+        style.color = [0x16, 0x77, 0xFF, 0xFF];
+        style.width = 12;
+        layer.apply_style(AnnotationTool::Line, &style, base).unwrap();
+        drag(&mut layer, base, (40.0, 100.0), (240.0, 100.0));
+        let (_, _, rgba) = layer.export_rgba([0, 0, w as i32, h as i32], base).unwrap();
+        let mid = px(&rgba, w, 140, 100);
+        assert!(mid[2] > 200 && mid[0] < 60, "应为蓝色: {mid:?}");
+        let thickness = (0..h).filter(|&y| px(&rgba, w, 140, y)[0] < 128).count();
+        assert!((10..=14).contains(&thickness), "线宽应约 12px，实际 {thickness}");
+    }
+
+    /// 设备像素比 2 时，逻辑线宽乘 2 下发引擎。
+    #[test]
+    fn style_width_scales_with_dpr() {
+        let (w, h) = (300, 200);
+        let data = white(w, h);
+        let base = BaseView { width: w, height: h, bgra: &data };
+        let mut layer = AnnotationLayer::new(w, h, 2.0).unwrap();
+        layer.set_tool(AnnotationTool::Line).unwrap();
+        let mut style = default_style(AnnotationTool::Line);
+        style.width = 4;
+        layer.apply_style(AnnotationTool::Line, &style, base).unwrap();
+        drag(&mut layer, base, (40.0, 100.0), (240.0, 100.0));
+        let (_, _, rgba) = layer.export_rgba([0, 0, w as i32, h as i32], base).unwrap();
+        let thickness = (0..h).filter(|&y| px(&rgba, w, 140, y)[1] < 128).count();
+        assert!((7..=9).contains(&thickness), "4 逻辑像素 @2x 应约 8 物理像素，实际 {thickness}");
+    }
+
+    /// 形状填充开关：开启后内部被半透明描边色覆盖。
+    #[test]
+    fn rectangle_fill_toggle() {
+        let (w, h) = (300, 200);
+        let data = white(w, h);
+        let base = BaseView { width: w, height: h, bgra: &data };
+        let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
+        layer.set_tool(AnnotationTool::Rectangle).unwrap();
+        let mut style = default_style(AnnotationTool::Rectangle);
+        style.fill = true;
+        layer.apply_style(AnnotationTool::Rectangle, &style, base).unwrap();
+        drag(&mut layer, base, (40.0, 40.0), (240.0, 160.0));
+        let (_, _, rgba) = layer.export_rgba([0, 0, w as i32, h as i32], base).unwrap();
+        let inner = px(&rgba, w, 140, 100);
+        assert!(inner[0] > 200 && inner[1] < 245 && inner[1] > 100, "内部应是淡红填充: {inner:?}");
+    }
+
+    /// 箭头头型：选“无”时末端没有头部，比标准箭头少很多像素。
+    #[test]
+    fn arrowhead_none_draws_fewer_pixels() {
+        let (w, h) = (300, 200);
+        let data = white(w, h);
+        let base = BaseView { width: w, height: h, bgra: &data };
+        let count = |head: ArrowheadChoice| {
+            let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
+            layer.set_tool(AnnotationTool::Arrow).unwrap();
+            let mut style = default_style(AnnotationTool::Arrow);
+            style.arrowhead = head;
+            style.width = 4;
+            layer.apply_style(AnnotationTool::Arrow, &style, base).unwrap();
+            drag(&mut layer, base, (40.0, 100.0), (240.0, 100.0));
+            let (_, _, rgba) = layer.export_rgba([0, 0, w as i32, h as i32], base).unwrap();
+            rgba.chunks_exact(4).filter(|p| p[1] < 128).count()
+        };
+        let none = count(ArrowheadChoice::None);
+        let arrow = count(ArrowheadChoice::Arrow);
+        assert!(none > 0 && arrow > none + 20, "无头 {none} 像素，标准箭头 {arrow} 像素");
+    }
+
+    /// 荧光笔：画出半透明粗线，底图仍能透出来。
+    #[test]
+    fn highlighter_draws_translucent_stroke() {
+        let (w, h) = (300, 200);
+        let data = gradient(w, h);
+        let base = BaseView { width: w, height: h, bgra: &data };
+        let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
+        layer.set_tool(AnnotationTool::Highlighter).unwrap();
+        layer
+            .apply_style(AnnotationTool::Highlighter, &default_style(AnnotationTool::Highlighter), base)
+            .unwrap();
+        drag(&mut layer, base, (40.0, 100.0), (240.0, 100.0));
+        assert_eq!(layer.item_count(), 1);
+        let (_, _, rgba) = layer.export_rgba([0, 0, w as i32, h as i32], base).unwrap();
+        let hit = px(&rgba, w, 140, 100);
+        let b = &data[((100 * w + 140) * 4) as usize..];
+        assert_ne!(hit, [b[2], b[1], b[0], 255], "荧光笔应改变像素");
+        assert_ne!(hit, [0xFF, 0xD6, 0x0A, 255], "不应完全覆盖底图");
+        let rows = (0..h)
+            .filter(|&y| {
+                let o = ((y * w + 140) * 4) as usize;
+                px(&rgba, w, 140, y) != [data[o + 2], data[o + 1], data[o], 255]
+            })
+            .count();
+        assert!((16..=24).contains(&rows), "荧光笔线宽应约 20，实际 {rows}");
+    }
+
+    /// 序号球：每次点击落一个球，数字依次递增，球体与数字都画出来。
+    #[test]
+    fn counter_places_numbered_balls() {
+        let (w, h) = (300, 200);
+        let data = white(w, h);
+        let base = BaseView { width: w, height: h, bgra: &data };
+        let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
+        layer.set_tool(AnnotationTool::Counter).unwrap();
+        let mut style = default_style(AnnotationTool::Counter);
+        style.color = [0x16, 0x77, 0xFF, 0xFF];
+        layer.apply_style(AnnotationTool::Counter, &style, base).unwrap();
+        for x in [80.0, 200.0] {
+            layer.pointer_down(x, 100.0, base).unwrap();
+            layer.pointer_up(x, 100.0, base).unwrap();
+        }
+        assert_eq!(layer.item_count(), 2);
+        let (_, _, rgba) = layer.export_rgba([0, 0, w as i32, h as i32], base).unwrap();
+        let blue = |x0: u32, x1: u32| {
+            (60..140)
+                .flat_map(|y| (x0..x1).map(move |x| (x, y)))
+                .filter(|&(x, y)| {
+                    let p = px(&rgba, w, x, y);
+                    p[2] > 200 && p[0] < 80
+                })
+                .count()
+        };
+        assert!(blue(50, 110) > 100, "第一个球应是蓝色实心");
+        assert!(blue(170, 230) > 100, "第二个球应是蓝色实心");
+        let rgba_ref = &rgba;
+        let patch = |x0: u32| {
+            (x0..x0 + 30)
+                .flat_map(|x| (85..116).map(move |y| px(rgba_ref, w, x, y)))
+                .collect::<Vec<_>>()
+        };
+        let white_dots = patch(65).iter().filter(|p| p[..3] == [255, 255, 255]).count();
+        assert!(white_dots > 5, "球内应有白色数字，实际白点 {white_dots}");
+        assert_ne!(patch(65), patch(185), "两个球的数字应不同");
+    }
+
+    /// 文字样式：字号与颜色作用于之后提交的文字。
+    #[test]
+    fn text_style_affects_committed_text() {
+        let (w, h) = (400, 200);
+        let data = white(w, h);
+        let base = BaseView { width: w, height: h, bgra: &data };
+        let measure = |font: u32| {
+            let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
+            layer.set_tool(AnnotationTool::Text).unwrap();
+            let mut style = default_style(AnnotationTool::Text);
+            style.font_size = font;
+            style.color = [0x16, 0x77, 0xFF, 0xFF];
+            layer.apply_style(AnnotationTool::Text, &style, base).unwrap();
+            layer.commit_text(20.0, 30.0, "Snow", base).unwrap();
+            let (_, _, rgba) = layer.export_rgba([0, 0, w as i32, h as i32], base).unwrap();
+            let blue = rgba.chunks_exact(4).filter(|p| p[2] > 200 && p[0] < 80).count();
+            (layer.measure_text("Snow").unwrap().0, blue)
+        };
+        let (small_w, small_blue) = measure(16);
+        let (big_w, big_blue) = measure(48);
+        assert!(big_w > small_w * 2, "字号变大文字应更宽: {small_w} -> {big_w}");
+        assert!(small_blue > 20 && big_blue > small_blue, "文字应是蓝色: {small_blue} / {big_blue}");
+    }
+
+    /// 没有样式的工具（马赛克 / 无）不产生更新也不报错。
+    #[test]
+    fn style_for_filter_tools_is_noop() {
+        let (w, h) = (100, 100);
+        let data = white(w, h);
+        let base = BaseView { width: w, height: h, bgra: &data };
+        let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
+        let update = layer
+            .apply_style(AnnotationTool::Mosaic, &default_style(AnnotationTool::Line), base)
+            .unwrap();
+        assert!(update.is_empty());
     }
 }

@@ -330,9 +330,11 @@ mod tests {
     /// 配置改键后生效；缺键补默认；整张表的键都在 schema 里。
     #[test]
     fn config_overrides_and_missing_keys() {
-        let doc = ConfigDocument::from_bytes(Some(
-            br#"{"screenshot_shortcuts":{"cancel_screenshot":["Q"]},"drawing_shortcuts":{"arrow":["Ctrl+2"]}}"#,
-        ));
+        let mut doc = ConfigDocument::from_bytes(None);
+        doc.set_value("screenshot_shortcuts/cancel_screenshot", serde_json::json!([{"portable": "Q"}]))
+            .unwrap();
+        doc.set_value("drawing_shortcuts/arrow", serde_json::json!([{"portable": "Ctrl+2"}]))
+            .unwrap();
         let map = OverlayKeymap::from_document(&doc);
         assert_eq!(map.resolve("q", false, false, false), Some(OverlayKeyAction::Cancel));
         assert_eq!(map.resolve("escape", false, false, false), None);

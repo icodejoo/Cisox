@@ -6,10 +6,11 @@
 
 use super::overlay_model::{CopyState, OverlayModel};
 use super::status::Status;
+use super::translate::TranslationState;
 use crate::settings_state::UiPrefs;
 use crate::settings_view::{Palette, palette};
 use snow_platform::clipboard::copy_text_to_clipboard;
-use snow_ui::ui::component::button::Button;
+use snow_ui::ui::component::button::{Button, ButtonVariants};
 use snow_ui::ui::component::input::{Textarea, TextareaState};
 use snow_ui::ui::component::{Sizable, Size as ComponentSize, Theme, ThemeMode};
 use snow_ui::ui::*;
@@ -17,7 +18,7 @@ use snow_ui::ui::*;
 /// 浮窗逻辑宽度。
 pub const WINDOW_WIDTH: f32 = 380.0;
 /// 浮窗逻辑高度。
-pub const WINDOW_HEIGHT: f32 = 270.0;
+pub const WINDOW_HEIGHT: f32 = 234.0;
 /// 浮窗距工作区右、下边缘的逻辑边距。
 pub const WINDOW_MARGIN: f32 = 16.0;
 /// 文本区最少行数。
@@ -32,6 +33,10 @@ const GAP: f32 = 8.0;
 const TEXT_SIZE: f32 = 13.0;
 /// 状态行字号。
 const STATUS_SIZE: f32 = 12.0;
+/// 译文区最多显示最近几句译文（窗口高度固定，更早的译文被省略）。
+const TRANSLATION_MAX_SENTENCES: usize = 2;
+/// 译文待出时的占位符。
+const TRANSLATION_PENDING: &str = "…";
 
 /// 语音转文字浮窗视图。
 pub struct DictationView {
@@ -102,8 +107,26 @@ impl DictationView {
     /// # 参数
     /// - `finals`：已落定文本。
     /// - `partial`：未落定文本。
-    pub fn seed(&mut self, finals: &str, partial: &str, cx: &mut Context<Self>) {
+    /// - `translations`：与定稿句序对位的按句译文状态。
+    pub fn seed(
+        &mut self,
+        finals: &str,
+        partial: &str,
+        translations: &[Option<TranslationState>],
+        cx: &mut Context<Self>,
+    ) {
         self.model.seed(finals, partial);
+        self.model.set_translations(translations);
+        cx.notify();
+    }
+
+    /// 更新某一句的译文状态（按句序号对位）。
+    ///
+    /// # 参数
+    /// - `seq`：句序号。
+    /// - `state`：新状态。
+    pub fn set_translation(&mut self, seq: usize, state: TranslationState, cx: &mut Context<Self>) {
+        self.model.set_translation(seq, state);
         cx.notify();
     }
 
@@ -138,6 +161,26 @@ impl DictationView {
     }
 }
 
+impl DictationView {
+    /// 译文区的行：最近几句已参与翻译的句子，待出显示占位符，失败显示淡色提示；没有翻译时为空。
+    fn translation_lines(&self, i18n: &snow_i18n::I18n) -> Vec<String> {
+        let mut lines: Vec<String> = self
+            .model
+            .translations()
+            .iter()
+            .flatten()
+            .map(|state| match state {
+                TranslationState::Pending => TRANSLATION_PENDING.to_string(),
+                TranslationState::Done(text) => text.clone(),
+                TranslationState::Failed => i18n.tr("dictation-translate-failed"),
+            })
+            .collect();
+        let skip = lines.len().saturating_sub(TRANSLATION_MAX_SENTENCES);
+        lines.drain(..skip);
+        lines
+    }
+}
+
 impl Render for DictationView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.apply_pending(window, cx);
@@ -150,6 +193,7 @@ impl Render for DictationView {
         let (status_text, failed) = status.unwrap_or_default();
         let status_color = if failed { p.danger } else { p.dim };
         let partial = self.model.partial().to_string();
+        let translation_lines = self.translation_lines(i18n);
         let copy_note = match self.model.copy_state() {
             CopyState::Idle => String::new(),
             CopyState::Copied => i18n.tr("dictation-overlay-copied"),
@@ -184,19 +228,38 @@ impl Render for DictationView {
                     .items_start()
                     .gap(px(GAP))
                     .text_size(px(STATUS_SIZE))
-                    .child(div().flex_1().text_color(status_color).child(status_text)),
+                    .child(div().flex_1().text_color(status_color).child(status_text))
+                    .child(
+                        Button::new("dictation-close")
+                            .ghost()
+                            .with_size(ComponentSize::XSmall)
+                            .label("✕")
+                            .on_click(cx.listener(|_this, _event: &ClickEvent, window, _cx| {
+                                window.remove_window()
+                            })),
+                    ),
             )
             .child(Textarea::new(&self.input))
             .child(
                 div()
-                    .min_h(px(TEXT_SIZE * 1.6))
+                    .min_h(px(TEXT_SIZE * 0.8))
                     .text_size(px(TEXT_SIZE))
                     .text_color(p.dim)
                     .italic()
                     .underline()
                     .child(partial),
             )
-            .child(div().flex_1())
+            .when(!translation_lines.is_empty(), |this| {
+                this.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .overflow_hidden()
+                        .text_size(px(TEXT_SIZE))
+                        .text_color(p.dim)
+                        .children(translation_lines),
+                )
+            })
             .child(
                 div()
                     .flex()
@@ -216,14 +279,6 @@ impl Render for DictationView {
                             .on_click(
                                 cx.listener(|this, _event: &ClickEvent, _window, cx| this.copy(cx)),
                             ),
-                    )
-                    .child(
-                        Button::new("dictation-close")
-                            .with_size(ComponentSize::Small)
-                            .label(i18n.tr("dictation-overlay-close"))
-                            .on_click(cx.listener(|_this, _event: &ClickEvent, window, _cx| {
-                                window.remove_window()
-                            })),
                     ),
             )
     }

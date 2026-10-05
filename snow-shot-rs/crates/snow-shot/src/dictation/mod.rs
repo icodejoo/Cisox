@@ -15,6 +15,7 @@ pub mod output;
 pub mod overlay_model;
 pub mod status;
 pub mod text;
+pub mod translate;
 pub mod typing;
 pub mod view;
 

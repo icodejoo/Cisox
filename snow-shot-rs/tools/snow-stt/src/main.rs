@@ -6,6 +6,7 @@
 //! `--stats` 结束时向 stderr 打印耗时统计，`--probe-system [--probe-lang <语言>]` 只探测系统语音能力后退出。
 
 mod backend;
+mod offline;
 mod session;
 mod sherpa;
 mod source;
@@ -15,7 +16,7 @@ use std::io::{BufRead, Write};
 use std::sync::mpsc;
 use std::time::Instant;
 
-use snow_stt_protocol::{BackendKind, Command, Event, SystemError};
+use snow_stt_protocol::{BackendKind, Command, Event, RecognitionMode, SystemError};
 
 use backend::SttBackend;
 use session::{Ctl, SessionEnd, SessionStats, run_session, wait_for_start};
@@ -138,15 +139,22 @@ fn main() {
     };
 
     let t0 = Instant::now();
-    let loaded: Result<Box<dyn SttBackend>, String> = match req.backend {
-        BackendKind::Local => {
+    let loaded: Result<Box<dyn SttBackend>, String> = match offline::check_mode_kind(&req)
+        .map(|()| req.backend)
+    {
+        Err(why) => Err(why),
+        // 离线整句识别：VAD 切句 + 后台线程解码（端点规则对其无意义）
+        Ok(BackendKind::Local) if req.mode == RecognitionMode::Offline => {
+            offline::OfflineSherpaBackend::load(&req).map(|b| Box::new(b) as Box<dyn SttBackend>)
+        }
+        Ok(BackendKind::Local) => {
             sherpa::SherpaBackend::load(&req).map(|b| Box::new(b) as Box<dyn SttBackend>)
         }
         // 系统语音：识别器自己占用默认麦克风
-        BackendKind::System if args.wav.is_some() => {
+        Ok(BackendKind::System) if args.wav.is_some() => {
             Err(SystemError::Other.to_error_text("系统语音后端不支持 --wav，只能用麦克风"))
         }
-        BackendKind::System => {
+        Ok(BackendKind::System) => {
             system::SystemBackend::load(&req).map(|b| Box::new(b) as Box<dyn SttBackend>)
         }
     };

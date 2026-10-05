@@ -164,6 +164,37 @@ impl PinnedManager {
         self.create(cx, width, height, rgba, geometry)
     }
 
+    /// 把一张已有图像（如截图历史里的）贴到光标所在显示器的中央。
+    ///
+    /// # 参数
+    /// - `cx`：外壳上下文。
+    /// - `width` / `height`：图像尺寸。
+    /// - `rgba`：RGBA 像素（透明部分会铺白底）。
+    ///
+    /// # 返回
+    /// 新贴图 ID；取不到显示器或建窗失败返回错误说明。
+    ///
+    /// ```ignore
+    /// let id = manager.create_from_image(cx, 200, 100, rgba)?;
+    /// ```
+    pub fn create_from_image(
+        &mut self,
+        cx: &mut ShellContext,
+        width: u32,
+        height: u32,
+        mut rgba: Vec<u8>,
+    ) -> Result<String, String> {
+        flatten_alpha_on_white(&mut rgba);
+        let monitors = cx.monitors().map_err(|e| e.to_string())?;
+        let cursor = cursor_screen_position().ok();
+        let work_area = pick_monitor(&monitors, cursor)
+            .map(|m| m.work_area)
+            .ok_or_else(|| "系统没有可用显示器".to_string())?;
+        let (rect, zoom) = initial_clipboard_rect(width, height, work_area);
+        let geometry = PinGeometry::new(rect, zoom, 1.0, true);
+        self.create(cx, width, height, rgba, geometry)
+    }
+
     /// 创建贴图：分配 ID、先落盘（崩溃安全）再开窗、按容量策略淘汰最老的。
     fn create(
         &mut self,

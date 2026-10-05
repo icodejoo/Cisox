@@ -475,58 +475,45 @@ placeholder_request!(
     ExportRecognitionRequest
 );
 
-/// 全局快捷键动作：只有热键 / 托盘等本地入口发射，不在 MCP tool 内。
+/// 全局快捷键“快捷动作”：除截图 / 录屏 / 贴图剪贴板 / 输入框翻译 / 语音转文字外的其余动作。
 ///
-/// 能直接落到已有命令的热键（截图、录屏、贴图剪贴板、全屏 / 窗口直接截图）不走这里，
-/// 这里只放需要专门处理或暂未实现的动作。
+/// 全局热键、托盘等发射端只携带动作种类，具体行为由主线程运行时解释。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum GlobalAction {
-    /// 延时截图（延时秒数读 `screenshot/delay_seconds`）。
-    DelayedCapture,
-    /// 截图，选区确认后直接贴图。
-    CaptureAndPin,
-    /// 截图，选区确认后直接识别文字。
-    CaptureAndOcr,
-    /// 截图，选区确认后直接翻译。
-    CaptureAndTranslate,
-    /// 截图，选区确认后直接复制。
-    CaptureAndCopy,
-    /// 录制并在结束时复制（占位：未在录制时等同开始录屏）。
-    RecordAndCopy,
+pub enum QuickAction {
+    /// 延迟截图：等待设定秒数后进入普通截图。
+    ScreenshotDelay,
+    /// 固定截图：框选后直接贴图。
+    ScreenshotFixed,
+    /// 截图并识别文字：框选后直接识别。
+    ScreenshotOcr,
+    /// 截图并翻译：框选后直接识别并翻译。
+    ScreenshotTranslation,
+    /// 截图并复制：框选后直接复制到剪贴板。
+    ScreenshotCopy,
+    /// 直接截取光标所在显示器整屏。
+    ScreenshotFullScreen,
+    /// 直接截取前台窗口。
+    ScreenshotFocusedWindow,
+    /// 录屏并复制（开始 / 结束录屏后复制结果）。
+    ScreenRecordCopy,
     /// 打开录屏保存目录。
-    OpenRecordingFolder,
-    /// 打开截图历史（占位）。
+    OpenScreenRecordingFolder,
+    /// 打开截图历史。
     OpenCaptureHistory,
-    /// 打开贴图管理（占位）。
+    /// 打开贴图管理。
     OpenPinManagement,
-    /// 打开设置。
+    /// 打开设置窗口。
     OpenSettings,
-    /// 翻译选中的文字（占位）。
+    /// 翻译选中文本。
     TranslateSelectedText,
-    /// 贴图选中的文件（占位）。
+    /// 把选中的文件贴到屏幕。
     PinSelectedFiles,
-    /// 恢复最近关闭的贴图窗口（占位）。
-    RestoreClosedPin,
-    /// 开 / 关全局热键（本次运行有效，不落盘）。
+    /// 恢复最近关闭的贴图窗口。
+    RestoreLastClosedWindows,
+    /// 暂停 / 恢复全部全局热键。
     ToggleGlobalHotkeys,
-    /// 开 / 关“前台全屏窗口时禁用热键”。
-    ToggleFullscreenSuppression,
-}
-
-impl GlobalAction {
-    /// 是否是“闸门控制”动作：它们在热键被整体禁用或被全屏抑制时仍然放行，用来自己解除禁用。
-    ///
-    /// ```rust
-    /// use snow_app_core::command::GlobalAction;
-    /// assert!(GlobalAction::ToggleGlobalHotkeys.controls_gate());
-    /// assert!(!GlobalAction::OpenSettings.controls_gate());
-    /// ```
-    pub const fn controls_gate(self) -> bool {
-        matches!(
-            self,
-            Self::ToggleGlobalHotkeys | Self::ToggleFullscreenSuppression
-        )
-    }
+    /// 切换“前台全屏窗口时停用热键”。
+    ToggleDisableOnFocusedFullscreen,
 }
 
 /// 应用命令：所有发射端共用的命令集合。
@@ -596,8 +583,8 @@ pub enum AppCommand {
     StartDictation,
     /// 结束语音转文字（按住说话：热键松开；未在进行中则忽略）。
     StopDictation,
-    /// 全局快捷键动作（热键 / 托盘触发，不在 MCP tool 内）。
-    Global(GlobalAction),
+    /// 快捷动作（全局热键触发，不在 MCP tool 内）。
+    QuickAction(QuickAction),
 }
 
 /// 生成 `CommandKind` 枚举与 `AppCommand::kind()`，保证两者变体同步。
@@ -664,7 +651,7 @@ command_kinds!(
     ToggleDictation,
     StartDictation,
     StopDictation,
-    Global(_),
+    QuickAction(_),
 );
 
 /// MCP 截图域 28 个 tool（去掉 `snow_shot_` 前缀）到命令种类的映射。
@@ -876,6 +863,16 @@ mod tests {
         assert_eq!(
             AppCommand::OpenTranslateInput.kind(),
             CommandKind::OpenTranslateInput
+        );
+    }
+
+    /// 快捷动作命令不属于 MCP 截图域，且能还原为对应种类。
+    #[test]
+    fn quick_action_is_not_an_mcp_tool() {
+        assert!(MCP_TOOL_MAP.iter().all(|(_, k)| *k != CommandKind::QuickAction));
+        assert_eq!(
+            AppCommand::QuickAction(QuickAction::OpenSettings).kind(),
+            CommandKind::QuickAction
         );
     }
 

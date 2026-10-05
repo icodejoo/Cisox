@@ -393,6 +393,7 @@ mod tests {
             endpoint: Default::default(),
             max_seconds: 0,
             model_dir: "D:/m".into(),
+            ..Default::default()
         };
         let effects = engine.start(
             now,

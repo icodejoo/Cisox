@@ -69,3 +69,95 @@ dictation-overlay-copied = 已复制
 dictation-overlay-copy-failed = 复制失败：{ $reason }
 
 dictation-overlay-close = 关闭
+
+dictation-error-model-not-installed = 语音模型 { $model } 还没下载。请到设置里的“语音输入”下载后再用。
+
+dictation-error-manual-dir-streaming = 手动指定的模型文件夹只能配合流式识别使用。请清空模型文件夹以使用内置离线模型，或改回流式。
+
+dictation-error-model-unavailable = 这个组合下没有可用的语音模型：{ $detail }
+
+stt-note-low-latency = 延迟最低，准确率略低于默认
+
+stt-note-multilingual = 另支持粤语与英文，下载体积大
+
+stt-note-high-memory = 最准，但占内存多（运行时约 670 MiB）
+
+stt-note-itn = 自动加标点并规整数字，另支持日语、韩语、粤语
+
+stt-ui-label-recommended = { $name }（推荐）
+
+stt-ui-label-alternate = { $name }
+
+stt-ui-label-legacy = { $name }（旧版）
+
+stt-ui-state-installed = 已安装
+
+stt-ui-state-missing = 未安装
+
+stt-ui-no-models = 这个语言与模式下没有可选模型
+
+stt-ui-row-installed = 已安装，占用 { $size }
+
+stt-ui-row-missing = 未安装，需下载约 { $archive }
+
+stt-ui-panel-title = 当前模型：{ $name }
+
+stt-ui-line-installed = 已安装。磁盘占用 { $size }，运行时内存约 { $mem } MiB（评测口径，仅供参考）。
+
+stt-ui-line-missing = 未安装。需下载约 { $archive }，磁盘占用 { $size }，运行时内存约 { $mem } MiB（评测口径，仅供参考）。
+
+stt-ui-line-license = 许可证：{ $license }
+
+stt-ui-license-unverified = 尚未核对
+
+stt-ui-line-vad-ok = 离线模式另用共享的语音活动检测文件：已安装
+
+stt-ui-line-vad-missing = 离线模式另需共享的语音活动检测文件（{ $size }），会随模型一起下载
+
+stt-ui-line-unpinned = 校验值待固定：下载文件目前只校验大小
+
+stt-ui-action-download = 下载
+
+stt-ui-action-cancel = 取消
+
+stt-ui-action-installed = 已安装
+
+stt-ui-action-busy = 正在下载其他模型
+
+stt-ui-stage-downloading = 下载中
+
+stt-ui-stage-verifying = 校验中
+
+stt-ui-stage-extracting = 解压中
+
+stt-ui-progress = { $stage } { $asset } { $percent }%
+
+stt-ui-progress-no-total = { $stage } { $asset }
+
+stt-ui-download-failed = 下载失败：{ $detail }
+
+stt-ui-download-cancelled = 已取消下载
+
+stt-ui-download-done = 下载完成
+
+stt-ui-lock-system = 系统语音引擎不使用这些模型
+
+stt-ui-lock-manual-dir = 已指定手动模型目录，此项不可选
+
+stt-ui-manual-dir-offline = 手动模型目录只能配合流式识别使用
+
+dictation-translate-no-model = 翻译已开启，但没有翻译模型。请先在翻译设置里下载。
+
+dictation-translate-unsupported = 已开启翻译，但已装的翻译模型都不支持 { $src } 到 { $tgt }。请先到翻译设置里下载支持的模型。
+
+dictation-translate-same-language = 已开启翻译，但源语言和目标语言相同，所以不翻译。
+
+dictation-translate-failed = （翻译失败）
+
+dictation-lang-zh-hans = 中文
+
+dictation-lang-en = 英文
+
+stt-ui-translate-preview = 将翻译：{ $pairs }
+
+stt-ui-translate-pair = { $src }译为{ $tgt }

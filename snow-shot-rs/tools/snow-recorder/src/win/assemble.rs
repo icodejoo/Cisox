@@ -8,6 +8,9 @@ use std::sync::Arc;
 
 use snow_d3d11::SharedDevice;
 
+use snow_recorder_protocol::AudioRequest;
+
+use crate::audio::{self, AudioCapture};
 use crate::pipeline::{self, CaptureSource, PipelineConfig, Running};
 use crate::settings::{AdapterInfo, ENV_ENCODER, EncoderPreference, HwCodec, select_encoder};
 use crate::timeline::QpcAnchor;
@@ -47,6 +50,8 @@ pub struct HardwareSpec {
     pub encoder: EncoderPreference,
     /// 是否改用 Media Foundation 硬件编码（可选原型，默认关）。
     pub media_foundation: bool,
+    /// 录音请求（默认全关；不可用的音源会降级为无该路）。
+    pub audio: AudioRequest,
 }
 
 impl HardwareSpec {
@@ -70,6 +75,7 @@ impl HardwareSpec {
             preset: QSV_PRESET.to_string(),
             encoder: EncoderPreference::Auto,
             media_foundation: false,
+            audio: AudioRequest::default(),
         }
     }
 
@@ -152,18 +158,29 @@ fn run_pipeline<C: CaptureSource<Frame = GpuFrame>>(spec: &HardwareSpec, capture
     if tiles > 1 {
         composer.ensure_tile_streams(tiles)?;
     }
+    // 音频：先打开采集，至少有一路可用才给容器加音轨；编码器打开失败时采集随之丢弃
+    let audio_capture = spec.audio.enabled().then(|| AudioCapture::open(&spec.audio, audio::stdout_reporter())).flatten();
     if spec.media_foundation {
-        let encoder = MfEncoder::open(hw, &spec.output, spec.out_size, spec.fps, parse_rate_control(std::env::var(ENV_MF_QUALITY).ok().as_deref()))?;
-        return pipeline::start(
+        let mut encoder = MfEncoder::open_with_audio(
+            hw,
+            &spec.output,
+            spec.out_size,
+            spec.fps,
+            parse_rate_control(std::env::var(ENV_MF_QUALITY).ok().as_deref()),
+            audio_capture.is_some(),
+        )?;
+        let recorder = audio_capture.zip(encoder.take_audio_sink()).map(|(capture, sink)| capture.run(sink));
+        return pipeline::start_with_audio(
             PipelineConfig { fps: spec.fps, show_cursor: spec.show_cursor },
             "dxgi+videoprocessor+media-foundation",
             capture,
             composer,
             encoder,
+            recorder,
         );
     }
     let codec = hw.codec_name();
-    let encoder = HwEncoder::open(
+    let mut encoder = HwEncoder::open_with_audio(
         hw,
         &HwConfig {
             path: spec.output.clone(),
@@ -174,13 +191,16 @@ fn run_pipeline<C: CaptureSource<Frame = GpuFrame>>(spec: &HardwareSpec, capture
             async_depth: spec.async_depth,
             preset: spec.preset.clone(),
         },
+        audio_capture.is_some(),
     )?;
-    pipeline::start(
+    let recorder = audio_capture.zip(encoder.take_audio_sink()).map(|(capture, sink)| capture.run(sink));
+    pipeline::start_with_audio(
         PipelineConfig { fps: spec.fps, show_cursor: spec.show_cursor },
         &format!("dxgi+videoprocessor+{codec}"),
         capture,
         composer,
         encoder,
+        recorder,
     )
 }
 

@@ -4,8 +4,9 @@
 //! 保持与原 Ant Design Qt `Popconfirm` 一致的交互体验。
 
 use snow_ui_shell::ui::{
-    Anchor, App, CursorStyle, ElementId, FontWeight, InteractiveElement, IntoElement, MouseButton,
-    ParentElement, RenderOnce, SharedString, Styled, Window, component, div, px, rgb,
+    Anchor, AnyElement, App, CursorStyle, Element, ElementId, FontWeight, InteractiveElement,
+    IntoElement, MouseButton, ParentElement, RenderOnce, SharedString, Styled, ViewElement, Window,
+    component, div, px, rgb,
 };
 use std::rc::Rc;
 
@@ -253,7 +254,9 @@ impl RenderOnce for Popconfirm {
         let mut popover = component::popover::Popover::new(self.id)
             .anchor(anchor)
             .offset(px(6.0))
-            .content(move |_state, _w, _cx| {
+            .content(move |_state, _w, pop_cx| {
+                // 点击确认 / 取消后关闭气泡
+                let pop = pop_cx.entity();
                 let on_confirm_cb = on_confirm.clone();
                 let on_cancel_cb = on_cancel.clone();
                 let ok_btn_bg = if ok_danger {
@@ -328,6 +331,7 @@ impl RenderOnce for Popconfirm {
                         // 取消按钮
                         .child({
                             let cancel_click = on_cancel_cb.clone();
+                            let pop = pop.clone();
                             div()
                                 .id("popconfirm-cancel")
                                 .px_2()
@@ -341,6 +345,7 @@ impl RenderOnce for Popconfirm {
                                 .text_size(px(12.0))
                                 .text_color(rgb(0x595959))
                                 .on_mouse_down(MouseButton::Left, move |_, w, cx| {
+                                    pop.update(cx, |state, pc| state.dismiss(w, pc));
                                     if let Some(cb) = &cancel_click {
                                         cb(w, cx);
                                     }
@@ -350,6 +355,7 @@ impl RenderOnce for Popconfirm {
                         // 确定按钮
                         .child({
                             let confirm_click = on_confirm_cb.clone();
+                            let pop = pop.clone();
                             div()
                                 .id("popconfirm-ok")
                                 .px_2()
@@ -361,6 +367,7 @@ impl RenderOnce for Popconfirm {
                                 .text_size(px(12.0))
                                 .text_color(rgb(0xFFFFFF))
                                 .on_mouse_down(MouseButton::Left, move |_, w, cx| {
+                                    pop.update(cx, |state, pc| state.dismiss(w, pc));
                                     if let Some(cb) = &confirm_click {
                                         cb(w, cx);
                                     }
@@ -382,5 +389,20 @@ impl RenderOnce for Popconfirm {
         });
 
         popover.trigger(trigger_btn)
+    }
+}
+
+/// 允许直接作为子元素使用（与其他 `RenderOnce` 组件一致）。
+impl IntoElement for Popconfirm {
+    type Element = ViewElement<Self>;
+
+    #[track_caller]
+    fn into_element(self) -> Self::Element {
+        ViewElement::new(self)
+    }
+
+    #[track_caller]
+    fn into_any_element(self) -> AnyElement {
+        Element::into_any(self.into_element())
     }
 }

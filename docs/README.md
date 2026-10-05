@@ -30,7 +30,7 @@
 - [guides/translation-quantization-benchmark.md](guides/translation-quantization-benchmark.md) — 本地翻译模型 int8 / int4 量化实测（mul-mul、NLLB-600M 6/14 语言裁剪版）：质量、体积、内存、延迟、性价比拐点、ORT 算子兼容与 worker 改动清单。有效。
 - [guides/translation-model-release.md](guides/translation-model-release.md) — 翻译模型最终选型、release 发布方式（A 现成文件 + B 自行生成）、CC-BY-NC 授权声明与应用内提示要求、产物规格与待办。有效。
 - [guides/translation-hymt2-eval.md](guides/translation-hymt2-eval.md) — Hy-MT2-1.8B（Apache-2.0）int4 的 ONNX 导出与质量评测，对比 NLLB 14 语言 int4：核心 11 向 +2.4、英→中 +16.9，代价是体积 1.3 GiB、内存约 3 倍、延迟约 5 倍；含导出补丁与分词注意点。有效。
-- [guides/snow-stt-worker.md](guides/snow-stt-worker.md) — 语音转文字 worker（snow-stt）：行协议、构建（短 target、联网下载、DLL 同目录）、模型放置、wav 自检脚本、espeak-ng GPL 声明注意。P1 第一步，未接主程序。
+- [guides/snow-stt-worker.md](guides/snow-stt-worker.md) — 语音转文字 worker（snow-stt）：行协议、构建（短 target、联网下载、DLL 同目录）、模型放置、wav 自检脚本、espeak-ng GPL 声明注意。已接主程序：协议扩展（离线模式、模型类型、VAD、ITN）、模型清单与按需下载、设置页、语音翻译级联、离线模型放置约定与自检脚本用法。真机麦克风验证未做。
 
 - [research/qt-parity-audit.md](research/qt-parity-audit.md) — **Qt 功能清单 vs Rust 实现对照审计（2026-10-03，读代码）**：82 项状态、配置键消费情况、缺口前十、真机验证清单。功能对齐程度以它为准。有效。
 ## 调研
@@ -44,4 +44,5 @@
 - [research/windows-hevc-support.md](research/windows-hevc-support.md) — Windows H.265 支持现状。已搁置，存档。
 - [research/adr5-local-nmt.md](research/adr5-local-nmt.md) — ADR-5 本地 NMT 推理后端选型。
 - [research/adr8-canvas-blob.md](research/adr8-canvas-blob.md) — ADR-8 canvas 历史/会话文件调研。
-- [research/speech-to-text-backends.md](research/speech-to-text-backends.md) — 实时语音转文字后端调研：sherpa-onnx 与 ort 共用 ORT、纯 ort 流式 Zipformer 实测（RTF≈0.12、~253MB）、Windows 系统语音、SendInput 键入、按住说话热键与分阶段计划。
+- [research/speech-to-text-backends.md](research/speech-to-text-backends.md) — 实时语音转文字后端调研：sherpa-onnx 与 ort 共用 ORT、纯 ort 流式 Zipformer 实测（RTF≈0.12、~253MB）、Windows 系统语音、SendInput 键入、按住说话热键与分阶段计划。§3 候选与 §7 首期推荐已被实测选型取代，见下一条。
+- [research/stt-model-selection.md](research/stt-model-selection.md) — 语音转文字模型选型与评测：流式与离线整句两个独立维度、评测方法与口径差异、各组默认与备选结论、语音翻译（端到端不可行、用级联）量化评测、复现方法与未验证清单。

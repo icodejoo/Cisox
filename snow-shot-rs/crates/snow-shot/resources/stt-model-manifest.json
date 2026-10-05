@@ -1,0 +1,300 @@
+{
+  "schema": 1,
+  "vad": {
+    "name": "silero_vad.onnx",
+    "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx",
+    "size": 643854,
+    "sha256": "9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6",
+    "license": "MIT"
+  },
+  "models": [
+    {
+      "id": "sherpa-onnx-streaming-zipformer-multi-zh-hans-2023-12-12",
+      "dimension": "zh",
+      "mode": "streaming",
+      "kind": "online-transducer",
+      "role": "default",
+      "archive": {
+        "name": "sherpa-onnx-streaming-zipformer-multi-zh-hans-2023-12-12.tar.bz2",
+        "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-multi-zh-hans-2023-12-12.tar.bz2",
+        "size": 310380628,
+        "sha256": "865308b30fba262182225f7e55ebb02a092566fe25dd6a78ec9dfeb7425dc7ba"
+      },
+      "files": [
+        "encoder-epoch-20-avg-1-chunk-16-left-128.int8.onnx",
+        "decoder-epoch-20-avg-1-chunk-16-left-128.onnx",
+        "joiner-epoch-20-avg-1-chunk-16-left-128.int8.onnx",
+        "tokens.txt"
+      ],
+      "license": "apache-2.0",
+      "size_bytes": 76326475,
+      "peak_mem_mb": 163
+    },
+    {
+      "id": "sherpa-onnx-streaming-zipformer-zh-int8-2025-06-30",
+      "dimension": "zh",
+      "mode": "streaming",
+      "kind": "online-transducer",
+      "role": "alternate",
+      "archive": {
+        "name": "sherpa-onnx-streaming-zipformer-zh-int8-2025-06-30.tar.bz2",
+        "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-zh-int8-2025-06-30.tar.bz2",
+        "size": 132634597,
+        "sha256": "5a2832047ea1f97dd0dc595b816c230c4bafad65cfc0341fa57517cadc50afd0"
+      },
+      "files": [
+        "encoder.int8.onnx",
+        "decoder.onnx",
+        "joiner.int8.onnx",
+        "tokens.txt"
+      ],
+      "license": "apache-2.0",
+      "size_bytes": 167360920,
+      "peak_mem_mb": 262
+    },
+    {
+      "id": "sherpa-onnx-streaming-zipformer-en-2023-06-26",
+      "dimension": "en",
+      "mode": "streaming",
+      "kind": "online-transducer",
+      "role": "default",
+      "archive": {
+        "name": "sherpa-onnx-streaming-zipformer-en-2023-06-26.tar.bz2",
+        "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-en-2023-06-26.tar.bz2",
+        "size": 310414022,
+        "sha256": ""
+      },
+      "files": [
+        "encoder-epoch-99-avg-1-chunk-16-left-128.int8.onnx",
+        "decoder-epoch-99-avg-1-chunk-16-left-128.onnx",
+        "joiner-epoch-99-avg-1-chunk-16-left-128.int8.onnx",
+        "tokens.txt"
+      ],
+      "license": "apache-2.0",
+      "size_bytes": 72466360,
+      "peak_mem_mb": 161
+    },
+    {
+      "id": "sherpa-onnx-streaming-zipformer-en-2023-06-21",
+      "dimension": "en",
+      "mode": "streaming",
+      "kind": "online-transducer",
+      "role": "alternate",
+      "archive": {
+        "name": "sherpa-onnx-streaming-zipformer-en-2023-06-21.tar.bz2",
+        "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-en-2023-06-21.tar.bz2",
+        "size": 506956414,
+        "sha256": ""
+      },
+      "files": [
+        "encoder-epoch-99-avg-1.int8.onnx",
+        "decoder-epoch-99-avg-1.onnx",
+        "joiner-epoch-99-avg-1.int8.onnx",
+        "tokens.txt"
+      ],
+      "license": "apache-2.0",
+      "size_bytes": 190180941,
+      "peak_mem_mb": 255
+    },
+    {
+      "id": "sherpa-onnx-x-asr-480ms-streaming-zipformer-transducer-zh-en-punct-int8-2026-06-05",
+      "dimension": "bilingual",
+      "mode": "streaming",
+      "kind": "online-transducer",
+      "role": "default",
+      "archive": {
+        "name": "sherpa-onnx-x-asr-480ms-streaming-zipformer-transducer-zh-en-punct-int8-2026-06-05.tar.bz2",
+        "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-x-asr-480ms-streaming-zipformer-transducer-zh-en-punct-int8-2026-06-05.tar.bz2",
+        "size": 133895136,
+        "sha256": "fa5f63d618e5a01526e275a358bb7772e403f84808a4769fba52cffd8160bf74"
+      },
+      "files": [
+        "encoder.int8.onnx",
+        "decoder.onnx",
+        "joiner.int8.onnx",
+        "tokens.txt",
+        "bpe.model"
+      ],
+      "license": "unverified",
+      "size_bytes": 169347218,
+      "peak_mem_mb": 269
+    },
+    {
+      "id": "sherpa-onnx-x-asr-160ms-streaming-zipformer-transducer-zh-en-punct-int8-2026-06-05",
+      "dimension": "bilingual",
+      "mode": "streaming",
+      "kind": "online-transducer",
+      "role": "alternate",
+      "archive": {
+        "name": "sherpa-onnx-x-asr-160ms-streaming-zipformer-transducer-zh-en-punct-int8-2026-06-05.tar.bz2",
+        "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-x-asr-160ms-streaming-zipformer-transducer-zh-en-punct-int8-2026-06-05.tar.bz2",
+        "size": 133898007,
+        "sha256": "8a6fca056e1a342546edd78be4d50274e2c01898e7b8ae8fc336f6410319c399"
+      },
+      "files": [
+        "encoder.int8.onnx",
+        "decoder.onnx",
+        "joiner.int8.onnx",
+        "tokens.txt",
+        "bpe.model"
+      ],
+      "license": "unverified",
+      "size_bytes": 169347218,
+      "peak_mem_mb": 268,
+      "notes_key": "stt-note-low-latency"
+    },
+    {
+      "id": "sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20",
+      "dimension": "bilingual",
+      "mode": "streaming",
+      "kind": "online-transducer",
+      "role": "legacy",
+      "archive": {
+        "name": "sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20.tar.bz2",
+        "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20.tar.bz2",
+        "size": 511274346,
+        "sha256": ""
+      },
+      "files": [
+        "encoder-epoch-99-avg-1.int8.onnx",
+        "decoder-epoch-99-avg-1.onnx",
+        "joiner-epoch-99-avg-1.int8.onnx",
+        "tokens.txt",
+        "bpe.model"
+      ],
+      "license": "apache-2.0",
+      "size_bytes": 199301041,
+      "peak_mem_mb": 272
+    },
+    {
+      "id": "sherpa-onnx-paraformer-zh-small-2024-03-09",
+      "dimension": "zh",
+      "mode": "offline",
+      "kind": "offline-paraformer",
+      "role": "default",
+      "archive": {
+        "name": "sherpa-onnx-paraformer-zh-small-2024-03-09.tar.bz2",
+        "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-paraformer-zh-small-2024-03-09.tar.bz2",
+        "size": 77920048,
+        "sha256": ""
+      },
+      "files": [
+        "model.int8.onnx",
+        "tokens.txt"
+      ],
+      "license": "unverified",
+      "size_bytes": 81904027,
+      "peak_mem_mb": 186
+    },
+    {
+      "id": "sherpa-onnx-paraformer-trilingual-zh-cantonese-en",
+      "dimension": "zh",
+      "mode": "offline",
+      "kind": "offline-paraformer",
+      "role": "alternate",
+      "archive": {
+        "name": "sherpa-onnx-paraformer-trilingual-zh-cantonese-en.tar.bz2",
+        "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-paraformer-trilingual-zh-cantonese-en.tar.bz2",
+        "size": 1059453702,
+        "sha256": ""
+      },
+      "files": [
+        "model.int8.onnx",
+        "tokens.txt"
+      ],
+      "license": "unverified",
+      "size_bytes": 244803083,
+      "peak_mem_mb": 369,
+      "notes_key": "stt-note-multilingual"
+    },
+    {
+      "id": "sherpa-onnx-zipformer-small-en-2023-06-26",
+      "dimension": "en",
+      "mode": "offline",
+      "kind": "offline-transducer",
+      "role": "default",
+      "archive": {
+        "name": "sherpa-onnx-zipformer-small-en-2023-06-26.tar.bz2",
+        "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-zipformer-small-en-2023-06-26.tar.bz2",
+        "size": 112232184,
+        "sha256": ""
+      },
+      "files": [
+        "encoder-epoch-99-avg-1.int8.onnx",
+        "decoder-epoch-99-avg-1.int8.onnx",
+        "joiner-epoch-99-avg-1.int8.onnx",
+        "tokens.txt"
+      ],
+      "license": "apache-2.0",
+      "size_bytes": 27586985,
+      "peak_mem_mb": 358
+    },
+    {
+      "id": "sherpa-onnx-zipformer-en-2023-06-26",
+      "dimension": "en",
+      "mode": "offline",
+      "kind": "offline-transducer",
+      "role": "alternate",
+      "archive": {
+        "name": "sherpa-onnx-zipformer-en-2023-06-26.tar.bz2",
+        "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-zipformer-en-2023-06-26.tar.bz2",
+        "size": 307666046,
+        "sha256": ""
+      },
+      "files": [
+        "encoder-epoch-99-avg-1.int8.onnx",
+        "decoder-epoch-99-avg-1.int8.onnx",
+        "joiner-epoch-99-avg-1.int8.onnx",
+        "tokens.txt"
+      ],
+      "license": "apache-2.0",
+      "size_bytes": 70350183,
+      "peak_mem_mb": 408
+    },
+    {
+      "id": "sherpa-onnx-x-asr-zipformer-transducer-zh-en-punct-int8-2026-06-03",
+      "dimension": "bilingual",
+      "mode": "offline",
+      "kind": "offline-transducer",
+      "role": "default",
+      "archive": {
+        "name": "sherpa-onnx-x-asr-zipformer-transducer-zh-en-punct-int8-2026-06-03.tar.bz2",
+        "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-x-asr-zipformer-transducer-zh-en-punct-int8-2026-06-03.tar.bz2",
+        "size": 136396739,
+        "sha256": "5d02c36d7b44e886b7c8f0d8e051f8713acab96c264bb6ef9e718be39a6a2224"
+      },
+      "files": [
+        "encoder-epoch-99-avg-1.int8.onnx",
+        "decoder-epoch-99-avg-1.onnx",
+        "joiner-epoch-99-avg-1.int8.onnx",
+        "tokens.txt",
+        "bpe.model"
+      ],
+      "license": "unverified",
+      "size_bytes": 175084290,
+      "peak_mem_mb": 667,
+      "notes_key": "stt-note-high-memory"
+    },
+    {
+      "id": "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17",
+      "dimension": "bilingual",
+      "mode": "offline",
+      "kind": "offline-sense-voice",
+      "role": "alternate",
+      "archive": {
+        "name": "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2",
+        "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2",
+        "size": 163002883,
+        "sha256": "7d1efa2138a65b0b488df37f8b89e3d91a60676e416f515b952358d83dfd347e"
+      },
+      "files": [
+        "model.int8.onnx",
+        "tokens.txt"
+      ],
+      "license": "funasr-model-license",
+      "size_bytes": 239549735,
+      "peak_mem_mb": 415,
+      "notes_key": "stt-note-itn"
+    }
+  ]
+}

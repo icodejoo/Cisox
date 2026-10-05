@@ -4,6 +4,7 @@
 //! 一个进程只做一次录制；stdin 被关闭（主程序退出或崩溃）视为取消，并清理半截文件。
 //! 采集/转换/编码在后端的工作线程里进行（见 `backend`），本进程的主线程只做命令分发与状态回报。
 
+mod audio;
 mod backend;
 mod clock;
 #[cfg(windows)]

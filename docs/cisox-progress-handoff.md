@@ -193,8 +193,21 @@ Windows 主线已经能跑通「热键 / 托盘 / IPC → 截图覆盖窗（单�
 **语音转文字（speech-to-text）**
 - [x] 调研完成（2026-10-02，提交 fb4ae46a、766e678e）：sherpa-onnx 与 ort 共用 ORT、纯 ort 流式 Zipformer（RTF≈0.12、~253MB）、Windows 系统语音、SendInput 键入；详见 `docs/research/speech-to-text-backends.md`。
 - [x] worker 已实现（2026-10-03，提交 e2a07adc）：`snow-stt` + `snow-stt-protocol`（sherpa-onnx shared 链接；espeak-ng 随包库 GPL-3.0-or-later，需补第三方声明；打包脚本不覆盖独立 workspace）。
-- [x] 主程序接入（2026-10-03，提交 68529abb）：切换/按住两种触发、键入+右下角浮窗两套输出、输出方式 自动/只键入/只浮窗、UIA 焦点检测+UIPI 探测，system 后端仍占位。
-- [ ] 未做真机验证：热键 Released 实机、键入到真实应用/IME/游戏/远程桌面/Chrome、管理员窗口、浮窗位置与不抢焦点与多屏 DPI、麦克风实录识别质量。
+- [x] 主程序接入（2026-10-03，提交 68529abb）：切换/按住两种触发、键入+右下角浮窗两套输出、输出方式 自动/只键入/只浮窗、UIA 焦点检测+UIPI 探测。
+- [x] Windows 系统语音后端（2026-10-03，提交 75aa840a）：`backend=system`；联机开关打开后的真实听写没有测过。
+- [x] 协议扩展（2026-10-03，未提交，在工作区）：START 新增可选前缀键 `mode` / `kind` / `vad` / `itn`，旧格式字节不变，FINAL/PARTIAL 与协议版本不变；`StartRequest`/`Command` 不再派生 `Eq`。
+- [x] 离线整句后端（2026-10-03，未提交）：Silero VAD 切句 + 后台线程解码，只产出 FINAL；覆盖 transducer / Paraformer / SenseVoice / Whisper / Zipformer-CTC / NeMo-CTC / Moonshine 共 8 种 kind。
+- [x] 模型清单、按需下载与设置页（2026-10-03，未提交）：`stt-model-manifest.json`（13 个模型 + 共享 VAD，角色 default/alternate/legacy）、curl 下载 + certutil 校验 + 系统 tar 解压、识别模式/语言维度/模型三个下拉与下载面板、旧版平铺布局兼容。
+- [x] 语音翻译级联（2026-10-03，未提交）：定稿句 → 后台线程 → `snow-translate`，`(round,seq)` 对位，浮窗文本区下方独立译文列表显示最近 2 句，译文不进键入与复制。翻译设置界面（开关、目标语言下拉、可用性提示行）已接线，设置页部分已截图验证，翻译联调与浮窗译文未验证。
+- [x] 模型选型与评测（2026-10-03）：流式/离线两个独立维度、各组默认与备选、语音翻译端到端不可行改用级联，详见 `docs/research/stt-model-selection.md`。
+- [x] 设置页与下载真机截图验证（2026-10-04，本机 Windows 11、2560x1600、缩放 1.5）：模式/维度/模型联动、置灰、itn 显隐、中英文、真实下载与取消续传均已验证；顺带修了六处界面问题（英文说明截断、模型下拉标签截断、下载行显示长 id、中文标点孤立成行、分组数量与侧栏徽标不一致、取消下载记 WARN），并加固了 `settings_state` 测试夹具（临时目录改为唯一名并自动清理）。浮窗按工作区定位无误（本机被搜狗输入法悬浮条遮挡，非定位问题）。
+- [ ] 仍未做真机验证：热键 Released 实机、键入到真实应用/IME/游戏/远程桌面/Chrome、管理员窗口、浮窗不抢焦点与多屏 DPI、麦克风实录识别质量、翻译级联浮窗与翻译模型联调。
+- [ ] VAD 参数复测：默认 threshold 0.5 / 静音 500ms / 最短 250ms / 最长 20000ms 未经评测，会把中文长句切成两段。
+- [ ] 许可证：清单里 5 个模型标 `unverified`（x-asr 流式 480ms/160ms、x-asr 离线、paraformer-zh-small、paraformer-trilingual），SenseVoice 为 FunASR 模型许可，未逐条核对；评测过但未入清单的模型也没核。此前记录为「7 个未核实」，以清单现状为准。
+- [ ] sha256 固定：7 个模型压缩包 sha256 为空（GitHub 未返回 digest），下载器放行并提示，发布前必须固定。
+- [ ] 翻译上下文：首版每句独立翻译，`snow-translate` 接口不支持上下文。
+- [ ] 打包脚本与 CI 不覆盖独立 workspace `snow-stt`（需要后续处理）。
+- [ ] 第三方声明：espeak-ng GPL 声明沿用原有记录；`collect-third-party-licenses.ps1` 是否覆盖 sherpa 预编译库与各模型许可证未确认。
 
 **文本输入翻译浮窗**
 - [x] 快捷键唤起的文本输入翻译浮窗（2026-10-03，提交 07b5e518）：配置键 `global_shortcuts/translate_input`、`AppCommand::OpenTranslateInput`、模型下拉=已装包+自动、点击译文复制。
@@ -208,10 +221,38 @@ Windows 主线已经能跑通「热键 / 托盘 / IPC → 截图覆盖窗（单�
 - [x] 系统引擎（Media Foundation）已加入（提交 `3027b635`，`tools/snow-recorder/src/edit/system/*`）。[ ] 真实录屏样片基准与两引擎内存对比、合并操作（需改协议）仍缺；**主程序没有任何视频编辑入口**（审计 §3.3）。
 - [ ] 需要用户提供有代表性的录屏样片。
 
-**截图导出（迁移顺序 A 块，2026-10-03，未提交）**
+**截图导出（迁移顺序 A 块，2026-10-03，已提交 `5bb678ec`）**
 - [x] 另存为（系统 `IFileSaveDialog`）、快速保存、PNG / JPEG / BMP / WebP / PDF、文件名模板（Qt `QDateTime` 语法，默认含 `PRODUCT_NAME`）、重名 `_N`、目录回退；`Export` / `DirectCapture` 总线 handler；新接线 9 个 `screenshot/*` 配置键（见审计 §2）。
 - [ ] 仍缺：JXL / AVIF 编码、WebP 有损、自绘另存为对话框（`save_as_file_dialog = snow_shot`）、保存路径快捷项、缩放比例导出、保存后写历史、复制为文件、直接截图的 `render` 输出与对应全局热键。
 - [ ] 真机验证：对话框外观与置顶覆盖窗下的层级、PDF 在常见阅读器里打开、多屏 / 高 DPI 下焦点窗口直接截图。
+
+**覆盖窗键位表（2026-10-03，WIP 提交 `0061a4bc`，随合并保留）**
+- [x] 新增 `overlay_keymap.rs`：按旧版 `screenshot_shortcuts/*`（27 键）与 `drawing_shortcuts/*`（10 键）解析覆盖窗键位，并接入 `overlay_view.rs`；`snow-platform` 补 `window_rect` 前台窗口矩形等。
+- [ ] 本机断电前并行做过一套 `GlobalAction` 热键动作表（含“前台全屏窗口停用热键”闸门），与远端 `QuickAction` 重复，合并时已丢弃（仍在 `0061a4bc` 的 `global_actions.rs` 里）。**待办：把“前台全屏停用热键”（`toggle_disable_on_focused_fullscreen_window`，目前是占位）移植到 `QuickAction` 上**；覆盖窗键位表尚无真机验证。
+
+**2026-10-04 界面与截图补齐（未提交，在工作区）**
+- [x] 听写浮窗：右上角 ✕ 关闭按钮（原底部关闭按钮移除）；去掉撑高空白，窗口高度 270→234，复制按钮上下留白减半。
+- [x] 托盘菜单文案走 i18n（新增 `tray.ftl`、en-US/zh-CN），设置里切换语言后托盘菜单即时刷新（新增 `TrayService::set_menu`）。
+- [x] 设置窗口标题栏与托盘弹出菜单跟随主题深浅（`snow-ui-shell` 新增 `ShellWindow::set_dark_title`、`ui::set_popup_menu_dark`；后者用 uxtheme 未公开序号 135/136，系统不生效时需换做法；windows crate 新增 feature `Win32_Graphics_Dwm`、`Win32_System_LibraryLoader`，无新依赖）。
+- [x] 截图智能选区阶段 1（窗口级）：悬停高亮顶层窗口、单击选中、位移超约 10 逻辑像素转手动框选；复用配置键 `screenshot_selection`/`smart_selection`（默认开，文案"智能选择"）；新增 `window_pick.rs`；依赖 `snow-ui-selector`（path，仅 Windows，Apache-2.0）及其传递的 `rstar`、`crossbeam-channel`、`heapless` 0.8，Cargo.lock 带入 macOS 专用包（Windows 不编译）；第三方许可证脚本未跑，需确认是否覆盖 `snow-shot-rs`。多显示器/负坐标/DPI 仅纯函数单测，无真机验证。[ ] 阶段 2 控件级（UIA、滚轮切换层级）未做。
+- [x] 标注样式面板最小闭环：选中工具弹出样式条（颜色预设+最近 8 色、线宽/字号/箭头头型下拉、矩形椭圆填充开关），按工具记忆并持久化到旧键 `drawing/*_style`（子字段名 `color`/`width`/`font_size`/`fill`/`arrowhead` 为自定，旧版无金样本；`recent_colors` 放在 `shape_style` 内）；荧光笔（`PenHighlight`）与序号球（`SerialNumber`）接通，工具栏新增"高亮""序号"。未做：独立填充色、选择工具（已画标注无法选中改样式）、工具栏按钮文字仍硬编码中文未迁 `.ftl`、面板首次显示会调用一次 `Theme::change(Dark)`。
+- [x] 截图工具栏右侧溢出修复：改为按右边缘锚定，估算宽度 790→890；[ ] 仍是估算值，根治需测量真实宽度。
+- [ ] 听写有焦点场景（`output_mode=auto/type`）的真机验证仍未做。
+- [x] 全局热键补全与直接截图（未提交）：新增 `quick_actions.rs`（键表、延迟状态机、输出方案）、`direct_capture.rs`、`AppCommand::QuickAction`。已接线：`screenshot_full_screen`、`screenshot_focused_window`（新增 `foreground_window_rect()`，snow-platform 的 windows 依赖加 `Win32_Graphics_Dwm`）、`screenshot_delay`（只用于该动作，普通 F1 不延迟）、`screenshot_fixed` / `screenshot_copy`（Ctrl+F1）/ `screenshot_ocr` / `screenshot_translation`（覆盖层框选后自动确认，对应旧版 `captureAndPinSelection` 等）、`open_settings`、`toggle_global_hotkeys`、`open_screen_recording_folder`。直接截图始终复制到剪贴板，开 `screenshot/auto_save_after_copy` 或 `copy_image_file_to_clipboard` 时再落盘。
+- [ ] 占位（触发后只给本地化提示，提示走托盘悬停与日志，无弹窗）：`screen_record_copy`、`open_capture_history`、`open_pin_to_screen_management`、`translate_selected_text`、`pin_selected_files`、`restore_last_closed_windows`、`toggle_disable_on_focused_fullscreen_window`。
+- [x] 截图历史（未提交）：新增 `history_store.rs`（后台写入、去重 10 秒、上限裁剪、分页、缩略图）、`history_view.rs`（历史窗口：虚拟滚动、每页 20 条、复制/贴图/定位文件/删除、清空二次确认）；写入点覆盖普通截图复制/保存/贴图与直接截图；入口为托盘"截图历史"与热键 `open_capture_history`（已从占位改为真实动作）；复用旧键 `capture_history/*` 与 `snow-history` 的 `index.json` v2 存储，未新增依赖。
+- [ ] 历史遗留：仅靠 `snow-history` 往返测试验证兼容，未用旧版真实数据对照；`canvas_history.json` 写 `{}`（旧版"再编辑"不可用）；`displays[0]` 与 `result` 为同一份 PNG（每条占两份）；Popconfirm 颜色写死浅色，深色主题下气泡为浅色卡片；保留天数清理只在打开历史页时触发；无筛选/批量删除；无真机验证。
+- [x] 录屏音频阶段 1（未提交）：MP4 单轨混音（系统声 WASAPI loopback + 麦克风）。协议 `START` 加可选前缀 `mic=`/`sys=`/`mvol=`/`svol=`/`mdev=`/`sdev=`（旧格式字节不变）与事件 `AUDIO_STATE`；worker 新增 `audio.rs`（混音器：10ms 槽、100ms 抖动窗口、增益、补零、暂停丢包）与 `win/aacsink.rs`；Media Foundation 路径加 AAC 流、FFmpeg 硬编路径加原生 `aac` 流（128 kbps、48k 立体声）、软件路径透传开关；无新增依赖（`snow-audio-recorder` 为 path 依赖，已在依赖树内）。主程序读旧键 `screen_recording/enable_microphone`、`enable_system_audio`，非 MP4 强制关闭；录制控制条显示降级提示（不可用/中断/本次没有声音）；`verify-snow-recorder.ps1` 加 `-Audio`。真屏自检：三条路径音视频时长差 ≤0.05s，暂停场景正确，GIF 无音轨。
+- [ ] 录屏音频遗留：开关只在设置页，录制工具栏没有（延迟为 0 时来不及用）；非 MP4 时设置页只改说明文字，开关未置灰；软件路径不支持音量/设备/AUDIO_STATE；麦克风真实内容未验证（本机麦克风阵列近乎静音）；设备选择、音量滑块、双轨属阶段 2；偶发风险：带音频放音 + MF 路径下出现过 3 次停止耗时约 90 秒（捕获更新数异常高），之后 4 次未复现，未定位，建议长录制多测，必要时给 Finalize 加超时。
+
+**迁移差距盘点（2026-10-04）**
+
+核心项目进度与已知偏差：
+
+- **P0**：标注样式面板（已补最小闭环，见上）、截图历史（已补，见上）、全局热键原先仅接 5 组，现已补接直接截图等 9 个动作（见上，无真机验证），仍有 7 个为占位、录屏音频（阶段 1 已补，见上）。
+- **P1**：延迟截图（已接到 `screenshot_delay` 动作；普通 F1 不延迟，是否也要延迟待定）、快捷键录入控件（仍是通用文本框）、贴图管理页/分组/隐藏到顶部/从文件贴图、OCR 结果窗与二维码识别、选中文本翻译、视频编辑 UI、`snow-mcp`/`snow-update`/`snow-net` 仅占位、托盘缺更新等入口（历史入口已加）且图标为纯色占位、聚光灯/橡皮擦/水印/自动滤镜工具缺失。
+- **文档与代码不一致**：`docs/cisox-migration-acceptance-report.md` 写"核心功能已 100% 交付"、迁移方案 P6/handoff §5 写 `ClickRipple`、`KeystrokeDisplay` 已落地，但 crates 内无这两个符号，录屏也无音频/点击特效/按键回显；报告写"15 种标注工具"而 `AnnotationTool` 只有 12 个变体（本轮已补荧光笔与序号球可用）；handoff 说根 `AGENTS.md` 仍是旧 Qt 版的待办已过期（现已是 Rust 版）。
+- **已明确推迟/允许占位**：macOS/Linux（ADR-7）、自动更新/崩溃上报/表格公式识别/安装包/旧数据导入（迁移方案 §10）、H.265/AV1/WebM。
 
 **已搁置（存档，可恢复）**
 - H.265：暂不支持，原因与恢复起点见 `docs/research/windows-hevc-support.md`。恢复前要补：干净 Windows（未装 HEVC 扩展）实测、Intel/AMD 实测、法务确认授权。
