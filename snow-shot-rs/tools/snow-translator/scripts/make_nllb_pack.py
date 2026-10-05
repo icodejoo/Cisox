@@ -71,13 +71,13 @@ def externalize(src, dst, location):
                     location=location, size_threshold=1024)
 
 
-def build_manifest(pieces, info, display):
-    """生成 model.json（dict）。"""
+def build_manifest(pieces, info, display, pack_id):
+    """生成 model.json（dict）；pack_id 为模型包 id。"""
     tokens = {p["piece"]: p["new_id"] for p in pieces}
     langs = [c for c in info["langs"] if c in tokens]
     return {
         "schema_version": 1,
-        "id": "nllb600m-main14-ccm-int4",
+        "id": pack_id,
         "display_name": display,
         "family": "m2m100",
         "quantization": "int4",
@@ -106,6 +106,7 @@ def main():
     ap.add_argument("--orig-tok", required=True)
     ap.add_argument("--onnx", required=True)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--id", default="nllb600m-main14-ccm-int4", help="模型包 id（写入 model.json，不同语言集必须不同）")
     ap.add_argument("--display", default="NLLB-200 distilled 600M (14 languages, int4)")
     ap.add_argument("--skip-onnx", action="store_true", help="只生成 tokenizer.json 与 model.json")
     a = ap.parse_args()
@@ -117,7 +118,7 @@ def main():
     with open(os.path.join(a.out, "tokenizer.json"), "w", encoding="utf-8", newline="\n") as f:
         json.dump(tok, f, ensure_ascii=False)
     print("tokenizer: vocab", len(tok["model"]["vocab"]), "merges", len(tok["model"]["merges"]))
-    man = build_manifest(pieces, info, a.display)
+    man = build_manifest(pieces, info, a.display, a.id)
     with open(os.path.join(a.out, "model.json"), "w", encoding="utf-8", newline="\n") as f:
         json.dump(man, f, ensure_ascii=False, indent=2)
         f.write("\n")
