@@ -24,6 +24,7 @@
 - [cisox-todo-webm.md](cisox-todo-webm.md) — WebM 录制待实现说明。待办。
 
 ## 操作手册
+- [guides/build-speed.md](guides/build-speed.md) — 本机 Rust 编译提速实测：构建目录放 C: 盘（增量 8 秒 vs E: 盘 14~89 秒）、lld / sccache / 拆模块 / nextest / Cranelift 各自效果与是否采纳。有效。
 - [guides/ocr-samples.md](guides/ocr-samples.md) — OCR 真实样片的位置、格式、核对稿局限、同图对比怎么跑与当前结果。有效。
 
 - [guides/ocr-model-tiers-benchmark.md](guides/ocr-model-tiers-benchmark.md) — 本地 OCR 七档模型同图实测：CER、耗时、worker 内存、DirectML 对比、复现命令。有效。
