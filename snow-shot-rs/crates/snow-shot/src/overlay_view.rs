@@ -12,7 +12,8 @@ use crate::annotation_style::{
     config_key, nearest_index, panel_placement, style_fields,
 };
 use crate::frozen_frame::FrozenFrame;
-use crate::history_store::HistorySource;
+use crate::history_nav::{FinishStep, HistoryNav, HistoryProvider, LoadOutcome, NavStep};
+use crate::history_store::{HistorySnapshot, HistorySource, LoadedEntry};
 use crate::ocr_client::OcrError;
 use crate::ocr_flow::{OcrUiState, panel_lines};
 use crate::ocr_service::OcrResult;
@@ -20,11 +21,19 @@ use crate::translate_flow::{TranslateUiState, panel_lines as translate_panel_lin
 use crate::translate_service::{TranslateFlowError, TranslateOutcome, TranslateStage};
 use crate::overlay_probe::FrameProbe;
 use crate::overlay_keymap::{DrawingKey, OverlayKeyAction, OverlayKeymap};
+use crate::previous_selection::{PREVIOUS_SELECTION_KEY, SelectionStyle, decode, encode};
+use crate::region_select::{RegionDraft, RegionType};
+use snow_canvas_raster::region::{
+    PathCommand, RegionMask, RegionOp, RegionShape, flatten_commands, shape_commands,
+};
 use crate::screenshot_output::{
     self, ExportOverrides, ExportSettings, ManualSaveJob, SaveMode, SaveOutcome, home_directory,
 };
 use crate::settings_state::SharedConfig;
-use crate::window_pick::{DRAG_THRESHOLD_LOGICAL, WindowHover, exceeds_drag_threshold};
+use crate::window_pick::{
+    DRAG_THRESHOLD_LOGICAL, HighlightTransition, PickPath, PickTarget, SELECTION_TARGET_KEY, WindowHover,
+    exceeds_drag_threshold,
+};
 use image::{Frame, RgbaImage};
 use snow_app_core::command::SaveRequest;
 use snow_canvas_raster::TileKey;
@@ -32,6 +41,7 @@ use snow_config::store::ConfigStore;
 use snow_i18n::{Args, I18n};
 use snow_canvas_text::{CanvasTextInput, CanvasTextStyle, EditKeyOutcome};
 use snow_platform::text_raster::DEFAULT_FONT_FAMILY;
+use snow_platform::capture::CapturedScreen;
 use snow_platform::clipboard::{copy_image_to_clipboard, copy_text_to_clipboard};
 use snow_ui::shell::geometry::{PhysicalPoint, PhysicalRect};
 use snow_ui::ui::component::checkbox::Checkbox;
@@ -143,6 +153,15 @@ const OCR_PANEL_BG: u32 = 0x000000D9;
 const OCR_BOX_COLOR: u32 = 0xFAAD14;
 /// 双击判定所需的点击次数。
 const DOUBLE_CLICK_COUNT: usize = 2;
+
+/// 选区形状栏的估算高度（逻辑像素），用于把它摆在工具栏上方。
+const REGION_BAR_HEIGHT: f32 = 30.0;
+
+/// 选区形状栏估算半宽（逻辑像素），用于顶部居中。
+const REGION_BAR_HALF_WIDTH: f32 = 220.0;
+
+/// 选区形状的配置键。
+const REGION_TYPE_KEY: &str = "screenshot_selection/region_type";
 /// 标签相对选区上沿的逻辑偏移。
 const LABEL_OFFSET: f32 = 22.0;
 /// 标注基准的笔画数。
@@ -167,6 +186,46 @@ pub enum OverlayOutcome {
     AwaitSave,
 }
 
+/// 正在进行的「加 / 减区域」操作。
+struct RegionOpState {
+    /// 并入还是挖出。
+    op: RegionOp,
+    /// 操作开始前选区本是普通矩形时记下它（取消时据此还原成矩形）；本来就是自定义区域为 `None`。
+    plain_rect: Option<PhysicalRect>,
+}
+
+/// 翻到历史记录时暂存的「当前截图」：翻回来时原样放回（含标注撤销栈）。
+struct LiveEndpoint {
+    /// 当前截图的冻结底图。
+    frame: FrozenFrame,
+    /// 当前截图的标注层。
+    annotations: Option<AnnotationLayer>,
+    /// 离开时的选区状态。
+    state: SelectionState,
+    /// 离开时的自定义区域蒙版（折线 / 曲线 / 自由绘制选区）。
+    region_mask: Option<RegionMask>,
+}
+
+/// 截图历史翻页的宿主：数据来源、状态机与暂存的当前截图。
+struct HistoryHost {
+    /// 数据来源（索引与异步读取）。
+    provider: Box<dyn HistoryProvider>,
+    /// 翻页状态机。
+    nav: HistoryNav,
+    /// 翻到历史记录期间暂存的当前截图。
+    live: Option<LiveEndpoint>,
+}
+
+/// 读出的历史现场换成视图可用的底图、标注层与选区。
+struct PreparedEntry {
+    /// 历史底图。
+    frame: FrozenFrame,
+    /// 恢复出的标注层。
+    annotations: Option<AnnotationLayer>,
+    /// 历史选区。
+    selection: PhysicalRect,
+}
+
 /// 登记待执行的手动保存：任务与选区像素。
 struct PendingSave {
     /// 保存任务。
@@ -177,6 +236,8 @@ struct PendingSave {
     height: u32,
     /// RGBA 像素。
     rgba: Vec<u8>,
+    /// 保存成功后写入截图历史的完整现场（历史关闭 / 未接入时为 `None`）。
+    snapshot: Option<HistorySnapshot>,
 }
 
 /// 框选完成后自动执行的动作（快捷截图用：框选一松手就复制 / 贴图 / 识别 / 翻译）。
@@ -574,9 +635,14 @@ impl SystemOutput {
 }
 
 impl OutputSink for SystemOutput {
-    /// 写入系统剪贴板（CF_DIB）。
+    /// 写入系统剪贴板：不透明图用 CF_DIB；带透明区（自定义选区）时改放 CF_DIBV5 + PNG。
     fn copy_image(&mut self, width: u32, height: u32, rgba: &[u8]) -> Result<(), String> {
-        copy_image_to_clipboard(width, height, rgba)?;
+        if snow_platform::clipboard::has_transparency(rgba) {
+            let png = screenshot_output::encode_png(width, height, rgba)?;
+            snow_platform::clipboard::copy_image_with_png_to_clipboard(width, height, rgba, &png)?;
+        } else {
+            copy_image_to_clipboard(width, height, rgba)?;
+        }
         self.note_history(HistorySource::Copied, width, height, rgba);
         Ok(())
     }
@@ -819,6 +885,20 @@ pub struct ScreenshotOverlayView {
     status_message: Option<String>,
     /// 等待在借用之外执行的手动保存。
     pending_save: Option<PendingSave>,
+    /// 导出成功后接收完整现场的截图历史出口（未接入则不拷贝整帧）。
+    history_sink: Option<Box<dyn Fn(HistorySource, HistorySnapshot)>>,
+    /// 截图历史翻页宿主（未接入则翻页键无效）。
+    history_host: Option<HistoryHost>,
+    /// 当前选区形状类型（矩形 / 折线 / 曲线 / 自由绘制）。
+    region_type: RegionType,
+    /// 正在绘制的自定义区域草稿。
+    region_draft: Option<RegionDraft>,
+    /// 已确认的自定义区域蒙版；`None` 表示选区就是普通矩形。
+    region_mask: Option<RegionMask>,
+    /// 自定义区域在外接矩形范围内的遮罩图（区域外压暗 + 轮廓）。
+    region_overlay: Option<Arc<RenderImage>>,
+    /// 正在进行的加 / 减区域操作。
+    region_op: Option<RegionOpState>,
     /// 输出通道（剪贴板 / 文件）。
     output: Box<dyn OutputSink>,
     /// 键盘焦点句柄（测试环境为空）。
@@ -867,8 +947,10 @@ pub struct ScreenshotOverlayView {
     translate_serial: u64,
     /// 窗口悬停来源（智能选区开启时才有）。
     window_hover: Option<Box<dyn WindowHover>>,
-    /// 悬停窗口的底图矩形（仅 Idle 时更新并高亮）。
-    hover_window: Option<PhysicalRect>,
+    /// 悬停处的命中层级路径与当前选中层（仅 Idle 时更新并高亮）。
+    pick: PickPath,
+    /// 高亮框的过渡动画。
+    highlight_transition: HighlightTransition,
     /// 按下时锁定的窗口矩形：位移未超阈值就松开则直接作为选区，超过则作废转手动框选。
     click_window: Option<PhysicalRect>,
 }
@@ -918,6 +1000,13 @@ impl ScreenshotOverlayView {
             color_format: ColorFormat::Hex,
             status_message: None,
             pending_save: None,
+            history_sink: None,
+            history_host: None,
+            region_type: RegionType::Rectangle,
+            region_draft: None,
+            region_mask: None,
+            region_overlay: None,
+            region_op: None,
             output,
             focus_handle: None,
             probe: FrameProbe::new(),
@@ -942,7 +1031,8 @@ impl ScreenshotOverlayView {
             translate: TranslateUiState::Idle,
             translate_serial: 0,
             window_hover: None,
-            hover_window: None,
+            pick: PickPath::new(PickTarget::WindowSubElement),
+            highlight_transition: HighlightTransition::new(true),
             click_window: None,
         };
         let start = view.clamp_point(initial_cursor);
@@ -983,33 +1073,127 @@ impl ScreenshotOverlayView {
         }
     }
 
-    /// 接入窗口悬停来源，开启窗口级智能选区。
+    /// 接入悬停来源，开启智能选区（窗口 / 控件层级）。
     ///
     /// # 参数
     /// - `source`：悬停来源；传 `None` 关闭该功能。
+    /// - `target`：初始目标层级（来自 `screenshot_selection/selection_target`）。
+    /// - `animate`：高亮框是否使用过渡动画。
     ///
     /// ```ignore
-    /// view.set_window_hover(Some(Box::new(picker)));
+    /// view.set_window_hover(Some(Box::new(picker)), PickTarget::WindowSubElement, true);
     /// ```
-    pub fn set_window_hover(&mut self, source: Option<Box<dyn WindowHover>>) {
+    pub fn set_window_hover(&mut self, source: Option<Box<dyn WindowHover>>, target: PickTarget, animate: bool) {
         self.window_hover = source;
-        self.hover_window = None;
+        self.pick = PickPath::new(target);
+        self.highlight_transition = HighlightTransition::new(animate);
         self.click_window = None;
     }
 
     /// 当前应高亮的窗口矩形：空闲时是悬停窗口，按下未超阈值时是锁定窗口。
     fn window_highlight(&self) -> Option<PhysicalRect> {
         match self.state {
-            SelectionState::Idle => self.hover_window,
+            SelectionState::Idle => self.pick.current(),
             SelectionState::MarqueeDragging { .. } => self.click_window,
             _ => None,
         }
     }
 
-    /// 向悬停来源查询指定点下的窗口并更新高亮。
+    /// 向悬停来源查询指定点下的层级路径并更新当前选中层；顺带吸收后台细化出的更深层。
     fn refresh_window_hover(&mut self, point: PhysicalPoint) {
-        if let Some(source) = self.window_hover.as_mut() {
-            self.hover_window = source.hover(point);
+        let bounds = self.screen_bounds;
+        if self.region_type != RegionType::Rectangle {
+            self.pick.clear();
+            return;
+        }
+        let Some(source) = self.window_hover.as_mut() else {
+            return;
+        };
+        match source.hover(point, self.pick.target()) {
+            Some(path) => {
+                self.pick.apply_hit_path(&path, bounds, DEFAULT_MINIMUM_SELECTION_SIZE);
+            }
+            None => self.pick.clear(),
+        }
+        self.absorb_refinement();
+    }
+
+    /// 吸收后台细化出的更深层路径（有就应用）。
+    ///
+    /// # 返回
+    /// 路径是否被替换（需要重绘）。
+    fn absorb_refinement(&mut self) -> bool {
+        let bounds = self.screen_bounds;
+        let Some(refined) = self.window_hover.as_mut().and_then(|s| s.refinement()) else {
+            return false;
+        };
+        self.pick.apply_refinement(&refined, bounds, DEFAULT_MINIMUM_SELECTION_SIZE)
+    }
+
+    /// 渲染前轮询后台细化：空闲时吸收新路径，并在细化仍在进行时返回 `true`，让调用方继续请求下一帧。
+    ///
+    /// # 返回
+    /// 后台细化是否仍在进行。
+    fn poll_refinement(&mut self) -> bool {
+        if self.state == SelectionState::Idle {
+            self.absorb_refinement();
+        }
+        self.window_hover.as_ref().is_some_and(|s| s.refinement_pending())
+    }
+
+    /// 滚轮切换智能选区层级：向上（`lines_y > 0`）向外，向下向内；仅空闲且开启智能选区时生效。
+    ///
+    /// # 参数
+    /// - `lines_y`：滚轮行数，正为向上。
+    /// - `point`：当前光标（底图物理坐标）。
+    ///
+    /// # 返回
+    /// 是否消费了这次滚轮。
+    ///
+    /// ```ignore
+    /// view.handle_scroll(1.0, PhysicalPoint::new(60, 50));
+    /// ```
+    pub fn handle_scroll(&mut self, lines_y: f32, point: PhysicalPoint) -> bool {
+        if self.window_hover.is_none() || self.state != SelectionState::Idle || self.annotating {
+            return false;
+        }
+        let point = self.clamp_point(point);
+        self.cursor_pos = point;
+        self.refresh_window_hover(point);
+        if lines_y > 0.0 {
+            self.pick.select_step(1);
+        } else if lines_y < 0.0 {
+            self.pick.select_step(-1);
+        }
+        true
+    }
+
+    /// 在「窗口」与「窗口内子控件」目标之间切换，写回配置并按光标位置重新取层级。
+    ///
+    /// # 返回
+    /// 是否切换成功；未开启智能选区或不在空闲态时为 `false`。
+    fn toggle_selection_target(&mut self) -> bool {
+        if self.window_hover.is_none() || self.state != SelectionState::Idle {
+            return false;
+        }
+        let target = self.pick.toggle_target();
+        self.persist_selection_target(target);
+        self.refresh_window_hover(self.cursor_pos);
+        true
+    }
+
+    /// 把选区目标写回配置并落盘；失败只记日志。
+    fn persist_selection_target(&self, target: PickTarget) {
+        let Some(config) = self.config_handle() else {
+            return;
+        };
+        let mut store = config.borrow_mut();
+        if let Err(e) = store.set_value(SELECTION_TARGET_KEY, serde_json::json!(target.as_config())) {
+            tracing::warn!(error = %e, "写入选区目标配置失败");
+            return;
+        }
+        if let Err(e) = store.flush() {
+            tracing::warn!(error = %e, "选区目标落盘失败");
         }
     }
 
@@ -1116,23 +1300,30 @@ impl ScreenshotOverlayView {
         let point = self.clamp_point(point);
         self.cursor_pos = point;
         match self.state {
+            SelectionState::Idle if self.custom_input_active() => {
+                self.begin_region_input(point, click_count);
+            }
             SelectionState::Idle => {
                 // 按下点处的窗口先锁定，松开时若位移很小就直接选中该窗口
                 self.refresh_window_hover(point);
-                self.click_window = self.hover_window;
+                self.click_window = self.pick.current();
                 self.state = SelectionState::MarqueeDragging {
                     start: point,
                     current: point,
                 };
             }
             SelectionState::Selected { rect } => {
-                let mode = hit_test_drag_mode(
-                    rect,
-                    point,
-                    false,
-                    self.edge_tolerance(),
-                    DEFAULT_MINIMUM_SELECTION_SIZE,
-                );
+                let mode = self.drag_mode_for(rect, point);
+                // 非矩形选区：点框外先整体重置，回到选区阶段（下一次点击才开始画）
+                if mode == SelectionDragMode::None
+                    && (self.region_type != RegionType::Rectangle || self.region_mask.is_some())
+                {
+                    self.clear_region();
+                    self.reset_annotations();
+                    self.state = SelectionState::Idle;
+                    self.hover_mode = SelectionDragMode::None;
+                    return OverlayOutcome::Stay;
+                }
                 // 选中标注工具后，选区内部（非手柄 / 边缘）的按下属于标注
                 if mode == SelectionDragMode::All && self.tool != AnnotationTool::None {
                     if self.tool == AnnotationTool::Text {
@@ -1187,7 +1378,7 @@ impl ScreenshotOverlayView {
                 if self.click_window.is_some() && exceeds_drag_threshold(start, point, self.drag_threshold()) {
                     // 位移超过阈值：放弃窗口选区，转为手动框选
                     self.click_window = None;
-                    self.hover_window = None;
+                    self.pick.clear();
                 }
                 self.state = SelectionState::MarqueeDragging {
                     start,
@@ -1209,16 +1400,13 @@ impl ScreenshotOverlayView {
                 };
             }
             SelectionState::Selected { rect } => {
-                self.hover_mode = hit_test_drag_mode(
-                    rect,
-                    point,
-                    false,
-                    self.edge_tolerance(),
-                    DEFAULT_MINIMUM_SELECTION_SIZE,
-                );
+                self.hover_mode = self.drag_mode_for(rect, point);
             }
             SelectionState::Idle => {
                 self.hover_mode = SelectionDragMode::None;
+                if let Some(draft) = self.region_draft.as_mut() {
+                    draft.drag_to((point.x as f32, point.y as f32));
+                }
                 self.refresh_window_hover(point);
             }
         }
@@ -1238,19 +1426,44 @@ impl ScreenshotOverlayView {
             self.finish_annotation(point);
             return false;
         }
+        // 自由绘制：松开即收笔，随后尝试完成
+        if let Some(draft) = self.region_draft.as_mut()
+            && draft.release((point.x as f32, point.y as f32))
+        {
+            let committed = self.commit_region_draft();
+            if !committed {
+                self.region_draft = None;
+            }
+            return committed;
+        }
         match self.state {
             SelectionState::MarqueeDragging { start, .. } => {
                 let window = self.click_window.take();
-                self.hover_window = None;
+                self.pick.clear();
                 if let Some(rect) = window
                     && !exceeds_drag_threshold(start, point, self.drag_threshold())
+                    && rect.contains(point)
                     && rect.width >= DEFAULT_MINIMUM_SELECTION_SIZE
                     && rect.height >= DEFAULT_MINIMUM_SELECTION_SIZE
                 {
+                    if self.region_op.is_some() {
+                        return self.merge_rect_operand(rect);
+                    }
                     self.state = SelectionState::Selected { rect };
                     return true;
                 }
                 let r = marquee_selection_rect(start, point);
+                if self.region_op.is_some()
+                    && r.width >= DEFAULT_MINIMUM_SELECTION_SIZE
+                    && r.height >= DEFAULT_MINIMUM_SELECTION_SIZE
+                {
+                    self.state = SelectionState::Idle;
+                    let merged = self.merge_rect_operand(r);
+                    if !merged {
+                        self.refresh_window_hover(point);
+                    }
+                    return merged;
+                }
                 self.state = if r.width >= DEFAULT_MINIMUM_SELECTION_SIZE
                     && r.height >= DEFAULT_MINIMUM_SELECTION_SIZE
                 {
@@ -1258,6 +1471,9 @@ impl ScreenshotOverlayView {
                 } else {
                     SelectionState::Idle
                 };
+                if self.state == SelectionState::Idle {
+                    self.refresh_window_hover(point);
+                }
                 return matches!(self.state, SelectionState::Selected { .. });
             }
             SelectionState::Reshaping {
@@ -1275,6 +1491,10 @@ impl ScreenshotOverlayView {
                     DEFAULT_MINIMUM_SELECTION_SIZE,
                     None,
                 );
+                // 自定义区域跟着选区一起平移
+                if let Some(mask) = self.region_mask.as_mut() {
+                    *mask = mask.translated(rect.x - origin_rect.x, rect.y - origin_rect.y);
+                }
                 self.state = SelectionState::Selected { rect };
                 self.hover_mode = SelectionDragMode::None;
                 return true;
@@ -1287,13 +1507,24 @@ impl ScreenshotOverlayView {
     /// 处理鼠标右键：有选区时先撤销选区，没有选区则关闭覆盖窗。
     pub fn handle_right_click(&mut self) -> OverlayOutcome {
         if self.state == SelectionState::Idle {
+            // 正在画自定义区域：右键先取消草稿，再取消加 / 减区域，都没有才关闭
+            if self.region_draft.take().is_some() || self.cancel_region_op() {
+                return OverlayOutcome::Stay;
+            }
             return OverlayOutcome::Close;
+        }
+        // 正看着历史记录：右键先回到当前截图（对齐 Qt `returnToCurrentScreenshot`）
+        if self.history_return_to_live() {
+            return OverlayOutcome::Stay;
         }
         self.state = SelectionState::Idle;
         self.hover_mode = SelectionDragMode::None;
-        self.hover_window = None;
+        self.pick.clear();
         self.click_window = None;
+        self.clear_region();
         self.reset_annotations();
+        // 回到智能选区：不等下一次移动，立刻按光标位置重新命中
+        self.refresh_window_hover(self.cursor_pos);
         OverlayOutcome::Stay
     }
 
@@ -1325,6 +1556,20 @@ impl ScreenshotOverlayView {
     /// 窗口去向。Enter 固定为确认（复制 / 录屏 / 长截图）；Ctrl+Shift+Z 固定为重做；其余按键位表。
     pub fn handle_keystroke(&mut self, key: &str, control: bool, shift: bool, alt: bool) -> OverlayOutcome {
         match (key, control) {
+            ("enter", _) if self.region_draft.is_some() => {
+                self.finish_region_draft();
+                OverlayOutcome::Stay
+            }
+            ("backspace", false) if self.region_draft.is_some() => {
+                if let Some(draft) = self.region_draft.as_mut() {
+                    draft.remove_last();
+                }
+                OverlayOutcome::Stay
+            }
+            ("tab", true) => {
+                self.cycle_region_type(shift);
+                OverlayOutcome::Stay
+            }
             ("enter", _) if matches!(self.ocr, OcrUiState::Done { .. }) => self.copy_ocr_text_and_close(),
             ("enter", _) if matches!(self.translate, TranslateUiState::Done { .. }) => {
                 self.copy_translation_and_close()
@@ -1360,6 +1605,11 @@ impl ScreenshotOverlayView {
         let selecting_mode = self.record_mode || self.scroll_mode;
         let tools_ready = self.current_selection().is_some();
         match action {
+            // 加 / 减区域进行中：取消键先取消这次操作
+            OverlayKeyAction::Cancel if self.region_op.is_some() => {
+                self.cancel_region_op();
+                OverlayOutcome::Stay
+            }
             // 翻译 / OCR 界面打开时，取消键先退出该界面，再按一次才关闭覆盖窗
             OverlayKeyAction::Cancel if self.translate.is_visible() => {
                 self.dismiss_translate();
@@ -1404,6 +1654,22 @@ impl ScreenshotOverlayView {
             OverlayKeyAction::MoveCursor(dir) => {
                 let (dx, dy) = dir.delta();
                 self.cursor_pos = self.clamp_point(PhysicalPoint::new(self.cursor_pos.x + dx, self.cursor_pos.y + dy));
+                OverlayOutcome::Stay
+            }
+            OverlayKeyAction::PreviousHistory => {
+                self.history_previous();
+                OverlayOutcome::Stay
+            }
+            OverlayKeyAction::NextHistory => {
+                self.history_next();
+                OverlayOutcome::Stay
+            }
+            OverlayKeyAction::SelectPreviousSelection => {
+                self.select_previous_selection();
+                OverlayOutcome::Stay
+            }
+            OverlayKeyAction::ToggleSelectionTarget => {
+                self.toggle_selection_target();
                 OverlayOutcome::Stay
             }
             OverlayKeyAction::Unimplemented(config_key) => {
@@ -1738,6 +2004,91 @@ impl ScreenshotOverlayView {
         row
     }
 
+    /// 选区形状栏：四种形状单选；选区确定后再多出「添加 / 减去区域」两个按钮。
+    ///
+    /// # 参数
+    /// - `toolbar_pos`：主工具栏位置（逻辑像素）；有则把形状栏贴在它上方。
+    /// - `screen`：屏幕逻辑尺寸。
+    ///
+    /// # 返回
+    /// 形状栏元素；录屏 / 长截图 / 标注 / 文字输入 / 翻译或识别界面期间不显示。
+    fn render_region_bar(
+        &self,
+        toolbar_pos: Option<PhysicalPoint>,
+        screen: (f32, f32),
+        cx: &mut Context<Self>,
+    ) -> Option<Div> {
+        if self.record_mode
+            || self.scroll_mode
+            || self.annotating
+            || self.tool != AnnotationTool::None
+            || self.text_edit.is_some()
+            || self.ocr.is_visible()
+            || self.translate.is_visible()
+            || self.history_host.as_ref().is_some_and(|h| h.nav.in_history())
+        {
+            return None;
+        }
+        let selected = matches!(self.state, SelectionState::Selected { .. });
+        let i18n = self.i18n;
+        let button = |label: String, active: bool| {
+            div()
+                .px_2()
+                .py_0p5()
+                .rounded_xs()
+                .text_xs()
+                .cursor(CursorStyle::PointingHand)
+                .text_color(rgba(0xFFFFFFFF))
+                .bg(if active { rgb(ACCENT_COLOR) } else { rgb(0x2B2B2B) })
+                .child(label)
+        };
+        let mut row = div()
+            .absolute()
+            .flex()
+            .flex_row()
+            .gap_1()
+            .p_1()
+            .rounded_sm()
+            .bg(rgba(0x000000CC))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation());
+        if selected {
+            for (op, id) in [
+                (RegionOp::Add, "screenshot-tool-palette-add-screenshot-region-4f7ae0d9"),
+                (RegionOp::Subtract, "screenshot-tool-palette-subtract-screenshot-region-c0df476a"),
+            ] {
+                row = row.child(button(i18n.tr(id).to_string(), false).on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _: &MouseDownEvent, _window, cx| {
+                        this.begin_region_op(op);
+                        cx.stop_propagation();
+                        cx.notify();
+                    }),
+                ));
+            }
+        }
+        for (region_type, id) in [
+            (RegionType::Rectangle, "screenshot-tool-palette-rectangle-region-86f2b03d"),
+            (RegionType::Polyline, "screenshot-tool-palette-polyline-region-4f71de1a"),
+            (RegionType::Curve, "screenshot-tool-palette-curve-region-7a0abb9b"),
+            (RegionType::Freehand, "screenshot-tool-palette-freehand-region-c5a700ff"),
+        ] {
+            row = row.child(button(i18n.tr(id).to_string(), self.region_type == region_type).on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _: &MouseDownEvent, _window, cx| {
+                    this.switch_region_type(region_type);
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            ));
+        }
+        let (top, left) = match toolbar_pos {
+            Some(pos) if selected => ((pos.y as f32 - REGION_BAR_HEIGHT - 4.0).max(4.0), pos.x as f32),
+            _ => (8.0, (screen.0 / 2.0 - REGION_BAR_HALF_WIDTH).max(4.0)),
+        };
+        Some(row.top(px(top)).left(px(left)))
+    }
+
     /// 样式面板：按当前工具展示颜色 / 线宽 / 字号 / 填充 / 箭头头型，点击不穿透到选区。
     ///
     /// # 参数
@@ -1950,14 +2301,608 @@ impl ScreenshotOverlayView {
     /// 取选区对应的 RGBA 图像（含标注合成）；没有选区或选区在图外返回 `None`。
     fn selection_image(&mut self) -> Option<(u32, u32, Vec<u8>)> {
         let rect = self.current_selection()?;
-        match self.annotations.as_mut() {
+        let (w, h, mut rgba) = match self.annotations.as_mut() {
             Some(layer) => layer.export_rgba(
                 [rect.x, rect.y, rect.right(), rect.bottom()],
                 self.frame.base_view(),
             ),
             None => self.frame.crop_rgba(rect),
+        }?;
+        // 自定义区域：区域外变透明
+        if let Some(mask) = &self.region_mask {
+            mask.apply_to_rgba((rect.x, rect.y, w as i32, h as i32), &mut rgba);
+        }
+        Some((w, h, rgba))
+    }
+
+    /// 当前选区形状类型。
+    pub fn region_type(&self) -> RegionType {
+        self.region_type
+    }
+
+    /// 设置启动时的选区形状（来自配置，不回写）。
+    ///
+    /// # 参数
+    /// - `region_type`：形状类型。
+    pub fn set_initial_region_type(&mut self, region_type: RegionType) {
+        self.region_type = region_type;
+    }
+
+    /// 是否处于自定义区域输入态：选区形状不是矩形，且还没有选区。
+    fn custom_input_active(&self) -> bool {
+        self.region_type != RegionType::Rectangle && self.state == SelectionState::Idle
+    }
+
+    /// 清掉自定义区域的全部状态（草稿、蒙版、遮罩图）。
+    fn clear_region(&mut self) {
+        self.region_draft = None;
+        self.region_mask = None;
+        if let Some(image) = self.region_overlay.take() {
+            self.pending_drops.push(image);
         }
     }
+
+    /// 循环切换选区形状（Ctrl+Tab / Ctrl+Shift+Tab）。
+    ///
+    /// # 参数
+    /// - `reverse`：为 `true` 时往回循环。
+    ///
+    /// # 返回
+    /// 是否切换；标注 / 拖动 / 文字输入中为 `false`。
+    ///
+    /// ```ignore
+    /// view.cycle_region_type(false);
+    /// ```
+    pub fn cycle_region_type(&mut self, reverse: bool) -> bool {
+        self.switch_region_type(self.region_type.cycled(reverse))
+    }
+
+    /// 切换选区形状：丢掉当前草稿；没有进行加 / 减区域时还会丢掉当前选区，回到选区阶段。
+    ///
+    /// # 参数
+    /// - `region_type`：目标形状。
+    ///
+    /// # 返回
+    /// 是否发生了切换；形状没变、或标注 / 拖动 / 文字输入中为 `false`。
+    ///
+    /// ```ignore
+    /// view.switch_region_type(RegionType::Polyline);
+    /// ```
+    pub fn switch_region_type(&mut self, region_type: RegionType) -> bool {
+        if region_type == self.region_type
+            || self.annotating
+            || self.text_edit.is_some()
+            || !matches!(self.state, SelectionState::Idle | SelectionState::Selected { .. })
+        {
+            return false;
+        }
+        self.region_type = region_type;
+        self.persist_region_type();
+        self.region_draft = None;
+        self.pick.clear();
+        self.click_window = None;
+        if self.region_op.is_none() {
+            self.clear_region();
+            self.reset_annotations();
+            self.state = SelectionState::Idle;
+            self.hover_mode = SelectionDragMode::None;
+        }
+        self.refresh_window_hover(self.cursor_pos);
+        true
+    }
+
+    /// 开始「加区域」或「减区域」：当前选区保留为底，接下来画的形状并入 / 挖出它。
+    ///
+    /// # 参数
+    /// - `op`：并入还是挖出。
+    ///
+    /// # 返回
+    /// 是否开始；没有选区、正在标注 / 输入文字、录屏 / 长截图模式下为 `false`。
+    ///
+    /// ```ignore
+    /// view.begin_region_op(RegionOp::Subtract);
+    /// ```
+    pub fn begin_region_op(&mut self, op: RegionOp) -> bool {
+        if self.annotating || self.text_edit.is_some() || self.record_mode || self.scroll_mode {
+            return false;
+        }
+        let SelectionState::Selected { rect } = self.state else {
+            return false;
+        };
+        // 普通矩形选区先转成蒙版，后面统一按蒙版合成
+        let plain_rect = if self.region_mask.is_none() {
+            let (width, height) = self.frame.size();
+            self.region_mask = Some(RegionMask::from_rect(
+                width,
+                height,
+                (rect.x, rect.y, rect.width, rect.height),
+            ));
+            self.rebuild_region_overlay();
+            Some(rect)
+        } else {
+            None
+        };
+        self.region_op = Some(RegionOpState { op, plain_rect });
+        self.region_draft = None;
+        self.state = SelectionState::Idle;
+        self.hover_mode = SelectionDragMode::None;
+        self.pick.clear();
+        self.click_window = None;
+        self.refresh_window_hover(self.cursor_pos);
+        true
+    }
+
+    /// 取消进行中的加 / 减区域，选区回到操作之前的样子。
+    ///
+    /// # 返回
+    /// 是否取消了；没有进行中的操作为 `false`。
+    fn cancel_region_op(&mut self) -> bool {
+        let Some(op) = self.region_op.take() else {
+            return false;
+        };
+        self.region_draft = None;
+        match op.plain_rect {
+            Some(rect) => {
+                self.clear_region();
+                self.state = SelectionState::Selected { rect };
+            }
+            None => {
+                if let Some((x, y, w, h)) = self.region_mask.as_ref().and_then(RegionMask::bounds) {
+                    self.state = SelectionState::Selected {
+                        rect: PhysicalRect::new(x, y, w, h),
+                    };
+                }
+            }
+        }
+        true
+    }
+
+    /// 把一个操作数形状并入 / 挖出当前蒙版并确认为新选区。
+    ///
+    /// # 参数
+    /// - `commands`：操作数的路径命令。
+    ///
+    /// # 返回
+    /// 是否合成成功；结果为空或太小时丢弃操作数，操作仍保持进行。
+    fn merge_region_operand(&mut self, commands: &[PathCommand]) -> bool {
+        let (Some(op), Some(base)) = (self.region_op.as_ref().map(|o| o.op), self.region_mask.as_ref()) else {
+            return false;
+        };
+        let mut merged = base.clone();
+        merged.apply(commands, op);
+        let Some((x, y, w, h)) = merged.bounds() else {
+            return false;
+        };
+        if w < DEFAULT_MINIMUM_SELECTION_SIZE || h < DEFAULT_MINIMUM_SELECTION_SIZE {
+            return false;
+        }
+        self.region_mask = Some(merged);
+        self.region_op = None;
+        self.rebuild_region_overlay();
+        self.state = SelectionState::Selected {
+            rect: PhysicalRect::new(x, y, w, h),
+        };
+        true
+    }
+
+    /// 用矩形当操作数（矩形形状下的加 / 减区域，来自框选或点选窗口）。
+    fn merge_rect_operand(&mut self, rect: PhysicalRect) -> bool {
+        let (x0, y0) = (rect.x as f32, rect.y as f32);
+        let (x1, y1) = (rect.right() as f32, rect.bottom() as f32);
+        let corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)];
+        self.merge_region_operand(&shape_commands(RegionShape::Polyline, &corners))
+    }
+
+    /// 把选区形状写回配置并落盘；失败只记日志。
+    fn persist_region_type(&self) {
+        let Some(config) = self.config_handle() else {
+            return;
+        };
+        let mut store = config.borrow_mut();
+        if let Err(e) = store.set_value(REGION_TYPE_KEY, serde_json::json!(self.region_type.as_config())) {
+            tracing::warn!(error = %e, "写入选区形状配置失败");
+            return;
+        }
+        if let Err(e) = store.flush() {
+            tracing::warn!(error = %e, "选区形状落盘失败");
+        }
+    }
+
+    /// 自定义区域输入时按下鼠标：开始 / 继续草稿；双击折线 / 曲线则闭合完成。
+    fn begin_region_input(&mut self, point: PhysicalPoint, click_count: usize) {
+        let Some(shape) = self.region_type.shape() else {
+            return;
+        };
+        let p = (point.x as f32, point.y as f32);
+        self.pick.clear();
+        let draft = self.region_draft.get_or_insert_with(|| RegionDraft::new(shape));
+        if click_count >= DOUBLE_CLICK_COUNT {
+            if draft.double_click(p) {
+                self.commit_region_draft();
+            }
+            return;
+        }
+        draft.press(p);
+    }
+
+    /// 完成草稿：栅格化成蒙版并确认为选区；点数不足 / 没有面积 / 太小则丢弃草稿。
+    ///
+    /// # 返回
+    /// 是否成功得到选区。
+    fn commit_region_draft(&mut self) -> bool {
+        let Some(draft) = self.region_draft.take() else {
+            return false;
+        };
+        let Some(vertices) = draft.finish(self.scale) else {
+            return false;
+        };
+        if self.region_op.is_some() {
+            return self.merge_region_operand(&shape_commands(draft.shape(), &vertices));
+        }
+        let (width, height) = self.frame.size();
+        let mut mask = RegionMask::new(width, height);
+        mask.apply(&shape_commands(draft.shape(), &vertices), RegionOp::Add);
+        let Some((x, y, w, h)) = mask.bounds() else {
+            return false;
+        };
+        if w < DEFAULT_MINIMUM_SELECTION_SIZE || h < DEFAULT_MINIMUM_SELECTION_SIZE {
+            return false;
+        }
+        self.region_mask = Some(mask);
+        self.rebuild_region_overlay();
+        self.state = SelectionState::Selected {
+            rect: PhysicalRect::new(x, y, w, h),
+        };
+        true
+    }
+
+    /// 完成（Enter）当前草稿；失败就清掉草稿。
+    fn finish_region_draft(&mut self) {
+        if !self.commit_region_draft() {
+            self.region_draft = None;
+        }
+    }
+
+    /// 按当前蒙版重建遮罩图（外接矩形范围内：区域外压暗、区域边缘描一圈主题色）。
+    fn rebuild_region_overlay(&mut self) {
+        if let Some(old) = self.region_overlay.take() {
+            self.pending_drops.push(old);
+        }
+        let Some(mask) = &self.region_mask else {
+            return;
+        };
+        let Some((x, y, w, h)) = mask.bounds() else {
+            return;
+        };
+        let edge_width = self.scale.round().max(1.0) as i32;
+        let accent = ACCENT_COLOR.to_be_bytes();
+        let bgra = mask.overlay_bgra_in(
+            (x, y, w, h),
+            (MASK_COLOR & 0xFF) as u8,
+            Some((accent[3], accent[2], accent[1], edge_width)),
+        );
+        if let Some(buffer) = RgbaImage::from_raw(w as u32, h as u32, bgra) {
+            self.region_overlay = Some(Arc::new(RenderImage::new(vec![Frame::new(buffer)])));
+        }
+    }
+
+    /// 选区内某点对应的拖动模式：自定义区域只能整体移动（框内为移动，框外为无）。
+    fn drag_mode_for(&self, rect: PhysicalRect, point: PhysicalPoint) -> SelectionDragMode {
+        if self.region_mask.is_some() {
+            return if rect.contains(point) { SelectionDragMode::All } else { SelectionDragMode::None };
+        }
+        hit_test_drag_mode(rect, point, false, self.edge_tolerance(), DEFAULT_MINIMUM_SELECTION_SIZE)
+    }
+
+    /// 接入截图历史翻页的数据来源。
+    ///
+    /// # 参数
+    /// - `provider`：记录列表与异步读取。
+    ///
+    /// ```ignore
+    /// view.set_history_provider(Box::new(ThreadedHistoryProvider::start(&root, policy)?));
+    /// ```
+    pub fn set_history_provider(&mut self, provider: Box<dyn HistoryProvider>) {
+        self.history_host = Some(HistoryHost {
+            provider,
+            nav: HistoryNav::new(),
+            live: None,
+        });
+    }
+
+    /// 是否允许翻页：已接入来源、没有拖动 / 标注 / 文字输入，且在空闲或已选中状态。
+    fn can_navigate_history(&self) -> bool {
+        self.history_host.is_some()
+            && !self.annotating
+            && self.text_edit.is_none()
+            && matches!(self.state, SelectionState::Idle | SelectionState::Selected { .. })
+    }
+
+    /// 翻到更旧的一条截图历史。
+    ///
+    /// # 返回
+    /// 是否发起了读取；没有更旧的记录、正在读取或当前不允许翻页时为 `false`。
+    ///
+    /// ```ignore
+    /// view.history_previous();
+    /// ```
+    pub fn history_previous(&mut self) -> bool {
+        self.history_step(HistoryNav::older)
+    }
+
+    /// 翻到更新的一条截图历史；翻到头就回到当前截图。
+    ///
+    /// # 返回
+    /// 是否发生了切换或读取。
+    pub fn history_next(&mut self) -> bool {
+        self.history_step(HistoryNav::newer)
+    }
+
+    /// 回到当前截图（右键退出历史）。
+    ///
+    /// # 返回
+    /// 是否确实从历史记录切回了当前截图。
+    pub fn history_return_to_live(&mut self) -> bool {
+        self.history_step(HistoryNav::return_to_live)
+    }
+
+    /// 刷新记录列表后执行一步导航，并落实结果。
+    fn history_step(&mut self, step: impl FnOnce(&mut HistoryNav) -> NavStep) -> bool {
+        if !self.can_navigate_history() {
+            return false;
+        }
+        let Some(host) = self.history_host.as_mut() else {
+            return false;
+        };
+        let ids = host.provider.ids();
+        host.nav.set_ids(ids);
+        match step(&mut host.nav) {
+            NavStep::None => false,
+            NavStep::Load { id } => {
+                host.provider.begin_load(&id);
+                true
+            }
+            NavStep::ShowLive => self.restore_live_endpoint(),
+        }
+    }
+
+    /// 是否有历史读取在进行（渲染循环据此继续请求下一帧）。
+    fn history_busy(&self) -> bool {
+        self.history_host.as_ref().is_some_and(|h| h.nav.busy())
+    }
+
+    /// 轮询历史读取结果；读完且适用就应用到视图。
+    ///
+    /// # 返回
+    /// 视图内容是否发生了变化（需要重绘）。
+    pub fn poll_history(&mut self) -> bool {
+        let Some((id, entry)) = self
+            .history_host
+            .as_mut()
+            .and_then(|h| h.provider.poll_loaded())
+        else {
+            return false;
+        };
+        let prepared = entry.and_then(|e| self.prepare_entry(e));
+        let outcome = if prepared.is_some() { LoadOutcome::Loaded } else { LoadOutcome::Failed };
+        let Some(host) = self.history_host.as_mut() else {
+            return false;
+        };
+        match (host.nav.finish(&id, outcome), prepared) {
+            (FinishStep::Apply, Some(prepared)) => {
+                self.install_history_entry(prepared);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// 把读出的现场换成可显示的内容；底图尺寸与当前不同（换过显示器 / 分辨率）时不适用。
+    fn prepare_entry(&self, entry: LoadedEntry) -> Option<PreparedEntry> {
+        if (entry.frame_width, entry.frame_height) != self.frame.size() {
+            return None;
+        }
+        // 仓储里的 RGBA 换成 GPUI 约定的 BGRA
+        let mut data = entry.frame_rgba;
+        for pixel in data.chunks_exact_mut(4) {
+            pixel.swap(0, 2);
+        }
+        let frame = FrozenFrame::from_captured(CapturedScreen {
+            width: entry.frame_width,
+            height: entry.frame_height,
+            data,
+        })
+        .ok()?;
+        let (w, h) = frame.size();
+        let annotations = match &entry.canvas_history[..] {
+            [] | b"{}" => AnnotationLayer::new(w, h, self.scale).ok(),
+            bytes => AnnotationLayer::from_history(w, h, self.scale, bytes)
+                .inspect_err(|e| tracing::warn!(error = %e, "恢复历史标注失败"))
+                .ok(),
+        };
+        let (x, y, sw, sh) = entry.selection;
+        let selection = self.screen_bounds.intersect(&PhysicalRect::new(x, y, sw, sh))?;
+        Some(PreparedEntry {
+            frame,
+            annotations,
+            selection,
+        })
+    }
+
+    /// 清掉与旧底图 / 标注绑定的瞬态：标注拖动、文字输入、悬停层级与分块图。
+    fn clear_view_transients(&mut self) {
+        self.annotating = false;
+        self.pending_annotation_point = None;
+        self.tool = AnnotationTool::None;
+        self.text_edit = None;
+        self.pick.clear();
+        self.click_window = None;
+        for (_, sprite) in self.tile_sprites.drain() {
+            self.pending_drops.push(sprite.image);
+        }
+    }
+
+    /// 应用一条历史现场；第一次离开当前截图时把它暂存起来。
+    fn install_history_entry(&mut self, prepared: PreparedEntry) {
+        self.clear_view_transients();
+        let old_frame = std::mem::replace(&mut self.frame, prepared.frame);
+        let old_layer = std::mem::replace(&mut self.annotations, prepared.annotations);
+        let old_state = self.state;
+        let old_region = self.region_mask.take();
+        if let Some(image) = self.region_overlay.take() {
+            self.pending_drops.push(image);
+        }
+        self.region_draft = None;
+        if let Some(host) = self.history_host.as_mut() {
+            if host.live.is_none() {
+                host.live = Some(LiveEndpoint {
+                    frame: old_frame,
+                    annotations: old_layer,
+                    state: old_state,
+                    region_mask: old_region,
+                });
+            } else {
+                // 历史记录之间切换：上一条历史的图像不再需要
+                self.pending_drops.push(old_frame.image());
+            }
+        }
+        self.state = SelectionState::Selected {
+            rect: prepared.selection,
+        };
+        self.refresh_annotation_tiles();
+    }
+
+    /// 切回暂存的当前截图。
+    ///
+    /// # 返回
+    /// 是否确实切回；没有暂存时为 `false`。
+    fn restore_live_endpoint(&mut self) -> bool {
+        let Some(live) = self.history_host.as_mut().and_then(|h| h.live.take()) else {
+            return false;
+        };
+        self.clear_view_transients();
+        let history_frame = std::mem::replace(&mut self.frame, live.frame);
+        self.pending_drops.push(history_frame.image());
+        self.annotations = live.annotations;
+        self.state = live.state;
+        self.clear_region();
+        self.region_mask = live.region_mask;
+        self.rebuild_region_overlay();
+        self.refresh_annotation_tiles();
+        true
+    }
+
+    /// 让标注层重新输出全部预览块（恢复标注层之后调用）。
+    fn refresh_annotation_tiles(&mut self) {
+        self.run_layer(|layer, base| layer.refresh(base));
+    }
+
+    /// 接入截图历史出口：每次导出成功后收到整帧底图、选区、标注历史与结果图。
+    ///
+    /// # 参数
+    /// - `sink`：接收来源与完整现场；应只做投递（写盘在别的线程）。
+    ///
+    /// ```ignore
+    /// view.set_history_sink(|source, snapshot| recorder.submit_snapshot(policy(), source, snapshot));
+    /// ```
+    pub fn set_history_sink(&mut self, sink: impl Fn(HistorySource, HistorySnapshot) + 'static) {
+        self.history_sink = Some(Box::new(sink));
+    }
+
+    /// 为一次导出准备历史现场；未接入历史出口时返回 `None`（不拷贝整帧）。
+    ///
+    /// # 参数
+    /// - `width` / `height` / `rgba`：导出结果图。
+    fn history_snapshot(&self, width: u32, height: u32, rgba: &[u8]) -> Option<HistorySnapshot> {
+        self.history_sink.as_ref()?;
+        let selection = self.current_selection()?;
+        let (frame_width, frame_height, frame_rgba) = self.frame.crop_rgba(self.frame.bounds())?;
+        let canvas_history = self
+            .annotations
+            .as_ref()
+            .filter(|layer| layer.item_count() > 0 || layer.can_undo() || layer.can_redo())
+            .and_then(|layer| layer.serialize_history().ok())
+            .unwrap_or_default();
+        Some(HistorySnapshot {
+            frame_width,
+            frame_height,
+            frame_rgba,
+            selection: (selection.x, selection.y, selection.width, selection.height),
+            canvas_history,
+            result_width: width,
+            result_height: height,
+            result_rgba: rgba.to_vec(),
+        })
+    }
+
+    /// 把现场交给历史出口。
+    fn record_history(&self, source: HistorySource, snapshot: Option<HistorySnapshot>) {
+        if let (Some(sink), Some(snapshot)) = (&self.history_sink, snapshot) {
+            sink(source, snapshot);
+        }
+    }
+
+    /// 取视图持有的共享配置（`set_style_config` 注入）。
+    fn config_handle(&self) -> Option<&SharedConfig> {
+        self.style_config.as_ref()
+    }
+
+    /// 导出时记下当前选区，供「选择上一次选区」使用。
+    fn remember_selection(&self) {
+        if let Some(rect) = self.current_selection() {
+            self.persist_previous_selection(rect);
+        }
+    }
+
+    /// 把选区写入 `previous_selection` 并落盘；失败只记日志。
+    fn persist_previous_selection(&self, rect: PhysicalRect) {
+        let Some(config) = self.config_handle() else {
+            return;
+        };
+        let mut store = config.borrow_mut();
+        let doc = store.document();
+        let int = |key: &str| doc.value(key).as_i64().and_then(|n| i32::try_from(n).ok()).unwrap_or(0);
+        let style = SelectionStyle {
+            corner_radius: int("screenshot_selection/corner_radius"),
+            shadow_width: int("screenshot_selection/shadow_width"),
+            lock_aspect_ratio: doc.value("screenshot_selection/lock_aspect_ratio").as_bool().unwrap_or(false),
+        };
+        let value = encode(rect, self.scale, style);
+        if let Err(e) = store.set_value(PREVIOUS_SELECTION_KEY, value) {
+            tracing::warn!(error = %e, "写入上一次选区失败");
+            return;
+        }
+        if let Err(e) = store.flush() {
+            tracing::warn!(error = %e, "上一次选区落盘失败");
+        }
+    }
+
+    /// 选中上一次导出时保存的选区（空闲或已有选区时可用，替换当前选区）。
+    ///
+    /// # 返回
+    /// 是否成功选中；没有保存的选区、裁剪后太小或正在标注时为 `false`。
+    ///
+    /// ```ignore
+    /// view.select_previous_selection();
+    /// ```
+    pub fn select_previous_selection(&mut self) -> bool {
+        if self.annotating || !matches!(self.state, SelectionState::Idle | SelectionState::Selected { .. }) {
+            return false;
+        }
+        let Some(config) = self.config_handle() else {
+            return false;
+        };
+        let value = config.borrow().document().value(PREVIOUS_SELECTION_KEY);
+        let Some(rect) = decode(&value, self.scale, self.screen_bounds, DEFAULT_MINIMUM_SELECTION_SIZE) else {
+            return false;
+        };
+        self.pick.clear();
+        self.click_window = None;
+        self.clear_region();
+        self.state = SelectionState::Selected { rect };
+        true
+    }
+
 
     /// 复制选区到剪贴板；成功后关闭覆盖窗，失败保留窗口并提示。
     fn copy_selection_and_close(&mut self) -> OverlayOutcome {
@@ -1969,10 +2914,13 @@ impl ScreenshotOverlayView {
             self.status_message = Some("选区无效".into());
             return OverlayOutcome::Stay;
         };
+        self.remember_selection();
+        let snapshot = self.history_snapshot(w, h, &rgba);
         match self.output.copy_image(w, h, &rgba) {
             Ok(()) => {
                 tracing::info!(width = w, height = h, "截图已复制到剪贴板");
                 self.output.after_copy(w, h, &rgba);
+                self.record_history(HistorySource::Copied, snapshot);
                 OverlayOutcome::Close
             }
             Err(e) => {
@@ -2014,12 +2962,15 @@ impl ScreenshotOverlayView {
             self.status_message = Some("选区无效".into());
             return OverlayOutcome::Stay;
         };
+        self.remember_selection();
+        let snapshot = self.history_snapshot(w, h, &rgba);
         if let Some(job) = self.output.begin_manual_save(request) {
             self.pending_save = Some(PendingSave {
                 job,
                 width: w,
                 height: h,
                 rgba,
+                snapshot,
             });
             return OverlayOutcome::AwaitSave;
         }
@@ -2030,7 +2981,11 @@ impl ScreenshotOverlayView {
                 remember: false,
             }
         });
-        self.complete_save(result)
+        let outcome = self.complete_save(result);
+        if outcome == OverlayOutcome::Close {
+            self.record_history(HistorySource::Saved, snapshot);
+        }
+        outcome
     }
 
     /// 处理保存结果：成功关闭覆盖窗，取消保持原样，失败保留窗口并提示。
@@ -2081,9 +3036,12 @@ impl ScreenshotOverlayView {
             self.status_message = Some("选区无效".into());
             return OverlayOutcome::Stay;
         };
+        self.remember_selection();
+        let snapshot = self.history_snapshot(w, h, &rgba);
         match self.output.pin_image(rect, w, h, rgba) {
             Ok(()) => {
                 tracing::info!(rect = ?rect, width = w, height = h, "选区已贴图");
+                self.record_history(HistorySource::Pinned, snapshot);
                 OverlayOutcome::Close
             }
             Err(e) => {
@@ -2687,9 +3645,13 @@ impl ScreenshotOverlayView {
             let result = pending
                 .job
                 .run(pending.width, pending.height, &pending.rgba);
+            let snapshot = pending.snapshot;
             let _ = handle.update(cx, |_, window, app| {
                 entity.update(app, |view, cx| {
                     let outcome = view.complete_save(result);
+                    if outcome == OverlayOutcome::Close {
+                        view.record_history(HistorySource::Saved, snapshot);
+                    }
                     view.finish(outcome, window, cx);
                 });
             });
@@ -2875,7 +3837,21 @@ impl Render for ScreenshotOverlayView {
         let scale = self.scale;
         // 窗口点击候选期间不画框选遮罩，改画窗口高亮
         let sel = if self.click_window.is_some() { None } else { self.current_selection() };
-        let highlight = self.window_highlight();
+        // 加 / 减区域期间没有当前选区，用底区域的外接矩形来显示遮罩
+        let sel = sel.or_else(|| {
+            self.region_op.as_ref()?;
+            let (x, y, w, h) = self.region_mask.as_ref()?.bounds()?;
+            Some(PhysicalRect::new(x, y, w, h))
+        });
+        let loading_history = self.history_busy();
+        if loading_history {
+            self.poll_history();
+        }
+        let refining = self.poll_refinement() || self.history_busy();
+        let highlight = self.highlight_transition.advance(self.window_highlight(), Instant::now());
+        if refining || self.highlight_transition.is_running() {
+            window.request_animation_frame();
+        }
         let (frame_w, frame_h) = self.frame.size();
         let screen_w = frame_w as f32 / scale;
         let screen_h = frame_h as f32 / scale;
@@ -2923,6 +3899,18 @@ impl Render for ScreenshotOverlayView {
                     this.finish(outcome, window, cx);
                 }),
             )
+            .on_scroll_wheel(cx.listener(|this, ev: &ScrollWheelEvent, window, cx| {
+                this.scale = this.scale_override.unwrap_or(window.scale_factor());
+                let lines_y = match ev.delta {
+                    ScrollDelta::Lines(p) => p.y,
+                    ScrollDelta::Pixels(p) => p.y.as_f32(),
+                };
+                let point = this.physical_point(ev.position);
+                if this.handle_scroll(lines_y, point) {
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            }))
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
                 let mods = ev.keystroke.modifiers;
                 // 文字输入进行中：按键先交给输入框（字符本身走系统输入法通道）
@@ -2959,6 +3947,60 @@ impl Render for ScreenshotOverlayView {
                     .h(self.lp(sprite.h as i32))
                     .object_fit(ObjectFit::Fill),
             );
+        }
+
+        // 自定义区域草稿：折线 / 曲线 / 自由绘制的轮廓与顶点
+        if let Some(draft) = &self.region_draft
+            && !draft.is_empty()
+            && let Some(shape) = self.region_type.shape()
+        {
+            let cursor = (self.cursor_pos.x as f32, self.cursor_pos.y as f32);
+            let vertices = draft.preview(Some(cursor));
+            let outline: Vec<(f32, f32)> = flatten_commands(&shape_commands(shape, &vertices))
+                .into_iter()
+                .map(|(x, y)| (x / scale, y / scale))
+                .collect();
+            let closed = outline.len() >= 3;
+            root = root.child(
+                canvas(
+                    |_, _, _| (),
+                    move |bounds, (), window, _| {
+                        let mut builder = PathBuilder::stroke(px(2.0));
+                        let at = |(x, y): (f32, f32)| snow_ui::ui::point(bounds.origin.x + px(x), bounds.origin.y + px(y));
+                        if let Some(first) = outline.first() {
+                            builder.move_to(at(*first));
+                            for p in &outline[1..] {
+                                builder.line_to(at(*p));
+                            }
+                            if closed {
+                                builder.close();
+                            }
+                        }
+                        if let Ok(path) = builder.build() {
+                            window.paint_path(path, rgb(ACCENT_COLOR));
+                        }
+                    },
+                )
+                .absolute()
+                .top(px(0.0))
+                .left(px(0.0))
+                .w(px(screen_w))
+                .h(px(screen_h)),
+            );
+            if shape != RegionShape::Freehand {
+                for &(x, y) in draft.points() {
+                    root = root.child(
+                        div()
+                            .absolute()
+                            .top(px(y / scale - 3.0))
+                            .left(px(x / scale - 3.0))
+                            .w(px(6.0))
+                            .h(px(6.0))
+                            .rounded_full()
+                            .bg(rgb(ACCENT_COLOR)),
+                    );
+                }
+            }
         }
 
         // 智能选区：悬停窗口的描边与尺寸标签
@@ -3022,21 +4064,37 @@ impl Render for ScreenshotOverlayView {
                 root = root.child(dark(sy, sx + sw, screen_w - (sx + sw), sh));
             }
 
+            // 自定义区域：外接矩形内的压暗 + 轮廓图；此时没有矩形框和手柄
+            let custom_region = self.region_overlay.is_some();
+            if let Some(overlay) = &self.region_overlay {
+                root = root.child(
+                    img(ImageSource::Render(Arc::clone(overlay)))
+                        .absolute()
+                        .top(px(sy))
+                        .left(px(sx))
+                        .w(px(sw))
+                        .h(px(sh))
+                        .object_fit(ObjectFit::Fill),
+                );
+            }
+
             // 选区框
-            root = root.child(
-                div()
-                    .absolute()
-                    .top(px(sy))
-                    .left(px(sx))
-                    .w(px(sw))
-                    .h(px(sh))
-                    .border_1()
-                    .border_color(rgb(ACCENT_COLOR)),
-            );
+            if !custom_region {
+                root = root.child(
+                    div()
+                        .absolute()
+                        .top(px(sy))
+                        .left(px(sx))
+                        .w(px(sw))
+                        .h(px(sh))
+                        .border_1()
+                        .border_color(rgb(ACCENT_COLOR)),
+                );
+            }
 
             // 八向手柄（边长保持约 8 个逻辑像素）
             let handle_size = (HANDLE_LOGICAL_SIZE * scale).round() as i32;
-            for (_, hr) in handle_rects(s, handle_size) {
+            for (_, hr) in handle_rects(s, handle_size).into_iter().filter(|_| !custom_region) {
                 root = root.child(
                     div()
                         .absolute()
@@ -3123,6 +4181,11 @@ impl Render for ScreenshotOverlayView {
                     .h(px(screen_h))
                     .bg(rgba(IDLE_MASK_COLOR)),
             );
+        }
+
+        // 选区形状栏：选区阶段浮在屏幕顶部；选区确定后贴在工具栏上方（含加 / 减区域）
+        if let Some(bar) = self.render_region_bar(toolbar_pos, (screen_w, screen_h), cx) {
+            root = root.child(bar);
         }
 
         // OCR 结果：文本框描边 + 结果面板；翻译结果面板
@@ -3354,17 +4417,575 @@ mod tests {
     struct FakeHover(PhysicalRect);
 
     impl WindowHover for FakeHover {
-        /// 点在矩形内返回矩形，否则无窗口。
-        fn hover(&mut self, point: PhysicalPoint) -> Option<PhysicalRect> {
+        /// 点在矩形内返回单层路径，否则无窗口。
+        fn hover(&mut self, point: PhysicalPoint, _target: PickTarget) -> Option<Vec<PhysicalRect>> {
             let r = self.0;
-            (point.x >= r.x && point.x < r.right() && point.y >= r.y && point.y < r.bottom()).then_some(r)
+            (point.x >= r.x && point.x < r.right() && point.y >= r.y && point.y < r.bottom()).then(|| vec![r])
         }
+    }
+
+    /// 测试用多层来源：点落在哪几层内就返回哪几层（按钮 → 面板 → 窗口，自深到浅）。
+    /// `deeper` 非空时，第一次悬停后会"细化"出一个更深层，取走后不再待定。
+    #[derive(Default)]
+    struct FakeLayers {
+        /// 待吐出的细化路径。
+        deeper: Option<Vec<PhysicalRect>>,
+    }
+
+    impl WindowHover for FakeLayers {
+        /// 按点落入的层数返回路径；窗口目标时只给最后一层。
+        fn hover(&mut self, point: PhysicalPoint, target: PickTarget) -> Option<Vec<PhysicalRect>> {
+            let layers = [
+                PhysicalRect::new(60, 50, 20, 15),
+                PhysicalRect::new(50, 40, 80, 60),
+                PhysicalRect::new(40, 30, 150, 120),
+            ];
+            let hit: Vec<PhysicalRect> = layers.into_iter().filter(|r| r.contains(point)).collect();
+            if hit.is_empty() {
+                return None;
+            }
+            match target {
+                PickTarget::Window => hit.last().map(|r| vec![*r]),
+                PickTarget::WindowSubElement => Some(hit),
+            }
+        }
+
+        /// 取走待吐出的细化路径。
+        fn refinement(&mut self) -> Option<Vec<PhysicalRect>> {
+            self.deeper.take()
+        }
+
+        /// 还有细化路径没取走就算待定。
+        fn refinement_pending(&self) -> bool {
+            self.deeper.is_some()
+        }
+    }
+
+    /// 带三层假来源的视图。
+    fn layered_view() -> ScreenshotOverlayView {
+        let (mut view, _) = view_with(300, 200, 1.0, false);
+        view.set_window_hover(Some(Box::new(FakeLayers::default())), PickTarget::WindowSubElement, false);
+        view
+    }
+
+    /// 子控件目标默认高亮最深层；滚轮向上依次向外，向下回到更深层。
+    #[test]
+    fn wheel_walks_layers_outward_and_inward() {
+        let mut view = layered_view();
+        let p = PhysicalPoint::new(65, 55);
+        view.handle_mouse_move(p);
+        assert_eq!(view.window_highlight(), Some(PhysicalRect::new(60, 50, 20, 15)));
+        assert!(view.handle_scroll(1.0, p));
+        assert_eq!(view.window_highlight(), Some(PhysicalRect::new(50, 40, 80, 60)));
+        assert!(view.handle_scroll(1.0, p));
+        assert_eq!(view.window_highlight(), Some(PhysicalRect::new(40, 30, 150, 120)));
+        assert!(view.handle_scroll(-1.0, p));
+        assert_eq!(view.window_highlight(), Some(PhysicalRect::new(50, 40, 80, 60)));
+    }
+
+    /// 滚轮选好的层级在同一路径内移动鼠标时保持，单击选中的就是它。
+    #[test]
+    fn wheel_selection_survives_move_and_is_clicked() {
+        let mut view = layered_view();
+        let p = PhysicalPoint::new(65, 55);
+        view.handle_mouse_move(p);
+        view.handle_scroll(1.0, p);
+        view.handle_mouse_move(PhysicalPoint::new(66, 56));
+        drag(&mut view, (66, 56), (68, 57));
+        assert_eq!(view.state, SelectionState::Selected { rect: PhysicalRect::new(50, 40, 80, 60) });
+    }
+
+    /// 后台细化到达后（无需鼠标事件）渲染前轮询即可吸收，高亮切到更深层；取走后不再待定。
+    #[test]
+    fn refinement_is_absorbed_on_poll_without_mouse_events() {
+        let deeper = vec![
+            PhysicalRect::new(62, 52, 16, 12),
+            PhysicalRect::new(60, 50, 20, 15),
+            PhysicalRect::new(50, 40, 80, 60),
+            PhysicalRect::new(40, 30, 150, 120),
+        ];
+        let (mut view, _) = view_with(300, 200, 1.0, false);
+        let source = FakeLayers { deeper: Some(deeper) };
+        view.set_window_hover(Some(Box::new(source)), PickTarget::WindowSubElement, false);
+        // 点落在三层内：先拿到前台结果，此时细化还没吸收
+        let p = PhysicalPoint::new(65, 55);
+        // 只取前台结果，不触发细化吸收
+        let path = view.window_hover.as_mut().unwrap().hover(p, PickTarget::WindowSubElement).unwrap();
+        view.pick.apply_hit_path(&path, view.screen_bounds, 1);
+        assert_eq!(view.window_highlight(), Some(PhysicalRect::new(60, 50, 20, 15)));
+        assert!(!view.poll_refinement());
+        assert_eq!(view.window_highlight(), Some(PhysicalRect::new(62, 52, 16, 12)));
+    }
+
+    /// 右键回退到智能选区时立刻按光标位置命中，不必等下一次移动。
+    #[test]
+    fn right_click_resumes_hover_immediately() {
+        let mut view = layered_view();
+        view.handle_mouse_move(PhysicalPoint::new(65, 55));
+        drag(&mut view, (65, 55), (200, 150));
+        assert!(matches!(view.state, SelectionState::Selected { .. }));
+        // 光标回到控件上再右键：不再移动鼠标，高亮也应立刻出现
+        view.handle_mouse_move(PhysicalPoint::new(65, 55));
+        view.handle_right_click();
+        assert_eq!(view.window_highlight(), Some(PhysicalRect::new(60, 50, 20, 15)));
+    }
+
+    /// 复制成功后历史出口收到完整现场：整帧底图、选区、标注历史与结果图；复制失败则不记录。
+    #[test]
+    fn copy_records_full_snapshot_only_on_success() {
+        let (mut view, _) = view_with(120, 80, 1.0, false);
+        let got: Rc<RefCell<Vec<(HistorySource, HistorySnapshot)>>> = Rc::default();
+        let sink = Rc::clone(&got);
+        view.set_history_sink(move |source, snapshot| sink.borrow_mut().push((source, snapshot)));
+        drag(&mut view, (10, 10), (70, 50));
+        assert!(matches!(view.state, SelectionState::Selected { .. }));
+        view.apply_action(ToolbarAction::Copy);
+        let recorded = got.borrow();
+        assert_eq!(recorded.len(), 1);
+        let (source, snapshot) = &recorded[0];
+        assert_eq!(*source, HistorySource::Copied);
+        assert_eq!((snapshot.frame_width, snapshot.frame_height), (120, 80));
+        assert_eq!(snapshot.frame_rgba.len(), 120 * 80 * 4);
+        assert_eq!(snapshot.selection, (10, 10, 61, 41));
+        assert_eq!((snapshot.result_width, snapshot.result_height), (61, 41));
+        assert!(snapshot.canvas_history.is_empty());
+        drop(recorded);
+
+        let (mut failing, _) = view_with(120, 80, 1.0, true);
+        let none: Rc<RefCell<Vec<HistorySource>>> = Rc::default();
+        let sink = Rc::clone(&none);
+        failing.set_history_sink(move |source, _| sink.borrow_mut().push(source));
+        drag(&mut failing, (10, 10), (70, 50));
+        failing.apply_action(ToolbarAction::Copy);
+        assert!(none.borrow().is_empty());
+    }
+
+    /// 测试用历史来源：按 ID 返回预置的现场（`None` 表示读取失败）；读取立即就绪。
+    struct FakeHistory {
+        /// 记录 ID（新的在前）。
+        ids: Vec<String>,
+        /// 预置的现场。
+        entries: std::collections::HashMap<String, Option<LoadedEntry>>,
+        /// 已发起、等待取走的结果。
+        ready: Vec<(String, Option<LoadedEntry>)>,
+    }
+
+    impl HistoryProvider for FakeHistory {
+        /// 返回预置的 ID 列表。
+        fn ids(&mut self) -> Vec<String> {
+            self.ids.clone()
+        }
+
+        /// 读取立即完成：把预置结果放进就绪队列。
+        fn begin_load(&mut self, id: &str) {
+            let entry = self.entries.get(id).cloned().flatten();
+            self.ready.push((id.to_string(), entry));
+        }
+
+        /// 取走一个就绪结果。
+        fn poll_loaded(&mut self) -> Option<(String, Option<LoadedEntry>)> {
+            self.ready.pop()
+        }
+    }
+
+    /// 纯色历史现场（底图 `w x h`，选区 `(x, y, 宽, 高)`，空标注）。
+    fn history_entry(w: u32, h: u32, shade: u8, selection: (i32, i32, i32, i32)) -> LoadedEntry {
+        LoadedEntry {
+            frame_width: w,
+            frame_height: h,
+            frame_rgba: vec![shade; (w * h * 4) as usize],
+            selection,
+            canvas_history: b"{}".to_vec(),
+        }
+    }
+
+    /// 带历史来源的 100x80 视图；`c` 是最新记录，`b` 次之，`bad` 读取失败，`big` 尺寸不符。
+    fn history_view() -> ScreenshotOverlayView {
+        let (mut view, _) = view_with(100, 80, 1.0, false);
+        let mut entries = std::collections::HashMap::new();
+        entries.insert("c".to_string(), Some(history_entry(100, 80, 50, (10, 10, 30, 20))));
+        entries.insert("b".to_string(), Some(history_entry(100, 80, 90, (20, 20, 40, 30))));
+        entries.insert("bad".to_string(), None);
+        entries.insert("big".to_string(), Some(history_entry(200, 160, 1, (0, 0, 10, 10))));
+        let ids = ["c", "b", "bad", "big"].iter().map(|s| s.to_string()).collect();
+        view.set_history_provider(Box::new(FakeHistory { ids, entries, ready: Vec::new() }));
+        view
+    }
+
+    /// 取视图底图中心像素的 R 通道（BGRA 里是第三个字节）。
+    fn center_red(view: &ScreenshotOverlayView) -> u8 {
+        view.frame.pixel_rgba(50, 40).unwrap().0
+    }
+
+    /// 往旧翻：底图、选区换成历史记录；再往旧翻到下一条；右键回到当前截图并原样恢复。
+    #[test]
+    fn history_walk_applies_entries_and_right_click_restores_live() {
+        let mut view = history_view();
+        let live_red = center_red(&view);
+        drag(&mut view, (5, 5), (60, 40));
+        let live_state = view.state;
+        assert!(matches!(live_state, SelectionState::Selected { .. }));
+
+        assert!(view.history_previous());
+        assert!(view.history_busy());
+        assert!(view.poll_history());
+        assert_eq!(center_red(&view), 50);
+        assert_eq!(view.state, SelectionState::Selected { rect: PhysicalRect::new(10, 10, 30, 20) });
+
+        assert!(view.history_previous());
+        assert!(view.poll_history());
+        assert_eq!(center_red(&view), 90);
+
+        // 右键：先回到当前截图，不是撤销选区
+        assert_eq!(view.handle_right_click(), OverlayOutcome::Stay);
+        assert_eq!(center_red(&view), live_red);
+        assert_eq!(view.state, live_state);
+        assert!(!view.history_busy());
+    }
+
+    /// 往新翻到头等于回到当前截图；已在当前截图时再往新翻无动作。
+    #[test]
+    fn history_newer_returns_to_live() {
+        let mut view = history_view();
+        let live_red = center_red(&view);
+        assert!(!view.history_next());
+        view.history_previous();
+        view.poll_history();
+        assert_eq!(center_red(&view), 50);
+        assert!(view.history_next());
+        assert_eq!(center_red(&view), live_red);
+    }
+
+    /// 读取失败的记录被跳过（不应用、不卡住），尺寸不符的同样；之后能继续往旧翻。
+    #[test]
+    fn history_skips_failed_and_mismatched_entries() {
+        let mut view = history_view();
+        view.history_previous();
+        view.poll_history();
+        view.history_previous();
+        view.poll_history();
+        assert_eq!(center_red(&view), 90);
+        // 下一条 "bad" 读取失败：画面不变，状态机不再忙
+        assert!(view.history_previous());
+        assert!(!view.poll_history());
+        assert_eq!(center_red(&view), 90);
+        assert!(!view.history_busy());
+        // 再翻：来到 "big"，尺寸不符同样被丢弃
+        assert!(view.history_previous());
+        assert!(!view.poll_history());
+        assert_eq!(center_red(&view), 90);
+        // 列表里已没有可翻的记录
+        assert!(!view.history_previous());
+    }
+
+    /// 标注拖动或拖拽选区过程中不允许翻页；没接历史来源时翻页键无效。
+    #[test]
+    fn history_navigation_is_gated() {
+        let (mut plain, _) = view_with(100, 80, 1.0, false);
+        assert!(!plain.history_previous());
+        let mut view = history_view();
+        view.handle_mouse_down(PhysicalPoint::new(5, 5), 1);
+        assert!(!view.history_previous());
+    }
+
+    /// 在 `(x, y)` 单击一次（按下 + 松开）。
+    fn click_at(view: &mut ScreenshotOverlayView, x: i32, y: i32, count: usize) {
+        view.handle_mouse_down(PhysicalPoint::new(x, y), count);
+        view.handle_mouse_up(PhysicalPoint::new(x, y));
+    }
+
+    /// 带指定选区形状的 200x150 视图。
+    fn region_view(region_type: RegionType) -> (ScreenshotOverlayView, Rc<RefCell<Recorded>>) {
+        let (mut view, rec) = view_with(200, 150, 1.0, false);
+        view.set_initial_region_type(region_type);
+        (view, rec)
+    }
+
+    /// 用折线点出一个三角形（20,20）（100,20）（60,100）并双击闭合。
+    fn draw_triangle(view: &mut ScreenshotOverlayView) {
+        click_at(view, 20, 20, 1);
+        click_at(view, 100, 20, 1);
+        click_at(view, 60, 100, 1);
+        view.handle_mouse_down(PhysicalPoint::new(60, 100), 2);
+        view.handle_mouse_up(PhysicalPoint::new(60, 100));
+    }
+
+    /// 折线：逐点单击、双击闭合后得到自定义区域，选区是它的外接矩形。
+    #[test]
+    fn polyline_click_and_double_click_commits_region() {
+        let (mut view, _) = region_view(RegionType::Polyline);
+        click_at(&mut view, 20, 20, 1);
+        click_at(&mut view, 100, 20, 1);
+        assert_eq!(view.state, SelectionState::Idle, "还在画");
+        assert!(view.region_draft.is_some());
+        click_at(&mut view, 60, 100, 1);
+        view.handle_mouse_down(PhysicalPoint::new(60, 100), 2);
+        let SelectionState::Selected { rect } = view.state else {
+            panic!("应已确认选区: {:?}", view.state);
+        };
+        assert!((rect.x - 20).abs() <= 1 && (rect.width - 80).abs() <= 2 && (rect.height - 80).abs() <= 2);
+        let mask = view.region_mask.as_ref().unwrap();
+        assert!(mask.contains(60, 40) && !mask.contains(25, 95));
+        assert!(view.region_overlay.is_some());
+        assert!(view.region_draft.is_none());
+    }
+
+    /// Enter 完成草稿、Backspace 撤销顶点；点数不足时 Enter 丢弃草稿。
+    #[test]
+    fn enter_finishes_and_backspace_removes_vertex() {
+        let (mut view, _) = region_view(RegionType::Curve);
+        click_at(&mut view, 20, 20, 1);
+        click_at(&mut view, 100, 20, 1);
+        click_at(&mut view, 60, 100, 1);
+        click_at(&mut view, 10, 90, 1);
+        view.handle_keystroke("backspace", false, false, false);
+        assert_eq!(view.region_draft.as_ref().unwrap().points().len(), 3);
+        view.handle_keystroke("enter", false, false, false);
+        assert!(view.region_mask.is_some());
+
+        let (mut few, _) = region_view(RegionType::Polyline);
+        click_at(&mut few, 20, 20, 1);
+        click_at(&mut few, 50, 50, 1);
+        few.handle_keystroke("enter", false, false, false);
+        assert!(few.region_draft.is_none() && few.region_mask.is_none());
+        assert_eq!(few.state, SelectionState::Idle);
+    }
+
+    /// 自由绘制：按住拖一圈、松开即完成。
+    #[test]
+    fn freehand_drag_and_release_commits_region() {
+        let (mut view, _) = region_view(RegionType::Freehand);
+        view.handle_mouse_down(PhysicalPoint::new(30, 30), 1);
+        view.handle_mouse_move(PhysicalPoint::new(120, 30));
+        view.handle_mouse_move(PhysicalPoint::new(120, 110));
+        view.handle_mouse_move(PhysicalPoint::new(30, 110));
+        assert!(view.handle_mouse_up(PhysicalPoint::new(30, 70)));
+        assert!(matches!(view.state, SelectionState::Selected { .. }));
+        assert!(view.region_mask.as_ref().unwrap().contains(70, 70));
+    }
+
+    /// 导出：区域外（外接矩形内）alpha 为 0，区域内保持不透明。
+    #[test]
+    fn export_makes_outside_of_region_transparent() {
+        let (mut view, rec) = region_view(RegionType::Polyline);
+        draw_triangle(&mut view);
+        view.apply_action(ToolbarAction::Copy);
+        let recorded = rec.borrow();
+        let (w, _, rgba) = &recorded.images[0];
+        let alpha = |x: usize, y: usize| rgba[(y * *w as usize + x) * 4 + 3];
+        let (rx, ry) = (20usize, 20usize);
+        assert_eq!(alpha(60 - rx, 40 - ry), 255, "三角形内");
+        assert_eq!(alpha(23 - rx, 95 - ry), 0, "外接矩形内、三角形外");
+    }
+
+    /// 右键：先取消草稿；再右键关闭。已确认的区域右键清掉，回到选区阶段。
+    #[test]
+    fn right_click_cancels_draft_then_clears_region() {
+        let (mut view, _) = region_view(RegionType::Polyline);
+        click_at(&mut view, 20, 20, 1);
+        assert_eq!(view.handle_right_click(), OverlayOutcome::Stay);
+        assert!(view.region_draft.is_none());
+        assert_eq!(view.handle_right_click(), OverlayOutcome::Close);
+
+        draw_triangle(&mut view);
+        assert!(view.region_mask.is_some());
+        assert_eq!(view.handle_right_click(), OverlayOutcome::Stay);
+        assert!(view.region_mask.is_none() && view.region_overlay.is_none());
+        assert_eq!(view.state, SelectionState::Idle);
+    }
+
+    /// 区域框内按住拖动整体移动，蒙版跟着平移；点框外则整体重置回选区阶段（不立即开始画）。
+    #[test]
+    fn region_moves_as_a_whole_and_outside_click_resets() {
+        let (mut view, _) = region_view(RegionType::Polyline);
+        draw_triangle(&mut view);
+        view.handle_mouse_down(PhysicalPoint::new(60, 40), 1);
+        view.handle_mouse_move(PhysicalPoint::new(70, 45));
+        view.handle_mouse_up(PhysicalPoint::new(70, 45));
+        let mask = view.region_mask.as_ref().unwrap();
+        assert!(mask.contains(70, 45) && !mask.contains(25, 22));
+        let SelectionState::Selected { rect } = view.state else {
+            panic!("应保持选中");
+        };
+        assert!((rect.x - 30).abs() <= 1 && (rect.y - 25).abs() <= 1);
+
+        view.handle_mouse_down(PhysicalPoint::new(190, 140), 1);
+        assert_eq!(view.state, SelectionState::Idle);
+        assert!(view.region_mask.is_none() && view.region_draft.is_none());
+    }
+
+    /// 减区域（折线操作数）：从三角形里挖掉一块，挖掉的位置不再属于选区，外接矩形不变。
+    #[test]
+    fn subtract_polyline_operand_cuts_hole() {
+        let (mut view, _) = region_view(RegionType::Polyline);
+        draw_triangle(&mut view);
+        assert!(view.begin_region_op(RegionOp::Subtract));
+        assert_eq!(view.state, SelectionState::Idle, "操作期间回到选区阶段");
+        // 在三角形中间画一个小三角形挖掉
+        click_at(&mut view, 50, 30, 1);
+        click_at(&mut view, 70, 30, 1);
+        click_at(&mut view, 60, 45, 1);
+        view.handle_mouse_down(PhysicalPoint::new(60, 45), 2);
+        assert!(view.region_op.is_none());
+        let mask = view.region_mask.as_ref().unwrap();
+        assert!(!mask.contains(60, 35), "被挖掉");
+        assert!(mask.contains(60, 60), "没挖的部分还在");
+        assert!(matches!(view.state, SelectionState::Selected { .. }));
+    }
+
+    /// 加区域（矩形操作数，框选）：并入后外接矩形扩大；普通矩形选区也能作为底。
+    #[test]
+    fn add_rectangle_operand_unions_with_plain_rect_selection() {
+        let (mut view, _) = region_view(RegionType::Rectangle);
+        drag(&mut view, (10, 10), (60, 50));
+        assert!(view.begin_region_op(RegionOp::Add));
+        assert!(view.region_mask.is_some(), "普通矩形先转成蒙版");
+        drag(&mut view, (80, 30), (140, 90));
+        let SelectionState::Selected { rect } = view.state else {
+            panic!("应已确认: {:?}", view.state);
+        };
+        assert!(rect.x <= 10 && rect.right() >= 140 && rect.bottom() >= 90);
+        let mask = view.region_mask.as_ref().unwrap();
+        assert!(mask.contains(30, 30) && mask.contains(100, 60));
+        assert!(!mask.contains(70, 20), "两块之间的空隙不属于选区");
+    }
+
+    /// Esc / 右键取消加减区域：本来是普通矩形就还原成矩形，本来是自定义区域就保持原区域。
+    #[test]
+    fn cancel_region_op_restores_previous_selection() {
+        let (mut view, _) = region_view(RegionType::Rectangle);
+        drag(&mut view, (10, 10), (60, 50));
+        let before = view.state;
+        view.begin_region_op(RegionOp::Subtract);
+        view.handle_keystroke("escape", false, false, false);
+        assert_eq!(view.state, before);
+        assert!(view.region_mask.is_none() && view.region_op.is_none());
+
+        let (mut custom, _) = region_view(RegionType::Polyline);
+        draw_triangle(&mut custom);
+        let region_state = custom.state;
+        custom.begin_region_op(RegionOp::Add);
+        assert_eq!(custom.handle_right_click(), OverlayOutcome::Stay);
+        assert_eq!(custom.state, region_state);
+        assert!(custom.region_mask.is_some() && custom.region_op.is_none());
+    }
+
+    /// 减掉整块（结果为空）时丢弃操作数，操作保持进行；没有选区或标注中不能开始。
+    #[test]
+    fn region_op_rejects_empty_result_and_invalid_start() {
+        let (mut view, _) = region_view(RegionType::Rectangle);
+        assert!(!view.begin_region_op(RegionOp::Add), "没有选区");
+        drag(&mut view, (10, 10), (60, 50));
+        view.begin_region_op(RegionOp::Subtract);
+        drag(&mut view, (0, 0), (150, 140));
+        assert!(view.region_op.is_some(), "整块被减空：操作仍在进行");
+        assert!(view.region_mask.as_ref().is_some_and(|m| !m.is_empty()), "底区域没被破坏");
+    }
+
+    /// 加减区域期间切换形状：保留操作与底区域，只丢草稿。
+    #[test]
+    fn switching_type_during_region_op_keeps_the_operation() {
+        let (mut view, _) = region_view(RegionType::Polyline);
+        draw_triangle(&mut view);
+        view.begin_region_op(RegionOp::Add);
+        click_at(&mut view, 150, 20, 1);
+        assert!(view.switch_region_type(RegionType::Freehand));
+        assert!(view.region_op.is_some() && view.region_mask.is_some());
+        assert!(view.region_draft.is_none());
+        assert!(!view.switch_region_type(RegionType::Freehand), "形状没变不算切换");
+    }
+
+    /// Ctrl+Tab 循环选区形状并写回配置；切换会丢弃当前选区；非矩形形状下智能选区不高亮。
+    #[test]
+    fn ctrl_tab_cycles_region_type_and_disables_smart_selection() {
+        let mut view = hover_view(1.0);
+        view.handle_mouse_move(PhysicalPoint::new(60, 50));
+        assert!(view.window_highlight().is_some());
+        let dir = std::env::temp_dir().join(format!(
+            "cisox-region-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = Rc::new(RefCell::new(ConfigStore::open(dir.join("config.json"))));
+        view.set_style_config(config.clone(), "zh-CN");
+        view.handle_keystroke("tab", true, false, false);
+        assert_eq!(view.region_type(), RegionType::Polyline);
+        assert_eq!(
+            config.borrow().document().value("screenshot_selection/region_type").as_str(),
+            Some("polyline")
+        );
+        view.handle_mouse_move(PhysicalPoint::new(61, 51));
+        assert_eq!(view.window_highlight(), None);
+        view.handle_keystroke("tab", true, true, false);
+        assert_eq!(view.region_type(), RegionType::Rectangle);
+        view.handle_mouse_move(PhysicalPoint::new(62, 52));
+        assert!(view.window_highlight().is_some(), "回到矩形后恢复智能选区");
+        // 切换时丢掉已有选区
+        drag(&mut view, (10, 10), (80, 60));
+        view.handle_keystroke("tab", true, false, false);
+        assert_eq!(view.state, SelectionState::Idle);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 导出时记下选区；新一次截图里用快捷键动作就能选回同一块区域。
+    #[test]
+    fn previous_selection_is_saved_on_export_and_restored() {
+        let dir = std::env::temp_dir().join(format!(
+            "cisox-prevsel-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+
+        let (mut first, _) = view_with(300, 200, 1.0, false);
+        first.set_style_config(Rc::new(RefCell::new(ConfigStore::open(&path))), "en-US");
+        first.state = SelectionState::Selected { rect: PhysicalRect::new(20, 30, 100, 80) };
+        first.remember_selection();
+
+        let (mut second, _) = view_with(300, 200, 1.0, false);
+        second.set_style_config(Rc::new(RefCell::new(ConfigStore::open(&path))), "en-US");
+        assert!(second.select_previous_selection());
+        assert_eq!(second.state, SelectionState::Selected { rect: PhysicalRect::new(20, 30, 100, 80) });
+
+        // 没有保存值（或在标注 / 拖动中）时返回 false
+        let (mut empty, _) = view_with(300, 200, 1.0, false);
+        assert!(!empty.select_previous_selection());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 没有智能选区来源或非空闲态时，滚轮不被消费。
+    #[test]
+    fn wheel_ignored_without_source_or_when_not_idle() {
+        let (mut plain, _) = view_with(300, 200, 1.0, false);
+        assert!(!plain.handle_scroll(1.0, PhysicalPoint::new(5, 5)));
+        let mut view = layered_view();
+        view.handle_mouse_move(PhysicalPoint::new(65, 55));
+        view.state = SelectionState::Selected { rect: PhysicalRect::new(0, 0, 50, 50) };
+        assert!(!view.handle_scroll(1.0, PhysicalPoint::new(65, 55)));
+    }
+
+    /// 快捷键切换目标：窗口目标直接高亮顶层窗口，再切回子控件；无配置时不 panic。
+    #[test]
+    fn toggle_target_switches_layer() {
+        let mut view = layered_view();
+        let p = PhysicalPoint::new(65, 55);
+        view.handle_mouse_move(p);
+        assert!(view.toggle_selection_target());
+        assert_eq!(view.window_highlight(), Some(PhysicalRect::new(40, 30, 150, 120)));
+        assert!(view.toggle_selection_target());
+        assert_eq!(view.window_highlight(), Some(PhysicalRect::new(60, 50, 20, 15)));
     }
 
     /// 带假窗口来源（窗口 40,30 100x80）的视图。
     fn hover_view(scale: f32) -> ScreenshotOverlayView {
         let (mut view, _) = view_with(300, 200, scale, false);
-        view.set_window_hover(Some(Box::new(FakeHover(PhysicalRect::new(40, 30, 100, 80)))));
+        view.set_window_hover(Some(Box::new(FakeHover(PhysicalRect::new(40, 30, 100, 80)))), PickTarget::WindowSubElement, false);
         view
     }
 
@@ -3434,7 +5055,8 @@ mod tests {
         assert!(matches!(view.state, SelectionState::Selected { .. }));
         assert_eq!(view.handle_right_click(), OverlayOutcome::Stay);
         assert_eq!(view.state, SelectionState::Idle);
-        assert_eq!(view.window_highlight(), None);
+        // 回到智能选区：光标仍在窗口内，立刻重新高亮该窗口（对齐 Qt）
+        assert_eq!(view.window_highlight(), Some(PhysicalRect::new(40, 30, 100, 80)));
         assert_eq!(view.handle_right_click(), OverlayOutcome::Close);
     }
 

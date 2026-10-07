@@ -8,6 +8,7 @@
 
 use crate::capture_flow::{CapturePayload, pick_monitor, spawn_capture};
 use crate::direct_capture::{DirectHistory, DirectResult, spawn_direct_capture};
+use crate::history_nav::ThreadedHistoryProvider;
 use crate::history_store::{
     HistoryRecorder, HistorySource, HistoryStore, Thumbnail, policy_from_document,
 };
@@ -16,7 +17,7 @@ use crate::quick_actions::{
     DelayGate, DirectKind, QUICK_ACTION_KEYS, QuickPlan, clip_to_monitor, delay_seconds,
     direct_output_plan_from, full_monitor_region, plan_for, recording_directory, stays_registered_when_paused,
 };
-use crate::window_pick::{WindowHover, start_window_hover};
+use crate::window_pick::{WindowHover, selection_target, start_window_hover, transition_animation_enabled};
 use crate::dictation::config::DictationConfig;
 use crate::dictation::translate::TranslationOutcome;
 use crate::dictation::focus::Verdict;
@@ -1412,17 +1413,9 @@ fn open_overlay(cx: &mut ShellContext, state: &mut AppState, payload: CapturePay
     let translate_download_inbox = state.inbox.clone();
     let scroll_inbox = state.inbox.clone();
     let scroll_monitor = monitor.clone();
-    let history_sink = state.history.clone();
-    let history_config = Rc::clone(&state.config);
     let output = Box::new(
         SystemOutput::new(save_dir)
             .with_config(state.config.clone())
-            .with_history(move |source, width, height, rgba| {
-                if let Some(recorder) = &history_sink {
-                    let policy = policy_from_document(history_config.borrow().document());
-                    recorder.submit(policy, source, width, height, rgba);
-                }
-            })
             .with_recording(move |rect| {
                 // 覆盖窗坐标以显示器左上角为原点，换算成虚拟桌面坐标
                 record_inbox.push(UiEvent::RecordingRegionChosen {
@@ -1496,8 +1489,45 @@ fn open_overlay(cx: &mut ShellContext, state: &mut AppState, payload: CapturePay
             let style_locale = ui_prefs_from_document(state.config.borrow().document()).locale;
             let style_config = state.config.clone();
             view.update(cx.app(), |v, _| v.set_style_config(style_config, style_locale));
+            // 选区形状：读取上次使用的形状（矩形 / 折线 / 曲线 / 自由绘制）
+            {
+                let region_type = crate::region_select::RegionType::from_config(
+                    state
+                        .config
+                        .borrow()
+                        .document()
+                        .value("screenshot_selection/region_type")
+                        .as_str()
+                        .unwrap_or_default(),
+                );
+                view.update(cx.app(), |v, _| v.set_initial_region_type(region_type));
+            }
+            // 历史翻页：覆盖窗里用快捷键在截图历史里前后翻，读盘在后台线程
+            {
+                let policy = policy_from_document(state.config.borrow().document());
+                match ThreadedHistoryProvider::start(&state.data_root, policy) {
+                    Ok(provider) => {
+                        view.update(cx.app(), |v, _| v.set_history_provider(Box::new(provider)));
+                    }
+                    Err(e) => tracing::warn!(error = %e, "启动截图历史读取线程失败，翻页不可用"),
+                }
+            }
+            // 导出成功后由视图把整帧、选区、标注历史与结果图交给历史写入线程
+            if let Some(recorder) = state.history.clone() {
+                let config = Rc::clone(&state.config);
+                view.update(cx.app(), |v, _| {
+                    v.set_history_sink(move |source, snapshot| {
+                        let policy = policy_from_document(config.borrow().document());
+                        recorder.submit_snapshot(policy, source, snapshot);
+                    });
+                });
+            }
             if let Some(hover) = state.window_hover.take() {
-                view.update(cx.app(), |v, _| v.set_window_hover(Some(hover)));
+                let (target, animate) = {
+                    let config = state.config.borrow();
+                    (selection_target(config.document()), transition_animation_enabled(config.document()))
+                };
+                view.update(cx.app(), |v, _| v.set_window_hover(Some(hover), target, animate));
             }
             if record_mode {
                 view.update(cx.app(), |v, _| v.set_record_mode(true));

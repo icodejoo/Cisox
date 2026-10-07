@@ -191,6 +191,96 @@ impl Deduper {
     }
 }
 
+/// 一次导出的完整现场：整帧底图、选区、标注文档历史与导出结果图。
+#[derive(Debug, Clone)]
+pub struct HistorySnapshot {
+    /// 底图宽（物理像素）。
+    pub frame_width: u32,
+    /// 底图高（物理像素）。
+    pub frame_height: u32,
+    /// 底图 RGBA 像素。
+    pub frame_rgba: Vec<u8>,
+    /// 选区 `(x, y, 宽, 高)`，底图物理坐标。
+    pub selection: (i32, i32, i32, i32),
+    /// 标注文档历史 JSON（[`crate::annotation::AnnotationLayer::serialize_history`] 产出）；空表示没有标注。
+    pub canvas_history: Vec<u8>,
+    /// 导出结果图宽。
+    pub result_width: u32,
+    /// 导出结果图高。
+    pub result_height: u32,
+    /// 导出结果图 RGBA 像素（含标注合成）。
+    pub result_rgba: Vec<u8>,
+}
+
+/// 把选区钳制到底图内；非法（空或完全越界）时回落为整幅底图。
+fn clamp_selection(selection: (i32, i32, i32, i32), width: i64, height: i64) -> Rect {
+    let (x, y, w, h) = selection;
+    let left = i64::from(x).clamp(0, width);
+    let top = i64::from(y).clamp(0, height);
+    let right = (i64::from(x) + i64::from(w)).clamp(0, width);
+    let bottom = (i64::from(y) + i64::from(h)).clamp(0, height);
+    let (cw, ch) = if right > left && bottom > top {
+        (right - left, bottom - top)
+    } else {
+        return Rect { x: 0, y: 0, width, height, extra: Default::default() };
+    };
+    Rect { x: left, y: top, width: cw, height: ch, extra: Default::default() }
+}
+
+/// 由底图、选区、画布历史与结果图组装草稿（单显示器）。
+fn assemble_draft(
+    source: HistorySource,
+    frame: DraftImage,
+    selection: Rect,
+    canvas_history: Vec<u8>,
+    result: DraftImage,
+    now_ms: i64,
+) -> HistoryDraft {
+    let bounds = Rect {
+        x: 0,
+        y: 0,
+        width: frame.width,
+        height: frame.height,
+        extra: Default::default(),
+    };
+    HistoryDraft {
+        id: new_uuid_v4(),
+        created_utc: format_iso_utc_ms(now_ms),
+        source: source.as_str().to_string(),
+        canvas_bounds: bounds,
+        selection: Selection {
+            rectangle: selection,
+            corner_radius: 0,
+            shadow_width: 0,
+            shadow_color: DEFAULT_SHADOW_COLOR.to_string(),
+            lock_aspect_ratio: false,
+            lock_drag_aspect_ratio: false,
+            geometry: None,
+            regions: None,
+            extra: Default::default(),
+        },
+        canvas_history,
+        displays: vec![DraftDisplay {
+            image: frame,
+            stable_id: DISPLAY_STABLE_ID.to_string(),
+            display_name: DISPLAY_NAME.to_string(),
+            source_canvas_origin: Some(Point {
+                x: 0,
+                y: 0,
+                extra: Default::default(),
+            }),
+            source_canvas_rect: None,
+            backing_scale: None,
+            native_display_id: None,
+            canvas_space: None,
+        }],
+        result: Some(result),
+        content_image: true,
+        scrolling: None,
+        desktop_geometry: None,
+    }
+}
+
 /// 把整幅截图包装成历史草稿（单显示器、画布为空对象，结果图与显示图同一份 PNG）。
 ///
 /// # 参数
@@ -208,55 +298,57 @@ pub fn build_draft(
     now_ms: i64,
 ) -> Result<HistoryDraft, String> {
     let png = encode_png(width, height, rgba)?;
-    let (w, h) = (i64::from(width), i64::from(height));
-    let bounds = Rect {
-        x: 0,
-        y: 0,
-        width: w,
-        height: h,
-        extra: Default::default(),
-    };
     let image = DraftImage {
-        width: w,
-        height: h,
+        width: i64::from(width),
+        height: i64::from(height),
         png,
     };
-    Ok(HistoryDraft {
-        id: new_uuid_v4(),
-        created_utc: format_iso_utc_ms(now_ms),
-        source: source.as_str().to_string(),
-        canvas_bounds: bounds.clone(),
-        selection: Selection {
-            rectangle: bounds,
-            corner_radius: 0,
-            shadow_width: 0,
-            shadow_color: DEFAULT_SHADOW_COLOR.to_string(),
-            lock_aspect_ratio: false,
-            lock_drag_aspect_ratio: false,
-            geometry: None,
-            regions: None,
-            extra: Default::default(),
-        },
-        canvas_history: EMPTY_CANVAS.to_vec(),
-        displays: vec![DraftDisplay {
-            image: image.clone(),
-            stable_id: DISPLAY_STABLE_ID.to_string(),
-            display_name: DISPLAY_NAME.to_string(),
-            source_canvas_origin: Some(Point {
-                x: 0,
-                y: 0,
-                extra: Default::default(),
-            }),
-            source_canvas_rect: None,
-            backing_scale: None,
-            native_display_id: None,
-            canvas_space: None,
-        }],
-        result: Some(image),
-        content_image: true,
-        scrolling: None,
-        desktop_geometry: None,
-    })
+    let selection = clamp_selection((0, 0, width as i32, height as i32), image.width, image.height);
+    Ok(assemble_draft(
+        source,
+        image.clone(),
+        selection,
+        EMPTY_CANVAS.to_vec(),
+        image,
+        now_ms,
+    ))
+}
+
+/// 把一次导出的完整现场包装成历史草稿：显示图是整帧底图，结果图是导出图，画布历史带标注。
+///
+/// # 参数
+/// - `source`：来源。
+/// - `snapshot`：完整现场。
+/// - `now_ms`：创建时间（UTC 毫秒）。
+///
+/// # 返回
+/// 草稿；像素缓冲非法时返回错误说明。
+///
+/// ```ignore
+/// let draft = build_snapshot_draft(HistorySource::Copied, &snapshot, now_ms)?;
+/// ```
+pub fn build_snapshot_draft(
+    source: HistorySource,
+    snapshot: &HistorySnapshot,
+    now_ms: i64,
+) -> Result<HistoryDraft, String> {
+    let frame = DraftImage {
+        width: i64::from(snapshot.frame_width),
+        height: i64::from(snapshot.frame_height),
+        png: encode_png(snapshot.frame_width, snapshot.frame_height, &snapshot.frame_rgba)?,
+    };
+    let result = DraftImage {
+        width: i64::from(snapshot.result_width),
+        height: i64::from(snapshot.result_height),
+        png: encode_png(snapshot.result_width, snapshot.result_height, &snapshot.result_rgba)?,
+    };
+    let selection = clamp_selection(snapshot.selection, frame.width, frame.height);
+    let canvas = if snapshot.canvas_history.is_empty() {
+        EMPTY_CANVAS.to_vec()
+    } else {
+        snapshot.canvas_history.clone()
+    };
+    Ok(assemble_draft(source, frame, selection, canvas, result, now_ms))
 }
 
 /// 分页结果。
@@ -417,6 +509,21 @@ pub fn decode_rgba(png: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
     Ok((w, h, rgba.into_raw()))
 }
 
+/// 从历史记录读出的完整现场。
+#[derive(Debug, Clone)]
+pub struct LoadedEntry {
+    /// 底图宽（物理像素）。
+    pub frame_width: u32,
+    /// 底图高（物理像素）。
+    pub frame_height: u32,
+    /// 底图 RGBA 像素。
+    pub frame_rgba: Vec<u8>,
+    /// 选区 `(x, y, 宽, 高)`，底图物理坐标。
+    pub selection: (i32, i32, i32, i32),
+    /// 标注文档历史 JSON。
+    pub canvas_history: Vec<u8>,
+}
+
 /// 历史存取入口：绑定数据根与策略，所有操作在进程级锁内完成。
 #[derive(Debug, Clone)]
 pub struct HistoryStore {
@@ -479,6 +586,27 @@ impl HistoryStore {
         })
     }
 
+    /// 写入一条带完整现场的历史（整帧底图 + 选区 + 标注 + 结果图）。
+    ///
+    /// # 参数
+    /// - `source`：来源。
+    /// - `snapshot`：完整现场。
+    /// - `now_ms`：当前 UTC 毫秒（测试可注入）。
+    ///
+    /// # 返回
+    /// 新记录；历史关闭、草稿非法或写盘失败返回错误说明。
+    pub fn record_snapshot(
+        &self,
+        source: HistorySource,
+        snapshot: &HistorySnapshot,
+        now_ms: i64,
+    ) -> Result<Record, String> {
+        let draft = build_snapshot_draft(source, snapshot, now_ms)?;
+        self.with_repo(Some(Arc::new(move || now_ms)), |repo| {
+            repo.publish(draft).map_err(|e| e.to_string())
+        })
+    }
+
     /// 读取一页记录；同时顺带清理已过期记录。
     ///
     /// # 参数
@@ -520,6 +648,44 @@ impl HistoryStore {
         )
     }
 
+    /// 全部记录（新的在前），顺带清理已过期记录；翻页导航按这个顺序走。
+    pub fn records(&self) -> Vec<Record> {
+        self.with_repo(None, |repo| {
+            if repo.needs_maintenance()
+                && let Err(e) = repo.maintenance()
+            {
+                tracing::warn!(error = %e, "截图历史维护失败");
+            }
+            repo.records()
+        })
+    }
+
+    /// 读出一条记录的完整现场（整帧底图、选区、标注历史），供覆盖窗翻页恢复。
+    ///
+    /// # 参数
+    /// - `record`：记录元数据。
+    ///
+    /// # 返回
+    /// 现场；记录没有显示器图、文件损坏或解码失败时为 `None`（仓储会自行移除坏记录）。
+    pub fn load_entry(&self, record: &Record) -> Option<LoadedEntry> {
+        let display = record.displays.first()?;
+        let (png, canvas_history) = self.with_repo(None, |repo| {
+            let png = repo.read_image_file(record, &display.image_file)?;
+            let canvas = repo.load_canvas(record)?;
+            Some((png, canvas))
+        })?;
+        let (frame_width, frame_height, frame_rgba) = decode_rgba(&png).ok()?;
+        let rect = &record.selection.rectangle;
+        let to_i32 = |n: i64| i32::try_from(n).ok();
+        Some(LoadedEntry {
+            frame_width,
+            frame_height,
+            frame_rgba,
+            selection: (to_i32(rect.x)?, to_i32(rect.y)?, to_i32(rect.width)?, to_i32(rect.height)?),
+            canvas_history,
+        })
+    }
+
     /// 删除一条记录。
     pub fn remove(&self, id: &str) -> Result<(), String> {
         self.with_repo(None, |repo| {
@@ -546,17 +712,29 @@ pub enum RecordOutcome {
 }
 
 /// 一次写入任务。
-struct Job {
-    /// 提交时的策略快照。
-    policy: CaptureHistoryPolicy,
-    /// 来源。
-    source: HistorySource,
-    /// 宽。
-    width: u32,
-    /// 高。
-    height: u32,
-    /// RGBA 像素。
-    rgba: Vec<u8>,
+enum Job {
+    /// 只有结果图（直接截图、长截图等没有覆盖窗现场的来源）。
+    Plain {
+        /// 提交时的策略快照。
+        policy: CaptureHistoryPolicy,
+        /// 来源。
+        source: HistorySource,
+        /// 宽。
+        width: u32,
+        /// 高。
+        height: u32,
+        /// RGBA 像素。
+        rgba: Vec<u8>,
+    },
+    /// 覆盖窗导出的完整现场。
+    Snapshot {
+        /// 提交时的策略快照。
+        policy: CaptureHistoryPolicy,
+        /// 来源。
+        source: HistorySource,
+        /// 完整现场。
+        snapshot: Box<HistorySnapshot>,
+    },
 }
 
 /// 处理一次写入：先判开关，再去重，最后写盘（后台线程与测试共用）。
@@ -583,6 +761,39 @@ pub fn process_record(
     }
     HistoryStore::new(data_root, policy.clone())
         .record(source, width, height, rgba, now_ms)
+        .map(|r| RecordOutcome::Recorded(r.id))
+}
+
+/// 处理一次带完整现场的写入：先判开关，再按结果图去重，最后写盘。
+///
+/// # 参数
+/// - `data_root`：数据根。
+/// - `deduper`：去重器。
+/// - `policy`：策略。
+/// - `source`：来源。
+/// - `snapshot`：完整现场。
+/// - `now_ms`：当前 UTC 毫秒。
+pub fn process_snapshot(
+    data_root: &Path,
+    deduper: &mut Deduper,
+    policy: &CaptureHistoryPolicy,
+    source: HistorySource,
+    snapshot: &HistorySnapshot,
+    now_ms: i64,
+) -> Result<RecordOutcome, String> {
+    if !policy.enabled {
+        return Ok(RecordOutcome::Disabled);
+    }
+    let fingerprint = content_fingerprint(
+        snapshot.result_width,
+        snapshot.result_height,
+        &snapshot.result_rgba,
+    );
+    if !deduper.admit(fingerprint, now_ms) {
+        return Ok(RecordOutcome::Duplicate);
+    }
+    HistoryStore::new(data_root, policy.clone())
+        .record_snapshot(source, snapshot, now_ms)
         .map(|r| RecordOutcome::Recorded(r.id))
 }
 
@@ -635,12 +846,37 @@ impl HistoryRecorder {
         if !policy.enabled {
             return;
         }
-        let job = Job {
+        let job = Job::Plain {
             policy,
             source,
             width,
             height,
             rgba: rgba.to_vec(),
+        };
+        if self.tx.send(job).is_err() {
+            tracing::warn!("截图历史写入线程已退出，丢弃本次写入");
+        }
+    }
+
+    /// 提交一次带完整现场的写入（历史关闭时直接忽略；现场被移动进任务，不再拷贝）。
+    ///
+    /// # 参数
+    /// - `policy`：当前策略快照。
+    /// - `source`：来源。
+    /// - `snapshot`：完整现场。
+    pub fn submit_snapshot(
+        &self,
+        policy: CaptureHistoryPolicy,
+        source: HistorySource,
+        snapshot: HistorySnapshot,
+    ) {
+        if !policy.enabled {
+            return;
+        }
+        let job = Job::Snapshot {
+            policy,
+            source,
+            snapshot: Box::new(snapshot),
         };
         if self.tx.send(job).is_err() {
             tracing::warn!("截图历史写入线程已退出，丢弃本次写入");
@@ -652,14 +888,27 @@ impl HistoryRecorder {
 fn writer_loop(root: &Path, rx: Receiver<Job>, on_recorded: impl Fn()) {
     let mut deduper = Deduper::default();
     while let Ok(job) = rx.recv() {
-        let result = process_record(
-            root,
-            &mut deduper,
-            &job.policy,
-            job.source,
-            (job.width, job.height, &job.rgba),
-            now_utc_ms(),
-        );
+        let result = match &job {
+            Job::Plain {
+                policy,
+                source,
+                width,
+                height,
+                rgba,
+            } => process_record(
+                root,
+                &mut deduper,
+                policy,
+                *source,
+                (*width, *height, rgba),
+                now_utc_ms(),
+            ),
+            Job::Snapshot {
+                policy,
+                source,
+                snapshot,
+            } => process_snapshot(root, &mut deduper, policy, *source, snapshot, now_utc_ms()),
+        };
         match result {
             Ok(RecordOutcome::Recorded(id)) => {
                 tracing::debug!(%id, "已写入截图历史");
@@ -689,6 +938,114 @@ mod tests {
     /// 测试基准时间：取当前时刻，避免记录被保留期淘汰。
     fn base_ms() -> i64 {
         now_utc_ms()
+    }
+
+    /// 带完整现场写入后：列表可见、整帧底图与结果图分开保存、画布历史原样保存。
+    #[test]
+    fn snapshot_record_keeps_frame_selection_and_canvas() {
+        let root = temp_root("snapshot");
+        let store = HistoryStore::new(&root, policy(10));
+        let canvas = br#"{"schema_version":1,"history":[]}"#.to_vec();
+        let snapshot = HistorySnapshot {
+            frame_width: 40,
+            frame_height: 30,
+            frame_rgba: solid(40, 30, 200),
+            selection: (5, 6, 20, 10),
+            canvas_history: canvas.clone(),
+            result_width: 20,
+            result_height: 10,
+            result_rgba: solid(20, 10, 100),
+        };
+        let record = store
+            .record_snapshot(HistorySource::Copied, &snapshot, base_ms())
+            .unwrap();
+        assert_eq!(record.selection.rectangle.x, 5);
+        assert_eq!((record.selection.rectangle.width, record.selection.rectangle.height), (20, 10));
+        assert_eq!(record_size(&record), (20, 10));
+        assert_eq!(store.list_page(0, 10).total, 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 写入后能原样读回完整现场；记录按新到旧排列。
+    #[test]
+    fn load_entry_round_trips_snapshot_and_orders_records() {
+        let root = temp_root("loadentry");
+        let store = HistoryStore::new(&root, policy(10));
+        let canvas = br#"{"schema_version":1}"#.to_vec();
+        let snapshot = |shade: u8| HistorySnapshot {
+            frame_width: 16,
+            frame_height: 12,
+            frame_rgba: solid(16, 12, shade),
+            selection: (2, 3, 8, 6),
+            canvas_history: canvas.clone(),
+            result_width: 8,
+            result_height: 6,
+            result_rgba: solid(8, 6, shade),
+        };
+        let t0 = base_ms();
+        store.record_snapshot(HistorySource::Copied, &snapshot(10), t0).unwrap();
+        store.record_snapshot(HistorySource::Saved, &snapshot(20), t0 + 1000).unwrap();
+        let records = store.records();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].source, "saved_to_file");
+        let entry = store.load_entry(&records[0]).unwrap();
+        assert_eq!((entry.frame_width, entry.frame_height), (16, 12));
+        assert_eq!(entry.frame_rgba, solid(16, 12, 20));
+        assert_eq!(entry.selection, (2, 3, 8, 6));
+        assert_eq!(entry.canvas_history, canvas);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 越界或空的选区回落为整幅底图；空画布历史写成空对象。
+    #[test]
+    fn snapshot_draft_clamps_selection_and_fills_empty_canvas() {
+        let snapshot = HistorySnapshot {
+            frame_width: 8,
+            frame_height: 8,
+            frame_rgba: solid(8, 8, 1),
+            selection: (100, 100, 5, 5),
+            canvas_history: Vec::new(),
+            result_width: 8,
+            result_height: 8,
+            result_rgba: solid(8, 8, 2),
+        };
+        let draft = build_snapshot_draft(HistorySource::Saved, &snapshot, base_ms()).unwrap();
+        assert_eq!((draft.selection.rectangle.width, draft.selection.rectangle.height), (8, 8));
+        assert_eq!(draft.canvas_history, EMPTY_CANVAS);
+        let partly = HistorySnapshot { selection: (-4, -4, 10, 10), ..snapshot };
+        let draft = build_snapshot_draft(HistorySource::Saved, &partly, base_ms()).unwrap();
+        assert_eq!(
+            (draft.selection.rectangle.x, draft.selection.rectangle.width),
+            (0, 6)
+        );
+    }
+
+    /// 完整现场同样按结果图去重；历史关闭时不写入。
+    #[test]
+    fn process_snapshot_dedupes_and_respects_disabled() {
+        let root = temp_root("snapdedupe");
+        let snapshot = HistorySnapshot {
+            frame_width: 8,
+            frame_height: 8,
+            frame_rgba: solid(8, 8, 1),
+            selection: (0, 0, 8, 8),
+            canvas_history: Vec::new(),
+            result_width: 8,
+            result_height: 8,
+            result_rgba: solid(8, 8, 2),
+        };
+        let mut dedupe = Deduper::default();
+        let enabled = policy(10);
+        let now = base_ms();
+        let first = process_snapshot(&root, &mut dedupe, &enabled, HistorySource::Copied, &snapshot, now).unwrap();
+        assert!(matches!(first, RecordOutcome::Recorded(_)));
+        let second = process_snapshot(&root, &mut dedupe, &enabled, HistorySource::Saved, &snapshot, now + 1).unwrap();
+        assert_eq!(second, RecordOutcome::Duplicate);
+        let mut off = policy(10);
+        off.enabled = false;
+        let third = process_snapshot(&root, &mut Deduper::default(), &off, HistorySource::Copied, &snapshot, now).unwrap();
+        assert_eq!(third, RecordOutcome::Disabled);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// 纯色 RGBA 像素。

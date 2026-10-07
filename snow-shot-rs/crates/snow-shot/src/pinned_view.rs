@@ -13,7 +13,7 @@ use crate::frozen_frame::FrozenFrame;
 use crate::overlay_view::TileSprite;
 use crate::pinned_model::{
     EDGE_MARGIN, HANDLE_SIZE, PinClickAction, PinGeometry, apply_wheel, drag_rect,
-    swap_rb_in_place, wheel_anchor, wheel_steps,
+    premultiply_alpha_in_place, swap_rb_in_place, wheel_anchor, wheel_steps,
 };
 use crate::pinned_shared::{PinInteraction, PinShared};
 use crate::screenshot_output::encode_png;
@@ -104,7 +104,7 @@ pub struct PinInit {
 ///
 /// # 参数
 /// - `width` / `height`：图像尺寸。
-/// - `rgba`：不透明 RGBA 像素（长度须为 `宽 * 高 * 4`）。
+/// - `rgba`：RGBA 像素（长度须为 `宽 * 高 * 4`）；带透明区（自定义选区的贴图）时按预乘 alpha 上传。
 ///
 /// # 返回
 /// 底图；尺寸为 0 或长度不符返回错误说明。
@@ -114,6 +114,7 @@ pub struct PinInit {
 /// assert_eq!(frame.size(), (2, 1));
 /// ```
 pub fn frame_from_rgba(width: u32, height: u32, mut rgba: Vec<u8>) -> Result<FrozenFrame, String> {
+    premultiply_alpha_in_place(&mut rgba);
     swap_rb_in_place(&mut rgba);
     FrozenFrame::from_captured(CapturedScreen {
         width,

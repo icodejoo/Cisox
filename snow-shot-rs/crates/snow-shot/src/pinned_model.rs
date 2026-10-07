@@ -595,6 +595,29 @@ pub fn swap_rb_in_place(pixels: &mut [u8]) {
     }
 }
 
+/// 把直通（非预乘）RGBA 缓冲原地转成预乘 alpha（GPU 图像要求预乘；全不透明像素不动）。
+///
+/// # 参数
+/// - `rgba`：4 字节一像素的缓冲。
+///
+/// ```
+/// use snow_shot::pinned_model::premultiply_alpha_in_place;
+/// let mut px = vec![200, 100, 50, 128, 1, 2, 3, 255];
+/// premultiply_alpha_in_place(&mut px);
+/// assert_eq!(px, vec![100, 50, 25, 128, 1, 2, 3, 255]);
+/// ```
+pub fn premultiply_alpha_in_place(rgba: &mut [u8]) {
+    for p in rgba.chunks_exact_mut(4) {
+        let a = u32::from(p[3]);
+        if a == 255 {
+            continue;
+        }
+        for c in &mut p[..3] {
+            *c = ((u32::from(*c) * a + 127) / 255) as u8;
+        }
+    }
+}
+
 /// 剪贴板贴图的初始窗口占屏比例上限（超出则缩小显示）。
 const CLIPBOARD_FIT_RATIO: f32 = 0.8;
 
@@ -1033,6 +1056,14 @@ mod tests {
         assert_eq!(&px[0..4], &[255, 255, 255, 255]);
         assert_eq!(&px[4..8], &[127, 127, 127, 255]);
         assert_eq!(&px[8..12], &[10, 20, 30, 255]);
+    }
+
+    /// 预乘 alpha：透明像素颜色归零，半透明按比例缩，不透明不动。
+    #[test]
+    fn premultiply_alpha() {
+        let mut px = vec![255, 255, 255, 0, 200, 100, 50, 128, 9, 9, 9, 255];
+        premultiply_alpha_in_place(&mut px);
+        assert_eq!(px, vec![0, 0, 0, 0, 100, 50, 25, 128, 9, 9, 9, 255]);
     }
 
     /// R/B 交换：整像素交换，尾部不足 4 字节的残余不动。

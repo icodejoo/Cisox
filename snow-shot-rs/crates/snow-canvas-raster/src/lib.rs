@@ -22,6 +22,7 @@
 
 mod draw;
 mod rasterizer;
+pub mod region;
 mod types;
 
 pub use rasterizer::{CanvasRasterizer, TinySkiaRasterizer};

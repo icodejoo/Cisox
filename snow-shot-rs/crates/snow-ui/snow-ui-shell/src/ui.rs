@@ -22,6 +22,7 @@ use snow_capability::CapabilityRegistry;
 pub use gpui_kit::{
     Anchor, AnyElement, App, AppContext, Bounds, ClickEvent, Context, CursorStyle, Div, Element,
     ElementId, ElementInputHandler, Entity, EntityInputHandler, FocusHandle, Focusable, FontWeight,
+    PathBuilder,
     Hsla, ImageSource, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, ObjectFit, ParentElement, Pixels, Point, QuitMode, Render,
     RenderImage, RenderOnce, Rgba, SharedString, Size, StatefulInteractiveElement, Styled,

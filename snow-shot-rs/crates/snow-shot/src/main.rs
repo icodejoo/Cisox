@@ -71,6 +71,9 @@ pub mod translate_layout;
 pub mod translate_service;
 pub mod language_names;
 pub mod translate_settings;
+pub mod history_nav;
+pub mod previous_selection;
+pub mod region_select;
 pub mod window_pick;
 
 /// 单实例互斥体 / 管道名使用的应用标识。

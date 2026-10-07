@@ -88,6 +88,14 @@ pub enum OverlayKeyAction {
     MoveCursor(Dir),
     /// 切换标注工具。
     Tool(DrawingKey),
+    /// 智能选区在「窗口」与「窗口内子控件」之间切换目标。
+    ToggleSelectionTarget,
+    /// 选中上一次导出时保存的选区。
+    SelectPreviousSelection,
+    /// 翻到更旧的一条截图历史。
+    PreviousHistory,
+    /// 翻到更新的一条截图历史（翻到头即回到当前截图）。
+    NextHistory,
     /// 尚未实现：携带配置键，用来取动作名给出提示。
     Unimplemented(&'static str),
 }
@@ -185,10 +193,10 @@ const SCREENSHOT_KEYS: &[(&str, OverlayKeyAction)] = &[
     ("screenshot_shortcuts/move_cursor_right", OverlayKeyAction::MoveCursor(Dir::Right)),
     ("screenshot_shortcuts/move_entire_selection", OverlayKeyAction::Unimplemented("screenshot_shortcuts/move_entire_selection")),
     ("screenshot_shortcuts/keep_selection_width_and_height_consistent", OverlayKeyAction::Unimplemented("screenshot_shortcuts/keep_selection_width_and_height_consistent")),
-    ("screenshot_shortcuts/switch_selection_between_window_and_window_sub_element", OverlayKeyAction::Unimplemented("screenshot_shortcuts/switch_selection_between_window_and_window_sub_element")),
-    ("screenshot_shortcuts/previous_screenshot_history", OverlayKeyAction::Unimplemented("screenshot_shortcuts/previous_screenshot_history")),
-    ("screenshot_shortcuts/next_screenshot_history", OverlayKeyAction::Unimplemented("screenshot_shortcuts/next_screenshot_history")),
-    ("screenshot_shortcuts/select_previously_selected_area", OverlayKeyAction::Unimplemented("screenshot_shortcuts/select_previously_selected_area")),
+    ("screenshot_shortcuts/switch_selection_between_window_and_window_sub_element", OverlayKeyAction::ToggleSelectionTarget),
+    ("screenshot_shortcuts/previous_screenshot_history", OverlayKeyAction::PreviousHistory),
+    ("screenshot_shortcuts/next_screenshot_history", OverlayKeyAction::NextHistory),
+    ("screenshot_shortcuts/select_previously_selected_area", OverlayKeyAction::SelectPreviousSelection),
     ("screenshot_shortcuts/recapture", OverlayKeyAction::Unimplemented("screenshot_shortcuts/recapture")),
     ("screenshot_shortcuts/toggle_coordinate_mode", OverlayKeyAction::Unimplemented("screenshot_shortcuts/toggle_coordinate_mode")),
 ];

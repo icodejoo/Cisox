@@ -608,6 +608,40 @@ impl AnnotationLayer {
         Self::from_engine(engine, width, height, dpr, style)
     }
 
+    /// 从文档历史 JSON 恢复标注层（截图历史记录用的 `canvas_history.json` 格式，含撤销 / 重做）。
+    ///
+    /// # 参数
+    /// - `width` / `height`：画布物理尺寸（必须与保存时的底图一致）。
+    /// - `dpr`：设备像素比。
+    /// - `history`：[`AnnotationLayer::serialize_history`] 产出的字节。
+    ///
+    /// # 返回
+    /// 标注层；内容损坏或版本不兼容返回错误说明。
+    ///
+    /// ```
+    /// use snow_shot::annotation::AnnotationLayer;
+    /// let layer = AnnotationLayer::new(64, 64, 1.0).unwrap();
+    /// let bytes = layer.serialize_history().unwrap();
+    /// assert!(AnnotationLayer::from_history(64, 64, 1.0, &bytes).is_ok());
+    /// assert!(AnnotationLayer::from_history(64, 64, 1.0, b"junk").is_err());
+    /// ```
+    pub fn from_history(width: u32, height: u32, dpr: f32, history: &[u8]) -> Result<Self, String> {
+        let style = AnnotationStyle::for_dpr(dpr);
+        let engine = Engine::from_serialized_document_history_with_config(history, runtime_config(style))
+            .map_err(|e| format!("恢复标注历史失败: {e:?}"))?;
+        Self::from_engine(engine, width, height, dpr, style)
+    }
+
+    /// 序列化当前标注文档历史为 JSON（元素 + 撤销 / 重做），供截图历史记录持久化。
+    ///
+    /// # 返回
+    /// JSON 字节；超出引擎上限等失败返回错误说明。
+    pub fn serialize_history(&self) -> Result<Vec<u8>, String> {
+        self.engine
+            .serialize_document_history()
+            .map_err(|e| format!("序列化标注历史失败: {e:?}"))
+    }
+
     /// 序列化当前标注会话（元素 + 撤销 / 重做历史），供贴图持久化。
     ///
     /// # 返回
@@ -1315,6 +1349,31 @@ mod tests {
         layer.redo(base).unwrap();
         let again = layer.export_rgba([0, 0, w as i32, h as i32], base).unwrap().2;
         assert_eq!(with, again);
+    }
+
+    /// 标注历史 JSON 往返：恢复后元素、导出像素与撤销栈都与保存时一致，且仍可继续撤销。
+    #[test]
+    fn history_json_round_trip_keeps_items_and_undo() {
+        let (w, h) = (200, 150);
+        let data = gradient(w, h);
+        let base = BaseView { width: w, height: h, bgra: &data };
+        let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
+        layer.set_tool(AnnotationTool::Rectangle).unwrap();
+        drag(&mut layer, base, (20.0, 20.0), (120.0, 100.0));
+        let bytes = layer.serialize_history().unwrap();
+        // 仓储要求画布历史是 JSON 对象 / 数组
+        assert!(matches!(bytes.first(), Some(b'{' | b'[')));
+        let before = layer.export_rgba([0, 0, w as i32, h as i32], base).unwrap().2;
+
+        let mut restored = AnnotationLayer::from_history(w, h, 1.0, &bytes).unwrap();
+        restored.refresh(base).unwrap();
+        assert_eq!(restored.item_count(), layer.item_count());
+        let after = restored.export_rgba([0, 0, w as i32, h as i32], base).unwrap().2;
+        assert_eq!(before, after);
+        assert!(restored.can_undo());
+        restored.undo(base).unwrap();
+        assert_eq!(restored.item_count(), 0);
+        assert!(AnnotationLayer::from_history(w, h, 1.0, b"not json").is_err());
     }
 
     /// 马赛克：区域内出现分块（同一块内像素相同），区域外保持原样。
