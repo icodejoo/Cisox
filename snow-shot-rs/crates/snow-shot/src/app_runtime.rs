@@ -14,7 +14,7 @@ use crate::history_store::{
 };
 use crate::history_view::{HistoryAction, HistoryView};
 use crate::quick_actions::{
-    DelayGate, DirectKind, QUICK_ACTION_KEYS, QuickPlan, clip_to_monitor, delay_seconds,
+    DELAY_SECONDS_CONFIG_KEY, DelayGate, DirectKind, QUICK_ACTION_KEYS, QuickPlan, clip_to_monitor, delay_seconds,
     direct_output_plan_from, full_monitor_region, plan_for, recording_directory, stays_registered_when_paused,
 };
 use crate::window_pick::{WindowHover, selection_target, start_window_hover, transition_animation_enabled};
@@ -170,6 +170,8 @@ pub enum UiEvent {
     CaptureFailed(String),
     /// 打开（或激活）设置窗口。
     OpenSettings,
+    /// 重启应用：先拉起延迟启动的新实例，再正常退出。
+    Restart,
     /// 请求录制：进入选区，确认后拉起独立的录制进程。
     StartRecording,
     /// 导出命令（保存 / 复制），作用于当前覆盖窗里的选区。
@@ -419,55 +421,149 @@ pub fn map_tray_signal(signal: &str) -> Option<UiEvent> {
         TRAY_SIGNAL_HISTORY => Some(UiEvent::OpenHistory),
         TRAY_SIGNAL_SETTINGS => Some(UiEvent::OpenSettings),
         TRAY_SIGNAL_QUIT => Some(UiEvent::Quit),
+        TRAY_SIGNAL_RESTART => Some(UiEvent::Restart),
         _ => None,
     }
 }
 
-/// 构造托盘描述：截图 / 录屏（命令）、剪贴板贴图 / 设置 / 退出（信号）。
+/// 托盘菜单图标边长（逻辑像素）。
+const TRAY_MENU_ICON_SIZE: u32 = 16;
+/// 托盘信号：重启应用。
+pub const TRAY_SIGNAL_RESTART: &str = "restart";
+/// 托盘延迟截图文案的秒数变量位置（`$arg1`）。
+const TRAY_DELAY_ARG_INDEX: u8 = 1;
+/// 重启时等待旧进程退出的 ping 次数（约 1 秒/次，借 ping 做无控制台延时）。
+const RESTART_WAIT_PINGS: u32 = 3;
+
+/// 渲染一个托盘菜单图标（Ant Design 描边图标）；名称不存在或渲染失败时返回 `None`，菜单项退化为无图标。
+///
+/// # 参数
+/// - `renderer`：图标光栅化器（带缓存）。
+/// - `name`：图标 kebab-case 名称，如 `camera`。
+fn tray_menu_icon(renderer: &snow_ui::icons::IconRenderer, name: &str) -> Option<TrayIconImage> {
+    let icon = snow_ui::icons::IconRef::new(snow_ui::icons::IconTheme::Outlined, name);
+    if !icon.exists() {
+        return None;
+    }
+    let bitmap = renderer.render(&icon, &snow_ui::icons::IconRequest::square(TRAY_MENU_ICON_SIZE, 1.0))?;
+    TrayIconImage::new(bitmap.to_straight_rgba(), bitmap.width, bitmap.height).ok()
+}
+
+/// 构造托盘描述：按上游分组（截图 / 贴图 / 录屏 / 其他 / 系统，组间有分隔线），每项带图标。
 ///
 /// # 参数
 /// - `locale`：界面语料语言代码（如 `zh-CN`）。
+/// - `doc`：配置文档（读取延迟截图秒数）。
+/// - `hotkeys_paused`：全局热键当前是否被暂停（决定“禁用全局热键”的勾选状态）。
 ///
 /// # 返回
 /// 托盘描述；图标数据非法返回错误文本（占位图标恒合法）。
 ///
 /// ```ignore
-/// let spec = build_tray_spec("zh-CN").unwrap();
-/// assert_eq!(spec.menu.len(), 7);
+/// let doc = ConfigDocument::from_bytes(None);
+/// let spec = build_tray_spec("zh-CN", &doc, false).unwrap();
+/// assert_eq!(spec.menu.len(), 25);
 /// ```
-pub fn build_tray_spec(locale: &str) -> Result<TraySpec, String> {
+pub fn build_tray_spec(locale: &str, doc: &ConfigDocument, hotkeys_paused: bool) -> Result<TraySpec, String> {
     let i18n = crate::ocr_backend::i18n_for(locale);
     let icon = TrayIconImage::solid(TRAY_ICON_SIZE, TRAY_ICON_SIZE, TRAY_ICON_RGBA)
         .map_err(|e| e.to_string())?;
-    let item = |key: &str, action: TrayAction| TrayMenuEntry::Item {
-        label: i18n.tr(key),
+    let renderer = snow_ui::icons::IconRenderer::new();
+    let entry = |label: String, icon_name: &str, checked: Option<bool>, action: TrayAction| TrayMenuEntry::Item {
+        label,
         enabled: true,
+        checked,
+        icon: tray_menu_icon(&renderer, icon_name),
         action,
     };
+    let item = |key: &str, icon_name: &str, action: TrayAction| entry(i18n.tr(key), icon_name, None, action);
+    let quick = |action: QuickAction| TrayAction::Command(AppCommand::QuickAction(action));
+    let delay_label = i18n.tr_with(
+        "tray-capture-delay",
+        &Args::new().arg(TRAY_DELAY_ARG_INDEX, delay_seconds(doc)),
+    );
+
     Ok(TraySpec {
         tooltip: TRAY_TOOLTIP.to_string(),
         icon,
         menu: vec![
+            // 截图组
             item(
                 "tray-capture",
+                "camera",
                 TrayAction::Command(AppCommand::Capture(CaptureRequest::default())),
             ),
-            item(
-                "tray-record",
-                TrayAction::Command(AppCommand::StartRecording(RecordingRequest::default())),
-            ),
+            entry(delay_label, "clock-circle", None, quick(QuickAction::ScreenshotDelay)),
+            item("tray-capture-pin", "pushpin", quick(QuickAction::ScreenshotFixed)),
+            item("tray-capture-ocr", "file-search", quick(QuickAction::ScreenshotOcr)),
+            item("tray-capture-translate", "translation", quick(QuickAction::ScreenshotTranslation)),
+            item("tray-capture-copy", "copy", quick(QuickAction::ScreenshotCopy)),
+            item("tray-capture-full-screen", "desktop", quick(QuickAction::ScreenshotFullScreen)),
+            item("tray-capture-focused-window", "scan", quick(QuickAction::ScreenshotFocusedWindow)),
+            TrayMenuEntry::Separator,
+            // 贴图组
             item(
                 "tray-pin-clipboard",
+                "snippets",
                 TrayAction::Signal(TRAY_SIGNAL_PIN_CLIPBOARD.into()),
             ),
-            item("tray-history", TrayAction::Signal(TRAY_SIGNAL_HISTORY.into())),
-            item("tray-settings", TrayAction::Signal(TRAY_SIGNAL_SETTINGS.into())),
+            item("tray-pin-selected-files", "paper-clip", quick(QuickAction::PinSelectedFiles)),
+            item("tray-restore-closed", "undo", quick(QuickAction::RestoreLastClosedWindows)),
             TrayMenuEntry::Separator,
-            item("tray-quit", TrayAction::Signal(TRAY_SIGNAL_QUIT.into())),
+            // 录屏组
+            item(
+                "tray-record",
+                "video-camera",
+                TrayAction::Command(AppCommand::StartRecording(RecordingRequest::default())),
+            ),
+            item("tray-record-copy", "export", quick(QuickAction::ScreenRecordCopy)),
+            item("tray-open-recordings", "folder-open", quick(QuickAction::OpenScreenRecordingFolder)),
+            TrayMenuEntry::Separator,
+            // 其他组
+            item("tray-history", "history", TrayAction::Signal(TRAY_SIGNAL_HISTORY.into())),
+            item("tray-translate-selected", "select", quick(QuickAction::TranslateSelectedText)),
+            entry(
+                i18n.tr("tray-toggle-hotkeys"),
+                "stop",
+                Some(hotkeys_paused),
+                quick(QuickAction::ToggleGlobalHotkeys),
+            ),
+            // 该动作暂为占位（尚无前台全屏检测），勾选恒为否
+            entry(
+                i18n.tr("tray-toggle-fullscreen"),
+                "fullscreen",
+                Some(false),
+                quick(QuickAction::ToggleDisableOnFocusedFullscreen),
+            ),
+            TrayMenuEntry::Separator,
+            // 系统组
+            item("tray-show-main", "home", TrayAction::Signal(TRAY_SIGNAL_SETTINGS.into())),
+            item("tray-restart", "reload", TrayAction::Signal(TRAY_SIGNAL_RESTART.into())),
+            item("tray-quit", "poweroff", TrayAction::Signal(TRAY_SIGNAL_QUIT.into())),
         ],
         on_left_click: None,
         on_double_click: Some(TrayAction::Signal(TRAY_SIGNAL_SETTINGS.into())),
     })
+}
+
+/// 拉起一个延迟启动的新实例（等旧进程退出、释放单实例互斥后再启动）。
+///
+/// # 返回
+/// 成功拉起辅助进程为 `Ok`；取不到自身路径或拉起失败返回错误。
+fn spawn_restart_helper() -> std::io::Result<()> {
+    use std::os::windows::process::CommandExt;
+    /// 不创建控制台窗口。
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let exe = std::env::current_exe()?;
+    let line = format!(
+        "/C ping -n {RESTART_WAIT_PINGS} 127.0.0.1 >NUL & start \"\" \"{}\"",
+        exe.display()
+    );
+    std::process::Command::new("cmd")
+        .raw_arg(line)
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+        .map(|_| ())
 }
 
 /// 由配置文档解析界面偏好（深浅色、语言、主色）。
@@ -2241,8 +2337,9 @@ fn refresh_tray_menu(state: &AppState) {
         return;
     };
     let locale = ui_prefs_from_document(state.config.borrow().document()).locale;
-    match build_tray_spec(locale).and_then(|spec| tray.set_menu(spec.menu).map_err(|e| e.to_string())) {
-        Ok(()) => tracing::info!(locale, "托盘菜单已按界面语言刷新"),
+    let built = build_tray_spec(locale, state.config.borrow().document(), state.hotkeys_paused);
+    match built.and_then(|spec| tray.set_menu(spec.menu).map_err(|e| e.to_string())) {
+        Ok(()) => tracing::info!(locale, "托盘菜单已刷新"),
         Err(e) => tracing::warn!(error = %e, "刷新托盘菜单失败"),
     }
 }
@@ -2278,7 +2375,7 @@ fn hotkey_config_key(key: &str) -> Option<&'static str> {
 /// - `key`：变更的配置键。
 /// - `previous`：变更前的值。
 fn on_config_changed(cx: &mut ShellContext, state: &mut AppState, key: &str, previous: Value) {
-    if key == LANGUAGE_KEY {
+    if key == LANGUAGE_KEY || key == DELAY_SECONDS_CONFIG_KEY {
         refresh_tray_menu(state);
         return;
     }
@@ -2402,6 +2499,10 @@ fn run_quick_action(cx: &mut ShellContext, state: &mut AppState, action: QuickAc
             let text = notice_text(state, id, Args::new());
             show_notice(state, &text);
         }
+    }
+    if action == QuickAction::ToggleDisableOnFocusedFullscreen {
+        // 原生勾选框点击即翻转；该动作尚是占位，需重建菜单把勾选复位
+        refresh_tray_menu(state);
     }
 }
 
@@ -2554,6 +2655,7 @@ fn toggle_global_hotkeys(state: &mut AppState) {
     let paused = !state.hotkeys_paused;
     let attempt = register_all_hotkeys_gated(service, state.config.borrow().document(), paused);
     state.hotkeys_paused = paused;
+    refresh_tray_menu(state);
     state.hotkey_handles = attempt.handles;
     tracing::info!(paused, registered = state.hotkey_handles.len(), "全局热键暂停状态已切换");
     let text = if paused {
@@ -2817,16 +2919,27 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
             }
         }
         UiEvent::DirectCaptureDone(result) => on_direct_capture_done(state, result),
-        UiEvent::Quit => {
-            tracing::info!("quit requested, shutting down");
-            state.ocr.shutdown();
-            state.translator.shutdown();
-            state.dictation.shutdown();
-            state.pins.persist_all(cx);
-            state.shutdown_services();
-            cx.quit();
-        }
+        UiEvent::Quit => shutdown_app(cx, state),
+        UiEvent::Restart => match spawn_restart_helper() {
+            Ok(()) => shutdown_app(cx, state),
+            Err(e) => tracing::warn!(error = %e, "拉起新实例失败，取消重启"),
+        },
     }
+}
+
+/// 有序关闭各后台服务并退出应用。
+///
+/// # 参数
+/// - `cx`：外壳上下文。
+/// - `state`：运行时状态。
+fn shutdown_app(cx: &mut ShellContext, state: &mut AppState) {
+    tracing::info!("quit requested, shutting down");
+    state.ocr.shutdown();
+    state.translator.shutdown();
+    state.dictation.shutdown();
+    state.pins.persist_all(cx);
+    state.shutdown_services();
+    cx.quit();
 }
 
 /// 启动托盘与全局热键；任一失败只记日志并降级。
@@ -2852,7 +2965,7 @@ pub fn start_services(
     let prefs = ui_prefs_from_document(document);
     let locale = prefs.locale;
     apply_popup_menu_theme(prefs.dark);
-    let tray = match build_tray_spec(locale)
+    let tray = match build_tray_spec(locale, document, false)
         .and_then(|spec| TrayService::start(caps, spec, Dispatcher::from_bus(bus.clone())).map_err(|e| e.to_string()))
     {
         Ok(tray) => {
@@ -2931,40 +3044,77 @@ mod tests {
         assert_eq!(map_tray_signal("settings"), Some(UiEvent::OpenSettings));
         assert_eq!(map_tray_signal("history"), Some(UiEvent::OpenHistory));
         assert_eq!(map_tray_signal("quit"), Some(UiEvent::Quit));
+        assert_eq!(map_tray_signal("restart"), Some(UiEvent::Restart));
         assert_eq!(map_tray_signal("pin_clipboard"), Some(UiEvent::PinFromClipboard));
         assert_eq!(map_tray_signal("rm -rf"), None);
     }
 
-    /// 托盘菜单：截图为命令，设置/退出为信号，退出前有分隔线。
+    /// 托盘菜单：25 项，分隔线落在各组之间，首尾条目正确，所有条目带图标。
     #[test]
     fn tray_spec_shape() {
-        let spec = build_tray_spec("zh-CN").unwrap();
-        assert_eq!(spec.menu.len(), 7);
+        let doc = ConfigDocument::from_bytes(None);
+        let spec = build_tray_spec("zh-CN", &doc, false).unwrap();
+        assert_eq!(spec.menu.len(), 25);
+        let seps: Vec<usize> = spec
+            .menu
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| matches!(e, TrayMenuEntry::Separator))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(seps, vec![8, 12, 16, 21]);
         assert!(matches!(
             &spec.menu[0],
             TrayMenuEntry::Item { action: TrayAction::Command(AppCommand::Capture(_)), .. }
         ));
         assert!(matches!(
-            &spec.menu[1],
-            TrayMenuEntry::Item { action: TrayAction::Command(AppCommand::StartRecording(_)), .. }
-        ));
-        assert!(matches!(
-            &spec.menu[2],
-            TrayMenuEntry::Item { action: TrayAction::Signal(s), .. } if s == TRAY_SIGNAL_PIN_CLIPBOARD
-        ));
-        assert!(matches!(
-            &spec.menu[3],
-            TrayMenuEntry::Item { action: TrayAction::Signal(s), .. } if s == TRAY_SIGNAL_HISTORY
-        ));
-        assert!(matches!(
-            &spec.menu[4],
-            TrayMenuEntry::Item { action: TrayAction::Signal(s), .. } if s == TRAY_SIGNAL_SETTINGS
-        ));
-        assert!(matches!(&spec.menu[5], TrayMenuEntry::Separator));
-        assert!(matches!(
-            &spec.menu[6],
+            &spec.menu[24],
             TrayMenuEntry::Item { action: TrayAction::Signal(s), .. } if s == TRAY_SIGNAL_QUIT
         ));
+        for entry in &spec.menu {
+            if let TrayMenuEntry::Item { icon, label, .. } = entry {
+                assert!(icon.is_some(), "缺少图标: {label}");
+            }
+        }
+    }
+
+    /// 取菜单里第 `i` 项的 `(label, checked)`。
+    fn tray_item(spec: &TraySpec, i: usize) -> (String, Option<bool>) {
+        match &spec.menu[i] {
+            TrayMenuEntry::Item { label, checked, .. } => (label.clone(), *checked),
+            TrayMenuEntry::Separator => panic!("应为条目"),
+        }
+    }
+
+    /// 托盘“禁用全局热键”勾选状态随热键暂停状态变化。
+    #[test]
+    fn tray_hotkey_toggle_checked_follows_state() {
+        let doc = ConfigDocument::from_bytes(None);
+        assert_eq!(tray_item(&build_tray_spec("en-US", &doc, false).unwrap(), 19).1, Some(false));
+        assert_eq!(tray_item(&build_tray_spec("en-US", &doc, true).unwrap(), 19).1, Some(true));
+    }
+
+    /// 延迟截图文案带上配置的秒数（默认 3，改成 7 后跟随）。
+    #[test]
+    fn tray_delay_label_contains_seconds() {
+        let mut doc = ConfigDocument::from_bytes(None);
+        assert!(tray_item(&build_tray_spec("en-US", &doc, false).unwrap(), 1).0.contains('3'));
+        doc.set_value(DELAY_SECONDS_CONFIG_KEY, serde_json::json!(7)).unwrap();
+        assert!(tray_item(&build_tray_spec("zh-CN", &doc, false).unwrap(), 1).0.contains('7'));
+    }
+
+    /// 两种语言下所有托盘文案都存在（无“缺失”占位）。
+    #[test]
+    fn tray_labels_exist_in_both_locales() {
+        let doc = ConfigDocument::from_bytes(None);
+        for locale in ["en-US", "zh-CN"] {
+            let spec = build_tray_spec(locale, &doc, false).unwrap();
+            for entry in &spec.menu {
+                if let TrayMenuEntry::Item { label, .. } = entry {
+                    assert!(!label.is_empty() && !label.contains("[!"), "{locale}: {label}");
+                }
+            }
+        }
     }
 
     /// 总线上的截图命令会变成带来源的收件箱事件。

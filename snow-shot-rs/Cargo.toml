@@ -49,6 +49,14 @@ panic = "abort"
 debug = 0
 incremental = false
 
+# 开发模式编译优化：debug = 1 保留行号/文件名堆栈信息（panic 及断点仍可定位），大幅缩减符号体积以加速 link.exe
+[profile.dev]
+debug = 1
+
+# 对第三方依赖 crate 适度优化，减少宏展开和泛型单态化的符号膨胀
+[profile.dev.package."*"]
+opt-level = 2
+
 # GPUI 依赖族锁定到本地 vendor（ADR-1）：升级必须走 vendor/README.md 的评审流程
 [patch.crates-io]
 gpui-base = { path = "vendor/gpui-base-0.7.0" }

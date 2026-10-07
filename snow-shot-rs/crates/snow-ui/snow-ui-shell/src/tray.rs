@@ -93,6 +93,10 @@ pub enum TrayMenuEntry {
         label: String,
         /// 是否可点击。
         enabled: bool,
+        /// 勾选状态，None 表示不带复选框（原生复选框菜单项不能同时显示图标）。
+        checked: Option<bool>,
+        /// 图标，None 表示无图标。
+        icon: Option<TrayIconImage>,
         /// 点击动作。
         action: TrayAction,
     },
@@ -118,8 +122,8 @@ pub struct TraySpec {
 /// 菜单构建计划中的一项（已分配稳定 id）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum MenuPlan {
-    /// 条目：id、文字、是否可用。
-    Item(String, String, bool),
+    /// 条目：id、文字、是否可用、勾选状态、图标。
+    Item(String, String, bool, Option<bool>, Option<TrayIconImage>),
     /// 分隔线。
     Separator,
 }
@@ -143,11 +147,13 @@ impl TrayActions {
                 TrayMenuEntry::Item {
                     label,
                     enabled,
+                    checked,
+                    icon,
                     action,
                 } => {
                     let id = format!("tray.item.{i}");
                     actions.map.insert(id.clone(), action.clone());
-                    MenuPlan::Item(id, label.clone(), *enabled)
+                    MenuPlan::Item(id, label.clone(), *enabled, *checked, icon.clone())
                 }
             })
             .collect();
@@ -213,9 +219,39 @@ mod backend {
                 MenuPlan::Separator => menu
                     .append(&PredefinedMenuItem::separator())
                     .map_err(|e| plat("追加分隔线", &e))?,
-                MenuPlan::Item(id, label, enabled) => menu
-                    .append(&MenuItem::with_id(id.as_str(), label, *enabled, None))
-                    .map_err(|e| plat("追加菜单项", &e))?,
+                MenuPlan::Item(id, label, enabled, checked, icon) => {
+                    let native_icon = if let Some(i) = icon {
+                        let (w, h) = i.size();
+                        Some(
+                            tray_icon::menu::Icon::from_rgba(i.rgba.clone(), w, h)
+                                .map_err(|e| plat("图标转换", &e))?,
+                        )
+                    } else {
+                        None
+                    };
+                    if let Some(c) = checked {
+                        let item = tray_icon::menu::CheckMenuItem::with_id(
+                            id.as_str(),
+                            label,
+                            *enabled,
+                            *c,
+                            None,
+                        );
+                        menu.append(&item).map_err(|e| plat("追加勾选菜单项", &e))?;
+                    } else if native_icon.is_some() {
+                        let item = tray_icon::menu::IconMenuItem::with_id(
+                            id.as_str(),
+                            label,
+                            *enabled,
+                            native_icon,
+                            None,
+                        );
+                        menu.append(&item).map_err(|e| plat("追加图标菜单项", &e))?;
+                    } else {
+                        let item = MenuItem::with_id(id.as_str(), label, *enabled, None);
+                        menu.append(&item).map_err(|e| plat("追加菜单项", &e))?;
+                    }
+                }
             }
         }
         Ok(menu)
@@ -599,27 +635,32 @@ mod tests {
             TrayMenuEntry::Item {
                 label: "取消".into(),
                 enabled: true,
+                checked: None,
+                icon: None,
                 action: TrayAction::Command(AppCommand::Cancel(Default::default())),
             },
             TrayMenuEntry::Separator,
             TrayMenuEntry::Item {
                 label: "退出".into(),
                 enabled: false,
+                checked: Some(true),
+                icon: None,
                 action: TrayAction::Signal("quit".into()),
             },
         ];
         let (plan, actions) = TrayActions::plan(&entries);
         assert_eq!(plan.len(), 3);
         assert_eq!(plan[1], MenuPlan::Separator);
-        let MenuPlan::Item(id0, _, en0) = &plan[0] else {
+        let MenuPlan::Item(id0, _, en0, _, _) = &plan[0] else {
             panic!("应为条目");
         };
-        let MenuPlan::Item(id2, label2, en2) = &plan[2] else {
+        let MenuPlan::Item(id2, label2, en2, checked2, _) = &plan[2] else {
             panic!("应为条目");
         };
         assert_ne!(id0, id2);
         assert!(*en0 && !*en2);
         assert_eq!(label2, "退出");
+        assert_eq!(*checked2, Some(true));
         assert_eq!(
             actions.resolve(id0),
             Some(&TrayAction::Command(AppCommand::Cancel(Default::default())))

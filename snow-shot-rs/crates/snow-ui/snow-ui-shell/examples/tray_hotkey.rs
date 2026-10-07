@@ -55,12 +55,16 @@ fn demo_tray_spec() -> Result<TraySpec, ShellError> {
             TrayMenuEntry::Item {
                 label: "触发 Undo".into(),
                 enabled: true,
+                checked: None,
+                icon: None,
                 action: TrayAction::Command(AppCommand::Undo(Default::default())),
             },
             TrayMenuEntry::Separator,
             TrayMenuEntry::Item {
                 label: "退出".into(),
                 enabled: true,
+                checked: None,
+                icon: None,
                 action: TrayAction::Signal(SIGNAL_QUIT.into()),
             },
         ],

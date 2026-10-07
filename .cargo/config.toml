@@ -1,3 +1,7 @@
 [build]
 target-dir = "build/cargo"
 rustflags = ["-Dwarnings"]
+
+# Windows 用工具链自带的 rust-lld 链接，比 link.exe 快得多
+[target.x86_64-pc-windows-msvc]
+linker = "rust-lld"
