@@ -82,7 +82,7 @@
 
 | ID | 功能 | C++ 位置 | Rust 现状 | 状态 | 依据 |
 |---|---|---|---|---|---|
-| D01 | 屏幕采集 | `capture/screenshotcapturecoordinator.cpp`、`screenshotcaptureworker.cpp`；`snow-crates/snow-capture` | `snow-platform::capture`，GDI 抓取，**只抓光标所在的一块显示器**；不用 `snow-capture`（DXGI/WGC）；无光标采集、HDR、窗口排除。后台线程采集后回主线程开覆盖窗 | 🟡 | 读码 |
+| D01 | 屏幕采集 | `capture/screenshotcapturecoordinator.cpp`、`screenshotcaptureworker.cpp`；`snow-crates/snow-capture` | `snow-platform::capture`，GDI 抓取；**2026-10-07 起所有显示器并行采集、每屏一个覆盖窗、共享虚拟桌面画布，选区可跨屏**（`CaptureCollector` / `DesktopFrames` / `OverlayWindowView`，方案见 [design/multi-display-overlay.md](../design/multi-display-overlay.md)）；不用 `snow-capture`（DXGI/WGC）；无光标采集、HDR、窗口排除。跨屏时录屏 / 长截图禁用；混合 DPI 与负原点副屏无真机验证 | 🟡 | 读码 |
 | D02 | 冻结覆盖窗 | `overlay/screenshotoverlaywindow.cpp`、`screenshotoverlaycoordinator.cpp`、`screenshotoverlaypool.cpp` | `overlay_view.rs`（3212 行，53 项测试）；单显示器、不透明窗；无多屏跨屏选区；无窗口池（每次新建）。性能基准（4K 标注）有环境变量驱动，结果见台账 | 🟡 | 读码 |
 | D03 | 选区交互（框选、八向手柄、拖动、边界限制） | `selection/screenshotselectiongeometry.cpp`、`core/screenshotgeometry.cpp` | `snow-ui-shell::selection`（46 项测试）+ overlay 状态机；右键先撤销选区再关闭 | ✅ | 读码 |
 | D04 | 选区高级项（锁比例、上次选区、预设、圆角、阴影、尺寸弹窗、单位、过渡动画） | `selection/screenshotselectionresize*.cpp`、`screenshotselectionsettingsstore.cpp` | 无；`screenshot_selection/*` 8 键与 `screenshot_ui/*` 13 键全未消费 | ⬜ | 读码 |

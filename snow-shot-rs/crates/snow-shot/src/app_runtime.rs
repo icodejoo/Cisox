@@ -6,7 +6,9 @@
 //! 所属阶段：A（事件循环骨架）+ B1（截图触发 → 采集光标所在显示器 → 冻结覆盖窗）。
 //! 采集在后台线程完成，结果经收件箱回到主线程再建窗。
 
-use crate::capture_flow::{CapturePayload, pick_monitor, spawn_capture};
+use crate::capture_flow::{CaptureCollector, CapturePayload, pick_monitor, spawn_capture};
+use crate::desktop_frames::{DesktopFrames, MonitorFrame};
+use snow_ui::ui::AppContext;
 use crate::direct_capture::{DirectHistory, DirectResult, spawn_direct_capture};
 use crate::history_nav::ThreadedHistoryProvider;
 use crate::history_store::{
@@ -39,7 +41,7 @@ use crate::translate_input_view::{TranslateInputView, WINDOW_HEIGHT as TRANSLATE
 use crate::translate_service::{
     TranslateConfig, TranslateFlowError, TranslateHost, TranslateOutcome, TranslateStage, Translated, run_flow,
 };
-use crate::overlay_view::{AutoConfirm, OverlayOutcome, ScreenshotOverlayView, SystemOutput};
+use crate::overlay_view::{AutoConfirm, OverlayOutcome, OverlayWindowView, ScreenshotOverlayView, SystemOutput};
 use crate::pinned_manager::PinnedManager;
 use crate::recording_flow::{
     ENV_RECORDING_AUTOTEST, RecordingHost, monitor_for_region, parse_autotest,
@@ -168,6 +170,8 @@ pub enum UiEvent {
     CaptureReady(CapturePayload),
     /// 后台采集失败。
     CaptureFailed(String),
+    /// 覆盖窗关闭了：同一会话里其余显示器上的覆盖窗跟着关闭。
+    OverlayClosed,
     /// 打开（或激活）设置窗口。
     OpenSettings,
     /// 重启应用：先拉起延迟启动的新实例，再正常退出。
@@ -1103,9 +1107,13 @@ pub struct AppState {
     translator: Arc<TranslateHost>,
     /// 应用数据根目录（OCR 组件下载位置等）。
     data_root: PathBuf,
-    /// 当前覆盖窗的视图（OCR 结果回写用）。
+    /// 截图会话的共享视图（所有显示器上的覆盖窗共用；OCR 结果回写、导出命令用）。
     overlay_view: Option<Entity<ScreenshotOverlayView>>,
-    /// 为即将打开的覆盖窗预先启动的窗口悬停来源（采集开始时抓窗口快照，覆盖窗打开时交给视图）。
+    /// 其余显示器上的覆盖窗（每块显示器一个窗口；光标所在屏的窗口在 `overlay`）。
+    overlay_windows: Vec<ShellWindow>,
+    /// 多屏采集收集器：各显示器并行采集，到齐后统一开窗。
+    capture_collector: CaptureCollector,
+    /// 为即将打开的覆盖窗预先启动的窗口悬停来源（采集开始时抓窗口快照，覆盖窗打开时交给共享视图）。
     window_hover: Option<Box<dyn WindowHover>>,
     /// 主线程收件箱（采集线程完成后经它回到主线程）。
     inbox: MainThreadInbox<UiEvent>,
@@ -1167,6 +1175,8 @@ impl AppState {
             translator: Arc::clone(&translator),
             data_root: data_root.to_path_buf(),
             overlay_view: None,
+            overlay_windows: Vec::new(),
+            capture_collector: CaptureCollector::default(),
             window_hover: None,
             scroll: ScrollHost::new(caps.clone(), inbox.clone(), Rc::clone(&config)),
             recording: RecordingHost::new(caps, inbox.clone(), Rc::clone(&config)),
@@ -1359,10 +1369,7 @@ fn request_capture(
     mode: CaptureMode,
 ) {
     let seq = on_capture_requested(state, origin);
-    let overlay_open = state
-        .overlay
-        .as_ref()
-        .is_some_and(|window| cx.is_window_open(window));
+    let overlay_open = any_overlay_open(cx, state);
     match capture_gate(state.capture_in_flight, overlay_open) {
         CaptureGate::Proceed => {}
         gate => {
@@ -1393,12 +1400,24 @@ fn request_capture(
     );
     state.capture_in_flight = true;
     state.capture_mode = mode;
-    // 此刻覆盖窗尚未出现：先抓窗口快照，保证与冻结帧一致且不含 Cisox 自己的覆盖窗
-    state.window_hover = start_window_hover(state.config.borrow().document(), monitor.bounds);
-    let inbox = state.inbox.clone();
     // 基准合成底图模式：底图由 open_overlay 用合成渐变替换，不需要真实屏幕采集
     // （锁屏 / 屏保期间 GDI 采集必失败，此模式仍可跑标注性能基准）
-    if std::env::var(ENV_OVERLAY_SYNTH).ok().and_then(|v| parse_size(&v)).is_some() {
+    let synth = std::env::var(ENV_OVERLAY_SYNTH).ok().and_then(|v| parse_size(&v)).is_some();
+    // 所有显示器同时出覆盖窗；合成底图的性能基准只开光标所在屏
+    let targets: Vec<MonitorInfo> = if synth {
+        vec![monitor.clone()]
+    } else {
+        monitors.all().to_vec()
+    };
+    state.capture_collector.begin(targets.len(), monitor.id);
+    // 此刻覆盖窗尚未出现：先抓窗口快照（一条线程服务所有显示器），保证与冻结帧一致且不含 Cisox 自己的覆盖窗
+    let canvas = canvas_bounds(targets.iter().map(|m| m.bounds));
+    state.window_hover = start_window_hover(state.config.borrow().document(), &[canvas])
+        .into_iter()
+        .next()
+        .flatten();
+    let inbox = state.inbox.clone();
+    if synth {
         tracing::info!(seq, "性能基准：跳过真实屏幕采集");
         inbox.push(UiEvent::CaptureReady(CapturePayload {
             monitor,
@@ -1407,16 +1426,21 @@ fn request_capture(
         }));
         return;
     }
-    let spawned = spawn_capture(monitor, move |result| {
-        inbox.push(match result {
-            Ok(payload) => UiEvent::CaptureReady(payload),
-            Err(e) => UiEvent::CaptureFailed(e),
+    for target in targets {
+        let inbox = inbox.clone();
+        let spawned = spawn_capture(target, move |result| {
+            inbox.push(match result {
+                Ok(payload) => UiEvent::CaptureReady(payload),
+                Err(e) => UiEvent::CaptureFailed(e),
+            });
         });
-    });
-    if let Err(e) = spawned {
-        state.capture_in_flight = false;
-        state.capture_mode = CaptureMode::Screenshot;
-        tracing::error!(seq, error = %e, "启动采集线程失败");
+        if let Err(e) = spawned {
+            state.capture_collector.cancel();
+            state.capture_in_flight = false;
+            state.capture_mode = CaptureMode::Screenshot;
+            tracing::error!(seq, error = %e, "启动采集线程失败");
+            return;
+        }
     }
 }
 
@@ -1436,52 +1460,78 @@ pub fn cursor_in_monitor(monitor: &MonitorInfo, cursor: Option<PhysicalPoint>) -
     }
 }
 
-/// 采集完成后在光标所在显示器上打开冻结覆盖窗。
+/// 所有显示器采集到齐后，各开一个冻结覆盖窗：所有窗口共用**一个**逻辑视图，选区工作在虚拟桌面画布坐标上，
+/// 每个窗口只负责渲染自己那块屏的一片。光标所在显示器最后开（拿键盘焦点，也是主窗口）。
 ///
 /// # 参数
 /// - `cx`：GPUI 外壳上下文。
 /// - `state`：运行时状态。
-/// - `payload`：采集结果。
-fn open_overlay(cx: &mut ShellContext, state: &mut AppState, payload: CapturePayload) {
+/// - `payloads`：按开窗顺序排好的采集结果（光标所在屏在最后）。
+fn open_overlays(cx: &mut ShellContext, state: &mut AppState, payloads: Vec<CapturePayload>) {
     state.capture_in_flight = false;
     let mode = std::mem::replace(&mut state.capture_mode, CaptureMode::Screenshot);
-    let record_mode = mode == CaptureMode::Record;
-    let scroll_mode = mode == CaptureMode::Scroll;
-    let auto_confirm = match mode {
-        CaptureMode::Quick(action) => Some(action),
-        _ => None,
-    };
-    let CapturePayload {
-        monitor,
-        mut screen,
-        elapsed,
-    } = payload;
-    tracing::info!(
-        monitor = monitor.id.0,
-        width = screen.width,
-        height = screen.height,
-        capture_ms = elapsed.as_millis() as u64,
-        "采集完成，准备打开覆盖窗"
-    );
+    state.overlay_windows.clear();
+    if payloads.is_empty() {
+        return;
+    }
     // 性能基准可用合成底图替换真实截图（例如在非 4K 屏上测 4K 纹理）
     let synth = std::env::var(ENV_OVERLAY_SYNTH)
         .ok()
         .and_then(|v| parse_size(&v));
+    // 画布 = 所有显示器的虚拟桌面外接矩形（桌面物理坐标，可为负）
+    let canvas = canvas_bounds(payloads.iter().map(|p| p.monitor.bounds));
     let mut scale_override = None;
-    if let Some((w, h)) = synth {
-        let logical_width = monitor.bounds.width as f32 / monitor.scale.value();
-        scale_override = Some(w as f32 / logical_width);
-        screen = synthetic_screen(w, h);
-        tracing::info!(w, h, "性能基准：使用合成底图");
+    let mut monitors: Vec<MonitorInfo> = Vec::with_capacity(payloads.len());
+    let mut frames: Vec<MonitorFrame> = Vec::with_capacity(payloads.len());
+    for payload in payloads {
+        let CapturePayload {
+            monitor,
+            mut screen,
+            elapsed,
+        } = payload;
+        tracing::info!(
+            monitor = monitor.id.0,
+            width = screen.width,
+            height = screen.height,
+            capture_ms = elapsed.as_millis() as u64,
+            "采集完成，准备打开覆盖窗"
+        );
+        if let Some((w, h)) = synth {
+            let logical_width = monitor.bounds.width as f32 / monitor.scale.value();
+            scale_override = Some(w as f32 / logical_width);
+            screen = synthetic_screen(w, h);
+            tracing::info!(w, h, "性能基准：使用合成底图");
+        }
+        let frame = match FrozenFrame::from_captured(screen) {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::error!(error = %e, "构造冻结底图失败");
+                return;
+            }
+        };
+        let (frame_w, frame_h) = frame.size();
+        let rect = if synth.is_some() {
+            PhysicalRect::new(0, 0, frame_w as i32, frame_h as i32)
+        } else {
+            PhysicalRect::new(monitor.bounds.x - canvas.x, monitor.bounds.y - canvas.y, frame_w as i32, frame_h as i32)
+        };
+        frames.push(MonitorFrame { rect, frame });
+        monitors.push(monitor);
     }
-    let frame = match FrozenFrame::from_captured(screen) {
+    let frames = match DesktopFrames::new(frames) {
         Ok(f) => f,
         Err(e) => {
-            tracing::error!(error = %e, "构造冻结底图失败");
+            tracing::error!(error = %e, "拼接多屏底图失败");
             return;
         }
     };
-    let cursor = cursor_in_monitor(&monitor, cursor_screen_position().ok());
+    let Some(primary) = monitors.last().cloned() else {
+        return;
+    };
+    let cursor = match cursor_screen_position().ok() {
+        Some(p) => PhysicalPoint::new(p.x - canvas.x, p.y - canvas.y),
+        None => PhysicalPoint::new(canvas.width / 2, canvas.height / 2),
+    };
 
     let (save_dir, source, format, supported) = {
         let store = state.config.borrow();
@@ -1495,39 +1545,30 @@ fn open_overlay(cx: &mut ShellContext, state: &mut AppState, payload: CapturePay
         tracing::warn!(format, "配置的图片格式暂不支持，保存时使用 PNG");
     }
 
-    let mut spec = WindowSpec::overlay(MonitorTarget::Id(monitor.id));
-    // 需要键盘（Esc / Enter / C），所以建窗时抢占焦点；底图不透明，无需窗口透明
-    spec.focus = true;
-    spec.transparent = false;
     let record_inbox = state.inbox.clone();
-    let record_monitor = monitor.clone();
+    let record_monitors = monitors.clone();
     let pin_inbox = state.inbox.clone();
-    let pin_origin = monitor.bounds;
     let ocr_inbox = state.inbox.clone();
     let ocr_download_inbox = state.inbox.clone();
     let translate_inbox = state.inbox.clone();
     let translate_download_inbox = state.inbox.clone();
     let scroll_inbox = state.inbox.clone();
-    let scroll_monitor = monitor.clone();
+    let scroll_monitors = monitors.clone();
     let output = Box::new(
         SystemOutput::new(save_dir)
             .with_config(state.config.clone())
             .with_recording(move |rect| {
-                // 覆盖窗坐标以显示器左上角为原点，换算成虚拟桌面坐标
+                // 覆盖窗坐标以画布左上角为原点，换算成虚拟桌面坐标；录制窗绑定选区所在的那块显示器
+                let region = monitor_local_to_desktop(rect, canvas);
                 record_inbox.push(UiEvent::RecordingRegionChosen {
-                    region: monitor_local_to_desktop(rect, record_monitor.bounds),
-                    monitor: record_monitor.clone(),
+                    region,
+                    monitor: session_monitor_for(&record_monitors, region),
                 });
             })
             .with_pin(move |rect, width, height, rgba| {
-                // 贴图在选区原位打开：同样把显示器内坐标换算成虚拟桌面坐标
+                // 贴图在选区原位打开：同样把画布内坐标换算成虚拟桌面坐标
                 pin_inbox.push(UiEvent::PinCreate {
-                    rect: PhysicalRect::new(
-                        rect.x + pin_origin.x,
-                        rect.y + pin_origin.y,
-                        rect.width,
-                        rect.height,
-                    ),
+                    rect: monitor_local_to_desktop(rect, canvas),
                     width,
                     height,
                     rgba,
@@ -1546,116 +1587,260 @@ fn open_overlay(cx: &mut ShellContext, state: &mut AppState, payload: CapturePay
                 translate_download_inbox.push(UiEvent::TranslateDownloadRequested);
             })
             .with_scroll_capture(move |rect| {
-                let bounds = scroll_monitor.bounds;
+                let region = monitor_local_to_desktop(rect, canvas);
                 scroll_inbox.push(UiEvent::ScrollRegionChosen {
-                    region: PhysicalRect::new(rect.x + bounds.x, rect.y + bounds.y, rect.width, rect.height),
-                    monitor: scroll_monitor.clone(),
+                    region,
+                    monitor: session_monitor_for(&scroll_monitors, region),
                 });
             }),
     );
-    let opened = cx.open_window(&spec, move |window, app| {
-        ScreenshotOverlayView::create(window, app, frame, cursor, output)
-    });
-    match opened {
-        Ok((window, view)) => {
-            tracing::info!(
-                monitor = monitor.id.0,
-                rect = ?monitor.bounds,
-                hwnd = ?window.native_id().map(|id| id.0),
-                "screenshot overlay opened"
-            );
-            // 另存为对话框要以覆盖窗为所有者，否则会被置顶的覆盖窗盖住
-            if let Some(id) = window.native_id() {
-                view.update(cx.app(), |v, _| v.set_owner_window(id.0));
-            }
-            let (keymap, locale) = {
-                let store = state.config.borrow();
-                (
-                    crate::overlay_keymap::OverlayKeymap::from_document(store.document()),
-                    interface_locale(store.document()),
-                )
+
+    // 每块显示器一个窗口；第一个窗口负责创建共享视图，其余窗口复用它
+    let mut frames_slot = Some(frames);
+    let mut output_slot = Some(output);
+    let mut shared: Option<Entity<ScreenshotOverlayView>> = None;
+    let mut windows: Vec<ShellWindow> = Vec::with_capacity(monitors.len());
+    let initial_scale = scale_override.unwrap_or_else(|| primary.scale.value());
+    for (index, monitor) in monitors.iter().enumerate() {
+        let mut spec = WindowSpec::overlay(MonitorTarget::Id(monitor.id));
+        // 需要键盘（Esc / Enter / C），所以建窗时抢占焦点；底图不透明，无需窗口透明
+        spec.focus = true;
+        spec.transparent = false;
+        let existing = shared.clone();
+        let (frames_for, output_for) = if existing.is_none() {
+            (frames_slot.take(), output_slot.take())
+        } else {
+            (None, None)
+        };
+        let opened = cx.open_window(&spec, move |window, app| {
+            let entity = match (existing, frames_for, output_for) {
+                (Some(entity), _, _) => entity,
+                (None, Some(frames), Some(output)) => {
+                    ScreenshotOverlayView::create_shared(app, frames, initial_scale, cursor, output)
+                }
+                _ => unreachable!("首个窗口必须带着底图与输出通道"),
             };
-            view.update(cx.app(), |v, _| {
-                v.set_keymap(keymap);
-                v.set_locale(&locale);
-            });
-            state.overlay = Some(window);
-            state.overlay_view = Some(view.clone());
-            // 标注样式：读取已保存的各工具样式，之后的修改写回同一份配置
-            let style_locale = ui_prefs_from_document(state.config.borrow().document()).locale;
-            let style_config = state.config.clone();
-            view.update(cx.app(), |v, _| v.set_style_config(style_config, style_locale));
-            // 选区形状：读取上次使用的形状（矩形 / 折线 / 曲线 / 自由绘制）
-            {
-                let region_type = crate::region_select::RegionType::from_config(
-                    state
-                        .config
-                        .borrow()
-                        .document()
-                        .value("screenshot_selection/region_type")
-                        .as_str()
-                        .unwrap_or_default(),
+            app.new(|vcx| OverlayWindowView::new(entity, index, window, vcx))
+        });
+        match opened {
+            Ok((window, root)) => {
+                tracing::info!(
+                    monitor = monitor.id.0,
+                    rect = ?monitor.bounds,
+                    hwnd = ?window.native_id().map(|id| id.0),
+                    "screenshot overlay opened"
                 );
-                view.update(cx.app(), |v, _| v.set_initial_region_type(region_type));
+                if shared.is_none() {
+                    shared = Some(root.read(cx.app()).shared());
+                }
+                windows.push(window);
             }
-            // 历史翻页：覆盖窗里用快捷键在截图历史里前后翻，读盘在后台线程
-            {
-                let policy = policy_from_document(state.config.borrow().document());
-                match ThreadedHistoryProvider::start(&state.data_root, policy) {
-                    Ok(provider) => {
-                        view.update(cx.app(), |v, _| v.set_history_provider(Box::new(provider)));
-                    }
-                    Err(e) => tracing::warn!(error = %e, "启动截图历史读取线程失败，翻页不可用"),
+            Err(e) => {
+                tracing::error!(error = %e, monitor = monitor.id.0, "打开截图覆盖窗失败");
+                if shared.is_none() {
+                    return;
                 }
             }
-            // 导出成功后由视图把整帧、选区、标注历史与结果图交给历史写入线程
-            if let Some(recorder) = state.history.clone() {
-                let config = Rc::clone(&state.config);
-                view.update(cx.app(), |v, _| {
-                    v.set_history_sink(move |source, snapshot| {
-                        let policy = policy_from_document(config.borrow().document());
-                        recorder.submit_snapshot(policy, source, snapshot);
-                    });
-                });
-            }
-            if let Some(hover) = state.window_hover.take() {
-                let (target, animate) = {
-                    let config = state.config.borrow();
-                    (selection_target(config.document()), transition_animation_enabled(config.document()))
-                };
-                view.update(cx.app(), |v, _| v.set_window_hover(Some(hover), target, animate));
-            }
-            if record_mode {
-                view.update(cx.app(), |v, _| v.set_record_mode(true));
-            }
-            if scroll_mode {
-                view.update(cx.app(), |v, _| v.set_scroll_mode(true));
-            }
-            if auto_confirm.is_some() {
-                view.update(cx.app(), |v, _| v.set_auto_confirm(auto_confirm));
-            }
-            if let Some(s) = scale_override {
-                view.update(cx.app(), |v, _| v.set_scale_override(Some(s)));
-            }
-            let bench = parse_bench_steps(std::env::var(ENV_OVERLAY_BENCH).ok().as_deref());
-            if let Some(steps) = bench {
-                let tool = parse_bench_tool(std::env::var(ENV_OVERLAY_BENCH_TOOL).ok().as_deref());
-                let hold = std::env::var_os(ENV_OVERLAY_BENCH_HOLD).is_some();
-                let action = if std::env::var_os(ENV_OVERLAY_BENCH_PIN).is_some() {
-                    Some(ToolbarAction::Pin)
-                } else if std::env::var_os(ENV_OVERLAY_BENCH_OCR).is_some() {
-                    Some(ToolbarAction::Ocr)
-                } else if std::env::var_os(ENV_OVERLAY_BENCH_TRANSLATE).is_some() {
-                    Some(ToolbarAction::Translate)
-                } else if std::env::var_os(ENV_OVERLAY_BENCH_SCROLL).is_some() {
-                    Some(ToolbarAction::ScrollCapture)
-                } else {
-                    None
-                };
-                spawn_overlay_bench(cx, window, view, steps, tool, hold, action);
-            }
         }
-        Err(e) => tracing::error!(error = %e, "打开截图覆盖窗失败"),
+    }
+    let (Some(view), Some(&window)) = (shared, windows.last()) else {
+        return;
+    };
+    state.overlay_windows = windows[..windows.len() - 1].to_vec();
+    configure_overlay(cx, state, window, view, canvas, mode, scale_override);
+}
+
+/// 虚拟桌面外接矩形：所有显示器范围的并集（桌面物理坐标，可为负）；没有显示器时为空矩形。
+///
+/// # 参数
+/// - `bounds`：各显示器的桌面物理范围。
+///
+/// ```ignore
+/// let canvas = canvas_bounds([PhysicalRect::new(-1920, 0, 1920, 1080), PhysicalRect::new(0, 0, 2560, 1440)]);
+/// assert_eq!((canvas.x, canvas.width), (-1920, 4480));
+/// ```
+fn canvas_bounds(bounds: impl IntoIterator<Item = PhysicalRect>) -> PhysicalRect {
+    let mut iter = bounds.into_iter();
+    let Some(first) = iter.next() else {
+        return PhysicalRect::new(0, 0, 0, 0);
+    };
+    let (mut left, mut top, mut right, mut bottom) = (first.x, first.y, first.right(), first.bottom());
+    for rect in iter {
+        left = left.min(rect.x);
+        top = top.min(rect.y);
+        right = right.max(rect.right());
+        bottom = bottom.max(rect.bottom());
+    }
+    PhysicalRect::new(left, top, right - left, bottom - top)
+}
+
+/// 选区（桌面物理坐标）所在的显示器：复用录屏流程的判定，都不相交时退回第一块。
+///
+/// # 参数
+/// - `monitors`：本次会话的各显示器（至少一块）。
+/// - `region`：选区（桌面物理坐标）。
+fn session_monitor_for(monitors: &[MonitorInfo], region: PhysicalRect) -> MonitorInfo {
+    monitor_for_region(monitors, region)
+        .or_else(|| monitors.first())
+        .cloned()
+        .expect("会话至少有一块显示器")
+}
+
+/// 当前是否有任何一块显示器上的覆盖窗仍然打开。
+fn any_overlay_open(cx: &ShellContext, state: &AppState) -> bool {
+    state.overlay.as_ref().is_some_and(|w| cx.is_window_open(w))
+        || state.overlay_windows.iter().any(|w| cx.is_window_open(w))
+}
+
+/// 某个覆盖窗关闭后，把同一会话里其余仍打开的窗口也关掉（走共享视图的关闭流程，释放底图与分块图集）。
+///
+/// # 参数
+/// - `cx`：GPUI 外壳上下文。
+/// - `state`：运行时状态。
+fn close_all_overlays(cx: &mut ShellContext, state: &mut AppState) {
+    // 每个窗口关闭都会触发一次本函数：取走会话句柄，后到的重复事件就无事可做
+    let Some(view) = state.overlay_view.take() else {
+        state.overlay_windows.clear();
+        return;
+    };
+    let mut windows = std::mem::take(&mut state.overlay_windows);
+    if let Some(primary) = state.overlay.take() {
+        windows.push(primary);
+    }
+    for window in windows {
+        if cx.is_window_open(&window) {
+            let view = view.clone();
+            let _ = window
+                .gpui_handle()
+                .update(cx.app(), |_, w, app| view.update(app, |v, _| v.close(w)));
+        }
+    }
+}
+
+/// 给刚创建好的共享视图装配会话所需的一切：句柄、键位、语言、样式、历史、悬停来源、模式与基准。
+///
+/// # 参数
+/// - `cx`：GPUI 外壳上下文。
+/// - `state`：运行时状态。
+/// - `window`：主窗口（光标所在显示器上的窗口，也是对话框的所有者）。
+/// - `view`：共享视图。
+/// - `canvas`：虚拟桌面外接矩形（桌面物理坐标）；其左上角是画布原点。
+/// - `mode`：覆盖窗的用途。
+/// - `scale_override`：性能基准的固定缩放比。
+fn configure_overlay(
+    cx: &mut ShellContext,
+    state: &mut AppState,
+    window: ShellWindow,
+    view: Entity<ScreenshotOverlayView>,
+    canvas: PhysicalRect,
+    mode: CaptureMode,
+    scale_override: Option<f32>,
+) {
+    let record_mode = mode == CaptureMode::Record;
+    let scroll_mode = mode == CaptureMode::Scroll;
+    let auto_confirm = match mode {
+        CaptureMode::Quick(action) => Some(action),
+        _ => None,
+    };
+    view.update(cx.app(), |v, _| v.set_canvas_origin(PhysicalPoint::new(canvas.x, canvas.y)));
+    // 另存为对话框要以覆盖窗为所有者，否则会被置顶的覆盖窗盖住
+    if let Some(id) = window.native_id() {
+        view.update(cx.app(), |v, _| v.set_owner_window(id.0));
+    }
+    let (keymap, locale) = {
+        let store = state.config.borrow();
+        (
+            crate::overlay_keymap::OverlayKeymap::from_document(store.document()),
+            interface_locale(store.document()),
+        )
+    };
+    view.update(cx.app(), |v, _| {
+        v.set_keymap(keymap);
+        v.set_locale(&locale);
+    });
+    state.overlay = Some(window);
+    state.overlay_view = Some(view.clone());
+    // 多屏会话协调：任一窗口关闭时，其余显示器上的窗口跟着关闭
+    {
+        let close_inbox = state.inbox.clone();
+        view.update(cx.app(), |v, _| {
+            v.set_close_hook(move || {
+                close_inbox.push(UiEvent::OverlayClosed);
+            });
+        });
+    }
+    // 标注样式：读取已保存的各工具样式，之后的修改写回同一份配置
+    let style_locale = ui_prefs_from_document(state.config.borrow().document()).locale;
+    let style_config = state.config.clone();
+    view.update(cx.app(), |v, _| v.set_style_config(style_config, style_locale));
+    // 选区形状：读取上次使用的形状（矩形 / 折线 / 曲线 / 自由绘制）
+    {
+        let region_type = crate::region_select::RegionType::from_config(
+            state
+                .config
+                .borrow()
+                .document()
+                .value("screenshot_selection/region_type")
+                .as_str()
+                .unwrap_or_default(),
+        );
+        view.update(cx.app(), |v, _| v.set_initial_region_type(region_type));
+    }
+    // 历史翻页：覆盖窗里用快捷键在截图历史里前后翻，读盘在后台线程
+    {
+        let policy = policy_from_document(state.config.borrow().document());
+        match ThreadedHistoryProvider::start(&state.data_root, policy) {
+            Ok(provider) => {
+                view.update(cx.app(), |v, _| v.set_history_provider(Box::new(provider)));
+            }
+            Err(e) => tracing::warn!(error = %e, "启动截图历史读取线程失败，翻页不可用"),
+        }
+    }
+    // 导出成功后由视图把整帧、选区、标注历史与结果图交给历史写入线程
+    if let Some(recorder) = state.history.clone() {
+        let config = Rc::clone(&state.config);
+        view.update(cx.app(), |v, _| {
+            v.set_history_sink(move |source, snapshot| {
+                let policy = policy_from_document(config.borrow().document());
+                recorder.submit_snapshot(policy, source, snapshot);
+            });
+        });
+    }
+    if let Some(hover) = state.window_hover.take() {
+        let (target, animate) = {
+            let config = state.config.borrow();
+            (selection_target(config.document()), transition_animation_enabled(config.document()))
+        };
+        view.update(cx.app(), |v, _| v.set_window_hover(Some(hover), target, animate));
+    }
+    if record_mode {
+        view.update(cx.app(), |v, _| v.set_record_mode(true));
+    }
+    if scroll_mode {
+        view.update(cx.app(), |v, _| v.set_scroll_mode(true));
+    }
+    if auto_confirm.is_some() {
+        view.update(cx.app(), |v, _| v.set_auto_confirm(auto_confirm));
+    }
+    if let Some(s) = scale_override {
+        view.update(cx.app(), |v, _| v.set_scale_override(Some(s)));
+    }
+    let bench = parse_bench_steps(std::env::var(ENV_OVERLAY_BENCH).ok().as_deref());
+    if let Some(steps) = bench {
+        let tool = parse_bench_tool(std::env::var(ENV_OVERLAY_BENCH_TOOL).ok().as_deref());
+        let hold = std::env::var_os(ENV_OVERLAY_BENCH_HOLD).is_some();
+        let action = if std::env::var_os(ENV_OVERLAY_BENCH_PIN).is_some() {
+            Some(ToolbarAction::Pin)
+        } else if std::env::var_os(ENV_OVERLAY_BENCH_OCR).is_some() {
+            Some(ToolbarAction::Ocr)
+        } else if std::env::var_os(ENV_OVERLAY_BENCH_TRANSLATE).is_some() {
+            Some(ToolbarAction::Translate)
+        } else if std::env::var_os(ENV_OVERLAY_BENCH_SCROLL).is_some() {
+            Some(ToolbarAction::ScrollCapture)
+        } else {
+            None
+        };
+        spawn_overlay_bench(cx, window, view, steps, tool, hold, action);
     }
 }
 
@@ -2718,8 +2903,15 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
         UiEvent::Capture { origin } => {
             request_capture(cx, state, origin, CaptureMode::Screenshot);
         }
-        UiEvent::CaptureReady(payload) => open_overlay(cx, state, payload),
+        UiEvent::CaptureReady(payload) => {
+            if let Some(payloads) = state.capture_collector.push(payload) {
+                open_overlays(cx, state, payloads);
+            }
+        }
+        UiEvent::OverlayClosed => close_all_overlays(cx, state),
         UiEvent::CaptureFailed(reason) => {
+            state.capture_collector.cancel();
+            state.window_hover = None;
             state.capture_in_flight = false;
             state.capture_mode = CaptureMode::Screenshot;
             tracing::error!(%reason, "屏幕采集失败，未打开覆盖窗");

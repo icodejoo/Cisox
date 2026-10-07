@@ -71,6 +71,7 @@ pub mod translate_layout;
 pub mod translate_service;
 pub mod language_names;
 pub mod translate_settings;
+pub mod desktop_frames;
 pub mod history_nav;
 pub mod previous_selection;
 pub mod region_select;

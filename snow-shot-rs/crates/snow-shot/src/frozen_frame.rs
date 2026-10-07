@@ -79,6 +79,11 @@ impl FrozenFrame {
         self.image.as_bytes(0).unwrap_or(&[])
     }
 
+    /// BGRA 像素缓冲（多屏画布合成用）。
+    pub(crate) fn bgra_pixels(&self) -> &[u8] {
+        self.pixels()
+    }
+
     /// 标注合成用的只读底图视图（借用图像资源里的 BGRA 缓冲，不拷贝）。
     ///
     /// ```ignore

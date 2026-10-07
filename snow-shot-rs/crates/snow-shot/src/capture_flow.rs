@@ -2,7 +2,7 @@
 
 use snow_platform::capture::{CapturedScreen, capture_display};
 use snow_ui::shell::geometry::PhysicalPoint;
-use snow_ui::shell::monitor::{MonitorInfo, Monitors};
+use snow_ui::shell::monitor::{MonitorId, MonitorInfo, Monitors};
 use std::time::{Duration, Instant};
 
 /// 采集线程名称。
@@ -36,6 +36,69 @@ impl PartialEq for CapturePayload {
         self.monitor == other.monitor
             && self.screen.width == other.screen.width
             && self.screen.height == other.screen.height
+    }
+}
+
+/// 一次多屏采集的收集器：每块显示器各自后台采集，等全部到齐再统一开窗。
+///
+/// 光标所在的显示器（主显示器）排到最后一个开窗，这样它最后创建、拿到键盘焦点。
+#[derive(Debug, Default)]
+pub struct CaptureCollector {
+    /// 还在等待的显示器总数；0 表示当前没有进行中的采集。
+    expected: usize,
+    /// 光标所在显示器（最后开窗）。
+    primary: Option<MonitorId>,
+    /// 已到达的载荷。
+    ready: Vec<CapturePayload>,
+}
+
+impl CaptureCollector {
+    /// 开始一次新的采集，丢弃上一次的残留。
+    ///
+    /// # 参数
+    /// - `expected`：要采集的显示器数量。
+    /// - `primary`：光标所在的显示器。
+    pub fn begin(&mut self, expected: usize, primary: MonitorId) {
+        self.expected = expected;
+        self.primary = Some(primary);
+        self.ready.clear();
+    }
+
+    /// 是否有进行中的采集。
+    pub fn is_active(&self) -> bool {
+        self.expected > 0
+    }
+
+    /// 取消当前采集：之后到达的载荷一律丢弃。
+    pub fn cancel(&mut self) {
+        self.expected = 0;
+        self.primary = None;
+        self.ready.clear();
+    }
+
+    /// 收到一块显示器的采集结果。
+    ///
+    /// # 返回
+    /// 全部到齐时返回按开窗顺序排好的载荷（光标所在屏最后）；否则 `None`。
+    /// 没有进行中的采集（已取消 / 已完成）时直接丢弃该载荷。
+    ///
+    /// ```ignore
+    /// if let Some(payloads) = collector.push(payload) { open_all(payloads); }
+    /// ```
+    pub fn push(&mut self, payload: CapturePayload) -> Option<Vec<CapturePayload>> {
+        if !self.is_active() {
+            return None;
+        }
+        self.ready.push(payload);
+        if self.ready.len() < self.expected {
+            return None;
+        }
+        let primary = self.primary.take();
+        self.expected = 0;
+        let mut all = std::mem::take(&mut self.ready);
+        // 稳定排序：光标所在屏排到最后，其余保持到达顺序
+        all.sort_by_key(|p| Some(p.monitor.id) == primary);
+        Some(all)
     }
 }
 
@@ -129,6 +192,31 @@ mod tests {
             monitor(1, PhysicalRect::new(0, 0, 2560, 1440), true),
             monitor(2, PhysicalRect::new(-1920, 200, 1920, 1080), false),
         ])
+    }
+
+    /// 多屏收集：全部到齐才开窗；光标所在屏排最后；取消后迟到的载荷被丢弃。
+    #[test]
+    fn collector_waits_for_all_and_puts_primary_last() {
+        let monitors = two();
+        let (a, b) = (monitors.all()[0].clone(), monitors.all()[1].clone());
+        let payload = |m: &MonitorInfo| CapturePayload {
+            monitor: m.clone(),
+            screen: CapturedScreen::new_solid(2, 2, (0, 0, 0, 255)),
+            elapsed: Duration::ZERO,
+        };
+        let mut collector = CaptureCollector::default();
+        assert!(!collector.is_active());
+        assert!(collector.push(payload(&a)).is_none(), "没开始时丢弃");
+        collector.begin(2, a.id);
+        assert!(collector.push(payload(&a)).is_none());
+        let all = collector.push(payload(&b)).expect("到齐");
+        assert_eq!(all.iter().map(|p| p.monitor.id).collect::<Vec<_>>(), vec![b.id, a.id]);
+        assert!(!collector.is_active());
+
+        collector.begin(2, b.id);
+        collector.push(payload(&a));
+        collector.cancel();
+        assert!(collector.push(payload(&b)).is_none(), "取消后迟到的载荷丢弃");
     }
 
     /// 光标在哪块屏就选哪块，含负坐标副屏。

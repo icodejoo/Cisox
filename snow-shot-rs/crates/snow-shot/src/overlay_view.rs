@@ -11,6 +11,7 @@ use crate::annotation_style::{
     ArrowheadChoice, FONT_PRESETS, PALETTE, Rgba, ToolStyle, ToolStyleStore, WIDTH_PRESETS,
     config_key, nearest_index, panel_placement, style_fields,
 };
+use crate::desktop_frames::DesktopFrames;
 use crate::frozen_frame::FrozenFrame;
 use crate::history_nav::{FinishStep, HistoryNav, HistoryProvider, LoadOutcome, NavStep};
 use crate::history_store::{HistorySnapshot, HistorySource, LoadedEntry};
@@ -41,7 +42,6 @@ use snow_config::store::ConfigStore;
 use snow_i18n::{Args, I18n};
 use snow_canvas_text::{CanvasTextInput, CanvasTextStyle, EditKeyOutcome};
 use snow_platform::text_raster::DEFAULT_FONT_FAMILY;
-use snow_platform::capture::CapturedScreen;
 use snow_platform::clipboard::{copy_image_to_clipboard, copy_text_to_clipboard};
 use snow_ui::shell::geometry::{PhysicalPoint, PhysicalRect};
 use snow_ui::ui::component::checkbox::Checkbox;
@@ -197,7 +197,7 @@ struct RegionOpState {
 /// 翻到历史记录时暂存的「当前截图」：翻回来时原样放回（含标注撤销栈）。
 struct LiveEndpoint {
     /// 当前截图的冻结底图。
-    frame: FrozenFrame,
+    frame: DesktopFrames,
     /// 当前截图的标注层。
     annotations: Option<AnnotationLayer>,
     /// 离开时的选区状态。
@@ -219,7 +219,7 @@ struct HistoryHost {
 /// 读出的历史现场换成视图可用的底图、标注层与选区。
 struct PreparedEntry {
     /// 历史底图。
-    frame: FrozenFrame,
+    frame: DesktopFrames,
     /// 恢复出的标注层。
     annotations: Option<AnnotationLayer>,
     /// 历史选区。
@@ -864,7 +864,7 @@ fn logical_rect(rect: PhysicalRect, scale: f32) -> PhysicalRect {
 /// 截图覆盖窗主视图组件。
 pub struct ScreenshotOverlayView {
     /// 冻结底图。
-    frame: FrozenFrame,
+    frame: DesktopFrames,
     /// 底图物理边界（原点 0,0）。
     screen_bounds: PhysicalRect,
     /// 当前窗口缩放比（物理 / 逻辑）。
@@ -889,6 +889,10 @@ pub struct ScreenshotOverlayView {
     history_sink: Option<Box<dyn Fn(HistorySource, HistorySnapshot)>>,
     /// 截图历史翻页宿主（未接入则翻页键无效）。
     history_host: Option<HistoryHost>,
+    /// 画布左上角在虚拟桌面里的坐标（单屏为该屏原点）；「上一次选区」按桌面坐标存取，换屏幕排布后不会错位。
+    canvas_origin: PhysicalPoint,
+    /// 会话钩子：本视图关闭时通知运行时（多屏时其余显示器上的窗口跟着关闭）。
+    close_hook: Option<Box<dyn Fn()>>,
     /// 当前选区形状类型（矩形 / 折线 / 曲线 / 自由绘制）。
     region_type: RegionType,
     /// 正在绘制的自定义区域草稿。
@@ -956,7 +960,7 @@ pub struct ScreenshotOverlayView {
 }
 
 impl ScreenshotOverlayView {
-    /// 创建覆盖窗主视图（不依赖 GPUI 上下文，可离屏测试）。
+    /// 创建单显示器覆盖窗主视图（不依赖 GPUI 上下文，可离屏测试）。
     ///
     /// # 参数
     /// - `frame`：冻结底图。
@@ -974,6 +978,26 @@ impl ScreenshotOverlayView {
     /// ```
     pub fn new(
         frame: FrozenFrame,
+        scale: f32,
+        initial_cursor: PhysicalPoint,
+        output: Box<dyn OutputSink>,
+    ) -> Self {
+        Self::new_multi(DesktopFrames::single(frame), scale, initial_cursor, output)
+    }
+
+    /// 创建多显示器共享的覆盖窗主视图：逻辑工作在虚拟桌面画布坐标上，每块屏由各自的窗口渲染一片。
+    ///
+    /// # 参数
+    /// - `frame`：各显示器的冻结底图与它们在画布里的矩形。
+    /// - `scale`：初始缩放比（渲染与事件时按各窗口实际缩放更新）。
+    /// - `initial_cursor`：创建时光标的画布坐标。
+    /// - `output`：输出通道。
+    ///
+    /// ```ignore
+    /// let view = ScreenshotOverlayView::new_multi(frames, 1.0, cursor, sink);
+    /// ```
+    pub fn new_multi(
+        frame: DesktopFrames,
         scale: f32,
         initial_cursor: PhysicalPoint,
         output: Box<dyn OutputSink>,
@@ -1002,6 +1026,8 @@ impl ScreenshotOverlayView {
             pending_save: None,
             history_sink: None,
             history_host: None,
+            close_hook: None,
+            canvas_origin: PhysicalPoint::new(0, 0),
             region_type: RegionType::Rectangle,
             region_draft: None,
             region_mask: None,
@@ -1041,28 +1067,26 @@ impl ScreenshotOverlayView {
         view
     }
 
-    /// 在 GPUI 中创建视图实体并抢占键盘焦点。
+    /// 在 GPUI 中创建多个窗口共用的视图实体。
     ///
     /// # 参数
-    /// - `window` / `app`：建窗回调提供的上下文。
-    /// - 其余参数同 [`ScreenshotOverlayView::new`]。
-    pub fn create(
-        window: &mut Window,
+    /// - `app`：应用上下文。
+    /// - `frames`：各显示器的冻结底图。
+    /// - `scale`：初始缩放比。
+    /// - `initial_cursor`：创建时光标的画布坐标。
+    /// - `output`：输出通道。
+    ///
+    /// ```ignore
+    /// let shared = ScreenshotOverlayView::create_shared(app, frames, 1.0, cursor, output);
+    /// ```
+    pub fn create_shared(
         app: &mut App,
-        frame: FrozenFrame,
+        frames: DesktopFrames,
+        scale: f32,
         initial_cursor: PhysicalPoint,
         output: Box<dyn OutputSink>,
     ) -> Entity<Self> {
-        let scale = window.scale_factor();
-        let view = app.new(|cx| {
-            let mut view = Self::new(frame, scale, initial_cursor, output);
-            view.focus_handle = Some(cx.focus_handle());
-            view
-        });
-        if let Some(handle) = view.read(app).focus_handle.clone() {
-            window.focus(&handle, app);
-        }
-        view
+        app.new(|_| Self::new_multi(frames, scale, initial_cursor, output))
     }
 
     /// 固定缩放比（性能基准用：让 4K 底图铺满较小的窗口时坐标仍自洽）。
@@ -1258,10 +1282,35 @@ impl ScreenshotOverlayView {
     /// let p = view.physical_point(point(px(100.0), px(50.0)));
     /// ```
     pub fn physical_point(&self, logical: Point<Pixels>) -> PhysicalPoint {
+        self.canvas_point(0, logical)
+    }
+
+    /// 第 `index` 块显示器窗口内的逻辑坐标换成画布物理坐标（可落在本屏之外：跨屏拖动时指针已离开本窗口）。
+    ///
+    /// # 参数
+    /// - `index`：事件所属窗口对应的显示器序号。
+    /// - `logical`：窗口内的逻辑像素坐标（可为负或超出窗口）。
+    ///
+    /// ```ignore
+    /// let p = view.canvas_point(1, point(px(30.0), px(40.0)));
+    /// ```
+    pub fn canvas_point(&self, index: usize, logical: Point<Pixels>) -> PhysicalPoint {
+        let origin = self.frame.rect(index.min(self.frame.count().saturating_sub(1)));
         self.clamp_point(PhysicalPoint::new(
-            (logical.x.as_f32() * self.scale).round() as i32,
-            (logical.y.as_f32() * self.scale).round() as i32,
+            origin.x + (logical.x.as_f32() * self.scale).round() as i32,
+            origin.y + (logical.y.as_f32() * self.scale).round() as i32,
         ))
+    }
+
+    /// 选区是否跨越多块显示器（录屏 / 长截图的采集窗绑定单屏，跨屏时不允许）。
+    fn selection_spans_monitors(&self) -> bool {
+        let Some(selection) = self.current_selection() else {
+            return false;
+        };
+        (0..self.frame.count())
+            .filter(|&i| self.frame.rect(i).intersect(&selection).is_some_and(|r| !r.is_empty()))
+            .count()
+            > 1
     }
 
     /// 物理像素长度转 GPUI 逻辑像素。
@@ -2008,14 +2057,14 @@ impl ScreenshotOverlayView {
     ///
     /// # 参数
     /// - `toolbar_pos`：主工具栏位置（逻辑像素）；有则把形状栏贴在它上方。
-    /// - `screen`：屏幕逻辑尺寸。
+    /// - `monitor`：本窗口所在显示器在画布里的逻辑矩形 `(x, y, 宽, 高)`；选区阶段形状栏顶部居中于它。
     ///
     /// # 返回
     /// 形状栏元素；录屏 / 长截图 / 标注 / 文字输入 / 翻译或识别界面期间不显示。
     fn render_region_bar(
         &self,
         toolbar_pos: Option<PhysicalPoint>,
-        screen: (f32, f32),
+        monitor: (f32, f32, f32, f32),
         cx: &mut Context<Self>,
     ) -> Option<Div> {
         if self.record_mode
@@ -2084,7 +2133,7 @@ impl ScreenshotOverlayView {
         }
         let (top, left) = match toolbar_pos {
             Some(pos) if selected => ((pos.y as f32 - REGION_BAR_HEIGHT - 4.0).max(4.0), pos.x as f32),
-            _ => (8.0, (screen.0 / 2.0 - REGION_BAR_HALF_WIDTH).max(4.0)),
+            _ => (monitor.1 + 8.0, monitor.0 + (monitor.2 / 2.0 - REGION_BAR_HALF_WIDTH).max(4.0)),
         };
         Some(row.top(px(top)).left(px(left)))
     }
@@ -2313,6 +2362,26 @@ impl ScreenshotOverlayView {
             mask.apply_to_rgba((rect.x, rect.y, w as i32, h as i32), &mut rgba);
         }
         Some((w, h, rgba))
+    }
+
+    /// 设置画布左上角在虚拟桌面里的坐标。
+    ///
+    /// # 参数
+    /// - `origin`：虚拟桌面外接矩形的左上角（桌面物理坐标，可为负）。
+    pub fn set_canvas_origin(&mut self, origin: PhysicalPoint) {
+        self.canvas_origin = origin;
+    }
+
+    /// 接入关闭钩子：视图关闭（任一窗口关闭）时调用，运行时据此把同一会话的其余窗口一起关掉。
+    ///
+    /// # 参数
+    /// - `on_close`：只应做投递。
+    ///
+    /// ```ignore
+    /// view.set_close_hook(|| inbox.push(UiEvent::OverlayClosed));
+    /// ```
+    pub fn set_close_hook(&mut self, on_close: impl Fn() + 'static) {
+        self.close_hook = Some(Box::new(on_close));
     }
 
     /// 当前选区形状类型。
@@ -2707,12 +2776,9 @@ impl ScreenshotOverlayView {
         for pixel in data.chunks_exact_mut(4) {
             pixel.swap(0, 2);
         }
-        let frame = FrozenFrame::from_captured(CapturedScreen {
-            width: entry.frame_width,
-            height: entry.frame_height,
-            data,
-        })
-        .ok()?;
+        // 历史里是整张画布；按当前各显示器的矩形切回每屏一帧
+        let rects: Vec<PhysicalRect> = (0..self.frame.count()).map(|i| self.frame.rect(i)).collect();
+        let frame = DesktopFrames::from_canvas_bgra(entry.frame_width, entry.frame_height, data, &rects).ok()?;
         let (w, h) = frame.size();
         let annotations = match &entry.canvas_history[..] {
             [] | b"{}" => AnnotationLayer::new(w, h, self.scale).ok(),
@@ -2763,7 +2829,7 @@ impl ScreenshotOverlayView {
                 });
             } else {
                 // 历史记录之间切换：上一条历史的图像不再需要
-                self.pending_drops.push(old_frame.image());
+                self.pending_drops.extend(old_frame.images());
             }
         }
         self.state = SelectionState::Selected {
@@ -2782,7 +2848,7 @@ impl ScreenshotOverlayView {
         };
         self.clear_view_transients();
         let history_frame = std::mem::replace(&mut self.frame, live.frame);
-        self.pending_drops.push(history_frame.image());
+        self.pending_drops.extend(history_frame.images());
         self.annotations = live.annotations;
         self.state = live.state;
         self.clear_region();
@@ -2867,7 +2933,8 @@ impl ScreenshotOverlayView {
             shadow_width: int("screenshot_selection/shadow_width"),
             lock_aspect_ratio: doc.value("screenshot_selection/lock_aspect_ratio").as_bool().unwrap_or(false),
         };
-        let value = encode(rect, self.scale, style);
+        let desktop = rect.translate(self.canvas_origin.x, self.canvas_origin.y);
+        let value = encode(desktop, self.scale, style);
         if let Err(e) = store.set_value(PREVIOUS_SELECTION_KEY, value) {
             tracing::warn!(error = %e, "写入上一次选区失败");
             return;
@@ -2893,7 +2960,10 @@ impl ScreenshotOverlayView {
             return false;
         };
         let value = config.borrow().document().value(PREVIOUS_SELECTION_KEY);
-        let Some(rect) = decode(&value, self.scale, self.screen_bounds, DEFAULT_MINIMUM_SELECTION_SIZE) else {
+        let desktop_bounds = self.screen_bounds.translate(self.canvas_origin.x, self.canvas_origin.y);
+        let Some(rect) = decode(&value, self.scale, desktop_bounds, DEFAULT_MINIMUM_SELECTION_SIZE)
+            .map(|r| r.translate(-self.canvas_origin.x, -self.canvas_origin.y))
+        else {
             return false;
         };
         self.pick.clear();
@@ -3374,6 +3444,10 @@ impl ScreenshotOverlayView {
             self.status_message = Some("选区无效".into());
             return OverlayOutcome::Stay;
         };
+        if self.selection_spans_monitors() {
+            self.status_message = Some("长截图的选区不能跨显示器".into());
+            return OverlayOutcome::Stay;
+        }
         match self.output.start_scroll_capture(rect) {
             Ok(()) => {
                 tracing::info!(rect = ?rect, "长截图选区已确认");
@@ -3499,6 +3573,10 @@ impl ScreenshotOverlayView {
             self.status_message = Some("选区无效".into());
             return OverlayOutcome::Stay;
         };
+        if self.selection_spans_monitors() {
+            self.status_message = Some("录屏的选区不能跨显示器".into());
+            return OverlayOutcome::Stay;
+        }
         match self.output.start_recording(rect) {
             Ok(()) => {
                 tracing::info!(rect = ?rect, "录屏选区已确认");
@@ -3599,14 +3677,20 @@ impl ScreenshotOverlayView {
     /// - `window`：当前窗口。
     pub fn close(&mut self, window: &mut Window) {
         tracing::info!(stats = %self.probe.describe(), "overlay closing");
-        if let Err(e) = window.drop_image(self.frame.image()) {
-            tracing::warn!(error = %e, "释放底图图集失败");
+        for image in self.frame.images() {
+            // 这块图只在对应显示器的窗口里上传过；别的窗口里释放会报未找到，忽略即可
+            if let Err(e) = window.drop_image(image) {
+                tracing::debug!(error = %e, "释放底图图集失败（可能属于别的窗口）");
+            }
         }
         self.flush_pending_drops(window);
         for (_, sprite) in self.tile_sprites.drain() {
             if let Err(e) = window.drop_image(sprite.image) {
                 tracing::warn!(error = %e, "释放标注分块图集失败");
             }
+        }
+        if let Some(hook) = &self.close_hook {
+            hook();
         }
         window.remove_window();
     }
@@ -3826,8 +3910,33 @@ impl ScreenshotOverlayView {
 }
 
 impl Render for ScreenshotOverlayView {
-    /// 渲染覆盖窗视图。
+    /// 渲染覆盖窗视图（单窗口路径：等价于第 0 块显示器）。
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.render_monitor(0, None, window, cx)
+    }
+}
+
+impl ScreenshotOverlayView {
+    /// 渲染第 `index` 块显示器窗口里的内容：整个画布场景整体平移到本屏原点，外层裁剪并接收事件。
+    ///
+    /// 选区、遮罩、手柄、标注分块等元素的位置仍按画布坐标计算；工具栏、形状栏、OCR / 翻译面板、
+    /// 文字输入框只在它们所属的那一块屏的窗口里画，放大镜与提示条只在光标所在屏画。
+    ///
+    /// # 参数
+    /// - `index`：显示器序号。
+    /// - `focus`：本窗口自己的焦点句柄；`None` 时用视图自带的。
+    ///
+    /// ```ignore
+    /// let element = shared.update(cx, |v, vcx| v.render_monitor(1, Some(&focus), window, vcx));
+    /// ```
+    pub fn render_monitor(
+        &mut self,
+        index: usize,
+        focus: Option<&FocusHandle>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let index = index.min(self.frame.count().saturating_sub(1));
         self.flush_pending_annotation();
         let render_started = self.probe.render_start();
         self.flush_pending_drops(window);
@@ -3843,6 +3952,14 @@ impl Render for ScreenshotOverlayView {
             let (x, y, w, h) = self.region_mask.as_ref()?.bounds()?;
             Some(PhysicalRect::new(x, y, w, h))
         });
+        // 本屏在画布里的几何；锚点屏 = 选区右下角所在屏，光标屏 = 光标所在屏
+        let mon = self.frame.rect(index);
+        let (ox, oy) = (mon.x as f32 / scale, mon.y as f32 / scale);
+        let (mon_w, mon_h) = (mon.width as f32 / scale, mon.height as f32 / scale);
+        let cursor_here = self.frame.nearest_monitor(self.cursor_pos) == index;
+        let anchor_here = sel.is_some_and(|s| {
+            self.frame.nearest_monitor(PhysicalPoint::new(s.right() - 1, s.bottom() - 1)) == index
+        });
         let loading_history = self.history_busy();
         if loading_history {
             self.poll_history();
@@ -3857,82 +3974,22 @@ impl Render for ScreenshotOverlayView {
         let screen_h = frame_h as f32 / scale;
         let dragging = matches!(self.state, SelectionState::Reshaping { .. });
 
+        // 内容层：整个画布场景，整体平移到本屏原点（外层负责裁剪与事件）
         let mut root = div()
-            .relative()
-            .size_full()
-            .bg(rgb(0x000000))
-            .overflow_hidden()
-            .cursor(self.cursor_style(dragging))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, ev: &MouseDownEvent, window, cx| {
-                    this.scale = this.scale_override.unwrap_or(window.scale_factor());
-                    // 点击输入框以外的位置：先提交正在输入的文字
-                    this.commit_text_edit(window, cx);
-                    let p = this.physical_point(ev.position);
-                    let outcome = this.handle_mouse_down(p, ev.click_count);
-                    this.finish(outcome, window, cx);
-                }),
-            )
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(|this, _: &MouseDownEvent, window, cx| {
-                    let outcome = this.handle_right_click();
-                    this.finish(outcome, window, cx);
-                }),
-            )
-            .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, window, cx| {
-                let started = Instant::now();
-                this.scale = this.scale_override.unwrap_or(window.scale_factor());
-                let p = this.physical_point(ev.position);
-                this.handle_mouse_move(p);
-                this.probe.record_move(started.elapsed());
-                cx.notify();
-            }))
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, ev: &MouseUpEvent, window, cx| {
-                    this.scale = this.scale_override.unwrap_or(window.scale_factor());
-                    let p = this.physical_point(ev.position);
-                    this.handle_mouse_up(p);
-                    let outcome = this.auto_confirm_outcome();
-                    this.finish(outcome, window, cx);
-                }),
-            )
-            .on_scroll_wheel(cx.listener(|this, ev: &ScrollWheelEvent, window, cx| {
-                this.scale = this.scale_override.unwrap_or(window.scale_factor());
-                let lines_y = match ev.delta {
-                    ScrollDelta::Lines(p) => p.y,
-                    ScrollDelta::Pixels(p) => p.y.as_f32(),
-                };
-                let point = this.physical_point(ev.position);
-                if this.handle_scroll(lines_y, point) {
-                    cx.stop_propagation();
-                    cx.notify();
-                }
-            }))
-            .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
-                let mods = ev.keystroke.modifiers;
-                // 文字输入进行中：按键先交给输入框（字符本身走系统输入法通道）
-                if this.route_key_to_text_edit(&ev.keystroke.key, mods.shift, mods.control, window, cx) {
-                    cx.stop_propagation();
-                    return;
-                }
-                let outcome = this.handle_keystroke(&ev.keystroke.key, mods.control, mods.shift, mods.alt);
-                this.finish(outcome, window, cx);
-            }));
-        if let Some(handle) = &self.focus_handle {
-            root = root.track_focus(handle);
-        }
+            .absolute()
+            .left(px(-ox))
+            .top(px(-oy))
+            .w(px(screen_w))
+            .h(px(screen_h));
 
         // 冻结底图：图像资源只构造一次，这里仅复用句柄
         root = root.child(
-            img(ImageSource::Render(self.frame.image()))
+            img(ImageSource::Render(self.frame.image(index)))
                 .absolute()
-                .top(px(0.0))
-                .left(px(0.0))
-                .w(px(screen_w))
-                .h(px(screen_h))
+                .top(px(oy))
+                .left(px(ox))
+                .w(px(mon_w))
+                .h(px(mon_h))
                 .object_fit(ObjectFit::Fill),
         );
 
@@ -4125,10 +4182,11 @@ impl Render for ScreenshotOverlayView {
             );
 
             // 浮动工具栏（选区确定后展示；标注工具未实现所以隐藏，贴图 / OCR / 翻译置灰）
-            if matches!(self.state, SelectionState::Selected { .. }) {
-                let screen_logical = PhysicalRect::new(0, 0, screen_w as i32, screen_h as i32);
+            if matches!(self.state, SelectionState::Selected { .. }) && anchor_here {
+                let screen_logical = PhysicalRect::new(ox as i32, oy as i32, mon_w as i32, mon_h as i32);
+                let on_this_monitor = mon.intersect(&s).unwrap_or(s);
                 let pos = calculate_toolbar_placement(
-                    logical_rect(s, scale),
+                    logical_rect(on_this_monitor, scale),
                     PhysicalPoint::new(TOOLBAR_LOGICAL_SIZE.0, TOOLBAR_LOGICAL_SIZE.1),
                     screen_logical,
                     TOOLBAR_MARGIN,
@@ -4163,9 +4221,10 @@ impl Render for ScreenshotOverlayView {
                         .right(px(right_gap))
                         .child(tb),
                 );
-                if let Some(origin) =
-                    self.style_panel_origin((pos.x, pos.y), (screen_w as i32, screen_h as i32))
-                {
+                // 样式面板按本屏相对坐标摆放，再平移回画布坐标
+                let (mx, my) = (ox as i32, oy as i32);
+                if let Some(origin) = self.style_panel_origin((pos.x - mx, pos.y - my), (mon_w as i32, mon_h as i32)) {
+                    let origin = (origin.0 + mx, origin.1 + my);
                     panel_pos = Some(PhysicalPoint::new(origin.0, origin.1));
                     root = root.child(self.render_style_panel(origin, cx));
                 }
@@ -4184,12 +4243,16 @@ impl Render for ScreenshotOverlayView {
         }
 
         // 选区形状栏：选区阶段浮在屏幕顶部；选区确定后贴在工具栏上方（含加 / 减区域）
-        if let Some(bar) = self.render_region_bar(toolbar_pos, (screen_w, screen_h), cx) {
+        if (anchor_here || (sel.is_none() && cursor_here))
+            && let Some(bar) = self.render_region_bar(toolbar_pos, (ox, oy, mon_w, mon_h), cx)
+        {
             root = root.child(bar);
         }
 
         // OCR 结果：文本框描边 + 结果面板；翻译结果面板
-        if let Some(s) = sel {
+        if let Some(s) = sel
+            && anchor_here
+        {
             for part in self.ocr_overlay(s) {
                 root = root.child(part);
             }
@@ -4199,7 +4262,7 @@ impl Render for ScreenshotOverlayView {
         }
 
         // 文字输入框：点击框内不冒泡到根节点（否则会被当成“点击别处”而提交）
-        if let Some(session) = &self.text_edit {
+        if let Some(session) = self.text_edit.as_ref().filter(|s| self.frame.nearest_monitor(s.origin) == index) {
             root = root.child(
                 div()
                     .absolute()
@@ -4212,8 +4275,8 @@ impl Render for ScreenshotOverlayView {
         }
 
         // 放大镜：跟随光标，光标压在工具栏上时隐藏
-        if !self.cursor_over_toolbar(toolbar_pos) && !self.cursor_over_style_panel(panel_pos) {
-            let screen_logical = PhysicalRect::new(0, 0, screen_w as i32, screen_h as i32);
+        if cursor_here && !self.cursor_over_toolbar(toolbar_pos) && !self.cursor_over_style_panel(panel_pos) {
+            let screen_logical = PhysicalRect::new(ox as i32, oy as i32, mon_w as i32, mon_h as i32);
             let cursor_logical = logical_rect(
                 PhysicalRect::new(self.cursor_pos.x, self.cursor_pos.y, 1, 1),
                 scale,
@@ -4236,27 +4299,170 @@ impl Render for ScreenshotOverlayView {
             );
         }
 
-        // 底部提示条（状态消息优先）
-        let hint = self
-            .status_message
-            .clone()
-            .unwrap_or_else(|| self.default_hint().to_string());
-        root = root.child(
-            div()
-                .absolute()
-                .bottom(px(12.0))
-                .left(px(16.0))
-                .px_3()
-                .py_1()
-                .rounded_md()
-                .bg(rgba(HINT_BG_COLOR))
-                .text_color(rgba(HINT_TEXT_COLOR))
-                .text_xs()
-                .child(hint),
+        // 外层：裁剪、背景、光标、事件
+        let entity = cx.entity();
+        let mut outer = div()
+            .relative()
+            .size_full()
+            .bg(rgb(0x000000))
+            .overflow_hidden()
+            .cursor(self.cursor_style(dragging))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
+                    this.scale = this.scale_override.unwrap_or(window.scale_factor());
+                    // 点击输入框以外的位置：先提交正在输入的文字
+                    this.commit_text_edit(window, cx);
+                    let p = this.canvas_point(index, ev.position);
+                    let outcome = this.handle_mouse_down(p, ev.click_count);
+                    this.finish(outcome, window, cx);
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                    let outcome = this.handle_right_click();
+                    this.finish(outcome, window, cx);
+                }),
+            )
+            .on_scroll_wheel(cx.listener(move |this, ev: &ScrollWheelEvent, window, cx| {
+                this.scale = this.scale_override.unwrap_or(window.scale_factor());
+                let lines_y = match ev.delta {
+                    ScrollDelta::Lines(p) => p.y,
+                    ScrollDelta::Pixels(p) => p.y.as_f32(),
+                };
+                let point = this.canvas_point(index, ev.position);
+                if this.handle_scroll(lines_y, point) {
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            }))
+            .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
+                let mods = ev.keystroke.modifiers;
+                // 文字输入进行中：按键先交给输入框（字符本身走系统输入法通道）
+                if this.route_key_to_text_edit(&ev.keystroke.key, mods.shift, mods.control, window, cx) {
+                    cx.stop_propagation();
+                    return;
+                }
+                let outcome = this.handle_keystroke(&ev.keystroke.key, mods.control, mods.shift, mods.alt);
+                this.finish(outcome, window, cx);
+            }));
+        if let Some(handle) = focus.or(self.focus_handle.as_ref()) {
+            outer = outer.track_focus(handle);
+        }
+        // 移动与松开用窗口级原始监听：按下后系统把鼠标捕获给起始窗口，指针拖出本窗口（跨屏框选）
+        // 后元素级监听收不到（不再命中悬停），原始监听仍能拿到带符号的窗口外坐标
+        outer = outer.child(
+            canvas(
+                |_, _, _| (),
+                move |_, (), window, _| {
+                    let moves = entity.clone();
+                    window.on_mouse_event(move |ev: &MouseMoveEvent, phase, window, app| {
+                        if phase != DispatchPhase::Capture {
+                            return;
+                        }
+                        moves.update(app, |this, cx| {
+                            let started = Instant::now();
+                            this.scale = this.scale_override.unwrap_or(window.scale_factor());
+                            let p = this.canvas_point(index, ev.position);
+                            this.handle_mouse_move(p);
+                            this.probe.record_move(started.elapsed());
+                            cx.notify();
+                        });
+                    });
+                    let ups = entity.clone();
+                    window.on_mouse_event(move |ev: &MouseUpEvent, phase, window, app| {
+                        if phase != DispatchPhase::Capture || ev.button != MouseButton::Left {
+                            return;
+                        }
+                        ups.update(app, |this, cx| {
+                            this.scale = this.scale_override.unwrap_or(window.scale_factor());
+                            let p = this.canvas_point(index, ev.position);
+                            this.handle_mouse_up(p);
+                            let outcome = this.auto_confirm_outcome();
+                            this.finish(outcome, window, cx);
+                        });
+                    });
+                },
+            )
+            .absolute()
+            .size_full(),
         );
+        outer = outer.child(root);
+
+        // 底部提示条（状态消息优先）：相对窗口摆放，只在光标所在屏显示
+        if cursor_here {
+            let hint = self
+                .status_message
+                .clone()
+                .unwrap_or_else(|| self.default_hint().to_string());
+            outer = outer.child(
+                div()
+                    .absolute()
+                    .bottom(px(12.0))
+                    .left(px(16.0))
+                    .px_3()
+                    .py_1()
+                    .rounded_md()
+                    .bg(rgba(HINT_BG_COLOR))
+                    .text_color(rgba(HINT_TEXT_COLOR))
+                    .text_xs()
+                    .child(hint),
+            );
+        }
 
         self.probe.render_end(render_started);
-        root
+        outer
+    }
+}
+
+/// 一块显示器上的覆盖窗根视图：只持有共享视图的引用，自己的焦点句柄，并把渲染转给共享视图。
+pub struct OverlayWindowView {
+    /// 所有显示器共用的覆盖窗逻辑视图。
+    shared: Entity<ScreenshotOverlayView>,
+    /// 本窗口对应的显示器序号。
+    index: usize,
+    /// 本窗口自己的焦点句柄（键盘事件进入哪个窗口取决于焦点）。
+    focus: FocusHandle,
+}
+
+impl OverlayWindowView {
+    /// 创建窗口根视图并抢占键盘焦点。
+    ///
+    /// # 参数
+    /// - `shared`：共享的覆盖窗逻辑视图。
+    /// - `index`：本窗口对应的显示器序号。
+    /// - `window`：本窗口。
+    /// - `cx`：根视图上下文。
+    ///
+    /// ```ignore
+    /// let root = app.new(|cx| OverlayWindowView::new(shared.clone(), 1, window, cx));
+    /// ```
+    pub fn new(
+        shared: Entity<ScreenshotOverlayView>,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let focus = cx.focus_handle();
+        window.focus(&focus, cx);
+        // 共享视图的状态变化要让本窗口重绘
+        cx.observe(&shared, |_, _, cx| cx.notify()).detach();
+        Self { shared, index, focus }
+    }
+
+    /// 共享的覆盖窗逻辑视图。
+    pub fn shared(&self) -> Entity<ScreenshotOverlayView> {
+        self.shared.clone()
+    }
+}
+
+impl Render for OverlayWindowView {
+    /// 渲染：交给共享视图按本屏几何绘制。
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let (index, focus) = (self.index, self.focus.clone());
+        self.shared
+            .update(cx, |view, vcx| view.render_monitor(index, Some(&focus), window, vcx))
     }
 }
 
@@ -4927,6 +5133,126 @@ mod tests {
         drag(&mut view, (10, 10), (80, 60));
         view.handle_keystroke("tab", true, false, false);
         assert_eq!(view.state, SelectionState::Idle);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 左右并排两块 100x80 的屏（左屏 B=9 / 右屏 B=77 的纯色，便于在导出里分辨来源）：多屏共享视图。
+    fn two_monitor_view() -> (ScreenshotOverlayView, Rc<RefCell<Recorded>>) {
+        let frame = |shade: u8| {
+            FrozenFrame::from_captured(CapturedScreen {
+                width: 100,
+                height: 80,
+                data: [shade, 0, 0, 255].repeat(100 * 80),
+            })
+            .unwrap()
+        };
+        let frames = DesktopFrames::new(vec![
+            crate::desktop_frames::MonitorFrame {
+                rect: PhysicalRect::new(0, 0, 100, 80),
+                frame: frame(9),
+            },
+            crate::desktop_frames::MonitorFrame {
+                rect: PhysicalRect::new(100, 0, 100, 80),
+                frame: frame(77),
+            },
+        ])
+        .unwrap();
+        let rec = Rc::new(RefCell::new(Recorded::default()));
+        let sink = RecordingSink {
+            rec: Rc::clone(&rec),
+            fail: false,
+        };
+        let view = ScreenshotOverlayView::new_multi(frames, 1.0, PhysicalPoint::new(0, 0), Box::new(sink));
+        (view, rec)
+    }
+
+    /// 窗口局部逻辑坐标换成画布坐标：加上本屏在画布里的原点；指针拖出本窗口（负值）也能换算。
+    #[test]
+    fn canvas_point_adds_the_monitor_origin() {
+        let (view, _) = two_monitor_view();
+        assert_eq!(view.canvas_point(0, point(px(10.0), px(5.0))), PhysicalPoint::new(10, 5));
+        assert_eq!(view.canvas_point(1, point(px(10.0), px(5.0))), PhysicalPoint::new(110, 5));
+        assert_eq!(view.canvas_point(1, point(px(-30.0), px(5.0))), PhysicalPoint::new(70, 5));
+        // 越过画布边界会被夹住
+        assert_eq!(view.canvas_point(1, point(px(900.0), px(5.0))).x, 199);
+    }
+
+    /// 跨屏缝框选：选区横跨两块屏，导出的图左半来自左屏、右半来自右屏。
+    #[test]
+    fn selection_across_the_seam_exports_both_screens() {
+        let (mut view, rec) = two_monitor_view();
+        drag(&mut view, (80, 10), (130, 50));
+        let SelectionState::Selected { rect } = view.state else {
+            panic!("应已确认选区: {:?}", view.state);
+        };
+        assert_eq!((rect.x, rect.right()), (80, 131));
+        view.apply_action(ToolbarAction::Copy);
+        let recorded = rec.borrow();
+        let (w, _, rgba) = &recorded.images[0];
+        let blue = |x: usize| rgba[(5 * *w as usize + x) * 4 + 2];
+        assert_eq!((blue(0), blue(19), blue(20), blue(50)), (9, 9, 77, 77));
+    }
+
+    /// 选区跨屏时不能录屏 / 长截图（采集窗绑定单屏）；选区在单屏内则正常。
+    #[test]
+    fn record_and_scroll_refuse_cross_monitor_selection() {
+        let (mut view, rec) = two_monitor_view();
+        drag(&mut view, (80, 10), (130, 50));
+        assert!(view.selection_spans_monitors());
+        assert_eq!(view.apply_action(ToolbarAction::Record), OverlayOutcome::Stay);
+        assert_eq!(view.apply_action(ToolbarAction::ScrollCapture), OverlayOutcome::Stay);
+        assert!(rec.borrow().records.is_empty() && rec.borrow().scrolls.is_empty());
+
+        let (mut single, rec) = two_monitor_view();
+        drag(&mut single, (110, 10), (150, 50));
+        assert!(!single.selection_spans_monitors());
+        assert_eq!(single.apply_action(ToolbarAction::Record), OverlayOutcome::Close);
+        assert_eq!(rec.borrow().records.len(), 1);
+    }
+
+    /// 标注基底在多屏时才合成整张画布；放大镜跨屏缝取样。
+    #[test]
+    fn multi_monitor_base_is_lazy_and_magnifier_crosses_the_seam() {
+        let (mut view, _) = two_monitor_view();
+        assert!(!view.frame.composite_built());
+        view.handle_mouse_move(PhysicalPoint::new(100, 40));
+        assert!(!view.frame.composite_built(), "只是悬停不合成");
+        let grid = view.frame.sample_rgba_grid(100, 40, 3);
+        let blue = |col: usize| grid[(3 + col) * 4 + 2];
+        assert_eq!((blue(0), blue(1), blue(2)), (9, 77, 77));
+        let _ = view.frame.base_view();
+        assert!(view.frame.composite_built());
+    }
+
+    /// 上一次选区按桌面坐标存取：同样的屏幕排布下能选回；换了排布（画布原点不同）对不上时不乱选。
+    #[test]
+    fn previous_selection_uses_desktop_coordinates() {
+        let dir = std::env::temp_dir().join(format!(
+            "cisox-prevsel-origin-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        let open = || Rc::new(RefCell::new(ConfigStore::open(&path)));
+
+        let (mut first, _) = two_monitor_view();
+        first.set_style_config(open(), "en-US");
+        first.set_canvas_origin(PhysicalPoint::new(-1920, 100));
+        first.state = SelectionState::Selected { rect: PhysicalRect::new(10, 10, 50, 40) };
+        first.remember_selection();
+
+        let (mut same, _) = two_monitor_view();
+        same.set_style_config(open(), "en-US");
+        same.set_canvas_origin(PhysicalPoint::new(-1920, 100));
+        assert!(same.select_previous_selection());
+        assert_eq!(same.state, SelectionState::Selected { rect: PhysicalRect::new(10, 10, 50, 40) });
+
+        let (mut moved, _) = two_monitor_view();
+        moved.set_style_config(open(), "en-US");
+        assert!(!moved.select_previous_selection(), "原点不同：存的桌面坐标落在画布外");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

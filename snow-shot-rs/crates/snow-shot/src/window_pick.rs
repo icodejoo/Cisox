@@ -6,6 +6,8 @@
 
 use snow_config::document::ConfigDocument;
 use snow_ui::shell::geometry::{PhysicalPoint, PhysicalRect};
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -113,39 +115,111 @@ pub fn smart_selection_enabled(document: &ConfigDocument) -> bool {
         .unwrap_or(true)
 }
 
-/// 按配置启动窗口悬停来源；开关关闭、非 Windows 或启动失败时返回 `None`。
+/// 按配置为一组显示器启动窗口悬停来源：**只起一条** UIA 后台线程，所有显示器共用。
 ///
 /// # 参数
 /// - `document`：配置文档。
-/// - `monitor`：覆盖窗所在显示器的桌面物理范围。
+/// - `monitors`：各显示器的桌面物理范围（按覆盖窗要打开的顺序）。
 ///
 /// # 返回
-/// 悬停来源；调用应发生在覆盖窗显示之前，以便快照不含覆盖窗。
+/// 与 `monitors` 等长的悬停来源；开关关闭、非 Windows 或启动失败时全为 `None`。
+/// 调用应发生在所有覆盖窗显示之前，以便窗口快照不含覆盖窗。
 ///
 /// ```ignore
-/// let hover = start_window_hover(store.document(), monitor.bounds);
+/// let hovers = start_window_hover(store.document(), &[left.bounds, right.bounds]);
 /// ```
 pub fn start_window_hover(
     document: &ConfigDocument,
-    monitor: PhysicalRect,
-) -> Option<Box<dyn WindowHover>> {
+    monitors: &[PhysicalRect],
+) -> Vec<Option<Box<dyn WindowHover>>> {
+    let none = || monitors.iter().map(|_| None).collect();
     if !smart_selection_enabled(document) {
-        return None;
+        return none();
     }
     #[cfg(windows)]
     {
-        match WindowPicker::spawn(monitor, Vec::new()) {
-            Ok(picker) => Some(Box::new(picker)),
+        match WindowPicker::spawn(Vec::new()) {
+            Ok(picker) => {
+                let shared = Rc::new(RefCell::new(picker));
+                monitors
+                    .iter()
+                    .map(|monitor| {
+                        Some(Box::new(DisplayHover::new(Rc::clone(&shared), *monitor))
+                            as Box<dyn WindowHover>)
+                    })
+                    .collect()
+            }
             Err(e) => {
                 tracing::warn!(error = %e, "启动窗口命中线程失败，智能选区不可用");
-                None
+                none()
             }
         }
     }
     #[cfg(not(windows))]
     {
-        let _ = monitor;
-        None
+        none()
+    }
+}
+
+/// 桌面坐标下的命中查询：一条后台线程服务所有显示器。
+pub trait DesktopHover {
+    /// 查询桌面物理坐标下的层级路径。
+    ///
+    /// # 参数
+    /// - `point`：桌面物理坐标。
+    /// - `target`：目标层级。
+    ///
+    /// # 返回
+    /// 路径（桌面物理坐标，自深到浅，不按显示器裁剪）；未命中或结果未就绪为 `None`。
+    fn query(&mut self, point: PhysicalPoint, target: PickTarget) -> Option<PickRects>;
+
+    /// 取走后台细化路径；只有最近一次查询点落在 `monitor` 内时才给，避免被别的显示器抢走。
+    fn take_refinement_in(&mut self, monitor: PhysicalRect) -> Option<PickRects>;
+
+    /// 最近一次查询点落在 `monitor` 内，且后台仍在细化或有结果未取走。
+    fn refinement_pending_in(&self, monitor: PhysicalRect) -> bool;
+}
+
+/// 某块显示器上的悬停来源：把共享的桌面坐标命中器换算成本屏的底图坐标。
+pub struct DisplayHover<Q: DesktopHover> {
+    /// 共享的命中器。
+    query: Rc<RefCell<Q>>,
+    /// 本显示器的桌面物理范围。
+    monitor: PhysicalRect,
+}
+
+impl<Q: DesktopHover> DisplayHover<Q> {
+    /// 创建某块显示器的悬停来源。
+    ///
+    /// # 参数
+    /// - `query`：多块显示器共享的命中器。
+    /// - `monitor`：本显示器的桌面物理范围。
+    pub fn new(query: Rc<RefCell<Q>>, monitor: PhysicalRect) -> Self {
+        Self { query, monitor }
+    }
+
+    /// 桌面路径换成本屏底图坐标，丢掉与本屏无交集的层。
+    fn to_frame(&self, path: &[PhysicalRect]) -> PickRects {
+        path.iter()
+            .filter_map(|rect| screen_rect_to_frame(*rect, self.monitor))
+            .collect()
+    }
+}
+
+impl<Q: DesktopHover> WindowHover for DisplayHover<Q> {
+    fn hover(&mut self, point: PhysicalPoint, target: PickTarget) -> Option<PickRects> {
+        let desktop = PhysicalPoint::new(point.x + self.monitor.x, point.y + self.monitor.y);
+        let path = self.query.borrow_mut().query(desktop, target)?;
+        Some(self.to_frame(&path)).filter(|frame| !frame.is_empty())
+    }
+
+    fn refinement(&mut self) -> Option<PickRects> {
+        let path = self.query.borrow_mut().take_refinement_in(self.monitor)?;
+        Some(self.to_frame(&path)).filter(|frame| !frame.is_empty())
+    }
+
+    fn refinement_pending(&self) -> bool {
+        self.query.borrow().refinement_pending_in(self.monitor)
     }
 }
 
@@ -646,12 +720,10 @@ impl HoverMailbox {
 #[cfg(windows)]
 pub use native::WindowPicker;
 
-/// Windows 实现：专用线程持有 `ElementRegionService`，覆盖窗显示前即完成窗口快照。
+/// Windows 实现：专用线程持有 `ElementRegionService`，覆盖窗显示前即完成窗口快照；全部使用桌面坐标。
 #[cfg(windows)]
 mod native {
-    use super::{
-        HOVER_WAIT, HoverMailbox, PickRects, PickTarget, WindowHover, screen_rect_to_frame,
-    };
+    use super::{DesktopHover, HOVER_WAIT, HoverMailbox, PickRects, PickTarget};
     use snow_ui::shell::geometry::{PhysicalPoint, PhysicalRect};
     use snow_ui_selector::{
         AccessibilityBackend, ElementRect, ElementRegionService, HitTestMode, Point, QueryControl,
@@ -662,42 +734,45 @@ mod native {
     /// 命中线程名称。
     const PICKER_THREAD_NAME: &str = "snow-window-pick";
 
-    /// 窗口悬停命中器：句柄由 UI 线程持有，查询在后台线程执行。
+    /// 窗口命中器：句柄由 UI 线程持有，查询在后台线程执行；所有显示器共用一个。
     pub struct WindowPicker {
         /// 与工作线程共享的邮箱。
         mailbox: Arc<HoverMailbox>,
         /// 最近一次查询的点、目标与结果，用于同一点去重。
         last: Option<(PhysicalPoint, PickTarget, Option<PickRects>)>,
+        /// 最近一次查询点（桌面物理坐标），决定细化结果归哪块显示器。
+        last_point: Option<PhysicalPoint>,
     }
 
     impl WindowPicker {
-        /// 启动命中线程并立即抓取窗口快照（应在覆盖窗显示之前调用）。
+        /// 启动命中线程并立即抓取窗口快照（应在所有覆盖窗显示之前调用）。
         ///
         /// # 参数
-        /// - `monitor`：覆盖窗所在显示器的桌面物理范围，用于坐标换算。
         /// - `excluded`：需排除的窗口句柄（如 Cisox 自己的覆盖窗）。
         ///
         /// # 返回
         /// 命中器；线程创建失败时返回 IO 错误。
         ///
         /// ```ignore
-        /// let picker = WindowPicker::spawn(monitor.bounds, Vec::new())?;
+        /// let picker = WindowPicker::spawn(Vec::new())?;
         /// ```
-        pub fn spawn(monitor: PhysicalRect, excluded: Vec<usize>) -> std::io::Result<Self> {
+        pub fn spawn(excluded: Vec<usize>) -> std::io::Result<Self> {
             let mailbox = Arc::new(HoverMailbox::new());
             let worker_box = Arc::clone(&mailbox);
             std::thread::Builder::new()
                 .name(PICKER_THREAD_NAME.into())
-                .spawn(move || run_worker(&worker_box, monitor, &excluded))?;
+                .spawn(move || run_worker(&worker_box, &excluded))?;
             Ok(Self {
                 mailbox,
                 last: None,
+                last_point: None,
             })
         }
     }
 
-    impl WindowHover for WindowPicker {
-        fn hover(&mut self, point: PhysicalPoint, target: PickTarget) -> Option<PickRects> {
+    impl DesktopHover for WindowPicker {
+        fn query(&mut self, point: PhysicalPoint, target: PickTarget) -> Option<PickRects> {
+            self.last_point = Some(point);
             if let Some((p, t, path)) = &self.last
                 && *p == point
                 && *t == target
@@ -715,12 +790,17 @@ mod native {
             }
         }
 
-        fn refinement(&mut self) -> Option<PickRects> {
-            self.mailbox.take_refinement()
+        fn take_refinement_in(&mut self, monitor: PhysicalRect) -> Option<PickRects> {
+            if self.last_point.is_some_and(|p| monitor.contains(p)) {
+                self.mailbox.take_refinement()
+            } else {
+                None
+            }
         }
 
-        fn refinement_pending(&self) -> bool {
-            self.mailbox.refinement_pending()
+        fn refinement_pending_in(&self, monitor: PhysicalRect) -> bool {
+            self.last_point.is_some_and(|p| monitor.contains(p))
+                && self.mailbox.refinement_pending()
         }
     }
 
@@ -732,7 +812,7 @@ mod native {
     }
 
     /// 工作线程主体：建立服务（含窗口快照），循环应答请求，邮箱关闭后退出。
-    fn run_worker(mailbox: &HoverMailbox, monitor: PhysicalRect, excluded: &[usize]) {
+    fn run_worker(mailbox: &HoverMailbox, excluded: &[usize]) {
         let mut service = match ElementRegionService::with_backend_excluding_ids(
             AccessibilityBackend::Uia,
             excluded,
@@ -748,34 +828,30 @@ mod native {
                 mailbox.publish(seq, None);
                 continue;
             };
-            let (path, incomplete) = query_frame_path(service, point, target, monitor);
+            let (path, incomplete) = query_desktop_path(service, point, target);
             mailbox.publish(seq, path);
             // 控件级查询未走完（UIA 树尚在展开）：在后台继续细化，有新请求就取消
             if incomplete {
                 mailbox.set_refining(true);
-                refine(service, mailbox, seq, point, monitor);
+                refine(service, mailbox, seq, point);
                 mailbox.set_refining(false);
             }
         }
     }
 
-    /// 把桌面坐标的元素矩形换算为底图坐标路径，丢弃与显示器无交集的层。
-    fn to_frame_path(path: &[ElementRect], monitor: PhysicalRect) -> PickRects {
+    /// 元素矩形换成桌面物理矩形，丢掉空矩形。
+    fn to_desktop_path(path: &[ElementRect]) -> PickRects {
         path.iter()
-            .filter_map(|r| {
-                screen_rect_to_frame(
-                    PhysicalRect::new(r.left(), r.top(), r.width(), r.height()),
-                    monitor,
-                )
-            })
+            .map(|r| PhysicalRect::new(r.left(), r.top(), r.width(), r.height()))
+            .filter(|r| r.width > 0 && r.height > 0)
             .collect()
     }
 
     /// 构造桌面坐标查询点。
-    fn desktop_point(frame_point: PhysicalPoint, monitor: PhysicalRect) -> Point {
+    fn desktop_point(point: PhysicalPoint) -> Point {
         Point {
-            x: frame_point.x + monitor.x,
-            y: frame_point.y + monitor.y,
+            x: point.x,
+            y: point.y,
             display_id: 0,
         }
     }
@@ -784,18 +860,17 @@ mod native {
     ///
     /// # 返回
     /// 路径与"结果是否未走完"（控件模式下 UIA 超预算、仍有可细化空间）。
-    fn query_frame_path(
+    fn query_desktop_path(
         service: &mut ElementRegionService,
-        frame_point: PhysicalPoint,
+        point: PhysicalPoint,
         target: PickTarget,
-        monitor: PhysicalRect,
     ) -> (Option<PickRects>, bool) {
         let mode = match target {
             PickTarget::Window => HitTestMode::Window,
             PickTarget::WindowSubElement => HitTestMode::UiElement,
         };
         let result = match service.query(
-            desktop_point(frame_point, monitor),
+            desktop_point(point),
             mode,
             &QueryControl::foreground(),
             &mut |_| {},
@@ -810,7 +885,7 @@ mod native {
             target == PickTarget::WindowSubElement && result.reason != StopReason::Complete;
         let path = result
             .path
-            .map(|p| to_frame_path(&p, monitor))
+            .map(|p| to_desktop_path(&p))
             .filter(|p| !p.is_empty());
         (path, incomplete)
     }
@@ -820,19 +895,18 @@ mod native {
         service: &mut ElementRegionService,
         mailbox: &HoverMailbox,
         seq: u64,
-        frame_point: PhysicalPoint,
-        monitor: PhysicalRect,
+        point: PhysicalPoint,
     ) {
         let cancelled = || mailbox.superseded();
         let control = QueryControl::refinement(&cancelled);
         let mut publish = |path: &[ElementRect]| {
-            let frame = to_frame_path(path, monitor);
-            if !frame.is_empty() {
-                mailbox.publish_refinement(seq, frame);
+            let desktop = to_desktop_path(path);
+            if !desktop.is_empty() {
+                mailbox.publish_refinement(seq, desktop);
             }
         };
         match service.query(
-            desktop_point(frame_point, monitor),
+            desktop_point(point),
             HitTestMode::UiElement,
             &control,
             &mut publish,
@@ -850,21 +924,15 @@ mod native {
     mod tests {
         use super::*;
 
-        /// 冒烟：真实枚举窗口，结果（若有）必须落在显示器范围内且不卡死。
+        /// 冒烟：真实枚举窗口，结果（若有）是桌面坐标下的非空矩形，且不卡死。
         #[test]
-        fn smoke_enumerates_windows_within_monitor() {
-            let monitor = PhysicalRect::new(0, 0, 4000, 3000);
-            let mut picker = WindowPicker::spawn(monitor, Vec::new()).expect("spawn");
+        fn smoke_enumerates_windows_in_desktop_space() {
+            let mut picker = WindowPicker::spawn(Vec::new()).expect("spawn");
             for (x, y) in [(10, 10), (500, 400), (1200, 800), (3000, 2000)] {
                 // 首次可能因快照未就绪超时，多等几轮
                 for _ in 0..50 {
-                    if let Some(path) = picker.hover(PhysicalPoint::new(x, y), PickTarget::Window) {
-                        for r in path {
-                            assert!(r.width > 0 && r.height > 0);
-                            assert!(
-                                r.x >= 0 && r.y >= 0 && r.right() <= 4000 && r.bottom() <= 3000
-                            );
-                        }
+                    if let Some(path) = picker.query(PhysicalPoint::new(x, y), PickTarget::Window) {
+                        assert!(path.iter().all(|r| r.width > 0 && r.height > 0));
                         break;
                     }
                 }
@@ -885,7 +953,15 @@ mod tests {
         doc.set_value(SMART_SELECTION_KEY, serde_json::json!(false))
             .unwrap();
         assert!(!smart_selection_enabled(&doc));
-        assert!(start_window_hover(&doc, PhysicalRect::new(0, 0, 10, 10)).is_none());
+        let hovers = start_window_hover(
+            &doc,
+            &[
+                PhysicalRect::new(0, 0, 10, 10),
+                PhysicalRect::new(10, 0, 10, 10),
+            ],
+        );
+        assert_eq!(hovers.len(), 2);
+        assert!(hovers.iter().all(Option::is_none));
     }
 
     /// 选区目标默认子控件，配置为 window 时切到窗口；未知值回落默认。
@@ -1089,6 +1165,74 @@ mod tests {
         off.advance(Some(a), t0);
         assert_eq!(off.advance(Some(b), t0), Some(b));
         assert!(!off.is_running());
+    }
+
+    /// 测试用桌面命中器：按固定层级返回桌面坐标路径，并模拟细化。
+    #[derive(Default)]
+    struct FakeDesktop {
+        /// 最近一次查询点。
+        last: Option<PhysicalPoint>,
+        /// 待取走的细化路径。
+        refined: Option<PickRects>,
+    }
+
+    impl DesktopHover for FakeDesktop {
+        /// 返回横跨两块屏的窗口 + 控件（桌面坐标）。
+        fn query(&mut self, point: PhysicalPoint, _target: PickTarget) -> Option<PickRects> {
+            self.last = Some(point);
+            Some(vec![r(2500, 100, 200, 80), r(2400, 50, 600, 400)])
+        }
+
+        /// 查询点在该屏内才给细化。
+        fn take_refinement_in(&mut self, monitor: PhysicalRect) -> Option<PickRects> {
+            self.last.filter(|p| monitor.contains(*p))?;
+            self.refined.take()
+        }
+
+        /// 查询点在该屏内且还有细化没取走。
+        fn refinement_pending_in(&self, monitor: PhysicalRect) -> bool {
+            self.last.is_some_and(|p| monitor.contains(p)) && self.refined.is_some()
+        }
+    }
+
+    /// 同一个桌面命中器服务两块屏：各自按本屏原点换算并裁剪；跨缝的窗口在两屏都出现各自那一段。
+    #[test]
+    fn display_hover_maps_desktop_path_per_monitor() {
+        let shared = Rc::new(RefCell::new(FakeDesktop::default()));
+        let left = r(0, 0, 2560, 1440);
+        let right = r(2560, 0, 2560, 1440);
+        let mut on_left = DisplayHover::new(Rc::clone(&shared), left);
+        let mut on_right = DisplayHover::new(Rc::clone(&shared), right);
+        // 左屏点 (2500,100) 的桌面查询：控件整个在左屏，窗口跨缝
+        let path = on_left
+            .hover(PhysicalPoint::new(2500, 100), PickTarget::WindowSubElement)
+            .unwrap();
+        assert_eq!(path, vec![r(2500, 100, 60, 80), r(2400, 50, 160, 400)]);
+        // 右屏同一个桌面点（局部 (-60,100) 不会发生，改用右屏局部 (10,100) = 桌面 (2570,100)）
+        let path = on_right
+            .hover(PhysicalPoint::new(10, 100), PickTarget::WindowSubElement)
+            .unwrap();
+        assert_eq!(path, vec![r(0, 100, 140, 80), r(0, 50, 440, 400)]);
+    }
+
+    /// 细化只归最近一次查询点所在的显示器，别的显示器取不走也不会误报「待定」。
+    #[test]
+    fn display_hover_routes_refinement_to_the_hovered_monitor() {
+        let shared = Rc::new(RefCell::new(FakeDesktop::default()));
+        let left = r(0, 0, 2560, 1440);
+        let right = r(2560, 0, 2560, 1440);
+        let mut on_left = DisplayHover::new(Rc::clone(&shared), left);
+        let mut on_right = DisplayHover::new(Rc::clone(&shared), right);
+        on_right.hover(PhysicalPoint::new(10, 100), PickTarget::WindowSubElement);
+        shared.borrow_mut().refined = Some(vec![r(2600, 120, 50, 50), r(2570, 100, 100, 100)]);
+        assert!(!on_left.refinement_pending());
+        assert!(on_left.refinement().is_none());
+        assert!(on_right.refinement_pending());
+        assert_eq!(
+            on_right.refinement(),
+            Some(vec![r(40, 120, 50, 50), r(10, 100, 100, 100)])
+        );
+        assert!(!on_right.refinement_pending());
     }
 
     /// 邮箱：新请求覆盖旧请求，只有最新的会被工作线程取到。
