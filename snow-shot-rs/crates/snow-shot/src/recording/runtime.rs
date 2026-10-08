@@ -135,6 +135,7 @@ impl ScreenRecordingSession {
             output: self.config.output_path.clone(),
             audio: self.config.audio.clone(),
             effects: self.config.effects.clone(),
+            quality: self.config.quality.clone(),
         };
         self.state = RecordingState::Recording {
             elapsed_secs: 0,

@@ -330,12 +330,44 @@ pub fn parse_size_limit(text: &str) -> Option<SizeLimit> {
     (w > 0 && h > 0).then_some(Some((w.max(h), w.min(h))))
 }
 
-/// 读取当前生效的输出上限：环境变量优先，否则产品默认 1080p。
-pub fn configured_size_limit() -> SizeLimit {
-    std::env::var(ENV_MAX_SIZE)
-        .ok()
-        .and_then(|v| parse_size_limit(&v))
-        .unwrap_or(Some((DEFAULT_MAX_LONG_SIDE, DEFAULT_MAX_SHORT_SIDE)))
+/// 决定本次录制的输出尺寸上限：环境变量（调试覆盖）优先，其次请求里的清晰度，最后产品默认。
+///
+/// # 参数
+/// - `env`：`SNOW_RECORDER_MAX_SIZE` 的值；`None` 表示未设置。
+/// - `requested`：请求里的（长边，短边）上限。
+///
+/// # 示例
+/// ```
+/// use crate::settings::resolve_size_limit;
+/// assert_eq!(resolve_size_limit(None, Some((1280, 720))), Some((1280, 720)));
+/// assert_eq!(resolve_size_limit(Some("none"), Some((1280, 720))), None);
+/// ```
+pub fn resolve_size_limit(env: Option<&str>, requested: Option<(u32, u32)>) -> SizeLimit {
+    if let Some(parsed) = env.and_then(parse_size_limit) {
+        return parsed;
+    }
+    requested.or(Some((DEFAULT_MAX_LONG_SIDE, DEFAULT_MAX_SHORT_SIDE)))
+}
+
+/// 读取本次请求生效的输出上限（见 [`resolve_size_limit`]）。
+///
+/// # 参数
+/// - `requested`：请求里的（长边，短边）上限。
+pub fn size_limit_for(requested: Option<(u32, u32)>) -> SizeLimit {
+    resolve_size_limit(std::env::var(ENV_MAX_SIZE).ok().as_deref(), requested)
+}
+
+/// 决定本次录制的硬件模式：环境变量优先；未设置时请求禁用硬编则只用软编，否则用默认模式。
+///
+/// # 参数
+/// - `env`：`SNOW_RECORDER_HARDWARE` 的值；`None` 表示未设置。
+/// - `hardware_allowed`：请求是否允许硬件编码。
+pub fn resolve_hardware_mode(env: Option<&str>, hardware_allowed: bool) -> HardwareMode {
+    match env {
+        Some(_) => parse_hardware_mode(env),
+        None if hardware_allowed => DEFAULT_HARDWARE_MODE,
+        None => HardwareMode::Off,
+    }
 }
 
 /// 把上限按选区方向取向成（最大宽，最大高）。
@@ -395,6 +427,19 @@ mod tests {
         assert!(error.contains("没有受支持") && error.contains("0x1414"));
         assert_eq!(HwCodec::Nvenc.ffmpeg_name(), "h264_nvenc");
         assert_eq!(HwCodec::for_vendor(0), None);
+    }
+
+    /// 尺寸上限：环境变量 > 请求 > 默认；硬件模式：环境变量 > 请求开关 > 默认。
+    #[test]
+    fn request_overrides_resolve() {
+        assert_eq!(resolve_size_limit(None, None), Some((1920, 1080)));
+        assert_eq!(resolve_size_limit(None, Some((854, 480))), Some((854, 480)));
+        assert_eq!(resolve_size_limit(Some("1280x720"), Some((854, 480))), Some((1280, 720)));
+        assert_eq!(resolve_size_limit(Some("none"), Some((854, 480))), None);
+        assert_eq!(resolve_size_limit(Some("junk"), Some((854, 480))), Some((854, 480)));
+        assert_eq!(resolve_hardware_mode(None, true), DEFAULT_HARDWARE_MODE);
+        assert_eq!(resolve_hardware_mode(None, false), HardwareMode::Off);
+        assert_eq!(resolve_hardware_mode(Some("gpu"), false), HardwareMode::Gpu);
     }
 
     /// 环境变量解析：别名、大小写、空值与非法值。

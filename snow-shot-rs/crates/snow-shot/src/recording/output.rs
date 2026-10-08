@@ -196,6 +196,10 @@ pub fn build_recording_config(
             .unwrap_or(0),
         audio: audio_request(document, format),
         effects: crate::recording::effects::effects_request(document),
+        quality: crate::recording::quality::quality_request(
+            document,
+            format != RecordingFormat::Mp4,
+        ),
     })
 }
 

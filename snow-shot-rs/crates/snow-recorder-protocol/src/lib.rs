@@ -115,6 +115,18 @@ const START_KEY_SIZE_KEY: &str = "ksize";
 const START_KEY_BG_KEY: &str = "kbg";
 /// START 前缀令牌：按键回显文字色。
 const START_KEY_FG_KEY: &str = "kfg";
+/// START 前缀令牌：输出尺寸上限（`长边xx短边`，如 `1920x1080`）。
+const START_MAX_SIZE_KEY: &str = "maxsz";
+/// START 前缀令牌：是否允许硬件编码（`0` 只用软件编码）。
+const START_HARDWARE_KEY: &str = "hw";
+/// START 前缀令牌：软件编码预设名。
+const START_PRESET_KEY: &str = "preset";
+/// START 前缀令牌：动图是否循环播放（`0` 只播一遍）。
+const START_LOOP_KEY: &str = "loop";
+/// 预设名最大长度（过长视为非法）。
+const PRESET_NAME_MAX: usize = 16;
+/// 输出尺寸上限的边长上限（防御畸形输入）。
+const MAX_SIZE_SIDE_LIMIT: u32 = 16384;
 /// 鼠标轨迹默认持续时间（毫秒）。
 pub const TRAIL_MS_DEFAULT: u32 = 500;
 /// 按键回显默认键帽大小。
@@ -294,6 +306,55 @@ impl EffectsRequest {
     }
 }
 
+/// 编码质量请求（清晰度上限、硬编开关、软编预设、动图循环）。
+///
+/// 全是缺省值时不产生任何 START 令牌，线格式与旧版字节一致；旧版录制进程会忽略未知令牌。
+///
+/// # 示例
+/// ```
+/// use snow_recorder_protocol::QualityRequest;
+/// let q = QualityRequest { max_size: Some((1280, 720)), ..QualityRequest::default() };
+/// assert!(q.hardware && q.loop_animated);
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QualityRequest {
+    /// 输出尺寸上限（长边、短边，与选区方向无关）；`None` 由录制进程用自己的默认值。
+    pub max_size: Option<(u32, u32)>,
+    /// 是否允许硬件编码；`false` 强制软件编码。
+    pub hardware: bool,
+    /// 软件编码预设名（x264 预设，如 `veryfast`）；`None` 用录制进程默认。
+    pub preset: Option<String>,
+    /// 动图（GIF / APNG / WebP）是否循环播放。
+    pub loop_animated: bool,
+}
+
+impl Default for QualityRequest {
+    /// 不限定尺寸、允许硬编、默认预设、动图循环。
+    fn default() -> Self {
+        Self {
+            max_size: None,
+            hardware: true,
+            preset: None,
+            loop_animated: true,
+        }
+    }
+}
+
+/// 预设名是否合法：非空、全小写字母、长度不超过上限。
+fn valid_preset(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= PRESET_NAME_MAX
+        && name.bytes().all(|b| b.is_ascii_lowercase())
+}
+
+/// 解析 `长边x短边`；两边须在 `1..=MAX_SIZE_SIDE_LIMIT`，否则 `None`。
+fn parse_max_size(text: &str) -> Option<(u32, u32)> {
+    let (a, b) = text.split_once('x')?;
+    let (a, b) = (a.parse::<u32>().ok()?, b.parse::<u32>().ok()?);
+    let ok = |v: u32| (1..=MAX_SIZE_SIDE_LIMIT).contains(&v);
+    (ok(a) && ok(b)).then_some((a.max(b), a.min(b)))
+}
+
 /// 把 RGBA 编成 `RRGGBBAA` 十六进制。
 fn rgba_hex(c: [u8; 4]) -> String {
     format!("{:02X}{:02X}{:02X}{:02X}", c[0], c[1], c[2], c[3])
@@ -391,6 +452,8 @@ pub struct StartRequest {
     pub audio: AudioRequest,
     /// 输入特效请求（默认全关）。
     pub effects: EffectsRequest,
+    /// 编码质量请求（默认全缺省，等同旧版行为）。
+    pub quality: QualityRequest,
 }
 
 /// 编辑引擎选择。
@@ -816,7 +879,7 @@ fn decode_token(text: &str) -> Option<String> {
 }
 
 /// START 的可选前缀令牌（每个后跟一个空格）；缺省值不输出，旧格式字节不变。
-fn start_prefix(a: &AudioRequest, e: &EffectsRequest) -> String {
+fn start_prefix(a: &AudioRequest, e: &EffectsRequest, q: &QualityRequest) -> String {
     let mut out = String::new();
     if a.microphone {
         out.push_str(&format!("{START_MIC_KEY}=1 "));
@@ -859,16 +922,39 @@ fn start_prefix(a: &AudioRequest, e: &EffectsRequest) -> String {
         out.push_str(&format!("{START_KEY_SIZE_KEY}={} ", e.keyboard_size));
     }
     if e.keyboard_background != defaults.keyboard_background {
-        out.push_str(&format!("{START_KEY_BG_KEY}={} ", rgba_hex(e.keyboard_background)));
+        out.push_str(&format!(
+            "{START_KEY_BG_KEY}={} ",
+            rgba_hex(e.keyboard_background)
+        ));
     }
     if e.keyboard_text != defaults.keyboard_text {
-        out.push_str(&format!("{START_KEY_FG_KEY}={} ", rgba_hex(e.keyboard_text)));
+        out.push_str(&format!(
+            "{START_KEY_FG_KEY}={} ",
+            rgba_hex(e.keyboard_text)
+        ));
+    }
+    if let Some((long, short)) = q.max_size {
+        out.push_str(&format!("{START_MAX_SIZE_KEY}={long}x{short} "));
+    }
+    if !q.hardware {
+        out.push_str(&format!("{START_HARDWARE_KEY}=0 "));
+    }
+    if let Some(p) = q.preset.as_deref().filter(|p| valid_preset(p)) {
+        out.push_str(&format!("{START_PRESET_KEY}={p} "));
+    }
+    if !q.loop_animated {
+        out.push_str(&format!("{START_LOOP_KEY}=0 "));
     }
     out
 }
 
 /// 把一个前缀令牌应用到录音请求；未知键忽略（向前兼容）。
-fn apply_prefix_token(a: &mut AudioRequest, e: &mut EffectsRequest, token: &str) {
+fn apply_prefix_token(
+    a: &mut AudioRequest,
+    e: &mut EffectsRequest,
+    q: &mut QualityRequest,
+    token: &str,
+) {
     let Some((key, value)) = token.split_once('=') else {
         return;
     };
@@ -882,21 +968,31 @@ fn apply_prefix_token(a: &mut AudioRequest, e: &mut EffectsRequest, token: &str)
         START_SYS_DEV_KEY => a.system_device = decode_token(value).filter(|d| !d.is_empty()),
         START_TRAIL_KEY => e.trail = parse_rgba_hex(value).unwrap_or([0; 4]),
         START_TRAIL_MS_KEY => {
-            e.trail_ms = value.parse::<u32>().map_or(TRAIL_MS_DEFAULT, |v| v.clamp(100, 2000));
+            e.trail_ms = value
+                .parse::<u32>()
+                .map_or(TRAIL_MS_DEFAULT, |v| v.clamp(100, 2000));
         }
         START_CLICK_KEY => e.click = parse_rgba_hex(value).unwrap_or([0; 4]),
         START_HIGHLIGHT_KEY => e.highlight = parse_rgba_hex(value).unwrap_or([0; 4]),
         START_CLICKS_KEY => e.record_clicks = value == "1",
         START_KEYS_KEY => e.keyboard = value == "1",
         START_KEY_SIZE_KEY => {
-            e.keyboard_size = value.parse::<u32>().map_or(KEY_SIZE_DEFAULT, |v| v.clamp(32, 128));
+            e.keyboard_size = value
+                .parse::<u32>()
+                .map_or(KEY_SIZE_DEFAULT, |v| v.clamp(32, 128));
         }
         START_KEY_BG_KEY => {
-            e.keyboard_background = parse_rgba_hex(value).unwrap_or(EffectsRequest::default().keyboard_background);
+            e.keyboard_background =
+                parse_rgba_hex(value).unwrap_or(EffectsRequest::default().keyboard_background);
         }
         START_KEY_FG_KEY => {
-            e.keyboard_text = parse_rgba_hex(value).unwrap_or(EffectsRequest::default().keyboard_text);
+            e.keyboard_text =
+                parse_rgba_hex(value).unwrap_or(EffectsRequest::default().keyboard_text);
         }
+        START_MAX_SIZE_KEY => q.max_size = parse_max_size(value),
+        START_HARDWARE_KEY => q.hardware = value != "0",
+        START_PRESET_KEY => q.preset = valid_preset(value).then(|| value.to_string()),
+        START_LOOP_KEY => q.loop_animated = value != "0",
         _ => {}
     }
 }
@@ -916,7 +1012,7 @@ impl Command {
         match self {
             Self::Start(r) => format!(
                 "{CMD_START} {}{} {} {} {} {} {} {} {}",
-                start_prefix(&r.audio, &r.effects),
+                start_prefix(&r.audio, &r.effects, &r.quality),
                 r.x,
                 r.y,
                 r.width,
@@ -967,12 +1063,13 @@ impl Command {
             CMD_START => {
                 let mut audio = AudioRequest::default();
                 let mut effects = EffectsRequest::default();
+                let mut quality = QualityRequest::default();
                 let mut rest = rest;
                 while let Some((token, after)) = rest
                     .split_once(' ')
                     .filter(|(token, _)| token.contains('='))
                 {
-                    apply_prefix_token(&mut audio, &mut effects, token);
+                    apply_prefix_token(&mut audio, &mut effects, &mut quality, token);
                     rest = after;
                 }
                 let mut it = rest.splitn(8, ' ');
@@ -999,6 +1096,7 @@ impl Command {
                     output: PathBuf::from(path),
                     audio,
                     effects,
+                    quality,
                 }))
             }
             CMD_EDIT => {
@@ -1202,6 +1300,7 @@ mod tests {
             output: PathBuf::from("C:\\My Videos\\a b.gif"),
             audio: AudioRequest::default(),
             effects: EffectsRequest::default(),
+            quality: QualityRequest::default(),
         }
     }
 
@@ -1484,8 +1583,12 @@ mod tests {
             output: PathBuf::from("o.mp4"),
             audio: AudioRequest::default(),
             effects: EffectsRequest::default(),
+            quality: QualityRequest::default(),
         };
-        assert_eq!(Command::Start(base.clone()).to_line(), "START 1 2 3 4 mp4 30 1 o.mp4");
+        assert_eq!(
+            Command::Start(base.clone()).to_line(),
+            "START 1 2 3 4 mp4 30 1 o.mp4"
+        );
         let mut on = base;
         on.effects = EffectsRequest {
             trail: [255, 0, 0, 128],
@@ -1506,14 +1609,52 @@ mod tests {
     /// 非法的特效令牌回到安全默认值，时长与键帽大小被夹到合法范围。
     #[test]
     fn effects_tokens_are_sanitised() {
-        let Command::Start(r) =
-            Command::parse("START trail=zz click=FF0000FF trms=99999 ksize=1 1 2 3 4 mp4 30 0 o.mp4").unwrap()
-        else {
+        let Command::Start(r) = Command::parse(
+            "START trail=zz click=FF0000FF trms=99999 ksize=1 1 2 3 4 mp4 30 0 o.mp4",
+        )
+        .unwrap() else {
             panic!("应为 START");
         };
         assert_eq!(r.effects.trail, [0; 4]);
         assert_eq!(r.effects.click, [255, 0, 0, 255]);
         assert_eq!(r.effects.trail_ms, 2000);
         assert_eq!(r.effects.keyboard_size, 32);
+    }
+
+    /// 质量字段往返：缺省时 START 行与旧格式字节一致；设置后往返不丢字段；非法值回到缺省。
+    #[test]
+    fn quality_roundtrip_defaults_and_sanitising() {
+        let mut req = sample_start();
+        req.format = MediaFormat::Mp4;
+        req.output = PathBuf::from("o.mp4");
+        assert!(!Command::Start(req.clone()).to_line().contains("maxsz"));
+        req.quality = QualityRequest {
+            max_size: Some((2560, 1440)),
+            hardware: false,
+            preset: Some("veryslow".into()),
+            loop_animated: false,
+        };
+        let line = Command::Start(req.clone()).to_line();
+        assert_eq!(Command::parse(&line).unwrap(), Command::Start(req));
+        let Command::Start(r) =
+            Command::parse("START maxsz=bad preset=BAD! hw=1 loop=1 1 2 3 4 mp4 30 0 o.mp4")
+                .unwrap()
+        else {
+            panic!("应为 START");
+        };
+        assert_eq!(r.quality, QualityRequest::default());
+        // 竖向写法也归一成（长边，短边）；超界拒绝
+        let Command::Start(r) =
+            Command::parse("START maxsz=1080x1920 1 2 3 4 mp4 30 0 o.mp4").unwrap()
+        else {
+            panic!("应为 START");
+        };
+        assert_eq!(r.quality.max_size, Some((1920, 1080)));
+        let Command::Start(r) =
+            Command::parse("START maxsz=99999x10 1 2 3 4 mp4 30 0 o.mp4").unwrap()
+        else {
+            panic!("应为 START");
+        };
+        assert_eq!(r.quality.max_size, None);
     }
 }

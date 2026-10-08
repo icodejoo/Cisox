@@ -10,6 +10,7 @@ pub mod effects;
 pub mod keymap;
 pub mod model;
 pub mod output;
+pub mod quality;
 pub mod runtime;
 
 pub use area_view::{AutoPlan, RecordingAreaAction, RecordingAreaView};

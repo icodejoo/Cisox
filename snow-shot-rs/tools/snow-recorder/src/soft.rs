@@ -109,7 +109,7 @@ impl RecordingBackend for SoftBackend {
 /// # 返回
 /// 适配后的后端；配置非法或会话启动失败返回原因。
 pub fn start_software(request: &StartRequest, partial: PathBuf, upstream_gpu: bool) -> Result<Box<dyn RecordingBackend>, String> {
-    let mut config = plan::build_config(request, partial, upstream_gpu, settings::configured_size_limit());
+    let mut config = plan::build_config(request, partial, upstream_gpu, settings::size_limit_for(request.quality.max_size));
     if let Some(p) = std::env::var(plan::ENV_PRESET).ok().and_then(|v| plan::parse_preset(&v)) {
         config.preset = p;
     }
