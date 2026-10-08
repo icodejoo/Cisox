@@ -2,9 +2,11 @@
 
 config-transfer-title = Export and import settings
 
-config-transfer-description = Save all settings to one archive, or restore them from an archive. API keys are left out of exports.
+config-transfer-description = Save all settings to one archive, or restore them from an archive. API keys are left out unless you tick the box.
 
 config-transfer-export = Export settings…
+
+config-transfer-include-keys = Include API keys
 
 config-transfer-import = Import settings…
 

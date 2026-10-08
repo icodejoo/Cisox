@@ -36,6 +36,7 @@ use snow_config::extensions::{
 };
 use serde_json::{Value, json};
 use snow_ui::ui::component::button::Button;
+use snow_ui::ui::component::checkbox::Checkbox;
 use snow_ui::ui::component::searchable_list::{SearchableListItem, SearchableVec};
 use snow_ui::ui::component::select::{Select, SelectEvent, SelectState};
 use snow_ui::ui::component::{Disableable, IndexPath, Sizable, Size as ComponentSize, Theme, ThemeMode};
@@ -306,6 +307,8 @@ pub struct SettingsView {
     update_hook: Option<Rc<dyn Fn()>>,
     /// 设置导出 / 导入的界面状态。
     transfer_state: TransferUiState,
+    /// 导出时是否包含 API 密钥（默认不含，只在本视图存活）。
+    transfer_include_keys: bool,
     /// 请求导出 / 导入的入口（未接入时为 `None`，按钮不可用）。
     transfer_hook: Option<Rc<dyn Fn(TransferAction)>>,
     /// 语音模型下载任务的界面状态。
@@ -400,6 +403,7 @@ impl SettingsView {
             update_state: UpdateUiState::Idle,
             update_hook: None,
             transfer_state: TransferUiState::Idle,
+            transfer_include_keys: false,
             transfer_hook: None,
             stt_download: DownloadState::Idle,
             stt_cancel: None,
@@ -1541,7 +1545,11 @@ impl SettingsView {
             Hymt2Row::Actions => {
                 let mut buttons = Vec::new();
                 for (id, label, action) in [
-                    ("config-export", panel.export_label, TransferAction::Export),
+                    (
+                        "config-export",
+                        panel.export_label,
+                        TransferAction::Export { include_credentials: self.transfer_include_keys },
+                    ),
                     ("config-import", panel.import_label, TransferAction::Import),
                 ] {
                     let mut button = Button::new(id).small().label(label);
@@ -1556,6 +1564,13 @@ impl SettingsView {
                     };
                     buttons.push(button);
                 }
+                let include_keys = Checkbox::new("config-include-keys")
+                    .label(SharedString::from(panel.include_keys_label))
+                    .checked(self.transfer_include_keys)
+                    .on_click(cx.listener(|this, checked: &bool, _window, cx| {
+                        this.transfer_include_keys = *checked;
+                        cx.notify();
+                    }));
                 let notice = panel.notice.map(|(text, danger)| {
                     div()
                         .text_size(px(11.0))
@@ -1568,7 +1583,15 @@ impl SettingsView {
                     .pt(px(2.0))
                     .border_b_1()
                     .border_color(p.border)
-                    .child(div().flex().items_center().gap_3().children(buttons).children(notice))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .children(buttons)
+                            .child(include_keys)
+                            .children(notice),
+                    )
                     .into_any_element()
             }
         }

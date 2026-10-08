@@ -28,7 +28,10 @@ const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransferAction {
     /// 导出设置。
-    Export,
+    Export {
+        /// 是否把自定义模型的 API 密钥一并写入归档（默认不含）。
+        include_credentials: bool,
+    },
     /// 导入设置。
     Import,
 }
@@ -59,6 +62,8 @@ pub struct TransferPanel {
     pub export_label: String,
     /// 导入按钮文案。
     pub import_label: String,
+    /// “包含 API 密钥”勾选项文案。
+    pub include_keys_label: String,
     /// 结果提示与是否警示。
     pub notice: Option<(String, bool)>,
 }
@@ -75,6 +80,7 @@ pub fn transfer_panel(locale: &str, state: &TransferUiState) -> TransferPanel {
         description: i18n.tr("config-transfer-description"),
         export_label: i18n.tr("config-transfer-export"),
         import_label: i18n.tr("config-transfer-import"),
+        include_keys_label: i18n.tr("config-transfer-include-keys"),
         notice: match state {
             TransferUiState::Idle => None,
             TransferUiState::Done { text, failed } => Some((text.clone(), *failed)),
@@ -92,18 +98,23 @@ pub fn default_export_name(iso: &str) -> String {
     format!("{EXPORT_FILE_PREFIX}{date}-{time}{ARCHIVE_EXTENSION}")
 }
 
-/// 导出：把当前配置写成归档（默认脱敏自定义模型密钥）。
+/// 导出：把当前配置写成归档。
 ///
 /// # 参数
 /// - `store`：配置存储（只读）
 /// - `path`：目标归档路径
-pub fn export_configuration(store: &ConfigStore, path: &Path) -> Result<(), ArchiveError> {
+/// - `include_credentials`：为假（默认）时清空自定义模型的 API 密钥并记入清单；为真时原样写入
+pub fn export_configuration(
+    store: &ConfigStore,
+    path: &Path,
+    include_credentials: bool,
+) -> Result<(), ArchiveError> {
     let bytes = write_archive_bytes(
         store.document().values(),
         current_version(),
         APP_VERSION,
         &iso_utc_now(),
-        true,
+        !include_credentials,
     );
     write_archive_file(path, &bytes)
 }
@@ -226,7 +237,7 @@ mod tests {
             .set_value("system/auto_start_at_boot", json!(false))
             .unwrap();
         let archive = dir.join("out.zip");
-        export_configuration(&source, &archive).unwrap();
+        export_configuration(&source, &archive, false).unwrap();
 
         let mut target = ConfigStore::open(dir.join("b").join("config.json"));
         let changed = import_configuration(&mut target, &archive).unwrap();
@@ -281,10 +292,38 @@ mod tests {
             .set_value("api_configuration/custom_models", models)
             .unwrap();
         let archive = dir.join("out.zip");
-        export_configuration(&store, &archive).unwrap();
+        export_configuration(&store, &archive, false).unwrap();
         assert!(!String::from_utf8_lossy(&fs::read(&archive).unwrap()).contains("secret-key"));
         import_configuration(&mut store, &archive).unwrap();
         let after = store.value("api_configuration/custom_models");
+        assert_eq!(after[0]["api_key"], json!("secret-key"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// 勾选“包含密钥”导出：归档里带密钥，且清单不记脱敏 id；导入到空配置也能带回密钥。
+    #[test]
+    fn credentials_included_when_requested() {
+        let dir = temp_dir("cred-in");
+        let mut store = ConfigStore::open(dir.join("a").join("config.json"));
+        let models = json!([{
+            "id": "0a1b2c3d-0000-4000-8000-000000000001",
+            "name": "m",
+            "base_url": "https://example.com/v1",
+            "api_key": "secret-key",
+            "model": "x",
+            "supports_vision": false,
+            "supports_reasoning": false
+        }]);
+        store
+            .set_value("api_configuration/custom_models", models)
+            .unwrap();
+        let archive = dir.join("out.zip");
+        export_configuration(&store, &archive, true).unwrap();
+        let contents = read_archive_file(&archive).unwrap();
+        assert!(contents.redacted_credential_ids.is_empty());
+        let mut target = ConfigStore::open(dir.join("b").join("config.json"));
+        import_configuration(&mut target, &archive).unwrap();
+        let after = target.value("api_configuration/custom_models");
         assert_eq!(after[0]["api_key"], json!("secret-key"));
         fs::remove_dir_all(dir).unwrap();
     }
@@ -295,6 +334,7 @@ mod tests {
         for locale in ["en-US", "zh-CN"] {
             let panel = transfer_panel(locale, &TransferUiState::Idle);
             assert!(!panel.title.is_empty() && !panel.export_label.is_empty());
+            assert!(!panel.include_keys_label.is_empty());
             for error in [
                 ArchiveError::Invalid,
                 ArchiveError::NotConfigArchive,
