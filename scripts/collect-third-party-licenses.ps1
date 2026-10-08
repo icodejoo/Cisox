@@ -7,6 +7,8 @@ param(
     [switch]$StandaloneMedia,
     [Parameter(Mandatory = $true)][string[]]$CargoManifest,
     [hashtable]$CargoOptions = @{},
+    # 非 Cargo 组件的额外声明（sherpa 预编译库、模型许可证等），每项含 Category/Package/DeclaredLicense/Source
+    [hashtable[]]$ExtraNotices = @(),
     [Parameter(Mandatory = $true)][string]$AntDesignNotice,
     [Parameter(Mandatory = $true)][string]$FallbackLicenseDirectory,
     [string]$CargoTarget = "x86_64-pc-windows-msvc"
@@ -267,6 +269,17 @@ Copy-LicenseNotice -Category "project-notices" -Package "snow-shot-attributions"
     -DeclaredLicense "MIT" `
     -Source (Join-Path $PSScriptRoot "../snow_shot/THIRD_PARTY_NOTICES.md") `
     -RelativeName "THIRD_PARTY_NOTICES.md"
+
+foreach ($extra in $ExtraNotices) {
+    foreach ($key in 'Category', 'Package', 'DeclaredLicense', 'Source') {
+        if (-not $extra.ContainsKey($key) -or [string]::IsNullOrWhiteSpace([string]$extra[$key])) {
+            throw "ExtraNotices entry is missing '$key'."
+        }
+    }
+    $extraSource = Resolve-ExistingPath -Path $extra.Source -Description "extra notice" -PathType Leaf
+    Copy-LicenseNotice -Category $extra.Category -Package $extra.Package `
+        -DeclaredLicense $extra.DeclaredLicense -Source $extraSource
+}
 
 $sortedRecords = @($records | Sort-Object Category, Package, Notice)
 $indexLines = [System.Collections.Generic.List[string]]::new()

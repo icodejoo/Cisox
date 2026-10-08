@@ -73,6 +73,6 @@
 - **传输**：同一时刻只服务一个连接（单管道实例，空闲 5 分钟断开）；桥接进程 `snow-mcp-bridge` 属 M4，尚未做。
 - **描述符**：写在 `<数据根>/mcp/descriptor.json`，依赖数据根目录自身的用户私有 ACL，未单独收紧文件 ACL。
 - **入参 schema**：旧清单没有逐 tool 的 schema，只有名称；未实现的 tool 用开放的 `{"type":"object"}`，已实现的写了严格 schema，校验器是自带的极简子集（`schema.rs`）。`settings_get` 的参数是 `section`（键前缀）/ `key`，不同于旧版的页面 / 分组 id，敏感键（含 `api_key` / `token` / `secret` 等）输出 `<redacted>`。
-- **依赖**：未新增 crate；`snow-platform` 的 `windows` 依赖新增 `Win32_Security_Cryptography` 特性（`BCryptGenRandom`）。
+- **依赖**：未新增 crate；`snow-platform` 的 `windows` 依赖新增 `Win32_Security_Cryptography` 特性（`BCryptGenRandom`）。该特性已获用户批准（2026-10-08），同日批准的还有独立 workspace `tools/snow-table`（见交接文档 §0.0）。
 
 剩余未实现 tool 数随期数递减：M1 截图域 27（`mcp_status` 已实现）、M2 应用域 23 + 文档域 33、M3 媒体域 13；`registry.rs` 的测试固定“已实现 + 未实现 = 101”。
