@@ -313,3 +313,5 @@ setting-mcp-allow-capture = 允许截图类工具
 setting-mcp-allow-control = 允许控制类工具
 setting-mcp-allow-capture-desc = 允许 MCP 客户端截图与标注。只读查询始终可用
 setting-mcp-allow-control-desc = 允许 MCP 客户端改设置、开窗口。默认关闭；改动后服务会自动重启生效
+setting-screenshot-translation-page-auto-translate = 翻译页自动翻译
+setting-screenshot-translation-page-auto-translate-desc = 停止输入片刻后自动翻译（默认关闭）

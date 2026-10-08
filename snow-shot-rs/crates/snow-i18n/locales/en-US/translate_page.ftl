@@ -23,3 +23,11 @@ translate-page-button-copy = Copy
 translate-page-button-copy-close = Copy and close
 
 translate-page-no-model-guide = No translation model is installed yet. Put a model folder into the translation models directory, then reopen this page.
+
+translate-page-history-title = Recent ({ $arg1 })
+
+translate-page-history-empty = Nothing translated yet
+
+translate-page-history-clear = Clear history
+
+translate-page-auto-on = Auto translate is on: translation starts a moment after you stop typing.

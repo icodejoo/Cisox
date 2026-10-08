@@ -57,18 +57,25 @@ use crate::stt_models;
 use crate::stt_settings::{CancelFlag, SttHooks};
 use crate::sys_prefs::system_ui_language;
 use crate::translate_flow::TranslateUiState;
+use crate::translate_history::history_path;
 use crate::translate_input::{InputError, translate_text};
 use crate::translate_input_view::{
     TranslateInputView, WINDOW_HEIGHT as TRANSLATE_INPUT_HEIGHT,
     WINDOW_WIDTH as TRANSLATE_INPUT_WIDTH,
 };
-use crate::translate_page::page_config;
+use crate::translate_page::{KEY_PAGE_AUTO_TRANSLATE, page_config};
 use crate::translate_page_view::{
-    TranslatePageView, WINDOW_HEIGHT as TRANSLATE_PAGE_HEIGHT, WINDOW_WIDTH as TRANSLATE_PAGE_WIDTH,
+    PageOptions, TranslatePageView, WINDOW_HEIGHT as TRANSLATE_PAGE_HEIGHT,
+    WINDOW_WIDTH as TRANSLATE_PAGE_WIDTH,
 };
 use crate::translate_service::{
     TranslateConfig, TranslateFlowError, TranslateHost, TranslateOutcome, TranslateStage,
     Translated, run_flow,
+};
+use crate::window_geometry::{
+    MAIN_MIN_HEIGHT, MAIN_MIN_WIDTH, MAIN_WINDOW_GEOMETRY_KEY, TRANSLATE_MIN_HEIGHT,
+    TRANSLATE_MIN_WIDTH, TRANSLATION_WINDOW_SIZE_KEY, clamp_size, fit_geometry, geometry_to_json,
+    parse_geometry, parse_window_size, size_to_json,
 };
 use crate::window_pick::{
     WindowHover, selection_target, start_window_hover, transition_animation_enabled,
@@ -230,6 +237,8 @@ pub enum UiEvent {
         source: snow_translate::Lang,
         /// 页面上选的目标语言。
         target: snow_translate::Lang,
+        /// 是否来自主窗口内嵌的翻译页（决定结果回给哪一份视图）。
+        embedded: bool,
     },
     /// 翻译页翻译完成（成功或失败）。
     TranslatePageFinished {
@@ -237,7 +246,21 @@ pub enum UiEvent {
         serial: u64,
         /// 译文或失败原因。
         result: Result<Translated, InputError>,
+        /// 是否回给主窗口内嵌的翻译页。
+        embedded: bool,
     },
+    /// 独立翻译窗口尺寸停住了（该记忆大小）。
+    TranslateWindowSettled {
+        /// 窗口缩放比，用来把物理外框换算成逻辑大小。
+        scale: f32,
+    },
+    /// 主窗口位置 / 大小停住了（该记忆几何）。
+    MainWindowSettled {
+        /// 此刻是否最大化（最大化时只更新标记，不覆盖普通态外框）。
+        maximized: bool,
+    },
+    /// 用系统默认程序打开一个文件（如许可证摘要）。
+    OpenFile(PathBuf),
     /// 语音转文字命令（来自热键或总线）。
     Dictation(DictationCommand),
     /// 语音转文字：工作进程有新事件，或定时器到点（取事件、查超时、重试键入）。
@@ -3345,15 +3368,33 @@ fn open_or_focus_main_window(cx: &mut ShellContext, state: &mut AppState) {
         return;
     }
     let prefs = ui_prefs_from_config(&state.config);
-    let spec = WindowSpec::normal(
+    let mut spec = WindowSpec::normal(
         PRODUCT_NAME.to_string(),
         LogicalSize::new(
             crate::main_window_view::WINDOW_WIDTH,
             crate::main_window_view::WINDOW_HEIGHT,
         ),
     );
+    // 恢复上次的位置与大小（修正到当前屏幕内）；没有记忆就保持居中
+    let saved = parse_geometry(&state.config.borrow().value(MAIN_WINDOW_GEOMETRY_KEY));
+    if let Some(saved) = saved
+        && let Ok(monitors) = cx.monitors()
+    {
+        let mut areas: Vec<PhysicalRect> = monitors.all().iter().map(|m| m.work_area).collect();
+        // 主屏排最前（修正落点时以第一块为准）
+        if let Some(ix) = monitors.all().iter().position(|m| m.is_primary) {
+            areas.swap(0, ix);
+        }
+        spec.placement = Placement::Physical(fit_geometry(
+            saved.rect,
+            (MAIN_MIN_WIDTH, MAIN_MIN_HEIGHT),
+            &areas,
+        ));
+    }
+    let maximized = saved.is_some_and(|g| g.maximized);
     let config = Rc::clone(&state.config);
     let inbox = state.inbox.clone();
+    let translate_factory = translate_page_factory(state, true);
     let factory: crate::main_window_view::SettingsFactory = {
         let config = Rc::clone(&state.config);
         let inbox = state.inbox.clone();
@@ -3369,8 +3410,17 @@ fn open_or_focus_main_window(cx: &mut ShellContext, state: &mut AppState) {
             )
         })
     };
-    match cx.open_window(&spec, move |_window, app| {
-        MainWindowView::create(app, &config, prefs, inbox, factory)
+    match cx.open_window(&spec, move |window, app| {
+        MainWindowView::create(
+            window,
+            app,
+            &config,
+            prefs,
+            inbox,
+            factory,
+            translate_factory,
+            maximized,
+        )
     }) {
         Ok((window, view)) => {
             state.main_window = Some((window, view));
@@ -3379,6 +3429,142 @@ fn open_or_focus_main_window(cx: &mut ShellContext, state: &mut AppState) {
         }
         Err(e) => tracing::error!(error = %e, "打开主窗口失败"),
     }
+}
+
+/// 窗口外框在最小化时会被系统挪到这个坐标以下，此时的几何不能记。
+const MINIMIZED_COORDINATE: i32 = -30000;
+
+/// 把一个配置值写回并落盘；与当前值相同则不写。失败只记日志。
+///
+/// # 参数
+/// - `state`：运行时状态。
+/// - `key`：配置键。
+/// - `value`：新值。
+/// - `what`：日志里的说明。
+fn save_config_value(state: &AppState, key: &str, value: Value, what: &str) {
+    let mut store = state.config.borrow_mut();
+    if store.value(key) == value {
+        return;
+    }
+    if let Err(e) = store.set_value(key, value) {
+        tracing::warn!(error = %e, "写入{what}失败");
+    } else if let Err(e) = store.flush() {
+        tracing::warn!(error = %e, "{what}落盘失败");
+    }
+}
+
+/// 把更新检查 / 下载的新状态同步给所有显示它的界面：各份设置页与主窗口的关于页。
+///
+/// # 参数
+/// - `state`：运行时状态。
+/// - `cx`：外壳上下文。
+/// - `ui_state`：新的界面状态。
+fn publish_update_state(
+    state: &AppState,
+    cx: &mut ShellContext,
+    ui_state: crate::net_settings::UpdateUiState,
+) {
+    for view in settings_views(state, cx.app()) {
+        let ui_state = ui_state.clone();
+        view.update(cx.app(), |v, vcx| v.finish_update_check(ui_state, vcx));
+    }
+    if let Some((_, main)) = &state.main_window {
+        main.update(cx.app(), |v, vcx| v.finish_update_check(ui_state, vcx));
+    }
+}
+
+/// 记忆主窗口位置与大小：最大化时只更新标记并保留普通态外框，最小化时不记。
+///
+/// # 参数
+/// - `state`：运行时状态。
+/// - `maximized`：此刻是否最大化。
+fn save_main_window_geometry(state: &AppState, maximized: bool) {
+    let Some((window, _)) = &state.main_window else {
+        return;
+    };
+    let previous = parse_geometry(&state.config.borrow().value(MAIN_WINDOW_GEOMETRY_KEY));
+    let rect = if maximized {
+        previous.map(|g| g.rect)
+    } else {
+        window.rect().ok().filter(|r| r.x > MINIMIZED_COORDINATE)
+    };
+    if let Some(rect) = rect {
+        save_config_value(
+            state,
+            MAIN_WINDOW_GEOMETRY_KEY,
+            geometry_to_json(rect, maximized),
+            "主窗口位置",
+        );
+    }
+}
+
+/// 记忆独立翻译窗口的逻辑大小（外框物理像素除以缩放比）。
+///
+/// # 参数
+/// - `state`：运行时状态。
+/// - `scale`：窗口缩放比。
+fn save_translate_window_size(state: &AppState, scale: f32) {
+    let Some((window, _)) = &state.translate_page else {
+        return;
+    };
+    let Some(rect) = window.rect().ok().filter(|r| r.x > MINIMIZED_COORDINATE) else {
+        return;
+    };
+    if scale <= 0.0 {
+        return;
+    }
+    let width = (rect.width as f32 / scale).round() as i32;
+    let height = (rect.height as f32 / scale).round() as i32;
+    save_config_value(
+        state,
+        TRANSLATION_WINDOW_SIZE_KEY,
+        size_to_json(width, height),
+        "翻译窗口大小",
+    );
+}
+
+/// 生成翻译页的创建工厂：每次调用时现读配置与已装包，历史落在数据根目录。
+///
+/// # 参数
+/// - `state`：运行时状态。
+/// - `embedded`：是否内嵌在主窗口里。
+fn translate_page_factory(
+    state: &AppState,
+    embedded: bool,
+) -> crate::main_window_view::TranslateFactory {
+    let config = Rc::clone(&state.config);
+    let inbox = state.inbox.clone();
+    let translator = Arc::clone(&state.translator);
+    let data_root = state.data_root.clone();
+    Rc::new(move |window, app| {
+        let (translate_config, packs, auto) = {
+            let store = config.borrow();
+            let translate_config =
+                TranslateConfig::from_document(store.document(), &system_ui_language());
+            let packs =
+                crate::translate_input::installed_packs(&translator.scan(&translate_config).models);
+            let auto = store
+                .value(KEY_PAGE_AUTO_TRANSLATE)
+                .as_bool()
+                .unwrap_or(false);
+            (translate_config, packs, auto)
+        };
+        let prefs = ui_prefs_from_config(&config);
+        let options = PageOptions {
+            embedded,
+            auto_translate: auto,
+            history_path: Some(history_path(&data_root)),
+        };
+        TranslatePageView::create(
+            window,
+            app,
+            &translate_config,
+            packs,
+            prefs,
+            inbox.clone(),
+            options,
+        )
+    })
 }
 
 /// 把主窗口侧栏折叠状态写回配置并落盘；失败只记日志。
@@ -3781,24 +3967,17 @@ fn open_or_focus_translate_page(cx: &mut ShellContext, state: &mut AppState) {
         return;
     }
     let prefs = ui_prefs_from_config(&state.config);
-    let (translate_config, packs) = {
-        let config = state.config.borrow();
-        let translate_config =
-            TranslateConfig::from_document(config.document(), &system_ui_language());
-        let packs = crate::translate_input::installed_packs(
-            &state.translator.scan(&translate_config).models,
-        );
-        (translate_config, packs)
-    };
     let title = crate::ocr_backend::i18n_for(prefs.locale).tr("translate-page-title");
-    let spec = WindowSpec::normal(
-        title,
-        LogicalSize::new(TRANSLATE_PAGE_WIDTH, TRANSLATE_PAGE_HEIGHT),
+    // 上次记住的窗口大小（逻辑像素），没有就用默认尺寸
+    let saved = parse_window_size(&state.config.borrow().value(TRANSLATION_WINDOW_SIZE_KEY));
+    let (width, height) = clamp_size(
+        saved.unwrap_or((TRANSLATE_PAGE_WIDTH as i32, TRANSLATE_PAGE_HEIGHT as i32)),
+        (TRANSLATE_MIN_WIDTH, TRANSLATE_MIN_HEIGHT),
+        (i32::MAX, i32::MAX),
     );
-    let inbox = state.inbox.clone();
-    match cx.open_window(&spec, move |window, app| {
-        TranslatePageView::create(window, app, &translate_config, packs, prefs, inbox)
-    }) {
+    let spec = WindowSpec::normal(title, LogicalSize::new(width as f32, height as f32));
+    let factory = translate_page_factory(state, false);
+    match cx.open_window(&spec, move |window, app| factory(window, app)) {
         Ok((window, view)) => {
             state.translate_page = Some((window, view));
             tracing::info!("翻译页窗口已打开");
@@ -3815,6 +3994,7 @@ fn open_or_focus_translate_page(cx: &mut ShellContext, state: &mut AppState) {
 /// - `text`：原文。
 /// - `model_id`：下拉选中的包 ID（空串为自动）。
 /// - `source` / `target`：页面上选的语言。
+/// - `embedded`：请求是否来自主窗口内嵌的翻译页（结果回给同一份）。
 fn spawn_translate_page(
     state: &AppState,
     serial: u64,
@@ -3822,6 +4002,7 @@ fn spawn_translate_page(
     model_id: String,
     source: snow_translate::Lang,
     target: snow_translate::Lang,
+    embedded: bool,
 ) {
     let base =
         TranslateConfig::from_document(state.config.borrow().document(), &system_ui_language());
@@ -3832,7 +4013,11 @@ fn spawn_translate_page(
         .name("snow-translate-page".into())
         .spawn(move || {
             let result = translate_text(translator.as_ref(), &config, &model_id, &text);
-            inbox.push(UiEvent::TranslatePageFinished { serial, result });
+            inbox.push(UiEvent::TranslatePageFinished {
+                serial,
+                result,
+                embedded,
+            });
         });
     if let Err(e) = spawned {
         tracing::error!(error = %e, "无法创建翻译页翻译线程");
@@ -3841,6 +4026,7 @@ fn spawn_translate_page(
             result: Err(InputError::Translate(snow_translate::TranslateError::Io(
                 e.to_string(),
             ))),
+            embedded,
         });
     }
 }
@@ -4060,10 +4246,25 @@ fn on_config_changed(cx: &mut ShellContext, state: &mut AppState, key: &str, pre
         }
         return;
     }
+    if key == KEY_PAGE_AUTO_TRANSLATE {
+        let enabled = state.config.borrow().value(key).as_bool().unwrap_or(false);
+        let embedded = state
+            .main_window
+            .as_ref()
+            .and_then(|(_, main)| main.read(cx.app()).translate_view());
+        let standalone = state.translate_page.as_ref().map(|(_, view)| view.clone());
+        for view in embedded.into_iter().chain(standalone) {
+            view.update(cx.app(), |v, vcx| v.set_auto_translate(enabled, vcx));
+        }
+        return;
+    }
     if key == LANGUAGE_KEY || key == THEME_MODE_KEY {
         let prefs = ui_prefs_from_config(&state.config);
         if let Some((_, view)) = &state.main_window {
             view.update(cx.app(), |v, cx| v.set_prefs(prefs, cx));
+        }
+        if let Some((_, view)) = &state.translate_page {
+            view.update(cx.app(), |v, vcx| v.set_prefs(prefs, vcx));
         }
     }
     if key == LANGUAGE_KEY
@@ -4587,12 +4788,35 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
             model_id,
             source,
             target,
-        } => spawn_translate_page(state, serial, text, model_id, source, target),
-        UiEvent::TranslatePageFinished { serial, result } => {
-            if let Some((window, view)) = &state.translate_page
+            embedded,
+        } => spawn_translate_page(state, serial, text, model_id, source, target, embedded),
+        UiEvent::TranslatePageFinished {
+            serial,
+            result,
+            embedded,
+        } => {
+            if embedded {
+                let page = state
+                    .main_window
+                    .as_ref()
+                    .and_then(|(_, main)| main.read(cx.app()).translate_view());
+                if let Some(view) = page {
+                    view.update(cx.app(), |v, vcx| v.finish(serial, result, vcx));
+                }
+            } else if let Some((window, view)) = &state.translate_page
                 && cx.is_window_open(window)
             {
                 view.update(cx.app(), |v, vcx| v.finish(serial, result, vcx));
+            }
+        }
+        UiEvent::TranslateWindowSettled { scale } => save_translate_window_size(state, scale),
+        UiEvent::MainWindowSettled { maximized } => save_main_window_geometry(state, maximized),
+        UiEvent::OpenFile(path) => {
+            if let Err(e) = std::process::Command::new("explorer.exe")
+                .arg(&path)
+                .spawn()
+            {
+                tracing::warn!(path = %path.display(), error = %e, "打开文件失败");
             }
         }
         UiEvent::Dictation(command) => state.dictation.command(cx, state.tray.as_ref(), command),
@@ -4887,18 +5111,13 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
             let locale = ui_prefs_from_document(state.config.borrow().document()).locale;
             let ui_state = crate::net_settings::download_outcome_state(&info, &outcome, locale);
             tracing::info!(version = %info.version, ?outcome, "更新包下载结束");
-            if let Some(view) = &state.settings_view {
-                view.update(cx.app(), |v, vcx| v.finish_update_check(ui_state, vcx));
-            }
+            publish_update_state(state, cx, ui_state);
         }
         UiEvent::UpdateCheckFinished(outcome) => {
             let locale = ui_prefs_from_document(state.config.borrow().document()).locale;
             let ui_state = crate::net_settings::update_outcome_state(&outcome, locale);
             tracing::info!(?outcome, "检查更新结束");
-            for view in settings_views(state, cx.app()) {
-                let ui_state = ui_state.clone();
-                view.update(cx.app(), |v, vcx| v.finish_update_check(ui_state, vcx));
-            }
+            publish_update_state(state, cx, ui_state);
         }
         UiEvent::SttDownloadRequested { model_id, cancel } => {
             spawn_stt_download(state, model_id, cancel)

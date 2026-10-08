@@ -313,3 +313,5 @@ setting-mcp-allow-capture = Allow screenshot tools
 setting-mcp-allow-control = Allow control tools
 setting-mcp-allow-capture-desc = Let MCP clients take and annotate screenshots. Read-only queries are always allowed
 setting-mcp-allow-control-desc = Let MCP clients change settings and open windows. Off by default; the service restarts by itself to apply it
+setting-screenshot-translation-page-auto-translate = Auto translate on the translation page
+setting-screenshot-translation-page-auto-translate-desc = Translate automatically a moment after you stop typing (off by default)

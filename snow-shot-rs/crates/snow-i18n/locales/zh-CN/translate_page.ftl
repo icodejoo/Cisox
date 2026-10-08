@@ -23,3 +23,11 @@ translate-page-button-copy = 复制
 translate-page-button-copy-close = 复制并关闭
 
 translate-page-no-model-guide = 还没有安装翻译模型。把模型文件夹放进翻译模型目录后，重新打开本页即可。
+
+translate-page-history-title = 最近翻译（{ $arg1 }）
+
+translate-page-history-empty = 还没有翻译记录
+
+translate-page-history-clear = 清空历史
+
+translate-page-auto-on = 自动翻译已开启：停止输入片刻后自动翻译。
