@@ -41,3 +41,11 @@ tray-toggle-fullscreen = 全屏窗口中禁用热键
 tray-show-main = 显示主界面
 
 tray-restart = 重启应用
+
+tray-group-default = 默认分组
+
+tray-group-new = 新建分组
+
+tray-group-delete-empty = 删除空分组
+
+tray-pin-management = 贴图管理

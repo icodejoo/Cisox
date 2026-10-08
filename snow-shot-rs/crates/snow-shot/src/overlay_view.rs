@@ -58,7 +58,7 @@ use snow_ui::widgets::{
     AnnotationTool, ColorFormat, Magnifier, MagnifierGrid, ScreenshotToolbar, ToolbarAction,
     calculate_magnifier_placement, calculate_toolbar_placement,
 };
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -72,7 +72,7 @@ const MAGNIFIER_LOGICAL_SIZE: (i32, i32) = (109, 178);
 /// 放大镜距光标的逻辑偏移。
 const MAGNIFIER_OFFSET: i32 = 16;
 /// 工具栏的逻辑尺寸（宽, 高），仅用于定位与命中避让。
-const TOOLBAR_LOGICAL_SIZE: (i32, i32) = (890, 36);
+const TOOLBAR_LOGICAL_SIZE: (i32, i32) = (980, 36);
 /// 样式面板的逻辑尺寸（宽, 高），仅用于定位与命中避让。
 const STYLE_PANEL_SIZE: (i32, i32) = (560, 84);
 /// 样式面板与工具栏的间距。
@@ -111,16 +111,14 @@ const HOVER_FILL_COLOR: u32 = 0x1677FF22;
 const HINT_BG_COLOR: u32 = 0x000000B3;
 /// 底部提示条文字色。
 const HINT_TEXT_COLOR: u32 = 0xFFFFFFCC;
-/// 底部默认提示文案。
-const HINT_TEXT: &str =
-    "拖拽框选 · 双击/Enter 复制 · Ctrl+S 保存 · C 复制颜色 · Esc/右键 取消";
-/// 选中标注工具后的底部提示文案。
-const TOOL_HINT_TEXT: &str =
-    "在选区内拖动绘制 · Ctrl+Z 撤销 · Ctrl+Y 重做 · Enter 复制 · Ctrl+S 保存 · Esc 取消";
+/// 底部默认提示文案的 id。
+const HINT_TEXT: &str = "overlay-hint-idle";
+/// 选中标注工具后的底部提示文案 id。
+const TOOL_HINT_TEXT: &str = "overlay-hint-tool";
 /// 文字工具编辑中的提示文案。
-const TEXT_HINT_TEXT: &str = "输入文字 · Enter 完成 · Shift+Enter 换行 · Esc 放弃";
+const TEXT_HINT_TEXT: &str = "overlay-hint-text";
 /// 录屏选区模式的底部提示文案。
-const RECORD_HINT_TEXT: &str = "拖拽框选录制区域 · 双击/Enter 开始录制 · Esc/右键 取消";
+const RECORD_HINT_TEXT: &str = "overlay-hint-record";
 /// 文字输入框的行高倍率。
 const TEXT_LINE_HEIGHT: f32 = 1.25;
 /// 尚未接入的工具栏动作（普通截图模式下已全部接入，故为空）。
@@ -144,7 +142,7 @@ const SCROLL_MODE_DISABLED_ACTIONS: [ToolbarAction; 6] = [
     ToolbarAction::Copy,
 ];
 /// 长截图选区模式的底部提示文案。
-const SCROLL_HINT_TEXT: &str = "拖拽框选要滚动截取的区域 · 双击/Enter 开始长截图 · Esc/右键 取消";
+const SCROLL_HINT_TEXT: &str = "overlay-hint-scroll";
 /// OCR 结果面板的逻辑宽度上限。
 const OCR_PANEL_MAX_WIDTH: f32 = 520.0;
 /// OCR 结果面板背景色。
@@ -172,6 +170,87 @@ const BENCH_MARGIN_DIVISOR: i32 = 16;
 const BENCH_MIN_MARGIN: i32 = 4;
 /// 标注基准的示例文字。
 const BENCH_TEXT: &str = "Snow Shot 标注文字 Text 12345";
+
+/// 双击选区内部的动作配置键。
+const DOUBLE_CLICK_ACTION_KEY: &str = "screenshot/double_click_action";
+/// 鼠标中键的动作配置键。
+const MIDDLE_CLICK_ACTION_KEY: &str = "screenshot/middle_mouse_button_action";
+/// 选区边框颜色配置键（`#RRGGBBAA`）。
+const SELECTION_BORDER_COLOR_KEY: &str = "screenshot_ui/selection_border_color";
+/// 选区外遮罩颜色配置键（`#RRGGBBAA`）。
+const SELECTION_MASK_COLOR_KEY: &str = "screenshot_ui/selection_mask_color";
+/// 选区尺寸显示单位配置键。
+const SELECTION_UNIT_KEY: &str = "screenshot_ui/selection_display_unit";
+/// 选区尺寸显示单位：逻辑像素。
+const SELECTION_UNIT_LOGICAL: &str = "logical_pixels";
+
+/// 双击 / 中键可以触发的选区动作。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClickAction {
+    /// 复制选区并关闭。
+    Copy,
+    /// 另存为（弹对话框）。
+    Save,
+    /// 快速保存（不弹对话框）。
+    QuickSave,
+    /// 贴到屏幕。
+    Pin,
+    /// 什么也不做。
+    None,
+}
+
+impl ClickAction {
+    /// 由配置值解析；未知值返回 `None`。
+    ///
+    /// # 参数
+    /// - `text`：配置里的动作名。
+    ///
+    /// ```ignore
+    /// assert_eq!(ClickAction::parse("quick_save"), Some(ClickAction::QuickSave));
+    /// ```
+    pub fn parse(text: &str) -> Option<Self> {
+        Some(match text {
+            "copy" => Self::Copy,
+            "save" => Self::Save,
+            "quick_save" => Self::QuickSave,
+            "pin" => Self::Pin,
+            "none" => Self::None,
+            _ => return Option::None,
+        })
+    }
+}
+
+/// 全局鼠标手势驱动覆盖窗的一步（鼠标按下的真实事件被钩子吞掉，由上层转发）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GestureStep {
+    /// 在给定位置按下左键开始框选。
+    Down,
+    /// 拖动到给定位置。
+    Move,
+    /// 在给定位置松开：完成框选并执行自动动作。
+    Up,
+}
+
+/// 读取 `#RRGGBBAA` 颜色配置；缺失或非法返回默认值。
+///
+/// # 参数
+/// - `config`：配置存储。
+/// - `key`：配置键。
+/// - `default`：默认 `0xRRGGBBAA`。
+fn color_setting(config: &ConfigStore, key: &str, default: u32) -> u32 {
+    config
+        .value(key)
+        .as_str()
+        .and_then(crate::pinned_model::parse_hex_color)
+        .unwrap_or(default)
+}
+
+/// 放大镜坐标显示模式的配置键。
+const COORDINATE_MODE_KEY: &str = "screenshot_ui/color_picker_coordinate_mode";
+/// 坐标显示模式：桌面全局坐标。
+const COORDINATE_MODE_GLOBAL: &str = "global";
+/// 坐标显示模式：画布内相对坐标。
+const COORDINATE_MODE_RELATIVE: &str = "relative";
 
 /// 用户操作处理后的窗口去向。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -251,6 +330,10 @@ pub enum AutoConfirm {
     Ocr,
     /// 对选区做识别 + 翻译。
     Translate,
+    /// 另存为（弹对话框）。
+    Save,
+    /// 快速保存（不弹对话框）。
+    QuickSave,
 }
 
 impl AutoConfirm {
@@ -261,6 +344,8 @@ impl AutoConfirm {
             Self::Pin => ToolbarAction::Pin,
             Self::Ocr => ToolbarAction::Ocr,
             Self::Translate => ToolbarAction::Translate,
+            // 快速保存没有对应的工具栏按钮，由 `auto_confirm_outcome` 单独处理
+            Self::Save | Self::QuickSave => ToolbarAction::Save,
         }
     }
 }
@@ -445,6 +530,14 @@ pub trait OutputSink {
         Err("OCR 下载功能未接入".to_string())
     }
 
+    /// 打开文字识别结果窗（图片 + 文字块 + 可编辑全文）；默认不支持。
+    ///
+    /// # 参数
+    /// - `data`：结果窗需要的图片、全文与文字块。
+    fn open_recognition_window(&mut self, _data: crate::recognition_view::RecognitionData) -> Result<(), String> {
+        Err("识别结果窗未接入".to_string())
+    }
+
     /// 对选区图像发起“识别 + 翻译”（异步：结果稍后经 [`ScreenshotOverlayView::finish_translate`] 回来）；默认不支持。
     ///
     /// # 参数
@@ -485,6 +578,8 @@ pub struct SystemOutput {
     on_ocr: Option<OcrCallback>,
     /// OCR 组件下载回调。
     on_ocr_download: Option<Box<dyn Fn()>>,
+    /// 打开识别结果窗的回调。
+    on_recognition_window: Option<Box<dyn Fn(crate::recognition_view::RecognitionData)>>,
     /// 文字翻译回调：`(序号, 宽, 高, RGBA)`。
     on_translate: Option<OcrCallback>,
     /// 翻译运行时下载回调。
@@ -518,6 +613,7 @@ impl SystemOutput {
             on_pin: None,
             on_ocr: None,
             on_ocr_download: None,
+            on_recognition_window: None,
             on_translate: None,
             on_translate_download: None,
             on_scroll: None,
@@ -582,6 +678,15 @@ impl SystemOutput {
     /// - `callback`：接收请求序号、图像尺寸与 RGBA 像素。
     pub fn with_ocr(mut self, callback: impl Fn(u64, u32, u32, Vec<u8>) + 'static) -> Self {
         self.on_ocr = Some(Box::new(callback));
+        self
+    }
+
+    /// 设置打开识别结果窗的回调。
+    pub fn with_recognition_window(
+        mut self,
+        callback: impl Fn(crate::recognition_view::RecognitionData) + 'static,
+    ) -> Self {
+        self.on_recognition_window = Some(Box::new(callback));
         self
     }
 
@@ -785,6 +890,17 @@ impl OutputSink for SystemOutput {
         }
     }
 
+    /// 触发打开识别结果窗回调；未设置回调时报错。
+    fn open_recognition_window(&mut self, data: crate::recognition_view::RecognitionData) -> Result<(), String> {
+        match &self.on_recognition_window {
+            Some(callback) => {
+                callback(data);
+                Ok(())
+            }
+            None => Err("识别结果窗未接入".to_string()),
+        }
+    }
+
     /// 触发 OCR 组件下载回调；未设置回调时报错。
     fn start_ocr_download(&mut self) -> Result<(), String> {
         match &self.on_ocr_download {
@@ -891,6 +1007,24 @@ pub struct ScreenshotOverlayView {
     history_host: Option<HistoryHost>,
     /// 画布左上角在虚拟桌面里的坐标（单屏为该屏原点）；「上一次选区」按桌面坐标存取，换屏幕排布后不会错位。
     canvas_origin: PhysicalPoint,
+    /// 放大镜坐标是否显示为桌面全局坐标（否则为画布内相对坐标）。
+    coordinate_global: bool,
+    /// 双击选区内部的动作。
+    double_click_action: ClickAction,
+    /// 鼠标中键的动作。
+    middle_click_action: ClickAction,
+    /// 选区边框颜色（`0xRRGGBBAA`）。
+    border_color: u32,
+    /// 选区外遮罩颜色（`0xRRGGBBAA`）。
+    mask_color: u32,
+    /// 选区尺寸标签是否用逻辑像素显示。
+    logical_size_label: bool,
+    /// 按住「移动整个选区」键：框选拖动变成平移。
+    move_held: bool,
+    /// 按住 Shift（且已绑定「保持宽高一致」）：框选保持正方形、调整选区保持原宽高比。
+    keep_ratio: bool,
+    /// 请求关闭后重新截图（与关闭回调共享，回调里读取并清零）。
+    recapture: Rc<Cell<bool>>,
     /// 会话钩子：本视图关闭时通知运行时（多屏时其余显示器上的窗口跟着关闭）。
     close_hook: Option<Box<dyn Fn()>>,
     /// 当前选区形状类型（矩形 / 折线 / 曲线 / 自由绘制）。
@@ -1028,6 +1162,15 @@ impl ScreenshotOverlayView {
             history_host: None,
             close_hook: None,
             canvas_origin: PhysicalPoint::new(0, 0),
+            coordinate_global: true,
+            double_click_action: ClickAction::Copy,
+            middle_click_action: ClickAction::Pin,
+            border_color: (ACCENT_COLOR << 8) | 0xFF,
+            mask_color: MASK_COLOR,
+            logical_size_label: false,
+            move_held: false,
+            keep_ratio: false,
+            recapture: Rc::new(Cell::new(false)),
             region_type: RegionType::Rectangle,
             region_draft: None,
             region_mask: None,
@@ -1251,7 +1394,7 @@ impl ScreenshotOverlayView {
                 current_pos,
                 Some(self.screen_bounds),
                 DEFAULT_MINIMUM_SELECTION_SIZE,
-                None,
+                self.locked_ratio(origin_rect),
             )),
             _ => self.state.current_rect(),
         }
@@ -1387,7 +1530,7 @@ impl ScreenshotOverlayView {
                     } else if self.scroll_mode {
                         self.start_scroll_capture_and_close()
                     } else {
-                        self.copy_selection_and_close()
+                        self.run_click_action(self.double_click_action)
                     };
                 }
                 self.state = if mode == SelectionDragMode::None {
@@ -1416,6 +1559,7 @@ impl ScreenshotOverlayView {
     /// - `point`：底图物理坐标。
     pub fn handle_mouse_move(&mut self, point: PhysicalPoint) {
         let point = self.clamp_point(point);
+        let previous = self.cursor_pos;
         self.cursor_pos = point;
         self.update_magnifier_grid(point);
         if self.annotating {
@@ -1423,7 +1567,15 @@ impl ScreenshotOverlayView {
             return;
         }
         match self.state {
+            SelectionState::MarqueeDragging { start, .. } if self.move_held => {
+                // 按住移动键：整个框跟着鼠标平移（起点与终点一起位移）
+                let dx = point.x - previous.x;
+                let dy = point.y - previous.y;
+                let start = self.clamp_point(PhysicalPoint::new(start.x + dx, start.y + dy));
+                self.state = SelectionState::MarqueeDragging { start, current: point };
+            }
             SelectionState::MarqueeDragging { start, .. } => {
+                let point = self.constrained_end(start, point);
                 if self.click_window.is_some() && exceeds_drag_threshold(start, point, self.drag_threshold()) {
                     // 位移超过阈值：放弃窗口选区，转为手动框选
                     self.click_window = None;
@@ -1471,6 +1623,7 @@ impl ScreenshotOverlayView {
     pub fn handle_mouse_up(&mut self, point: PhysicalPoint) -> bool {
         let point = self.clamp_point(point);
         self.cursor_pos = point;
+        self.move_held = false;
         if self.annotating {
             self.finish_annotation(point);
             return false;
@@ -1501,6 +1654,7 @@ impl ScreenshotOverlayView {
                     self.state = SelectionState::Selected { rect };
                     return true;
                 }
+                let point = self.constrained_end(start, point);
                 let r = marquee_selection_rect(start, point);
                 if self.region_op.is_some()
                     && r.width >= DEFAULT_MINIMUM_SELECTION_SIZE
@@ -1538,7 +1692,7 @@ impl ScreenshotOverlayView {
                     point,
                     Some(self.screen_bounds),
                     DEFAULT_MINIMUM_SELECTION_SIZE,
-                    None,
+                    self.locked_ratio(origin_rect),
                 );
                 // 自定义区域跟着选区一起平移
                 if let Some(mask) = self.region_mask.as_mut() {
@@ -1617,6 +1771,10 @@ impl ScreenshotOverlayView {
             }
             ("tab", true) => {
                 self.cycle_region_type(shift);
+                OverlayOutcome::Stay
+            }
+            ("e", false) if matches!(self.ocr, OcrUiState::Done { ref text, .. } if !text.is_empty()) => {
+                self.open_recognition_window();
                 OverlayOutcome::Stay
             }
             ("enter", _) if matches!(self.ocr, OcrUiState::Done { .. }) => self.copy_ocr_text_and_close(),
@@ -1721,6 +1879,20 @@ impl ScreenshotOverlayView {
                 self.toggle_selection_target();
                 OverlayOutcome::Stay
             }
+            OverlayKeyAction::MoveEntireSelection => {
+                self.move_held = true;
+                OverlayOutcome::Stay
+            }
+            OverlayKeyAction::QuickSave if selecting_mode => OverlayOutcome::Stay,
+            OverlayKeyAction::QuickSave => self.save_selection_inner(None, true),
+            OverlayKeyAction::Recapture => {
+                self.recapture.set(true);
+                OverlayOutcome::Close
+            }
+            OverlayKeyAction::ToggleCoordinateMode => {
+                self.toggle_coordinate_mode();
+                OverlayOutcome::Stay
+            }
             OverlayKeyAction::Unimplemented(config_key) => {
                 self.show_not_implemented(config_key);
                 OverlayOutcome::Stay
@@ -1734,7 +1906,7 @@ impl ScreenshotOverlayView {
     /// - `key`：绘制键位。
     fn apply_drawing_key(&mut self, key: DrawingKey) -> OverlayOutcome {
         let tool = match key {
-            DrawingKey::Select => AnnotationTool::None,
+            DrawingKey::Select => AnnotationTool::Select,
             DrawingKey::Shape => AnnotationTool::Rectangle,
             DrawingKey::Arrow => AnnotationTool::Arrow,
             DrawingKey::Brush => AnnotationTool::Pencil,
@@ -1742,7 +1914,7 @@ impl ScreenshotOverlayView {
             DrawingKey::Text => AnnotationTool::Text,
             DrawingKey::SerialNumber => AnnotationTool::Counter,
             DrawingKey::Filter => AnnotationTool::Mosaic,
-            DrawingKey::Eraser => return self.not_implemented_outcome("drawing_shortcuts/eraser"),
+            DrawingKey::Eraser => AnnotationTool::Eraser,
             DrawingKey::Watermark => return self.not_implemented_outcome("drawing_shortcuts/watermark"),
         };
         // 再按同一个键不取消工具（与点工具栏不同），只在工具变化时切换
@@ -1836,7 +2008,7 @@ impl ScreenshotOverlayView {
     pub fn select_tool(&mut self, tool: AnnotationTool) {
         let next = if tool == self.tool { AnnotationTool::None } else { tool };
         let Some(layer) = self.annotations.as_mut() else {
-            self.status_message = Some("标注功能不可用".into());
+            self.status_message = Some(self.i18n.tr("overlay-msg-annotation-unavailable"));
             return;
         };
         match layer.set_tool(next) {
@@ -1847,7 +2019,7 @@ impl ScreenshotOverlayView {
             }
             Err(e) => {
                 tracing::error!(error = %e, tool = ?next, "切换标注工具失败");
-                self.status_message = Some(format!("切换工具失败: {e}"));
+                self.status_message = Some(self.i18n.tr_with("overlay-msg-switch-tool-failed", &Args::new().arg(1, e.to_string())));
             }
         }
     }
@@ -1863,8 +2035,83 @@ impl ScreenshotOverlayView {
     /// ```
     pub fn set_style_config(&mut self, config: Rc<RefCell<ConfigStore>>, locale: &str) {
         self.styles = ToolStyleStore::load(|key| config.borrow().value(key));
+        self.coordinate_global = config.borrow().value(COORDINATE_MODE_KEY).as_str() != Some(COORDINATE_MODE_RELATIVE);
+        {
+            let store = config.borrow();
+            let action = |key: &str, default: ClickAction| {
+                store.value(key).as_str().and_then(ClickAction::parse).unwrap_or(default)
+            };
+            self.double_click_action = action(DOUBLE_CLICK_ACTION_KEY, ClickAction::Copy);
+            self.middle_click_action = action(MIDDLE_CLICK_ACTION_KEY, ClickAction::Pin);
+            self.border_color = color_setting(&store, SELECTION_BORDER_COLOR_KEY, (ACCENT_COLOR << 8) | 0xFF);
+            self.mask_color = color_setting(&store, SELECTION_MASK_COLOR_KEY, MASK_COLOR);
+            self.logical_size_label = store.value(SELECTION_UNIT_KEY).as_str() == Some(SELECTION_UNIT_LOGICAL);
+        }
         self.style_config = Some(config);
         self.i18n = crate::ocr_backend::i18n_for(locale);
+    }
+
+    /// 同步修饰键状态：按住 Shift 且配置把它绑给「保持宽高一致」时才锁比例。
+    ///
+    /// # 参数
+    /// - `shift`：Shift 是否按下（取自鼠标 / 键盘事件的修饰键）。
+    pub fn set_shift(&mut self, shift: bool) {
+        self.keep_ratio = shift && self.keymap.shift_keeps_ratio();
+    }
+
+    /// 设置「移动整个选区」键是否按住。
+    ///
+    /// # 参数
+    /// - `held`：是否按住。
+    pub fn set_move_held(&mut self, held: bool) {
+        self.move_held = held;
+    }
+
+    /// 键盘松开事件：松开「移动整个选区」键时结束平移模式。
+    ///
+    /// # 参数
+    /// - `key` / `control` / `shift` / `alt`：松开的按键与修饰键。
+    pub fn handle_key_release(&mut self, key: &str, control: bool, shift: bool, alt: bool) {
+        if self.keymap.resolve(key, control, shift, alt) == Some(OverlayKeyAction::MoveEntireSelection) {
+            self.move_held = false;
+        }
+    }
+
+    /// 框选终点按「保持宽高一致」收敛：边长取两轴位移的较大者，方向保持。
+    fn constrained_end(&self, start: PhysicalPoint, end: PhysicalPoint) -> PhysicalPoint {
+        if !self.keep_ratio {
+            return end;
+        }
+        let dx = end.x - start.x;
+        let dy = end.y - start.y;
+        let side = dx.abs().max(dy.abs());
+        let x = start.x + if dx < 0 { -side } else { side };
+        let y = start.y + if dy < 0 { -side } else { side };
+        self.clamp_point(PhysicalPoint::new(x, y))
+    }
+
+    /// 调整选区时要锁定的宽高比：按住 Shift 时取原选区宽高比，否则不锁。
+    fn locked_ratio(&self, origin: PhysicalRect) -> Option<f64> {
+        (self.keep_ratio && origin.height > 0).then(|| f64::from(origin.width) / f64::from(origin.height))
+    }
+
+    /// 「重新截图」请求标志：关闭回调读取后清零，为真时再发起一次截图。
+    pub fn recapture_flag(&self) -> Rc<Cell<bool>> {
+        Rc::clone(&self.recapture)
+    }
+
+    /// 切换放大镜坐标显示模式（全局 / 相对）并写回配置。
+    fn toggle_coordinate_mode(&mut self) {
+        self.coordinate_global = !self.coordinate_global;
+        let value = if self.coordinate_global { COORDINATE_MODE_GLOBAL } else { COORDINATE_MODE_RELATIVE };
+        if let Some(config) = self.config_handle() {
+            let mut store = config.borrow_mut();
+            if let Err(e) = store.set_value(COORDINATE_MODE_KEY, serde_json::json!(value)) {
+                tracing::warn!(error = %e, "写入坐标显示模式失败");
+            } else if let Err(e) = store.flush() {
+                tracing::warn!(error = %e, "坐标显示模式落盘失败");
+            }
+        }
     }
 
     /// 工具当前样式。
@@ -2245,7 +2492,7 @@ impl ScreenshotOverlayView {
             Ok(update) => self.install_update(update, compute),
             Err(e) => {
                 tracing::error!(error = %e, "标注层操作失败");
-                self.status_message = Some(format!("标注失败: {e}"));
+                self.status_message = Some(self.i18n.tr_with("overlay-msg-annotate-failed", &Args::new().arg(1, e.to_string())));
             }
         }
     }
@@ -2647,7 +2894,7 @@ impl ScreenshotOverlayView {
         let accent = ACCENT_COLOR.to_be_bytes();
         let bgra = mask.overlay_bgra_in(
             (x, y, w, h),
-            (MASK_COLOR & 0xFF) as u8,
+            (self.mask_color & 0xFF) as u8,
             Some((accent[3], accent[2], accent[1], edge_width)),
         );
         if let Some(buffer) = RgbaImage::from_raw(w as u32, h as u32, bgra) {
@@ -2977,11 +3224,11 @@ impl ScreenshotOverlayView {
     /// 复制选区到剪贴板；成功后关闭覆盖窗，失败保留窗口并提示。
     fn copy_selection_and_close(&mut self) -> OverlayOutcome {
         if !self.has_committed_selection() {
-            self.status_message = Some("请先框选一个区域".into());
+            self.status_message = Some(self.i18n.tr("overlay-msg-select-area-first"));
             return OverlayOutcome::Stay;
         }
         let Some((w, h, rgba)) = self.selection_image() else {
-            self.status_message = Some("选区无效".into());
+            self.status_message = Some(self.i18n.tr("overlay-msg-selection-invalid"));
             return OverlayOutcome::Stay;
         };
         self.remember_selection();
@@ -2995,7 +3242,7 @@ impl ScreenshotOverlayView {
             }
             Err(e) => {
                 tracing::error!(error = %e, "复制截图到剪贴板失败");
-                self.status_message = Some(format!("复制失败: {e}"));
+                self.status_message = Some(self.i18n.tr_with("overlay-msg-copy-failed", &Args::new().arg(1, e.to_string())));
                 OverlayOutcome::Stay
             }
         }
@@ -3024,17 +3271,22 @@ impl ScreenshotOverlayView {
 
     /// 保存选区：输出通道给出任务时登记为异步（对话框不能在界面借用里弹），否则同步保存。
     fn save_selection_with(&mut self, request: Option<&SaveRequest>) -> OverlayOutcome {
+        self.save_selection_inner(request, false)
+    }
+
+    /// 保存选区；`quick` 为真时跳过另存为对话框，直接按配置同步保存。
+    fn save_selection_inner(&mut self, request: Option<&SaveRequest>, quick: bool) -> OverlayOutcome {
         if !self.has_committed_selection() {
-            self.status_message = Some("请先框选一个区域".into());
+            self.status_message = Some(self.i18n.tr("overlay-msg-select-area-first"));
             return OverlayOutcome::Stay;
         }
         let Some((w, h, rgba)) = self.selection_image() else {
-            self.status_message = Some("选区无效".into());
+            self.status_message = Some(self.i18n.tr("overlay-msg-selection-invalid"));
             return OverlayOutcome::Stay;
         };
         self.remember_selection();
         let snapshot = self.history_snapshot(w, h, &rgba);
-        if let Some(job) = self.output.begin_manual_save(request) {
+        if !quick && let Some(job) = self.output.begin_manual_save(request) {
             self.pending_save = Some(PendingSave {
                 job,
                 width: w,
@@ -3092,18 +3344,18 @@ impl ScreenshotOverlayView {
     /// 把选区（含标注合成结果）贴到屏幕原位；成功后关闭覆盖窗，失败保留窗口并提示。
     fn pin_selection_and_close(&mut self) -> OverlayOutcome {
         if !self.has_committed_selection() {
-            self.status_message = Some("请先框选一个区域".into());
+            self.status_message = Some(self.i18n.tr("overlay-msg-select-area-first"));
             return OverlayOutcome::Stay;
         }
         let Some(rect) = self
             .current_selection()
             .and_then(|r| self.screen_bounds.intersect(&r))
         else {
-            self.status_message = Some("选区无效".into());
+            self.status_message = Some(self.i18n.tr("overlay-msg-selection-invalid"));
             return OverlayOutcome::Stay;
         };
         let Some((w, h, rgba)) = self.selection_image() else {
-            self.status_message = Some("选区无效".into());
+            self.status_message = Some(self.i18n.tr("overlay-msg-selection-invalid"));
             return OverlayOutcome::Stay;
         };
         self.remember_selection();
@@ -3116,7 +3368,7 @@ impl ScreenshotOverlayView {
             }
             Err(e) => {
                 tracing::error!(error = %e, "贴图失败");
-                self.status_message = Some(format!("贴图失败: {e}"));
+                self.status_message = Some(self.i18n.tr_with("overlay-msg-pin-failed", &Args::new().arg(1, e.to_string())));
                 OverlayOutcome::Stay
             }
         }
@@ -3125,7 +3377,7 @@ impl ScreenshotOverlayView {
     /// 对选区（含标注合成结果）发起文字识别；识别在后台进行，结果经 [`Self::finish_ocr`] 回来。
     fn start_ocr(&mut self) -> OverlayOutcome {
         if !self.has_committed_selection() {
-            self.status_message = Some("请先框选一个区域".into());
+            self.status_message = Some(self.i18n.tr("overlay-msg-select-area-first"));
             return OverlayOutcome::Stay;
         }
         if self.ocr.is_busy() || self.translate.is_busy() {
@@ -3135,7 +3387,7 @@ impl ScreenshotOverlayView {
             self.dismiss_translate();
         }
         let Some((w, h, rgba)) = self.selection_image() else {
-            self.status_message = Some("选区无效".into());
+            self.status_message = Some(self.i18n.tr("overlay-msg-selection-invalid"));
             return OverlayOutcome::Stay;
         };
         self.ocr_serial += 1;
@@ -3147,7 +3399,7 @@ impl ScreenshotOverlayView {
             Err(e) => {
                 tracing::error!(error = %e, "提交文字识别失败");
                 self.set_ocr_state(OcrUiState::Failed {
-                    message: format!("文字识别不可用: {e}"),
+                    message: self.i18n.tr_with("overlay-msg-ocr-unavailable", &Args::new().arg(1, e.to_string())),
                     can_download: false,
                 });
             }
@@ -3195,9 +3447,9 @@ impl ScreenshotOverlayView {
     /// 触发 OCR 组件下载（仅缺资产时可用）。
     fn start_ocr_download(&mut self) {
         match self.output.start_ocr_download() {
-            Ok(()) => self.set_ocr_state(OcrUiState::Downloading("正在准备下载 OCR 组件…".to_string())),
+            Ok(()) => self.set_ocr_state(OcrUiState::Downloading(self.i18n.tr("overlay-msg-ocr-download-preparing"))),
             Err(e) => self.set_ocr_state(OcrUiState::Failed {
-                message: format!("无法下载 OCR 组件: {e}"),
+                message: self.i18n.tr_with("overlay-msg-ocr-download-start-failed", &Args::new().arg(1, e.to_string())),
                 can_download: false,
             }),
         }
@@ -3224,10 +3476,10 @@ impl ScreenshotOverlayView {
         match result {
             Ok(()) => {
                 self.ocr = OcrUiState::Idle;
-                self.status_message = Some("OCR 组件已就绪，请再次点击“OCR”".to_string());
+                self.status_message = Some(self.i18n.tr("overlay-msg-ocr-download-ready"));
             }
             Err(e) => self.set_ocr_state(OcrUiState::Failed {
-                message: format!("OCR 组件下载失败: {e}"),
+                message: self.i18n.tr_with("overlay-msg-ocr-download-failed", &Args::new().arg(1, e.to_string())),
                 can_download: true,
             }),
         }
@@ -3241,7 +3493,7 @@ impl ScreenshotOverlayView {
     /// 对选区（含标注合成结果）发起“识别 + 翻译”；在后台进行，结果经 [`Self::finish_translate`] 回来。
     fn start_translate(&mut self) -> OverlayOutcome {
         if !self.has_committed_selection() {
-            self.status_message = Some("请先框选一个区域".into());
+            self.status_message = Some(self.i18n.tr("overlay-msg-select-area-first"));
             return OverlayOutcome::Stay;
         }
         if self.translate.is_busy() || self.ocr.is_busy() {
@@ -3251,7 +3503,7 @@ impl ScreenshotOverlayView {
             self.dismiss_ocr();
         }
         let Some((w, h, rgba)) = self.selection_image() else {
-            self.status_message = Some("选区无效".into());
+            self.status_message = Some(self.i18n.tr("overlay-msg-selection-invalid"));
             return OverlayOutcome::Stay;
         };
         self.translate_serial += 1;
@@ -3263,7 +3515,7 @@ impl ScreenshotOverlayView {
             Err(e) => {
                 tracing::error!(error = %e, "提交文字翻译失败");
                 self.set_translate_state(TranslateUiState::Failed {
-                    message: format!("文字翻译不可用: {e}"),
+                    message: self.i18n.tr_with("overlay-msg-translate-unavailable", &Args::new().arg(1, e.to_string())),
                     can_download: false,
                 });
             }
@@ -3328,9 +3580,9 @@ impl ScreenshotOverlayView {
     /// 触发翻译运行时下载（仅缺运行时可用）。
     fn start_translate_download(&mut self) {
         match self.output.start_translate_download() {
-            Ok(()) => self.set_translate_state(TranslateUiState::Downloading("正在准备下载 onnxruntime 运行时…".to_string())),
+            Ok(()) => self.set_translate_state(TranslateUiState::Downloading(self.i18n.tr("overlay-msg-runtime-download-preparing"))),
             Err(e) => self.set_translate_state(TranslateUiState::Failed {
-                message: format!("无法下载运行时: {e}"),
+                message: self.i18n.tr_with("overlay-msg-runtime-download-start-failed", &Args::new().arg(1, e.to_string())),
                 can_download: false,
             }),
         }
@@ -3357,10 +3609,10 @@ impl ScreenshotOverlayView {
         match result {
             Ok(()) => {
                 self.translate = TranslateUiState::Idle;
-                self.status_message = Some("翻译运行时已就绪，请再次点击“翻译”".to_string());
+                self.status_message = Some(self.i18n.tr("overlay-msg-runtime-download-ready"));
             }
             Err(e) => self.set_translate_state(TranslateUiState::Failed {
-                message: format!("运行时下载失败: {e}"),
+                message: self.i18n.tr_with("overlay-msg-runtime-download-failed", &Args::new().arg(1, e.to_string())),
                 can_download: true,
             }),
         }
@@ -3383,7 +3635,7 @@ impl ScreenshotOverlayView {
         match self.output.copy_text(&text) {
             Ok(()) => OverlayOutcome::Close,
             Err(e) => {
-                self.status_message = Some(format!("复制译文失败: {e}"));
+                self.status_message = Some(self.i18n.tr_with("overlay-msg-copy-translation-failed", &Args::new().arg(1, e.to_string())));
                 OverlayOutcome::Stay
             }
         }
@@ -3413,6 +3665,93 @@ impl ScreenshotOverlayView {
         vec![panel.into_any_element()]
     }
 
+    /// 执行双击 / 中键配置的选区动作；没有确定选区时只提示（`None` 动作除外）。
+    ///
+    /// # 参数
+    /// - `action`：要执行的动作。
+    pub fn run_click_action(&mut self, action: ClickAction) -> OverlayOutcome {
+        match action {
+            ClickAction::None => OverlayOutcome::Stay,
+            ClickAction::Copy => self.copy_selection_and_close(),
+            ClickAction::Save => self.save_selection_and_close(),
+            ClickAction::QuickSave => self.save_selection_inner(None, true),
+            ClickAction::Pin => self.apply_action(ToolbarAction::Pin),
+        }
+    }
+
+    /// 鼠标中键：执行配置的动作（录屏 / 长截图选区模式下不响应）。
+    pub fn handle_middle_click(&mut self) -> OverlayOutcome {
+        if self.record_mode || self.scroll_mode || !self.has_committed_selection() {
+            return OverlayOutcome::Stay;
+        }
+        self.run_click_action(self.middle_click_action)
+    }
+
+    /// 选区尺寸标签文字：按配置用物理或逻辑像素。
+    fn size_label(&self, rect: PhysicalRect) -> String {
+        if self.logical_size_label {
+            let l = logical_rect(rect, self.scale);
+            selection_size_label(PhysicalRect::new(l.x, l.y, l.width, l.height))
+        } else {
+            selection_size_label(rect)
+        }
+    }
+
+    /// 驱动一步全局鼠标手势：把桌面物理坐标换成画布坐标后按普通框选处理，松开时执行自动动作 / 录屏。
+    ///
+    /// # 参数
+    /// - `step`：这一步是按下、移动还是松开。
+    /// - `desktop`：鼠标位置（虚拟桌面物理像素）。
+    /// - `window`：用于收尾的窗口。
+    pub fn drive_gesture(
+        &mut self,
+        step: GestureStep,
+        desktop: PhysicalPoint,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let point = self.clamp_point(PhysicalPoint::new(
+            desktop.x - self.canvas_origin.x,
+            desktop.y - self.canvas_origin.y,
+        ));
+        match step {
+            GestureStep::Down => {
+                let outcome = self.handle_mouse_down(point, 1);
+                self.finish(outcome, window, cx);
+            }
+            GestureStep::Move => {
+                self.handle_mouse_move(point);
+                cx.notify();
+            }
+            GestureStep::Up => {
+                self.handle_mouse_up(point);
+                let outcome = if self.record_mode {
+                    self.start_recording_and_close()
+                } else {
+                    self.auto_confirm_outcome()
+                };
+                self.finish(outcome, window, cx);
+            }
+        }
+    }
+
+    /// 打开识别结果窗：带上选区图片、全文与文字块，覆盖窗保持不变。
+    fn open_recognition_window(&mut self) {
+        let OcrUiState::Done { text, boxes, .. } = &self.ocr else {
+            return;
+        };
+        let (text, boxes) = (text.clone(), boxes.clone());
+        let Some((width, height, rgba)) = self.selection_image() else {
+            self.status_message = Some(self.i18n.tr("overlay-msg-selection-invalid"));
+            return;
+        };
+        let data = crate::recognition_view::RecognitionData { width, height, rgba, text, boxes };
+        if let Err(e) = self.output.open_recognition_window(data) {
+            tracing::warn!(error = %e, "打开识别结果窗失败");
+            self.status_message = Some(self.i18n.tr_with("overlay-msg-recognition-window-failed", &Args::new().arg(1, e.to_string())));
+        }
+    }
+
     /// 再次复制识别文本并关闭覆盖窗；复制失败保留窗口并提示。
     fn copy_ocr_text_and_close(&mut self) -> OverlayOutcome {
         let OcrUiState::Done { text, .. } = &self.ocr else {
@@ -3425,7 +3764,7 @@ impl ScreenshotOverlayView {
         match self.output.copy_text(&text) {
             Ok(()) => OverlayOutcome::Close,
             Err(e) => {
-                self.status_message = Some(format!("复制文字失败: {e}"));
+                self.status_message = Some(self.i18n.tr_with("overlay-msg-copy-text-failed", &Args::new().arg(1, e.to_string())));
                 OverlayOutcome::Stay
             }
         }
@@ -3434,18 +3773,18 @@ impl ScreenshotOverlayView {
     /// 以当前选区开始长截图；成功后关闭覆盖窗，失败保留窗口并提示。
     fn start_scroll_capture_and_close(&mut self) -> OverlayOutcome {
         if !self.has_committed_selection() {
-            self.status_message = Some("请先框选要滚动截取的区域".into());
+            self.status_message = Some(self.i18n.tr("overlay-msg-select-scroll-first"));
             return OverlayOutcome::Stay;
         }
         let Some(rect) = self
             .current_selection()
             .and_then(|r| self.screen_bounds.intersect(&r))
         else {
-            self.status_message = Some("选区无效".into());
+            self.status_message = Some(self.i18n.tr("overlay-msg-selection-invalid"));
             return OverlayOutcome::Stay;
         };
         if self.selection_spans_monitors() {
-            self.status_message = Some("长截图的选区不能跨显示器".into());
+            self.status_message = Some(self.i18n.tr("overlay-msg-scroll-single-display"));
             return OverlayOutcome::Stay;
         }
         match self.output.start_scroll_capture(rect) {
@@ -3455,7 +3794,7 @@ impl ScreenshotOverlayView {
             }
             Err(e) => {
                 tracing::error!(error = %e, "启动长截图失败");
-                self.status_message = Some(format!("启动长截图失败: {e}"));
+                self.status_message = Some(self.i18n.tr_with("overlay-msg-scroll-start-failed", &Args::new().arg(1, e.to_string())));
                 OverlayOutcome::Stay
             }
         }
@@ -3511,11 +3850,11 @@ impl ScreenshotOverlayView {
         match self.output.copy_text(&text) {
             Ok(()) => {
                 tracing::info!(color = %text, "已复制颜色值");
-                self.status_message = Some(format!("已复制颜色 {text}"));
+                self.status_message = Some(self.i18n.tr_with("overlay-msg-color-copied", &Args::new().arg(1, text.clone())));
             }
             Err(e) => {
                 tracing::error!(error = %e, "复制颜色失败");
-                self.status_message = Some(format!("复制颜色失败: {e}"));
+                self.status_message = Some(self.i18n.tr_with("overlay-msg-color-copy-failed", &Args::new().arg(1, e.to_string())));
             }
         }
     }
@@ -3558,6 +3897,7 @@ impl ScreenshotOverlayView {
             return OverlayOutcome::Stay;
         }
         match self.auto_confirm.take() {
+            Some(AutoConfirm::QuickSave) => self.run_click_action(ClickAction::QuickSave),
             Some(action) => self.apply_action(action.toolbar_action()),
             None => OverlayOutcome::Stay,
         }
@@ -3566,15 +3906,15 @@ impl ScreenshotOverlayView {
     /// 以当前选区开始录屏；成功后关闭覆盖窗，失败保留窗口并提示。
     fn start_recording_and_close(&mut self) -> OverlayOutcome {
         if !self.has_committed_selection() {
-            self.status_message = Some("请先框选录制区域".into());
+            self.status_message = Some(self.i18n.tr("overlay-msg-select-record-first"));
             return OverlayOutcome::Stay;
         }
         let Some(rect) = self.current_selection() else {
-            self.status_message = Some("选区无效".into());
+            self.status_message = Some(self.i18n.tr("overlay-msg-selection-invalid"));
             return OverlayOutcome::Stay;
         };
         if self.selection_spans_monitors() {
-            self.status_message = Some("录屏的选区不能跨显示器".into());
+            self.status_message = Some(self.i18n.tr("overlay-msg-record-single-display"));
             return OverlayOutcome::Stay;
         }
         match self.output.start_recording(rect) {
@@ -3584,7 +3924,7 @@ impl ScreenshotOverlayView {
             }
             Err(e) => {
                 tracing::error!(error = %e, "启动录屏失败");
-                self.status_message = Some(format!("启动录屏失败: {e}"));
+                self.status_message = Some(self.i18n.tr_with("overlay-msg-record-start-failed", &Args::new().arg(1, e.to_string())));
                 OverlayOutcome::Stay
             }
         }
@@ -3867,7 +4207,7 @@ impl ScreenshotOverlayView {
         cursor_for_mode(self.hover_mode, dragging)
     }
 
-    /// 底部提示条的默认文案。
+    /// 底部提示条默认文案的 message id。
     fn default_hint(&self) -> &'static str {
         if self.text_edit.is_some() {
             TEXT_HINT_TEXT
@@ -4087,7 +4427,7 @@ impl ScreenshotOverlayView {
                     .bg(rgba(LABEL_BG_COLOR))
                     .text_color(rgba(0xFFFFFFFF))
                     .text_xs()
-                    .child(selection_size_label(w)),
+                    .child(self.size_label(w)),
             );
         }
 
@@ -4096,7 +4436,7 @@ impl ScreenshotOverlayView {
         if let Some(s) = sel {
             let (sx, sy) = (s.x as f32 / scale, s.y as f32 / scale);
             let (sw, sh) = (s.width as f32 / scale, s.height as f32 / scale);
-            let mask_color = rgba(MASK_COLOR);
+            let mask_color = rgba(self.mask_color);
 
             // 选区外四向暗化遮罩（上 / 下 / 左 / 右 四个矩形拼接）
             let dark = |top: f32, left: f32, w: f32, h: f32| {
@@ -4145,7 +4485,7 @@ impl ScreenshotOverlayView {
                         .w(px(sw))
                         .h(px(sh))
                         .border_1()
-                        .border_color(rgb(ACCENT_COLOR)),
+                        .border_color(rgba(self.border_color)),
                 );
             }
 
@@ -4161,7 +4501,7 @@ impl ScreenshotOverlayView {
                         .h(self.lp(hr.height))
                         .bg(rgba(0xFFFFFFFF))
                         .border_1()
-                        .border_color(rgb(ACCENT_COLOR)),
+                        .border_color(rgba(self.border_color)),
                 );
             }
 
@@ -4178,7 +4518,7 @@ impl ScreenshotOverlayView {
                     .bg(rgba(LABEL_BG_COLOR))
                     .text_color(rgba(0xFFFFFFFF))
                     .text_xs()
-                    .child(selection_size_label(s)),
+                    .child(self.size_label(s)),
             );
 
             // 浮动工具栏（选区确定后展示；标注工具未实现所以隐藏，贴图 / OCR / 翻译置灰）
@@ -4287,7 +4627,12 @@ impl ScreenshotOverlayView {
                 screen_logical,
                 MAGNIFIER_OFFSET,
             );
-            let mag = Magnifier::new("cursor-mag", self.magnifier_grid.clone(), self.cursor_pos)
+            let shown_cursor = if self.coordinate_global {
+                PhysicalPoint::new(self.cursor_pos.x + self.canvas_origin.x, self.cursor_pos.y + self.canvas_origin.y)
+            } else {
+                self.cursor_pos
+            };
+            let mag = Magnifier::new("cursor-mag", self.magnifier_grid.clone(), shown_cursor)
                 .selection_rect(sel)
                 .color_format(self.color_format);
             root = root.child(
@@ -4314,7 +4659,15 @@ impl ScreenshotOverlayView {
                     // 点击输入框以外的位置：先提交正在输入的文字
                     this.commit_text_edit(window, cx);
                     let p = this.canvas_point(index, ev.position);
+                    this.set_shift(ev.modifiers.shift);
                     let outcome = this.handle_mouse_down(p, ev.click_count);
+                    this.finish(outcome, window, cx);
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Middle,
+                cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                    let outcome = this.handle_middle_click();
                     this.finish(outcome, window, cx);
                 }),
             )
@@ -4344,8 +4697,14 @@ impl ScreenshotOverlayView {
                     cx.stop_propagation();
                     return;
                 }
+                this.set_shift(mods.shift);
                 let outcome = this.handle_keystroke(&ev.keystroke.key, mods.control, mods.shift, mods.alt);
                 this.finish(outcome, window, cx);
+            }))
+            .on_key_up(cx.listener(|this, ev: &KeyUpEvent, _window, _cx| {
+                let mods = ev.keystroke.modifiers;
+                this.set_shift(mods.shift);
+                this.handle_key_release(&ev.keystroke.key, mods.control, mods.shift, mods.alt);
             }));
         if let Some(handle) = focus.or(self.focus_handle.as_ref()) {
             outer = outer.track_focus(handle);
@@ -4365,6 +4724,7 @@ impl ScreenshotOverlayView {
                             let started = Instant::now();
                             this.scale = this.scale_override.unwrap_or(window.scale_factor());
                             let p = this.canvas_point(index, ev.position);
+                            this.set_shift(ev.modifiers.shift);
                             this.handle_mouse_move(p);
                             this.probe.record_move(started.elapsed());
                             cx.notify();
@@ -4378,6 +4738,7 @@ impl ScreenshotOverlayView {
                         ups.update(app, |this, cx| {
                             this.scale = this.scale_override.unwrap_or(window.scale_factor());
                             let p = this.canvas_point(index, ev.position);
+                            this.set_shift(ev.modifiers.shift);
                             this.handle_mouse_up(p);
                             let outcome = this.auto_confirm_outcome();
                             this.finish(outcome, window, cx);
@@ -4395,7 +4756,7 @@ impl ScreenshotOverlayView {
             let hint = self
                 .status_message
                 .clone()
-                .unwrap_or_else(|| self.default_hint().to_string());
+                .unwrap_or_else(|| self.i18n.tr(self.default_hint()));
             outer = outer.child(
                 div()
                     .absolute()
@@ -5467,6 +5828,83 @@ mod tests {
         assert!(matches!(view.state, SelectionState::MarqueeDragging { .. }));
     }
 
+    /// 按住 Shift 框选得到正方形；不按则是自由矩形。
+    #[test]
+    fn shift_marquee_is_square() {
+        let (mut view, _) = view_with(300, 200, 1.0, false);
+        view.set_shift(true);
+        drag(&mut view, (20, 20), (120, 70));
+        let sel = view.current_selection().unwrap();
+        assert_eq!(sel.width, sel.height, "Shift 锁定为正方形");
+        assert!(sel.width >= 100);
+
+        let (mut free, _) = view_with(300, 200, 1.0, false);
+        free.set_shift(false);
+        drag(&mut free, (20, 20), (120, 70));
+        let sel = free.current_selection().unwrap();
+        assert_ne!(sel.width, sel.height);
+    }
+
+    /// 配置没有把「保持宽高一致」绑在 Shift 上时，按 Shift 不锁比例。
+    #[test]
+    fn shift_does_not_lock_when_unbound() {
+        let (mut view, _) = view_with(300, 200, 1.0, false);
+        let mut doc = snow_config::document::ConfigDocument::from_bytes(None);
+        doc.set_value(
+            "screenshot_shortcuts/keep_selection_width_and_height_consistent",
+            serde_json::json!([{"portable": "Ctrl+K"}]),
+        )
+        .unwrap();
+        view.set_keymap(OverlayKeymap::from_document(&doc));
+        view.set_shift(true);
+        drag(&mut view, (20, 20), (120, 70));
+        let sel = view.current_selection().unwrap();
+        assert_ne!(sel.width, sel.height);
+    }
+
+    /// 框选拖动中按住移动键：整个框平移（尺寸不变），松开键后恢复框选。
+    #[test]
+    fn move_key_translates_the_marquee() {
+        let (mut view, _) = view_with(300, 200, 1.0, false);
+        view.handle_mouse_down(PhysicalPoint::new(20, 20), 1);
+        view.handle_mouse_move(PhysicalPoint::new(60, 50));
+        let before = view.current_selection().unwrap();
+        assert_eq!(view.handle_keystroke("space", false, false, false), OverlayOutcome::Stay);
+        view.handle_mouse_move(PhysicalPoint::new(100, 90));
+        let moved = view.current_selection().unwrap();
+        assert_eq!((moved.width, moved.height), (before.width, before.height));
+        assert_eq!((moved.x - before.x, moved.y - before.y), (40, 40));
+        view.handle_key_release("space", false, false, false);
+        view.handle_mouse_move(PhysicalPoint::new(130, 110));
+        let resized = view.current_selection().unwrap();
+        assert!(resized.width > moved.width, "松开后继续框选");
+    }
+
+    /// Alt+R 重新截图：关闭覆盖窗、置位重截标志，不写任何输出。
+    #[test]
+    fn recapture_sets_flag_and_closes() {
+        let (mut view, rec) = view_with(100, 80, 1.0, false);
+        let flag = view.recapture_flag();
+        assert!(!flag.get());
+        assert_eq!(view.handle_keystroke("r", false, false, true), OverlayOutcome::Close);
+        assert!(flag.get());
+        let r = rec.borrow();
+        assert!(r.images.is_empty() && r.saved.is_empty());
+    }
+
+    /// Ctrl+P 切换坐标显示模式，来回切换；没有选区时 Ctrl+Shift+S 快速保存只提示不保存。
+    #[test]
+    fn coordinate_mode_toggles_and_quick_save_needs_selection() {
+        let (mut view, rec) = view_with(100, 80, 1.0, false);
+        assert!(view.coordinate_global, "默认是全局坐标");
+        assert_eq!(view.handle_keystroke("p", true, false, false), OverlayOutcome::Stay);
+        assert!(!view.coordinate_global);
+        view.handle_keystroke("p", true, false, false);
+        assert!(view.coordinate_global);
+        assert_eq!(view.handle_keystroke("s", true, true, false), OverlayOutcome::Stay);
+        assert!(rec.borrow().saved.is_empty());
+    }
+
     /// Esc 关闭，不写任何输出。
     #[test]
     fn escape_closes_without_output() {
@@ -5567,7 +6005,7 @@ mod tests {
         let (mut view, _) = view_with(100, 80, 1.0, true);
         drag(&mut view, (5, 5), (44, 34));
         assert_eq!(view.apply_action(ToolbarAction::Pin), OverlayOutcome::Stay);
-        assert!(view.status_message.as_deref().unwrap().contains("贴图失败"));
+        assert!(view.status_message.as_deref().unwrap().contains("Pin failed"));
     }
 
     /// 输出失败时窗口保留并给出错误提示。
@@ -5576,7 +6014,7 @@ mod tests {
         let (mut view, _) = view_with(100, 80, 1.0, true);
         drag(&mut view, (5, 5), (44, 34));
         assert_eq!(view.handle_key("enter", false, false), OverlayOutcome::Stay);
-        assert!(view.status_message.as_deref().unwrap().contains("复制失败"));
+        assert!(view.status_message.as_deref().unwrap().contains("Copy failed"));
         assert_eq!(view.apply_action(ToolbarAction::Save), OverlayOutcome::Stay);
         assert!(view.status_message.as_deref().unwrap().contains("boom"));
     }
@@ -5589,6 +6027,35 @@ mod tests {
         let outcome = view.handle_mouse_down(PhysicalPoint::new(70, 60), 2);
         assert_eq!(outcome, OverlayOutcome::Close);
         assert_eq!(rec.borrow().images.len(), 1);
+    }
+
+    /// 双击 / 中键的动作跟随配置；颜色与尺寸单位配置也被读取。
+    #[test]
+    fn click_actions_and_colors_follow_config() {
+        let dir = std::env::temp_dir().join(format!("snow-click-cfg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut store = ConfigStore::open(dir.join("config.json"));
+        store.set_value(DOUBLE_CLICK_ACTION_KEY, serde_json::json!("none")).unwrap();
+        store.set_value(MIDDLE_CLICK_ACTION_KEY, serde_json::json!("quick_save")).unwrap();
+        store.set_value(SELECTION_BORDER_COLOR_KEY, serde_json::json!("#FF0000FF")).unwrap();
+        store.set_value(SELECTION_MASK_COLOR_KEY, serde_json::json!("#11223344")).unwrap();
+        store.set_value(SELECTION_UNIT_KEY, serde_json::json!("logical_pixels")).unwrap();
+        let (mut view, rec) = view_with(200, 150, 2.0, false);
+        view.set_style_config(Rc::new(RefCell::new(store)), "en-US");
+        assert_eq!(view.double_click_action, ClickAction::None);
+        assert_eq!(view.middle_click_action, ClickAction::QuickSave);
+        assert_eq!((view.border_color, view.mask_color), (0xFF0000FF, 0x11223344));
+        assert!(view.logical_size_label);
+        // 双击不再复制
+        drag(&mut view, (20, 20), (120, 100));
+        assert_eq!(view.handle_mouse_down(PhysicalPoint::new(70, 60), 2), OverlayOutcome::Stay);
+        assert!(rec.borrow().images.is_empty());
+        // 逻辑像素标签：缩放 2 倍时数值减半
+        let physical = view.size_label(PhysicalRect::new(0, 0, 100, 60));
+        assert_ne!(physical, selection_size_label(PhysicalRect::new(0, 0, 100, 60)));
+        assert_eq!(ClickAction::parse("pin"), Some(ClickAction::Pin));
+        assert_eq!(ClickAction::parse("bogus"), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// C 键复制光标处像素的颜色值（不关闭窗口）。
@@ -6113,7 +6580,7 @@ mod tests {
         assert_eq!(rec.borrow().translate_downloads, 2);
         view.finish_translate_download(Ok(()));
         assert_eq!(view.translate_state(), &TranslateUiState::Idle);
-        assert!(view.status_message.as_deref().is_some_and(|s| s.contains("再次点击")));
+        assert!(view.status_message.as_deref().is_some_and(|s| s.contains("again")));
     }
 
     /// OCR 与翻译互斥：翻译界面打开时点 OCR 会先退出翻译界面；反过来同理。
@@ -6224,7 +6691,7 @@ mod tests {
         view.handle_key("d", false, false);
         view.finish_ocr_download(Ok(()));
         assert_eq!(view.ocr_state(), &OcrUiState::Idle);
-        assert!(view.status_message.as_deref().is_some_and(|s| s.contains("再次点击")));
+        assert!(view.status_message.as_deref().is_some_and(|s| s.contains("again")));
     }
 
     /// 过期结果（用户已退出 OCR 或又发起了新请求）被丢弃。
@@ -6252,7 +6719,7 @@ mod tests {
         let (mut view, _) = view_with(100, 80, 1.0, true);
         drag(&mut view, (5, 5), (44, 34));
         assert_eq!(view.apply_action(ToolbarAction::ScrollCapture), OverlayOutcome::Stay);
-        assert!(view.status_message.as_deref().is_some_and(|s| s.contains("长截图")));
+        assert!(view.status_message.as_deref().is_some_and(|s| s.contains("scrolling capture")));
     }
 
     /// 长截图选区模式：Enter 确认区域并交给长截图；复制 / 保存快捷键被禁用；Esc 仍可取消。
@@ -6261,7 +6728,7 @@ mod tests {
         let (mut view, rec) = view_with(100, 80, 1.0, false);
         view.set_scroll_mode(true);
         assert_eq!(view.handle_key("enter", false, false), OverlayOutcome::Stay);
-        assert!(view.status_message.as_deref().is_some_and(|s| s.contains("框选")));
+        assert!(view.status_message.as_deref().is_some_and(|s| s.contains("Select")));
         drag(&mut view, (5, 5), (44, 34));
         assert_eq!(view.handle_key("c", true, false), OverlayOutcome::Stay);
         assert_eq!(view.handle_key("s", true, false), OverlayOutcome::Stay);

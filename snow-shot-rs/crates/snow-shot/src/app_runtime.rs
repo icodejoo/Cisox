@@ -15,9 +15,11 @@ use crate::history_store::{
     HistoryRecorder, HistorySource, HistoryStore, Thumbnail, policy_from_document,
 };
 use crate::history_view::{HistoryAction, HistoryView};
+use crate::pinned_manage_view::PinManageView;
 use crate::quick_actions::{
     DELAY_SECONDS_CONFIG_KEY, DelayGate, DirectKind, QUICK_ACTION_KEYS, QuickPlan, clip_to_monitor, delay_seconds,
     direct_output_plan_from, full_monitor_region, plan_for, recording_directory, stays_registered_when_paused,
+    NOTICE_FULLSCREEN_GATE_OFF, NOTICE_FULLSCREEN_GATE_ON, NOTICE_NO_SELECTED_TEXT, NOTICE_PIN_SELECTED_FILES, NOTICE_RESTORE_CLOSED,
 };
 use crate::window_pick::{WindowHover, selection_target, start_window_hover, transition_animation_enabled};
 use crate::dictation::config::DictationConfig;
@@ -100,10 +102,14 @@ pub const TRAY_SIGNAL_HISTORY: &str = "history";
 pub const TRAY_SIGNAL_SETTINGS: &str = "settings";
 /// 托盘信号：退出。
 pub const TRAY_SIGNAL_QUIT: &str = "quit";
-/// 托盘占位图标边长（像素）。
-const TRAY_ICON_SIZE: u32 = 32;
-/// 托盘占位图标颜色（RGBA）。
-const TRAY_ICON_RGBA: [u8; 4] = [22, 119, 255, 255];
+/// 托盘信号前缀：切换贴图分组（后接分组 ID）。
+pub const TRAY_SIGNAL_GROUP_PREFIX: &str = "group:";
+/// 托盘信号：打开贴图管理窗口。
+pub const TRAY_SIGNAL_PIN_MANAGE: &str = "pin_manage";
+/// 托盘信号：新建贴图分组。
+pub const TRAY_SIGNAL_GROUP_NEW: &str = "group_new";
+/// 托盘信号：删除空的贴图分组。
+pub const TRAY_SIGNAL_GROUP_DELETE_EMPTY: &str = "group_delete_empty";
 /// 设置窗口逻辑宽度。
 const SETTINGS_WINDOW_WIDTH: f32 = 1000.0;
 /// 设置窗口逻辑高度。
@@ -136,6 +142,8 @@ pub const ORIGIN_OTHER: &str = "other";
 pub const ORIGIN_RECORDING: &str = "recording";
 /// 事件来源标签：长截图选区流程。
 pub const ORIGIN_SCROLL: &str = "scroll";
+/// 来源标签：全局鼠标手势。
+pub const ORIGIN_GESTURE: &str = "gesture";
 /// 性能基准环境变量：值为步数（正整数）时，覆盖窗打开后自动跑一遍模拟框选并自动关闭。
 pub const ENV_OVERLAY_BENCH: &str = "SNOW_OVERLAY_BENCH";
 /// 性能基准的合成底图尺寸环境变量，格式 `宽x高`（如 `3840x2160`）。
@@ -284,6 +292,94 @@ pub enum UiEvent {
     },
     /// 启动时恢复已持久化的贴图窗口。
     RestorePins,
+    /// 贴图窗口的控制事件（点击穿透退出按钮的开关）。
+    PinControl(crate::pinned_shared::PinControlEvent),
+    /// 打开（或激活）贴图管理窗口。
+    OpenPinManage,
+    /// 全局鼠标手势的拖动事件（来自钩子线程）。
+    MouseGesture(snow_platform::global_mouse::DragEvent),
+    /// 打开文字识别结果窗（每次新开一个，窗口自带数据）。
+    OpenRecognitionWindow(Box<crate::recognition_view::RecognitionData>),
+    /// 前台应用选中的文字已读取（`None` 表示没有选中或读取失败）。
+    SelectedTextReady(Option<String>),
+    /// 把一张已解码的图片贴到屏幕（贴选中的文件）。
+    PinImage {
+        /// 图像宽。
+        width: u32,
+        /// 图像高。
+        height: u32,
+        /// RGBA 像素。
+        rgba: Vec<u8>,
+    },
+    /// 没有找到可贴的选中图片文件。
+    PinFilesEmpty,
+    /// 贴图文字识别完成（成功或失败）。
+    PinOcrFinished {
+        /// 贴图 ID。
+        id: String,
+        /// 识别结果或失败原因。
+        result: Result<OcrResult, String>,
+    },
+    /// 管理窗口的一张缩略图就绪（`None` 表示解码失败）。
+    PinManageThumb {
+        /// 贴图 ID。
+        id: String,
+        /// 缩略图。
+        thumb: Option<Thumbnail>,
+    },
+    /// 管理窗口：显示一张贴图（必要时先切换分组）。
+    PinManageShow {
+        /// 贴图 ID。
+        id: String,
+    },
+    /// 管理窗口：删除一张贴图。
+    PinManageDelete {
+        /// 贴图 ID。
+        id: String,
+    },
+    /// 管理窗口：删除全部贴图。
+    PinManageDeleteAll,
+    /// 管理窗口：按名称新建分组。
+    PinGroupCreateNamed {
+        /// 分组名。
+        name: String,
+    },
+    /// 管理窗口：删除指定分组及其中的贴图。
+    PinGroupDelete {
+        /// 分组 ID。
+        id: String,
+    },
+    /// 切换到某个贴图分组。
+    PinGroupSwitch {
+        /// 分组 ID。
+        id: String,
+    },
+    /// 新建一个贴图分组（自动命名）。
+    PinGroupNew,
+    /// 删除全部空的贴图分组。
+    PinGroupDeleteEmpty,
+    /// 把一张贴图移到另一个分组。
+    PinMoveToGroup {
+        /// 贴图 ID。
+        id: String,
+        /// 目标分组 ID。
+        group: String,
+    },
+    /// 鼠标移到「隐藏到顶部」的把手上。
+    PinHideReveal {
+        /// 贴图 ID。
+        id: String,
+    },
+    /// 「隐藏到顶部」的把手被点击。
+    PinExitHideToTop {
+        /// 贴图 ID。
+        id: String,
+    },
+    /// 点击穿透退出按钮被点击。
+    PinExitClickThrough {
+        /// 贴图 ID。
+        id: String,
+    },
     /// 某张贴图窗口已关闭（回收其句柄）。
     PinClosed {
         /// 贴图 ID。
@@ -426,7 +522,12 @@ pub fn map_tray_signal(signal: &str) -> Option<UiEvent> {
         TRAY_SIGNAL_SETTINGS => Some(UiEvent::OpenSettings),
         TRAY_SIGNAL_QUIT => Some(UiEvent::Quit),
         TRAY_SIGNAL_RESTART => Some(UiEvent::Restart),
-        _ => None,
+        TRAY_SIGNAL_PIN_MANAGE => Some(UiEvent::OpenPinManage),
+        TRAY_SIGNAL_GROUP_NEW => Some(UiEvent::PinGroupNew),
+        TRAY_SIGNAL_GROUP_DELETE_EMPTY => Some(UiEvent::PinGroupDeleteEmpty),
+        other => other
+            .strip_prefix(TRAY_SIGNAL_GROUP_PREFIX)
+            .map(|id| UiEvent::PinGroupSwitch { id: id.to_string() }),
     }
 }
 
@@ -469,9 +570,24 @@ fn tray_menu_icon(renderer: &snow_ui::icons::IconRenderer, name: &str) -> Option
 /// assert_eq!(spec.menu.len(), 25);
 /// ```
 pub fn build_tray_spec(locale: &str, doc: &ConfigDocument, hotkeys_paused: bool) -> Result<TraySpec, String> {
+    build_tray_spec_with_groups(locale, doc, hotkeys_paused, &[], "")
+}
+
+/// 同 [`build_tray_spec`]，并在贴图组后追加「贴图分组」块（切换、新建、删除空分组）。
+///
+/// # 参数
+/// - `groups`：`(分组 ID, 显示名)` 列表；为空则不显示分组块。
+/// - `active`：当前激活的分组 ID（打勾）。
+pub fn build_tray_spec_with_groups(
+    locale: &str,
+    doc: &ConfigDocument,
+    hotkeys_paused: bool,
+    groups: &[(String, String)],
+    active: &str,
+) -> Result<TraySpec, String> {
     let i18n = crate::ocr_backend::i18n_for(locale);
-    let icon = TrayIconImage::solid(TRAY_ICON_SIZE, TRAY_ICON_SIZE, TRAY_ICON_RGBA)
-        .map_err(|e| e.to_string())?;
+    let icon = crate::tray_config::tray_icon_image(doc);
+    let enabled = crate::tray_config::menu_options(doc);
     let renderer = snow_ui::icons::IconRenderer::new();
     let entry = |label: String, icon_name: &str, checked: Option<bool>, action: TrayAction| TrayMenuEntry::Item {
         label,
@@ -486,67 +602,168 @@ pub fn build_tray_spec(locale: &str, doc: &ConfigDocument, hotkeys_paused: bool)
         "tray-capture-delay",
         &Args::new().arg(TRAY_DELAY_ARG_INDEX, delay_seconds(doc)),
     );
+    let sep = || (None, TrayMenuEntry::Separator);
 
-    Ok(TraySpec {
-        tooltip: TRAY_TOOLTIP.to_string(),
-        icon,
-        menu: vec![
-            // 截图组
+    // 每项带 `tray/menu_options` 里的标识，未启用的项在筛选时去掉
+    let mut menu: Vec<(Option<&'static str>, TrayMenuEntry)> = vec![
+        // 截图组
+        (
+            Some("quick.screenshot"),
             item(
                 "tray-capture",
                 "camera",
                 TrayAction::Command(AppCommand::Capture(CaptureRequest::default())),
             ),
+        ),
+        (
+            Some("quick.screenshot-delay"),
             entry(delay_label, "clock-circle", None, quick(QuickAction::ScreenshotDelay)),
-            item("tray-capture-pin", "pushpin", quick(QuickAction::ScreenshotFixed)),
-            item("tray-capture-ocr", "file-search", quick(QuickAction::ScreenshotOcr)),
+        ),
+        (Some("quick.screenshot-fixed"), item("tray-capture-pin", "pushpin", quick(QuickAction::ScreenshotFixed))),
+        (Some("quick.screenshot-ocr"), item("tray-capture-ocr", "file-search", quick(QuickAction::ScreenshotOcr))),
+        (
+            Some("quick.screenshot-translation"),
             item("tray-capture-translate", "translation", quick(QuickAction::ScreenshotTranslation)),
-            item("tray-capture-copy", "copy", quick(QuickAction::ScreenshotCopy)),
+        ),
+        (Some("quick.screenshot-copy"), item("tray-capture-copy", "copy", quick(QuickAction::ScreenshotCopy))),
+        (
+            Some("quick.screenshot-full-screen"),
             item("tray-capture-full-screen", "desktop", quick(QuickAction::ScreenshotFullScreen)),
+        ),
+        (
+            Some("quick.screenshot-focused-window"),
             item("tray-capture-focused-window", "scan", quick(QuickAction::ScreenshotFocusedWindow)),
-            TrayMenuEntry::Separator,
-            // 贴图组
-            item(
-                "tray-pin-clipboard",
-                "snippets",
-                TrayAction::Signal(TRAY_SIGNAL_PIN_CLIPBOARD.into()),
-            ),
+        ),
+        sep(),
+        // 贴图组
+        (
+            Some("quick.pin-clipboard-content"),
+            item("tray-pin-clipboard", "snippets", TrayAction::Signal(TRAY_SIGNAL_PIN_CLIPBOARD.into())),
+        ),
+        (
+            Some("quick.pin-selected-files"),
             item("tray-pin-selected-files", "paper-clip", quick(QuickAction::PinSelectedFiles)),
+        ),
+        (
+            Some("quick.restore-last-closed-windows"),
             item("tray-restore-closed", "undo", quick(QuickAction::RestoreLastClosedWindows)),
-            TrayMenuEntry::Separator,
-            // 录屏组
+        ),
+        sep(),
+        // 录屏组
+        (
+            Some("quick.screen-record"),
             item(
                 "tray-record",
                 "video-camera",
                 TrayAction::Command(AppCommand::StartRecording(RecordingRequest::default())),
             ),
+        ),
+        (
+            Some("quick.screen-record-copy"),
             item("tray-record-copy", "export", quick(QuickAction::ScreenRecordCopy)),
+        ),
+        (
+            Some("quick.open-screen-recording-folder"),
             item("tray-open-recordings", "folder-open", quick(QuickAction::OpenScreenRecordingFolder)),
-            TrayMenuEntry::Separator,
-            // 其他组
+        ),
+        sep(),
+        // 其他组
+        (
+            Some("quick.open-capture-history"),
             item("tray-history", "history", TrayAction::Signal(TRAY_SIGNAL_HISTORY.into())),
+        ),
+        (
+            Some("quick.translate-selected-text"),
             item("tray-translate-selected", "select", quick(QuickAction::TranslateSelectedText)),
+        ),
+        (
+            Some("quick.toggle-global-hotkeys"),
             entry(
                 i18n.tr("tray-toggle-hotkeys"),
                 "stop",
                 Some(hotkeys_paused),
                 quick(QuickAction::ToggleGlobalHotkeys),
             ),
-            // 该动作暂为占位（尚无前台全屏检测），勾选恒为否
+        ),
+        (
+            Some("quick.toggle-disable-on-focused-fullscreen-window"),
             entry(
                 i18n.tr("tray-toggle-fullscreen"),
                 "fullscreen",
-                Some(false),
+                Some(crate::fullscreen_gate::configured(doc)),
                 quick(QuickAction::ToggleDisableOnFocusedFullscreen),
             ),
-            TrayMenuEntry::Separator,
-            // 系统组
+        ),
+        sep(),
+        // 系统组
+        (
+            Some("tray.show-main-window"),
             item("tray-show-main", "home", TrayAction::Signal(TRAY_SIGNAL_SETTINGS.into())),
+        ),
+        (
+            Some("tray.restart-app"),
             item("tray-restart", "reload", TrayAction::Signal(TRAY_SIGNAL_RESTART.into())),
-            item("tray-quit", "poweroff", TrayAction::Signal(TRAY_SIGNAL_QUIT.into())),
-        ],
-        on_left_click: None,
-        on_double_click: Some(TrayAction::Signal(TRAY_SIGNAL_SETTINGS.into())),
+        ),
+        (Some("tray.exit"), item("tray-quit", "poweroff", TrayAction::Signal(TRAY_SIGNAL_QUIT.into()))),
+    ];
+    // 贴图分组块放在「贴图组」之后（第二条分隔线位置）；整块由 `tray.window-grouping` 控制
+    if !groups.is_empty() {
+        let at = menu
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, e))| matches!(e, TrayMenuEntry::Separator))
+            .nth(1)
+            .map_or(menu.len(), |(i, _)| i + 1);
+        let mut block: Vec<(Option<&'static str>, TrayMenuEntry)> = groups
+            .iter()
+            .map(|(id, name)| {
+                (
+                    Some("tray.window-grouping"),
+                    entry(
+                        name.clone(),
+                        "folder",
+                        Some(id == active),
+                        TrayAction::Signal(format!("{TRAY_SIGNAL_GROUP_PREFIX}{id}")),
+                    ),
+                )
+            })
+            .collect();
+        block.push((
+            Some("tray.window-grouping"),
+            item("tray-group-new", "plus", TrayAction::Signal(TRAY_SIGNAL_GROUP_NEW.into())),
+        ));
+        block.push((
+            Some("tray.window-grouping"),
+            item("tray-group-delete-empty", "delete", TrayAction::Signal(TRAY_SIGNAL_GROUP_DELETE_EMPTY.into())),
+        ));
+        block.push((
+            Some("tray.window-grouping"),
+            item("tray-pin-management", "appstore", TrayAction::Signal(TRAY_SIGNAL_PIN_MANAGE.into())),
+        ));
+        block.push(sep());
+        menu.splice(at..at, block);
+    }
+    let menu = crate::tray_config::filter_menu(menu, &enabled);
+
+    let click_signal = |action: crate::tray_config::TrayClick| {
+        use crate::tray_config::TrayClick;
+        match action {
+            TrayClick::Screenshot => TrayAction::Command(AppCommand::Capture(CaptureRequest::default())),
+            TrayClick::ShowMainWindow | TrayClick::OpenFunctionSettings => {
+                TrayAction::Signal(TRAY_SIGNAL_SETTINGS.into())
+            }
+            TrayClick::ScreenshotCopy => quick(QuickAction::ScreenshotCopy),
+            TrayClick::ScreenshotFixed => quick(QuickAction::ScreenshotFixed),
+        }
+    };
+    use crate::tray_config::{KEY_LEFT_CLICK, KEY_MIDDLE_CLICK, TrayClick, click_action};
+    Ok(TraySpec {
+        tooltip: TRAY_TOOLTIP.to_string(),
+        icon,
+        menu,
+        on_left_click: Some(click_signal(click_action(doc, KEY_LEFT_CLICK, TrayClick::Screenshot))),
+        on_double_click: None,
+        on_middle_click: Some(click_signal(click_action(doc, KEY_MIDDLE_CLICK, TrayClick::ScreenshotFixed))),
     })
 }
 
@@ -1071,6 +1288,21 @@ pub enum CaptureMode {
     Quick(AutoConfirm),
 }
 
+/// 一次全局鼠标手势会话：钩子线程比覆盖窗打开得快，期间的位置先记在这里，覆盖窗就绪后一次性补上。
+#[derive(Debug, Clone)]
+struct GestureSession {
+    /// 手势编号（与钩子事件对应）。
+    id: u64,
+    /// 手势按下的位置（虚拟桌面物理像素）。
+    start: snow_platform::global_mouse::Point,
+    /// 最近一次位置。
+    latest: snow_platform::global_mouse::Point,
+    /// 鼠标键是否已经松开。
+    finished: bool,
+    /// 是否已经把按下 / 移动补发给覆盖窗。
+    applied: bool,
+}
+
 /// 常驻运行时状态：随主线程事件循环存活。
 pub struct AppState {
     /// 共享配置存储（设置页写入，截图 / 录制 / 热键从同一份读取）。
@@ -1085,6 +1317,8 @@ pub struct AppState {
     history: Option<Arc<HistoryRecorder>>,
     /// 截图历史窗口（若已打开）与其视图。
     history_window: Option<(ShellWindow, Entity<HistoryView>)>,
+    /// 贴图管理窗口（打开时有值）。
+    pin_manage_window: Option<(ShellWindow, Entity<PinManageView>)>,
     /// 语音转文字宿主（独立工作进程、键入与右下角浮窗的生命周期）。
     dictation: DictationHost,
     /// 收到的截图请求累计数。
@@ -1129,6 +1363,12 @@ pub struct AppState {
     delay: DelayGate,
     /// 直接截图是否正在进行（进行中忽略新的直接截图）。
     direct_in_flight: bool,
+    /// 下一次开始的录制完成后要把文件复制到剪贴板（「录屏并复制」触发）。
+    record_copy_pending: bool,
+    /// 全局鼠标手势服务（有绑定时才启动；丢弃即卸载钩子）。
+    mouse_service: Option<snow_platform::global_mouse::GlobalMouseService>,
+    /// 进行中的鼠标手势会话。
+    gesture: Option<GestureSession>,
 }
 
 impl AppState {
@@ -1168,6 +1408,10 @@ impl AppState {
                 closed_inbox.push(UiEvent::PinClosed { id: id.to_string() });
             }),
         );
+        let control_inbox = inbox.clone();
+        pins.shared().set_control_sink(Box::new(move |event| {
+            control_inbox.push(UiEvent::PinControl(event));
+        }));
         let translator = Arc::new(TranslateHost::new(data_root));
         Self {
             pins,
@@ -1192,6 +1436,7 @@ impl AppState {
             translate_input: None,
             history,
             history_window: None,
+            pin_manage_window: None,
             capture_requests: 0,
             overlay: None,
             capture_in_flight: false,
@@ -1203,6 +1448,9 @@ impl AppState {
             hotkeys_paused: false,
             delay: DelayGate::default(),
             direct_in_flight: false,
+            record_copy_pending: false,
+            mouse_service: None,
+            gesture: None,
         }
     }
 
@@ -1213,6 +1461,7 @@ impl AppState {
 
     /// 释放托盘与热键（移除图标、注销热键）。
     pub fn shutdown_services(&mut self) {
+        self.mouse_service.take();
         self.tray.take();
         self.hotkeys.take();
     }
@@ -1472,6 +1721,7 @@ fn open_overlays(cx: &mut ShellContext, state: &mut AppState, payloads: Vec<Capt
     let mode = std::mem::replace(&mut state.capture_mode, CaptureMode::Screenshot);
     state.overlay_windows.clear();
     if payloads.is_empty() {
+        state.gesture = None;
         return;
     }
     // 性能基准可用合成底图替换真实截图（例如在非 4K 屏上测 4K 纹理）
@@ -1550,6 +1800,7 @@ fn open_overlays(cx: &mut ShellContext, state: &mut AppState, payloads: Vec<Capt
     let pin_inbox = state.inbox.clone();
     let ocr_inbox = state.inbox.clone();
     let ocr_download_inbox = state.inbox.clone();
+    let recognition_inbox = state.inbox.clone();
     let translate_inbox = state.inbox.clone();
     let translate_download_inbox = state.inbox.clone();
     let scroll_inbox = state.inbox.clone();
@@ -1579,6 +1830,9 @@ fn open_overlays(cx: &mut ShellContext, state: &mut AppState, payloads: Vec<Capt
             })
             .with_ocr_download(move || {
                 ocr_download_inbox.push(UiEvent::OcrDownloadRequested);
+            })
+            .with_recognition_window(move |data| {
+                recognition_inbox.push(UiEvent::OpenRecognitionWindow(Box::new(data)));
             })
             .with_translate(move |serial, width, height, rgba| {
                 translate_inbox.push(UiEvent::TranslateRequested { serial, width, height, rgba });
@@ -1699,6 +1953,7 @@ fn any_overlay_open(cx: &ShellContext, state: &AppState) -> bool {
 /// - `state`：运行时状态。
 fn close_all_overlays(cx: &mut ShellContext, state: &mut AppState) {
     // 每个窗口关闭都会触发一次本函数：取走会话句柄，后到的重复事件就无事可做
+    state.gesture = None;
     let Some(view) = state.overlay_view.take() else {
         state.overlay_windows.clear();
         return;
@@ -1764,8 +2019,13 @@ fn configure_overlay(
     {
         let close_inbox = state.inbox.clone();
         view.update(cx.app(), |v, _| {
+            let recapture = v.recapture_flag();
             v.set_close_hook(move || {
                 close_inbox.push(UiEvent::OverlayClosed);
+                // 「重新截图」：覆盖窗收尾后再发起一次普通截图
+                if recapture.take() {
+                    close_inbox.push(UiEvent::Capture { origin: ORIGIN_HOTKEY });
+                }
             });
         });
     }
@@ -1842,6 +2102,8 @@ fn configure_overlay(
         };
         spawn_overlay_bench(cx, window, view, steps, tool, hold, action);
     }
+    // 鼠标手势触发的截图：把已发生的按下 / 移动补发给刚打开的覆盖窗
+    apply_pending_gesture(cx, state);
 }
 
 /// 处理总线上的导出命令：交给当前打开的覆盖窗按选区复制 / 保存；没有覆盖窗时只记日志。
@@ -1978,6 +2240,141 @@ fn spawn_ocr(state: &AppState, serial: u64, width: u32, height: u32, rgba: Vec<u
             serial,
             result: Err(OcrError::SpawnFailed(e.to_string())),
         });
+    }
+}
+
+/// 在后台线程读取前台应用选中的文字（先于任何自身窗口激活），结果经收件箱回到主线程。
+///
+/// 读取走无障碍接口，必要时回退到「复制」并还原剪贴板；超时 2 秒。
+///
+/// # 参数
+/// - `state`：运行时状态（取收件箱）。
+fn spawn_selected_text_capture(state: &AppState) {
+    let inbox = state.inbox.clone();
+    let spawned = std::thread::Builder::new().name("snow-selected-text".into()).spawn(move || {
+        let text = read_selected_text();
+        inbox.push(UiEvent::SelectedTextReady(text));
+    });
+    if let Err(e) = spawned {
+        tracing::error!(error = %e, "无法创建读取选中文字的线程");
+        state.inbox.push(UiEvent::SelectedTextReady(None));
+    }
+}
+
+/// 同步读取前台应用选中的文字；没有选中、不支持或失败返回 `None`（阻塞，勿在界面线程调用）。
+fn read_selected_text() -> Option<String> {
+    use snow_selected_text::{CaptureOptions, SelectedTextService, SelectionOutcome};
+    let service = match SelectedTextService::new() {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(error = ?e, "选中文字服务不可用");
+            return None;
+        }
+    };
+    // 排除自身：避免读到本程序窗口里的文字
+    let own = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .into_iter()
+        .collect();
+    let options = CaptureOptions { excluded_executables: own, ..CaptureOptions::default() };
+    let request = match service.start_capture(options) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(error = ?e, "启动选中文字读取失败");
+            return None;
+        }
+    };
+    match request.wait().as_ref() {
+        Ok(SelectionOutcome::Selected(selected)) => {
+            let text = selected.text.trim().to_string();
+            (!text.is_empty()).then_some(text)
+        }
+        Ok(_) => None,
+        Err(e) => {
+            tracing::warn!(error = ?e, "读取选中文字失败");
+            None
+        }
+    }
+}
+
+/// 可以贴到屏幕的图片扩展名（小写）。
+const PINNABLE_IMAGE_EXTENSIONS: [&str; 6] = ["png", "jpg", "jpeg", "bmp", "gif", "webp"];
+/// 一次最多贴多少个选中的文件。
+const MAX_PIN_FILES: usize = 12;
+
+/// 判断路径是不是可贴的图片文件（只看扩展名）。
+///
+/// # 参数
+/// - `path`：文件路径。
+///
+/// ```ignore
+/// assert!(is_pinnable_image(std::path::Path::new("a.PNG")));
+/// ```
+pub fn is_pinnable_image(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| PINNABLE_IMAGE_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
+}
+
+/// 在后台线程读取前台资源管理器 / 桌面里选中的图片并逐张解码，结果经收件箱回到主线程贴出。
+///
+/// # 参数
+/// - `state`：运行时状态（取收件箱）。
+fn spawn_pin_selected_files(state: &AppState) {
+    let inbox = state.inbox.clone();
+    let spawned = std::thread::Builder::new().name("snow-pin-files".into()).spawn(move || {
+        let files: Vec<_> = snow_platform::selected_files::foreground_selected_files()
+            .into_iter()
+            .filter(|p| is_pinnable_image(p))
+            .take(MAX_PIN_FILES)
+            .collect();
+        if files.is_empty() {
+            inbox.push(UiEvent::PinFilesEmpty);
+            return;
+        }
+        let mut pinned = 0usize;
+        for path in files {
+            match image::open(&path) {
+                Ok(img) => {
+                    let rgba = img.to_rgba8();
+                    let (width, height) = rgba.dimensions();
+                    inbox.push(UiEvent::PinImage { width, height, rgba: rgba.into_raw() });
+                    pinned += 1;
+                }
+                Err(e) => tracing::warn!(path = %path.display(), error = %e, "解码要贴的图片失败"),
+            }
+        }
+        if pinned == 0 {
+            inbox.push(UiEvent::PinFilesEmpty);
+        }
+    });
+    if let Err(e) = spawned {
+        tracing::error!(error = %e, "无法创建贴选中文件的线程");
+    }
+}
+
+/// 在后台线程识别一张贴图的文字，结果经收件箱回到主线程。
+///
+/// # 参数
+/// - `state`：运行时状态（取 OCR 引擎选择与收件箱）。
+/// - `id`：贴图 ID。
+/// - `width` / `height` / `rgba`：贴图图像。
+fn spawn_pin_ocr(state: &AppState, id: String, width: u32, height: u32, rgba: Vec<u8>) {
+    let selection = select_from_document(state.config.borrow().document(), Arc::clone(&state.ocr));
+    if let Some(notice) = selection.notice {
+        tracing::warn!(?notice, requested = ?selection.requested, effective = ?selection.effective, "OCR 后端回落");
+    }
+    let engine = selection.engine;
+    let inbox = state.inbox.clone();
+    let done_id = id.clone();
+    let spawned = std::thread::Builder::new().name("snow-pin-ocr".into()).spawn(move || {
+        let result = engine.recognize(&OcrInput { width, height, rgba: &rgba }).map_err(|e| format!("{e:?}"));
+        inbox.push(UiEvent::PinOcrFinished { id: done_id, result });
+    });
+    if let Err(e) = spawned {
+        tracing::error!(error = %e, "无法创建贴图 OCR 线程");
+        state.inbox.push(UiEvent::PinOcrFinished { id, result: Err(e.to_string()) });
     }
 }
 
@@ -2332,6 +2729,201 @@ fn open_or_focus_history(cx: &mut ShellContext, state: &mut AppState) {
     }
 }
 
+/// 打开贴图管理窗口；已打开则只激活。
+///
+/// # 参数
+/// - `cx`：外壳上下文。
+/// - `state`：运行时状态。
+fn open_or_focus_pin_manage(cx: &mut ShellContext, state: &mut AppState) {
+    if let Some((window, _)) = &state.pin_manage_window
+        && cx.is_window_open(window)
+    {
+        cx.activate_window(window);
+        return;
+    }
+    let prefs = ui_prefs_from_config(&state.config);
+    let title = crate::ocr_backend::i18n_for(prefs.locale).tr("pinmgr-window-title");
+    let spec = WindowSpec::normal(
+        title,
+        LogicalSize::new(crate::pinned_manage_view::WINDOW_WIDTH, crate::pinned_manage_view::WINDOW_HEIGHT),
+    );
+    let shared = Rc::clone(state.pins.shared());
+    let open_ids = state.pins.open_ids();
+    let inbox = state.inbox.clone();
+    match cx.open_window(&spec, move |window, app| {
+        PinManageView::create(window, app, shared, open_ids, prefs, inbox)
+    }) {
+        Ok((window, view)) => {
+            state.pin_manage_window = Some((window, view));
+            apply_chrome_theme(state);
+            tracing::info!("贴图管理窗口已打开");
+        }
+        Err(e) => tracing::error!(error = %e, "打开贴图管理窗口失败"),
+    }
+}
+
+/// 启动全局鼠标手势服务（至少有一条绑定时才装钩子）；失败只记日志。
+///
+/// # 参数
+/// - `state`：运行时状态（取配置与收件箱，保存服务句柄）。
+pub fn start_mouse_gesture(state: &mut AppState) {
+    let bindings = crate::mouse_gesture::bindings_from_document(state.config.borrow().document());
+    if bindings.is_empty() {
+        tracing::info!("没有配置鼠标手势，不安装全局钩子");
+        return;
+    }
+    let inbox = state.inbox.clone();
+    match snow_platform::global_mouse::GlobalMouseService::start(Box::new(move |event| {
+        inbox.push(UiEvent::MouseGesture(event));
+    })) {
+        Ok(service) => {
+            tracing::info!(bindings = bindings.len(), "全局鼠标手势已启动");
+            service.set_bindings(bindings);
+            state.mouse_service = Some(service);
+        }
+        Err(e) => tracing::warn!(error = %e, "启动全局鼠标手势失败"),
+    }
+}
+
+/// 处理鼠标手势事件：开始时发起截图；覆盖窗就绪前的位置先记下，就绪后补发；松开时完成框选。
+///
+/// # 参数
+/// - `cx`：外壳上下文。
+/// - `state`：运行时状态。
+/// - `event`：拖动事件。
+fn on_mouse_gesture(cx: &mut ShellContext, state: &mut AppState, event: snow_platform::global_mouse::DragEvent) {
+    use snow_platform::global_mouse::DragEvent;
+    match event {
+        DragEvent::Begin { id, action, pos } => {
+            let Some(mode) = crate::mouse_gesture::mode_for_action(&action) else {
+                tracing::warn!(%action, "未知的鼠标手势动作");
+                return;
+            };
+            if state.capture_in_flight || any_overlay_open(cx, state) || state.recording.is_busy(cx) {
+                tracing::info!(%action, "已有截图 / 录制在进行，忽略鼠标手势");
+                if let Some(service) = &state.mouse_service {
+                    service.cancel();
+                }
+                return;
+            }
+            state.gesture = Some(GestureSession { id, start: pos, latest: pos, finished: false, applied: false });
+            request_capture(cx, state, ORIGIN_GESTURE, mode);
+        }
+        DragEvent::Update { id, pos } => {
+            if let Some(session) = state.gesture.as_mut().filter(|s| s.id == id) {
+                session.latest = pos;
+                if session.applied {
+                    drive_gesture(cx, state, snow_platform::global_mouse::Point { x: pos.x, y: pos.y }, crate::overlay_view::GestureStep::Move);
+                }
+            }
+        }
+        DragEvent::Finish { id, pos } => {
+            let Some(session) = state.gesture.as_mut().filter(|s| s.id == id) else {
+                return;
+            };
+            session.latest = pos;
+            session.finished = true;
+            if session.applied {
+                state.gesture = None;
+                drive_gesture(cx, state, pos, crate::overlay_view::GestureStep::Up);
+            }
+        }
+        DragEvent::Cancel { id } => {
+            if state.gesture.as_ref().is_some_and(|s| s.id == id) {
+                state.gesture = None;
+            }
+        }
+    }
+}
+
+/// 把一步手势交给覆盖窗；没有覆盖窗时忽略。
+///
+/// # 参数
+/// - `cx`：外壳上下文。
+/// - `state`：运行时状态。
+/// - `pos`：鼠标位置（虚拟桌面物理像素）。
+/// - `step`：这一步是按下、移动还是松开。
+fn drive_gesture(
+    cx: &mut ShellContext,
+    state: &AppState,
+    pos: snow_platform::global_mouse::Point,
+    step: crate::overlay_view::GestureStep,
+) {
+    let (Some(window), Some(view)) = (state.overlay.as_ref(), state.overlay_view.clone()) else {
+        return;
+    };
+    let point = PhysicalPoint::new(pos.x, pos.y);
+    let _ = window.gpui_handle().update(cx.app(), |_, window, app| {
+        view.update(app, |v, vcx| v.drive_gesture(step, point, window, vcx));
+    });
+}
+
+/// 覆盖窗刚打开时，把手势已经发生的按下与移动补发给它；鼠标键已松开的话顺带完成框选。
+///
+/// # 参数
+/// - `cx`：外壳上下文。
+/// - `state`：运行时状态。
+fn apply_pending_gesture(cx: &mut ShellContext, state: &mut AppState) {
+    let Some(session) = state.gesture.as_mut().filter(|s| !s.applied) else {
+        return;
+    };
+    session.applied = true;
+    let (start, latest, finished) = (session.start, session.latest, session.finished);
+    if finished {
+        state.gesture = None;
+    }
+    use crate::overlay_view::GestureStep;
+    drive_gesture(cx, state, start, GestureStep::Down);
+    drive_gesture(cx, state, latest, GestureStep::Move);
+    if finished {
+        drive_gesture(cx, state, latest, GestureStep::Up);
+    }
+}
+
+/// 打开文字识别结果窗（每次新开一个，窗口关闭即释放）。
+///
+/// # 参数
+/// - `cx`：外壳上下文。
+/// - `state`：运行时状态（取界面偏好）。
+/// - `data`：识别结果数据。
+fn open_recognition_window(cx: &mut ShellContext, state: &mut AppState, data: crate::recognition_view::RecognitionData) {
+    use crate::recognition_view::{RecognitionView, WINDOW_HEIGHT, WINDOW_WIDTH};
+    let prefs = ui_prefs_from_config(&state.config);
+    let title = crate::ocr_backend::i18n_for(prefs.locale).tr("recwin-window-title");
+    let spec = WindowSpec::normal(title, LogicalSize::new(WINDOW_WIDTH, WINDOW_HEIGHT));
+    match cx.open_window(&spec, move |window, app| RecognitionView::create(window, app, data, prefs)) {
+        Ok(_) => {
+            apply_chrome_theme(state);
+            tracing::info!("识别结果窗已打开");
+        }
+        Err(e) => tracing::error!(error = %e, "打开识别结果窗失败"),
+    }
+}
+
+/// 贴图 / 分组 / 窗口状态变化后，刷新已打开的管理窗口。
+///
+/// # 参数
+/// - `cx`：外壳上下文。
+/// - `state`：运行时状态。
+fn refresh_pin_manage(cx: &mut ShellContext, state: &AppState) {
+    if let Some((_, view)) = &state.pin_manage_window {
+        let open_ids = state.pins.open_ids();
+        view.update(cx.app(), |v, cx| v.refresh(open_ids, cx));
+    }
+}
+
+/// 把操作结果交给管理窗口显示错误（成功则什么也不做）。
+///
+/// # 参数
+/// - `cx`：外壳上下文。
+/// - `state`：运行时状态。
+/// - `error`：失败原因。
+fn report_pin_manage_error(cx: &mut ShellContext, state: &AppState, error: String) {
+    if let Some((_, view)) = &state.pin_manage_window {
+        view.update(cx.app(), |v, cx| v.show_error(error, cx));
+    }
+}
+
 /// 光标所在显示器作为输入框翻译浮窗的落点；取不到光标或显示器时用主屏。
 ///
 /// # 参数
@@ -2513,6 +3105,25 @@ fn describe_hotkey_failure(attempt: &HotkeyRegistration, config_key: &str) -> St
     }
 }
 
+/// 托盘分组块的 `(分组 ID, 显示名)` 列表：默认分组显示本地化名称。
+///
+/// # 参数
+/// - `state`：运行时状态。
+/// - `locale`：界面语料语言代码。
+fn tray_group_labels(state: &AppState, locale: &str) -> Vec<(String, String)> {
+    let i18n = crate::ocr_backend::i18n_for(locale);
+    state
+        .pins
+        .shared()
+        .groups()
+        .into_iter()
+        .map(|g| {
+            let name = if g.built_in { i18n.tr("tray-group-default") } else { g.name };
+            (g.id, name)
+        })
+        .collect()
+}
+
 /// 按当前界面语言重建托盘菜单文案。
 ///
 /// # 参数
@@ -2522,7 +3133,14 @@ fn refresh_tray_menu(state: &AppState) {
         return;
     };
     let locale = ui_prefs_from_document(state.config.borrow().document()).locale;
-    let built = build_tray_spec(locale, state.config.borrow().document(), state.hotkeys_paused);
+    let groups = tray_group_labels(state, locale);
+    let built = build_tray_spec_with_groups(
+        locale,
+        state.config.borrow().document(),
+        state.hotkeys_paused,
+        &groups,
+        &state.pins.shared().active_group_id(),
+    );
     match built.and_then(|spec| tray.set_menu(spec.menu).map_err(|e| e.to_string())) {
         Ok(()) => tracing::info!(locale, "托盘菜单已刷新"),
         Err(e) => tracing::warn!(error = %e, "刷新托盘菜单失败"),
@@ -2560,12 +3178,16 @@ fn hotkey_config_key(key: &str) -> Option<&'static str> {
 /// - `key`：变更的配置键。
 /// - `previous`：变更前的值。
 fn on_config_changed(cx: &mut ShellContext, state: &mut AppState, key: &str, previous: Value) {
-    if key == LANGUAGE_KEY || key == DELAY_SECONDS_CONFIG_KEY {
+    if key == LANGUAGE_KEY || key == DELAY_SECONDS_CONFIG_KEY || key == crate::tray_config::KEY_MENU_OPTIONS {
         refresh_tray_menu(state);
         return;
     }
     if key == THEME_MODE_KEY {
         apply_chrome_theme(state);
+        return;
+    }
+    if key == crate::system_settings::KEY_PRIORITY || key == crate::system_settings::KEY_AUTO_START {
+        crate::system_settings::apply(state.config.borrow().document());
         return;
     }
     let Some(config_key) = hotkey_config_key(key) else {
@@ -2678,16 +3300,31 @@ fn run_quick_action(cx: &mut ShellContext, state: &mut AppState, action: QuickAc
         QuickPlan::Delayed => begin_delayed_capture(state),
         QuickPlan::OpenSettings => open_or_focus_settings(cx, state),
         QuickPlan::OpenHistory => open_or_focus_history(cx, state),
+        QuickPlan::OpenPinManage => open_or_focus_pin_manage(cx, state),
+        QuickPlan::PinSelectedFiles => spawn_pin_selected_files(state),
+        QuickPlan::TranslateSelected => spawn_selected_text_capture(state),
+        QuickPlan::RecordAndCopy => {
+            state.record_copy_pending = true;
+            request_recording(cx, state);
+        }
+        QuickPlan::RestoreClosed => match state.pins.restore_last_closed(cx) {
+            Ok(Some(id)) => {
+                tracing::info!(id = %id, "已恢复最近关闭的贴图");
+                refresh_pin_manage(cx, state);
+            }
+            Ok(None) => {
+                let text = notice_text(state, NOTICE_RESTORE_CLOSED, Args::new());
+                show_notice(state, &text);
+            }
+            Err(e) => tracing::warn!(error = %e, "恢复最近关闭的贴图失败"),
+        },
         QuickPlan::ToggleHotkeys => toggle_global_hotkeys(state),
+        QuickPlan::ToggleFullscreenGate => toggle_fullscreen_gate(state),
         QuickPlan::OpenRecordingFolder => open_recording_folder(state),
         QuickPlan::Placeholder(id) => {
             let text = notice_text(state, id, Args::new());
             show_notice(state, &text);
         }
-    }
-    if action == QuickAction::ToggleDisableOnFocusedFullscreen {
-        // 原生勾选框点击即翻转；该动作尚是占位，需重建菜单把勾选复位
-        refresh_tray_menu(state);
     }
 }
 
@@ -2820,6 +3457,30 @@ fn on_direct_capture_done(state: &mut AppState, result: Result<DirectResult, Str
             }
         }
     };
+    show_notice(state, &text);
+}
+
+/// 切换「前台全屏窗口时停用热键」：写回配置、同步闸门镜像并重建托盘菜单的勾选。
+///
+/// # 参数
+/// - `state`：运行时状态。
+fn toggle_fullscreen_gate(state: &mut AppState) {
+    use crate::fullscreen_gate::{DISABLE_ON_FULLSCREEN_CONFIG_KEY, config_value, configured, set_enabled};
+    let enabled = !configured(state.config.borrow().document());
+    {
+        let mut store = state.config.borrow_mut();
+        if let Err(e) = store.set_value(DISABLE_ON_FULLSCREEN_CONFIG_KEY, config_value(enabled)) {
+            tracing::warn!(error = %e, "写入前台全屏停用热键开关失败");
+        } else if let Err(e) = store.flush() {
+            tracing::warn!(error = %e, "前台全屏停用热键开关落盘失败");
+        }
+    }
+    // 以配置为准：写入失败时镜像与勾选都回到真实状态
+    let effective = configured(state.config.borrow().document());
+    set_enabled(effective);
+    refresh_tray_menu(state);
+    let id = if effective { NOTICE_FULLSCREEN_GATE_ON } else { NOTICE_FULLSCREEN_GATE_OFF };
+    let text = notice_text(state, id, Args::new());
     show_notice(state, &text);
 }
 
@@ -2971,6 +3632,9 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
         UiEvent::StartRecording => request_recording(cx, state),
         UiEvent::RecordingRegionChosen { region, monitor } => {
             state.recording.begin(cx, region, &monitor, None);
+            if std::mem::take(&mut state.record_copy_pending) {
+                state.recording.mark_copy_on_finish(cx);
+            }
         }
         UiEvent::RecorderPoll | UiEvent::RecordingTick => state.recording.sync(cx),
         UiEvent::PinCreate {
@@ -2989,8 +3653,111 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
         UiEvent::RestorePins => {
             let restored = state.pins.restore_all(cx);
             tracing::info!(restored, "启动恢复贴图");
+            refresh_tray_menu(state);
         }
-        UiEvent::PinClosed { id } => state.pins.forget(&id),
+        UiEvent::PinControl(crate::pinned_shared::PinControlEvent::OcrRequested { id, width, height, rgba }) => {
+            spawn_pin_ocr(state, id, width, height, rgba);
+        }
+        UiEvent::PinOcrFinished { id, result } => state.pins.deliver_ocr(cx, &id, result),
+        UiEvent::PinClosed { id } => {
+            state.pins.forget(&id);
+            refresh_pin_manage(cx, state);
+        }
+        UiEvent::OpenPinManage => open_or_focus_pin_manage(cx, state),
+        UiEvent::MouseGesture(event) => on_mouse_gesture(cx, state, event),
+        UiEvent::OpenRecognitionWindow(data) => open_recognition_window(cx, state, *data),
+        UiEvent::SelectedTextReady(None) => {
+            let text = notice_text(state, NOTICE_NO_SELECTED_TEXT, Args::new());
+            show_notice(state, &text);
+        }
+        UiEvent::SelectedTextReady(Some(text)) => {
+            open_or_focus_translate_input(cx, state);
+            if let Some((window, view)) = &state.translate_input {
+                let view = view.clone();
+                let _ = window.gpui_handle().update(cx.app(), |_, window, app| {
+                    view.update(app, |v, vcx| v.prefill_and_submit(&text, window, vcx));
+                });
+            }
+        }
+        UiEvent::PinImage { width, height, rgba } => {
+            if let Err(e) = state.pins.create_from_image(cx, width, height, rgba) {
+                tracing::warn!(error = %e, "贴选中的图片失败");
+            }
+            refresh_pin_manage(cx, state);
+        }
+        UiEvent::PinFilesEmpty => {
+            let text = notice_text(state, NOTICE_PIN_SELECTED_FILES, Args::new());
+            show_notice(state, &text);
+        }
+        UiEvent::PinManageThumb { id, thumb } => {
+            if let Some((_, view)) = &state.pin_manage_window {
+                view.update(cx.app(), |v, cx| v.set_thumb(&id, thumb, cx));
+            }
+        }
+        UiEvent::PinManageShow { id } => {
+            if let Err(e) = state.pins.show_pin(cx, &id) {
+                report_pin_manage_error(cx, state, e);
+            }
+            refresh_tray_menu(state);
+            refresh_pin_manage(cx, state);
+        }
+        UiEvent::PinManageDelete { id } => {
+            state.pins.delete_pin(cx, &id);
+            refresh_pin_manage(cx, state);
+        }
+        UiEvent::PinManageDeleteAll => {
+            let deleted = state.pins.delete_all(cx);
+            tracing::info!(deleted, "已删除全部贴图");
+            refresh_pin_manage(cx, state);
+        }
+        UiEvent::PinGroupCreateNamed { name } => {
+            if let Err(e) = state.pins.shared().create_group(Some(&name)) {
+                report_pin_manage_error(cx, state, e);
+            }
+            refresh_tray_menu(state);
+            refresh_pin_manage(cx, state);
+        }
+        UiEvent::PinGroupDelete { id } => {
+            if let Err(e) = state.pins.delete_group(cx, &id) {
+                report_pin_manage_error(cx, state, e);
+            }
+            refresh_tray_menu(state);
+            refresh_pin_manage(cx, state);
+        }
+        UiEvent::PinGroupSwitch { id } => {
+            match state.pins.switch_group(cx, &id) {
+                Ok(restored) => tracing::info!(group = %id, restored, "已切换贴图分组"),
+                Err(e) => tracing::warn!(group = %id, error = %e, "切换贴图分组失败"),
+            }
+            refresh_tray_menu(state);
+            refresh_pin_manage(cx, state);
+        }
+        UiEvent::PinGroupNew => {
+            match state.pins.shared().create_group(None) {
+                Ok(id) => tracing::info!(group = %id, "已新建贴图分组"),
+                Err(e) => tracing::warn!(error = %e, "新建贴图分组失败"),
+            }
+            refresh_tray_menu(state);
+            refresh_pin_manage(cx, state);
+        }
+        UiEvent::PinGroupDeleteEmpty => {
+            match state.pins.shared().delete_empty_groups() {
+                Ok(n) => tracing::info!(deleted = n, "已删除空的贴图分组"),
+                Err(e) => tracing::warn!(error = %e, "删除空分组失败"),
+            }
+            refresh_tray_menu(state);
+            refresh_pin_manage(cx, state);
+        }
+        UiEvent::PinMoveToGroup { id, group } => {
+            if let Err(e) = state.pins.move_to_group(cx, &id, &group) {
+                tracing::warn!(id = %id, group = %group, error = %e, "移动贴图到分组失败");
+            }
+            refresh_pin_manage(cx, state);
+        }
+        UiEvent::PinControl(event) => state.pins.handle_control(cx, &state.inbox, event),
+        UiEvent::PinExitClickThrough { id } => state.pins.exit_click_through(cx, &id),
+        UiEvent::PinHideReveal { id } => state.pins.reveal_hidden(cx, &id),
+        UiEvent::PinExitHideToTop { id } => state.pins.exit_hide_to_top(cx, &id),
         UiEvent::OcrRequested {
             serial,
             width,
@@ -3157,7 +3924,13 @@ pub fn start_services(
     let prefs = ui_prefs_from_document(document);
     let locale = prefs.locale;
     apply_popup_menu_theme(prefs.dark);
-    let tray = match build_tray_spec(locale, document, false)
+    let tray_on = crate::tray_config::tray_enabled(document);
+    let tray_spec = if tray_on {
+        build_tray_spec(locale, document, false)
+    } else {
+        Err("托盘已在设置中关闭".to_string())
+    };
+    let tray = match tray_spec
         .and_then(|spec| TrayService::start(caps, spec, Dispatcher::from_bus(bus.clone())).map_err(|e| e.to_string()))
     {
         Ok(tray) => {
@@ -3175,12 +3948,21 @@ pub fn start_services(
             Some(tray)
         }
         Err(e) => {
-            tracing::error!(error = %e, "托盘启动失败，将无托盘图标运行");
+            if tray_on {
+                tracing::error!(error = %e, "托盘启动失败，将无托盘图标运行");
+            } else {
+                tracing::info!("托盘已在设置中关闭，不创建托盘图标");
+            }
             None
         }
     };
+    crate::fullscreen_gate::set_enabled(crate::fullscreen_gate::configured(document));
+    let hotkey_dispatcher = crate::fullscreen_gate::gate_dispatcher(
+        Dispatcher::from_bus(bus.clone()),
+        snow_platform::window_rect::focused_fullscreen_window_exists,
+    );
     let mut handles = Vec::new();
-    let hotkeys = match HotkeyService::start(caps, Dispatcher::from_bus(bus.clone())) {
+    let hotkeys = match HotkeyService::start(caps, hotkey_dispatcher) {
         Ok(service) => {
             let registration = register_all_hotkeys(&service, document);
             tracing::info!(
@@ -3241,12 +4023,12 @@ mod tests {
         assert_eq!(map_tray_signal("rm -rf"), None);
     }
 
-    /// 托盘菜单：25 项，分隔线落在各组之间，首尾条目正确，所有条目带图标。
+    /// 托盘菜单（默认 `tray/menu_options` 的 12 项）：分隔线落在各组之间，首尾条目正确，非勾选条目带图标。
     #[test]
     fn tray_spec_shape() {
         let doc = ConfigDocument::from_bytes(None);
         let spec = build_tray_spec("zh-CN", &doc, false).unwrap();
-        assert_eq!(spec.menu.len(), 25);
+        assert_eq!(spec.menu.len(), 15);
         let seps: Vec<usize> = spec
             .menu
             .iter()
@@ -3254,17 +4036,17 @@ mod tests {
             .filter(|(_, e)| matches!(e, TrayMenuEntry::Separator))
             .map(|(i, _)| i)
             .collect();
-        assert_eq!(seps, vec![8, 12, 16, 21]);
+        assert_eq!(seps, vec![5, 8, 10, 12]);
         assert!(matches!(
             &spec.menu[0],
             TrayMenuEntry::Item { action: TrayAction::Command(AppCommand::Capture(_)), .. }
         ));
         assert!(matches!(
-            &spec.menu[24],
+            spec.menu.last().unwrap(),
             TrayMenuEntry::Item { action: TrayAction::Signal(s), .. } if s == TRAY_SIGNAL_QUIT
         ));
         for entry in &spec.menu {
-            if let TrayMenuEntry::Item { icon, label, .. } = entry {
+            if let TrayMenuEntry::Item { icon, label, checked: None, .. } = entry {
                 assert!(icon.is_some(), "缺少图标: {label}");
             }
         }
@@ -3282,8 +4064,54 @@ mod tests {
     #[test]
     fn tray_hotkey_toggle_checked_follows_state() {
         let doc = ConfigDocument::from_bytes(None);
-        assert_eq!(tray_item(&build_tray_spec("en-US", &doc, false).unwrap(), 19).1, Some(false));
-        assert_eq!(tray_item(&build_tray_spec("en-US", &doc, true).unwrap(), 19).1, Some(true));
+        let toggle_at = |spec: &TraySpec| {
+            spec.menu
+                .iter()
+                .position(|e| {
+                    matches!(
+                        e,
+                        TrayMenuEntry::Item {
+                            action: TrayAction::Command(AppCommand::QuickAction(QuickAction::ToggleGlobalHotkeys)),
+                            ..
+                        }
+                    )
+                })
+                .expect("默认菜单含暂停热键项")
+        };
+        let off = build_tray_spec("en-US", &doc, false).unwrap();
+        let on = build_tray_spec("en-US", &doc, true).unwrap();
+        assert_eq!(tray_item(&off, toggle_at(&off)).1, Some(false));
+        assert_eq!(tray_item(&on, toggle_at(&on)).1, Some(true));
+    }
+
+    /// `tray/menu_options` 决定显示哪些项；左 / 中键动作跟随 `tray/*_click_action`，默认左键截图、中键贴图。
+    #[test]
+    fn tray_follows_menu_options_and_click_actions() {
+        let mut doc = ConfigDocument::from_bytes(None);
+        let default_spec = build_tray_spec("en-US", &doc, false).unwrap();
+        assert!(matches!(
+            default_spec.on_left_click,
+            Some(TrayAction::Command(AppCommand::Capture(_)))
+        ));
+        assert!(matches!(
+            default_spec.on_middle_click,
+            Some(TrayAction::Command(AppCommand::QuickAction(QuickAction::ScreenshotFixed)))
+        ));
+        assert!(!has_signal(&default_spec, TRAY_SIGNAL_HISTORY));
+
+        doc.set_value("tray/menu_options", serde_json::json!(["quick.open-capture-history", "tray.exit"]))
+            .unwrap();
+        doc.set_value("tray/left_click_action", serde_json::json!("show_main_window")).unwrap();
+        let spec = build_tray_spec("en-US", &doc, false).unwrap();
+        assert_eq!(spec.menu.len(), 3, "历史、退出两项，中间只留一条组间分隔线");
+        assert!(matches!(spec.menu[1], TrayMenuEntry::Separator));
+        assert!(has_signal(&spec, TRAY_SIGNAL_HISTORY) && has_signal(&spec, TRAY_SIGNAL_QUIT));
+        assert!(matches!(spec.on_left_click, Some(TrayAction::Signal(ref s)) if s == TRAY_SIGNAL_SETTINGS));
+    }
+
+    /// 菜单里是否有触发指定信号的条目。
+    fn has_signal(spec: &TraySpec, wanted: &str) -> bool {
+        spec.menu.iter().any(|e| matches!(e, TrayMenuEntry::Item { action: TrayAction::Signal(s), .. } if s == wanted))
     }
 
     /// 延迟截图文案带上配置的秒数（默认 3，改成 7 后跟随）。
@@ -3307,6 +4135,53 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// 真机：读取前台应用当前选中的文字并打印。需要先在别的应用里选中文字，默认忽略；手动用 `--ignored --nocapture` 跑。
+    #[test]
+    #[ignore = "需要前台应用里有选中的文字"]
+    fn real_selected_text_probe() {
+        eprintln!("SELECTED: {:?}", read_selected_text());
+    }
+
+    /// 只有常见图片扩展名（不分大小写）才会被当成可贴的文件。
+    #[test]
+    fn pinnable_image_extensions() {
+        for ok in ["a.png", "b.JPG", "c.jpeg", "d.bmp", "e.gif", "f.WebP"] {
+            assert!(is_pinnable_image(std::path::Path::new(ok)), "{ok}");
+        }
+        for bad in ["a.txt", "b", "c.png.exe", "d.svg"] {
+            assert!(!is_pinnable_image(std::path::Path::new(bad)), "{bad}");
+        }
+    }
+
+    /// 托盘分组块：出现在贴图组之后，激活分组带勾，新建 / 删除空分组两项走信号。
+    #[test]
+    fn tray_group_block_follows_pin_section() {
+        let doc = ConfigDocument::from_bytes(None);
+        let base = build_tray_spec("en-US", &doc, false).unwrap().menu.len();
+        let groups = vec![("default".to_string(), "Default group".to_string()), ("g1".to_string(), "Work".to_string())];
+        let spec = build_tray_spec_with_groups("en-US", &doc, false, &groups, "g1").unwrap();
+        // 两个分组 + 新建 + 删除空 + 贴图管理 + 一条分隔线
+        assert_eq!(spec.menu.len(), base + 6);
+        let find = |wanted: &str| {
+            spec.menu.iter().find_map(|e| match e {
+                TrayMenuEntry::Item { action: TrayAction::Signal(s), checked, .. } if s == wanted => Some(*checked),
+                _ => None,
+            })
+        };
+        assert_eq!(find("group:g1"), Some(Some(true)));
+        assert_eq!(find("group:default"), Some(Some(false)));
+        assert!(find(TRAY_SIGNAL_GROUP_NEW).is_some() && find(TRAY_SIGNAL_GROUP_DELETE_EMPTY).is_some());
+    }
+
+    /// 分组相关托盘信号映射成收件箱事件。
+    #[test]
+    fn tray_group_signals_map() {
+        assert_eq!(map_tray_signal("group:abc"), Some(UiEvent::PinGroupSwitch { id: "abc".into() }));
+        assert_eq!(map_tray_signal(TRAY_SIGNAL_GROUP_NEW), Some(UiEvent::PinGroupNew));
+        assert_eq!(map_tray_signal(TRAY_SIGNAL_GROUP_DELETE_EMPTY), Some(UiEvent::PinGroupDeleteEmpty));
+        assert_eq!(map_tray_signal("nope"), None);
     }
 
     /// 总线上的截图命令会变成带来源的收件箱事件。

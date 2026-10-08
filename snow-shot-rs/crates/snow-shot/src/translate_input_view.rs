@@ -184,6 +184,16 @@ impl TranslateInputView {
         view
     }
 
+    /// 预填文本并立即翻译（选中文字翻译用）。
+    ///
+    /// # 参数
+    /// - `text`：要翻译的原文。
+    /// - `window`：当前窗口。
+    pub fn prefill_and_submit(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.input.update(cx, |state, cx| state.set_value(text.to_string(), window, cx));
+        self.submit(window, cx);
+    }
+
     /// 发起翻译：输入为空或正忙时只更新状态，不发请求。
     fn submit(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         let text = self.input.read(cx).value().to_string();

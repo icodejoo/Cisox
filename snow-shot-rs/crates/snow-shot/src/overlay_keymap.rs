@@ -96,6 +96,14 @@ pub enum OverlayKeyAction {
     PreviousHistory,
     /// 翻到更新的一条截图历史（翻到头即回到当前截图）。
     NextHistory,
+    /// 按住时拖动框选可整体移动选区（按下进入，松开由视图的松开事件结束）。
+    MoveEntireSelection,
+    /// 快速保存：不弹另存为对话框，直接按配置的目录与格式保存。
+    QuickSave,
+    /// 放弃当前截图并重新截一张。
+    Recapture,
+    /// 切换放大镜坐标显示：全局（桌面）/ 相对。
+    ToggleCoordinateMode,
     /// 尚未实现：携带配置键，用来取动作名给出提示。
     Unimplemented(&'static str),
 }
@@ -175,7 +183,7 @@ const SCREENSHOT_KEYS: &[(&str, OverlayKeyAction)] = &[
     ("screenshot_shortcuts/cancel_screenshot", OverlayKeyAction::Cancel),
     ("screenshot_shortcuts/copy_to_clipboard", OverlayKeyAction::CopyToClipboard),
     ("screenshot_shortcuts/save_as_file", OverlayKeyAction::SaveAsFile),
-    ("screenshot_shortcuts/quick_save", OverlayKeyAction::Unimplemented("screenshot_shortcuts/quick_save")),
+    ("screenshot_shortcuts/quick_save", OverlayKeyAction::QuickSave),
     ("screenshot_shortcuts/pin_to_screen", OverlayKeyAction::PinToScreen),
     ("screenshot_shortcuts/video_recording", OverlayKeyAction::VideoRecording),
     ("screenshot_shortcuts/text_recognition", OverlayKeyAction::TextRecognition),
@@ -191,15 +199,17 @@ const SCREENSHOT_KEYS: &[(&str, OverlayKeyAction)] = &[
     ("screenshot_shortcuts/move_cursor_down", OverlayKeyAction::MoveCursor(Dir::Down)),
     ("screenshot_shortcuts/move_cursor_left", OverlayKeyAction::MoveCursor(Dir::Left)),
     ("screenshot_shortcuts/move_cursor_right", OverlayKeyAction::MoveCursor(Dir::Right)),
-    ("screenshot_shortcuts/move_entire_selection", OverlayKeyAction::Unimplemented("screenshot_shortcuts/move_entire_selection")),
-    ("screenshot_shortcuts/keep_selection_width_and_height_consistent", OverlayKeyAction::Unimplemented("screenshot_shortcuts/keep_selection_width_and_height_consistent")),
+    ("screenshot_shortcuts/move_entire_selection", OverlayKeyAction::MoveEntireSelection),
     ("screenshot_shortcuts/switch_selection_between_window_and_window_sub_element", OverlayKeyAction::ToggleSelectionTarget),
     ("screenshot_shortcuts/previous_screenshot_history", OverlayKeyAction::PreviousHistory),
     ("screenshot_shortcuts/next_screenshot_history", OverlayKeyAction::NextHistory),
     ("screenshot_shortcuts/select_previously_selected_area", OverlayKeyAction::SelectPreviousSelection),
-    ("screenshot_shortcuts/recapture", OverlayKeyAction::Unimplemented("screenshot_shortcuts/recapture")),
-    ("screenshot_shortcuts/toggle_coordinate_mode", OverlayKeyAction::Unimplemented("screenshot_shortcuts/toggle_coordinate_mode")),
+    ("screenshot_shortcuts/recapture", OverlayKeyAction::Recapture),
+    ("screenshot_shortcuts/toggle_coordinate_mode", OverlayKeyAction::ToggleCoordinateMode),
 ];
+
+/// 「保持选区宽高一致」的配置键（默认绑定 Shift，只有修饰键，不进键位表）。
+const KEEP_RATIO_KEY: &str = "screenshot_shortcuts/keep_selection_width_and_height_consistent";
 
 /// 绘制工具键位表：配置键 → 工具。
 const DRAWING_KEYS: &[(&str, DrawingKey)] = &[
@@ -220,6 +230,8 @@ const DRAWING_KEYS: &[(&str, DrawingKey)] = &[
 pub struct OverlayKeymap {
     /// 按优先级排列的 `(组合, 动作)`。
     bindings: Vec<(Chord, OverlayKeyAction)>,
+    /// 「保持宽高一致」是否绑定在 Shift 上（只有修饰键的绑定解析不成 [`Chord`]，单独记录）。
+    shift_keeps_ratio: bool,
 }
 
 impl OverlayKeymap {
@@ -245,7 +257,15 @@ impl OverlayKeymap {
                 }
             }
         }
-        Self { bindings }
+        let shift_keeps_ratio = shortcut_strings(&document.value(KEEP_RATIO_KEY))
+            .iter()
+            .any(|text| text.trim().eq_ignore_ascii_case("shift"));
+        Self { bindings, shift_keeps_ratio }
+    }
+
+    /// 按住 Shift 是否应当锁定选区宽高关系（配置 `keep_selection_width_and_height_consistent` 绑在 Shift 上）。
+    pub fn shift_keeps_ratio(&self) -> bool {
+        self.shift_keeps_ratio
     }
 
     /// 解析一次按键。
@@ -273,9 +293,8 @@ impl Default for OverlayKeymap {
 
 /// 键位表里涉及的全部配置键（供“已接线键清单”核对与测试）。
 pub fn wired_config_keys() -> Vec<&'static str> {
-    SCREENSHOT_KEYS
-        .iter()
-        .map(|(k, _)| *k)
+    std::iter::once(KEEP_RATIO_KEY)
+        .chain(SCREENSHOT_KEYS.iter().map(|(k, _)| *k))
         .chain(DRAWING_KEYS.iter().map(|(k, _)| *k))
         .collect()
 }
@@ -323,8 +342,9 @@ mod tests {
             ("1", false, false, false, Tool(DrawingKey::Shape)),
             ("p", false, false, false, Tool(DrawingKey::Brush)),
             ("9", false, false, false, Tool(DrawingKey::Watermark)),
-            ("s", true, true, false, Unimplemented("screenshot_shortcuts/quick_save")),
-            ("r", false, false, true, Unimplemented("screenshot_shortcuts/recapture")),
+            ("s", true, true, false, QuickSave),
+            ("r", false, false, true, Recapture),
+            ("p", true, false, false, ToggleCoordinateMode),
             ("x", true, false, false, Unimplemented("screenshot_shortcuts/table_recognition")),
         ];
         for (key, ctrl, shift, alt, want) in cases {

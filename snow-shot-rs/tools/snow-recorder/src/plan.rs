@@ -2,20 +2,16 @@
 
 use std::path::PathBuf;
 
-use snow_recorder_protocol::{MediaFormat, StartRequest};
+use snow_recorder_protocol::{EffectsRequest, MediaFormat, StartRequest};
 
 use crate::settings::{SizeLimit, oriented_limit};
 #[cfg(test)]
 use snow_recorder_protocol::scratch_file;
 use snow_screen_recorder::{
-    CaptureBackendKind, DirectRecordingConfig, ExportFormat, RecordingRegion, VideoCodec,
+    CaptureBackendKind, DirectRecordingConfig, ExportFormat, KeyboardOverlayConfig, RecordingRegion, VideoCodec,
     VideoEncodingSpeed,
 };
 
-/// 鼠标轨迹时长（毫秒）；运行时要求 100..=2000，即便轨迹被关闭也需合法。
-const MOUSE_TRAIL_DURATION_MS: u64 = 500;
-/// 全透明色：关闭对应叠加特效。
-const EFFECT_OFF_RGBA: [u8; 4] = [0; 4];
 /// 环境变量：覆盖 x264 预设（ultrafast / superfast / veryfast / faster / fast / medium）。
 pub const ENV_PRESET: &str = "SNOW_RECORDER_PRESET";
 
@@ -46,6 +42,27 @@ pub fn export_format(format: MediaFormat) -> ExportFormat {
         MediaFormat::Apng => ExportFormat::Apng,
         MediaFormat::Webp => ExportFormat::Webp,
     }
+}
+
+/// 按钮帽边框的透明度（相对文字色）。
+const KEYCAP_BORDER_ALPHA: u8 = 0x40;
+
+/// 按特效请求构造按键回显配置；未开启返回 `None`。
+///
+/// # 参数
+/// - `effects`：特效请求。
+fn keyboard_overlay(effects: &EffectsRequest) -> Option<KeyboardOverlayConfig> {
+    effects.keyboard.then(|| {
+        let [r, g, b, _] = effects.keyboard_text;
+        KeyboardOverlayConfig {
+            font: None,
+            keycap_size: effects.keyboard_size,
+            background_rgba: effects.keyboard_background,
+            text_rgba: effects.keyboard_text,
+            border_rgba: [r, g, b, KEYCAP_BORDER_ALPHA],
+            labels: Default::default(),
+        }
+    })
 }
 
 /// 由开始请求构造直录配置；输出指向中间文件（完成后由调用方改名为最终路径）。
@@ -79,13 +96,13 @@ pub fn build_config(
         enable_microphone: request.audio.microphone && request.format == MediaFormat::Mp4,
         enable_system_audio: request.audio.system && request.format == MediaFormat::Mp4,
         show_cursor: request.show_cursor,
-        keyboard: None,
-        mouse_trail_rgba: EFFECT_OFF_RGBA,
-        mouse_trail_duration_ms: MOUSE_TRAIL_DURATION_MS,
-        mouse_click_rgba: EFFECT_OFF_RGBA,
-        mouse_highlight_rgba: EFFECT_OFF_RGBA,
-        record_mouse_clicks: false,
-        show_keyboard: false,
+        keyboard: keyboard_overlay(&request.effects),
+        mouse_trail_rgba: request.effects.trail,
+        mouse_trail_duration_ms: u64::from(request.effects.trail_ms).clamp(100, 2000),
+        mouse_click_rgba: request.effects.click,
+        mouse_highlight_rgba: request.effects.highlight,
+        record_mouse_clicks: request.effects.record_clicks,
+        show_keyboard: request.effects.keyboard,
         excluded_windows: Default::default(),
         excluded_processes: Default::default(),
     }
@@ -107,6 +124,7 @@ mod tests {
             show_cursor: true,
             output: PathBuf::from(output),
             audio: Default::default(),
+            effects: Default::default(),
         }
     }
 
@@ -152,5 +170,34 @@ mod tests {
         req.width = 0;
         let config = build_config(&req, scratch_file(&req.output, 1), false, None);
         assert!(config.validate().is_err());
+    }
+
+    /// 特效请求映射到直录配置：全关时与旧行为一致，打开后各字段透传并通过运行时校验。
+    #[test]
+    fn effects_map_into_config() {
+        let mut req = request(MediaFormat::Mp4, "o.mp4");
+        let off = build_config(&req, scratch_file(&req.output, 1), false, None);
+        assert!(!off.show_keyboard && !off.record_mouse_clicks && off.keyboard.is_none());
+        assert_eq!(off.mouse_trail_rgba, [0; 4]);
+        assert_eq!(off.mouse_trail_duration_ms, 500);
+
+        req.effects = EffectsRequest {
+            trail: [255, 0, 0, 200],
+            trail_ms: 900,
+            click: [0, 255, 0, 255],
+            highlight: [255, 255, 0, 90],
+            record_clicks: true,
+            keyboard: true,
+            keyboard_size: 80,
+            ..EffectsRequest::default()
+        };
+        let on = build_config(&req, scratch_file(&req.output, 1), false, None);
+        assert_eq!(on.validate(), Ok(()));
+        assert_eq!(on.mouse_trail_rgba, [255, 0, 0, 200]);
+        assert_eq!(on.mouse_trail_duration_ms, 900);
+        assert_eq!(on.mouse_click_rgba, [0, 255, 0, 255]);
+        assert_eq!(on.mouse_highlight_rgba, [255, 255, 0, 90]);
+        assert!(on.record_mouse_clicks && on.show_keyboard);
+        assert_eq!(on.keyboard.as_ref().map(|k| k.keycap_size), Some(80));
     }
 }

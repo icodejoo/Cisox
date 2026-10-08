@@ -97,6 +97,28 @@ const START_SYS_VOL_KEY: &str = "svol";
 const START_MIC_DEV_KEY: &str = "mdev";
 /// START 前缀令牌：系统声（渲染）设备 ID。
 const START_SYS_DEV_KEY: &str = "sdev";
+/// START 前缀令牌：鼠标轨迹颜色（`RRGGBBAA` 十六进制，全透明即关闭）。
+const START_TRAIL_KEY: &str = "trail";
+/// START 前缀令牌：鼠标轨迹持续时间（毫秒）。
+const START_TRAIL_MS_KEY: &str = "trms";
+/// START 前缀令牌：点击波纹颜色。
+const START_CLICK_KEY: &str = "click";
+/// START 前缀令牌：鼠标高亮光圈颜色。
+const START_HIGHLIGHT_KEY: &str = "hl";
+/// START 前缀令牌：是否录制鼠标点击。
+const START_CLICKS_KEY: &str = "clicks";
+/// START 前缀令牌：是否显示按键回显。
+const START_KEYS_KEY: &str = "keys";
+/// START 前缀令牌：按键回显键帽大小。
+const START_KEY_SIZE_KEY: &str = "ksize";
+/// START 前缀令牌：按键回显背景色。
+const START_KEY_BG_KEY: &str = "kbg";
+/// START 前缀令牌：按键回显文字色。
+const START_KEY_FG_KEY: &str = "kfg";
+/// 鼠标轨迹默认持续时间（毫秒）。
+pub const TRAIL_MS_DEFAULT: u32 = 500;
+/// 按键回显默认键帽大小。
+pub const KEY_SIZE_DEFAULT: u32 = 64;
 /// 音量默认值（百分比，100 为原始电平）。
 pub const AUDIO_VOLUME_DEFAULT: u16 = 100;
 /// 音量上限（百分比）。
@@ -211,6 +233,81 @@ impl AudioRequest {
     }
 }
 
+/// 录制画面上的输入特效请求（鼠标轨迹 / 点击 / 高亮、按键回显）。
+///
+/// 任一特效打开时，录制进程改走能叠加特效的软件编码路径（硬件流水线暂不叠加特效）。
+///
+/// # 示例
+/// ```
+/// use snow_recorder_protocol::EffectsRequest;
+/// let e = EffectsRequest { record_clicks: true, ..EffectsRequest::default() };
+/// assert!(e.enabled());
+/// assert!(!EffectsRequest::default().enabled());
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffectsRequest {
+    /// 鼠标轨迹颜色（RGBA，alpha 为 0 即关闭）。
+    pub trail: [u8; 4],
+    /// 鼠标轨迹持续时间（毫秒，100..=2000）。
+    pub trail_ms: u32,
+    /// 点击波纹颜色（alpha 为 0 即关闭）。
+    pub click: [u8; 4],
+    /// 鼠标高亮光圈颜色（alpha 为 0 即关闭）。
+    pub highlight: [u8; 4],
+    /// 是否录制鼠标点击（点击波纹的前提）。
+    pub record_clicks: bool,
+    /// 是否显示按键回显。
+    pub keyboard: bool,
+    /// 按键回显键帽大小（像素）。
+    pub keyboard_size: u32,
+    /// 按键回显背景色。
+    pub keyboard_background: [u8; 4],
+    /// 按键回显文字色。
+    pub keyboard_text: [u8; 4],
+}
+
+impl Default for EffectsRequest {
+    /// 全关；时长与键帽大小取默认值，颜色与旧版设置默认一致。
+    fn default() -> Self {
+        Self {
+            trail: [0; 4],
+            trail_ms: TRAIL_MS_DEFAULT,
+            click: [0; 4],
+            highlight: [0; 4],
+            record_clicks: false,
+            keyboard: false,
+            keyboard_size: KEY_SIZE_DEFAULT,
+            keyboard_background: [0, 0, 0, 0xCC],
+            keyboard_text: [0xFF; 4],
+        }
+    }
+}
+
+impl EffectsRequest {
+    /// 是否至少启用一种特效。
+    pub fn enabled(&self) -> bool {
+        self.trail[3] != 0
+            || self.click[3] != 0
+            || self.highlight[3] != 0
+            || self.record_clicks
+            || self.keyboard
+    }
+}
+
+/// 把 RGBA 编成 `RRGGBBAA` 十六进制。
+fn rgba_hex(c: [u8; 4]) -> String {
+    format!("{:02X}{:02X}{:02X}{:02X}", c[0], c[1], c[2], c[3])
+}
+
+/// 解析 `RRGGBBAA` 十六进制；长度或字符非法返回 `None`。
+fn parse_rgba_hex(text: &str) -> Option<[u8; 4]> {
+    if text.len() != 8 || !text.is_ascii() {
+        return None;
+    }
+    let byte = |i: usize| u8::from_str_radix(&text[i..i + 2], 16).ok();
+    Some([byte(0)?, byte(2)?, byte(4)?, byte(6)?])
+}
+
 /// 音频源类别。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AudioSource {
@@ -292,6 +389,8 @@ pub struct StartRequest {
     pub output: PathBuf,
     /// 录音请求（默认全关）。
     pub audio: AudioRequest,
+    /// 输入特效请求（默认全关）。
+    pub effects: EffectsRequest,
 }
 
 /// 编辑引擎选择。
@@ -717,7 +816,7 @@ fn decode_token(text: &str) -> Option<String> {
 }
 
 /// START 的可选前缀令牌（每个后跟一个空格）；缺省值不输出，旧格式字节不变。
-fn start_prefix(a: &AudioRequest) -> String {
+fn start_prefix(a: &AudioRequest, e: &EffectsRequest) -> String {
     let mut out = String::new();
     if a.microphone {
         out.push_str(&format!("{START_MIC_KEY}=1 "));
@@ -737,11 +836,39 @@ fn start_prefix(a: &AudioRequest) -> String {
     if let Some(d) = a.system_device.as_deref().filter(|d| !d.is_empty()) {
         out.push_str(&format!("{START_SYS_DEV_KEY}={} ", encode_token(d)));
     }
+    let defaults = EffectsRequest::default();
+    if e.trail[3] != 0 {
+        out.push_str(&format!("{START_TRAIL_KEY}={} ", rgba_hex(e.trail)));
+    }
+    if e.trail_ms != defaults.trail_ms {
+        out.push_str(&format!("{START_TRAIL_MS_KEY}={} ", e.trail_ms));
+    }
+    if e.click[3] != 0 {
+        out.push_str(&format!("{START_CLICK_KEY}={} ", rgba_hex(e.click)));
+    }
+    if e.highlight[3] != 0 {
+        out.push_str(&format!("{START_HIGHLIGHT_KEY}={} ", rgba_hex(e.highlight)));
+    }
+    if e.record_clicks {
+        out.push_str(&format!("{START_CLICKS_KEY}=1 "));
+    }
+    if e.keyboard {
+        out.push_str(&format!("{START_KEYS_KEY}=1 "));
+    }
+    if e.keyboard_size != defaults.keyboard_size {
+        out.push_str(&format!("{START_KEY_SIZE_KEY}={} ", e.keyboard_size));
+    }
+    if e.keyboard_background != defaults.keyboard_background {
+        out.push_str(&format!("{START_KEY_BG_KEY}={} ", rgba_hex(e.keyboard_background)));
+    }
+    if e.keyboard_text != defaults.keyboard_text {
+        out.push_str(&format!("{START_KEY_FG_KEY}={} ", rgba_hex(e.keyboard_text)));
+    }
     out
 }
 
 /// 把一个前缀令牌应用到录音请求；未知键忽略（向前兼容）。
-fn apply_prefix_token(a: &mut AudioRequest, token: &str) {
+fn apply_prefix_token(a: &mut AudioRequest, e: &mut EffectsRequest, token: &str) {
     let Some((key, value)) = token.split_once('=') else {
         return;
     };
@@ -753,6 +880,23 @@ fn apply_prefix_token(a: &mut AudioRequest, token: &str) {
         START_SYS_VOL_KEY => a.system_volume = volume().unwrap_or(AUDIO_VOLUME_DEFAULT),
         START_MIC_DEV_KEY => a.mic_device = decode_token(value).filter(|d| !d.is_empty()),
         START_SYS_DEV_KEY => a.system_device = decode_token(value).filter(|d| !d.is_empty()),
+        START_TRAIL_KEY => e.trail = parse_rgba_hex(value).unwrap_or([0; 4]),
+        START_TRAIL_MS_KEY => {
+            e.trail_ms = value.parse::<u32>().map_or(TRAIL_MS_DEFAULT, |v| v.clamp(100, 2000));
+        }
+        START_CLICK_KEY => e.click = parse_rgba_hex(value).unwrap_or([0; 4]),
+        START_HIGHLIGHT_KEY => e.highlight = parse_rgba_hex(value).unwrap_or([0; 4]),
+        START_CLICKS_KEY => e.record_clicks = value == "1",
+        START_KEYS_KEY => e.keyboard = value == "1",
+        START_KEY_SIZE_KEY => {
+            e.keyboard_size = value.parse::<u32>().map_or(KEY_SIZE_DEFAULT, |v| v.clamp(32, 128));
+        }
+        START_KEY_BG_KEY => {
+            e.keyboard_background = parse_rgba_hex(value).unwrap_or(EffectsRequest::default().keyboard_background);
+        }
+        START_KEY_FG_KEY => {
+            e.keyboard_text = parse_rgba_hex(value).unwrap_or(EffectsRequest::default().keyboard_text);
+        }
         _ => {}
     }
 }
@@ -772,7 +916,7 @@ impl Command {
         match self {
             Self::Start(r) => format!(
                 "{CMD_START} {}{} {} {} {} {} {} {} {}",
-                start_prefix(&r.audio),
+                start_prefix(&r.audio, &r.effects),
                 r.x,
                 r.y,
                 r.width,
@@ -822,12 +966,13 @@ impl Command {
             CMD_CANCEL => Ok(Self::Cancel),
             CMD_START => {
                 let mut audio = AudioRequest::default();
+                let mut effects = EffectsRequest::default();
                 let mut rest = rest;
                 while let Some((token, after)) = rest
                     .split_once(' ')
                     .filter(|(token, _)| token.contains('='))
                 {
-                    apply_prefix_token(&mut audio, token);
+                    apply_prefix_token(&mut audio, &mut effects, token);
                     rest = after;
                 }
                 let mut it = rest.splitn(8, ' ');
@@ -853,6 +998,7 @@ impl Command {
                     show_cursor: cursor != 0,
                     output: PathBuf::from(path),
                     audio,
+                    effects,
                 }))
             }
             CMD_EDIT => {
@@ -1055,6 +1201,7 @@ mod tests {
             show_cursor: true,
             output: PathBuf::from("C:\\My Videos\\a b.gif"),
             audio: AudioRequest::default(),
+            effects: EffectsRequest::default(),
         }
     }
 
@@ -1321,5 +1468,52 @@ mod tests {
         assert_eq!(MediaFormat::normalize("webm"), MediaFormat::Mp4);
         assert_eq!(MediaFormat::normalize("WEBP"), MediaFormat::Webp);
         assert_eq!(MediaFormat::normalize(""), MediaFormat::Mp4);
+    }
+
+    /// 特效字段往返：全关时 START 行与旧格式字节一致；打开后经 START 行往返不丢字段。
+    #[test]
+    fn effects_roundtrip_and_stay_off_by_default() {
+        let base = StartRequest {
+            x: 1,
+            y: 2,
+            width: 3,
+            height: 4,
+            format: MediaFormat::Mp4,
+            fps: 30,
+            show_cursor: true,
+            output: PathBuf::from("o.mp4"),
+            audio: AudioRequest::default(),
+            effects: EffectsRequest::default(),
+        };
+        assert_eq!(Command::Start(base.clone()).to_line(), "START 1 2 3 4 mp4 30 1 o.mp4");
+        let mut on = base;
+        on.effects = EffectsRequest {
+            trail: [255, 0, 0, 128],
+            trail_ms: 800,
+            click: [0, 255, 0, 255],
+            highlight: [255, 255, 0, 64],
+            record_clicks: true,
+            keyboard: true,
+            keyboard_size: 96,
+            keyboard_background: [1, 2, 3, 4],
+            keyboard_text: [5, 6, 7, 8],
+        };
+        assert!(on.effects.enabled());
+        let line = Command::Start(on.clone()).to_line();
+        assert_eq!(Command::parse(&line).unwrap(), Command::Start(on));
+    }
+
+    /// 非法的特效令牌回到安全默认值，时长与键帽大小被夹到合法范围。
+    #[test]
+    fn effects_tokens_are_sanitised() {
+        let Command::Start(r) =
+            Command::parse("START trail=zz click=FF0000FF trms=99999 ksize=1 1 2 3 4 mp4 30 0 o.mp4").unwrap()
+        else {
+            panic!("应为 START");
+        };
+        assert_eq!(r.effects.trail, [0; 4]);
+        assert_eq!(r.effects.click, [255, 0, 0, 255]);
+        assert_eq!(r.effects.trail_ms, 2000);
+        assert_eq!(r.effects.keyboard_size, 32);
     }
 }

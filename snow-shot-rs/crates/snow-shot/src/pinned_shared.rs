@@ -7,11 +7,15 @@ use crate::pinned_model::{
     parse_hex_color, parse_middle_click_action, record_created_ms, record_geometry,
     record_payload_bytes, select_evictions,
 };
+use crate::pinned_keymap::PinKeymap;
 use crate::settings_state::SharedConfig;
 use image::ImageFormat;
 use snow_history::pin_id::new_unique_pin_id;
-use snow_history::pinned::{PinImage, PinOptions, PinPayload, PinnedStore};
+use snow_history::pinned::{
+    DEFAULT_GROUP_ID, MAX_GROUP_NAME_UNITS, MAX_GROUPS, PinGroup, PinImage, PinOptions, PinPayload, PinnedStore,
+};
 use snow_history::timeutil::now_utc_ms;
+use snow_ui::shell::geometry::PhysicalRect;
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -51,6 +55,10 @@ pub struct PinInteraction {
     pub border: u32,
     /// 激活（悬停 / 拖动）边框色（0xRRGGBBAA）。
     pub border_active: u32,
+    /// 贴图窗口键位表（`pin_to_screen_shortcuts/*`）。
+    pub keymap: PinKeymap,
+    /// 界面语言代码（右键菜单与状态提示的文案语言）。
+    pub locale: &'static str,
 }
 
 /// 从仓储恢复出的一张贴图。
@@ -74,8 +82,89 @@ pub struct RestoredPin {
     pub canvas_session: Vec<u8>,
 }
 
+/// 贴图窗口发给管理器的控制事件（管理器负责开关点击穿透时的退出按钮小窗）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PinControlEvent {
+    /// 贴图请求文字识别（像素为合成后的完整图像，识别在后台线程执行）。
+    OcrRequested {
+        /// 贴图 ID。
+        id: String,
+        /// 图像宽。
+        width: u32,
+        /// 图像高。
+        height: u32,
+        /// 不透明 RGBA 像素。
+        rgba: Vec<u8>,
+    },
+    /// 贴图请求移到另一个分组（由管理器改记录并关闭窗口）。
+    MoveToGroup {
+        /// 贴图 ID。
+        id: String,
+        /// 目标分组 ID。
+        group: String,
+    },
+    /// 贴图进入点击穿透：需要在它旁边放一个可点击的退出按钮。
+    ClickThroughEntered {
+        /// 贴图 ID。
+        id: String,
+        /// 贴图当前外框（物理像素）。
+        rect: PhysicalRect,
+        /// 贴图是否置顶（退出按钮要在同一层级）。
+        topmost: bool,
+    },
+    /// 贴图请求隐藏到屏幕顶部：管理器放出把手小窗，并回告把手与工作区位置。
+    HideToTopRequested {
+        /// 贴图 ID。
+        id: String,
+        /// 贴图当前外框（物理像素）。
+        rect: PhysicalRect,
+        /// 贴图是否置顶。
+        topmost: bool,
+    },
+    /// 贴图退出隐藏到顶部（或关闭）：撤掉把手小窗。
+    HideToTopExited {
+        /// 贴图 ID。
+        id: String,
+    },
+    /// 贴图退出点击穿透（或关闭）：撤掉退出按钮。
+    ClickThroughExited {
+        /// 贴图 ID。
+        id: String,
+    },
+}
+
+/// 最多记住的最近关闭贴图数。
+const MAX_CLOSED_PINS: usize = 10;
+/// 最近关闭贴图占用内存的上限（源图 + 标注会话字节数之和）。
+const MAX_CLOSED_BYTES: usize = 64 * 1024 * 1024;
+
+/// 一张最近关闭的贴图（内存里的快照，用来恢复）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClosedPin {
+    /// 源图 PNG。
+    pub png: Vec<u8>,
+    /// 标注引擎会话字节；没有标注为空。
+    pub session: Vec<u8>,
+    /// 关闭时的窗口几何。
+    pub geometry: Option<PinGeometry>,
+}
+
+impl ClosedPin {
+    /// 占用的内存字节数。
+    fn bytes(&self) -> usize {
+        self.png.len() + self.session.len()
+    }
+}
+
+/// 控制事件出口的类型。
+type ControlSink = Box<dyn Fn(PinControlEvent)>;
+
 /// 贴图共享上下文。
 pub struct PinShared {
+    /// 最近关闭的贴图（新的在末尾），受条数与内存双重上限约束。
+    closed: RefCell<Vec<ClosedPin>>,
+    /// 控制事件出口（由主程序接到主线程收件箱）。
+    control_sink: RefCell<Option<ControlSink>>,
     /// 持久化仓储。
     store: RefCell<PinnedStore>,
     /// 共享配置。
@@ -103,6 +192,8 @@ impl PinShared {
             tracing::error!(error = %store.last_error(), "贴图仓储打开异常");
         }
         Rc::new(Self {
+            closed: RefCell::new(Vec::new()),
+            control_sink: RefCell::new(None),
             store: RefCell::new(store),
             config,
             issued: RefCell::new(BTreeSet::new()),
@@ -139,6 +230,8 @@ impl PinShared {
             wheel_mode: text(KEY_WHEEL_MODE, DEFAULT_WHEEL_MODE),
             border: color(KEY_BORDER, DEFAULT_BORDER),
             border_active: color(KEY_BORDER_ACTIVE, DEFAULT_BORDER_ACTIVE),
+            keymap: PinKeymap::from_document(doc),
+            locale: crate::app_runtime::ui_prefs_from_document(doc).locale,
         }
     }
 
@@ -170,6 +263,196 @@ impl PinShared {
         Ok(id)
     }
 
+    /// 一张贴图所属的分组：已有记录沿用其分组，新贴图归入当前激活分组。
+    fn group_for(&self, id: &str) -> String {
+        let store = self.store.borrow();
+        store
+            .record(id)
+            .and_then(|r| r.get("group_id").and_then(|g| g.as_str().map(str::to_string)))
+            .unwrap_or_else(|| store.active_group_id())
+    }
+
+    /// 贴图当前保存的窗口几何；记录缺失或损坏返回 `None`。
+    ///
+    /// # 参数
+    /// - `id`：贴图 ID。
+    pub fn pin_geometry(&self, id: &str) -> Option<PinGeometry> {
+        crate::pinned_model::record_geometry(&self.store.borrow().record(id)?)
+    }
+
+    /// 贴图源图的 PNG 字节（管理页缩略图用）；读取失败返回 `None`。
+    ///
+    /// # 参数
+    /// - `id`：贴图 ID。
+    pub fn source_png(&self, id: &str) -> Option<Vec<u8>> {
+        let payload = self.store.borrow().load_payload(id).ok()??;
+        payload.image.map(|image| image.bytes)
+    }
+
+    /// 全部分组（默认分组在最前）。
+    pub fn groups(&self) -> Vec<PinGroup> {
+        self.store.borrow().groups()
+    }
+
+    /// 当前激活分组 ID。
+    pub fn active_group_id(&self) -> String {
+        self.store.borrow().active_group_id()
+    }
+
+    /// 某分组里的贴图 ID（升序）。
+    ///
+    /// # 参数
+    /// - `group`：分组 ID。
+    pub fn ids_in_group(&self, group: &str) -> Vec<String> {
+        let store = self.store.borrow();
+        store
+            .record_ids()
+            .into_iter()
+            .filter(|id| {
+                store
+                    .record(id)
+                    .and_then(|r| r.get("group_id").and_then(|g| g.as_str().map(|g| g == group)))
+                    .unwrap_or(false)
+            })
+            .collect()
+    }
+
+    /// 读取一个布尔配置项；缺失或类型不对按 `false`。
+    ///
+    /// # 参数
+    /// - `key`：配置键。
+    pub fn config_bool(&self, key: &str) -> bool {
+        self.config.borrow().document().value(key).as_bool().unwrap_or(false)
+    }
+
+    /// 贴图所属分组 ID；仓储里没有这条记录时返回 `None`。
+    ///
+    /// # 参数
+    /// - `id`：贴图 ID。
+    pub fn pin_group(&self, id: &str) -> Option<String> {
+        self.store
+            .borrow()
+            .record(id)
+            .and_then(|r| r.get("group_id").and_then(|g| g.as_str().map(str::to_string)))
+    }
+
+    /// 新建分组。
+    ///
+    /// # 参数
+    /// - `name`：分组名；`None` 时自动取「分组 N」，N 取第一个未被占用的序号。
+    ///
+    /// # 返回
+    /// 新分组 ID；名称为空、超过 16 个 UTF-16 单元、重名或分组数已满返回错误说明。
+    ///
+    /// ```ignore
+    /// let id = shared.create_group(Some("工作")).unwrap();
+    /// ```
+    pub fn create_group(&self, name: Option<&str>) -> Result<String, String> {
+        let mut store = self.store.borrow_mut();
+        let groups = store.groups();
+        let name = match name.map(str::trim) {
+            Some(n) => n.to_string(),
+            None => (1..)
+                .map(|n| format!("分组 {n}"))
+                .find(|candidate| !groups.iter().any(|g| &g.name == candidate))
+                .unwrap_or_default(),
+        };
+        if name.is_empty() {
+            return Err("分组名不能为空".into());
+        }
+        if name.encode_utf16().count() > MAX_GROUP_NAME_UNITS {
+            return Err(format!("分组名不能超过 {MAX_GROUP_NAME_UNITS} 个字符"));
+        }
+        if groups.iter().any(|g| g.name == name) {
+            return Err("已有同名分组".into());
+        }
+        if groups.len() >= MAX_GROUPS {
+            return Err("分组数量已达上限".into());
+        }
+        let id = snow_history::pin_id::new_uuid_v4();
+        let mut next: Vec<PinGroup> = groups.into_iter().filter(|g| !g.built_in).collect();
+        next.push(PinGroup { id: id.clone(), name, built_in: false });
+        let active = store.active_group_id();
+        store.set_groups(&next, &active);
+        store.flush().map_err(|e| e.to_string())?;
+        Ok(id)
+    }
+
+    /// 删除一个分组及其中的全部贴图；默认分组不可删。
+    ///
+    /// # 参数
+    /// - `group`：分组 ID。
+    ///
+    /// # 返回
+    /// 被一并删除的贴图 ID（调用方应关闭对应窗口）；分组不存在或是默认分组返回错误。
+    pub fn delete_group(&self, group: &str) -> Result<Vec<String>, String> {
+        if group == DEFAULT_GROUP_ID {
+            return Err("默认分组不能删除".into());
+        }
+        if !self.groups().iter().any(|g| g.id == group) {
+            return Err("分组不存在".into());
+        }
+        let victims = self.ids_in_group(group);
+        let mut store = self.store.borrow_mut();
+        for id in &victims {
+            store.remove(id);
+        }
+        let next: Vec<PinGroup> = store.groups().into_iter().filter(|g| !g.built_in && g.id != group).collect();
+        let active = store.active_group_id();
+        let active = if active == group { DEFAULT_GROUP_ID.to_string() } else { active };
+        store.set_groups(&next, &active);
+        store.flush().map_err(|e| e.to_string())?;
+        Ok(victims)
+    }
+
+    /// 删除全部没有贴图的自定义分组。
+    ///
+    /// # 返回
+    /// 被删除的分组数。
+    pub fn delete_empty_groups(&self) -> Result<usize, String> {
+        let empty: Vec<String> = self
+            .groups()
+            .into_iter()
+            .filter(|g| !g.built_in && self.ids_in_group(&g.id).is_empty())
+            .map(|g| g.id)
+            .collect();
+        for id in &empty {
+            self.delete_group(id)?;
+        }
+        Ok(empty.len())
+    }
+
+    /// 切换激活分组并落盘。
+    ///
+    /// # 参数
+    /// - `group`：分组 ID，必须存在。
+    pub fn set_active_group(&self, group: &str) -> Result<(), String> {
+        let mut store = self.store.borrow_mut();
+        let groups = store.groups();
+        if !groups.iter().any(|g| g.id == group) {
+            return Err("分组不存在".into());
+        }
+        let custom: Vec<PinGroup> = groups.into_iter().filter(|g| !g.built_in).collect();
+        store.set_groups(&custom, group);
+        store.flush().map_err(|e| e.to_string())
+    }
+
+    /// 把一张贴图移到另一个分组（只改清单，不动图片）。
+    ///
+    /// # 参数
+    /// - `id`：贴图 ID。
+    /// - `group`：目标分组 ID。
+    pub fn move_pin(&self, id: &str, group: &str) -> Result<(), String> {
+        let mut store = self.store.borrow_mut();
+        if !store.groups().iter().any(|g| g.id == group) {
+            return Err("分组不存在".into());
+        }
+        let mut record = store.record(id).ok_or_else(|| "贴图不存在".to_string())?;
+        record.insert("group_id".into(), serde_json::Value::String(group.into()));
+        store.upsert(record, None).map_err(|e| e.to_string())?;
+        store.flush().map_err(|e| e.to_string())
+    }
+
     /// 登记一个来自仓储的既有 ID（恢复时调用，使其不会再被分配）。
     pub fn adopt_id(&self, id: &str) {
         self.issued.borrow_mut().insert(id.to_string());
@@ -197,7 +480,7 @@ impl PinShared {
         if !self.policy().enabled {
             return Ok(());
         }
-        let group = self.store.borrow().active_group_id();
+        let group = self.group_for(id);
         let record = build_record(id, &group, geometry, created_ms, payload_bytes);
         let payload = png.map(|bytes| PinPayload {
             image: Some(PinImage {
@@ -239,12 +522,51 @@ impl PinShared {
         let total =
             payload.image.as_ref().map_or(0, |i| i.bytes.len() as u64) + session.len() as u64;
         payload.canvas_session = session;
-        let record = build_record(id, &store.active_group_id(), geometry, created_ms, total);
+        let group = store
+            .record(id)
+            .and_then(|r| r.get("group_id").and_then(|g| g.as_str().map(str::to_string)))
+            .unwrap_or_else(|| store.active_group_id());
+        let record = build_record(id, &group, geometry, created_ms, total);
         store
             .upsert(record, Some(payload))
             .map_err(|e| e.to_string())?;
         store.flush().map_err(|e| e.to_string())?;
         Ok(total)
+    }
+
+    /// 用户主动关闭一张贴图：先把它的源图、标注会话和几何记进「最近关闭」，再从仓储移除。
+    ///
+    /// # 参数
+    /// - `id`：贴图 ID。
+    ///
+    /// # 返回
+    /// 仓储里确有这条记录并已移除时为 `true`。
+    pub fn remove_remembering(&self, id: &str) -> bool {
+        let snapshot = {
+            let store = self.store.borrow();
+            let geometry = store.record(id).and_then(|r| crate::pinned_model::record_geometry(&r));
+            store.load_payload(id).ok().flatten().and_then(|payload| {
+                payload.image.map(|image| ClosedPin { png: image.bytes, session: payload.canvas_session, geometry })
+            })
+        };
+        if let Some(pin) = snapshot {
+            let mut closed = self.closed.borrow_mut();
+            closed.push(pin);
+            while closed.len() > MAX_CLOSED_PINS || (closed.len() > 1 && closed.iter().map(ClosedPin::bytes).sum::<usize>() > MAX_CLOSED_BYTES) {
+                closed.remove(0);
+            }
+        }
+        self.remove(id)
+    }
+
+    /// 取出最近关闭的一张贴图（后进先出）；没有则为 `None`。
+    pub fn pop_closed(&self) -> Option<ClosedPin> {
+        self.closed.borrow_mut().pop()
+    }
+
+    /// 当前可恢复的最近关闭贴图数。
+    pub fn closed_count(&self) -> usize {
+        self.closed.borrow().len()
     }
 
     /// 从仓储移除一张贴图并落盘；不存在返回 `false`。
@@ -347,6 +669,33 @@ impl PinShared {
         })
     }
 
+    /// 设置控制事件出口（启动时由主程序调用一次）。
+    ///
+    /// # 参数
+    /// - `sink`：收到事件时调用，应只做轻量转发。
+    pub fn set_control_sink(&self, sink: Box<dyn Fn(PinControlEvent)>) {
+        *self.control_sink.borrow_mut() = Some(sink);
+    }
+
+    /// 请求把一张贴图移到另一个分组（经控制事件交给管理器处理）。
+    ///
+    /// # 参数
+    /// - `id`：贴图 ID。
+    /// - `group`：目标分组 ID。
+    pub fn request_move_to_group(&self, id: &str, group: &str) {
+        self.emit_control(PinControlEvent::MoveToGroup { id: id.to_string(), group: group.to_string() });
+    }
+
+    /// 发出一个控制事件；没有设置出口时忽略。
+    ///
+    /// # 参数
+    /// - `event`：控制事件。
+    pub fn emit_control(&self, event: PinControlEvent) {
+        if let Some(sink) = self.control_sink.borrow().as_ref() {
+            sink(event);
+        }
+    }
+
     /// 通知管理器某张贴图窗口已关闭，并释放其 ID 占用。
     pub fn notify_closed(&self, id: &str) {
         self.issued.borrow_mut().remove(id);
@@ -373,6 +722,67 @@ mod tests {
             Box::new(move |_| counter.set(counter.get() + 1)),
         );
         (shared, closed)
+    }
+
+    /// 分组：新建 / 重名 / 超长 / 移动 / 删除 / 切换激活分组，且几何更新不会把贴图挪回激活分组。
+    #[test]
+    fn groups_create_move_delete_and_keep_membership() {
+        let dir = temp_dir("groups");
+        let (shared, _) = open_in(&dir);
+        let work = shared.create_group(Some("工作")).unwrap();
+        assert!(shared.create_group(Some("工作")).is_err());
+        assert!(shared.create_group(Some("")).is_err());
+        assert!(shared.create_group(Some("一二三四五六七八九十一二三四五六七")).is_err());
+        let auto = shared.create_group(None).unwrap();
+        assert_eq!(shared.groups().iter().find(|g| g.id == auto).unwrap().name, "分组 1");
+
+        let a = store_pin(&shared, 8, 8, PhysicalRect::new(0, 0, 8, 8));
+        let b = store_pin(&shared, 8, 8, PhysicalRect::new(10, 0, 8, 8));
+        assert_eq!(shared.pin_group(&a).as_deref(), Some("default"));
+        shared.move_pin(&a, &work).unwrap();
+        shared.set_active_group(&work).unwrap();
+        // 激活分组变了，但已有记录的几何更新仍留在自己的分组
+        let geometry = PinGeometry::new(PhysicalRect::new(5, 5, 8, 8), 1.0, 1.0, true);
+        shared.persist(&b, &geometry, 1, 10, None).unwrap();
+        assert_eq!(shared.pin_group(&b).as_deref(), Some("default"));
+        assert_eq!(shared.ids_in_group(&work), vec![a.clone()]);
+
+        assert!(shared.delete_group("default").is_err());
+        assert_eq!(shared.delete_empty_groups().unwrap(), 1);
+        let removed = shared.delete_group(&work).unwrap();
+        assert_eq!(removed, vec![a]);
+        assert_eq!(shared.active_group_id(), "default");
+        assert_eq!(shared.ids_in_group("default"), vec![b]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 关闭记忆：主动关闭的贴图可按后进先出恢复（含几何），超过条数上限丢最旧的；仅仓储移除（淘汰）不记忆。
+    #[test]
+    fn closed_pins_restore_lifo_and_respect_limit() {
+        let dir = temp_dir("closed");
+        let (shared, _) = open_in(&dir);
+        let first = store_pin(&shared, 8, 8, PhysicalRect::new(1, 2, 8, 8));
+        let second = store_pin(&shared, 8, 8, PhysicalRect::new(3, 4, 8, 8));
+        assert!(shared.remove_remembering(&first));
+        assert!(shared.remove_remembering(&second));
+        assert!(!shared.remove_remembering(&second), "记录已不在，不应重复记忆");
+        assert_eq!(shared.closed_count(), 2);
+        let latest = shared.pop_closed().unwrap();
+        assert_eq!(latest.geometry.unwrap().rect(), PhysicalRect::new(3, 4, 8, 8));
+        assert!(!latest.png.is_empty());
+        let older = shared.pop_closed().unwrap();
+        assert_eq!(older.geometry.unwrap().rect(), PhysicalRect::new(1, 2, 8, 8));
+        assert!(shared.pop_closed().is_none());
+
+        let kept = store_pin(&shared, 8, 8, PhysicalRect::new(0, 0, 8, 8));
+        assert!(shared.remove(&kept));
+        assert_eq!(shared.closed_count(), 0, "普通移除（淘汰 / 删除）不进最近关闭");
+        for _ in 0..(MAX_CLOSED_PINS + 3) {
+            let id = store_pin(&shared, 8, 8, PhysicalRect::new(0, 0, 8, 8));
+            shared.remove_remembering(&id);
+        }
+        assert_eq!(shared.closed_count(), MAX_CLOSED_PINS);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 创建唯一的临时目录。

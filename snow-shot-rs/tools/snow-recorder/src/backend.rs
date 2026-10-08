@@ -131,8 +131,9 @@ pub fn start_first_available(attempts: Vec<Attempt>, log: &mut dyn FnMut(&str)) 
 /// `Upstream` 模式只有上游 GPU 路径；`Off` 只有软件编码。
 pub fn plan_attempts(request: &StartRequest, partial: &std::path::Path, mode: HardwareMode) -> Vec<Attempt> {
     let mut attempts: Vec<Attempt> = Vec::new();
+    // 自建硬件流水线暂不叠加输入特效：任一特效打开就只走能叠加特效的软件路径
     #[cfg(windows)]
-    if request.format == MediaFormat::Mp4 {
+    if request.format == MediaFormat::Mp4 && !request.effects.enabled() {
         // (装配名, 是否用 Media Foundation 编码)：Auto 固化为 MF 优先，其次 FFmpeg 厂商硬编，最后才是软编
         let hardware: &[(&'static str, bool)] = match mode {
             HardwareMode::Gpu => &[("windows-hardware", false)],
@@ -251,7 +252,7 @@ mod tests {
 
     /// 构造测试请求。
     fn request(format: MediaFormat) -> StartRequest {
-        StartRequest { x: 0, y: 0, width: 64, height: 64, format, fps: 30, show_cursor: true, output: PathBuf::from("o.mp4"), audio: Default::default() }
+        StartRequest { x: 0, y: 0, width: 64, height: 64, format, fps: 30, show_cursor: true, output: PathBuf::from("o.mp4"), audio: Default::default(), effects: Default::default() }
     }
 
     /// 首个装配成功就不再尝试后面的。

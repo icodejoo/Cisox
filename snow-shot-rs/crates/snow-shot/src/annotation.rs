@@ -164,6 +164,8 @@ pub fn engine_tool(tool: AnnotationTool) -> Option<ActiveTool> {
         AnnotationTool::Mosaic | AnnotationTool::Blur => Some(ActiveTool::RectangleFilter),
         AnnotationTool::Highlighter => Some(ActiveTool::PenHighlight),
         AnnotationTool::Counter => Some(ActiveTool::SerialNumber),
+        AnnotationTool::Eraser => Some(ActiveTool::Eraser),
+        AnnotationTool::Select => Some(ActiveTool::Select),
         AnnotationTool::None => None,
     }
 }
@@ -1603,6 +1605,47 @@ mod tests {
     fn highlighter_and_counter_map_to_engine_tools() {
         assert_eq!(engine_tool(AnnotationTool::Highlighter), Some(ActiveTool::PenHighlight));
         assert_eq!(engine_tool(AnnotationTool::Counter), Some(ActiveTool::SerialNumber));
+    }
+
+    /// 橡皮与选对象映射到引擎的 Eraser / Select。
+    #[test]
+    fn eraser_and_select_map_to_engine_tools() {
+        assert_eq!(engine_tool(AnnotationTool::Eraser), Some(ActiveTool::Eraser));
+        assert_eq!(engine_tool(AnnotationTool::Select), Some(ActiveTool::Select));
+    }
+
+    /// 橡皮拖过一条已画的线：这条线被擦除（元素数归零），撤销后恢复。
+    #[test]
+    fn eraser_removes_a_drawn_line_and_undo_restores_it() {
+        let (w, h) = (300, 200);
+        let data = white(w, h);
+        let base = BaseView { width: w, height: h, bgra: &data };
+        let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
+        layer.set_tool(AnnotationTool::Line).unwrap();
+        drag(&mut layer, base, (40.0, 100.0), (240.0, 100.0));
+        assert_eq!(layer.item_count(), 1);
+        layer.set_tool(AnnotationTool::Eraser).unwrap();
+        drag(&mut layer, base, (140.0, 80.0), (140.0, 120.0));
+        assert_eq!(layer.item_count(), 0, "橡皮应擦掉被拖过的线");
+        layer.undo(base).unwrap();
+        assert_eq!(layer.item_count(), 1, "撤销后线回来");
+    }
+
+    /// 选对象工具能点中已画的线并整体拖动：线的位置随之移动。
+    #[test]
+    fn select_tool_moves_a_drawn_line() {
+        let (w, h) = (300, 200);
+        let data = white(w, h);
+        let base = BaseView { width: w, height: h, bgra: &data };
+        let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
+        layer.set_tool(AnnotationTool::Line).unwrap();
+        drag(&mut layer, base, (40.0, 60.0), (240.0, 60.0));
+        layer.set_tool(AnnotationTool::Select).unwrap();
+        drag(&mut layer, base, (140.0, 60.0), (140.0, 140.0));
+        assert_eq!(layer.item_count(), 1);
+        let (_, _, rgba) = layer.export_rgba([0, 0, w as i32, h as i32], base).unwrap();
+        let moved = (0..h).filter(|&y| px(&rgba, w, 140, y)[..3].iter().any(|&c| c < 200)).collect::<Vec<_>>();
+        assert!(!moved.is_empty() && moved.iter().all(|&y| (125..=155).contains(&y)), "线应被移到 y≈140: {moved:?}");
     }
 
     /// 改色与线宽后，后续绘制按新样式出图（颜色为蓝，线宽约 12）。

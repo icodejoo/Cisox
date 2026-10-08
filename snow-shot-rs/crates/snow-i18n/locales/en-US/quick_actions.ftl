@@ -1,14 +1,13 @@
-quick-notice-pin-management = Pin management is not available yet. This shortcut is saved and will work once the page lands.
 
-quick-notice-translate-selected = Translating selected text is not available yet.
+quick-notice-no-selected-text = No selected text was found. Select some text in an app first.
 
-quick-notice-pin-selected-files = Pinning selected files is not available yet.
+quick-notice-pin-selected-files = Select image files in File Explorer or on the desktop first.
 
-quick-notice-restore-closed = Restoring recently closed pins is not available yet.
+quick-notice-restore-closed = There are no recently closed pins to restore.
 
-quick-notice-record-copy = Record and copy is not available yet. Use the regular record shortcut instead.
 
-quick-notice-disable-fullscreen = Disabling hotkeys while a fullscreen window is focused is not available yet.
+quick-notice-fullscreen-gate-on = Hotkeys are now ignored while a fullscreen window is focused.
+quick-notice-fullscreen-gate-off = Hotkeys stay active in fullscreen windows.
 
 quick-notice-hotkeys-paused = Global hotkeys paused. Press the toggle shortcut again to resume.
 

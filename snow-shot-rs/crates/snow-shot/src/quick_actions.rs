@@ -117,26 +117,36 @@ pub enum QuickPlan {
     OpenSettings,
     /// 打开（或激活）截图历史窗口。
     OpenHistory,
+    /// 打开（或激活）贴图管理窗口。
+    OpenPinManage,
+    /// 把前台资源管理器 / 桌面里选中的图片文件贴到屏幕。
+    PinSelectedFiles,
+    /// 恢复最近关闭的一张贴图。
+    RestoreClosed,
+    /// 录屏，完成后把录制文件复制到剪贴板。
+    RecordAndCopy,
+    /// 读取前台应用选中的文字并翻译。
+    TranslateSelected,
     /// 暂停 / 恢复全部全局热键。
     ToggleHotkeys,
+    /// 切换「前台全屏窗口时停用热键」。
+    ToggleFullscreenGate,
     /// 打开录屏保存目录。
     OpenRecordingFolder,
     /// 暂无实现：只给出本地化提示（携带提示消息 id）。
     Placeholder(&'static str),
 }
 
-/// 提示消息 id：贴图管理页尚未接入。
-pub const NOTICE_PIN_MANAGEMENT: &str = "quick-notice-pin-management";
-/// 提示消息 id：选中文本翻译尚未接入。
-pub const NOTICE_TRANSLATE_SELECTED: &str = "quick-notice-translate-selected";
-/// 提示消息 id：贴选中文件尚未接入。
+/// 提示消息 id：没有读取到选中的文字。
+pub const NOTICE_NO_SELECTED_TEXT: &str = "quick-notice-no-selected-text";
+/// 提示消息 id：没有选中的图片文件。
 pub const NOTICE_PIN_SELECTED_FILES: &str = "quick-notice-pin-selected-files";
-/// 提示消息 id：恢复最近关闭窗口尚未接入。
+/// 提示消息 id：没有可恢复的最近关闭贴图。
 pub const NOTICE_RESTORE_CLOSED: &str = "quick-notice-restore-closed";
-/// 提示消息 id：录屏并复制尚未接入。
-pub const NOTICE_RECORD_COPY: &str = "quick-notice-record-copy";
-/// 提示消息 id：全屏时停用热键尚未接入。
-pub const NOTICE_DISABLE_FULLSCREEN: &str = "quick-notice-disable-fullscreen";
+/// 提示消息 id：前台全屏停用热键已打开。
+pub const NOTICE_FULLSCREEN_GATE_ON: &str = "quick-notice-fullscreen-gate-on";
+/// 提示消息 id：前台全屏停用热键已关闭。
+pub const NOTICE_FULLSCREEN_GATE_OFF: &str = "quick-notice-fullscreen-gate-off";
 
 /// 由热键配置键查快捷动作；不在表内返回 `None`。
 ///
@@ -174,14 +184,12 @@ pub fn plan_for(action: QuickAction) -> QuickPlan {
         QuickAction::OpenSettings => QuickPlan::OpenSettings,
         QuickAction::ToggleGlobalHotkeys => QuickPlan::ToggleHotkeys,
         QuickAction::OpenCaptureHistory => QuickPlan::OpenHistory,
-        QuickAction::OpenPinManagement => QuickPlan::Placeholder(NOTICE_PIN_MANAGEMENT),
-        QuickAction::TranslateSelectedText => QuickPlan::Placeholder(NOTICE_TRANSLATE_SELECTED),
-        QuickAction::PinSelectedFiles => QuickPlan::Placeholder(NOTICE_PIN_SELECTED_FILES),
-        QuickAction::RestoreLastClosedWindows => QuickPlan::Placeholder(NOTICE_RESTORE_CLOSED),
-        QuickAction::ScreenRecordCopy => QuickPlan::Placeholder(NOTICE_RECORD_COPY),
-        QuickAction::ToggleDisableOnFocusedFullscreen => {
-            QuickPlan::Placeholder(NOTICE_DISABLE_FULLSCREEN)
-        }
+        QuickAction::OpenPinManagement => QuickPlan::OpenPinManage,
+        QuickAction::TranslateSelectedText => QuickPlan::TranslateSelected,
+        QuickAction::PinSelectedFiles => QuickPlan::PinSelectedFiles,
+        QuickAction::RestoreLastClosedWindows => QuickPlan::RestoreClosed,
+        QuickAction::ScreenRecordCopy => QuickPlan::RecordAndCopy,
+        QuickAction::ToggleDisableOnFocusedFullscreen => QuickPlan::ToggleFullscreenGate,
     }
 }
 
@@ -543,12 +551,11 @@ mod tests {
     #[test]
     fn notice_messages_resolve_in_both_locales() {
         let plain = [
-            NOTICE_PIN_MANAGEMENT,
-            NOTICE_TRANSLATE_SELECTED,
+            NOTICE_NO_SELECTED_TEXT,
             NOTICE_PIN_SELECTED_FILES,
             NOTICE_RESTORE_CLOSED,
-            NOTICE_RECORD_COPY,
-            NOTICE_DISABLE_FULLSCREEN,
+            NOTICE_FULLSCREEN_GATE_ON,
+            NOTICE_FULLSCREEN_GATE_OFF,
             "quick-notice-hotkeys-paused",
             "quick-notice-hotkeys-resumed",
             "quick-notice-delay-busy",

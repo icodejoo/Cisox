@@ -15,7 +15,10 @@ use crate::pinned_model::{
     EDGE_MARGIN, HANDLE_SIZE, PinClickAction, PinGeometry, apply_wheel, drag_rect,
     premultiply_alpha_in_place, swap_rb_in_place, wheel_anchor, wheel_steps,
 };
-use crate::pinned_shared::{PinInteraction, PinShared};
+use crate::ocr_service::{OcrResult, OcrTextBox};
+use crate::pinned_controls::revealed_rect;
+use crate::pinned_keymap::PinKeyAction;
+use crate::pinned_shared::{PinControlEvent, PinInteraction, PinShared};
 use crate::screenshot_output::encode_png;
 use serde::Deserialize;
 use snow_canvas_raster::TileKey;
@@ -26,7 +29,9 @@ use snow_platform::menu::{MenuEntry, MenuItem, show_popup_menu};
 use snow_platform::text_raster::DEFAULT_FONT_FAMILY;
 use snow_ui::shell::geometry::{PhysicalPoint, PhysicalRect};
 use snow_ui::shell::overlay::cursor_screen_position;
-use snow_ui::shell::pinned_geometry::{PinnedDragHandle, handle_rects, hit_test_handle};
+use snow_ui::shell::pinned_geometry::{
+    PinnedDragHandle, ScaleAnchor, anchored_scale_rect, handle_rects, hit_test_handle,
+};
 use snow_ui::ui::*;
 use snow_ui::widgets::AnnotationTool;
 use std::collections::HashMap;
@@ -46,10 +51,14 @@ const TEXT_LINE_HEIGHT: f32 = 1.25;
 const BADGE_BG: u32 = 0x000000B3;
 /// 提示条文字色。
 const BADGE_TEXT: u32 = 0xFFFFFFE6;
+/// 识别文字框描边色。
+const OCR_BOX_BORDER: u32 = 0x4096FFFF;
+/// 识别文字框填充色（半透明）。
+const OCR_BOX_FILL: u32 = 0x4096FF2E;
 /// 手柄填充色。
 const HANDLE_FILL: u32 = 0xFFFFFFFF;
 /// 二次标注提示。
-const EDITING_HINT: &str = "二次标注 · 右键选工具 · Ctrl+Z/Y 撤销重做 · Esc 结束";
+const EDITING_HINT: &str = "pinned-editing-hint";
 
 /// 菜单项：复制。
 const MENU_COPY: u32 = 1;
@@ -67,19 +76,82 @@ const MENU_CLOSE: u32 = 6;
 const MENU_UNDO: u32 = 7;
 /// 菜单项：重做。
 const MENU_REDO: u32 = 8;
+/// 菜单项：缩略图模式。
+const MENU_THUMBNAIL: u32 = 9;
+/// 菜单项：点击穿透。
+const MENU_CLICK_THROUGH: u32 = 10;
+/// 菜单项：显示 / 隐藏识别文字。
+const MENU_RECOGNIZE: u32 = 12;
+/// 菜单项：复制全部识别文字。
+const MENU_COPY_TEXT: u32 = 13;
+/// 菜单项：隐藏到顶部。
+const MENU_HIDE_TO_TOP: u32 = 11;
+/// 「移到分组」菜单项 ID 起点（`GROUP_BASE + 分组序号`）。
+const MENU_GROUP_BASE: u32 = 1000;
+/// 缩略图边长（逻辑像素，同旧版 `kThumbnailSize`）。
+const THUMBNAIL_SIZE: f32 = 83.0;
 /// 工具菜单项 ID 起点（`TOOL_BASE + 工具序号`）。
 const MENU_TOOL_BASE: u32 = 100;
 
+/// 贴图上文字识别的进度。
+#[derive(Debug, Clone, PartialEq, Default)]
+enum OcrPhase {
+    /// 尚未识别。
+    #[default]
+    Idle,
+    /// 后台识别中。
+    Running,
+    /// 识别完成（可能没有文字）。
+    Done(Vec<OcrTextBox>),
+    /// 识别失败（识别组件缺失等）。
+    Failed,
+}
+
+/// 「隐藏到顶部」期间的状态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HideState {
+    /// 隐藏前的外框。
+    normal: PhysicalRect,
+    /// 把手外框。
+    handle: PhysicalRect,
+    /// 所在显示器工作区。
+    work: PhysicalRect,
+    /// 当前是否已滑出。
+    revealed: bool,
+}
+
+/// 滑出后检查鼠标是否离开的间隔。
+const HIDE_POLL_INTERVAL: Duration = Duration::from_millis(150);
+
+/// 计算缩略图外框：边长 [`THUMBNAIL_SIZE`] 乘缩放比，保持鼠标指针在内容中的相对位置不动。
+///
+/// # 参数
+/// - `normal`：进入缩略图前的窗口外框（物理像素）。
+/// - `scale`：窗口缩放比（DPI）。
+/// - `cursor`：鼠标指针屏幕坐标。
+///
+/// # 返回
+/// 缩略图外框。
+///
+/// ```ignore
+/// let r = thumbnail_rect(PhysicalRect::new(0, 0, 400, 300), 1.0, PhysicalPoint::new(200, 150));
+/// assert_eq!((r.width, r.height), (83, 83));
+/// ```
+pub fn thumbnail_rect(normal: PhysicalRect, scale: f32, cursor: PhysicalPoint) -> PhysicalRect {
+    let side = ((THUMBNAIL_SIZE * scale).round() as i32).max(1);
+    anchored_scale_rect(normal, PhysicalPoint::new(side, side), ScaleAnchor::MousePoint(cursor))
+}
+
 /// 菜单里可选的标注工具（顺序即菜单顺序）。
 const MENU_TOOLS: [(AnnotationTool, &str); 8] = [
-    (AnnotationTool::Rectangle, "矩形"),
-    (AnnotationTool::Ellipse, "椭圆"),
-    (AnnotationTool::Arrow, "箭头"),
-    (AnnotationTool::Line, "直线"),
-    (AnnotationTool::Pencil, "画笔"),
-    (AnnotationTool::Text, "文字"),
-    (AnnotationTool::Mosaic, "马赛克"),
-    (AnnotationTool::Blur, "模糊"),
+    (AnnotationTool::Rectangle, "pinned-tool-rectangle"),
+    (AnnotationTool::Ellipse, "pinned-tool-ellipse"),
+    (AnnotationTool::Arrow, "pinned-tool-arrow"),
+    (AnnotationTool::Line, "pinned-tool-line"),
+    (AnnotationTool::Pencil, "pinned-tool-pencil"),
+    (AnnotationTool::Text, "pinned-tool-text"),
+    (AnnotationTool::Mosaic, "pinned-tool-mosaic"),
+    (AnnotationTool::Blur, "pinned-tool-blur"),
 ];
 
 /// 创建贴图视图所需的参数。
@@ -270,6 +342,16 @@ pub struct PinnedWindowView {
     hover: bool,
     /// 悬停命中的手柄。
     hover_handle: Option<PinnedDragHandle>,
+    /// 文字识别进度。
+    ocr: OcrPhase,
+    /// 是否显示识别出的文字框（点击文字框复制该段文字）。
+    ocr_visible: bool,
+    /// 是否处于点击穿透（窗口不再接收鼠标，由独立退出按钮恢复）。
+    click_through: bool,
+    /// 隐藏到顶部的状态；`Some` 即处于该模式。
+    hide: Option<HideState>,
+    /// 缩略图模式下保存的原外框；`Some` 即处于缩略图模式。
+    pre_thumbnail: Option<PhysicalRect>,
     /// 等待应用到原生窗口的外框。
     pending_rect: Option<PhysicalRect>,
     /// 已经安排了一次外框应用任务。
@@ -349,6 +431,11 @@ impl PinnedWindowView {
             layer: None,
             tile_sprites: HashMap::new(),
             pending_drops: Vec::new(),
+            ocr: OcrPhase::Idle,
+            ocr_visible: false,
+            click_through: false,
+            hide: None,
+            pre_thumbnail: None,
             annotating: false,
             pending_annotation_point: None,
             text_edit: None,
@@ -461,7 +548,9 @@ impl PinnedWindowView {
 
     /// 当前窗口几何与显示状态。
     pub fn geometry(&self) -> PinGeometry {
-        PinGeometry::new(self.bounds, self.zoom, self.opacity, self.topmost)
+        // 缩略图 / 隐藏到顶部期间落盘原外框：重启后恢复为正常状态
+        let saved = self.hide.map(|h| h.normal).or(self.pre_thumbnail).unwrap_or(self.bounds);
+        PinGeometry::new(saved, self.zoom, self.opacity, self.topmost)
     }
 
     /// 1 个图像像素对应的窗口逻辑像素数（缩放 / DPI 换算）。
@@ -480,6 +569,28 @@ impl PinnedWindowView {
         let x = (pos.0 / k).clamp(0.0, (w - 1).max(0) as f32);
         let y = (pos.1 / k).clamp(0.0, (h - 1).max(0) as f32);
         (f64::from(x), f64::from(y))
+    }
+
+    /// 取界面语言下的文案。
+    fn t(&self, id: &str) -> String {
+        crate::ocr_backend::i18n_for(self.interaction.locale).tr(id)
+    }
+
+    /// 取带一个参数的文案。
+    fn t_with(&self, id: &str, arg: &str) -> String {
+        crate::ocr_backend::i18n_for(self.interaction.locale).tr_with(id, &snow_i18n::Args::new().arg(1, arg.to_string()))
+    }
+
+    /// 按 message id 设置状态提示。
+    fn say(&mut self, id: &str, cx: &mut Context<Self>) {
+        let text = self.t(id);
+        self.set_status(text, cx);
+    }
+
+    /// 按 message id 设置带一个参数的状态提示。
+    fn say_with(&mut self, id: &str, arg: String, cx: &mut Context<Self>) {
+        let text = self.t_with(id, &arg);
+        self.set_status(text, cx);
     }
 
     /// 设置状态提示（显示一段时间后自动消失）。
@@ -563,6 +674,9 @@ impl PinnedWindowView {
     /// - `ctrl`：是否按住 Ctrl。
     /// - `cursor`：光标屏幕坐标（鼠标锚点用）。
     pub fn wheel(&mut self, steps: f32, ctrl: bool, cursor: PhysicalPoint, cx: &mut Context<Self>) {
+        if self.pre_thumbnail.is_some() {
+            return;
+        }
         let anchor = wheel_anchor(&self.interaction.wheel_mode, cursor);
         let out = apply_wheel(
             self.bounds,
@@ -754,17 +868,32 @@ impl PinnedWindowView {
     /// 复制（含标注的）图像到剪贴板。
     pub fn copy_to_clipboard(&mut self, cx: &mut Context<Self>) {
         let Some((w, h, rgba)) = self.composite_rgba() else {
-            self.set_status("复制失败：无法导出图像", cx);
+            self.say("pinned-msg-export-failed-copy", cx);
             return;
         };
         match copy_image_to_clipboard(w, h, &rgba) {
             Ok(()) => {
                 tracing::info!(id = %self.id, width = w, height = h, "贴图已复制到剪贴板");
-                self.set_status("已复制到剪贴板", cx);
+                self.say("pinned-msg-copied", cx);
             }
             Err(e) => {
                 tracing::error!(id = %self.id, error = %e, "复制贴图失败");
-                self.set_status(format!("复制失败：{e}"), cx);
+                self.say_with("pinned-msg-copy-failed", e.to_string(), cx);
+            }
+        }
+    }
+
+    /// 复制不含标注的原图到剪贴板。
+    pub fn copy_original(&mut self, cx: &mut Context<Self>) {
+        let Some((w, h, rgba)) = self.frame.crop_rgba(self.frame.bounds()) else {
+            self.say("pinned-msg-export-failed-copy", cx);
+            return;
+        };
+        match copy_image_to_clipboard(w, h, &rgba) {
+            Ok(()) => self.say("pinned-msg-original-copied", cx),
+            Err(e) => {
+                tracing::error!(id = %self.id, error = %e, "复制贴图原图失败");
+                self.say_with("pinned-msg-copy-failed", e.to_string(), cx);
             }
         }
     }
@@ -772,17 +901,17 @@ impl PinnedWindowView {
     /// 保存（含标注的）图像为文件（格式、目录、文件名取自截图保存配置）。
     pub fn save_to_file(&mut self, cx: &mut Context<Self>) {
         let Some((w, h, rgba)) = self.composite_rgba() else {
-            self.set_status("保存失败：无法导出图像", cx);
+            self.say("pinned-msg-export-failed-save", cx);
             return;
         };
         match self.shared.quick_save(w, h, &rgba) {
             Ok(path) => {
                 tracing::info!(id = %self.id, path = %path.display(), "贴图已保存");
-                self.set_status(format!("已保存：{}", path.display()), cx);
+                self.say_with("pinned-msg-saved", path.display().to_string(), cx);
             }
             Err(e) => {
                 tracing::error!(id = %self.id, error = %e, "保存贴图失败");
-                self.set_status(format!("保存失败：{e}"), cx);
+                self.say_with("pinned-msg-save-failed", e.to_string(), cx);
             }
         }
     }
@@ -794,13 +923,16 @@ impl PinnedWindowView {
     /// # 参数
     /// - `dpr`：设备像素比（决定默认线宽与字号）。
     pub fn begin_editing(&mut self, dpr: f32, cx: &mut Context<Self>) {
+        if self.pre_thumbnail.is_some() {
+            return;
+        }
         if self.layer.is_none() {
             let (w, h) = self.frame.size();
             match AnnotationLayer::new(w, h, dpr) {
                 Ok(layer) => self.layer = Some(layer),
                 Err(e) => {
                     tracing::error!(id = %self.id, error = %e, "标注层初始化失败");
-                    self.set_status("标注功能不可用", cx);
+                    self.say("pinned-msg-annotation-unavailable", cx);
                     return;
                 }
             }
@@ -833,7 +965,7 @@ impl PinnedWindowView {
             }
             Err(e) => {
                 tracing::error!(id = %self.id, error = %e, ?tool, "切换标注工具失败");
-                self.set_status(format!("切换工具失败：{e}"), cx);
+                self.say_with("pinned-msg-switch-tool-failed", e.to_string(), cx);
             }
         }
     }
@@ -862,7 +994,7 @@ impl PinnedWindowView {
             }
             Err(e) => {
                 tracing::error!(id = %self.id, error = %e, "标注层操作失败");
-                self.set_status(format!("标注失败：{e}"), cx);
+                self.say_with("pinned-msg-annotate-failed", e.to_string(), cx);
             }
         }
     }
@@ -1075,8 +1207,13 @@ impl PinnedWindowView {
             return;
         }
         let cursor = self.cursor_or(pos);
-        let handle = hit_test_handle(self.bounds, cursor, HANDLE_SIZE, EDGE_MARGIN)
-            .unwrap_or(PinnedDragHandle::Move);
+        // 缩略图模式只允许整体移动，不允许拖边缩放
+        let handle = if self.pre_thumbnail.is_some() {
+            PinnedDragHandle::Move
+        } else {
+            hit_test_handle(self.bounds, cursor, HANDLE_SIZE, EDGE_MARGIN)
+                .unwrap_or(PinnedDragHandle::Move)
+        };
         self.begin_drag(handle, cursor);
         cx.notify();
     }
@@ -1177,31 +1314,50 @@ impl PinnedWindowView {
         if self.editing {
             for (i, (tool, label)) in MENU_TOOLS.iter().enumerate() {
                 entries.push(MenuEntry::Item(
-                    MenuItem::new(MENU_TOOL_BASE + i as u32, format!("标注工具：{label}"))
+                    MenuItem::new(MENU_TOOL_BASE + i as u32, self.t_with("pinned-menu-tool", &self.t(label)))
                         .checked(self.tool == *tool),
                 ));
             }
             entries.push(MenuEntry::Separator);
             entries.push(MenuEntry::Item(
-                MenuItem::new(MENU_UNDO, "撤销").enabled(can_undo),
+                MenuItem::new(MENU_UNDO, self.t("pinned-menu-undo")).enabled(can_undo),
             ));
             entries.push(MenuEntry::Item(
-                MenuItem::new(MENU_REDO, "重做").enabled(can_redo),
+                MenuItem::new(MENU_REDO, self.t("pinned-menu-redo")).enabled(can_redo),
             ));
             entries.push(MenuEntry::Separator);
-            entries.push(item(MENU_ANNOTATE, "结束二次标注"));
+            entries.push(item(MENU_ANNOTATE, &self.t("pinned-menu-finish-annotate")));
         } else {
-            entries.push(item(MENU_ANNOTATE, "开始二次标注"));
+            entries.push(item(MENU_ANNOTATE, &self.t("pinned-menu-start-annotate")));
         }
         entries.push(MenuEntry::Separator);
-        entries.push(item(MENU_COPY, "复制"));
-        entries.push(item(MENU_SAVE, "保存为文件"));
+        entries.push(item(MENU_COPY, &self.t("pinned-menu-copy")));
+        entries.push(item(MENU_SAVE, &self.t("pinned-menu-save")));
         entries.push(MenuEntry::Item(
-            MenuItem::new(MENU_TOPMOST, "窗口置顶").checked(self.topmost),
+            MenuItem::new(MENU_TOPMOST, self.t("pinned-menu-topmost")).checked(self.topmost),
         ));
-        entries.push(item(MENU_RESET_ZOOM, "还原 100% 缩放"));
+        entries.push(item(MENU_RESET_ZOOM, &self.t("pinned-menu-reset-zoom")));
+        entries.push(MenuEntry::Item(
+            MenuItem::new(MENU_THUMBNAIL, self.t("pinned-menu-thumbnail")).checked(self.pre_thumbnail.is_some()),
+        ));
+        entries.push(MenuEntry::Item(
+            MenuItem::new(MENU_RECOGNIZE, self.t("pinned-menu-recognize")).checked(self.ocr_visible),
+        ));
+        if self.ocr_full_text().is_some() {
+            entries.push(item(MENU_COPY_TEXT, &self.t("pinned-menu-copy-text")));
+        }
+        entries.push(item(MENU_CLICK_THROUGH, &self.t("pinned-menu-click-through")));
+        entries.push(item(MENU_HIDE_TO_TOP, &self.t("pinned-menu-hide-to-top")));
+        let current = self.shared.pin_group(&self.id);
+        for (i, group) in self.shared.groups().iter().enumerate() {
+            if current.as_deref() == Some(group.id.as_str()) {
+                continue;
+            }
+            let name = if group.built_in { self.t("pinned-menu-default-group") } else { group.name.clone() };
+            entries.push(item(MENU_GROUP_BASE + i as u32, &self.t_with("pinned-menu-move-to-group", &name)));
+        }
         entries.push(MenuEntry::Separator);
-        entries.push(item(MENU_CLOSE, "关闭"));
+        entries.push(item(MENU_CLOSE, &self.t("pinned-menu-close")));
         entries
     }
 
@@ -1225,9 +1381,25 @@ impl PinnedWindowView {
                 }
             }
             MENU_RESET_ZOOM => self.reset_zoom(cx),
+            MENU_THUMBNAIL => self.toggle_thumbnail(window, cx),
+            MENU_RECOGNIZE => self.toggle_text_recognition(cx),
+            MENU_COPY_TEXT => {
+                if let Some(text) = self.ocr_full_text() {
+                    self.copy_ocr_text(&text, cx);
+                }
+            }
+            MENU_CLICK_THROUGH => self.set_click_through(true, window, cx),
+            MENU_HIDE_TO_TOP => self.toggle_hide_to_top(window, cx),
             MENU_UNDO => self.undo_annotation(cx),
             MENU_REDO => self.redo_annotation(cx),
             MENU_CLOSE => self.close(window, true),
+            other if other >= MENU_GROUP_BASE => {
+                let groups = self.shared.groups();
+                match groups.get((other - MENU_GROUP_BASE) as usize) {
+                    Some(group) => self.shared.request_move_to_group(&self.id, &group.id),
+                    None => tracing::warn!(id = other, "未知的分组菜单项"),
+                }
+            }
             other => {
                 let index = other.checked_sub(MENU_TOOL_BASE).map(|i| i as usize);
                 match index.and_then(|i| MENU_TOOLS.get(i)) {
@@ -1246,20 +1418,332 @@ impl PinnedWindowView {
             cx.stop_propagation();
             return;
         }
+        if let Some(action) = self.interaction.keymap.resolve(key, mods.control, mods.shift, mods.alt) {
+            self.run_key_action(action, window, cx);
+            return;
+        }
         match (key, mods.control) {
-            ("escape", _) => {
+            ("z", true) if mods.shift => self.redo_annotation(cx),
+            ("z", true) => self.undo_annotation(cx),
+            ("y", true) => self.redo_annotation(cx),
+            _ => {}
+        }
+    }
+
+    /// 是否处于缩略图模式。
+    pub fn is_thumbnail(&self) -> bool {
+        self.pre_thumbnail.is_some()
+    }
+
+    /// 切换缩略图模式：进入时退出标注并缩成小方块（以鼠标位置为锚点），再次触发还原原外框。
+    ///
+    /// # 参数
+    /// - `window`：当前窗口（进入时用来收起标注模式）。
+    pub fn toggle_thumbnail(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.drag.is_some() {
+            self.end_drag(cx);
+        }
+        match self.pre_thumbnail.take() {
+            Some(normal) => self.set_bounds(normal, cx),
+            None => {
+                if self.editing {
+                    self.end_editing(window, cx);
+                }
+                let cursor = self.cursor_or((0.0, 0.0));
+                let target = thumbnail_rect(self.bounds, window.scale_factor(), cursor);
+                self.pre_thumbnail = Some(self.bounds);
+                self.set_bounds(target, cx);
+            }
+        }
+        self.geometry_changed(cx);
+    }
+
+    /// 开关识别文字框：首次打开时触发识别；识别完成后显示文字框，点击文字框复制该段文字。
+    pub fn toggle_text_recognition(&mut self, cx: &mut Context<Self>) {
+        self.ocr_visible = !self.ocr_visible;
+        if self.ocr_visible {
+            match self.ocr {
+                OcrPhase::Idle | OcrPhase::Failed => self.request_ocr(cx),
+                OcrPhase::Running => self.say("pinned-msg-recognizing", cx),
+                OcrPhase::Done(ref boxes) if boxes.is_empty() => self.say("pinned-msg-no-text", cx),
+                OcrPhase::Done(_) => {}
+            }
+        }
+        cx.notify();
+    }
+
+    /// 发起文字识别（已在识别或已完成时忽略）；像素取合成后的完整图像，识别在后台线程执行。
+    pub fn request_ocr(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.ocr, OcrPhase::Running | OcrPhase::Done(_)) {
+            return;
+        }
+        let Some((width, height, rgba)) = self.composite_rgba() else {
+            return;
+        };
+        self.ocr = OcrPhase::Running;
+        self.shared.emit_control(PinControlEvent::OcrRequested { id: self.id.clone(), width, height, rgba });
+        if self.ocr_visible {
+            self.say("pinned-msg-recognizing", cx);
+        }
+    }
+
+    /// 收到后台识别结果。
+    ///
+    /// # 参数
+    /// - `result`：识别结果或失败原因。
+    pub fn set_ocr_result(&mut self, result: Result<OcrResult, String>, cx: &mut Context<Self>) {
+        match result {
+            Ok(r) => {
+                tracing::info!(id = %self.id, boxes = r.boxes.len(), "贴图文字识别完成");
+                let empty = r.boxes.is_empty();
+                self.ocr = OcrPhase::Done(r.boxes);
+                if self.ocr_visible && empty {
+                    self.say("pinned-msg-no-text", cx);
+                }
+            }
+            Err(e) => {
+                tracing::warn!(id = %self.id, error = %e, "贴图文字识别失败");
+                self.ocr = OcrPhase::Failed;
+                if self.ocr_visible {
+                    self.say_with("pinned-msg-recognize-failed", e.to_string(), cx);
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// 全部识别文字（行序，行间换行）；未完成或没有文字时为 `None`。
+    fn ocr_full_text(&self) -> Option<String> {
+        match &self.ocr {
+            OcrPhase::Done(boxes) if !boxes.is_empty() => {
+                Some(boxes.iter().map(|b| b.text.as_str()).collect::<Vec<_>>().join("\n"))
+            }
+            _ => None,
+        }
+    }
+
+    /// 复制一段文字到剪贴板并提示。
+    fn copy_ocr_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        match snow_platform::clipboard::copy_text_to_clipboard(text) {
+            Ok(()) => self.say("pinned-msg-text-copied", cx),
+            Err(e) => self.say_with("pinned-msg-copy-failed", e.to_string(), cx),
+        }
+    }
+
+    /// 是否处于隐藏到顶部。
+    pub fn is_hidden_to_top(&self) -> bool {
+        self.hide.is_some()
+    }
+
+    /// 键位 / 菜单入口：未隐藏则请求隐藏（由管理器放把手），已隐藏则恢复原位。
+    ///
+    /// # 参数
+    /// - `window`：当前窗口（收起标注用）。
+    pub fn toggle_hide_to_top(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.closed || self.click_through {
+            return;
+        }
+        if self.hide.is_some() {
+            self.exit_hide_to_top(cx);
+            return;
+        }
+        if self.drag.is_some() {
+            self.end_drag(cx);
+        }
+        if self.editing {
+            self.end_editing(window, cx);
+        }
+        let normal = self.pre_thumbnail.take().unwrap_or(self.bounds);
+        if normal != self.bounds {
+            self.set_bounds(normal, cx);
+        }
+        self.shared.emit_control(PinControlEvent::HideToTopRequested {
+            id: self.id.clone(),
+            rect: normal,
+            topmost: self.topmost,
+        });
+    }
+
+    /// 管理器放好把手后调用：记录状态并隐藏窗口。
+    ///
+    /// # 参数
+    /// - `handle`：把手外框。
+    /// - `work`：所在显示器工作区。
+    pub fn enter_hide_to_top(&mut self, handle: PhysicalRect, work: PhysicalRect, cx: &mut Context<Self>) {
+        self.hide = Some(HideState { normal: self.bounds, handle, work, revealed: false });
+        self.set_native_visible(false, cx);
+        cx.notify();
+    }
+
+    /// 鼠标移到把手上：贴图滑到把手下方并开始监视鼠标是否离开。
+    pub fn reveal_from_top(&mut self, cx: &mut Context<Self>) {
+        let Some(state) = self.hide.as_mut() else {
+            return;
+        };
+        if state.revealed {
+            return;
+        }
+        state.revealed = true;
+        let target = revealed_rect(state.normal, state.handle, state.work);
+        self.set_bounds(target, cx);
+        self.set_native_visible(true, cx);
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(HIDE_POLL_INTERVAL).await;
+                match this.update(cx, |v, cx| v.poll_hide_to_top(cx)) {
+                    Ok(false) => {}
+                    _ => break,
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// 滑出期间的轮询：鼠标离开贴图与把手后重新隐藏。返回 `true` 表示轮询应结束。
+    fn poll_hide_to_top(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(state) = self.hide.as_mut() else {
+            return true;
+        };
+        if !state.revealed {
+            return true;
+        }
+        if self.drag.is_some() {
+            return false;
+        }
+        let Ok(cursor) = cursor_screen_position() else {
+            return false;
+        };
+        let inside = |r: PhysicalRect| cursor.x >= r.x && cursor.x < r.right() && cursor.y >= r.y && cursor.y < r.bottom();
+        if inside(self.bounds) || inside(state.handle) {
+            return false;
+        }
+        state.revealed = false;
+        self.set_native_visible(false, cx);
+        true
+    }
+
+    /// 退出隐藏到顶部：回到隐藏前的位置并显示窗口，通知管理器撤掉把手。
+    pub fn exit_hide_to_top(&mut self, cx: &mut Context<Self>) {
+        let Some(state) = self.hide.take() else {
+            return;
+        };
+        self.set_bounds(state.normal, cx);
+        self.set_native_visible(true, cx);
+        self.shared.emit_control(PinControlEvent::HideToTopExited { id: self.id.clone() });
+        self.geometry_changed(cx);
+    }
+
+    /// 在异步任务里显示 / 隐藏原生窗口（避免在视图回调里同步触发窗口消息）。
+    fn set_native_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        let Some(shell) = self.window else {
+            return;
+        };
+        cx.spawn(async move |_this, _cx| {
+            if let Err(e) = shell.set_visible(visible) {
+                tracing::warn!(error = %e, visible, "显示 / 隐藏贴图窗口失败");
+            }
+        })
+        .detach();
+    }
+
+    /// 是否处于点击穿透。
+    pub fn is_click_through(&self) -> bool {
+        self.click_through
+    }
+
+    /// 开关点击穿透：进入时先收起标注与缩略图，原生样式在异步任务里设置（避免在视图回调里同步触发窗口消息），
+    /// 成功后通知管理器放出（或撤掉）独立的退出按钮小窗；原生设置失败则保持原状。
+    ///
+    /// # 参数
+    /// - `enabled`：`true` 进入穿透，`false` 退出。
+    /// - `window`：当前窗口。
+    pub fn set_click_through(&mut self, enabled: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.closed || enabled == self.click_through {
+            return;
+        }
+        let Some(shell) = self.window else {
+            return;
+        };
+        if enabled {
+            if self.drag.is_some() {
+                self.end_drag(cx);
+            }
+            if self.editing {
+                self.end_editing(window, cx);
+            }
+            if let Some(normal) = self.pre_thumbnail.take() {
+                self.set_bounds(normal, cx);
+            }
+        }
+        cx.spawn(async move |this, cx| {
+            let result = shell.set_input_transparent(enabled);
+            let _ = this.update(cx, |v, cx| v.finish_click_through(enabled, result.err().map(|e| e.to_string()), cx));
+        })
+        .detach();
+    }
+
+    /// 原生穿透样式设置完成后的收尾：成功则记录状态并通知管理器，失败只提示。
+    fn finish_click_through(&mut self, enabled: bool, error: Option<String>, cx: &mut Context<Self>) {
+        if let Some(e) = error {
+            tracing::error!(id = %self.id, error = %e, enabled, "设置点击穿透失败");
+            self.say("pinned-msg-click-through-failed", cx);
+            return;
+        }
+        if self.closed {
+            return;
+        }
+        self.click_through = enabled;
+        let event = if enabled {
+            PinControlEvent::ClickThroughEntered { id: self.id.clone(), rect: self.bounds, topmost: self.topmost }
+        } else {
+            PinControlEvent::ClickThroughExited { id: self.id.clone() }
+        };
+        self.shared.emit_control(event);
+        cx.notify();
+    }
+
+    /// 执行一个键位动作。
+    ///
+    /// # 参数
+    /// - `action`：键位表解析出的动作。
+    /// - `window`：当前窗口。
+    fn run_key_action(&mut self, action: PinKeyAction, window: &mut Window, cx: &mut Context<Self>) {
+        match action {
+            PinKeyAction::CopyToClipboard => self.copy_to_clipboard(cx),
+            PinKeyAction::CopyOriginal => self.copy_original(cx),
+            PinKeyAction::SaveAsFile => self.save_to_file(cx),
+            PinKeyAction::DrawingMode => {
+                if self.editing {
+                    self.end_editing(window, cx);
+                } else {
+                    self.begin_editing(window.scale_factor(), cx);
+                }
+            }
+            PinKeyAction::CloseWindow => {
                 if self.editing {
                     self.end_editing(window, cx);
                 } else {
                     self.close(window, true);
                 }
             }
-            ("c", true) => self.copy_to_clipboard(cx),
-            ("s", true) => self.save_to_file(cx),
-            ("z", true) if mods.shift => self.redo_annotation(cx),
-            ("z", true) => self.undo_annotation(cx),
-            ("y", true) => self.redo_annotation(cx),
-            _ => {}
+            PinKeyAction::DestroyWindow => self.close(window, true),
+            PinKeyAction::MoveCursor(dir) => {
+                let (dx, dy) = dir.delta();
+                if !snow_platform::window_rect::nudge_cursor(dx, dy) {
+                    tracing::warn!(id = %self.id, "微移鼠标指针失败");
+                }
+            }
+            // 后续任务（缩放到尺寸）尚未接入
+            PinKeyAction::ThumbnailMode => self.toggle_thumbnail(window, cx),
+            PinKeyAction::ToggleClickThrough => {
+                let target = !self.click_through;
+                self.set_click_through(target, window, cx);
+            }
+            PinKeyAction::HideToTop => self.toggle_hide_to_top(window, cx),
+            PinKeyAction::ShowTextRecognition => self.toggle_text_recognition(cx),
+            PinKeyAction::ResizeWindow => {
+                tracing::info!(id = %self.id, ?action, "贴图键位动作尚未实现");
+            }
         }
     }
 
@@ -1275,9 +1759,15 @@ impl PinnedWindowView {
             return;
         }
         self.closed = true;
+        if self.click_through {
+            self.shared.emit_control(PinControlEvent::ClickThroughExited { id: self.id.clone() });
+        }
+        if self.hide.is_some() {
+            self.shared.emit_control(PinControlEvent::HideToTopExited { id: self.id.clone() });
+        }
         tracing::info!(id = %self.id, renders = self.render_count, remove_from_store, "贴图窗口关闭");
         if remove_from_store {
-            self.shared.remove(&self.id);
+            self.shared.remove_remembering(&self.id);
         }
         if let Err(e) = window.drop_image(self.frame.image()) {
             tracing::warn!(error = %e, "释放贴图底图图集失败");
@@ -1376,7 +1866,7 @@ impl PinnedWindowView {
         if let Some(status) = &self.status {
             return Some(status.clone());
         }
-        self.editing.then(|| EDITING_HINT.to_string())
+        self.editing.then(|| self.t(EDITING_HINT))
     }
 }
 
@@ -1496,6 +1986,36 @@ impl Render for PinnedWindowView {
             );
         }
 
+        // 识别出的文字框：点击复制该段文字（图像像素 -> 窗口逻辑像素）
+        if self.ocr_visible
+            && !self.editing
+            && let OcrPhase::Done(boxes) = &self.ocr
+        {
+            for (ix, b) in boxes.iter().enumerate() {
+                let text = b.text.clone();
+                root = root.child(
+                    div()
+                        .id(("pin-ocr-box", ix))
+                        .absolute()
+                        .top(px(b.rect.y as f32 * k))
+                        .left(px(b.rect.x as f32 * k))
+                        .w(px(b.rect.width as f32 * k))
+                        .h(px(b.rect.height as f32 * k))
+                        .border_1()
+                        .border_color(rgba(OCR_BOX_BORDER))
+                        .bg(rgba(OCR_BOX_FILL))
+                        .cursor_pointer()
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _: &MouseDownEvent, _window, cx| {
+                                this.copy_ocr_text(&text, cx);
+                                cx.stop_propagation();
+                            }),
+                        ),
+                );
+            }
+        }
+
         // 边框
         root = root.child(
             div()
@@ -1559,6 +2079,18 @@ impl Render for PinnedWindowView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 缩略图外框：边长随缩放比、鼠标位置在内容中的相对位置不变。
+    #[test]
+    fn thumbnail_rect_keeps_cursor_anchor() {
+        let normal = PhysicalRect::new(100, 100, 400, 200);
+        let r = thumbnail_rect(normal, 1.0, PhysicalPoint::new(300, 200));
+        assert_eq!((r.width, r.height), (83, 83));
+        // 鼠标在原外框 50% 处，缩小后仍在新外框约 50% 处（41.5 四舍五入为 42）
+        assert_eq!((r.x + 42, r.y + 42), (300, 200));
+        let r2 = thumbnail_rect(normal, 1.5, PhysicalPoint::new(100, 100));
+        assert_eq!((r2.x, r2.y, r2.width), (100, 100, 125));
+    }
     use crate::pinned_shared::PinShared;
     use crate::settings_state::SharedConfig;
     use snow_config::store::ConfigStore;
@@ -1708,6 +2240,51 @@ mod tests {
             layer.pointer_up(to.0, to.1, base).unwrap();
         }
         view.payload_dirty = true;
+    }
+
+    /// 右键菜单文案走 `.ftl`：英文界面显示英文（全是 ASCII），也没有漏掉的 message id。
+    #[test]
+    fn context_menu_uses_localized_labels() {
+        let dir = temp_dir("menu-i18n");
+        let mut store = ConfigStore::open(dir.join("cfg.json"));
+        store.set_value(crate::settings_model::LANGUAGE_KEY, serde_json::json!("en-US")).unwrap();
+        let config: SharedConfig = Rc::new(RefCell::new(store));
+        let shared = PinShared::open(&dir, config, Box::new(|_| {}));
+        let view = view_in(&shared, 32, 32);
+        let labels: Vec<String> = view
+            .menu_entries()
+            .iter()
+            .filter_map(|e| match e {
+                MenuEntry::Item(item) => Some(item.label.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(labels.iter().any(|l| l == "Copy"), "{labels:?}");
+        assert!(labels.iter().any(|l| l == "Close"), "{labels:?}");
+        assert!(labels.iter().all(|l| !l.is_empty() && !l.contains("[!") && l.is_ascii()), "{labels:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 识别文字合并：未完成或没有文字时没有全文，完成后按行序换行拼接。
+    #[test]
+    fn ocr_full_text_joins_lines_only_when_done() {
+        let dir = temp_dir("ocr-text");
+        let shared = shared_in(&dir);
+        let mut view = view_in(&shared, 32, 32);
+        assert_eq!(view.ocr_full_text(), None);
+        view.ocr = OcrPhase::Done(Vec::new());
+        assert_eq!(view.ocr_full_text(), None);
+        let text_box = |y: i32, text: &str| OcrTextBox {
+            rect: PhysicalRect::new(0, y, 10, 8),
+            text: text.into(),
+            confidence: None,
+        };
+        view.ocr = OcrPhase::Done(vec![text_box(0, "第一行"), text_box(10, "second")]);
+        assert_eq!(view.ocr_full_text().as_deref(), Some("第一行
+second"));
+        view.ocr = OcrPhase::Failed;
+        assert_eq!(view.ocr_full_text(), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 二次标注可重编辑：落盘的源图仍是原图，标注存在引擎会话里；重启恢复后合成结果逐像素一致，

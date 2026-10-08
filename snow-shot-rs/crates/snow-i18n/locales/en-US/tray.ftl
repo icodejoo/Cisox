@@ -41,3 +41,11 @@ tray-toggle-fullscreen = Disable hotkeys in fullscreen windows
 tray-show-main = Show main window
 
 tray-restart = Restart app
+
+tray-group-default = Default group
+
+tray-group-new = New group
+
+tray-group-delete-empty = Delete empty groups
+
+tray-pin-management = Pin management

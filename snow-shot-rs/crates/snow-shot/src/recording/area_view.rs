@@ -4,6 +4,7 @@
 //! 其余像素靠 `SetWindowRgn` 命中区域穿透给被录制的应用（区域计算见 [`compute_layout`]）。
 //! 窗口自身通过 `WDA_EXCLUDEFROMCAPTURE` 排除在录制画面之外。
 
+use crate::recording::keymap::{RecordKeyAction, RecordKeymap};
 use crate::recording::model::{RecordingConfig, RecordingFormat, RecordingState};
 use crate::recording::runtime::ScreenRecordingSession;
 use snow_ui::shell::geometry::{PhysicalPoint, PhysicalRect};
@@ -187,6 +188,12 @@ pub struct RecordingAreaView {
     auto: Option<AutoState>,
     /// 界面语言代码（提示文案用）。
     locale: &'static str,
+    /// 控制条键位表。
+    keymap: RecordKeymap,
+    /// 键盘焦点句柄（离屏测试为空）。
+    focus: Option<FocusHandle>,
+    /// 完成后把录制文件复制到剪贴板。
+    copy_on_finish: bool,
 }
 
 impl RecordingAreaView {
@@ -209,6 +216,57 @@ impl RecordingAreaView {
             error_since: None,
             auto: None,
             locale: snow_i18n::FALLBACK_LOCALE,
+            keymap: RecordKeymap::default(),
+            focus: None,
+            copy_on_finish: false,
+        }
+    }
+
+    /// 设置控制条键位表。
+    ///
+    /// # 参数
+    /// - `keymap`：由配置构造的键位表。
+    pub fn set_keymap(&mut self, keymap: RecordKeymap) {
+        self.keymap = keymap;
+    }
+
+    /// 设置键盘焦点句柄（视图实体创建时由 GPUI 提供）。
+    pub fn set_focus_handle(&mut self, focus: FocusHandle) {
+        self.focus = Some(focus);
+    }
+
+    /// 设置录制完成后是否把文件复制到剪贴板。
+    ///
+    /// # 参数
+    /// - `copy`：是否复制。
+    pub fn set_copy_on_finish(&mut self, copy: bool) {
+        self.copy_on_finish = copy;
+    }
+
+    /// 录制完成后是否需要把文件复制到剪贴板。
+    pub fn copy_on_finish(&self) -> bool {
+        self.copy_on_finish
+    }
+
+    /// 处理一次按键动作；只在状态允许时生效（录制中才能导出 / 暂停，Esc 只放弃倒计时与错误提示）。
+    ///
+    /// # 参数
+    /// - `action`：键位表解析出的动作。
+    pub fn handle_key_action(&mut self, action: RecordKeyAction) {
+        let recording = matches!(self.session.state(), RecordingState::Recording { .. });
+        match action {
+            RecordKeyAction::Export if recording => self.handle_action(RecordingAreaAction::StopAndSave),
+            RecordKeyAction::ToggleRecording if recording => self.handle_action(RecordingAreaAction::TogglePause),
+            RecordKeyAction::CopyToClipboard if recording => {
+                self.copy_on_finish = true;
+                self.handle_action(RecordingAreaAction::StopAndSave);
+            }
+            RecordKeyAction::EndRecording => match self.session.state() {
+                RecordingState::Countdown { .. } => self.handle_action(RecordingAreaAction::Cancel),
+                RecordingState::Error { .. } => self.handle_action(RecordingAreaAction::Dismiss),
+                _ => {}
+            },
+            _ => {}
         }
     }
 
@@ -431,7 +489,29 @@ impl Render for RecordingAreaView {
             _ => COLOR_IDLE,
         };
 
-        let mut root = div().relative().w_full().h_full();
+        let mut root = div()
+            .relative()
+            .w_full()
+            .h_full()
+            .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _window, cx| {
+                let m = ev.keystroke.modifiers;
+                if let Some(action) = this.keymap.resolve(ev.keystroke.key.as_str(), m.control, m.shift, m.alt) {
+                    this.handle_key_action(action);
+                    cx.notify();
+                    cx.stop_propagation();
+                }
+            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                    if let Some(focus) = &this.focus {
+                        window.focus(focus, cx);
+                    }
+                }),
+            );
+        if let Some(focus) = &self.focus {
+            root = root.track_focus(focus);
+        }
         for strip in &layout.border {
             let (l, t, w, h) = self.logical(*strip);
             root = root.child(div().absolute().left(l).top(t).w(w).h(h).bg(rgba(accent)));
@@ -583,6 +663,36 @@ mod tests {
         let mut v = RecordingAreaView::new(config, PhysicalRect::new(0, 0, 1920, 1080), 1.0);
         v.session.begin(Box::new(Link(shared.clone())), countdown);
         (v, shared)
+    }
+
+    /// 键位动作按状态生效：录制中可导出 / 暂停 / 复制，Esc 只放弃倒计时，录制中的 Esc 不丢录像。
+    #[test]
+    fn key_actions_follow_state() {
+        let shared = Rc::new(RefCell::new((Vec::new(), Vec::new())));
+        let config = RecordingConfig { region: PhysicalRect::new(100, 100, 800, 600), ..RecordingConfig::default() };
+        let mut v = RecordingAreaView::new(config, PhysicalRect::new(0, 0, 1920, 1080), 1.0);
+        // 空闲时导出 / Esc 都不起作用
+        v.handle_key_action(RecordKeyAction::Export);
+        v.handle_key_action(RecordKeyAction::EndRecording);
+        assert!(shared.borrow().0.is_empty() && !v.cancelled);
+
+        v.session.begin(Box::new(Link(shared.clone())), 3);
+        v.handle_key_action(RecordKeyAction::Export);
+        assert!(shared.borrow().0.is_empty(), "倒计时中不能导出，也还没发过 START");
+        v.handle_key_action(RecordKeyAction::EndRecording);
+        assert!(v.cancelled, "倒计时中 Esc 放弃");
+
+        let shared = Rc::new(RefCell::new((Vec::new(), Vec::new())));
+        let config = RecordingConfig { region: PhysicalRect::new(100, 100, 800, 600), ..RecordingConfig::default() };
+        let mut v = RecordingAreaView::new(config, PhysicalRect::new(0, 0, 1920, 1080), 1.0);
+        v.session.begin(Box::new(Link(shared.clone())), 0);
+        v.handle_key_action(RecordKeyAction::ToggleRecording);
+        assert_eq!(shared.borrow().0.last(), Some(&Command::Pause));
+        v.handle_key_action(RecordKeyAction::EndRecording);
+        assert!(!v.cancelled, "录制中 Esc 不丢录像");
+        v.handle_key_action(RecordKeyAction::CopyToClipboard);
+        assert!(v.copy_on_finish());
+        assert_eq!(shared.borrow().0.last(), Some(&Command::Stop));
     }
 
     /// 音频降级提示：只在录制期间出现，随语言切换，并让控制条增高一行。

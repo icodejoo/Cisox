@@ -6,6 +6,8 @@
 pub mod area_view;
 pub mod audio;
 pub mod client;
+pub mod effects;
+pub mod keymap;
 pub mod model;
 pub mod output;
 pub mod runtime;

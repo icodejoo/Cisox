@@ -1,14 +1,13 @@
-quick-notice-pin-management = 贴图管理暂未提供。快捷键已保存，该页上线后即可使用。
 
-quick-notice-translate-selected = 选中文本翻译暂未提供。
+quick-notice-no-selected-text = 没有读到选中的文字，请先在应用里选中一段文字。
 
-quick-notice-pin-selected-files = 贴选中文件暂未提供。
+quick-notice-pin-selected-files = 请先在资源管理器或桌面上选中图片文件。
 
-quick-notice-restore-closed = 恢复最近关闭的贴图暂未提供。
+quick-notice-restore-closed = 没有可恢复的最近关闭的贴图。
 
-quick-notice-record-copy = 录屏并复制暂未提供，请先使用普通录屏快捷键。
 
-quick-notice-disable-fullscreen = 前台全屏时停用热键暂未提供。
+quick-notice-fullscreen-gate-on = 前台是全屏窗口时，热键已停用。
+quick-notice-fullscreen-gate-off = 全屏窗口里热键保持可用。
 
 quick-notice-hotkeys-paused = 全局热键已暂停，再按一次开关快捷键即可恢复。
 

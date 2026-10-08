@@ -4,7 +4,7 @@
 //! 支持的格式以 snow-crates 的导出能力为准：MP4 / GIF / APNG / 动画 WebP（不含 WebM，见 docs/cisox-todo-webm.md）。
 
 use serde::{Deserialize, Serialize};
-use snow_recorder_protocol::{AudioRequest, MediaFormat};
+use snow_recorder_protocol::{AudioRequest, EffectsRequest, MediaFormat};
 use snow_ui::shell::geometry::PhysicalRect;
 use std::fmt;
 use std::path::PathBuf;
@@ -97,6 +97,8 @@ pub struct RecordingConfig {
     pub countdown_secs: u32,
     /// 音频请求（仅 MP4 生效，其余格式恒为全关）。
     pub audio: AudioRequest,
+    /// 输入特效请求（鼠标轨迹 / 点击 / 高亮、按键回显）。
+    pub effects: EffectsRequest,
 }
 
 impl Default for RecordingConfig {
@@ -110,6 +112,7 @@ impl Default for RecordingConfig {
             output_path: PathBuf::from("recording.mp4"),
             countdown_secs: 0,
             audio: AudioRequest::default(),
+            effects: EffectsRequest::default(),
         }
     }
 }

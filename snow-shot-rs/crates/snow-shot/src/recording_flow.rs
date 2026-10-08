@@ -137,6 +137,16 @@ impl RecordingHost {
         }
     }
 
+    /// 让当前录制在完成后把文件复制到剪贴板（「录屏并复制」用）；没有录制时忽略。
+    ///
+    /// # 参数
+    /// - `cx`：外壳上下文。
+    pub fn mark_copy_on_finish(&self, cx: &mut ShellContext) {
+        if let Some(active) = &self.active {
+            active.view.update(cx.app(), |v, _| v.set_copy_on_finish(true));
+        }
+    }
+
     /// 是否有录制窗仍在运行（未关闭）。
     ///
     /// # 参数
@@ -201,6 +211,7 @@ impl RecordingHost {
         let countdown = config.countdown_secs;
         let mut view = RecordingAreaView::new(config, monitor.bounds, monitor.scale.value());
         view.set_locale(crate::app_runtime::ui_prefs_from_document(self.config.borrow().document()).locale);
+        view.set_keymap(crate::recording::keymap::RecordKeymap::from_document(self.config.borrow().document()));
         if let Some(a) = autotest {
             view.set_auto_plan(a.plan);
         }
@@ -208,7 +219,12 @@ impl RecordingHost {
 
         let mut spec = WindowSpec::overlay(MonitorTarget::Id(monitor.id));
         spec.focus = false;
-        let opened = cx.open_window(&spec, move |_window, app| app.new(|_| view));
+        let opened = cx.open_window(&spec, move |_window, app| {
+            app.new(|cx| {
+                view.set_focus_handle(cx.focus_handle());
+                view
+            })
+        });
         match opened {
             Ok((window, view)) => {
                 self.configure_window(&window);
@@ -287,7 +303,7 @@ impl RecordingHost {
             return;
         };
         let now = Instant::now();
-        let (layout_rects, over, finished) = active.view.update(cx.app(), |v, vcx| {
+        let (layout_rects, over, finished, copy) = active.view.update(cx.app(), |v, vcx| {
             if v.advance(now) {
                 vcx.notify();
             }
@@ -295,7 +311,7 @@ impl RecordingHost {
                 RecordingState::Finished { file_path, .. } => Some(file_path.clone()),
                 _ => None,
             };
-            (v.layout().hit_rects(), v.is_over(now), finished)
+            (v.layout().hit_rects(), v.is_over(now), finished, v.copy_on_finish())
         });
         if layout_rects != active.applied_hit {
             let mut region = Region::new();
@@ -323,7 +339,13 @@ impl RecordingHost {
         match finished {
             Some(path) => {
                 tracing::info!(path = %path.display(), "录屏完成");
-                if reveal && let Err(e) = snow_platform::shell::reveal_in_explorer(&path) {
+                if copy {
+                    match snow_platform::clipboard::copy_files_to_clipboard(std::slice::from_ref(&path)) {
+                        Ok(()) => tracing::info!(path = %path.display(), "录制文件已复制到剪贴板"),
+                        Err(e) => tracing::warn!(error = %e, "复制录制文件到剪贴板失败"),
+                    }
+                }
+                if reveal && !copy && let Err(e) = snow_platform::shell::reveal_in_explorer(&path) {
                     tracing::warn!(error = %e, "无法在资源管理器中定位录制文件");
                 }
             }

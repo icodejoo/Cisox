@@ -132,9 +132,9 @@ pub fn panel_lines(state: &OcrUiState) -> Vec<String> {
                 lines.push(format!("…（另有 {} 行）", all.len() - PANEL_MAX_LINES));
             }
             let footer = if *copied {
-                "已复制 · Enter 复制并关闭 · Esc 返回"
+                "已复制 · E 打开结果窗 · Enter 复制并关闭 · Esc 返回"
             } else {
-                "复制失败 · Enter 重试并关闭 · Esc 返回"
+                "复制失败 · E 打开结果窗 · Enter 重试并关闭 · Esc 返回"
             };
             lines.push(footer.to_string());
             lines

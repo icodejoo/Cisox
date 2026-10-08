@@ -180,6 +180,7 @@ pub fn build_recording_config(
         output_path,
         countdown_secs: document.value(KEY_START_DELAY).as_u64().and_then(|n| u32::try_from(n).ok()).unwrap_or(0),
         audio: audio_request(document, format),
+        effects: crate::recording::effects::effects_request(document),
     })
 }
 

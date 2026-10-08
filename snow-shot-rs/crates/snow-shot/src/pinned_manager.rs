@@ -7,17 +7,20 @@ use crate::capture_flow::pick_monitor;
 use crate::pinned_model::{
     PinGeometry, flatten_alpha_on_white, initial_clipboard_rect, visible_rect,
 };
-use crate::pinned_shared::PinShared;
+use crate::app_runtime::UiEvent;
+use crate::pinned_controls::{CONTROL_SIZE, PinExitControl, PinHideHandle, exit_button_rect, hide_handle_rect};
+use crate::pinned_shared::{PinControlEvent, PinShared};
 use crate::pinned_view::{PinInit, PinOp, PinnedWindowView, frame_from_rgba};
 use crate::screenshot_output::encode_png;
 use crate::settings_state::SharedConfig;
 use snow_history::timeutil::now_utc_ms;
 use snow_platform::clipboard::read_image_from_clipboard;
 use snow_ui::shell::geometry::PhysicalRect;
+use snow_ui::shell::inbox::MainThreadInbox;
 use snow_ui::shell::monitor::Monitors;
 use snow_ui::shell::overlay::cursor_screen_position;
 use snow_ui::shell::window::{Placement, WindowSpec};
-use snow_ui::ui::{Entity, ShellContext, ShellWindow};
+use snow_ui::ui::{AppContext, Entity, ShellContext, ShellWindow};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::rc::Rc;
@@ -42,6 +45,10 @@ struct PinWindow {
 
 /// 贴图窗口管理器。
 pub struct PinnedManager {
+    /// 隐藏到顶部的贴图的把手小窗（键为贴图 ID）。
+    hide_handles: BTreeMap<String, ShellWindow>,
+    /// 点击穿透中的贴图的退出按钮小窗（键为贴图 ID）。
+    exit_controls: BTreeMap<String, ShellWindow>,
     /// 共享上下文（仓储 / 配置）。
     shared: Rc<PinShared>,
     /// 当前打开的贴图窗口（键为贴图 ID）。
@@ -94,6 +101,8 @@ impl PinnedManager {
     /// ```
     pub fn new(data_root: &Path, config: SharedConfig, on_closed: Box<dyn Fn(&str)>) -> Self {
         Self {
+            hide_handles: BTreeMap::new(),
+            exit_controls: BTreeMap::new(),
             shared: PinShared::open(data_root, config, on_closed),
             windows: BTreeMap::new(),
         }
@@ -107,6 +116,280 @@ impl PinnedManager {
     /// 共享上下文（测试与探针用）。
     pub fn shared(&self) -> &Rc<PinShared> {
         &self.shared
+    }
+
+    /// 处理贴图发来的控制事件：进入点击穿透时放出退出按钮小窗，退出或关闭时撤掉。
+    ///
+    /// # 参数
+    /// - `cx`：外壳上下文。
+    /// - `inbox`：主线程收件箱（小窗按钮的点击出口）。
+    /// - `event`：控制事件。
+    pub fn handle_control(&mut self, cx: &mut ShellContext, inbox: &MainThreadInbox<UiEvent>, event: PinControlEvent) {
+        match event {
+            // 文字识别请求由主程序的后台线程处理，这里不需要动作
+            PinControlEvent::OcrRequested { .. } => {}
+            PinControlEvent::MoveToGroup { id, group } => {
+                if let Err(e) = self.move_to_group(cx, &id, &group) {
+                    tracing::warn!(id = %id, group = %group, error = %e, "移动贴图到分组失败");
+                }
+            }
+            PinControlEvent::ClickThroughExited { id } => self.close_exit_control(cx, &id),
+            PinControlEvent::HideToTopExited { id } => {
+                if let Some(window) = self.hide_handles.remove(&id) {
+                    window.close(cx.app());
+                }
+            }
+            PinControlEvent::HideToTopRequested { id, rect, topmost } => {
+                let Ok(monitors) = cx.monitors() else {
+                    tracing::warn!(id = %id, "枚举显示器失败，无法隐藏到顶部");
+                    return;
+                };
+                let Some(monitor) = monitors.best_for_rect(rect) else {
+                    return;
+                };
+                let work = monitor.work_area;
+                let Some(handle) = hide_handle_rect(rect, work, monitor.scale.value()) else {
+                    tracing::warn!(id = %id, "工作区放不下隐藏把手");
+                    return;
+                };
+                let spec = WindowSpec {
+                    title: PIN_WINDOW_TITLE.to_string(),
+                    placement: Placement::Physical(handle),
+                    transparent: false,
+                    always_on_top: topmost,
+                    decorations: false,
+                    show_in_taskbar: false,
+                    focus: false,
+                    resizable: false,
+                };
+                let view_id = id.clone();
+                let view_inbox = inbox.clone();
+                match cx.open_window(&spec, move |_window, app| app.new(|_| PinHideHandle::new(view_id, view_inbox))) {
+                    Ok((window, _view)) => {
+                        self.hide_handles.insert(id.clone(), window);
+                        if let Some(pin) = self.windows.get(&id) {
+                            let _ = pin.window.gpui_handle().update(cx.app(), |_, _, app| {
+                                pin.view.update(app, |v, cx| v.enter_hide_to_top(handle, work, cx));
+                            });
+                        }
+                    }
+                    Err(e) => tracing::error!(id = %id, error = %e, "打开隐藏把手失败"),
+                }
+            }
+            PinControlEvent::ClickThroughEntered { id, rect, topmost } => {
+                self.close_exit_control(cx, &id);
+                let Ok(monitors) = cx.monitors() else {
+                    tracing::warn!(id = %id, "枚举显示器失败，无法放置穿透退出按钮");
+                    return;
+                };
+                let Some(monitor) = monitors.best_for_rect(rect) else {
+                    return;
+                };
+                let Some(target) = exit_button_rect(rect, monitor.work_area, monitor.scale.value()) else {
+                    tracing::warn!(id = %id, "显示器放不下穿透退出按钮");
+                    return;
+                };
+                let spec = WindowSpec {
+                    title: PIN_WINDOW_TITLE.to_string(),
+                    placement: Placement::Physical(target),
+                    transparent: false,
+                    always_on_top: topmost,
+                    decorations: false,
+                    show_in_taskbar: false,
+                    focus: false,
+                    resizable: false,
+                };
+                let view_id = id.clone();
+                let view_inbox = inbox.clone();
+                match cx.open_window(&spec, move |_window, app| {
+                    app.new(|_| PinExitControl::new(view_id, view_inbox))
+                }) {
+                    Ok((window, _view)) => {
+                        tracing::info!(id = %id, rect = ?target, size = CONTROL_SIZE, "穿透退出按钮已打开");
+                        self.exit_controls.insert(id, window);
+                    }
+                    Err(e) => tracing::error!(id = %id, error = %e, "打开穿透退出按钮失败"),
+                }
+            }
+        }
+    }
+
+    /// 关闭某张贴图的退出按钮小窗（没有则忽略）。
+    fn close_exit_control(&mut self, cx: &mut ShellContext, id: &str) {
+        if let Some(window) = self.exit_controls.remove(id) {
+            window.close(cx.app());
+        }
+    }
+
+    /// 鼠标移到把手上：让隐藏中的贴图滑出。
+    ///
+    /// # 参数
+    /// - `cx`：外壳上下文。
+    /// - `id`：贴图 ID。
+    pub fn reveal_hidden(&mut self, cx: &mut ShellContext, id: &str) {
+        if let Some(pin) = self.windows.get(id) {
+            let _ = pin.window.gpui_handle().update(cx.app(), |_, _, app| {
+                pin.view.update(app, |v, cx| v.reveal_from_top(cx));
+            });
+        }
+    }
+
+    /// 点击把手：让贴图退出隐藏到顶部，回到原位。
+    ///
+    /// # 参数
+    /// - `cx`：外壳上下文。
+    /// - `id`：贴图 ID。
+    pub fn exit_hide_to_top(&mut self, cx: &mut ShellContext, id: &str) {
+        if let Some(pin) = self.windows.get(id) {
+            let _ = pin.window.gpui_handle().update(cx.app(), |_, _, app| {
+                pin.view.update(app, |v, cx| v.exit_hide_to_top(cx));
+            });
+        } else if let Some(window) = self.hide_handles.remove(id) {
+            window.close(cx.app());
+        }
+    }
+
+    /// 让某张贴图退出点击穿透（退出按钮被点击后调用）。
+    ///
+    /// # 参数
+    /// - `cx`：外壳上下文。
+    /// - `id`：贴图 ID。
+    pub fn exit_click_through(&mut self, cx: &mut ShellContext, id: &str) {
+        let Some(pin) = self.windows.get(id) else {
+            self.close_exit_control(cx, id);
+            return;
+        };
+        let _ = pin.window.gpui_handle().update(cx.app(), |_, window, app| {
+            pin.view.update(app, |v, cx| v.set_click_through(false, window, cx));
+        });
+    }
+
+    /// 切换激活分组：先落盘并关闭当前分组的全部贴图窗口（记录保留），再恢复目标分组的贴图。
+    ///
+    /// # 参数
+    /// - `cx`：外壳上下文。
+    /// - `group`：目标分组 ID。
+    ///
+    /// # 返回
+    /// 成功返回恢复出的窗口数；分组不存在返回错误说明。
+    pub fn switch_group(&mut self, cx: &mut ShellContext, group: &str) -> Result<usize, String> {
+        if self.shared.active_group_id() == group {
+            return Ok(self.windows.len());
+        }
+        if !self.shared.groups().iter().any(|g| g.id == group) {
+            return Err("分组不存在".into());
+        }
+        self.persist_all(cx);
+        let open: Vec<String> = self.windows.keys().cloned().collect();
+        for id in open {
+            self.close_evicted(cx, &id);
+        }
+        self.shared.set_active_group(group)?;
+        Ok(self.restore_all(cx))
+    }
+
+    /// 把一张贴图移到另一个分组：改记录后关闭它的窗口（它不再属于当前激活分组时不应显示）。
+    ///
+    /// # 参数
+    /// - `cx`：外壳上下文。
+    /// - `id`：贴图 ID。
+    /// - `group`：目标分组 ID。
+    pub fn move_to_group(&mut self, cx: &mut ShellContext, id: &str, group: &str) -> Result<(), String> {
+        self.persist_all(cx);
+        self.shared.move_pin(id, group)?;
+        if group != self.shared.active_group_id() {
+            self.close_evicted(cx, id);
+        }
+        Ok(())
+    }
+
+    /// 删除一个分组及其中的贴图，并关闭对应窗口。
+    ///
+    /// # 参数
+    /// - `cx`：外壳上下文。
+    /// - `group`：分组 ID。
+    ///
+    /// # 返回
+    /// 被删除的贴图数。
+    pub fn delete_group(&mut self, cx: &mut ShellContext, group: &str) -> Result<usize, String> {
+        let was_active = self.shared.active_group_id() == group;
+        let victims = self.shared.delete_group(group)?;
+        for id in &victims {
+            self.close_evicted(cx, id);
+        }
+        if was_active {
+            self.restore_all(cx);
+        }
+        Ok(victims.len())
+    }
+
+    /// 把后台识别结果交给对应贴图。
+    ///
+    /// # 参数
+    /// - `cx`：外壳上下文。
+    /// - `id`：贴图 ID。
+    /// - `result`：识别结果或失败原因。
+    pub fn deliver_ocr(&mut self, cx: &mut ShellContext, id: &str, result: Result<crate::ocr_service::OcrResult, String>) {
+        if let Some(pin) = self.windows.get(id) {
+            let _ = pin.window.gpui_handle().update(cx.app(), |_, _, app| {
+                pin.view.update(app, |v, cx| v.set_ocr_result(result, cx));
+            });
+        }
+    }
+
+    /// 新建的贴图按配置自动识别文字（恢复的旧贴图不触发，避免启动时批量识别）。
+    fn auto_recognize(&mut self, cx: &mut ShellContext, id: &str) {
+        let enabled = self
+            .shared
+            .config_bool("pin_to_screen/automatic_text_recognition");
+        if !enabled {
+            return;
+        }
+        if let Some(pin) = self.windows.get(id) {
+            let _ = pin.window.gpui_handle().update(cx.app(), |_, _, app| {
+                pin.view.update(app, |v, cx| v.request_ocr(cx));
+            });
+        }
+    }
+
+    /// 当前有窗口的贴图 ID。
+    pub fn open_ids(&self) -> std::collections::BTreeSet<String> {
+        self.windows.keys().cloned().collect()
+    }
+
+    /// 显示一张贴图：它不在当前激活分组时先切换到它所在的分组。
+    ///
+    /// # 参数
+    /// - `cx`：外壳上下文。
+    /// - `id`：贴图 ID。
+    pub fn show_pin(&mut self, cx: &mut ShellContext, id: &str) -> Result<(), String> {
+        let group = self.shared.pin_group(id).ok_or_else(|| "贴图不存在".to_string())?;
+        if group != self.shared.active_group_id() {
+            self.switch_group(cx, &group)?;
+        }
+        Ok(())
+    }
+
+    /// 删除一张贴图：关闭窗口并移除记录。
+    ///
+    /// # 参数
+    /// - `cx`：外壳上下文。
+    /// - `id`：贴图 ID。
+    pub fn delete_pin(&mut self, cx: &mut ShellContext, id: &str) {
+        self.close_evicted(cx, id);
+        self.shared.remove(id);
+    }
+
+    /// 删除全部贴图（所有分组）。
+    ///
+    /// # 返回
+    /// 被删除的条数。
+    pub fn delete_all(&mut self, cx: &mut ShellContext) -> usize {
+        let ids = self.shared.record_ids();
+        for id in &ids {
+            self.delete_pin(cx, id);
+        }
+        ids.len()
     }
 
     /// 窗口已关闭：回收对应的窗口句柄与视图实体。
@@ -195,6 +478,34 @@ impl PinnedManager {
         self.create(cx, width, height, rgba, geometry)
     }
 
+    /// 恢复最近关闭的一张贴图（含二次标注），位置校正到可见区域。
+    ///
+    /// # 参数
+    /// - `cx`：外壳上下文。
+    ///
+    /// # 返回
+    /// 恢复出的新贴图 ID；没有可恢复的返回 `Ok(None)`。
+    pub fn restore_last_closed(&mut self, cx: &mut ShellContext) -> Result<Option<String>, String> {
+        let Some(closed) = self.shared.pop_closed() else {
+            return Ok(None);
+        };
+        let decoded = image::load_from_memory_with_format(&closed.png, image::ImageFormat::Png)
+            .map_err(|e| format!("源图解码失败: {e}"))?
+            .to_rgba8();
+        let (width, height) = decoded.dimensions();
+        let monitors = cx.monitors().unwrap_or_default();
+        let mut geometry = closed.geometry.unwrap_or_else(|| {
+            PinGeometry::new(PhysicalRect::new(0, 0, width as i32, height as i32), 1.0, 1.0, true)
+        });
+        let rect = visible_rect(geometry.rect(), &monitor_rects(&monitors), 0);
+        geometry.x = rect.x;
+        geometry.y = rect.y;
+        geometry.width = rect.width;
+        geometry.height = rect.height;
+        let id = self.create_with_session(cx, width, height, decoded.into_raw(), geometry, closed.session)?;
+        Ok(Some(id))
+    }
+
     /// 创建贴图：分配 ID、先落盘（崩溃安全）再开窗、按容量策略淘汰最老的。
     fn create(
         &mut self,
@@ -203,6 +514,19 @@ impl PinnedManager {
         height: u32,
         rgba: Vec<u8>,
         geometry: PinGeometry,
+    ) -> Result<String, String> {
+        self.create_with_session(cx, width, height, rgba, geometry, Vec::new())
+    }
+
+    /// 同 [`Self::create`]，并带上二次标注会话（恢复关闭的贴图时用）。
+    fn create_with_session(
+        &mut self,
+        cx: &mut ShellContext,
+        width: u32,
+        height: u32,
+        rgba: Vec<u8>,
+        geometry: PinGeometry,
+        session: Vec<u8>,
     ) -> Result<String, String> {
         let id = self.shared.new_id()?;
         let created_ms = now_utc_ms();
@@ -222,10 +546,16 @@ impl PinnedManager {
             geometry,
             created_ms,
             payload_bytes,
-            session: Vec::new(),
+            session: session.clone(),
             dpr: 1.0,
         };
+        if !session.is_empty()
+            && let Err(e) = self.shared.persist_session(&id, &geometry, created_ms, session)
+        {
+            tracing::warn!(id = %id, error = %e, "恢复的贴图标注会话落盘失败");
+        }
         self.open_window(cx, init)?;
+        self.auto_recognize(cx, &id);
         for victim in self.shared.evict(Some(&id)) {
             tracing::info!(id = %victim, "贴图超出容量策略，已淘汰");
             self.close_evicted(cx, &victim);
@@ -299,7 +629,8 @@ impl PinnedManager {
         });
         let monitor_bounds = monitor_rects(&monitors);
         let mut restored = 0;
-        for (index, id) in self.shared.record_ids().into_iter().enumerate() {
+        let active_group = self.shared.active_group_id();
+        for (index, id) in self.shared.ids_in_group(&active_group).into_iter().enumerate() {
             self.shared.adopt_id(&id);
             let pin = match self.shared.load(&id) {
                 Ok(pin) => pin,

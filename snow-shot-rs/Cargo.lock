@@ -4839,7 +4839,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2a180dd8642fa45cdb7dd721cd4c11b1cadd4929ce112ebd8b9f5803cc79d536"
 dependencies = [
  "bitflags 2.13.2",
+ "block2 0.6.2",
  "dispatch2",
+ "libc",
  "objc2 0.6.4",
 ]
 
@@ -4850,10 +4852,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e022c9d066895efa1345f8e33e584b9f958da2fd4cd116792e15e07e4720a807"
 dependencies = [
  "bitflags 2.13.2",
+ "block2 0.6.2",
  "dispatch2",
+ "libc",
  "objc2 0.6.4",
  "objc2-core-foundation",
  "objc2-io-surface",
+ "objc2-metal 0.3.2",
 ]
 
 [[package]]
@@ -6949,6 +6954,20 @@ name = "snow-recorder-protocol"
 version = "0.1.0"
 
 [[package]]
+name = "snow-selected-text"
+version = "0.1.0"
+dependencies = [
+ "accessibility-sys",
+ "core-foundation 0.10.1",
+ "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
+ "objc2-foundation 0.3.2",
+ "windows 0.62.2",
+]
+
+[[package]]
 name = "snow-shot"
 version = "0.1.0"
 dependencies = [
@@ -6968,6 +6987,7 @@ dependencies = [
  "snow-ocr-protocol",
  "snow-platform",
  "snow-recorder-protocol",
+ "snow-selected-text",
  "snow-stitch-images",
  "snow-stt-protocol",
  "snow-translate",

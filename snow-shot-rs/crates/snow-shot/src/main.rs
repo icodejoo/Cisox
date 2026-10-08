@@ -31,8 +31,10 @@ pub mod export_format;
 pub mod export_naming;
 pub mod export_pdf;
 pub mod frozen_frame;
+pub mod fullscreen_gate;
 pub mod history_store;
 pub mod history_view;
+pub mod mouse_gesture;
 pub mod ocr_assets;
 pub mod ocr_backend;
 pub mod ocr_client;
@@ -43,6 +45,10 @@ pub mod ort_runtime;
 pub mod overlay_keymap;
 pub mod overlay_probe;
 pub mod overlay_view;
+pub mod pinned_controls;
+pub mod pinned_keymap;
+pub mod pinned_manage;
+pub mod pinned_manage_view;
 pub mod pinned_manager;
 pub mod pinned_model;
 pub mod pinned_shared;
@@ -64,6 +70,8 @@ pub mod stt_settings;
 #[cfg(test)]
 mod stitch_audit_tests;
 pub mod sys_prefs;
+pub mod tray_config;
+pub mod system_settings;
 pub mod translate_flow;
 pub mod translate_input;
 pub mod translate_input_view;
@@ -74,6 +82,7 @@ pub mod translate_settings;
 pub mod desktop_frames;
 pub mod history_nav;
 pub mod previous_selection;
+pub mod recognition_view;
 pub mod region_select;
 pub mod window_pick;
 
@@ -260,6 +269,7 @@ fn run_primary(ctx: &AppBootstrap, guard: &SingleInstanceGuard) -> ExitCode {
         let state_inbox = inbox.clone();
         let restore_inbox = inbox.clone();
         let config = app_runtime::open_shared_config(&data_root);
+        system_settings::apply(config.borrow().document());
         let (tray, hotkeys, hotkey_handles) =
             app_runtime::start_services(&caps, &bus, &inbox, config.borrow().document());
         let mut state = app_runtime::AppState::new(
@@ -271,6 +281,7 @@ fn run_primary(ctx: &AppBootstrap, guard: &SingleInstanceGuard) -> ExitCode {
             hotkey_handles,
             &data_root,
         );
+        app_runtime::start_mouse_gesture(&mut state);
         tracing::info!("event loop started (resident, QuitMode::Explicit)");
         cx.run_inbox(inbox, move |cx, event| {
             app_runtime::handle_event(cx, &mut state, event);
