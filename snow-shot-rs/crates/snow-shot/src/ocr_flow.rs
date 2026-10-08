@@ -7,6 +7,59 @@ use crate::ocr_client::OcrError;
 use crate::ocr_service::{OcrResult, OcrTextBox};
 use snow_i18n::{Args, I18n};
 
+/// 文字识别完成后的自动动作（配置 `screenshot/auto_execute_after_text_recognition`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OcrAutoAction {
+    /// 什么都不做（识别结果留在面板里，按 Enter 才复制）。
+    #[default]
+    NoAction,
+    /// 复制识别文本。
+    CopyText,
+    /// 复制识别文本并结束截图。
+    CopyTextAndEnd,
+    /// 仅“快速文字识别”时复制（本程序没有快速识别入口，等同什么都不做）。
+    QuickCopyText,
+    /// 仅“快速文字识别”时复制并结束（同上）。
+    QuickCopyTextAndEnd,
+    /// 打开可编辑的识别结果窗。
+    EnableEditMode,
+}
+
+impl OcrAutoAction {
+    /// 解析配置值。
+    ///
+    /// # 参数
+    /// - `value`：配置里的字符串。
+    ///
+    /// # 返回
+    /// 对应动作；不认识的值返回 `None`。
+    ///
+    /// ```ignore
+    /// assert_eq!(OcrAutoAction::parse("copy_text"), Some(OcrAutoAction::CopyText));
+    /// ```
+    pub fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "no_action" => Self::NoAction,
+            "copy_text" => Self::CopyText,
+            "copy_text_and_end_screenshot" => Self::CopyTextAndEnd,
+            "quick_copy_text" => Self::QuickCopyText,
+            "quick_copy_text_and_end_screenshot" => Self::QuickCopyTextAndEnd,
+            "enable_edit_mode" => Self::EnableEditMode,
+            _ => return None,
+        })
+    }
+
+    /// 识别完成后是否自动复制文本（快速变体只在快速识别时生效，这里恒为否）。
+    pub fn copies(self) -> bool {
+        matches!(self, Self::CopyText | Self::CopyTextAndEnd)
+    }
+
+    /// 复制成功后是否结束截图。
+    pub fn ends_screenshot(self) -> bool {
+        matches!(self, Self::CopyTextAndEnd)
+    }
+}
+
 /// 结果面板最多显示的行数。
 pub const PANEL_MAX_LINES: usize = 8;
 /// 结果面板每行最多显示的字符数。
@@ -27,6 +80,8 @@ pub enum OcrUiState {
         boxes: Vec<OcrTextBox>,
         /// 是否已成功复制到剪贴板。
         copied: bool,
+        /// 按配置没有自动复制（`copied` 为 false 但不是失败；按 Enter 才复制）。
+        skipped: bool,
     },
     /// 识别失败（含资产缺失）。
     Failed {
@@ -60,6 +115,23 @@ impl OcrUiState {
             text: result.full_text.clone(),
             boxes: result.boxes.clone(),
             copied,
+            skipped: false,
+        }
+    }
+
+    /// 把完成态标成“按配置没有自动复制”（不是复制失败）；其它状态原样返回。
+    ///
+    /// # 返回
+    /// `Done` 时 `copied = false`、`skipped = true`。
+    pub fn without_auto_copy(self) -> Self {
+        match self {
+            Self::Done { text, boxes, .. } => Self::Done {
+                text,
+                boxes,
+                copied: false,
+                skipped: true,
+            },
+            other => other,
         }
     }
 
@@ -90,6 +162,11 @@ impl OcrUiState {
                 copied: true,
                 ..
             } => Some(i18n.tr_with("ocr-panel-done-copied", &count(boxes))),
+            Self::Done {
+                boxes,
+                skipped: true,
+                ..
+            } => Some(i18n.tr_with("ocr-panel-done-not-copied", &count(boxes))),
             Self::Done {
                 boxes,
                 copied: false,
@@ -142,7 +219,12 @@ pub fn panel_lines(state: &OcrUiState, i18n: &I18n) -> Vec<String> {
         OcrUiState::Done { text, .. } if text.is_empty() => {
             vec![i18n.tr("ocr-panel-empty"), i18n.tr("ocr-panel-esc")]
         }
-        OcrUiState::Done { text, copied, .. } => {
+        OcrUiState::Done {
+            text,
+            copied,
+            skipped,
+            ..
+        } => {
             let all: Vec<&str> = text.lines().collect();
             let mut lines: Vec<String> = all
                 .iter()
@@ -157,6 +239,8 @@ pub fn panel_lines(state: &OcrUiState, i18n: &I18n) -> Vec<String> {
             }
             let footer = if *copied {
                 "ocr-panel-footer-copied"
+            } else if *skipped {
+                "ocr-panel-footer-not-copied"
             } else {
                 "ocr-panel-footer-copy-failed"
             };
@@ -308,5 +392,76 @@ mod tests {
             Some("正在下载 OCR 模型 (1/3)…")
         );
         assert_eq!(panel_lines(&d, zh()).len(), 2);
+    }
+
+    /// 自动动作配置：六个值都能解析，只有“复制”两种会自动复制，只有“复制并结束”会结束截图。
+    #[test]
+    fn auto_action_parses_all_values() {
+        let table = [
+            ("no_action", OcrAutoAction::NoAction, false, false),
+            ("copy_text", OcrAutoAction::CopyText, true, false),
+            (
+                "copy_text_and_end_screenshot",
+                OcrAutoAction::CopyTextAndEnd,
+                true,
+                true,
+            ),
+            (
+                "quick_copy_text",
+                OcrAutoAction::QuickCopyText,
+                false,
+                false,
+            ),
+            (
+                "quick_copy_text_and_end_screenshot",
+                OcrAutoAction::QuickCopyTextAndEnd,
+                false,
+                false,
+            ),
+            (
+                "enable_edit_mode",
+                OcrAutoAction::EnableEditMode,
+                false,
+                false,
+            ),
+        ];
+        for (value, action, copies, ends) in table {
+            assert_eq!(OcrAutoAction::parse(value), Some(action), "{value}");
+            assert_eq!(
+                (action.copies(), action.ends_screenshot()),
+                (copies, ends),
+                "{value}"
+            );
+        }
+        assert_eq!(OcrAutoAction::parse("bogus"), None);
+        assert_eq!(OcrAutoAction::default(), OcrAutoAction::NoAction);
+    }
+
+    /// 没有自动复制的完成态：状态条与底部提示是“未复制”文案，不是“复制失败”，中英文都有。
+    #[test]
+    fn skipped_copy_has_its_own_texts() {
+        let state = OcrUiState::from_result(&result(&["abc"]), true).without_auto_copy();
+        assert!(matches!(
+            state,
+            OcrUiState::Done {
+                copied: false,
+                skipped: true,
+                ..
+            }
+        ));
+        for i18n in [zh(), en()] {
+            let status = state.status_text(i18n).unwrap();
+            assert!(
+                !status.contains("失败") && !status.contains("failed"),
+                "{status}"
+            );
+            let footer = panel_lines(&state, i18n).pop().unwrap();
+            assert!(footer.contains("Enter"), "{footer}");
+            assert!(
+                !footer.contains("失败") && !footer.contains("failed"),
+                "{footer}"
+            );
+        }
+        assert_eq!(OcrUiState::Idle.without_auto_copy(), OcrUiState::Idle);
     }
 }

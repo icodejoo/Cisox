@@ -109,7 +109,7 @@ pub const ENV_SETTINGS_AUTOTEST: &str = "SNOW_SETTINGS_AUTOTEST";
 /// 设置窗所在显示器的设备名子串环境变量（如 `DISPLAY2`，验收用）。
 pub const ENV_SETTINGS_MONITOR: &str = "SNOW_SETTINGS_MONITOR";
 /// 托盘悬停提示。
-pub(crate) const TRAY_TOOLTIP: &str = "Cisox";
+pub(crate) const TRAY_TOOLTIP: &str = PRODUCT_NAME;
 /// 托盘信号：从剪贴板贴图。
 pub const TRAY_SIGNAL_PIN_CLIPBOARD: &str = "pin_clipboard";
 /// 托盘信号：打开截图历史。
@@ -526,8 +526,13 @@ pub enum UiEvent {
     },
     /// 设置页请求导出 / 导入设置。
     ConfigTransferRequested(crate::config_transfer::TransferAction),
-    /// 设置页请求检查更新。
-    UpdateCheckRequested,
+    /// 设置页“更新”分组的动作（检查 / 下载 / 打开目录）。
+    UpdateActionRequested(crate::net_settings::UpdateAction),
+    /// 更新包下载结束：被下载的更新与结果。
+    UpdateDownloadFinished(
+        crate::net_settings::UpdateInfo,
+        crate::net_settings::UpdateDownloadOutcome,
+    ),
     /// 检查更新结束（未本地化的结果）。
     UpdateCheckFinished(crate::net_settings::UpdateCheckOutcome),
     /// 快捷动作（来自全局热键 / 总线）。
@@ -3004,6 +3009,44 @@ fn run_config_transfer(
     }
 }
 
+/// 执行设置页“更新”分组的动作：检查更新、下载更新包（后台线程）、打开已下载目录。
+///
+/// # 参数
+/// - `state`：运行时状态。
+/// - `action`：用户触发的动作。
+fn run_update_action(state: &AppState, action: crate::net_settings::UpdateAction) {
+    use crate::net_settings::UpdateAction;
+    match action {
+        UpdateAction::Check => start_update_check(state),
+        UpdateAction::Download(info) => {
+            let inbox = state.inbox.clone();
+            let data_root = state.data_root.clone();
+            let worker = (inbox.clone(), info.clone());
+            let spawned = std::thread::Builder::new()
+                .name("snow-update-download".into())
+                .spawn(move || {
+                    let outcome = crate::net_settings::download_update(&info, &data_root);
+                    inbox.push(UiEvent::UpdateDownloadFinished(info, outcome));
+                });
+            if let Err(e) = spawned {
+                let (inbox, info) = worker;
+                let outcome = crate::net_settings::UpdateDownloadOutcome::Failed(
+                    crate::ocr_download::FetchError::RunTool {
+                        tool: "thread",
+                        detail: e.to_string(),
+                    },
+                );
+                inbox.push(UiEvent::UpdateDownloadFinished(info, outcome));
+            }
+        }
+        UpdateAction::OpenFolder(dir) => {
+            if let Err(e) = std::process::Command::new("explorer.exe").arg(&dir).spawn() {
+                tracing::warn!(dir = %dir.display(), error = %e, "打开更新包目录失败");
+            }
+        }
+    }
+}
+
 /// 开始检查更新：先解析配置里的清单地址（未配置 / 非法直接回结果），再起后台线程下载比对。
 ///
 /// # 参数
@@ -3258,8 +3301,8 @@ fn build_settings_view(
         v.set_transfer_hook(Rc::new(move |action| {
             transfer_inbox.push(UiEvent::ConfigTransferRequested(action));
         }));
-        v.set_update_hook(Rc::new(move || {
-            update_inbox.push(UiEvent::UpdateCheckRequested);
+        v.set_update_hook(Rc::new(move |action| {
+            update_inbox.push(UiEvent::UpdateActionRequested(action));
         }));
     });
     view
@@ -4705,11 +4748,16 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
         } => spawn_table(state, serial, width, height, rgba),
         UiEvent::TableDownloadRequested => spawn_table_download(state),
         UiEvent::OcrFinished { serial, result } => {
-            if let Some(view) = &state.overlay_view {
+            let outcome = state.overlay_view.as_ref().map(|view| {
                 view.update(cx.app(), |v, vcx| {
-                    v.finish_ocr(serial, result);
+                    let outcome = v.finish_ocr(serial, result);
                     vcx.notify();
-                });
+                    outcome
+                })
+            });
+            // 配置为“复制并结束截图”：复制成功后关闭覆盖窗
+            if outcome == Some(OverlayOutcome::Close) {
+                close_all_overlays(cx, state);
             }
         }
         UiEvent::TranslateRequested {
@@ -4802,7 +4850,15 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
             }
         }
         UiEvent::ConfigTransferRequested(action) => run_config_transfer(cx, state, action),
-        UiEvent::UpdateCheckRequested => start_update_check(state),
+        UiEvent::UpdateActionRequested(action) => run_update_action(state, action),
+        UiEvent::UpdateDownloadFinished(info, outcome) => {
+            let locale = ui_prefs_from_document(state.config.borrow().document()).locale;
+            let ui_state = crate::net_settings::download_outcome_state(&info, &outcome, locale);
+            tracing::info!(version = %info.version, ?outcome, "更新包下载结束");
+            if let Some(view) = &state.settings_view {
+                view.update(cx.app(), |v, vcx| v.finish_update_check(ui_state, vcx));
+            }
+        }
         UiEvent::UpdateCheckFinished(outcome) => {
             let locale = ui_prefs_from_document(state.config.borrow().document()).locale;
             let ui_state = crate::net_settings::update_outcome_state(&outcome, locale);

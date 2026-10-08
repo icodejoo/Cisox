@@ -117,3 +117,7 @@ ocr-panel-footer-copy-failed = 复制失败 · E 打开结果窗 · Enter 重试
 ocr-panel-download-hint = 按 D 下载 OCR 组件（运行时约 17 MB + 模型约 31 MB）
 
 fetch-task-start-failed = 无法启动后台任务: { $detail }
+
+ocr-panel-done-not-copied = 已识别 { $count } 行，按 Enter 复制文本
+
+ocr-panel-footer-not-copied = 未复制 · E 打开结果窗 · Enter 复制并关闭 · Esc 返回

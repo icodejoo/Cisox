@@ -117,3 +117,7 @@ ocr-panel-footer-copy-failed = Copy failed - E opens the result window - Enter r
 ocr-panel-download-hint = Press D to download the OCR components (runtime about 17 MB + model about 31 MB)
 
 fetch-task-start-failed = Could not start the background task: { $detail }
+
+ocr-panel-done-not-copied = Recognized { $count } lines; press Enter to copy the text
+
+ocr-panel-footer-not-copied = Not copied - E opens the result window - Enter copies and closes - Esc goes back

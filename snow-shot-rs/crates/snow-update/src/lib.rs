@@ -3,8 +3,9 @@
 //! 所属阶段：P7。当前落地两块纯逻辑：“更新清单地址”的解析（不硬编码任何端点，未配置时明确报错），
 //! 以及清单 JSON 的解析与版本比较（只检查、不下载安装）。
 //!
-//! 最小清单格式：`{"version": "1.2.3", "url": "https://…", "notes": "更新说明"}`，
-//! `version` 必填，`url` 与 `notes` 可省略。
+//! 清单格式：`{"version": "1.2.3", "url": "https://…", "notes": "更新说明", "sha256": "64 位十六进制"}`，
+//! `version` 必填，其余可省略。`url` 是安装包的下载地址；`sha256` 给出时，下载后必须校验一致才算成功，
+//! 省略则放行但界面会提示“未校验”。不自动安装，只下载到应用自己的数据目录。
 
 use serde_json::Value;
 use snow_net::{UrlError, validate_url};
@@ -42,6 +43,8 @@ pub struct UpdateManifest {
     pub url: String,
     /// 更新说明（可空）。
     pub notes: String,
+    /// 安装包的 SHA-256（小写十六进制，可空；空表示清单没有给校验值）。
+    pub sha256: String,
 }
 
 /// 清单解析失败的原因。
@@ -55,6 +58,8 @@ pub enum ManifestError {
     MissingVersion,
     /// 版本号无法解析（携带原值）。
     BadVersion(String),
+    /// `sha256` 不是 64 位十六进制（携带原值）。
+    BadSha256(String),
 }
 
 /// 当前版本与清单版本的比较结果。
@@ -117,11 +122,24 @@ pub fn parse_manifest(text: &str) -> Result<UpdateManifest, ManifestError> {
     if parse_version(&version).is_none() {
         return Err(ManifestError::BadVersion(version));
     }
+    let sha256 = field("sha256").to_ascii_lowercase();
+    if !sha256.is_empty() && !is_sha256_hex(&sha256) {
+        return Err(ManifestError::BadSha256(sha256));
+    }
     Ok(UpdateManifest {
         version,
         url: field("url"),
         notes: field("notes"),
+        sha256,
     })
+}
+
+/// SHA-256 十六进制串的长度。
+const SHA256_HEX_LEN: usize = 64;
+
+/// 是否为 64 位十六进制串。
+fn is_sha256_hex(text: &str) -> bool {
+    text.len() == SHA256_HEX_LEN && text.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 /// 把版本号拆成（数字段，是否带预发布后缀）；允许前缀 `v`，忽略 `+构建` 部分。
@@ -245,11 +263,29 @@ mod tests {
             UpdateManifest {
                 version: "1.2.3".into(),
                 url: "https://a.b/d".into(),
-                notes: "fix".into()
+                notes: "fix".into(),
+                sha256: String::new()
             }
         );
         let m = parse_manifest("\u{feff}{\"version\":\"2.0\"}").unwrap();
-        assert!(m.url.is_empty() && m.notes.is_empty());
+        assert!(m.url.is_empty() && m.notes.is_empty() && m.sha256.is_empty());
+    }
+
+    /// 清单里的 sha256：大写被规整为小写，长度或字符不对被拒。
+    #[test]
+    fn parses_sha256_field() {
+        let hash = "AB".repeat(32);
+        let m = parse_manifest(&format!(r#"{{"version":"1","sha256":"{hash}"}}"#)).unwrap();
+        assert_eq!(m.sha256, "ab".repeat(32));
+        assert!(matches!(
+            parse_manifest(r#"{"version":"1","sha256":"abc"}"#),
+            Err(ManifestError::BadSha256(_))
+        ));
+        let bad = "g".repeat(64);
+        assert!(matches!(
+            parse_manifest(&format!(r#"{{"version":"1","sha256":"{bad}"}}"#)),
+            Err(ManifestError::BadSha256(_))
+        ));
     }
 
     /// 清单非法：非 JSON、非对象、缺版本、版本非法、过大。

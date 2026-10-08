@@ -265,6 +265,7 @@ pub struct Magnifier {
     cursor: PhysicalPoint,
     selection_rect: Option<PhysicalRect>,
     color_format: ColorFormat,
+    hint: Option<SharedString>,
 }
 
 impl Magnifier {
@@ -292,7 +293,14 @@ impl Magnifier {
             cursor,
             selection_rect: None,
             color_format: ColorFormat::default(),
+            hint: None,
         }
+    }
+
+    /// 设置底部的操作提示（如“按 C 复制颜色值”，由界面提供本地化文案）；不设置则不显示。
+    pub fn hint(mut self, text: impl Into<SharedString>) -> Self {
+        self.hint = Some(text.into());
+        self
     }
 
     /// 设置关联的当前选区矩形。
@@ -384,12 +392,9 @@ impl RenderOnce for Magnifier {
                         this.child(format!("{} × {}", sel.width.max(0), sel.height.max(0)))
                     }),
             )
-            .child(
-                div()
-                    .text_color(rgba(0x888888FF))
-                    .text_xs()
-                    .child("按 C 复制颜色值"),
-            );
+            .when_some(self.hint, |this, hint| {
+                this.child(div().text_color(rgba(0x888888FF)).text_xs().child(hint))
+            });
 
         div()
             .id(self.id)

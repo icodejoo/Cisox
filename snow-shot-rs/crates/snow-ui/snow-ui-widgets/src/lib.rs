@@ -24,7 +24,7 @@ pub use segmented::{
     SegmentedItem,
 };
 pub use toolbar::{
-    AnnotationTool, ScreenshotToolbar, ToolbarAction, calculate_toolbar_placement,
+    AnnotationTool, ScreenshotToolbar, ToolbarAction, ToolbarLabel, calculate_toolbar_placement,
 };
 
 /// 本 crate 的阶段标记，用于骨架连通性测试。
