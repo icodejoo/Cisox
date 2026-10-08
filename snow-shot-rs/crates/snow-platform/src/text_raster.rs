@@ -102,16 +102,54 @@ pub fn rasterize_text(
     imp::rasterize(text, font_family, clamp_font_px(font_px), bold)
 }
 
+/// 整理字体族名单：去掉空名与竖排字体（`@` 开头）、去重并按不区分大小写排序。
+///
+/// # 参数
+/// - `names`：枚举得到的原始字体族名。
+///
+/// # 返回
+/// 整理后的名单。
+///
+/// ```
+/// use snow_platform::text_raster::normalize_font_families;
+/// let v = normalize_font_families(vec!["b".into(), "@Vertical".into(), "A".into(), "b".into()]);
+/// assert_eq!(v, vec!["A".to_owned(), "b".to_owned()]);
+/// ```
+pub fn normalize_font_families(names: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = names
+        .into_iter()
+        .map(|n| n.trim().to_owned())
+        .filter(|n| !n.is_empty() && !n.starts_with('@'))
+        .collect();
+    out.sort_by_key(|n| n.to_lowercase());
+    out.dedup();
+    out
+}
+
+/// 枚举系统已安装的字体族名（GDI 枚举，已去重排序）。
+///
+/// # 返回
+/// 字体族名单；枚举失败或非 Windows 平台返回空表。
+///
+/// ```no_run
+/// let fonts = snow_platform::text_raster::list_font_families();
+/// assert!(fonts.iter().any(|f| f == "Arial"));
+/// ```
+pub fn list_font_families() -> Vec<String> {
+    normalize_font_families(imp::list_families())
+}
+
 #[cfg(windows)]
 mod imp {
     use super::{MAX_BITMAP_SIDE, TextBitmap, TextMetrics};
-    use windows::Win32::Foundation::{COLORREF, RECT};
+    use windows::Win32::Foundation::{COLORREF, LPARAM, RECT};
     use windows::Win32::Graphics::Gdi::{
         ANTIALIASED_QUALITY, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLACKNESS, CLIP_DEFAULT_PRECIS,
         CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW, DEFAULT_CHARSET, DIB_RGB_COLORS,
         DT_CALCRECT, DT_EXPANDTABS, DT_LEFT, DT_NOPREFIX, DT_TOP, DeleteDC, DeleteObject,
-        DrawTextW, FF_DONTCARE, FW_BOLD, FW_NORMAL, GetDC, GetDIBits, HDC, HFONT, OUT_DEFAULT_PRECIS,
-        PatBlt, ReleaseDC, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
+        DrawTextW, EnumFontFamiliesExW, FF_DONTCARE, FW_BOLD, FW_NORMAL, GetDC, GetDIBits, HDC,
+        HFONT, LOGFONTW, OUT_DEFAULT_PRECIS, PatBlt, ReleaseDC, SelectObject, SetBkMode,
+        SetTextColor, TEXTMETRICW, TRANSPARENT,
     };
     use windows::core::PCWSTR;
 
@@ -126,6 +164,45 @@ mod imp {
     /// 转成以 0 结尾的 UTF-16。
     fn wide(text: &str) -> Vec<u16> {
         text.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    /// 字体枚举回调：把字体族名追加到 `lparam` 指向的向量。
+    unsafe extern "system" fn collect_family(
+        font: *const LOGFONTW,
+        _metric: *const TEXTMETRICW,
+        _kind: u32,
+        lparam: LPARAM,
+    ) -> i32 {
+        // SAFETY: font 由 GDI 提供有效 LOGFONTW；lparam 是调用方传入的 `Vec<String>` 可变指针。
+        let (face, out) = unsafe { (&(*font).lfFaceName, &mut *(lparam.0 as *mut Vec<String>)) };
+        let len = face.iter().position(|&c| c == 0).unwrap_or(face.len());
+        out.push(String::from_utf16_lossy(&face[..len]));
+        1
+    }
+
+    /// 枚举全部字体族名（未去重）。
+    pub fn list_families() -> Vec<String> {
+        let mut names: Vec<String> = Vec::new();
+        // SAFETY: DC 在本函数内获取并释放；回调只在枚举期间访问 names。
+        unsafe {
+            let screen = GetDC(None);
+            if screen.0.is_null() {
+                return names;
+            }
+            let filter = LOGFONTW {
+                lfCharSet: DEFAULT_CHARSET,
+                ..Default::default()
+            };
+            EnumFontFamiliesExW(
+                screen,
+                &filter,
+                Some(collect_family),
+                LPARAM(&mut names as *mut Vec<String> as isize),
+                0,
+            );
+            let _ = ReleaseDC(None, screen);
+        }
+        names
     }
 
     /// 创建 GDI 字体。
@@ -271,10 +348,7 @@ mod imp {
                 );
                 if lines == h as i32 {
                     // 灰度抗锯齿下三个通道相同，取绿色通道作为覆盖率
-                    let coverage = pixels
-                        .chunks_exact(BYTES_PER_PIXEL)
-                        .map(|p| p[1])
-                        .collect();
+                    let coverage = pixels.chunks_exact(BYTES_PER_PIXEL).map(|p| p[1]).collect();
                     out = Ok(TextBitmap {
                         width: w,
                         height: h,
@@ -312,11 +386,41 @@ mod imp {
     pub fn rasterize(_: &str, _: &str, _: f32, _: bool) -> Result<TextBitmap, String> {
         Err("当前平台不支持文本光栅化".into())
     }
+
+    /// 非 Windows：无字体可枚举。
+    pub fn list_families() -> Vec<String> {
+        Vec::new()
+    }
 }
 
 #[cfg(all(test, windows))]
 mod tests {
     use super::*;
+
+    /// 系统字体枚举非空、无竖排名、已排序去重，且含默认 UI 字体之一。
+    #[test]
+    fn lists_installed_font_families() {
+        let fonts = list_font_families();
+        assert!(!fonts.is_empty());
+        assert!(fonts.iter().all(|f| !f.starts_with('@') && !f.is_empty()));
+        let mut sorted = fonts.clone();
+        sorted.dedup();
+        assert_eq!(sorted.len(), fonts.len());
+        assert!(fonts.iter().any(|f| f == "Arial" || f == "Segoe UI"));
+    }
+
+    /// 名单整理：去空、去竖排、去重、不区分大小写排序。
+    #[test]
+    fn normalize_font_families_cleans_list() {
+        let v = normalize_font_families(vec![
+            " b ".into(),
+            "".into(),
+            "@Vert".into(),
+            "A".into(),
+            "b".into(),
+        ]);
+        assert_eq!(v, vec!["A".to_owned(), "b".to_owned()]);
+    }
 
     /// 字号被夹到合法范围。
     #[test]

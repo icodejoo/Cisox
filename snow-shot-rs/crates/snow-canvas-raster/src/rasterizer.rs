@@ -105,6 +105,14 @@ impl TinySkiaRasterizer {
         &self.decoration
     }
 
+    /// 设置水印字号 / 间距的逻辑像素到物理像素换算（画布已是物理像素时传显示器 DPR）。
+    ///
+    /// # 参数
+    /// - `scale`：换算系数，非法值按 1.0。
+    pub fn set_watermark_logical_scale(&mut self, scale: f64) {
+        self.decoration.set_logical_scale(scale);
+    }
+
     /// 渲染一个区域的装饰图层（预乘 RGBA），预览分块与导出裁切共用。
     ///
     /// # 参数

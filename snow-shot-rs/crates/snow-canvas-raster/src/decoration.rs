@@ -126,6 +126,8 @@ pub struct DecorationLayer {
     failed_key: Option<CellKey>,
     /// 复用的草稿块。
     scratch: Option<Pixmap>,
+    /// 逻辑像素到画布物理像素的换算（水印字号与间距按逻辑像素存储，高 DPR 屏要放大）；0 表示未设置。
+    logical_scale: f64,
 }
 
 impl DecorationLayer {
@@ -136,6 +138,23 @@ impl DecorationLayer {
         self.revision = None;
         self.cell = None;
         self.failed_key = None;
+    }
+
+    /// 设置水印字号 / 间距的“逻辑像素 → 画布物理像素”换算（通常是显示器 DPR）。
+    ///
+    /// # 参数
+    /// - `scale`：换算系数；非有限值或不大于 0 按 1.0。已构建的重复单元会因缓存键变化而重建。
+    pub fn set_logical_scale(&mut self, scale: f64) {
+        self.logical_scale = scale;
+    }
+
+    /// 当前生效的逻辑到物理换算（非法值回落 1.0）。
+    pub fn logical_scale(&self) -> f64 {
+        if self.logical_scale.is_finite() && self.logical_scale > 0.0 {
+            self.logical_scale
+        } else {
+            1.0
+        }
     }
 
     /// 应用一个装饰补丁：reset 清空洞列表，再按 `spotlight_ops` 做区间替换。
@@ -334,10 +353,9 @@ impl DecorationLayer {
     /// 按当前水印配置与缩放确保 `self.cell` 是对应的重复单元；失败时 `self.cell` 为 `None`。
     fn ensure_cell(&mut self, view: &View, text: &mut TextRasterizer<'_>) {
         let w = &self.view.watermark;
-        let scale = view.scale;
         let content = watermark_text(w);
-        let px = (w.font_size * scale * FONT_PX_QUANTIZATION).round() / FONT_PX_QUANTIZATION;
-        let gap_px = w.gap.clamp(WATERMARK_GAP_MIN, WATERMARK_GAP_MAX) * scale;
+        let (px, gap_px) =
+            watermark_physical(w.font_size, w.gap, view.scale * self.logical_scale());
         let alpha = watermark_alpha(w);
         let key = CellKey {
             text: content.clone(),
@@ -368,6 +386,27 @@ impl DecorationLayer {
             None => self.failed_key = Some(key),
         }
     }
+}
+
+/// 把水印字号与间距（逻辑像素）换算成物理像素。
+///
+/// # 参数
+/// - `font_size`：字号（逻辑像素）。
+/// - `gap`：间距（逻辑像素，先夹到 10..200）。
+/// - `scale`：总缩放（相机缩放 × DPR）。
+///
+/// # 返回
+/// `(物理字号（按 1/64 量化）, 物理间距)`。
+///
+/// ```
+/// use snow_canvas_raster::decoration::watermark_physical;
+/// let (px, gap) = watermark_physical(16.0, 56.0, 1.5);
+/// assert_eq!((px, gap), (24.0, 84.0));
+/// ```
+pub fn watermark_physical(font_size: f64, gap: f64, scale: f64) -> (f64, f64) {
+    let px = (font_size * scale * FONT_PX_QUANTIZATION).round() / FONT_PX_QUANTIZATION;
+    let gap_px = gap.clamp(WATERMARK_GAP_MIN, WATERMARK_GAP_MAX) * scale;
+    (px, gap_px)
 }
 
 /// 水印文本（UTF-8，按 `text_len` 截断；非法字节丢弃）。

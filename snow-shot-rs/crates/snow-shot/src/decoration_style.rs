@@ -4,7 +4,10 @@
 //! 水印文本与模板属于编辑会话，不进样式，所以这里只读外观字段。
 
 use serde_json::{Value, json};
-use snow_draw_engine::{ColorRgba8, SpotlightConfig, WatermarkConfig};
+use snow_draw_engine::{
+    ColorRgba8, SpotlightConfig, WatermarkConfig, WatermarkTemplateApplicationTime,
+};
+use snow_platform::local_time::LocalDateTime;
 
 use crate::annotation_style::{format_hex, parse_hex};
 
@@ -29,6 +32,10 @@ pub const WATERMARK_FONT_PRESETS: [u32; 8] = [12, 16, 24, 30, 48, 72, 96, 128];
 pub const WATERMARK_OPACITY_PRESETS: [u32; 10] = [4, 8, 12, 16, 24, 32, 48, 64, 80, 100];
 /// 聚光灯不透明度档位（百分比，旧版默认 64）。
 pub const SPOTLIGHT_OPACITY_PRESETS: [u32; 8] = [16, 32, 48, 64, 72, 80, 88, 96];
+/// 水印模板配置键（旧版保存的 `[{name, value}]` 列表）。
+pub const WATERMARK_TEMPLATES_KEY: &str = "drawing/watermark_templates";
+/// 水印模板名最大字符数（旧版输入框上限）。
+const WATERMARK_TEMPLATE_NAME_MAX_CHARS: usize = 80;
 /// 水印旋转角度档位（度）。
 pub const WATERMARK_ANGLE_PRESETS: [i32; 9] = [-60, -45, -30, -15, 0, 15, 30, 45, 60];
 /// 水印间距档位（画布像素）。
@@ -39,6 +46,17 @@ pub const WATERMARK_GAP_PRESETS: [u32; 8] = [10, 20, 32, 56, 80, 120, 160, 200];
 pub enum WatermarkEdit {
     /// 换颜色的 RGB，保留原透明度通道。
     ColorRgb([u8; 3]),
+    /// 换整个颜色（含透明度通道，取色器产生）。
+    Color(ColorRgba8),
+    /// 字体族（空串表示默认字体）。
+    FontFamily(String),
+    /// 文本模板（含 `{text}` 与 `{YYYY-MM-DD_HH-mm-ss}` 占位）与套用时间；空模板表示不用模板。
+    Template {
+        /// 模板文本。
+        value: String,
+        /// 套用时间（时间占位按它展开）。
+        applied_at: Option<WatermarkTemplateApplicationTime>,
+    },
     /// 水印文本（超长按字节上限截断，首尾空白去掉）。
     Text(String),
     /// 字号（画布像素）。
@@ -56,6 +74,8 @@ pub enum WatermarkEdit {
 pub enum SpotlightEdit {
     /// 换颜色的 RGB，保留原透明度通道。
     ColorRgb([u8; 3]),
+    /// 换整个颜色（含透明度通道，取色器产生）。
+    Color(ColorRgba8),
     /// 不透明度（0..1）。
     Opacity(f64),
 }
@@ -107,6 +127,13 @@ pub fn apply_watermark_edit(base: &WatermarkConfig, edit: WatermarkEdit) -> Wate
                 a: out.color.a,
             }
         }
+        WatermarkEdit::Color(color) => out.color = color,
+        WatermarkEdit::FontFamily(family) => out.font_family = family.trim().to_owned(),
+        WatermarkEdit::Template { value, applied_at } => {
+            let value = truncate_bytes(&value, WATERMARK_TEXT_MAX_BYTES).to_owned();
+            out.template_application_time = if value.is_empty() { None } else { applied_at };
+            out.template_value = value;
+        }
         WatermarkEdit::Text(text) => {
             out.text = truncate_bytes(text.trim(), WATERMARK_TEXT_MAX_BYTES).to_owned();
         }
@@ -134,6 +161,7 @@ pub fn apply_spotlight_edit(base: &SpotlightConfig, edit: SpotlightEdit) -> Spot
                 a: out.color.a,
             }
         }
+        SpotlightEdit::Color(color) => out.color = color,
         SpotlightEdit::Opacity(v) => {
             out.opacity = if v.is_finite() {
                 v.clamp(OPACITY_RANGE.0, OPACITY_RANGE.1)
@@ -141,6 +169,135 @@ pub fn apply_spotlight_edit(base: &SpotlightConfig, edit: SpotlightEdit) -> Spot
                 0.0
             };
         }
+    }
+    out
+}
+
+/// 水印模板（旧版 `drawing/watermark_templates` 的一项）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WatermarkTemplate {
+    /// 模板名（下拉里显示）。
+    pub name: String,
+    /// 模板文本。
+    pub value: String,
+}
+
+/// 从配置值读出模板列表；非数组或不合规的项（名 / 值去空白后为空）直接丢弃。
+///
+/// # 参数
+/// - `value`：`drawing/watermark_templates` 的值。
+///
+/// ```ignore
+/// let t = watermark_templates_from_json(&json!([{"name": "a", "value": "{text}"}]));
+/// assert_eq!(t.len(), 1);
+/// ```
+pub fn watermark_templates_from_json(value: &Value) -> Vec<WatermarkTemplate> {
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            let name = item.get("name")?.as_str()?.trim();
+            let text = item.get("value")?.as_str()?;
+            (!name.is_empty() && !text.trim().is_empty()).then(|| WatermarkTemplate {
+                name: name.to_owned(),
+                value: text.to_owned(),
+            })
+        })
+        .collect()
+}
+
+/// 模板列表序列化为配置值。
+///
+/// # 参数
+/// - `templates`：模板列表。
+pub fn watermark_templates_to_json(templates: &[WatermarkTemplate]) -> Value {
+    Value::Array(
+        templates
+            .iter()
+            .map(|t| json!({"name": t.name, "value": t.value}))
+            .collect(),
+    )
+}
+
+/// 把当前模板文本存成一个新模板（名字取文本本身，按字符数截断）。
+///
+/// # 参数
+/// - `templates`：现有模板列表。
+/// - `value`：要保存的模板文本。
+///
+/// # 返回
+/// 是否新增；文本为空白或已有相同文本的模板时返回 `false`。
+pub fn add_watermark_template(templates: &mut Vec<WatermarkTemplate>, value: &str) -> bool {
+    if value.trim().is_empty() || templates.iter().any(|t| t.value == value) {
+        return false;
+    }
+    let name: String = value
+        .trim()
+        .chars()
+        .take(WATERMARK_TEMPLATE_NAME_MAX_CHARS)
+        .collect();
+    templates.push(WatermarkTemplate {
+        name,
+        value: value.to_owned(),
+    });
+    true
+}
+
+/// 由本地时间得到模板套用时间；字段非法时返回 `None`。
+///
+/// # 参数
+/// - `now`：本地日期时间。
+pub fn template_time_from_local(now: LocalDateTime) -> Option<WatermarkTemplateApplicationTime> {
+    let time = WatermarkTemplateApplicationTime {
+        year: i32::from(now.year),
+        month: now.month,
+        day: now.day,
+        hour: now.hour,
+        minute: now.minute,
+        second: now.second,
+    };
+    time.is_valid().then_some(time)
+}
+
+/// 颜色转 0..1 的 RGBA 浮点（取色器用）。
+///
+/// # 参数
+/// - `color`：8 位颜色。
+pub fn color_to_unit(color: ColorRgba8) -> [f32; 4] {
+    [color.r, color.g, color.b, color.a].map(|c| f32::from(c) / 255.0)
+}
+
+/// 0..1 的 RGBA 浮点转 8 位颜色（越界与非有限值先夹取）。
+///
+/// # 参数
+/// - `unit`：取色器给出的 RGBA。
+pub fn color_from_unit(unit: [f32; 4]) -> ColorRgba8 {
+    let byte = |v: f32| {
+        if v.is_finite() {
+            (v.clamp(0.0, 1.0) * 255.0).round() as u8
+        } else {
+            0
+        }
+    };
+    ColorRgba8 {
+        r: byte(unit[0]),
+        g: byte(unit[1]),
+        b: byte(unit[2]),
+        a: byte(unit[3]),
+    }
+}
+
+/// 字体族下拉的选项：系统字体名单，若当前字体不在其中则补在最前（避免已保存的字体丢失）。
+///
+/// # 参数
+/// - `system`：系统字体名单。
+/// - `current`：当前配置的字体族（空串表示默认，不补）。
+pub fn font_family_options(system: Vec<String>, current: &str) -> Vec<String> {
+    let current = current.trim();
+    let mut out = system;
+    if !current.is_empty() && !out.iter().any(|f| f == current) {
+        out.insert(0, current.to_owned());
     }
     out
 }
@@ -407,6 +564,132 @@ mod tests {
         assert_eq!(nearest_preset(&WATERMARK_ANGLE_PRESETS, 28.0), 6);
         assert_eq!(nearest_preset(&WATERMARK_ANGLE_PRESETS, -100.0), 0);
         assert_eq!(nearest_preset(&[], 3.0), 0);
+    }
+
+    /// 取色器颜色整体替换（含透明度），聚光灯同理。
+    #[test]
+    fn full_color_edit_replaces_alpha() {
+        let c = ColorRgba8 {
+            r: 1,
+            g: 2,
+            b: 3,
+            a: 0x40,
+        };
+        let w = apply_watermark_edit(&WatermarkConfig::default(), WatermarkEdit::Color(c));
+        assert_eq!(w.color, c);
+        let s = apply_spotlight_edit(&SpotlightConfig::default(), SpotlightEdit::Color(c));
+        assert_eq!(s.color, c);
+    }
+
+    /// 取色器浮点颜色与 8 位颜色互转：往返一致，越界与非有限值被夹住。
+    #[test]
+    fn color_unit_round_trip_and_clamp() {
+        for v in [0u8, 1, 64, 128, 200, 255] {
+            let c = ColorRgba8 {
+                r: v,
+                g: 255 - v,
+                b: v / 2,
+                a: v,
+            };
+            assert_eq!(color_from_unit(color_to_unit(c)), c);
+        }
+        let c = color_from_unit([2.0, -1.0, f32::NAN, 0.5]);
+        assert_eq!((c.r, c.g, c.b, c.a), (255, 0, 0, 128));
+    }
+
+    /// 字体族编辑去空白；字体下拉补上不在系统名单里的当前字体。
+    #[test]
+    fn font_family_edit_and_options() {
+        let w = apply_watermark_edit(
+            &WatermarkConfig::default(),
+            WatermarkEdit::FontFamily("  Segoe UI ".into()),
+        );
+        assert_eq!(w.font_family, "Segoe UI");
+        let sys = vec!["Arial".to_owned(), "Segoe UI".to_owned()];
+        assert_eq!(font_family_options(sys.clone(), "Segoe UI"), sys);
+        assert_eq!(font_family_options(sys.clone(), ""), sys);
+        assert_eq!(font_family_options(sys, "Gone")[0], "Gone");
+    }
+
+    /// 模板编辑：写入模板与套用时间，空模板清掉套用时间，过长按字节截断；解析结果与引擎一致。
+    #[test]
+    fn template_edit_sets_time_and_resolves() {
+        let at = template_time_from_local(LocalDateTime {
+            year: 2026,
+            month: 10,
+            day: 8,
+            hour: 9,
+            minute: 5,
+            second: 7,
+        });
+        assert!(at.is_some());
+        let w = apply_watermark_edit(
+            &WatermarkConfig {
+                text: "Secret".into(),
+                ..WatermarkConfig::default()
+            },
+            WatermarkEdit::Template {
+                value: "{text}-{YYYY-MM-DD_HH-mm-ss}".into(),
+                applied_at: at,
+            },
+        );
+        assert_eq!(w.resolved_text(), "Secret-2026-10-08_09-05-07");
+        let cleared = apply_watermark_edit(
+            &w,
+            WatermarkEdit::Template {
+                value: String::new(),
+                applied_at: at,
+            },
+        );
+        assert_eq!(cleared.template_application_time, None);
+        assert_eq!(cleared.resolved_text(), "Secret");
+        let long = apply_watermark_edit(
+            &w,
+            WatermarkEdit::Template {
+                value: "水".repeat(200),
+                applied_at: at,
+            },
+        );
+        assert!(long.template_value.len() <= WATERMARK_TEXT_MAX_BYTES);
+        // 非法本地时间不产生套用时间
+        assert!(
+            template_time_from_local(LocalDateTime {
+                year: 2026,
+                month: 13,
+                day: 1,
+                hour: 0,
+                minute: 0,
+                second: 0
+            })
+            .is_none()
+        );
+    }
+
+    /// 模板列表：非法项被丢弃，保存去重，往返一致。
+    #[test]
+    fn watermark_templates_parse_add_and_round_trip() {
+        let list = watermark_templates_from_json(&json!([
+            {"name": " A ", "value": "{text}"},
+            {"name": "", "value": "x"},
+            {"name": "B", "value": "   "},
+            {"name": 3, "value": "x"},
+            "junk"
+        ]));
+        assert_eq!(
+            list,
+            vec![WatermarkTemplate {
+                name: "A".into(),
+                value: "{text}".into()
+            }]
+        );
+        assert!(watermark_templates_from_json(&json!({})).is_empty());
+        let mut list = list;
+        assert!(!add_watermark_template(&mut list, "{text}"));
+        assert!(!add_watermark_template(&mut list, "  "));
+        assert!(add_watermark_template(&mut list, "{text} {YYYY}"));
+        assert_eq!(list.len(), 2);
+        let back = watermark_templates_from_json(&watermark_templates_to_json(&list));
+        assert_eq!(back, list);
     }
 
     /// 聚光灯颜色与不透明度。

@@ -14,8 +14,10 @@ use crate::annotation_style::{
 use crate::decoration_style::{
     SPOTLIGHT_OPACITY_PRESETS, SPOTLIGHT_STYLE_KEY, SpotlightEdit, WATERMARK_ANGLE_PRESETS,
     WATERMARK_FONT_PRESETS, WATERMARK_GAP_PRESETS, WATERMARK_OPACITY_PRESETS, WATERMARK_STYLE_KEY,
-    WatermarkEdit, apply_spotlight_edit, apply_watermark_edit, nearest_preset, spotlight_to_json,
-    watermark_to_json,
+    WATERMARK_TEMPLATES_KEY, WatermarkEdit, add_watermark_template, apply_spotlight_edit,
+    apply_watermark_edit, color_from_unit, color_to_unit, font_family_options, nearest_preset,
+    spotlight_to_json, template_time_from_local, watermark_templates_from_json,
+    watermark_templates_to_json, watermark_to_json,
 };
 use crate::desktop_frames::DesktopFrames;
 use crate::frozen_frame::FrozenFrame;
@@ -55,7 +57,9 @@ use snow_ui::shell::selection::{
     SelectionState, dragged_selection_rect, handle_rects, hit_test_drag_mode,
     marquee_selection_rect, selection_size_label,
 };
+use snow_ui::ui::component::button::Button;
 use snow_ui::ui::component::checkbox::Checkbox;
+use snow_ui::ui::component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
 use snow_ui::ui::component::input::{Input, InputEvent, InputState};
 use snow_ui::ui::component::searchable_list::{SearchableListItem, SearchableVec};
 use snow_ui::ui::component::select::{Select, SelectEvent, SelectState};
@@ -79,15 +83,19 @@ const MAGNIFIER_LOGICAL_SIZE: (i32, i32) = (109, 178);
 /// 放大镜距光标的逻辑偏移。
 const MAGNIFIER_OFFSET: i32 = 16;
 /// 工具栏的逻辑尺寸（宽, 高），仅用于定位与命中避让。
-const TOOLBAR_LOGICAL_SIZE: (i32, i32) = (1080, 36);
+const TOOLBAR_LOGICAL_SIZE: (i32, i32) = (1120, 36);
 /// 样式面板的逻辑尺寸（宽, 高），仅用于定位与命中避让。
 const STYLE_PANEL_SIZE: (i32, i32) = (560, 84);
 /// 水印设置面板的逻辑尺寸（宽, 高），仅用于定位与命中避让。
-const WATERMARK_PANEL_SIZE: (i32, i32) = (560, 116);
+const WATERMARK_PANEL_SIZE: (i32, i32) = (560, 176);
 /// 聚光灯设置面板的逻辑尺寸（宽, 高），仅用于定位与命中避让。
 const SPOTLIGHT_PANEL_SIZE: (i32, i32) = (560, 48);
 /// 水印文字输入框的宽度。
 const WATERMARK_INPUT_WIDTH: f32 = 220.0;
+/// 水印字体族下拉的宽度。
+const WATERMARK_FAMILY_WIDTH: f32 = 180.0;
+/// 水印模板下拉的宽度。
+const WATERMARK_TEMPLATE_SELECT_WIDTH: f32 = 140.0;
 /// 样式面板与工具栏的间距。
 const STYLE_PANEL_GAP: i32 = 6;
 /// 样式面板背景色。
@@ -137,19 +145,21 @@ const TEXT_LINE_HEIGHT: f32 = 1.25;
 /// 尚未接入的工具栏动作（普通截图模式下已全部接入，故为空）。
 const DISABLED_TOOLBAR_ACTIONS: [ToolbarAction; 0] = [];
 /// 录屏选区模式下置灰的动作（只保留“录屏”与“取消”）。
-const RECORD_MODE_DISABLED_ACTIONS: [ToolbarAction; 6] = [
+const RECORD_MODE_DISABLED_ACTIONS: [ToolbarAction; 7] = [
     ToolbarAction::Pin,
     ToolbarAction::Ocr,
     ToolbarAction::Translate,
+    ToolbarAction::Table,
     ToolbarAction::ScrollCapture,
     ToolbarAction::Save,
     ToolbarAction::Copy,
 ];
 /// 长截图选区模式下置灰的动作（只保留“长图”与“取消”）。
-const SCROLL_MODE_DISABLED_ACTIONS: [ToolbarAction; 6] = [
+const SCROLL_MODE_DISABLED_ACTIONS: [ToolbarAction; 7] = [
     ToolbarAction::Pin,
     ToolbarAction::Ocr,
     ToolbarAction::Translate,
+    ToolbarAction::Table,
     ToolbarAction::Record,
     ToolbarAction::Save,
     ToolbarAction::Copy,
@@ -352,6 +362,7 @@ fn toolbar_label_id(key: ToolbarLabel) -> &'static str {
             ToolbarAction::Pin => "overlay-toolbar-pin",
             ToolbarAction::Ocr => "overlay-toolbar-ocr",
             ToolbarAction::Translate => "overlay-toolbar-translate",
+            ToolbarAction::Table => "overlay-toolbar-table",
             ToolbarAction::Record => "overlay-toolbar-record",
             ToolbarAction::ScrollCapture => "overlay-toolbar-scroll",
             ToolbarAction::Save => "overlay-toolbar-save",
@@ -592,6 +603,10 @@ enum DecorationSelectKind {
     WatermarkAngle,
     /// 水印平铺间距。
     WatermarkGap,
+    /// 水印字体族（取值为字体名，空串是默认字体）。
+    WatermarkFamily,
+    /// 水印模板（取值为模板文本）。
+    WatermarkTemplate,
     /// 聚光灯不透明度（百分比）。
     SpotlightOpacity,
 }
@@ -610,6 +625,16 @@ struct DecorationUi {
     wm_gap: Entity<StyleSelect>,
     /// 聚光灯不透明度下拉。
     sp_opacity: Entity<StyleSelect>,
+    /// 水印文本模板输入框。
+    template: Entity<InputState>,
+    /// 已保存模板下拉。
+    wm_template: Entity<StyleSelect>,
+    /// 水印字体族下拉（系统字体，可搜索）。
+    wm_family: Entity<StyleSelect>,
+    /// 水印颜色取色器（含透明度）。
+    wm_color: Entity<ColorPickerState>,
+    /// 聚光灯颜色取色器（含透明度）。
+    sp_color: Entity<ColorPickerState>,
 }
 
 /// 样式面板用到的三个下拉实体（首次显示面板时创建）。
@@ -2421,6 +2446,7 @@ impl ScreenshotOverlayView {
             ToolbarAction::Pin => self.pin_selection_and_close(),
             ToolbarAction::Ocr => self.start_ocr(),
             ToolbarAction::Translate => self.start_translate(),
+            ToolbarAction::Table => self.start_table(),
             ToolbarAction::ScrollCapture => self.start_scroll_capture_and_close(),
             ToolbarAction::Cancel => OverlayOutcome::Close,
             ToolbarAction::Undo => {
@@ -4110,7 +4136,12 @@ impl ScreenshotOverlayView {
         self.table_mode = true;
         match self.output.start_table(self.ocr_serial, w, h, rgba) {
             Ok(()) => {
-                tracing::info!(serial = self.ocr_serial, width = w, height = h, "已提交表格识别");
+                tracing::info!(
+                    serial = self.ocr_serial,
+                    width = w,
+                    height = h,
+                    "已提交表格识别"
+                );
                 self.set_ocr_state(OcrUiState::Running);
             }
             Err(e) => {
@@ -5325,6 +5356,95 @@ impl ScreenshotOverlayView {
             },
         )
         .detach();
+        let template_placeholder: SharedString =
+            self.i18n.tr("annot-deco-template-placeholder").into();
+        let template = cx.new(|cx| InputState::new(window, cx).placeholder(template_placeholder));
+        cx.subscribe_in(
+            &template,
+            window,
+            |this, _state, event: &InputEvent, window, cx| match event {
+                InputEvent::Focus => this.decoration_text_focused = true,
+                InputEvent::Blur => {
+                    this.decoration_text_focused = false;
+                    this.commit_watermark_template(window, cx);
+                }
+                InputEvent::PressEnter { .. } => {
+                    this.commit_watermark_template(window, cx);
+                    this.refocus_root(window, cx);
+                }
+                InputEvent::Change => {}
+            },
+        )
+        .detach();
+        let family_items = self.font_family_items();
+        let wm_family = cx.new(|cx| {
+            SelectState::new(SearchableVec::new(family_items), None, window, cx).searchable(true)
+        });
+        cx.subscribe_in(
+            &wm_family,
+            window,
+            |this, _state, event: &SelectEvent<SearchableVec<StyleItem>>, window, cx| {
+                if let SelectEvent::Confirm(Some(value)) = event {
+                    this.on_decoration_select(
+                        DecorationSelectKind::WatermarkFamily,
+                        value,
+                        window,
+                        cx,
+                    );
+                }
+            },
+        )
+        .detach();
+        let template_items = self.template_items();
+        let wm_template =
+            cx.new(|cx| SelectState::new(SearchableVec::new(template_items), None, window, cx));
+        cx.subscribe_in(
+            &wm_template,
+            window,
+            |this, _state, event: &SelectEvent<SearchableVec<StyleItem>>, window, cx| {
+                if let SelectEvent::Confirm(Some(value)) = event {
+                    this.on_decoration_select(
+                        DecorationSelectKind::WatermarkTemplate,
+                        value,
+                        window,
+                        cx,
+                    );
+                }
+            },
+        )
+        .detach();
+        let wm_color = cx.new(|cx| ColorPickerState::new(window, cx));
+        cx.subscribe_in(
+            &wm_color,
+            window,
+            |this, _state, event: &ColorPickerEvent, _window, cx| {
+                let ColorPickerEvent::Change(Some(color)) = event else {
+                    return;
+                };
+                let rgba = color.to_rgb();
+                this.edit_watermark(WatermarkEdit::Color(color_from_unit([
+                    rgba.r, rgba.g, rgba.b, rgba.a,
+                ])));
+                cx.notify();
+            },
+        )
+        .detach();
+        let sp_color = cx.new(|cx| ColorPickerState::new(window, cx));
+        cx.subscribe_in(
+            &sp_color,
+            window,
+            |this, _state, event: &ColorPickerEvent, _window, cx| {
+                let ColorPickerEvent::Change(Some(color)) = event else {
+                    return;
+                };
+                let rgba = color.to_rgb();
+                this.edit_spotlight(SpotlightEdit::Color(color_from_unit([
+                    rgba.r, rgba.g, rgba.b, rgba.a,
+                ])));
+                cx.notify();
+            },
+        )
+        .detach();
         let signed = |values: &[u32]| values.iter().map(|v| *v as i32).collect::<Vec<_>>();
         let sets: [(DecorationSelectKind, Vec<StyleItem>); 5] = [
             (
@@ -5378,6 +5498,11 @@ impl ScreenshotOverlayView {
                 wm_angle,
                 wm_gap,
                 sp_opacity,
+                template,
+                wm_template,
+                wm_family,
+                wm_color,
+                sp_color,
             });
         }
     }
@@ -5409,10 +5534,110 @@ impl ScreenshotOverlayView {
         ui.sp_opacity.update(cx, |s, cx| {
             s.set_selected_index(pick(sp_opacity), window, cx)
         });
+        let to_hsla = |c: snow_draw_engine::ColorRgba8| -> Hsla {
+            let [r, g, b, a] = color_to_unit(c);
+            snow_ui::ui::Rgba { r, g, b, a }.into()
+        };
+        let (wm_hsla, sp_hsla) = (to_hsla(wm.color), to_hsla(sp.color));
+        ui.wm_color
+            .update(cx, |s, cx| s.set_value(wm_hsla, window, cx));
+        ui.sp_color
+            .update(cx, |s, cx| s.set_value(sp_hsla, window, cx));
+        let family = wm.font_family.clone();
+        ui.wm_family
+            .update(cx, |s, cx| s.set_selected_value(&family, window, cx));
+        let templates = self.template_items();
+        ui.wm_template.update(cx, |s, cx| {
+            s.set_items(SearchableVec::new(templates), window, cx);
+            s.set_selected_index(None, window, cx);
+        });
         if !self.decoration_text_focused {
             let text = wm.text;
+            let template = wm.template_value;
             ui.text
                 .update(cx, |s, cx| s.set_value(text.as_str(), window, cx));
+            ui.template
+                .update(cx, |s, cx| s.set_value(template.as_str(), window, cx));
+        }
+    }
+
+    /// 字体族下拉的选项：默认字体 + 系统字体（当前字体不在系统名单里时补在最前）。
+    fn font_family_items(&self) -> Vec<StyleItem> {
+        let current = self
+            .annotations
+            .as_ref()
+            .map(|l| l.watermark_config().font_family)
+            .unwrap_or_default();
+        let mut items = vec![StyleItem {
+            value: String::new(),
+            label: self.i18n.tr("annot-deco-font-default").into(),
+        }];
+        items.extend(
+            font_family_options(snow_platform::text_raster::list_font_families(), &current)
+                .into_iter()
+                .map(|name| StyleItem {
+                    value: name.clone(),
+                    label: name.into(),
+                }),
+        );
+        items
+    }
+
+    /// 已保存水印模板的下拉选项（取值是模板文本，标签是模板名）。
+    fn template_items(&self) -> Vec<StyleItem> {
+        let Some(config) = &self.style_config else {
+            return Vec::new();
+        };
+        let saved = config.borrow().value(WATERMARK_TEMPLATES_KEY);
+        watermark_templates_from_json(&saved)
+            .into_iter()
+            .map(|t| StyleItem {
+                value: t.value,
+                label: t.name.into(),
+            })
+            .collect()
+    }
+
+    /// 提交水印模板输入框里的内容（回车或失焦）；内容没变就不产生撤销记录。
+    fn commit_watermark_template(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some(ui) = &self.decoration_ui else {
+            return;
+        };
+        let value = ui.template.read(cx).value().to_string();
+        self.apply_watermark_template(value);
+        cx.notify();
+    }
+
+    /// 应用水印模板：文本变了才写入，并记下套用时间（时间占位按它展开）。
+    ///
+    /// # 参数
+    /// - `value`：模板文本，空串表示不用模板。
+    fn apply_watermark_template(&mut self, value: String) {
+        let Some(layer) = &self.annotations else {
+            return;
+        };
+        if layer.watermark_config().template_value == value {
+            return;
+        }
+        let applied_at = template_time_from_local(snow_platform::local_time::now());
+        self.edit_watermark(WatermarkEdit::Template { value, applied_at });
+    }
+
+    /// 把当前模板文本保存进 `drawing/watermark_templates`（同文本不重复存）。
+    fn save_watermark_template(&mut self, cx: &mut Context<Self>) {
+        let (Some(layer), Some(config)) = (&self.annotations, &self.style_config) else {
+            return;
+        };
+        let value = layer.watermark_config().template_value;
+        let mut templates =
+            watermark_templates_from_json(&config.borrow().value(WATERMARK_TEMPLATES_KEY));
+        if add_watermark_template(&mut templates, &value) {
+            self.persist_decoration(
+                WATERMARK_TEMPLATES_KEY,
+                watermark_templates_to_json(&templates),
+            );
+            self.decoration_prepared = None;
+            cx.notify();
         }
     }
 
@@ -5421,9 +5646,26 @@ impl ScreenshotOverlayView {
         &mut self,
         kind: DecorationSelectKind,
         value: &str,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        match kind {
+            DecorationSelectKind::WatermarkFamily => {
+                self.edit_watermark(WatermarkEdit::FontFamily(value.to_owned()));
+                cx.notify();
+                return;
+            }
+            DecorationSelectKind::WatermarkTemplate => {
+                if let Some(ui) = &self.decoration_ui {
+                    ui.template
+                        .update(cx, |s, cx| s.set_value(value, window, cx));
+                }
+                self.apply_watermark_template(value.to_owned());
+                cx.notify();
+                return;
+            }
+            _ => {}
+        }
         let Ok(number) = value.parse::<f64>() else {
             return;
         };
@@ -5443,6 +5685,7 @@ impl ScreenshotOverlayView {
             DecorationSelectKind::WatermarkGap => {
                 self.edit_watermark(WatermarkEdit::Gap(number));
             }
+            DecorationSelectKind::WatermarkFamily | DecorationSelectKind::WatermarkTemplate => {}
         }
         cx.notify();
     }
@@ -5593,6 +5836,12 @@ impl ScreenshotOverlayView {
         let Some(ui) = &self.decoration_ui else {
             return panel;
         };
+        let picker = if watermark {
+            &ui.wm_color
+        } else {
+            &ui.sp_color
+        };
+        panel = panel.child(ColorPicker::new(picker).with_size(ComponentSize::Small));
         if watermark {
             panel = panel
                 .child(label("annot-deco-text"))
@@ -5600,6 +5849,42 @@ impl ScreenshotOverlayView {
                     div()
                         .w(px(WATERMARK_INPUT_WIDTH))
                         .child(Input::new(&ui.text).with_size(ComponentSize::Small)),
+                )
+                .child(label("annot-deco-template"))
+                .child(
+                    div()
+                        .w(px(WATERMARK_INPUT_WIDTH))
+                        .child(Input::new(&ui.template).with_size(ComponentSize::Small)),
+                )
+                .child(
+                    div()
+                        .w(px(WATERMARK_TEMPLATE_SELECT_WIDTH))
+                        .h(px(STYLE_SELECT_HEIGHT))
+                        .child(
+                            Select::new(&ui.wm_template)
+                                .with_size(ComponentSize::Small)
+                                .placeholder(i18n.tr("annot-deco-template-saved"))
+                                .menu_max_h(px(STYLE_SELECT_MENU_MAX_HEIGHT)),
+                        ),
+                )
+                .child(
+                    Button::new("deco-template-save")
+                        .with_size(ComponentSize::Small)
+                        .label(i18n.tr("annot-deco-template-save"))
+                        .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
+                            this.save_watermark_template(cx);
+                        })),
+                )
+                .child(label("annot-deco-font-family"))
+                .child(
+                    div()
+                        .w(px(WATERMARK_FAMILY_WIDTH))
+                        .h(px(STYLE_SELECT_HEIGHT))
+                        .child(
+                            Select::new(&ui.wm_family)
+                                .with_size(ComponentSize::Small)
+                                .menu_max_h(px(STYLE_SELECT_MENU_MAX_HEIGHT)),
+                        ),
                 )
                 .child(label("annot-deco-font-size"))
                 .child(select(&ui.wm_font))
@@ -6371,7 +6656,13 @@ mod tests {
             Ok(())
         }
         /// 记录表格识别请求。
-        fn start_table(&mut self, serial: u64, w: u32, h: u32, rgba: Vec<u8>) -> Result<(), String> {
+        fn start_table(
+            &mut self,
+            serial: u64,
+            w: u32,
+            h: u32,
+            rgba: Vec<u8>,
+        ) -> Result<(), String> {
             if self.fail {
                 return Err("boom".into());
             }
@@ -8722,13 +9013,65 @@ mod tests {
         assert_eq!(rec.borrow().tables.len(), 1);
         view.finish_ocr(
             serial,
-            Err(OcrError::TableUnavailable(TableUnavailable::NoModel { size: 7_758_305 })),
+            Err(OcrError::TableUnavailable(TableUnavailable::NoModel {
+                size: 7_758_305,
+            })),
         );
         let hint = view.status_message.clone().unwrap_or_default();
-        assert!(hint.contains("table recognition model") && hint.contains("press D"), "{hint}");
+        assert!(
+            hint.contains("table recognition model") && hint.contains("press D"),
+            "{hint}"
+        );
         view.handle_key("d", false, false);
         assert_eq!(rec.borrow().table_downloads, 1);
         assert_eq!(rec.borrow().ocr_downloads, 0, "表格缺组件不走 OCR 下载");
+    }
+
+    /// 工具栏“表格识别”按钮走同一条表格流程：无选区不提交，有选区提交一次，识别中不重复；录屏模式下置灰。
+    #[test]
+    fn toolbar_table_action_starts_table() {
+        let (mut view, rec) = view_with(100, 80, 1.0, false);
+        assert_eq!(
+            view.apply_action(ToolbarAction::Table),
+            OverlayOutcome::Stay
+        );
+        assert!(rec.borrow().tables.is_empty(), "没有选区不提交");
+        drag(&mut view, (5, 5), (44, 34));
+        assert_eq!(
+            view.apply_action(ToolbarAction::Table),
+            OverlayOutcome::Stay
+        );
+        assert_eq!(rec.borrow().tables.len(), 1);
+        assert_eq!(view.ocr_state(), &OcrUiState::Running);
+        view.apply_action(ToolbarAction::Table);
+        assert_eq!(rec.borrow().tables.len(), 1, "识别中不重复提交");
+        assert!(RECORD_MODE_DISABLED_ACTIONS.contains(&ToolbarAction::Table));
+        assert!(SCROLL_MODE_DISABLED_ACTIONS.contains(&ToolbarAction::Table));
+    }
+
+    /// 水印模板：写入模板与套用时间并展开 `{text}` / 年份占位；同一模板重复提交不产生新的撤销记录。
+    #[test]
+    fn watermark_template_applies_and_skips_unchanged() {
+        let (mut view, _) = view_with(300, 200, 1.0, false);
+        drag(&mut view, (20, 20), (219, 149));
+        view.select_tool(AnnotationTool::Watermark);
+        view.edit_watermark(WatermarkEdit::Text("Hi".into()));
+        view.apply_watermark_template("{text}-{YYYY}".into());
+        let wm = view.annotations.as_ref().unwrap().watermark_config();
+        assert_eq!(wm.template_value, "{text}-{YYYY}");
+        assert!(wm.template_application_time.is_some());
+        assert!(
+            wm.resolved_text().starts_with("Hi-20"),
+            "{}",
+            wm.resolved_text()
+        );
+        let (undo_before, _) = view.history_state();
+        view.apply_watermark_template("{text}-{YYYY}".into());
+        assert_eq!(view.history_state().0, undo_before);
+        view.apply_watermark_template(String::new());
+        let wm = view.annotations.as_ref().unwrap().watermark_config();
+        assert_eq!(wm.resolved_text(), "Hi");
+        assert_eq!(wm.template_application_time, None);
     }
 
     /// 表格结果：TSV 被复制，Markdown / HTML 随视图保留，切回普通识别后清掉。
@@ -8746,8 +9089,14 @@ mod tests {
             html: "<table></table>".into(),
         });
         view.finish_ocr(view.ocr_serial, Ok(result));
-        assert!(matches!(view.ocr_state(), OcrUiState::Done { copied: true, .. }));
-        assert_eq!(view.table_texts.as_ref().map(|t| t.markdown.as_str()), Some("| a | b |"));
+        assert!(matches!(
+            view.ocr_state(),
+            OcrUiState::Done { copied: true, .. }
+        ));
+        assert_eq!(
+            view.table_texts.as_ref().map(|t| t.markdown.as_str()),
+            Some("| a | b |")
+        );
         view.dismiss_ocr();
         view.set_ocr_state(OcrUiState::Idle);
         assert!(view.table_texts.is_none());

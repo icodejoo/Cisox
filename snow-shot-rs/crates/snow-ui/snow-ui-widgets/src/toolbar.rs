@@ -117,6 +117,8 @@ pub enum ToolbarAction {
     Ocr,
     /// 截图翻译。
     Translate,
+    /// 表格识别（把选区里的表格转成可复制的表格数据）。
+    Table,
     /// 录制屏幕（以当前选区开始录屏）。
     Record,
     /// 长截图（对当前选区做滚动截屏并拼接）。
@@ -231,10 +233,11 @@ type ActionHandler = Rc<dyn Fn(ToolbarAction, &mut Window, &mut App)>;
 type ToolHandler = Rc<dyn Fn(AnnotationTool, &mut Window, &mut App)>;
 
 /// 工具栏动作按钮的显示顺序、文案。
-const TOOLBAR_ACTIONS: [(&str, ToolbarAction); 8] = [
+const TOOLBAR_ACTIONS: [(&str, ToolbarAction); 9] = [
     ("贴图", ToolbarAction::Pin),
     ("OCR", ToolbarAction::Ocr),
     ("翻译", ToolbarAction::Translate),
+    ("表格", ToolbarAction::Table),
     ("长图", ToolbarAction::ScrollCapture),
     ("录屏", ToolbarAction::Record),
     ("保存", ToolbarAction::Save),
@@ -620,7 +623,7 @@ mod tests {
         for (_, a) in TOOLBAR_ACTIONS {
             assert!(seen.insert(a), "动作重复: {a:?}");
         }
-        assert_eq!(seen.len(), 8);
+        assert_eq!(seen.len(), 9);
         assert!(seen.contains(&ToolbarAction::Record));
         assert!(!seen.contains(&ToolbarAction::Undo) && !seen.contains(&ToolbarAction::Redo));
     }
