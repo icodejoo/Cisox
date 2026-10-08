@@ -12,6 +12,7 @@
 use crate::annotation_style::{
     COUNTER_DIGIT_COLOR, ToolStyle, engine_color, physical_px, shape_patch,
 };
+use crate::auto_filter::{AutoFilterKind, hit_regions, record_source};
 use snow_canvas_filters::{
     ExecutionOptions, FILTER_BLUR, FILTER_MOSAIC, OwnedImage, Parameters, apply,
     sampling_radius_pixels,
@@ -32,6 +33,7 @@ use snow_draw_engine::{
     DisplayFillStyle, DisplaySerialNumberType, SerialNumberDisplayItem, SerialNumberType,
 };
 use snow_draw_engine::{HighlightShape, ShapeStyle, TextStyle};
+use snow_draw_engine_document::AutoFilterRegionRecord;
 use snow_draw_engine_editor::{TEXT_STYLE_MIXED_COLOR, TEXT_STYLE_MIXED_FONT_SIZE};
 use snow_platform::text_raster::{self, DEFAULT_FONT_FAMILY, TextBitmap};
 use snow_ui::widgets::AnnotationTool;
@@ -186,6 +188,7 @@ pub fn engine_tool(tool: AnnotationTool) -> Option<ActiveTool> {
         AnnotationTool::Eraser => Some(ActiveTool::Eraser),
         AnnotationTool::Select => Some(ActiveTool::Select),
         AnnotationTool::Spotlight => Some(ActiveTool::Spotlight),
+        AnnotationTool::AutoFilter => Some(ActiveTool::AutoFilter),
         // 水印只开设置面板，不进引擎绘制工具
         AnnotationTool::Watermark | AnnotationTool::None => None,
     }
@@ -650,6 +653,8 @@ pub struct AnnotationLayer {
     text_cache: HashMap<TextKey, Option<Arc<TextBitmap>>>,
     /// 指针是否处于按下（正在绘制）状态。
     drawing: bool,
+    /// 自动滤镜铺的滤镜类型。
+    auto_filter_kind: AutoFilterKind,
 }
 
 /// 由标注样式生成引擎运行时配置。
@@ -837,6 +842,7 @@ impl AnnotationLayer {
             emitted: HashMap::new(),
             text_cache: HashMap::new(),
             drawing: false,
+            auto_filter_kind: AutoFilterKind::default(),
         })
     }
 
@@ -1010,9 +1016,104 @@ impl AnnotationLayer {
             AnnotationTool::Mosaic | AnnotationTool::Blur => {
                 self.apply_filter_overrides(tool, &FilterOverrides::default())?;
             }
+            AnnotationTool::AutoFilter => {
+                self.apply_filter_style(self.auto_filter_kind == AutoFilterKind::Blur)?;
+            }
             _ => {}
         }
         Ok(())
+    }
+
+    /// 把马赛克 / 模糊的默认样式下发给引擎（自动滤镜之后铺的滤镜用它）。
+    fn apply_filter_style(&mut self, blur: bool) -> Result<(), String> {
+        let tool = if blur {
+            AnnotationTool::Blur
+        } else {
+            AnnotationTool::Mosaic
+        };
+        self.apply_filter_overrides(tool, &FilterOverrides::default())
+    }
+
+    /// 自动滤镜当前铺的滤镜类型。
+    pub fn auto_filter_kind(&self) -> AutoFilterKind {
+        self.auto_filter_kind
+    }
+
+    /// 设置自动滤镜铺的滤镜类型；当前正是自动滤镜工具时立即下发给引擎。
+    ///
+    /// # 参数
+    /// - `kind`：马赛克或模糊。
+    ///
+    /// # 返回
+    /// 失败时返回引擎错误说明。
+    ///
+    /// ```
+    /// use snow_shot::annotation::AnnotationLayer;
+    /// use snow_shot::auto_filter::AutoFilterKind;
+    /// let mut layer = AnnotationLayer::new(64, 64, 1.0).unwrap();
+    /// layer.set_auto_filter_kind(AutoFilterKind::Blur).unwrap();
+    /// assert_eq!(layer.auto_filter_kind(), AutoFilterKind::Blur);
+    /// ```
+    pub fn set_auto_filter_kind(&mut self, kind: AutoFilterKind) -> Result<(), String> {
+        self.auto_filter_kind = kind;
+        if self.tool == AnnotationTool::AutoFilter {
+            self.apply_filter_style(kind == AutoFilterKind::Blur)?;
+        }
+        Ok(())
+    }
+
+    /// 引擎里现有自动滤镜区域记录的源范围；没有记录返回 `None`。
+    pub fn auto_filter_source(&self) -> Option<IntRect> {
+        self.engine.auto_filter_regions().map(record_source)
+    }
+
+    /// 写入（或清除）自动滤镜区域记录，同时清掉旧记录上已铺的滤镜；该操作进撤销历史。
+    ///
+    /// # 参数
+    /// - `record`：区域记录；`None` 清除。
+    /// - `base`：冻结底图。
+    ///
+    /// # 返回
+    /// 预览层增量更新。
+    ///
+    /// ```
+    /// use snow_shot::annotation::AnnotationLayer;
+    /// let layer = AnnotationLayer::new(64, 64, 1.0).unwrap();
+    /// assert!(layer.auto_filter_source().is_none());
+    /// ```
+    pub fn set_auto_filter_regions(
+        &mut self,
+        record: Option<AutoFilterRegionRecord>,
+        base: BaseView,
+    ) -> Result<LayerUpdate, String> {
+        self.engine
+            .set_auto_filter_regions(self.viewport, record)
+            .map_err(|e| format!("写入自动滤镜区域失败: {e:?}"))?;
+        self.sync(base)
+    }
+
+    /// 自动滤镜：指针当前会命中的区域外框（悬停或拖选预览用；引擎的预览叠加层本应用不绘制，由覆盖窗自己画）。
+    ///
+    /// # 参数
+    /// - `start`：按下点；悬停为 `None`。
+    /// - `point`：当前位置（画布物理坐标）。
+    ///
+    /// # 返回
+    /// 命中区域的外框 `[x0, y0, x1, y1]`；当前工具不是自动滤镜或还没有记录时为空。
+    ///
+    /// ```
+    /// use snow_shot::annotation::AnnotationLayer;
+    /// let layer = AnnotationLayer::new(64, 64, 1.0).unwrap();
+    /// assert!(layer.auto_filter_hits(None, (3.0, 3.0)).is_empty());
+    /// ```
+    pub fn auto_filter_hits(&self, start: Option<(f64, f64)>, point: (f64, f64)) -> Vec<[f64; 4]> {
+        if self.tool != AnnotationTool::AutoFilter {
+            return Vec::new();
+        }
+        self.engine
+            .auto_filter_regions()
+            .map(|record| hit_regions(record, start, point))
+            .unwrap_or_default()
     }
 
     /// 把工具样式下发给引擎：作用于该工具后续的绘制，也作用于当前选中的同类对象。
@@ -1792,6 +1893,145 @@ mod tests {
             "马赛克块内应相同: {same_neighbors}"
         );
         assert!(differs > 1000, "马赛克应改变像素: {differs}");
+    }
+
+    /// 构造自动滤镜测试用的区域记录：两个不相交区域，源范围为整幅画布。
+    fn auto_record(w: u32, h: u32) -> AutoFilterRegionRecord {
+        use snow_draw_engine::DrawRect;
+        use snow_draw_engine_document::AutoFilterRegion;
+        AutoFilterRegionRecord {
+            source_bounds: DrawRect::new(0.0, 0.0, f64::from(w), f64::from(h)),
+            regions: vec![
+                AutoFilterRegion {
+                    id: 1,
+                    bounds: DrawRect::new(50.0, 40.0, 200.0, 150.0),
+                    category: "image".into(),
+                },
+                AutoFilterRegion {
+                    id: 2,
+                    bounds: DrawRect::new(210.0, 40.0, 280.0, 100.0),
+                    category: "text".into(),
+                },
+            ],
+        }
+    }
+
+    /// 在 `(x, y)` 处点一下（按下 + 松开）。
+    fn click(layer: &mut AnnotationLayer, base: BaseView, x: f64, y: f64) {
+        layer.pointer_down(x, y, base).unwrap();
+        layer.pointer_up(x, y, base).unwrap();
+    }
+
+    /// 统计某矩形内与底图不同的像素数。
+    fn changed_pixels(rgba: &[u8], data: &[u8], w: u32, rect: (u32, u32, u32, u32)) -> usize {
+        let mut n = 0;
+        for y in rect.1..rect.3 {
+            for x in rect.0..rect.2 {
+                let o = ((y * w + x) * 4) as usize;
+                if px(rgba, w, x, y)[..3] != [data[o + 2], data[o + 1], data[o]] {
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+
+    /// 自动滤镜：点击区域铺马赛克、区域外不变、再点同一区域取消；记录进历史可撤销。
+    #[test]
+    fn auto_filter_click_fills_region_and_toggles() {
+        let (w, h) = (300, 200);
+        let data = gradient(w, h);
+        let base = BaseView {
+            width: w,
+            height: h,
+            bgra: &data,
+        };
+        let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
+        assert_eq!(
+            engine_tool(AnnotationTool::AutoFilter),
+            Some(ActiveTool::AutoFilter)
+        );
+        layer.set_tool(AnnotationTool::AutoFilter).unwrap();
+        assert!(layer.auto_filter_source().is_none());
+        layer
+            .set_auto_filter_regions(Some(auto_record(w, h)), base)
+            .unwrap();
+        assert_eq!(layer.auto_filter_source(), Some([0, 0, 300, 200]));
+
+        click(&mut layer, base, 120.0, 90.0);
+        let (_, _, rgba) = layer.export_rgba([0, 0, w as i32, h as i32], base).unwrap();
+        assert!(
+            changed_pixels(&rgba, &data, w, (50, 40, 200, 150)) > 1000,
+            "区域内应被马赛克"
+        );
+        assert_eq!(
+            changed_pixels(&rgba, &data, w, (210, 40, 280, 100)),
+            0,
+            "别的区域不变"
+        );
+        assert_eq!(
+            changed_pixels(&rgba, &data, w, (0, 160, 300, 200)),
+            0,
+            "区域外不变"
+        );
+
+        // 再点同一区域（同类型）取消
+        click(&mut layer, base, 120.0, 90.0);
+        let (_, _, rgba) = layer.export_rgba([0, 0, w as i32, h as i32], base).unwrap();
+        assert_eq!(changed_pixels(&rgba, &data, w, (50, 40, 200, 150)), 0);
+
+        // 换成模糊后点另一个区域
+        layer.set_auto_filter_kind(AutoFilterKind::Blur).unwrap();
+        click(&mut layer, base, 240.0, 70.0);
+        let (_, _, rgba) = layer.export_rgba([0, 0, w as i32, h as i32], base).unwrap();
+        assert!(
+            changed_pixels(&rgba, &data, w, (210, 40, 280, 100)) > 100,
+            "模糊应改变像素"
+        );
+        assert_eq!(changed_pixels(&rgba, &data, w, (50, 40, 200, 150)), 0);
+
+        // 清除记录：已铺的滤镜随之移除
+        layer.set_auto_filter_regions(None, base).unwrap();
+        assert!(layer.auto_filter_source().is_none());
+        let (_, _, rgba) = layer.export_rgba([0, 0, w as i32, h as i32], base).unwrap();
+        assert_eq!(changed_pixels(&rgba, &data, w, (0, 0, w, h)), 0);
+    }
+
+    /// 自动滤镜：悬停取点命中的区域，拖选取相交的全部区域；非自动滤镜工具返回空。
+    #[test]
+    fn auto_filter_hits_follow_point_and_drag() {
+        let (w, h) = (300, 200);
+        let data = gradient(w, h);
+        let base = BaseView {
+            width: w,
+            height: h,
+            bgra: &data,
+        };
+        let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
+        assert!(layer.auto_filter_hits(None, (120.0, 90.0)).is_empty());
+        layer.set_tool(AnnotationTool::AutoFilter).unwrap();
+        layer
+            .set_auto_filter_regions(Some(auto_record(w, h)), base)
+            .unwrap();
+        assert_eq!(
+            layer.auto_filter_hits(None, (120.0, 90.0)),
+            vec![[50.0, 40.0, 200.0, 150.0]]
+        );
+        assert!(layer.auto_filter_hits(None, (10.0, 190.0)).is_empty());
+        // 拖选横跨两个区域
+        assert_eq!(
+            layer
+                .auto_filter_hits(Some((100.0, 60.0)), (250.0, 80.0))
+                .len(),
+            2
+        );
+        // 位移不足阈值仍按点命中
+        assert_eq!(
+            layer
+                .auto_filter_hits(Some((120.0, 90.0)), (121.0, 90.0))
+                .len(),
+            1
+        );
     }
 
     /// 模糊：区域内高频渐变被平滑（相邻像素差变小）。

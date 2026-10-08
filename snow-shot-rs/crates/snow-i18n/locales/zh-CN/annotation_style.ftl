@@ -9,6 +9,9 @@ annot-style-font-size = 字号
 annot-style-fill = 填充
 
 annot-style-arrowhead = 箭头
+annot-style-filter-kind = 滤镜
+annot-autofilter-kind-mosaic = 马赛克
+annot-autofilter-kind-blur = 模糊
 
 annot-size-px = { $arg1 } 像素
 

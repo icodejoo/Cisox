@@ -11,6 +11,9 @@ use crate::annotation_style::{
     ArrowheadChoice, FONT_PRESETS, PALETTE, Rgba, ToolStyle, ToolStyleStore, WIDTH_PRESETS,
     config_key, nearest_index, panel_placement, style_fields,
 };
+use crate::auto_filter::{
+    AutoFilterJob, AutoFilterKind, AutoFilterSession, SessionPoll, SessionStep,
+};
 use crate::decoration_style::{
     SPOTLIGHT_OPACITY_PRESETS, SPOTLIGHT_STYLE_KEY, SpotlightEdit, WATERMARK_ANGLE_PRESETS,
     WATERMARK_FONT_PRESETS, WATERMARK_GAP_PRESETS, WATERMARK_OPACITY_PRESETS, WATERMARK_STYLE_KEY,
@@ -84,6 +87,10 @@ const MAGNIFIER_LOGICAL_SIZE: (i32, i32) = (109, 178);
 const MAGNIFIER_OFFSET: i32 = 16;
 /// 工具栏的逻辑尺寸（宽, 高），仅用于定位与命中避让。
 const TOOLBAR_LOGICAL_SIZE: (i32, i32) = (1120, 36);
+/// 自动滤镜命中区域的边框颜色（RGB，同旧版 `#ff4d4f`）。
+const AUTO_FILTER_BORDER_COLOR: u32 = 0xFF4D4F;
+/// 自动滤镜命中区域的填充颜色（RGBA，同旧版 alpha 51）。
+const AUTO_FILTER_FILL_COLOR: u32 = 0xFF4D4F33;
 /// 样式面板的逻辑尺寸（宽, 高），仅用于定位与命中避让。
 const STYLE_PANEL_SIZE: (i32, i32) = (560, 84);
 /// 水印设置面板的逻辑尺寸（宽, 高），仅用于定位与命中避让。
@@ -361,6 +368,7 @@ fn toolbar_label_id(key: ToolbarLabel) -> &'static str {
             AnnotationTool::Eraser => "overlay-toolbar-tool-eraser",
             AnnotationTool::Spotlight => "overlay-toolbar-tool-spotlight",
             AnnotationTool::Watermark => "overlay-toolbar-tool-watermark",
+            AnnotationTool::AutoFilter => "overlay-toolbar-tool-auto-filter",
         },
         ToolbarLabel::Action(action) => match action {
             ToolbarAction::Undo => "overlay-toolbar-undo",
@@ -396,7 +404,7 @@ fn last_tool_id(tool: AnnotationTool) -> Option<&'static str> {
         AnnotationTool::Highlighter => ID_HIGHLIGHTER,
         AnnotationTool::Text => ID_TEXT,
         AnnotationTool::Counter => ID_SERIAL_NUMBER,
-        AnnotationTool::Mosaic | AnnotationTool::Blur => ID_FILTER,
+        AnnotationTool::Mosaic | AnnotationTool::Blur | AnnotationTool::AutoFilter => ID_FILTER,
         AnnotationTool::Eraser => ID_ERASER,
         // 聚光灯 / 水印是装饰工具，不参与“记住上次工具”
         AnnotationTool::None
@@ -597,6 +605,8 @@ enum StyleSelectKind {
     FontSize,
     /// 箭头头型。
     Arrowhead,
+    /// 自动滤镜的滤镜类型（马赛克 / 模糊）。
+    FilterKind,
 }
 
 /// 聚光灯 / 水印设置面板里会触发变更的下拉种类。
@@ -652,6 +662,8 @@ struct StyleUi {
     font: Entity<StyleSelect>,
     /// 箭头头型下拉。
     arrowhead: Entity<StyleSelect>,
+    /// 自动滤镜类型下拉。
+    filter: Entity<StyleSelect>,
 }
 
 /// 正在进行的文字输入会话。
@@ -1487,6 +1499,12 @@ pub struct ScreenshotOverlayView {
     i18n: &'static I18n,
     /// 样式面板的下拉实体。
     style_ui: Option<StyleUi>,
+    /// 自动滤镜的检测会话（后台检测任务与重测判定）。
+    auto_filter: AutoFilterSession,
+    /// 自动滤镜当前命中区域的外框（画布物理坐标，悬停 / 拖选预览高亮）。
+    auto_filter_hits: Vec<[f64; 4]>,
+    /// 自动滤镜按下时的起点（拖选预览用）。
+    auto_filter_drag: Option<(f64, f64)>,
     /// 聚光灯 / 水印设置面板的控件实体。
     decoration_ui: Option<DecorationUi>,
     /// 设置面板已按该工具同步过控件状态（工具变化或撤销后重置）。
@@ -1645,6 +1663,9 @@ impl ScreenshotOverlayView {
             style_config: None,
             i18n: crate::ocr_backend::i18n_for(snow_i18n::FALLBACK_LOCALE),
             style_ui: None,
+            auto_filter: AutoFilterSession::new(),
+            auto_filter_hits: Vec::new(),
+            auto_filter_drag: None,
             decoration_ui: None,
             decoration_prepared: None,
             decoration_text_focused: false,
@@ -2011,6 +2032,9 @@ impl ScreenshotOverlayView {
                     if self.tool == AnnotationTool::Text {
                         return OverlayOutcome::BeginText(point);
                     }
+                    if self.tool == AnnotationTool::AutoFilter {
+                        self.sync_auto_filter(true);
+                    }
                     self.start_annotation(point, rect);
                     return OverlayOutcome::Stay;
                 }
@@ -2059,6 +2083,11 @@ impl ScreenshotOverlayView {
         self.update_magnifier_grid(point);
         if self.annotating {
             self.continue_annotation(point);
+            if self.tool == AnnotationTool::AutoFilter
+                && let Some(rect) = self.current_selection()
+            {
+                self.refresh_auto_filter_hits(point, rect);
+            }
             return;
         }
         match self.state {
@@ -2102,6 +2131,13 @@ impl ScreenshotOverlayView {
             }
             SelectionState::Selected { rect } => {
                 self.hover_mode = self.drag_mode_for(rect, point);
+                if self.tool == AnnotationTool::AutoFilter {
+                    if self.hover_mode == SelectionDragMode::All {
+                        self.refresh_auto_filter_hits(point, rect);
+                    } else {
+                        self.auto_filter_hits.clear();
+                    }
+                }
             }
             SelectionState::Idle => {
                 self.hover_mode = SelectionDragMode::None;
@@ -2580,6 +2616,12 @@ impl ScreenshotOverlayView {
                 self.apply_stored_filter(next);
                 self.apply_stored_decoration(next);
                 self.remember_last_tool(next);
+                if next == AnnotationTool::AutoFilter {
+                    self.sync_auto_filter(true);
+                } else {
+                    self.auto_filter.cancel();
+                    self.auto_filter_hits.clear();
+                }
             }
             Err(e) => {
                 tracing::error!(error = %e, tool = ?next, "切换标注工具失败");
@@ -2857,6 +2899,16 @@ impl ScreenshotOverlayView {
             (StyleSelectKind::Width, self.width_items(&WIDTH_PRESETS)),
             (StyleSelectKind::FontSize, self.width_items(&FONT_PRESETS)),
             (StyleSelectKind::Arrowhead, arrow_items),
+            (
+                StyleSelectKind::FilterKind,
+                AutoFilterKind::ALL
+                    .iter()
+                    .map(|k| StyleItem {
+                        value: k.id().to_string(),
+                        label: self.i18n.tr(k.text_id()).into(),
+                    })
+                    .collect(),
+            ),
         ];
         let mut made: Vec<Entity<StyleSelect>> = Vec::new();
         for (kind, items) in sets {
@@ -2874,12 +2926,14 @@ impl ScreenshotOverlayView {
             made.push(state);
         }
         let mut made = made.into_iter();
-        if let (Some(width), Some(font), Some(arrowhead)) = (made.next(), made.next(), made.next())
+        if let (Some(width), Some(font), Some(arrowhead), Some(filter)) =
+            (made.next(), made.next(), made.next(), made.next())
         {
             self.style_ui = Some(StyleUi {
                 width,
                 font,
                 arrowhead,
+                filter,
             });
         }
         self.sync_style_selects(window, cx);
@@ -2903,6 +2957,11 @@ impl ScreenshotOverlayView {
             .update(cx, |s, cx| s.set_selected_index(font, window, cx));
         ui.arrowhead.update(cx, |s, cx| {
             s.set_selected_index(head.and_then(pick), window, cx)
+        });
+        let kind = self.annotations.as_ref().map(|l| l.auto_filter_kind());
+        let kind_index = AutoFilterKind::ALL.iter().position(|k| Some(*k) == kind);
+        ui.filter.update(cx, |s, cx| {
+            s.set_selected_index(kind_index.and_then(pick), window, cx)
         });
     }
 
@@ -2930,6 +2989,14 @@ impl ScreenshotOverlayView {
             StyleSelectKind::Arrowhead => {
                 if let Some(head) = ArrowheadChoice::from_id(value) {
                     self.update_tool_style(tool, |s| s.arrowhead = head);
+                }
+            }
+            StyleSelectKind::FilterKind => {
+                if let (Some(kind), Some(layer)) =
+                    (AutoFilterKind::from_id(value), self.annotations.as_mut())
+                    && let Err(e) = layer.set_auto_filter_kind(kind)
+                {
+                    tracing::warn!(error = %e, "切换自动滤镜类型失败");
                 }
             }
         }
@@ -3173,6 +3240,11 @@ impl ScreenshotOverlayView {
                     .child(label("annot-style-arrowhead"))
                     .child(select(&ui.arrowhead));
             }
+            if fields.filter_kind {
+                panel = panel
+                    .child(label("annot-style-filter-kind"))
+                    .child(select(&ui.filter));
+            }
         }
         if fields.fill {
             let entity = cx.entity();
@@ -3274,6 +3346,7 @@ impl ScreenshotOverlayView {
     /// 在选区内按下：开始一次标注拖动。
     fn start_annotation(&mut self, point: PhysicalPoint, selection: PhysicalRect) {
         let (x, y) = Self::clamp_to_selection(point, selection);
+        self.auto_filter_drag = (self.tool == AnnotationTool::AutoFilter).then_some((x, y));
         self.run_layer(|layer, base| layer.pointer_down(x, y, base));
         self.annotating = self.annotations.as_ref().is_some_and(|l| l.is_drawing());
     }
@@ -3299,11 +3372,90 @@ impl ScreenshotOverlayView {
     fn finish_annotation(&mut self, point: PhysicalPoint) {
         self.annotating = false;
         self.pending_annotation_point = None;
+        self.auto_filter_drag = None;
         let Some(rect) = self.current_selection() else {
             return;
         };
         let (x, y) = Self::clamp_to_selection(point, rect);
         self.run_layer(|layer, base| layer.pointer_up(x, y, base));
+        if self.tool == AnnotationTool::AutoFilter {
+            self.refresh_auto_filter_hits(point, rect);
+        }
+    }
+
+    /// 自动滤镜：核对选区与区域记录，需要时清旧记录并在后台线程重新检测。
+    ///
+    /// 只在自动滤镜工具选中、选区已确定（非拖动中）时生效；`force` 为真（工具激活 / 按下）时，
+    /// 即使同一范围的记录已被撤销也会重测，否则同一范围只处理一次。
+    fn sync_auto_filter(&mut self, force: bool) {
+        if self.tool != AnnotationTool::AutoFilter {
+            return;
+        }
+        let SelectionState::Selected { rect } = self.state else {
+            return;
+        };
+        let (frame_w, frame_h) = self.frame.size();
+        let Some(rect) = PhysicalRect::new(0, 0, frame_w as i32, frame_h as i32).intersect(&rect)
+        else {
+            return;
+        };
+        let selection = [rect.x, rect.y, rect.right(), rect.bottom()];
+        let recorded = self
+            .annotations
+            .as_ref()
+            .and_then(|l| l.auto_filter_source());
+        let SessionStep::Detect { source, clear } =
+            self.auto_filter.step(Some(selection), recorded, force)
+        else {
+            return;
+        };
+        if clear {
+            self.run_layer(|layer, base| layer.set_auto_filter_regions(None, base));
+        }
+        let Some((w, h, rgba)) = self.frame.crop_rgba(rect) else {
+            return;
+        };
+        self.auto_filter
+            .begin(AutoFilterJob::spawn(source, w, h, rgba));
+        self.status_message = Some(self.i18n.tr("overlay-msg-auto-filter-detecting"));
+    }
+
+    /// 渲染前轮询自动滤镜：核对选区变化、吸收完成的检测结果。
+    ///
+    /// # 返回
+    /// 检测是否仍在进行（调用方据此继续请求下一帧）。
+    fn poll_auto_filter(&mut self) -> bool {
+        self.sync_auto_filter(false);
+        match self.auto_filter.poll() {
+            SessionPoll::Pending => {}
+            SessionPoll::Done(record) => {
+                self.status_message = None;
+                if record.is_some() {
+                    self.run_layer(|layer, base| layer.set_auto_filter_regions(record, base));
+                }
+            }
+            SessionPoll::Failed(e) => {
+                tracing::warn!(error = %e, "自动滤镜区域识别失败");
+                self.status_message = Some(self.i18n.tr("overlay-msg-auto-filter-failed"));
+            }
+        }
+        self.auto_filter.is_busy()
+    }
+
+    /// 自动滤镜工具下刷新命中区域高亮（悬停或拖选预览）。
+    ///
+    /// # 参数
+    /// - `point`：当前光标（底图物理坐标）。
+    /// - `selection`：选区；光标不在选区内部时高亮清空。
+    fn refresh_auto_filter_hits(&mut self, point: PhysicalPoint, selection: PhysicalRect) {
+        let inside = self.annotating || selection.contains(point);
+        self.auto_filter_hits = match (&self.annotations, inside) {
+            (Some(layer), true) => {
+                let (x, y) = Self::clamp_to_selection(point, selection);
+                layer.auto_filter_hits(self.auto_filter_drag, (x, y))
+            }
+            _ => Vec::new(),
+        };
     }
 
     /// 撤销上一个标注。
@@ -3328,6 +3480,9 @@ impl ScreenshotOverlayView {
     /// 清空全部标注（重新框选 / 取消选区时调用），并回到无工具状态。
     fn reset_annotations(&mut self) {
         self.annotating = false;
+        self.auto_filter.reset();
+        self.auto_filter_hits.clear();
+        self.auto_filter_drag = None;
         self.pending_annotation_point = None;
         self.tool = AnnotationTool::None;
         self.decoration_prepared = None;
@@ -4293,7 +4448,12 @@ impl ScreenshotOverlayView {
         self.latex_mode = true;
         match self.output.start_latex(self.ocr_serial, w, h, rgba) {
             Ok(()) => {
-                tracing::info!(serial = self.ocr_serial, width = w, height = h, "已提交公式识别");
+                tracing::info!(
+                    serial = self.ocr_serial,
+                    width = w,
+                    height = h,
+                    "已提交公式识别"
+                );
                 self.set_ocr_state(OcrUiState::Running);
             }
             Err(e) => {
@@ -6139,7 +6299,7 @@ impl ScreenshotOverlayView {
         if loading_history {
             self.poll_history();
         }
-        let refining = self.poll_refinement() || self.history_busy();
+        let refining = self.poll_refinement() || self.history_busy() || self.poll_auto_filter();
         let highlight = self
             .highlight_transition
             .advance(self.window_highlight(), Instant::now());
@@ -6181,6 +6341,23 @@ impl ScreenshotOverlayView {
                     .h(self.lp(sprite.h as i32))
                     .object_fit(ObjectFit::Fill),
             );
+        }
+
+        // 自动滤镜：命中区域的高亮框（悬停 / 拖选预览，红框淡红填充，同旧版）
+        if self.tool == AnnotationTool::AutoFilter {
+            for r in &self.auto_filter_hits {
+                root = root.child(
+                    div()
+                        .absolute()
+                        .top(px(r[1] as f32 / scale))
+                        .left(px(r[0] as f32 / scale))
+                        .w(px((r[2] - r[0]) as f32 / scale))
+                        .h(px((r[3] - r[1]) as f32 / scale))
+                        .bg(rgba(AUTO_FILTER_FILL_COLOR))
+                        .border_1()
+                        .border_color(rgb(AUTO_FILTER_BORDER_COLOR)),
+                );
+            }
         }
 
         // 自定义区域草稿：折线 / 曲线 / 自由绘制的轮廓与顶点
@@ -6856,7 +7033,13 @@ mod tests {
             Ok(())
         }
         /// 记录公式识别请求。
-        fn start_latex(&mut self, serial: u64, w: u32, h: u32, rgba: Vec<u8>) -> Result<(), String> {
+        fn start_latex(
+            &mut self,
+            serial: u64,
+            w: u32,
+            h: u32,
+            rgba: Vec<u8>,
+        ) -> Result<(), String> {
             if self.fail {
                 return Err("boom".into());
             }
@@ -9315,18 +9498,31 @@ mod tests {
         view.apply_action(ToolbarAction::Latex);
         assert_eq!(rec.borrow().latexes.len(), 1);
         // 缺模型：引导卡片文案含官方来源与文件名，且不提供下载
-        view.finish_ocr(serial, Err(OcrError::LatexUnavailable(LatexUnavailable::NoDir)));
-        let OcrUiState::Failed { message, can_download } = view.ocr_state().clone() else {
+        view.finish_ocr(
+            serial,
+            Err(OcrError::LatexUnavailable(LatexUnavailable::NoDir)),
+        );
+        let OcrUiState::Failed {
+            message,
+            can_download,
+        } = view.ocr_state().clone()
+        else {
             panic!("应为失败态");
         };
         assert!(!can_download);
-        assert!(message.contains("RapidLaTeXOCR") && message.contains("encoder.onnx"), "{message}");
+        assert!(
+            message.contains("RapidLaTeXOCR") && message.contains("encoder.onnx"),
+            "{message}"
+        );
         view.handle_key("d", false, false);
         assert_eq!(rec.borrow().latex_downloads, 0, "模型缺失不下载");
         // 缺运行时：按 D 走公式专属下载，不碰表格与 OCR 的下载
         view.apply_action(ToolbarAction::Latex);
         let serial = view.ocr_serial;
-        view.finish_ocr(serial, Err(OcrError::LatexUnavailable(LatexUnavailable::NoRuntime)));
+        view.finish_ocr(
+            serial,
+            Err(OcrError::LatexUnavailable(LatexUnavailable::NoRuntime)),
+        );
         view.handle_key("d", false, false);
         assert_eq!(rec.borrow().latex_downloads, 1);
         assert_eq!(rec.borrow().table_downloads + rec.borrow().ocr_downloads, 0);
@@ -9342,7 +9538,10 @@ mod tests {
         result.full_text = "\\frac{a}{b}".into();
         result.latex = Some("\\frac{a}{b}".into());
         view.finish_ocr(view.ocr_serial, Ok(result));
-        assert!(matches!(view.ocr_state(), OcrUiState::Done { copied: true, .. }));
+        assert!(matches!(
+            view.ocr_state(),
+            OcrUiState::Done { copied: true, .. }
+        ));
         assert_eq!(view.latex_text.as_deref(), Some("\\frac{a}{b}"));
         view.set_ocr_state(OcrUiState::Idle);
         assert!(view.latex_text.is_none());
@@ -9564,6 +9763,80 @@ mod tests {
             view.apply_action(ToolbarAction::Undo);
             assert_eq!(view.tile_sprite_count(), 0);
         }
+    }
+
+    /// 等自动滤镜后台检测结束（最多约 20 秒），期间照常轮询。
+    fn wait_auto_filter(view: &mut ScreenshotOverlayView) {
+        for _ in 0..4000 {
+            if !view.poll_auto_filter() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("自动滤镜检测超时");
+    }
+
+    /// 自动滤镜：选中工具后在后台检测选区并写入区域记录；切走工具取消任务。
+    #[test]
+    fn auto_filter_detects_selection_in_background() {
+        let (mut view, _) = view_with(300, 200, 1.0, false);
+        drag(&mut view, (20, 20), (219, 149));
+        view.select_tool(AnnotationTool::AutoFilter);
+        assert_eq!(view.current_tool(), AnnotationTool::AutoFilter);
+        assert!(view.auto_filter.is_busy(), "检测应在后台线程进行");
+        assert!(view.status_message.is_some());
+        wait_auto_filter(&mut view);
+        let sel = view.current_selection().unwrap();
+        assert_eq!(
+            view.annotations.as_ref().unwrap().auto_filter_source(),
+            Some([sel.x, sel.y, sel.right(), sel.bottom()])
+        );
+        assert!(view.status_message.is_none());
+        // 样式面板显示滤镜类型下拉
+        assert!(view.style_panel_origin((10, 10), (300, 200)).is_some());
+        // 切走工具：新任务（若有）被取消
+        view.select_tool(AnnotationTool::Mosaic);
+        assert!(!view.auto_filter.is_busy());
+    }
+
+    /// 自动滤镜：换选区后重新检测；点击命中区域铺滤镜，悬停给出高亮并可撤销。
+    #[test]
+    fn auto_filter_hover_click_and_reselect() {
+        use snow_draw_engine::DrawRect;
+        use snow_draw_engine_document::{AutoFilterRegion, AutoFilterRegionRecord};
+        let (mut view, _) = view_with(300, 200, 1.0, false);
+        drag(&mut view, (20, 20), (219, 149));
+        view.select_tool(AnnotationTool::AutoFilter);
+        wait_auto_filter(&mut view);
+        let sel = view.current_selection().unwrap();
+        let record = AutoFilterRegionRecord {
+            source_bounds: DrawRect::new(
+                f64::from(sel.x),
+                f64::from(sel.y),
+                f64::from(sel.right()),
+                f64::from(sel.bottom()),
+            ),
+            regions: vec![AutoFilterRegion {
+                id: 1,
+                bounds: DrawRect::new(60.0, 50.0, 160.0, 120.0),
+                category: "text".into(),
+            }],
+        };
+        view.run_layer(|layer, base| layer.set_auto_filter_regions(Some(record), base));
+        view.handle_mouse_move(PhysicalPoint::new(100, 80));
+        assert_eq!(view.auto_filter_hits.len(), 1, "悬停区域应高亮");
+        view.handle_mouse_move(PhysicalPoint::new(30, 30));
+        assert!(view.auto_filter_hits.is_empty());
+        annotate(&mut view, (100, 80), (100, 80));
+        assert!(view.tile_sprite_count() > 0, "点击区域应铺出滤镜");
+        assert!(view.history_state().0);
+        // 重新框选：旧记录与旧高亮随标注层重置
+        view.reset_annotations();
+        assert!(view.auto_filter_hits.is_empty());
+        assert_eq!(
+            view.annotations.as_ref().unwrap().auto_filter_source(),
+            None
+        );
     }
 
     /// 样式面板：滤镜工具与录屏 / 长图模式不显示，其余工具显示。

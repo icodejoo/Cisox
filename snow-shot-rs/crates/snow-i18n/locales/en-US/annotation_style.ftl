@@ -9,6 +9,9 @@ annot-style-font-size = Size
 annot-style-fill = Fill
 
 annot-style-arrowhead = Arrowhead
+annot-style-filter-kind = Filter
+annot-autofilter-kind-mosaic = Mosaic
+annot-autofilter-kind-blur = Blur
 
 annot-size-px = { $arg1 } px
 

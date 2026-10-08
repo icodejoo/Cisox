@@ -41,6 +41,8 @@ pub enum AnnotationTool {
     Spotlight,
     /// 水印：只打开水印设置面板，不在画布上拖拽。
     Watermark,
+    /// 自动滤镜：识别选区里的文字 / 图片 / 头像等区域，点击或拖选后一键铺马赛克 / 模糊。
+    AutoFilter,
 }
 
 impl AnnotationTool {
@@ -72,6 +74,7 @@ impl AnnotationTool {
             Self::Select => "选对象",
             Self::Spotlight => "聚光灯",
             Self::Watermark => "水印",
+            Self::AutoFilter => "自动滤镜",
         }
     }
 
@@ -249,7 +252,7 @@ const TOOLBAR_ACTIONS: [(&str, ToolbarAction); 10] = [
 ];
 
 /// 可选标注工具的显示顺序。
-const TOOLBAR_TOOLS: [AnnotationTool; 14] = [
+const TOOLBAR_TOOLS: [AnnotationTool; 15] = [
     AnnotationTool::Rectangle,
     AnnotationTool::Ellipse,
     AnnotationTool::Arrow,
@@ -260,6 +263,7 @@ const TOOLBAR_TOOLS: [AnnotationTool; 14] = [
     AnnotationTool::Text,
     AnnotationTool::Mosaic,
     AnnotationTool::Blur,
+    AnnotationTool::AutoFilter,
     AnnotationTool::Eraser,
     AnnotationTool::Select,
     AnnotationTool::Spotlight,
@@ -569,6 +573,8 @@ mod tests {
         assert!(TOOLBAR_TOOLS.contains(&AnnotationTool::Blur));
         assert!(TOOLBAR_TOOLS.contains(&AnnotationTool::Highlighter));
         assert!(TOOLBAR_TOOLS.contains(&AnnotationTool::Counter));
+        assert!(TOOLBAR_TOOLS.contains(&AnnotationTool::AutoFilter));
+        assert!(AnnotationTool::AutoFilter.draws());
     }
 
     /// 聚光灯与水印在工具栏里；只有水印不触发拖拽绘制。

@@ -24,6 +24,7 @@ use std::process::ExitCode;
 pub mod annotation;
 pub mod annotation_style;
 pub mod app_runtime;
+pub mod auto_filter;
 pub mod capture_flow;
 pub mod config_transfer;
 pub mod decoration_style;
