@@ -21,9 +21,9 @@
 
 **用户已批准的依赖 / 结构决定（2026-10-08）**：`windows` 的 `Win32_Security_Cryptography` 特性；独立 workspace `tools/snow-table`；`miniz_oxide`（仅 `snow-config` 读 deflate 归档）；`rqrr`；`snow-shot` 对仓库内 `visual-region-detector` 与 `snow-draw-engine-document` 的 path 依赖。新增独立 workspace `tools/snow-latex`（沿用 snow-table 的 ort 版本，无新第三方 crate）。
 
-**待用户拍板**
-1. `screen_recording/capture_toolbar_in_recording` 的语义：录制窗目前一律排除在捕获之外，该键默认 `true`，照字面做会让成片带控制条。
-2. `updates/mode = download` 目前与 `check` 一样只检查不自动下载（旧版会自动下载）；要不要自动下载。
+**已裁决（2026-10-09，用户）**
+1. `screen_recording/capture_toolbar_in_recording`：**不做**。录制控制条继续一律排除在成片之外，该键保持未消费（schema 保留以兼容旧配置）。
+2. `updates/mode = download`：**不做自动下载**。与 `check` 行为相同，只检查并提示，下载由用户在设置页点击。
 
 **仍未做 / 已知缺口**
 - 智能擦除（D12 P2 / P3：Lab 多尺度 PatchMatch 自写，零新依赖）；MCP 余下 89 个 tool 与桥接进程；G04 Markdown / HTML 调用。
