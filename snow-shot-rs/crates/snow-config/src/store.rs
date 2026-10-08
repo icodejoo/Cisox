@@ -241,8 +241,8 @@ fn utc_timestamp(time: SystemTime) -> String {
     )
 }
 
-/// 由自 1970-01-01 起的天数换算公历日期（Howard Hinnant 算法）。
-fn civil_from_days(days: i64) -> (i64, i64, i64) {
+/// 由自 1970-01-01 起的天数换算公历日期（Howard Hinnant 算法），返回 `(年, 月, 日)`。
+pub(crate) fn civil_from_days(days: i64) -> (i64, i64, i64) {
     let shifted = days + 719_468;
     let era = shifted.div_euclid(146_097);
     let day_of_era = shifted.rem_euclid(146_097);

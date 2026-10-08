@@ -2,7 +2,9 @@
 
 config-transfer-title = 导出与导入设置
 
-config-transfer-description = 把全部设置保存成一个归档，或从归档恢复。导出时不包含 API 密钥。
+config-transfer-description = 把全部设置保存成一个归档，或从归档恢复。导出时默认不含 API 密钥，勾选后才带上。
+
+config-transfer-include-keys = 包含 API 密钥
 
 config-transfer-export = 导出设置…
 

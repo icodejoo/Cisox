@@ -2811,7 +2811,7 @@ fn run_config_transfer(
         pattern: ARCHIVE_PATTERN.to_string(),
     }];
     let (ui_state, reload) = match action {
-        TransferAction::Export => {
+        TransferAction::Export { include_credentials } => {
             let request = SaveDialogRequest {
                 title: i18n.tr("config-transfer-dialog-export"),
                 file_name: default_export_name(&snow_config::archive::iso_utc_now()),
@@ -2824,7 +2824,7 @@ fn run_config_transfer(
                     if path.extension().is_none() {
                         path.as_mut_os_string().push(ARCHIVE_EXTENSION);
                     }
-                    let result = export_configuration(&state.config.borrow(), &path);
+                    let result = export_configuration(&state.config.borrow(), &path, include_credentials);
                     if let Err(e) = &result {
                         tracing::warn!(error = %e, "导出设置失败");
                     }

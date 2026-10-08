@@ -1,12 +1,14 @@
 //! 配置归档：把设置导出为单个 zip 归档、从归档读回（对应旧版 `ConfigurationArchive`）。
 //!
 //! 归档含两个条目：`manifest.json`（格式标记、版本、可选的“已脱敏模型 id”）与
-//! `config.json`（扁平 `"组/名"` 键值）。本模块自带最小 zip 读写（不新增依赖）：
-//! 写出一律“存储”方式（不压缩）；读取只接受“存储”方式，旧版用 deflate 压缩的归档
-//! 会返回 [`ArchiveError::UnsupportedCompression`]（与旧版格式的差异，见审计表 A06）。
+//! `config.json`（扁平 `"组/名"` 键值）。本模块自带最小 zip 读写，解压 deflate 用 `miniz_oxide`：
+//! 写出一律“存储”方式（配置只有几十 KB，压缩收益小，且存储输出可复现、任何 zip 工具都能读）；
+//! 读取同时接受“存储”与 deflate（旧版导出的归档），其余压缩方式返回
+//! [`ArchiveError::UnsupportedCompression`]。
 
 use crate::normalize::normalize;
 use crate::schema::{SCHEMA_VERSION_KEY, contains, current_version, parse_integer_version};
+use crate::store::civil_from_days;
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -91,7 +93,7 @@ pub enum ArchiveError {
     TooNew,
     /// 归档内没有可用的设置。
     NoCompatibleSettings,
-    /// 条目使用了本实现不支持的压缩方式（如旧版的 deflate）。
+    /// 条目使用了本实现不支持的压缩方式（存储与 deflate 之外）。
     UnsupportedCompression,
     /// 文件系统错误（携带说明）。
     Io(String),
@@ -369,18 +371,9 @@ pub fn iso_utc_now() -> String {
 
 /// 把 Unix 秒与毫秒格式化为 ISO 8601（UTC）。
 fn iso_utc(seconds: u64, millis: u32) -> String {
-    let days = (seconds / 86_400) as i64;
+    let days = i64::try_from(seconds / 86_400).unwrap_or(0);
     let rest = seconds % 86_400;
-    // 公历日期换算（Howard Hinnant 的 civil_from_days）。
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = yoe + era * 400 + i64::from(month <= 2);
+    let (year, month, day) = civil_from_days(days);
     format!(
         "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{millis:03}Z",
         rest / 3600,
@@ -558,22 +551,33 @@ fn parse_zip(data: &[u8]) -> Result<BTreeMap<String, Vec<u8>>, ArchiveError> {
         if result.contains_key(name) || size > limit {
             return Err(invalid());
         }
-        match method {
-            METHOD_STORED => {}
-            METHOD_DEFLATE => return Err(ArchiveError::UnsupportedCompression),
-            _ => return Err(invalid()),
+        if !matches!(method, METHOD_STORED | METHOD_DEFLATE) {
+            return Err(ArchiveError::UnsupportedCompression);
         }
-        if compressed != size || get32(data, local_offset) != Some(SIG_LOCAL) {
+        if (method == METHOD_STORED && compressed != size)
+            || get32(data, local_offset) != Some(SIG_LOCAL)
+        {
             return Err(invalid());
         }
         let local_name = usize::from(get16(data, local_offset + 26).ok_or_else(invalid)?);
         let local_extra = usize::from(get16(data, local_offset + 28).ok_or_else(invalid)?);
         let start = local_offset + LOCAL_HEADER_LEN + local_name + local_extra;
-        let payload = data.get(start..start + size).ok_or_else(invalid)?;
-        if crc32(payload) != crc {
+        let raw = data.get(start..start + compressed).ok_or_else(invalid)?;
+        let payload = if method == METHOD_DEFLATE {
+            // 带上限解压，防压缩炸弹；长度必须与声明一致。
+            let inflated = miniz_oxide::inflate::decompress_to_vec_with_limit(raw, limit)
+                .map_err(|_| invalid())?;
+            if inflated.len() != size {
+                return Err(invalid());
+            }
+            inflated
+        } else {
+            raw.to_vec()
+        };
+        if crc32(&payload) != crc {
             return Err(invalid());
         }
-        result.insert(name.to_string(), payload.to_vec());
+        result.insert(name.to_string(), payload);
     }
     Ok(result)
 }
@@ -652,6 +656,97 @@ mod tests {
         assert_eq!(back.values[KEY_AUTO_START], json!(false));
     }
 
+    /// 把条目按 deflate 方式打成 zip（样本用 `miniz_oxide` 压缩生成），模拟旧版导出的结构。
+    fn deflate_zip(files: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut central = Vec::new();
+        for (name, data) in files {
+            let packed = miniz_oxide::deflate::compress_to_vec(data, 6);
+            let offset = out.len() as u32;
+            let crc = crc32(data);
+            put32(&mut out, SIG_LOCAL);
+            for v in [20u16, FLAG_UTF8, METHOD_DEFLATE, 0, DOS_DATE] {
+                put16(&mut out, v);
+            }
+            put32(&mut out, crc);
+            put32(&mut out, packed.len() as u32);
+            put32(&mut out, data.len() as u32);
+            put16(&mut out, name.len() as u16);
+            put16(&mut out, 0);
+            out.extend_from_slice(name.as_bytes());
+            out.extend_from_slice(&packed);
+
+            put32(&mut central, SIG_CENTRAL);
+            // 创建版本高字节 3 = unix，属性高 16 位带普通文件模式，与常见 zip 工具一致。
+            for v in [0x031Eu16, 20, FLAG_UTF8, METHOD_DEFLATE, 0, DOS_DATE] {
+                put16(&mut central, v);
+            }
+            put32(&mut central, crc);
+            put32(&mut central, packed.len() as u32);
+            put32(&mut central, data.len() as u32);
+            put16(&mut central, name.len() as u16);
+            for _ in 0..4 {
+                put16(&mut central, 0);
+            }
+            put32(&mut central, (MODE_REGULAR | 0o644) << 16);
+            put32(&mut central, offset);
+            central.extend_from_slice(name.as_bytes());
+        }
+        let central_offset = out.len() as u32;
+        let central_size = central.len() as u32;
+        out.extend_from_slice(&central);
+        put32(&mut out, SIG_EOCD);
+        put16(&mut out, 0);
+        put16(&mut out, 0);
+        put16(&mut out, files.len() as u16);
+        put16(&mut out, files.len() as u16);
+        put32(&mut out, central_size);
+        put32(&mut out, central_offset);
+        put16(&mut out, 0);
+        out
+    }
+
+    /// 旧版结构的 deflate 归档能读出，且与存储归档结果一致。
+    #[test]
+    fn reads_legacy_deflate_archive() {
+        let manifest = serde_json::to_vec(&manifest(1, 3)).unwrap();
+        let config = serde_json::to_vec(&json!({
+            "screenshot/image_quality": 70,
+            "pad": "x".repeat(4000)
+        }))
+        .unwrap();
+        let legacy = deflate_zip(&[(MANIFEST_ENTRY, &manifest), (CONFIG_ENTRY, &config)]);
+        assert!(legacy.len() < manifest.len() + config.len());
+        let stored = build_zip(&[(MANIFEST_ENTRY, &manifest), (CONFIG_ENTRY, &config)]);
+        let back = read_archive_bytes(&legacy).unwrap();
+        assert_eq!(back, read_archive_bytes(&stored).unwrap());
+        assert_eq!(back.values["screenshot/image_quality"], json!(70));
+    }
+
+    /// deflate 数据损坏、声明长度不符、超限都按无效处理。
+    #[test]
+    fn bad_deflate_rejected() {
+        let manifest = serde_json::to_vec(&manifest(1, 3)).unwrap();
+        let config = br#"{"screenshot/image_quality":70}"#;
+        let good = deflate_zip(&[(MANIFEST_ENTRY, &manifest), (CONFIG_ENTRY, config)]);
+        // 破坏压缩流首字节。
+        let mut broken = good.clone();
+        broken[LOCAL_HEADER_LEN + MANIFEST_ENTRY.len()] = 0xFF;
+        assert_eq!(read_archive_bytes(&broken), Err(ArchiveError::Invalid));
+        // 声明的原始长度与实际不符（改中央目录里 manifest 的 size）。
+        let mut wrong = good.clone();
+        let central = wrong
+            .windows(4)
+            .position(|w| w == SIG_CENTRAL.to_le_bytes())
+            .unwrap();
+        wrong[central + 24] ^= 0x01;
+        assert_eq!(read_archive_bytes(&wrong), Err(ArchiveError::Invalid));
+        // 清单解压后超过上限。
+        let huge = vec![b' '; MAX_MANIFEST_BYTES + 1];
+        let bomb = deflate_zip(&[(MANIFEST_ENTRY, &huge), (CONFIG_ENTRY, config)]);
+        assert_eq!(read_archive_bytes(&bomb), Err(ArchiveError::Invalid));
+    }
+
     /// 重新打包任意条目，便于构造异常归档。
     fn archive_with(manifest: Value, config: Value) -> Vec<u8> {
         build_zip(&[
@@ -698,7 +793,7 @@ mod tests {
         );
     }
 
-    /// 损坏、截断、位翻转、多余条目、deflate 都被拒绝，且不 panic。
+    /// 损坏、截断、位翻转、多余条目、未知压缩方式都被拒绝，且不 panic。
     #[test]
     fn corrupt_archives_rejected() {
         let good = write_archive_bytes(&sample(), current_version(), "1", "t", false);
@@ -720,15 +815,15 @@ mod tests {
         assert_eq!(read_archive_bytes(&dup), Err(ArchiveError::Invalid));
         let not_json = build_zip(&[(MANIFEST_ENTRY, b"zzz"), (CONFIG_ENTRY, b"{}")]);
         assert_eq!(read_archive_bytes(&not_json), Err(ArchiveError::Invalid));
-        // 把方法改成 deflate（中央目录偏移 10）。
-        let mut deflate = good.clone();
-        let central = deflate
+        // 未知压缩方式（bzip2 = 12）。
+        let mut unknown = good.clone();
+        let central = unknown
             .windows(4)
             .position(|w| w == SIG_CENTRAL.to_le_bytes())
             .unwrap();
-        deflate[central + 10] = METHOD_DEFLATE as u8;
+        unknown[central + 10] = 12;
         assert_eq!(
-            read_archive_bytes(&deflate),
+            read_archive_bytes(&unknown),
             Err(ArchiveError::UnsupportedCompression)
         );
     }
