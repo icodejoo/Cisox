@@ -309,3 +309,5 @@ setting-screen-recording-enable-microphone-desc = 把麦克风录进 MP4 视频
 setting-screen-recording-enable-system-audio-desc = 把系统播放的声音录进 MP4 视频
 setting-updates-manifest-url = 更新清单地址
 setting-updates-manifest-url-desc = 检查新版本的地址；留空表示未配置，不会检查更新
+setting-screenshot-translation-page-auto-translate = 翻译页自动翻译
+setting-screenshot-translation-page-auto-translate-desc = 停止输入片刻后自动翻译（默认关闭）

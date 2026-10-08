@@ -60,6 +60,8 @@ pub enum PageContent {
     Open(OpenTarget),
     /// 内嵌设置页：直接显示本页所属的设置分组（复用设置页视图）。
     Settings,
+    /// 内嵌翻译页：直接在内容区翻译（复用翻译页视图），另可在独立窗口打开。
+    Translate,
     /// 关于页。
     About,
     /// 尚未提供的页面；可附带一个可用的替代入口。
@@ -130,7 +132,7 @@ impl MainPage {
         match self {
             Self::History => PageContent::Open(OpenTarget::History),
             Self::PinManage => PageContent::Open(OpenTarget::PinManage),
-            Self::Translation => PageContent::Open(OpenTarget::TranslatePage),
+            Self::Translation => PageContent::Translate,
             Self::About => PageContent::About,
             _ => PageContent::Settings,
         }
@@ -218,6 +220,26 @@ impl MainPage {
     pub fn in_settings_group(self) -> bool {
         SETTINGS_PAGES.contains(&self)
     }
+}
+
+/// 许可证摘要文件名（仓库根目录）。
+pub const LICENSE_FILE: &str = "LICENSE.md";
+/// 查找许可证文件时最多向上找几层目录（开发时可执行文件在 `build/cargo/<profile>/` 下）。
+const LICENSE_SEARCH_DEPTH: usize = 6;
+
+/// 从 `start` 起逐级向上找许可证摘要文件。
+///
+/// # 参数
+/// - `start`：起始目录（通常是可执行文件所在目录）。
+///
+/// # 返回
+/// 找到的文件路径；找不到返回 `None`（关于页就只显示文字说明）。
+pub fn find_license_file(start: &std::path::Path) -> Option<std::path::PathBuf> {
+    start
+        .ancestors()
+        .take(LICENSE_SEARCH_DEPTH)
+        .map(|dir| dir.join(LICENSE_FILE))
+        .find(|candidate| candidate.is_file())
 }
 
 /// 侧栏「设置」分组标题的图标名。
@@ -494,10 +516,7 @@ mod tests {
             assert!(ids.insert(p.title_id()));
             assert!(ids.insert(p.desc_id()));
         }
-        assert_eq!(
-            MainPage::Translation.content(),
-            PageContent::Open(OpenTarget::TranslatePage)
-        );
+        assert_eq!(MainPage::Translation.content(), PageContent::Translate);
         assert_eq!(MainPage::About.content(), PageContent::About);
         assert_eq!(
             MainPage::History.content(),
@@ -584,6 +603,20 @@ mod tests {
         let mut m = MainWindowModel::new(false, true);
         assert!(m.jump_to_group(MainPage::History.related_settings_group().unwrap()));
         assert_eq!(m.settings_group(), Some("capture_history"));
+    }
+
+    /// 许可证文件向上查找：从深层目录能找到上层的，同层优先。
+    #[test]
+    fn license_file_is_found_by_walking_up() {
+        let root = std::env::temp_dir().join(format!("cisox-license-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let deep = root.join("a").join("b");
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::write(root.join(LICENSE_FILE), "x").unwrap();
+        assert_eq!(find_license_file(&deep), Some(root.join(LICENSE_FILE)));
+        std::fs::write(deep.join(LICENSE_FILE), "y").unwrap();
+        assert_eq!(find_license_file(&deep), Some(deep.join(LICENSE_FILE)));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// 每个页面都有可渲染的侧栏图标。

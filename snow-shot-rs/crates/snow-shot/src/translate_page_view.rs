@@ -6,8 +6,12 @@
 use crate::app_runtime::UiEvent;
 use crate::settings_state::UiPrefs;
 use crate::settings_view::{Palette, palette};
+use crate::translate_history::{self, TranslateHistory};
 use crate::translate_input::{InputError, PackChoice, dropdown_choices};
-use crate::translate_page::{AUTO_LANGUAGE_ID, LangChoice, TranslatePageModel, language_choices};
+use crate::translate_page::{
+    AUTO_LANGUAGE_ID, AUTO_TRANSLATE_DEBOUNCE_MS, AutoDecision, LangChoice, TranslatePageModel,
+    language_choices,
+};
 use crate::translate_service::{TranslateConfig, Translated};
 use snow_platform::clipboard::copy_text_to_clipboard;
 use snow_translate::Lang;
@@ -20,11 +24,13 @@ use snow_ui::ui::component::{
     Disableable, IndexPath, Sizable, Size as ComponentSize, Theme, ThemeMode,
 };
 use snow_ui::ui::*;
+use std::path::PathBuf;
+use std::time::Duration;
 
 /// 窗口逻辑宽度。
 pub const WINDOW_WIDTH: f32 = 640.0;
 /// 窗口逻辑高度。
-pub const WINDOW_HEIGHT: f32 = 560.0;
+pub const WINDOW_HEIGHT: f32 = 640.0;
 /// 输入框最少行数。
 const INPUT_MIN_ROWS: usize = 5;
 /// 输入框最多行数（超过后框内滚动）。
@@ -37,6 +43,10 @@ const PACK_SELECT_WIDTH: f32 = 200.0;
 const SELECT_HEIGHT: f32 = 28.0;
 /// 下拉浮层最大高度。
 const SELECT_MENU_MAX_HEIGHT: f32 = 260.0;
+/// 窗口尺寸变化停止多久后才记忆（毫秒），避免拖拽边框时反复写盘。
+const SIZE_SAVE_DEBOUNCE_MS: u64 = 400;
+/// 历史列表的最大高度。
+const HISTORY_MAX_HEIGHT: f32 = 96.0;
 /// 窗口内边距。
 const PADDING: f32 = 14.0;
 /// 控件间距。
@@ -105,6 +115,17 @@ fn text(locale: &str, id: &str) -> String {
     crate::ocr_backend::i18n_for(locale).tr(id)
 }
 
+/// 翻译页的创建选项。
+#[derive(Debug, Clone, Default)]
+pub struct PageOptions {
+    /// 是否内嵌在主窗口里（内嵌时没有 Esc 关闭 / “复制并关闭”，也不记窗口大小）。
+    pub embedded: bool,
+    /// 输入变化后是否防抖自动翻译（来自配置）。
+    pub auto_translate: bool,
+    /// 历史文件路径；`None` 表示不持久化历史。
+    pub history_path: Option<PathBuf>,
+}
+
 /// 翻译页视图。
 pub struct TranslatePageView {
     /// 页面状态。
@@ -123,6 +144,10 @@ pub struct TranslatePageView {
     inbox: MainThreadInbox<UiEvent>,
     /// 输入框是否已聚焦过（只在首帧聚焦一次）。
     focused_once: bool,
+    /// 创建选项。
+    options: PageOptions,
+    /// 窗口尺寸变化的防抖代数（只用于独立窗口）。
+    size_gen: u64,
 }
 
 impl TranslatePageView {
@@ -134,6 +159,7 @@ impl TranslatePageView {
     /// - `packs`：已装翻译包（不含“自动”）。
     /// - `prefs`：界面偏好。
     /// - `inbox`：主线程收件箱。
+    /// - `options`：内嵌 / 自动翻译 / 历史路径等选项。
     pub fn create(
         window: &mut Window,
         app: &mut App,
@@ -141,6 +167,7 @@ impl TranslatePageView {
         packs: Vec<PackChoice>,
         prefs: UiPrefs,
         inbox: MainThreadInbox<UiEvent>,
+        options: PageOptions,
     ) -> Entity<Self> {
         Theme::change(
             if prefs.dark {
@@ -151,7 +178,11 @@ impl TranslatePageView {
             None,
             app,
         );
-        let model = TranslatePageModel::new(config, &packs);
+        let mut model = TranslatePageModel::new(config, &packs);
+        model.set_auto(options.auto_translate);
+        if let Some(path) = &options.history_path {
+            model.set_history(translate_history::load(path));
+        }
         let locale = prefs.locale;
         let placeholder = text(locale, "translate-page-placeholder");
         let input = app.new(|cx| {
@@ -189,13 +220,22 @@ impl TranslatePageView {
                 &input,
                 window,
                 |this: &mut Self, _state, event: &InputEvent, window, cx| {
-                    // Enter 翻译；Shift+Enter 留给换行
-                    if let InputEvent::PressEnter { shift: false, .. } = event {
-                        this.submit(window, cx);
+                    match event {
+                        // Enter 翻译；Shift+Enter 留给换行
+                        InputEvent::PressEnter { shift: false, .. } => this.submit(window, cx),
+                        InputEvent::Change => this.on_input_changed(cx),
+                        _ => {}
                     }
                 },
             )
             .detach();
+            if !options.embedded {
+                // 独立窗口：尺寸变化停住后记住大小
+                cx.observe_window_bounds(window, |this: &mut Self, window, cx| {
+                    this.on_bounds_changed(window.scale_factor(), cx)
+                })
+                .detach();
+            }
             cx.subscribe_in(
                 &source_select,
                 window,
@@ -241,6 +281,8 @@ impl TranslatePageView {
                 prefs,
                 inbox,
                 focused_once: false,
+                options,
+                size_gen: 0,
             }
         });
         input.update(app, |state, cx| state.focus(window, cx));
@@ -261,6 +303,11 @@ impl TranslatePageView {
     /// 发起翻译：输入为空或正忙时只更新状态，不发请求。
     fn submit(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         let text = self.input.read(cx).value().to_string();
+        self.start_request(text, cx);
+    }
+
+    /// 对 `text` 发起一次翻译请求（空文本 / 正忙时只更新状态）。
+    fn start_request(&mut self, text: String, cx: &mut Context<Self>) {
         if let Some(serial) = self.model.begin(&text) {
             self.inbox.push(UiEvent::TranslatePageRequested {
                 serial,
@@ -268,9 +315,159 @@ impl TranslatePageView {
                 model_id: self.model.pack_id.clone(),
                 source: self.model.source,
                 target: self.model.target,
+                embedded: self.options.embedded,
             });
         }
         cx.notify();
+    }
+
+    /// 输入内容变化：开着自动翻译时启动一轮防抖，到点再裁决是否翻译。
+    fn on_input_changed(&mut self, cx: &mut Context<Self>) {
+        let text = self.input.read(cx).value().to_string();
+        let Some(generation) = self.model.input_changed(&text) else {
+            return;
+        };
+        cx.spawn(async move |this, acx| {
+            acx.background_executor()
+                .timer(Duration::from_millis(AUTO_TRANSLATE_DEBOUNCE_MS))
+                .await;
+            let _ = this.update(acx, |view, cx| view.auto_translate_due(generation, cx));
+        })
+        .detach();
+    }
+
+    /// 防抖到点：按模型裁决发起翻译。
+    fn auto_translate_due(&mut self, generation: u64, cx: &mut Context<Self>) {
+        let text = self.input.read(cx).value().to_string();
+        if self.model.debounce_due(generation, &text) == AutoDecision::Run {
+            self.start_request(text, cx);
+        }
+    }
+
+    /// 窗口尺寸变化：停住一小会儿后通知运行时记忆大小。
+    ///
+    /// # 参数
+    /// - `scale`：窗口缩放比（运行时据此把物理外框换算成逻辑大小）。
+    fn on_bounds_changed(&mut self, scale: f32, cx: &mut Context<Self>) {
+        self.size_gen += 1;
+        let generation = self.size_gen;
+        cx.spawn(async move |this, acx| {
+            acx.background_executor()
+                .timer(Duration::from_millis(SIZE_SAVE_DEBOUNCE_MS))
+                .await;
+            let _ = this.update(acx, |view, _cx| {
+                if view.size_gen == generation {
+                    view.inbox.push(UiEvent::TranslateWindowSettled { scale });
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// 更新自动翻译开关（设置里改了）。
+    ///
+    /// # 参数
+    /// - `enabled`：新的开关值。
+    pub fn set_auto_translate(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        self.options.auto_translate = enabled;
+        self.model.set_auto(enabled);
+        cx.notify();
+    }
+
+    /// 界面偏好变化（语言 / 主题）。
+    ///
+    /// # 参数
+    /// - `prefs`：新的界面偏好。
+    pub fn set_prefs(&mut self, prefs: UiPrefs, cx: &mut Context<Self>) {
+        self.prefs = prefs;
+        cx.notify();
+    }
+
+    /// 把历史落盘（没配置路径或没变化时什么都不做）；失败只记日志。
+    fn persist_history(&mut self) {
+        if !self.model.take_history_dirty() {
+            return;
+        }
+        if let Some(path) = &self.options.history_path
+            && let Err(e) = translate_history::save(path, &self.model.history)
+        {
+            tracing::warn!(error = %e, "翻译历史写盘失败");
+        }
+    }
+
+    /// 点击历史记录：把原文放回输入框并显示当时的译文。
+    fn recall(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(text) = self.model.recall(index) {
+            self.set_text(&text, window, cx);
+            cx.notify();
+        }
+    }
+
+    /// 清空历史并落盘。
+    fn clear_history(&mut self, cx: &mut Context<Self>) {
+        self.model.clear_history();
+        self.persist_history();
+        cx.notify();
+    }
+
+    /// 渲染历史区：标题行（含清空按钮）加可滚动的记录列表。
+    fn render_history(&self, p: &Palette, locale: &str, cx: &mut Context<Self>) -> Div {
+        let history: &TranslateHistory = &self.model.history;
+        let i18n = crate::ocr_backend::i18n_for(locale);
+        let title = i18n.tr_with(
+            "translate-page-history-title",
+            &snow_i18n::Args::new().arg(1, history.len() as i64),
+        );
+        let header = div()
+            .flex()
+            .items_center()
+            .gap(px(GAP))
+            .child(
+                div()
+                    .flex_1()
+                    .text_size(px(SMALL_SIZE))
+                    .text_color(p.dim)
+                    .child(title),
+            )
+            .child(
+                Button::new("translate-history-clear")
+                    .with_size(ComponentSize::Small)
+                    .label(i18n.tr("translate-page-history-clear"))
+                    .disabled(history.is_empty())
+                    .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| this.clear_history(cx))),
+            );
+        let mut list = div()
+            .id("translate-history-list")
+            .max_h(px(HISTORY_MAX_HEIGHT))
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .gap(px(2.0));
+        if history.is_empty() {
+            list = list.child(
+                div()
+                    .text_size(px(SMALL_SIZE))
+                    .text_color(p.dim)
+                    .child(i18n.tr("translate-page-history-empty")),
+            );
+        }
+        for (ix, entry) in history.entries().iter().enumerate() {
+            list = list.child(
+                Button::new(SharedString::from(format!("translate-history-{ix}")))
+                    .with_size(ComponentSize::Small)
+                    .label(entry.preview())
+                    .on_click(cx.listener(move |this, _e: &ClickEvent, window, cx| {
+                        this.recall(ix, window, cx)
+                    })),
+            );
+        }
+        div()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .gap(px(4.0))
+            .child(header)
+            .child(list)
     }
 
     /// 收到后台翻译结果（过期序号会被忽略）。
@@ -285,6 +482,12 @@ impl TranslatePageView {
         cx: &mut Context<Self>,
     ) {
         if self.model.finish(serial, result) {
+            self.persist_history();
+            // 翻译期间输入又变了且开着自动翻译：补一轮
+            let text = self.input.read(cx).value().to_string();
+            if self.model.take_queued(&text) {
+                self.start_request(text, cx);
+            }
             cx.notify();
         }
     }
@@ -348,6 +551,9 @@ impl Render for TranslatePageView {
             self.focused_once = true;
             self.input.update(cx, |state, cx| state.focus(window, cx));
         }
+        let embedded = self.options.embedded;
+        let auto_on = self.model.auto_enabled();
+        let history = self.render_history(&p, locale, cx);
         let busy = self.model.is_busy();
         let status = self.model.status_line(locale);
         let status_color = if self.model.is_failed() {
@@ -403,8 +609,9 @@ impl Render for TranslatePageView {
             .flex()
             .flex_col()
             .gap(px(GAP))
-            .on_key_down(cx.listener(|_this, ev: &KeyDownEvent, window, _cx| {
-                if ev.keystroke.key == "escape" {
+            .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, _cx| {
+                // 内嵌在主窗口里时 Esc 不该关掉整个主窗口
+                if ev.keystroke.key == "escape" && !this.options.embedded {
                     window.remove_window();
                 }
             }))
@@ -443,14 +650,16 @@ impl Render for TranslatePageView {
                                 this.copy(false, window, cx)
                             })),
                     )
-                    .child(
-                        Button::new("translate-page-copy-close")
-                            .label(text(locale, "translate-page-button-copy-close"))
-                            .disabled(!has_translation)
-                            .on_click(cx.listener(|this, _e: &ClickEvent, window, cx| {
-                                this.copy(true, window, cx)
-                            })),
-                    ),
+                    .when(!embedded, |row| {
+                        row.child(
+                            Button::new("translate-page-copy-close")
+                                .label(text(locale, "translate-page-button-copy-close"))
+                                .disabled(!has_translation)
+                                .on_click(cx.listener(|this, _e: &ClickEvent, window, cx| {
+                                    this.copy(true, window, cx)
+                                })),
+                        )
+                    }),
             )
             .child(result_box)
             .child(
@@ -460,5 +669,14 @@ impl Render for TranslatePageView {
                     .text_color(status_color)
                     .child(status.unwrap_or_default()),
             )
+            .when(auto_on, |col| {
+                col.child(
+                    div()
+                        .text_size(px(SMALL_SIZE))
+                        .text_color(p.dim)
+                        .child(text(locale, "translate-page-auto-on")),
+                )
+            })
+            .child(history)
     }
 }

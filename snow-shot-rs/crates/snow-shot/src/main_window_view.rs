@@ -7,22 +7,27 @@
 use crate::app_runtime::UiEvent;
 use crate::main_window_model::{
     COLLAPSE_ICON, EXPAND_ICON, MainPage, MainWindowModel, NavItem, OpenTarget, PageContent,
-    SETTINGS_GROUP_ICON, SIDEBAR_COLLAPSED_KEY, TRANSLATION_PAGE_ENABLED_KEY,
+    SETTINGS_GROUP_ICON, SIDEBAR_COLLAPSED_KEY, TRANSLATION_PAGE_ENABLED_KEY, find_license_file,
 };
+use crate::net_settings::{UpdateAction, UpdateUiState, update_panel};
 use crate::settings_state::{SharedConfig, UiPrefs};
 use crate::settings_text::group_title;
 use crate::settings_view::{Palette, SettingsView, palette};
+use crate::translate_page_view::TranslatePageView;
 use image::{Frame, RgbaImage};
 use snow_app_core::PRODUCT_NAME;
 use snow_i18n::Args;
 use snow_ui::icons::{IconColors, IconRef, IconRenderer, IconRequest, IconTheme, Rgba as IconRgba};
 use snow_ui::shell::inbox::MainThreadInbox;
 use snow_ui::ui::component::button::Button;
-use snow_ui::ui::component::{Selectable, Sizable, Size as ComponentSize, Theme, ThemeMode};
+use snow_ui::ui::component::{
+    Disableable, Selectable, Sizable, Size as ComponentSize, Theme, ThemeMode,
+};
 use snow_ui::ui::*;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// 窗口逻辑宽度。
 pub const WINDOW_WIDTH: f32 = 900.0;
@@ -50,9 +55,14 @@ const ICON_COLOR_DARK: [u8; 3] = [0xE6, 0xE6, 0xE6];
 const ICON_COLOR_LIGHT: [u8; 3] = [0x26, 0x26, 0x26];
 /// 设备像素比放大成整数缓存键时的倍率。
 const SCALE_KEY_FACTOR: f32 = 100.0;
+/// 窗口位置 / 大小停住多久后才记忆（毫秒），避免拖动时反复写盘。
+const GEOMETRY_SAVE_DEBOUNCE_MS: u64 = 400;
 
 /// 创建设置页视图的工厂（由运行时提供，负责接好热键 / 更新 / 导入导出 / 语音模型等回调）。
 pub type SettingsFactory = Rc<dyn Fn(&mut Window, &mut App) -> Entity<SettingsView>>;
+
+/// 创建内嵌翻译页视图的工厂（由运行时提供：读翻译配置、已装包、历史路径与自动翻译开关）。
+pub type TranslateFactory = Rc<dyn Fn(&mut Window, &mut App) -> Entity<TranslatePageView>>;
 
 /// 把图标光栅化成 GPUI 要的预乘 BGRA 缓冲。
 ///
@@ -99,6 +109,16 @@ pub struct MainWindowView {
     inbox: MainThreadInbox<UiEvent>,
     /// 设置页视图工厂。
     settings_factory: SettingsFactory,
+    /// 翻译页视图工厂。
+    translate_factory: TranslateFactory,
+    /// 内嵌的翻译页视图（首次进入翻译页时创建，之后保留输入与历史直到窗口关闭）。
+    translate: Option<Entity<TranslatePageView>>,
+    /// 关于页的更新检查状态。
+    update_state: UpdateUiState,
+    /// 许可证摘要文件（找到才有；关于页据此决定是否显示“查看许可证”）。
+    license_file: Option<std::path::PathBuf>,
+    /// 窗口几何防抖代数。
+    geometry_gen: u64,
     /// 内嵌的设置页视图（首次进入设置页时创建）。
     settings: Option<Entity<SettingsView>>,
     /// 已推给内嵌设置页的分组 id（与模型不一致时下一帧补推）。
@@ -113,17 +133,24 @@ impl MainWindowView {
     /// 创建视图。
     ///
     /// # 参数
+    /// - `window`：窗口（用来监听位置 / 大小变化、恢复最大化）。
     /// - `app`：应用上下文（用来同步组件库主题）。
     /// - `config`：共享配置（读取折叠状态与翻译页开关）。
     /// - `prefs`：界面偏好。
     /// - `inbox`：主线程收件箱。
     /// - `settings_factory`：设置页视图工厂。
+    /// - `translate_factory`：翻译页视图工厂。
+    /// - `maximized`：是否按上次记忆恢复最大化。
+    #[allow(clippy::too_many_arguments)]
     pub fn create(
+        window: &mut Window,
         app: &mut App,
         config: &SharedConfig,
         prefs: UiPrefs,
         inbox: MainThreadInbox<UiEvent>,
         settings_factory: SettingsFactory,
+        translate_factory: TranslateFactory,
+        maximized: bool,
     ) -> Entity<Self> {
         Theme::change(
             if prefs.dark {
@@ -139,16 +166,68 @@ impl MainWindowView {
             flag(SIDEBAR_COLLAPSED_KEY),
             flag(TRANSLATION_PAGE_ENABLED_KEY),
         );
-        app.new(|_| Self {
-            model,
-            prefs,
-            inbox,
-            settings_factory,
-            settings: None,
-            synced_group: None,
-            renderer: IconRenderer::new(),
-            icons: HashMap::new(),
+        if maximized {
+            // 等首帧落位后再最大化，避免和创建时的物理落位互相覆盖
+            window.on_next_frame(|window, _| window.zoom_window());
+        }
+        let license_file = std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().and_then(find_license_file));
+        app.new(|cx| {
+            cx.observe_window_bounds(window, |this: &mut Self, window, cx| {
+                this.on_bounds_changed(window.is_maximized(), cx)
+            })
+            .detach();
+            Self {
+                model,
+                prefs,
+                inbox,
+                settings_factory,
+                translate_factory,
+                translate: None,
+                update_state: UpdateUiState::Idle,
+                license_file,
+                geometry_gen: 0,
+                settings: None,
+                synced_group: None,
+                renderer: IconRenderer::new(),
+                icons: HashMap::new(),
+            }
         })
+    }
+
+    /// 窗口位置 / 大小变化：停住一小会儿后通知运行时记忆几何。
+    ///
+    /// # 参数
+    /// - `maximized`：此刻是否最大化。
+    fn on_bounds_changed(&mut self, maximized: bool, cx: &mut Context<Self>) {
+        self.geometry_gen += 1;
+        let generation = self.geometry_gen;
+        cx.spawn(async move |this, acx| {
+            acx.background_executor()
+                .timer(Duration::from_millis(GEOMETRY_SAVE_DEBOUNCE_MS))
+                .await;
+            let _ = this.update(acx, |view, _cx| {
+                if view.geometry_gen == generation {
+                    view.inbox.push(UiEvent::MainWindowSettled { maximized });
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// 内嵌的翻译页视图（尚未进入过翻译页时为 `None`），运行时把翻译结果与开关变化同步给它。
+    pub fn translate_view(&self) -> Option<Entity<TranslatePageView>> {
+        self.translate.clone()
+    }
+
+    /// 关于页的更新检查有了新状态（检查结果 / 下载结果）。
+    ///
+    /// # 参数
+    /// - `state`：新的界面状态。
+    pub fn finish_update_check(&mut self, state: UpdateUiState, cx: &mut Context<Self>) {
+        self.update_state = state;
+        cx.notify();
     }
 
     /// 翻译页开关变化（设置里改了）。
@@ -165,6 +244,9 @@ impl MainWindowView {
     /// # 参数
     /// - `prefs`：新的界面偏好。
     pub fn set_prefs(&mut self, prefs: UiPrefs, cx: &mut Context<Self>) {
+        if let Some(view) = &self.translate {
+            view.update(cx, |v, vcx| v.set_prefs(prefs, vcx));
+        }
         self.prefs = prefs;
         cx.notify();
     }
@@ -414,12 +496,173 @@ impl MainWindowView {
         col
     }
 
+    /// 渲染内嵌翻译页：顶部入口行（独立窗口 / 相关设置）+ 翻译页视图。
+    fn render_translate_page(
+        &mut self,
+        p: &Palette,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let i18n = crate::ocr_backend::i18n_for(self.prefs.locale);
+        let page = self.model.current();
+        if self.translate.is_none() {
+            let factory = Rc::clone(&self.translate_factory);
+            self.translate = Some(factory(window, cx));
+        }
+        let mut row = div()
+            .flex_none()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(GAP))
+            .px(px(PADDING))
+            .py(px(GAP))
+            .border_b_1()
+            .border_color(p.border)
+            .child(
+                div()
+                    .text_size(px(TITLE_SIZE))
+                    .child(i18n.tr(page.title_id())),
+            )
+            .child(div().flex_1());
+        if let Some(group) = page.related_settings_group() {
+            row = row.child(
+                Button::new("main-goto-settings")
+                    .with_size(ComponentSize::Small)
+                    .label(i18n.tr("main-goto-settings"))
+                    .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| {
+                        this.show_settings_group(group, cx);
+                    })),
+            );
+        }
+        row = row.child(
+            Button::new("main-open-translate-window")
+                .with_size(ComponentSize::Small)
+                .label(i18n.tr(OpenTarget::TranslatePage.button_id()))
+                .on_click(cx.listener(|this, _e: &ClickEvent, _w, _cx| {
+                    this.inbox.push(Self::event_for(OpenTarget::TranslatePage));
+                })),
+        );
+        let mut col = div().flex_1().min_w_0().flex().flex_col().child(row);
+        if let Some(view) = &self.translate {
+            col = col.child(div().flex_1().min_h_0().child(view.clone()));
+        }
+        col
+    }
+
+    /// 渲染关于页：名称与版本、来源与许可证、更新检查。
+    ///
+    /// # 参数
+    /// - `col`：已放好标题与说明的内容列。
+    fn render_about(&mut self, col: Div, p: &Palette, cx: &mut Context<Self>) -> Div {
+        let locale = self.prefs.locale;
+        let i18n = crate::ocr_backend::i18n_for(locale);
+        let text = |content: String| {
+            div()
+                .text_size(px(TEXT_SIZE))
+                .text_color(p.dim)
+                .child(content)
+        };
+        let mut col = col
+            .child(div().text_size(px(TEXT_SIZE)).child(PRODUCT_NAME))
+            .child(text(i18n.tr_with(
+                "main-about-version",
+                &Args::new().arg(1, env!("CARGO_PKG_VERSION")),
+            )))
+            .child(text(i18n.tr("main-about-upstream")))
+            .child(text(i18n.tr("main-about-license")));
+        col = match self.license_file.clone() {
+            Some(path) => col.child(
+                div().child(
+                    Button::new("main-about-license-open")
+                        .with_size(ComponentSize::Small)
+                        .label(i18n.tr("main-about-license-open"))
+                        .on_click(cx.listener(move |this, _e: &ClickEvent, _w, _cx| {
+                            this.inbox.push(UiEvent::OpenFile(path.clone()));
+                        })),
+                ),
+            ),
+            None => col.child(text(i18n.tr("main-about-license-missing"))),
+        };
+        // 更新检查：与设置页“更新”分组共用同一套状态与文案
+        let panel = update_panel(locale, &self.update_state);
+        let running = matches!(
+            self.update_state,
+            UpdateUiState::Running | UpdateUiState::Downloading
+        );
+        let check = Button::new("main-about-update-check")
+            .with_size(ComponentSize::Small)
+            .label(panel.button_label)
+            .disabled(running)
+            .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
+                this.update_state = UpdateUiState::Running;
+                this.inbox
+                    .push(UiEvent::UpdateActionRequested(UpdateAction::Check));
+                cx.notify();
+            }));
+        let extra = match &self.update_state {
+            UpdateUiState::Available { info, .. } if !info.url.is_empty() => {
+                let info = info.clone();
+                Some(
+                    Button::new("main-about-update-download")
+                        .with_size(ComponentSize::Small)
+                        .label(panel.download_label)
+                        .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| {
+                            this.update_state = UpdateUiState::Downloading;
+                            this.inbox.push(UiEvent::UpdateActionRequested(
+                                UpdateAction::Download(info.clone()),
+                            ));
+                            cx.notify();
+                        })),
+                )
+            }
+            UpdateUiState::Downloaded { dir, .. } => {
+                let dir = dir.clone();
+                Some(
+                    Button::new("main-about-update-folder")
+                        .with_size(ComponentSize::Small)
+                        .label(panel.open_folder_label)
+                        .on_click(cx.listener(move |this, _e: &ClickEvent, _w, _cx| {
+                            this.inbox.push(UiEvent::UpdateActionRequested(
+                                UpdateAction::OpenFolder(dir.clone()),
+                            ));
+                        })),
+                )
+            }
+            _ => None,
+        };
+        let notice = panel.notice.map(|(content, danger)| {
+            div()
+                .text_size(px(TEXT_SIZE))
+                .text_color(if danger { p.danger } else { p.dim })
+                .child(content)
+        });
+        col.child(
+            div()
+                .text_size(px(TEXT_SIZE))
+                .font_weight(FontWeight::BOLD)
+                .child(panel.title),
+        )
+        .child(text(panel.current_line))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(GAP))
+                .child(check)
+                .children(extra)
+                .children(notice),
+        )
+    }
+
     /// 渲染右侧页面内容。
     fn render_content(&mut self, p: &Palette, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let i18n = crate::ocr_backend::i18n_for(self.prefs.locale);
         let page = self.model.current();
-        if page.content() == PageContent::Settings {
-            return self.render_settings_page(p, window, cx);
+        match page.content() {
+            PageContent::Settings => return self.render_settings_page(p, window, cx),
+            PageContent::Translate => return self.render_translate_page(p, window, cx),
+            _ => {}
         }
         let mut col = div()
             .flex_1()
@@ -447,19 +690,10 @@ impl MainWindowView {
                 }))
         };
         match page.content() {
-            // 设置页在函数开头已处理
-            PageContent::Settings => {}
+            // 设置页与翻译页在函数开头已处理
+            PageContent::Settings | PageContent::Translate => {}
             PageContent::Open(target) => col = col.child(open_button(target, cx)),
-            PageContent::About => {
-                col =
-                    col.child(div().text_size(px(TEXT_SIZE)).child(PRODUCT_NAME))
-                        .child(div().text_size(px(TEXT_SIZE)).text_color(p.dim).child(
-                            i18n.tr_with(
-                                "main-about-version",
-                                &Args::new().arg(1, env!("CARGO_PKG_VERSION")),
-                            ),
-                        ));
-            }
+            PageContent::About => col = self.render_about(col, p, cx),
             PageContent::Placeholder(fallback) => {
                 col = col.child(
                     div()

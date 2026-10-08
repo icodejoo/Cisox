@@ -309,3 +309,5 @@ setting-screen-recording-enable-microphone-desc = Mix the microphone into MP4 re
 setting-screen-recording-enable-system-audio-desc = Mix system sound into MP4 recordings
 setting-updates-manifest-url = Update manifest URL
 setting-updates-manifest-url-desc = Where to check for new versions; empty means not configured and update checks stay off
+setting-screenshot-translation-page-auto-translate = Auto translate on the translation page
+setting-screenshot-translation-page-auto-translate-desc = Translate automatically a moment after you stop typing (off by default)
