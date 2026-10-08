@@ -476,6 +476,8 @@ pub enum UiEvent {
         /// 结果（结构化错误，界面边界再翻译）。
         result: Result<(), ocr_download::FetchError>,
     },
+    /// 设置页请求导出 / 导入设置。
+    ConfigTransferRequested(crate::config_transfer::TransferAction),
     /// 设置页请求检查更新。
     UpdateCheckRequested,
     /// 检查更新结束（未本地化的结果）。
@@ -2741,6 +2743,92 @@ fn spawn_stt_download(state: &AppState, model_id: String, cancel: CancelFlag) {
     }
 }
 
+/// 执行设置导出 / 导入：弹原生文件对话框（阻塞）、读写归档，再把结果交给设置页；
+/// 导入成功后对有变化的键逐个走配置变更处理，让主题、语言、热键等即时生效。
+///
+/// # 参数
+/// - `cx`：外壳上下文。
+/// - `state`：运行时状态。
+/// - `action`：导出或导入。
+fn run_config_transfer(
+    cx: &mut ShellContext,
+    state: &mut AppState,
+    action: crate::config_transfer::TransferAction,
+) {
+    use crate::config_transfer::{
+        ARCHIVE_EXTENSION, ARCHIVE_PATTERN, TransferAction, default_export_name,
+        export_configuration, export_state, import_configuration, import_state,
+    };
+    use snow_platform::file_dialog::{
+        FileFilter, OpenDialogRequest, SaveDialogRequest, show_open_dialog, show_save_dialog,
+    };
+    let locale = ui_prefs_from_document(state.config.borrow().document()).locale;
+    let i18n = crate::ocr_backend::i18n_for(locale);
+    let filters = vec![FileFilter {
+        label: i18n.tr("config-transfer-filter"),
+        pattern: ARCHIVE_PATTERN.to_string(),
+    }];
+    let (ui_state, reload) = match action {
+        TransferAction::Export => {
+            let request = SaveDialogRequest {
+                title: i18n.tr("config-transfer-dialog-export"),
+                file_name: default_export_name(&snow_config::archive::iso_utc_now()),
+                filters,
+                ..SaveDialogRequest::default()
+            };
+            match show_save_dialog(&request) {
+                Ok(Some(choice)) => {
+                    let mut path = choice.path;
+                    if path.extension().is_none() {
+                        path.as_mut_os_string().push(ARCHIVE_EXTENSION);
+                    }
+                    let result = export_configuration(&state.config.borrow(), &path);
+                    if let Err(e) = &result {
+                        tracing::warn!(error = %e, "导出设置失败");
+                    }
+                    (export_state(&result, locale), false)
+                }
+                Ok(None) => return,
+                Err(e) => {
+                    tracing::warn!(error = %e, "导出设置：文件对话框失败");
+                    return;
+                }
+            }
+        }
+        TransferAction::Import => {
+            let request = OpenDialogRequest {
+                title: i18n.tr("config-transfer-dialog-import"),
+                filters,
+                ..OpenDialogRequest::default()
+            };
+            match show_open_dialog(&request) {
+                Ok(Some(path)) => {
+                    let result = import_configuration(&mut state.config.borrow_mut(), &path);
+                    let outcome = result.map(|changed| {
+                        let count = changed.len();
+                        for (key, previous) in changed {
+                            state.inbox.push(UiEvent::ConfigChanged { key, previous });
+                        }
+                        count
+                    });
+                    if let Err(e) = &outcome {
+                        tracing::warn!(error = ?e, "导入设置失败");
+                    }
+                    (import_state(&outcome, locale), outcome.is_ok())
+                }
+                Ok(None) => return,
+                Err(e) => {
+                    tracing::warn!(error = %e, "导入设置：文件对话框失败");
+                    return;
+                }
+            }
+        }
+    };
+    if let Some(view) = &state.settings_view {
+        view.update(cx.app(), |v, vcx| v.finish_transfer(ui_state, reload, vcx));
+    }
+}
+
 /// 开始检查更新：先解析配置里的清单地址（未配置 / 非法直接回结果），再起后台线程下载比对。
 ///
 /// # 参数
@@ -2960,6 +3048,12 @@ fn open_or_focus_settings(cx: &mut ShellContext, state: &mut AppState) {
                 }),
             };
             view.update(cx.app(), |v, _| v.set_stt_hooks(stt_hooks));
+            let transfer_inbox = state.inbox.clone();
+            view.update(cx.app(), |v, _| {
+                v.set_transfer_hook(Rc::new(move |action| {
+                    transfer_inbox.push(UiEvent::ConfigTransferRequested(action));
+                }));
+            });
             let update_inbox = state.inbox.clone();
             view.update(cx.app(), |v, _| {
                 v.set_update_hook(Rc::new(move || {
@@ -4312,6 +4406,7 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
                 });
             }
         }
+        UiEvent::ConfigTransferRequested(action) => run_config_transfer(cx, state, action),
         UiEvent::UpdateCheckRequested => start_update_check(state),
         UiEvent::UpdateCheckFinished(outcome) => {
             let locale = ui_prefs_from_document(state.config.borrow().document()).locale;

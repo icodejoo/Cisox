@@ -12,6 +12,7 @@ use crate::settings_state::{
     ConfigChange, EditTarget, KeyMods, RowModel, Scope, SettingsAction, SettingsState,
     SharedConfig, StatusKind, SystemPrefs, read_only_note,
 };
+use crate::config_transfer::{TRANSFER_GROUP_ID, TransferAction, TransferUiState, transfer_panel};
 use crate::net_settings::{UPDATES_GROUP_ID, UpdateUiState, update_panel};
 use crate::language_names::{is_language_key, language_option_label};
 use crate::ocr_backend::{OcrBackend, OcrNotice};
@@ -303,6 +304,10 @@ pub struct SettingsView {
     update_state: UpdateUiState,
     /// 请求检查更新的入口（未接入时为 `None`，按钮不可用）。
     update_hook: Option<Rc<dyn Fn()>>,
+    /// 设置导出 / 导入的界面状态。
+    transfer_state: TransferUiState,
+    /// 请求导出 / 导入的入口（未接入时为 `None`，按钮不可用）。
+    transfer_hook: Option<Rc<dyn Fn(TransferAction)>>,
     /// 语音模型下载任务的界面状态。
     stt_download: DownloadState,
     /// 进行中下载的取消标记。
@@ -358,6 +363,9 @@ fn dropdown_index(options: &[&'static str], current: &str) -> Option<usize> {
 /// 更新分组说明区的文本行数（只有“当前版本”一行）。
 const UPDATE_PANEL_LINES: usize = 1;
 
+/// 导出 / 导入说明区的文本行数（只有一行说明）。
+const TRANSFER_PANEL_LINES: usize = 1;
+
 /// 翻译设置所在分组的 id。
 const TRANSLATION_GROUP_ID: &str = "screenshot_translation";
 
@@ -391,6 +399,8 @@ impl SettingsView {
             stt_hooks: None,
             update_state: UpdateUiState::Idle,
             update_hook: None,
+            transfer_state: TransferUiState::Idle,
+            transfer_hook: None,
             stt_download: DownloadState::Idle,
             stt_cancel: None,
             stt_installed: HashSet::new(),
@@ -495,6 +505,28 @@ impl SettingsView {
     /// - `cx`：视图上下文
     pub fn finish_update_check(&mut self, state: UpdateUiState, cx: &mut Context<Self>) {
         self.update_state = state;
+        cx.notify();
+    }
+
+    /// 接入设置导出 / 导入入口。
+    ///
+    /// # 参数
+    /// - `hook`：点击按钮时调用，由上层弹文件对话框并执行
+    pub fn set_transfer_hook(&mut self, hook: Rc<dyn Fn(TransferAction)>) {
+        self.transfer_hook = Some(hook);
+    }
+
+    /// 收到导出 / 导入的结果；导入成功时重建行模型让界面显示新值。
+    ///
+    /// # 参数
+    /// - `state`：结果状态
+    /// - `reload`：是否需要从配置重建界面（导入成功）
+    /// - `cx`：视图上下文
+    pub fn finish_transfer(&mut self, state: TransferUiState, reload: bool, cx: &mut Context<Self>) {
+        if reload {
+            self.state.reload();
+        }
+        self.transfer_state = state;
         cx.notify();
     }
 
@@ -1299,6 +1331,7 @@ impl SettingsView {
                 .stt_panel()
                 .map_or(0, |panel| hymt2_rows(panel.lines.len()).len()),
             Some(UPDATES_GROUP_ID) => hymt2_rows(UPDATE_PANEL_LINES).len(),
+            Some(TRANSFER_GROUP_ID) => hymt2_rows(TRANSFER_PANEL_LINES).len(),
             _ => 0,
         }
     }
@@ -1428,6 +1461,7 @@ impl SettingsView {
         match self.current_group_id() {
             Some(DICTATION_GROUP_ID) => self.render_stt_row(row_index, p, cx),
             Some(UPDATES_GROUP_ID) => self.render_update_row(row_index, p, cx),
+            Some(TRANSFER_GROUP_ID) => self.render_transfer_row(row_index, p, cx),
             _ => self.render_hymt2_row(row_index, p, cx),
         }
     }
@@ -1479,6 +1513,62 @@ impl SettingsView {
                     .border_b_1()
                     .border_color(p.border)
                     .child(div().flex().items_center().gap_3().child(button).children(notice))
+                    .into_any_element()
+            }
+        }
+    }
+
+    /// 渲染“导出 / 导入设置”说明区的第 `row_index` 个定高行（说明行与按钮行）。
+    fn render_transfer_row(&self, row_index: usize, p: &Palette, cx: &mut Context<Self>) -> AnyElement {
+        let panel = transfer_panel(self.state.prefs().locale, &self.transfer_state);
+        let frame = div()
+            .h(px(ROW_HEIGHT))
+            .w_full()
+            .px_4()
+            .py_1()
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .text_size(px(12.0))
+            .line_height(px(16.0));
+        let rows = hymt2_rows(TRANSFER_PANEL_LINES);
+        let Some(row) = rows.get(row_index) else { return frame.into_any_element() };
+        match row {
+            Hymt2Row::Text { .. } => frame
+                .child(div().font_weight(FontWeight::BOLD).child(panel.title))
+                .child(div().text_color(p.dim).whitespace_nowrap().child(panel.description))
+                .into_any_element(),
+            Hymt2Row::Actions => {
+                let mut buttons = Vec::new();
+                for (id, label, action) in [
+                    ("config-export", panel.export_label, TransferAction::Export),
+                    ("config-import", panel.import_label, TransferAction::Import),
+                ] {
+                    let mut button = Button::new(id).small().label(label);
+                    button = match &self.transfer_hook {
+                        Some(hook) => {
+                            let hook = Rc::clone(hook);
+                            button.on_click(cx.listener(move |_this, _event: &ClickEvent, _window, _cx| {
+                                hook(action);
+                            }))
+                        }
+                        None => button.disabled(true),
+                    };
+                    buttons.push(button);
+                }
+                let notice = panel.notice.map(|(text, danger)| {
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(if danger { p.danger } else { p.dim })
+                        .whitespace_nowrap()
+                        .child(text)
+                });
+                frame
+                    .py_0()
+                    .pt(px(2.0))
+                    .border_b_1()
+                    .border_color(p.border)
+                    .child(div().flex().items_center().gap_3().children(buttons).children(notice))
                     .into_any_element()
             }
         }

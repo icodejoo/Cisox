@@ -20,6 +20,7 @@
 //! assert!(doc.set_value("screenshot/image_quality", json!(101)).is_err());
 //! ```
 
+pub mod archive;
 pub mod custom_models;
 pub mod document;
 pub mod extensions;
