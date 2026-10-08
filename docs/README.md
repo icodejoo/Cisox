@@ -38,6 +38,7 @@
 - [research/qt-parity-audit.md](research/qt-parity-audit.md) — **Qt 功能清单 vs Rust 实现对照审计（2026-10-03，读代码）**：82 项状态、配置键消费情况、缺口前十、真机验证清单。功能对齐程度以它为准。有效。
 - [research/g04-structured-recognition-selection.md](research/g04-structured-recognition-selection.md) — G04 表格 / LaTeX / Markdown 选型（2026-10-08）：表格先做 SLANet_plus，公式二期，Markdown 走自定义模型通道；待批准模型下载与许可核对。
 - [research/spotlight-watermark-selection.md](research/spotlight-watermark-selection.md) — 聚光灯 / 水印选型（2026-10-08）：复用 tiny-skia + GDI 文字，0 新依赖，自写约 300 行；含黄金对照做法。
+- [research/d12-auto-filter-erase-selection.md](research/d12-auto-filter-erase-selection.md) — D12 自动滤镜 / 智能擦除选型（2026-10-08）：自动滤镜复用仓库内 `visual-region-detector`（纯 Rust），智能擦除自写 Lab 多尺度 PatchMatch，零新增第三方依赖；分期 P1~P4。
 ## 调研
 - [research/cross-monitor-recording-hw.md](research/cross-monitor-recording-hw.md) — 跨屏/双屏选区录屏硬编方案，含裁决记录。探针已实现，跨屏 16/20（单屏对照 18/20），接缝与光标已验证；跨适配器待验证。
 - [research/video-editor-backends.md](research/video-editor-backends.md) — 视频编辑器后端调研。
