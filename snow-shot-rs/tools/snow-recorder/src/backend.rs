@@ -183,7 +183,7 @@ fn running_name(running: &Running) -> String {
 #[cfg(windows)]
 fn windows_spec(request: &StartRequest, partial: &std::path::Path) -> Result<crate::win::assemble::HardwareSpec, String> {
     use snow_screen_recorder::{ExportFormat, scaled_output_dimensions};
-    let (max_w, max_h) = settings::oriented_limit(settings::configured_size_limit(), request.width, request.height);
+    let (max_w, max_h) = settings::oriented_limit(settings::size_limit_for(request.quality.max_size), request.width, request.height);
     let out = scaled_output_dimensions(request.width, request.height, max_w, max_h, ExportFormat::Mp4);
     let mut spec = crate::win::assemble::HardwareSpec::new(
         (request.x, request.y, request.width, request.height),
@@ -218,7 +218,7 @@ fn windows_spec(request: &StartRequest, partial: &std::path::Path) -> Result<cra
 /// # 返回
 /// 运行中的后端；全部失败返回原因。
 pub fn start(request: &StartRequest, partial: &std::path::Path) -> Result<Box<dyn RecordingBackend>, String> {
-    let mode = settings::parse_hardware_mode(std::env::var(settings::ENV_PREFER_HARDWARE).ok().as_deref());
+    let mode = settings::resolve_hardware_mode(std::env::var(settings::ENV_PREFER_HARDWARE).ok().as_deref(), request.quality.hardware);
     start_first_available(plan_attempts(request, partial, mode), &mut |line| eprintln!("{line}"))
 }
 
@@ -252,7 +252,7 @@ mod tests {
 
     /// 构造测试请求。
     fn request(format: MediaFormat) -> StartRequest {
-        StartRequest { x: 0, y: 0, width: 64, height: 64, format, fps: 30, show_cursor: true, output: PathBuf::from("o.mp4"), audio: Default::default(), effects: Default::default() }
+        StartRequest { x: 0, y: 0, width: 64, height: 64, format, fps: 30, show_cursor: true, output: PathBuf::from("o.mp4"), audio: Default::default(), effects: Default::default(), quality: Default::default() }
     }
 
     /// 首个装配成功就不再尝试后面的。

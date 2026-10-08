@@ -12,7 +12,7 @@ use snow_screen_recorder::{
     VideoEncodingSpeed,
 };
 
-/// 环境变量：覆盖 x264 预设（ultrafast / superfast / veryfast / faster / fast / medium）。
+/// 环境变量：覆盖 x264 预设（ultrafast 到 placebo，与协议 `preset` 令牌同一套名字）。
 pub const ENV_PRESET: &str = "SNOW_RECORDER_PRESET";
 
 /// 解析预设名；未知或空返回 `None`（沿用默认 VeryFast）。
@@ -27,6 +27,10 @@ pub fn parse_preset(text: &str) -> Option<VideoEncodingSpeed> {
         "faster" => Some(VideoEncodingSpeed::Faster),
         "fast" => Some(VideoEncodingSpeed::Fast),
         "medium" => Some(VideoEncodingSpeed::Medium),
+        "slow" => Some(VideoEncodingSpeed::Slow),
+        "slower" => Some(VideoEncodingSpeed::Slower),
+        "veryslow" => Some(VideoEncodingSpeed::VerySlow),
+        "placebo" => Some(VideoEncodingSpeed::Placebo),
         _ => None,
     }
 }
@@ -80,7 +84,7 @@ pub fn build_config(
 ) -> DirectRecordingConfig {
     let (maximum_width, maximum_height) = oriented_limit(limit, request.width, request.height);
     DirectRecordingConfig {
-        loop_animated_images: true,
+        loop_animated_images: request.quality.loop_animated,
         region: RecordingRegion::new(request.x, request.y, request.width, request.height),
         capture_backend: CaptureBackendKind::Auto,
         output_path: partial,
@@ -90,7 +94,7 @@ pub fn build_config(
         maximum_width,
         maximum_height,
         codec: VideoCodec::H264,
-        preset: VideoEncodingSpeed::SuperFast,
+        preset: request.quality.preset.as_deref().and_then(parse_preset).unwrap_or(VideoEncodingSpeed::SuperFast),
         prefer_hardware_encoder: prefer_hardware,
         // 音频只在 MP4 启用；软件路径用上游会话自带的混音，音量与设备选择由自建路径支持
         enable_microphone: request.audio.microphone && request.format == MediaFormat::Mp4,
@@ -125,6 +129,7 @@ mod tests {
             output: PathBuf::from(output),
             audio: Default::default(),
             effects: Default::default(),
+            quality: Default::default(),
         }
     }
 
@@ -155,11 +160,26 @@ mod tests {
         assert!(!config.enable_microphone && !config.enable_system_audio);
     }
 
+    /// 质量请求映射：预设、循环透传，缺省保持旧行为（SuperFast + 循环）。
+    #[test]
+    fn quality_maps_into_config() {
+        let mut req = request(MediaFormat::Gif, "o.gif");
+        let base = build_config(&req, scratch_file(&req.output, 1), false, None);
+        assert!(matches!(base.preset, VideoEncodingSpeed::SuperFast) && base.loop_animated_images);
+        req.quality.preset = Some("medium".into());
+        req.quality.loop_animated = false;
+        let config = build_config(&req, scratch_file(&req.output, 1), false, None);
+        assert!(matches!(config.preset, VideoEncodingSpeed::Medium) && !config.loop_animated_images);
+        assert_eq!(config.validate(), Ok(()));
+    }
+
     /// 预设名解析。
     #[test]
     fn preset_parsing_cases() {
         assert!(matches!(parse_preset(" UltraFast "), Some(VideoEncodingSpeed::UltraFast)));
-        assert!(parse_preset("placebo").is_none());
+        assert!(matches!(parse_preset("placebo"), Some(VideoEncodingSpeed::Placebo)));
+        assert!(matches!(parse_preset("veryslow"), Some(VideoEncodingSpeed::VerySlow)));
+        assert!(parse_preset("turbo").is_none());
         assert!(parse_preset("").is_none());
     }
 

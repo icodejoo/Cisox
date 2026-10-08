@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 use snow_i18n::{Args, I18n};
-use snow_recorder_protocol::{AudioRequest, EffectsRequest, MediaFormat};
+use snow_recorder_protocol::{AudioRequest, EffectsRequest, MediaFormat, QualityRequest};
 use snow_ui::shell::geometry::PhysicalRect;
 use std::fmt;
 use std::path::PathBuf;
@@ -103,6 +103,8 @@ pub struct RecordingConfig {
     pub audio: AudioRequest,
     /// 输入特效请求（鼠标轨迹 / 点击 / 高亮、按键回显）。
     pub effects: EffectsRequest,
+    /// 编码质量请求（清晰度上限、硬编开关、软编预设、动图循环）。
+    pub quality: QualityRequest,
 }
 
 impl Default for RecordingConfig {
@@ -117,6 +119,7 @@ impl Default for RecordingConfig {
             countdown_secs: 0,
             audio: AudioRequest::default(),
             effects: EffectsRequest::default(),
+            quality: QualityRequest::default(),
         }
     }
 }
