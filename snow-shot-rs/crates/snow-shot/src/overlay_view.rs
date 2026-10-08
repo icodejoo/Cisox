@@ -593,6 +593,27 @@ pub trait OutputSink {
         Err("OCR download is not wired up".to_string())
     }
 
+    /// 对选区图像发起表格识别（异步：结果稍后经 [`ScreenshotOverlayView::finish_ocr`] 回来）；默认不支持。
+    ///
+    /// # 参数
+    /// - `serial`：本次请求序号，回传结果时原样带回（过期结果据此丢弃）。
+    /// - `width` / `height`：图像尺寸。
+    /// - `rgba`：选区（含标注合成）的 RGBA 像素。
+    fn start_table(
+        &mut self,
+        _serial: u64,
+        _width: u32,
+        _height: u32,
+        _rgba: Vec<u8>,
+    ) -> Result<(), String> {
+        Err("table recognition is not wired up".to_string())
+    }
+
+    /// 触发表格识别组件下载（异步）；默认不支持。
+    fn start_table_download(&mut self) -> Result<(), String> {
+        Err("table download is not wired up".to_string())
+    }
+
     /// 打开文字识别结果窗（图片 + 文字块 + 可编辑全文）；默认不支持。
     ///
     /// # 参数
@@ -650,6 +671,10 @@ pub struct SystemOutput {
     on_ocr: Option<OcrCallback>,
     /// OCR 组件下载回调。
     on_ocr_download: Option<Box<dyn Fn()>>,
+    /// 表格识别回调：`(序号, 宽, 高, RGBA)`。
+    on_table: Option<OcrCallback>,
+    /// 表格识别组件下载回调。
+    on_table_download: Option<Box<dyn Fn()>>,
     /// 打开识别结果窗的回调。
     on_recognition_window: Option<Box<dyn Fn(crate::recognition_view::RecognitionData)>>,
     /// 文字翻译回调：`(序号, 宽, 高, RGBA)`。
@@ -685,6 +710,8 @@ impl SystemOutput {
             on_pin: None,
             on_ocr: None,
             on_ocr_download: None,
+            on_table: None,
+            on_table_download: None,
             on_recognition_window: None,
             on_translate: None,
             on_translate_download: None,
@@ -762,6 +789,21 @@ impl SystemOutput {
         callback: impl Fn(crate::recognition_view::RecognitionData) + 'static,
     ) -> Self {
         self.on_recognition_window = Some(Box::new(callback));
+        self
+    }
+
+    /// 设置表格识别回调：用户触发表格识别时调用（OCR 与结构推理在后台线程执行）。
+    ///
+    /// # 参数
+    /// - `callback`：接收请求序号、图像尺寸与 RGBA 像素。
+    pub fn with_table(mut self, callback: impl Fn(u64, u32, u32, Vec<u8>) + 'static) -> Self {
+        self.on_table = Some(Box::new(callback));
+        self
+    }
+
+    /// 设置表格识别组件下载回调。
+    pub fn with_table_download(mut self, callback: impl Fn() + 'static) -> Self {
+        self.on_table_download = Some(Box::new(callback));
         self
     }
 
@@ -1006,6 +1048,34 @@ impl OutputSink for SystemOutput {
         }
     }
 
+    /// 触发表格识别回调；未设置回调时报错。
+    fn start_table(
+        &mut self,
+        serial: u64,
+        width: u32,
+        height: u32,
+        rgba: Vec<u8>,
+    ) -> Result<(), String> {
+        match &self.on_table {
+            Some(callback) => {
+                callback(serial, width, height, rgba);
+                Ok(())
+            }
+            None => Err("table recognition is not wired up".to_string()),
+        }
+    }
+
+    /// 触发表格识别组件下载回调；未设置回调时报错。
+    fn start_table_download(&mut self) -> Result<(), String> {
+        match &self.on_table_download {
+            Some(callback) => {
+                callback();
+                Ok(())
+            }
+            None => Err("table download is not wired up".to_string()),
+        }
+    }
+
     /// 触发文字翻译回调；未设置回调时报错。
     fn start_translate(
         &mut self,
@@ -1190,6 +1260,10 @@ pub struct ScreenshotOverlayView {
     qr_link: Option<String>,
     /// 最近一次 OCR 请求序号（过期结果据此丢弃）。
     ocr_serial: u64,
+    /// 当前这轮识别是不是表格识别（决定缺组件时按 D 下载哪一套）。
+    table_mode: bool,
+    /// 表格识别结果的 Markdown / TSV / HTML（打开结果窗时带上）。
+    table_texts: Option<crate::table_structure::TableTexts>,
     /// 文字翻译交互状态。
     translate: TranslateUiState,
     /// 最近一次翻译请求序号（过期结果据此丢弃）。
@@ -1315,6 +1389,8 @@ impl ScreenshotOverlayView {
             ocr: OcrUiState::Idle,
             qr_link: None,
             ocr_serial: 0,
+            table_mode: false,
+            table_texts: None,
             translate: TranslateUiState::Idle,
             translate_serial: 0,
             window_hover: None,
@@ -1965,7 +2041,11 @@ impl ScreenshotOverlayView {
                     }
                 ) =>
             {
-                self.start_ocr_download();
+                if self.table_mode {
+                    self.start_table_download();
+                } else {
+                    self.start_ocr_download();
+                }
                 OverlayOutcome::Stay
             }
             ("enter", _) if self.record_mode => self.start_recording_and_close(),
@@ -2081,6 +2161,8 @@ impl ScreenshotOverlayView {
             }
             OverlayKeyAction::QrCodeRecognition if selecting_mode => OverlayOutcome::Stay,
             OverlayKeyAction::QrCodeRecognition => self.recognize_qr_code(),
+            OverlayKeyAction::TableRecognition if selecting_mode => OverlayOutcome::Stay,
+            OverlayKeyAction::TableRecognition => self.start_table(),
             OverlayKeyAction::Unimplemented(config_key) => {
                 self.show_not_implemented(config_key);
                 OverlayOutcome::Stay
@@ -3768,6 +3850,7 @@ impl ScreenshotOverlayView {
             return OverlayOutcome::Stay;
         };
         self.ocr_serial += 1;
+        self.table_mode = false;
         match self.output.start_ocr(self.ocr_serial, w, h, rgba) {
             Ok(()) => {
                 tracing::info!(
@@ -3792,6 +3875,59 @@ impl ScreenshotOverlayView {
         OverlayOutcome::Stay
     }
 
+    /// 对选区（含标注合成结果）发起表格识别；识别在后台进行，结果经 [`Self::finish_ocr`] 回来。
+    fn start_table(&mut self) -> OverlayOutcome {
+        if !self.has_committed_selection() {
+            self.status_message = Some(self.i18n.tr("overlay-msg-select-area-first"));
+            return OverlayOutcome::Stay;
+        }
+        if self.ocr.is_busy() || self.translate.is_busy() {
+            return OverlayOutcome::Stay;
+        }
+        if self.translate.is_visible() {
+            self.dismiss_translate();
+        }
+        let Some((w, h, rgba)) = self.selection_image() else {
+            self.status_message = Some(self.i18n.tr("overlay-msg-selection-invalid"));
+            return OverlayOutcome::Stay;
+        };
+        self.ocr_serial += 1;
+        self.table_mode = true;
+        match self.output.start_table(self.ocr_serial, w, h, rgba) {
+            Ok(()) => {
+                tracing::info!(serial = self.ocr_serial, width = w, height = h, "已提交表格识别");
+                self.set_ocr_state(OcrUiState::Running);
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "提交表格识别失败");
+                self.set_ocr_state(OcrUiState::Failed {
+                    message: self.i18n.tr_with(
+                        "overlay-msg-ocr-unavailable",
+                        &Args::new().arg(1, e.to_string()),
+                    ),
+                    can_download: false,
+                });
+            }
+        }
+        OverlayOutcome::Stay
+    }
+
+    /// 触发表格识别组件下载（仅缺组件时可用）。
+    fn start_table_download(&mut self) {
+        match self.output.start_table_download() {
+            Ok(()) => self.set_ocr_state(OcrUiState::Downloading(
+                self.i18n.tr("overlay-msg-ocr-download-preparing"),
+            )),
+            Err(e) => self.set_ocr_state(OcrUiState::Failed {
+                message: self.i18n.tr_with(
+                    "overlay-msg-ocr-download-start-failed",
+                    &Args::new().arg(1, e.to_string()),
+                ),
+                can_download: false,
+            }),
+        }
+    }
+
     /// 对选区做二维码识别：同步解码，成功则复制内容并复用文字结果面板展示，找不到码给出提示。
     fn recognize_qr_code(&mut self) -> OverlayOutcome {
         if !self.has_committed_selection() {
@@ -3808,6 +3944,7 @@ impl ScreenshotOverlayView {
             self.status_message = Some(self.i18n.tr("overlay-msg-selection-invalid"));
             return OverlayOutcome::Stay;
         };
+        self.table_mode = false;
         let codes = crate::qr_decode::decode_qr_codes(w, h, &rgba);
         if codes.is_empty() {
             self.set_ocr_state(OcrUiState::Failed {
@@ -3863,6 +4000,7 @@ impl ScreenshotOverlayView {
     /// 切换 OCR 状态，同时刷新底部状态条。
     fn set_ocr_state(&mut self, state: OcrUiState) {
         self.qr_link = None;
+        self.table_texts = None;
         self.status_message = state.status_text(self.i18n);
         self.ocr = state;
     }
@@ -3885,6 +4023,7 @@ impl ScreenshotOverlayView {
             tracing::info!(serial, current = self.ocr_serial, "丢弃过期的识别结果");
             return;
         }
+        let mut table = None;
         let state = match result {
             Ok(r) => {
                 let copied = r.full_text.is_empty() || self.output.copy_text(&r.full_text).is_ok();
@@ -3894,6 +4033,7 @@ impl ScreenshotOverlayView {
                     copied,
                     "文字识别完成"
                 );
+                table = r.table.clone();
                 OcrUiState::from_result(&r, copied)
             }
             Err(e) => {
@@ -3902,6 +4042,7 @@ impl ScreenshotOverlayView {
             }
         };
         self.set_ocr_state(state);
+        self.table_texts = table;
     }
 
     /// 触发 OCR 组件下载（仅缺资产时可用）。
@@ -4256,6 +4397,8 @@ impl ScreenshotOverlayView {
             rgba,
             text,
             boxes,
+            table: self.table_texts.clone(),
+            conversion: crate::conversion_guide::ConversionGuide::NotConfigured,
         };
         if let Err(e) = self.output.open_recognition_window(data) {
             tracing::warn!(error = %e, "打开识别结果窗失败");
@@ -5450,6 +5593,10 @@ mod tests {
         ocrs: Vec<(u64, u32, u32, Vec<u8>)>,
         /// OCR 下载请求次数。
         ocr_downloads: u32,
+        /// 表格识别请求 `(序号, 宽, 高, RGBA)`。
+        tables: Vec<(u64, u32, u32, Vec<u8>)>,
+        /// 表格识别组件下载请求次数。
+        table_downloads: u32,
         /// 文字翻译请求 `(序号, 宽, 高, RGBA)`。
         translates: Vec<(u64, u32, u32, Vec<u8>)>,
         /// 翻译运行时下载请求次数。
@@ -5527,6 +5674,22 @@ mod tests {
                 return Err("boom".into());
             }
             self.rec.borrow_mut().ocrs.push((serial, w, h, rgba));
+            Ok(())
+        }
+        /// 记录表格识别请求。
+        fn start_table(&mut self, serial: u64, w: u32, h: u32, rgba: Vec<u8>) -> Result<(), String> {
+            if self.fail {
+                return Err("boom".into());
+            }
+            self.rec.borrow_mut().tables.push((serial, w, h, rgba));
+            Ok(())
+        }
+        /// 记录表格识别组件下载请求。
+        fn start_table_download(&mut self) -> Result<(), String> {
+            if self.fail {
+                return Err("boom".into());
+            }
+            self.rec.borrow_mut().table_downloads += 1;
             Ok(())
         }
         /// 记录 OCR 下载请求。
@@ -7374,6 +7537,7 @@ mod tests {
                 })
                 .collect(),
             elapsed_ms: 3,
+            table: None,
         }
     }
 
@@ -7813,6 +7977,56 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// 表格识别：没有选区先提示；有选区提交请求并进入识别中；缺组件时 D 下载的是表格组件而不是 OCR。
+    #[test]
+    fn table_recognition_flow() {
+        use crate::table_assets::TableUnavailable;
+        let (mut view, rec) = view_with(100, 80, 1.0, false);
+        view.handle_key("x", true, false);
+        assert!(rec.borrow().tables.is_empty(), "没有选区不提交");
+        drag(&mut view, (5, 5), (44, 34));
+        view.handle_key("x", true, false);
+        assert_eq!(rec.borrow().tables.len(), 1);
+        let (serial, w, h, rgba) = rec.borrow().tables[0].clone();
+        assert_eq!((w, h), (40, 30));
+        assert_eq!(rgba.len(), 40 * 30 * 4);
+        assert_eq!(view.ocr_state(), &OcrUiState::Running);
+        // 识别中再次触发不重复提交
+        view.handle_key("x", true, false);
+        assert_eq!(rec.borrow().tables.len(), 1);
+        view.finish_ocr(
+            serial,
+            Err(OcrError::TableUnavailable(TableUnavailable::NoModel { size: 7_758_305 })),
+        );
+        let hint = view.status_message.clone().unwrap_or_default();
+        assert!(hint.contains("table recognition model") && hint.contains("press D"), "{hint}");
+        view.handle_key("d", false, false);
+        assert_eq!(rec.borrow().table_downloads, 1);
+        assert_eq!(rec.borrow().ocr_downloads, 0, "表格缺组件不走 OCR 下载");
+    }
+
+    /// 表格结果：TSV 被复制，Markdown / HTML 随视图保留，切回普通识别后清掉。
+    #[test]
+    fn table_result_keeps_texts() {
+        use crate::table_structure::TableTexts;
+        let (mut view, _) = view_with(100, 80, 1.0, false);
+        drag(&mut view, (5, 5), (44, 34));
+        view.handle_key("x", true, false);
+        let mut result = ocr_result(&["a", "b"]);
+        result.full_text = "a	b".into();
+        result.table = Some(TableTexts {
+            markdown: "| a | b |".into(),
+            tsv: "a	b".into(),
+            html: "<table></table>".into(),
+        });
+        view.finish_ocr(view.ocr_serial, Ok(result));
+        assert!(matches!(view.ocr_state(), OcrUiState::Done { copied: true, .. }));
+        assert_eq!(view.table_texts.as_ref().map(|t| t.markdown.as_str()), Some("| a | b |"));
+        view.dismiss_ocr();
+        view.set_ocr_state(OcrUiState::Idle);
+        assert!(view.table_texts.is_none());
     }
 
     /// 按 D 触发下载；下载进度与结果更新状态；成功后回到待命，失败可再次重试。

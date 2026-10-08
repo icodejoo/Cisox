@@ -1,9 +1,11 @@
 //! 文字识别结果窗：左边是识别的图片（叠加文字块框，点框复制该段文字），右边是可编辑的全文，
 //! 可以改字后再复制。覆盖窗里 OCR 完成后按 `E` 打开；窗口自带一份图片与文本，不依赖覆盖窗继续存在。
 
+use crate::conversion_guide::ConversionGuide;
 use crate::ocr_service::OcrTextBox;
 use crate::settings_state::UiPrefs;
 use crate::settings_view::{Palette, palette};
+use crate::table_structure::TableTexts;
 use image::{Frame, RgbaImage};
 use snow_i18n::Args;
 use snow_platform::clipboard::copy_text_to_clipboard;
@@ -43,6 +45,10 @@ pub struct RecognitionData {
     pub text: String,
     /// 文字块（图像像素坐标）。
     pub boxes: Vec<OcrTextBox>,
+    /// 表格识别的 Markdown / TSV / HTML；普通文字识别为 `None`。
+    pub table: Option<TableTexts>,
+    /// Markdown / HTML 模型转换通道的配置状态（只用于未配置引导）。
+    pub conversion: ConversionGuide,
 }
 
 /// 把 RGBA 像素换成 GPUI 渲染图（GPUI 内部按 BGRA 存放）；尺寸与像素数不符返回 `None`。
@@ -99,6 +105,14 @@ impl RecognitionView {
         let longest = self.data.width.max(self.data.height).max(1) as f32;
         let k = (IMAGE_MAX_EDGE / longest).min(1.0);
         (self.data.width as f32 * k, self.data.height as f32 * k, k)
+    }
+
+    /// 显示模型转换通道的引导（未配置按错误色，已配置按普通提示）。
+    fn show_conversion_guide(&mut self, cx: &mut Context<Self>) {
+        let i18n = crate::ocr_backend::i18n_for(self.prefs.locale);
+        let ready = matches!(self.data.conversion, ConversionGuide::Ready(_));
+        self.notice = Some((self.data.conversion.message(i18n), !ready));
+        cx.notify();
     }
 
     /// 复制一段文字并给出提示。
@@ -170,16 +184,45 @@ impl Render for RecognitionView {
             .with_size(ComponentSize::Small)
             .label(i18n.tr("recwin-close"))
             .on_click(cx.listener(|_this, _e: &ClickEvent, window, _cx| window.remove_window()));
+        let mut format_row = div().flex().items_center().gap(px(GAP));
+        if let Some(table) = self.data.table.clone() {
+            let (markdown, html) = (table.markdown, table.html);
+            format_row = format_row
+                .child(
+                    Button::new("recwin-copy-markdown")
+                        .with_size(ComponentSize::Small)
+                        .label(i18n.tr("recwin-copy-markdown"))
+                        .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| this.copy(&markdown, cx))),
+                )
+                .child(
+                    Button::new("recwin-copy-html")
+                        .with_size(ComponentSize::Small)
+                        .label(i18n.tr("recwin-copy-html"))
+                        .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| this.copy(&html, cx))),
+                );
+        }
+        for (id, key) in [
+            ("recwin-convert-markdown", "recwin-convert-markdown"),
+            ("recwin-convert-html", "recwin-convert-html"),
+        ] {
+            format_row = format_row.child(
+                Button::new(id)
+                    .with_size(ComponentSize::Small)
+                    .label(i18n.tr(key))
+                    .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| this.show_conversion_guide(cx))),
+            );
+        }
         let right = div()
             .flex_1()
             .flex()
             .flex_col()
             .gap(px(GAP))
             .child(div().text_size(px(TEXT_SIZE)).child(i18n.tr_with(
-                "recwin-title",
+                if self.data.table.is_some() { "recwin-table-title" } else { "recwin-title" },
                 &Args::new().arg(1, self.data.boxes.len()),
             )))
             .child(div().flex_1().child(Textarea::new(&self.text)))
+            .child(format_row)
             .child(
                 div()
                     .flex()
@@ -208,6 +251,22 @@ impl Render for RecognitionView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 表格结果与转换引导随数据带入窗口。
+    #[test]
+    fn data_carries_table_and_guide() {
+        let data = RecognitionData {
+            width: 1,
+            height: 1,
+            rgba: vec![0; 4],
+            text: "a	b".into(),
+            boxes: Vec::new(),
+            table: None,
+            conversion: ConversionGuide::NotConfigured,
+        };
+        assert!(data.table.is_none());
+        assert_eq!(data.conversion, ConversionGuide::NotConfigured);
+    }
 
     /// RGBA 转 GPUI 渲染图：尺寸对得上才有图。
     #[test]

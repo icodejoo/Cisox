@@ -56,6 +56,8 @@ pub struct OcrResult {
     pub full_text: String,
     /// 执行耗时（毫秒，含拉起与模型加载）。
     pub elapsed_ms: u64,
+    /// 表格识别的三种文本；普通文字识别为 `None`。
+    pub table: Option<crate::table_structure::TableTexts>,
 }
 
 /// 一次识别请求的配置（来自设置页）。
@@ -353,6 +355,7 @@ impl OcrService {
             boxes,
             full_text,
             elapsed_ms: started.elapsed().as_millis() as u64,
+            table: None,
         })
     }
 

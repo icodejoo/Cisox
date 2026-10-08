@@ -1,0 +1,13 @@
+{
+  "id": "slanet-plus",
+  "license": "Apache-2.0",
+  "source": "RapidAI/RapidTable 官方发布的 SLANet_plus ONNX（魔搭 RapidAI/RapidTable 仓库，许可证 Apache-2.0；PaddleX SLANet_plus 的 ONNX 导出）。大小与 sha256 由本仓库在真实下载后核对，大小、哈希与魔搭文件列表接口给出的值一致。",
+  "files": [
+    {
+      "name": "slanet-plus.onnx",
+      "size": 7758305,
+      "sha256": "d57a942af6a2f57d6a4a0372573c696a2379bf5857c45e2ac69993f3b334514b",
+      "url": "https://www.modelscope.cn/models/RapidAI/RapidTable/resolve/master/slanet-plus.onnx"
+    }
+  ]
+}
