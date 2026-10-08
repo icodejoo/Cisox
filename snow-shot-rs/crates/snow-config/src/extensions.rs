@@ -8,7 +8,7 @@ use crate::schema::{IntRange, SchemaEntry, ValueKind, entry};
 use serde_json::json;
 
 /// 扩展项数量（`schema::entries()` 在原 238 项之后追加的条目数）。
-pub const EXTENSION_ENTRY_COUNT: usize = 27;
+pub const EXTENSION_ENTRY_COUNT: usize = 29;
 
 /// 翻译后端：`local` 本地 NMT worker，`openai` OpenAI 兼容通道。
 pub const KEY_TRANSLATION_BACKEND: &str = "screenshot_translation/backend";
@@ -33,6 +33,11 @@ pub const KEY_UPDATE_MANIFEST_URL: &str = "updates/manifest_url";
 
 /// 输入框翻译浮窗的全局热键（默认不绑定，未绑定时不注册）。
 pub const KEY_TRANSLATE_INPUT_HOTKEY: &str = "global_shortcuts/translate_input";
+
+/// 公式识别（RapidLaTeXOCR）模型目录；空串表示没设置。模型由用户自行下载放入，程序不内置、不托管、不下载。
+pub const KEY_LATEX_MODEL_DIR: &str = "screenshot_conversion/latex_model_dir";
+/// 覆盖窗里「公式识别」的快捷键（旧版没有这个动作，Cisox 新增）。
+pub const KEY_LATEX_SHORTCUT: &str = "screenshot_shortcuts/latex_recognition";
 
 /// 语音转文字「切换式」全局热键（按一下开始、再按一下结束；默认不绑定）。
 pub const KEY_DICTATION_TOGGLE_HOTKEY: &str = "global_shortcuts/dictation_toggle";
@@ -263,6 +268,8 @@ pub(crate) fn extension_entries() -> Vec<SchemaEntry> {
             &[],
             None,
         ),
+        entry(KEY_LATEX_MODEL_DIR, json!(""), ValueKind::String, None, &[], None),
+        entry(KEY_LATEX_SHORTCUT, json!([{"portable": "Ctrl+L"}]), ValueKind::ShortcutList, None, &[], Some(2)),
         entry(KEY_UPDATE_MANIFEST_URL, json!(""), ValueKind::String, None, &[], None),
         entry(KEY_OCR_BACKEND, json!(default_ocr_backend()), ValueKind::String, None, OCR_BACKEND_VALUES, None),
         entry(KEY_TRANSLATE_INPUT_HOTKEY, json!([]), ValueKind::StringList, None, &[], Some(2)),
@@ -319,6 +326,8 @@ mod tests {
                 item.key.starts_with("screenshot_translation/")
                     || item.key == KEY_OCR_BACKEND
                     || item.key == KEY_UPDATE_MANIFEST_URL
+                    || item.key == KEY_LATEX_MODEL_DIR
+                    || item.key == KEY_LATEX_SHORTCUT
                     || item.key == KEY_TRANSLATE_INPUT_HOTKEY
                     || item.key == KEY_DICTATION_TOGGLE_HOTKEY
                     || item.key == KEY_DICTATION_HOLD_HOTKEY

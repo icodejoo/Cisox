@@ -333,6 +333,7 @@ impl OcrEngine for SystemOcr {
             full_text,
             elapsed_ms: started.elapsed().as_millis() as u64,
             table: None,
+            latex: None,
         })
     }
 }

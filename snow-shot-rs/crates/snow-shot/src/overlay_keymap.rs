@@ -108,6 +108,8 @@ pub enum OverlayKeyAction {
     QrCodeRecognition,
     /// 表格识别：OCR 文字框 + 表格结构模型，结果以 TSV 复制并显示在结果面板。
     TableRecognition,
+    /// 公式识别：RapidLaTeXOCR 本地模型，结果（LaTeX）复制到剪贴板并显示在结果面板。
+    LatexRecognition,
     /// 尚未实现：携带配置键，用来取动作名给出提示。
     Unimplemented(&'static str),
 }
@@ -194,6 +196,7 @@ const SCREENSHOT_KEYS: &[(&str, OverlayKeyAction)] = &[
     ("screenshot_shortcuts/text_translation", OverlayKeyAction::TextTranslation),
     ("screenshot_shortcuts/scrolling_screenshot", OverlayKeyAction::ScrollingScreenshot),
     ("screenshot_shortcuts/table_recognition", OverlayKeyAction::TableRecognition),
+    ("screenshot_shortcuts/latex_recognition", OverlayKeyAction::LatexRecognition),
     ("screenshot_shortcuts/qr_code_recognition", OverlayKeyAction::QrCodeRecognition),
     ("screenshot_shortcuts/undo", OverlayKeyAction::Undo),
     ("screenshot_shortcuts/redo", OverlayKeyAction::Redo),
@@ -350,6 +353,7 @@ mod tests {
             ("r", false, false, true, Recapture),
             ("p", true, false, false, ToggleCoordinateMode),
             ("x", true, false, false, TableRecognition),
+            ("l", true, false, false, LatexRecognition),
         ];
         for (key, ctrl, shift, alt, want) in cases {
             assert_eq!(map.resolve(key, *ctrl, *shift, *alt), Some(*want), "{key}");
@@ -376,7 +380,7 @@ mod tests {
         for key in wired_config_keys() {
             assert!(!shortcut_strings(&defaults.value(key)).is_empty(), "{key} 缺默认值");
         }
-        assert_eq!(wired_config_keys().len(), 27 + 10);
+        assert_eq!(wired_config_keys().len(), 28 + 10);
     }
 
     /// 方向位移。

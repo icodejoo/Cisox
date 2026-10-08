@@ -19,7 +19,7 @@
 
 **原「待拍板 6 项」已按总原则裁决（2026-10-08，`b3011642`）**
 1. G03 二维码：引入纯 Rust `rqrr`，覆盖窗识别键已接线；内容是 http / https 链接时按 O 用默认浏览器打开（无真机验证）。
-2. G04 表格 / LaTeX / Markdown：**表格已做**（官方 SLANet_plus ONNX，`tools/snow-table` 工作进程 + 纯函数管线，Ctrl+X）；Markdown / HTML 仅做未配置引导；LaTeX 未做；`snow-table.exe` 待纳入安装包。详见 research/qt-parity-audit.md G04。
+2. G04 表格 / LaTeX / Markdown：**表格已做**（官方 SLANet_plus ONNX，`tools/snow-table` 工作进程 + 纯函数管线，Ctrl+X）；Markdown / HTML 仅做未配置引导；公式识别已做（RapidLaTeXOCR，用户自行下载模型、不内置，`tools/snow-latex`，覆盖窗 Ctrl+L）；`snow-table.exe` 待纳入安装包。详见 research/qt-parity-audit.md G04。
 3. A09 自动更新：配置键 `updates/manifest_url`（默认空）+ 地址解析已做；**设置页「更新」分组有“检查更新”入口，发现新版本后显示更新说明并可“下载”到数据目录、校验清单里的 `sha256`、提示“打开所在目录”，不自动安装**（清单格式 `{"version","url","notes","sha256"}`，细节见审计 A09）。
 4. A10 代理：`network/proxy` 支持 `none` / `system`（环境变量）或直接填地址（`http` / `https` / `socks5` / `socks5h`），转成 curl `--proxy`。
 5. A12 MCP：第一期（M0 骨架，5/101 个 tool）已实现，余下分期见 [design/mcp-subsystem.md](design/mcp-subsystem.md) §8。

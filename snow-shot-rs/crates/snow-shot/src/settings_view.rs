@@ -4,6 +4,7 @@
 //! 每帧只构建屏幕内可见的几行，与配置项总数无关。
 
 use crate::config_transfer::{TRANSFER_GROUP_ID, TransferAction, TransferUiState, transfer_panel};
+use crate::latex_assets::{LATEX_GROUP_ID, LatexAction, latex_panel};
 use crate::dictation::status::backend_notice as dictation_backend_notice;
 use crate::dictation::translate::ModelSupport;
 use crate::language_names::{is_language_key, language_option_label};
@@ -318,6 +319,8 @@ pub struct SettingsView {
     transfer_include_keys: bool,
     /// 请求导出 / 导入的入口（未接入时为 `None`，按钮不可用）。
     transfer_hook: Option<Rc<dyn Fn(TransferAction)>>,
+    /// “公式模型”面板按钮（打开目录 / 官方来源）的入口（未接入时为 `None`，按钮不可用）。
+    latex_hook: Option<Rc<dyn Fn(LatexAction)>>,
     /// 语音模型下载任务的界面状态。
     stt_download: DownloadState,
     /// 进行中下载的取消标记。
@@ -378,6 +381,9 @@ const UPDATE_PANEL_LINES: usize = 1;
 /// 导出 / 导入说明区的文本行数（只有一行说明）。
 const TRANSFER_PANEL_LINES: usize = 1;
 
+/// “公式模型”说明区的文本行数（标题加状态为一个定高行）。
+const LATEX_PANEL_LINES: usize = 1;
+
 /// 翻译设置所在分组的 id。
 const TRANSLATION_GROUP_ID: &str = "screenshot_translation";
 
@@ -414,6 +420,7 @@ impl SettingsView {
             transfer_state: TransferUiState::Idle,
             transfer_include_keys: false,
             transfer_hook: None,
+            latex_hook: None,
             stt_download: DownloadState::Idle,
             stt_cancel: None,
             stt_installed: HashSet::new(),
@@ -531,6 +538,26 @@ impl SettingsView {
     /// - `hook`：点击按钮时调用，由上层弹文件对话框并执行
     pub fn set_transfer_hook(&mut self, hook: Rc<dyn Fn(TransferAction)>) {
         self.transfer_hook = Some(hook);
+    }
+
+    /// 接入“公式模型”面板的按钮入口。
+    ///
+    /// # 参数
+    /// - `hook`：点击按钮时调用，由上层打开目录或浏览器
+    pub fn set_latex_hook(&mut self, hook: Rc<dyn Fn(LatexAction)>) {
+        self.latex_hook = Some(hook);
+    }
+
+    /// 当前配置里的公式模型目录（去掉首尾空白；没设置为空串）。
+    fn latex_model_dir(&self) -> String {
+        match self
+            .state
+            .row_by_key(snow_config::extensions::KEY_LATEX_MODEL_DIR)
+            .map(|row| &row.value)
+        {
+            Some(serde_json::Value::String(s)) => s.trim().to_string(),
+            _ => String::new(),
+        }
     }
 
     /// 收到导出 / 导入的结果；导入成功时重建行模型让界面显示新值。
@@ -1526,6 +1553,7 @@ impl SettingsView {
                 .map_or(0, |panel| hymt2_rows(panel.lines.len()).len()),
             Some(UPDATES_GROUP_ID) => hymt2_rows(UPDATE_PANEL_LINES).len(),
             Some(TRANSFER_GROUP_ID) => hymt2_rows(TRANSFER_PANEL_LINES).len(),
+            Some(LATEX_GROUP_ID) => hymt2_rows(LATEX_PANEL_LINES).len(),
             _ => 0,
         }
     }
@@ -1709,6 +1737,7 @@ impl SettingsView {
             Some(DICTATION_GROUP_ID) => self.render_stt_row(row_index, p, cx),
             Some(UPDATES_GROUP_ID) => self.render_update_row(row_index, p, cx),
             Some(TRANSFER_GROUP_ID) => self.render_transfer_row(row_index, p, cx),
+            Some(LATEX_GROUP_ID) => self.render_latex_row(row_index, p, cx),
             _ => self.render_hymt2_row(row_index, p, cx),
         }
     }
@@ -1803,6 +1832,65 @@ impl SettingsView {
                     .border_b_1()
                     .border_color(p.border)
                     .child(div().flex().items_center().gap_3().child(button).children(extra).children(notice))
+                    .into_any_element()
+            }
+        }
+    }
+
+    /// 渲染“公式模型”说明区的第 `row_index` 个定高行（标题与状态行、按钮行）。
+    fn render_latex_row(&self, row_index: usize, p: &Palette, cx: &mut Context<Self>) -> AnyElement {
+        let i18n = crate::ocr_backend::i18n_for(self.state.prefs().locale);
+        let panel = latex_panel(i18n, &self.latex_model_dir());
+        let frame = div()
+            .h(px(ROW_HEIGHT))
+            .w_full()
+            .px_4()
+            .py_1()
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .text_size(px(12.0))
+            .line_height(px(16.0));
+        let rows = hymt2_rows(LATEX_PANEL_LINES);
+        let Some(row) = rows.get(row_index) else {
+            return frame.into_any_element();
+        };
+        match row {
+            Hymt2Row::Text { .. } => frame
+                .child(div().font_weight(FontWeight::BOLD).child(panel.title))
+                .child(
+                    div()
+                        .text_color(if panel.status.1 { p.danger } else { p.dim })
+                        .whitespace_nowrap()
+                        .child(panel.status.0),
+                )
+                .into_any_element(),
+            Hymt2Row::Actions => {
+                let mut buttons = Vec::new();
+                for (id, label, action) in [
+                    ("latex-open-folder", panel.open_folder_label, LatexAction::OpenFolder),
+                    ("latex-open-source", panel.open_source_label, LatexAction::OpenSource),
+                ] {
+                    let mut button = Button::new(id).small().label(label);
+                    button = match &self.latex_hook {
+                        Some(hook) => {
+                            let hook = Rc::clone(hook);
+                            button.on_click(cx.listener(
+                                move |_this, _event: &ClickEvent, _window, _cx| {
+                                    hook(action);
+                                },
+                            ))
+                        }
+                        None => button.disabled(true),
+                    };
+                    buttons.push(button);
+                }
+                frame
+                    .py_0()
+                    .pt(px(2.0))
+                    .border_b_1()
+                    .border_color(p.border)
+                    .child(div().flex().items_center().gap_3().children(buttons))
                     .into_any_element()
             }
         }
