@@ -20,6 +20,7 @@ snow-i18n = { path = "../snow-i18n" }
 snow-draw-engine = { path = "../../../snow_draw_engine_qt/crates/snow-draw-engine" }
 snow-draw-engine-editor = { path = "../../../snow_draw_engine_qt/crates/snow-draw-engine-editor" }
 snow-history = { path = "../snow-history" }
+snow-mcp = { path = "../snow-mcp" }
 snow-ocr-protocol = { path = "../snow-ocr-protocol" }
 snow-net = { path = "../snow-net" }
 snow-platform = { path = "../snow-platform" }

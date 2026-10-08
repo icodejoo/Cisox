@@ -1554,6 +1554,8 @@ pub struct AppState {
     mouse_service: Option<snow_platform::global_mouse::GlobalMouseService>,
     /// 进行中的鼠标手势会话。
     gesture: Option<GestureSession>,
+    /// MCP 服务宿主（设置开关打开才启动）。
+    mcp: crate::mcp_host::McpHost,
 }
 
 impl AppState {
@@ -1638,7 +1640,13 @@ impl AppState {
             record_copy_pending: false,
             mouse_service: None,
             gesture: None,
+            mcp: crate::mcp_host::McpHost::new(),
         }
+    }
+
+    /// 按配置对齐 MCP 服务（启动时与设置变化时调用）。
+    pub fn sync_mcp(&mut self) {
+        self.mcp.sync(self.config.borrow().document(), &self.data_root);
     }
 
     /// 已收到的截图请求数。
@@ -1649,6 +1657,7 @@ impl AppState {
     /// 释放托盘与热键（移除图标、注销热键）。
     pub fn shutdown_services(&mut self) {
         self.mouse_service.take();
+        self.mcp = crate::mcp_host::McpHost::new();
         self.tray.take();
         self.hotkeys.take();
     }
@@ -3789,6 +3798,9 @@ fn hotkey_config_key(key: &str) -> Option<&'static str> {
 /// - `key`：变更的配置键。
 /// - `previous`：变更前的值。
 fn on_config_changed(cx: &mut ShellContext, state: &mut AppState, key: &str, previous: Value) {
+    if key == crate::mcp_host::KEY_ENABLED || state.mcp.is_running() {
+        state.sync_mcp();
+    }
     if key == TRANSLATION_PAGE_ENABLED_KEY {
         let enabled = state.config.borrow().value(key).as_bool().unwrap_or(false);
         if let Some((_, view)) = &state.main_window {

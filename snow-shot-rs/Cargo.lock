@@ -6984,6 +6984,11 @@ dependencies = [
 [[package]]
 name = "snow-mcp"
 version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "snow-platform",
+ "tracing",
+]
 
 [[package]]
 name = "snow-net"
@@ -7037,6 +7042,7 @@ dependencies = [
  "snow-draw-engine-editor",
  "snow-history",
  "snow-i18n",
+ "snow-mcp",
  "snow-net",
  "snow-ocr-protocol",
  "snow-platform",

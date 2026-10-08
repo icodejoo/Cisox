@@ -12,6 +12,7 @@ pub mod focus_probe;
 pub mod global_mouse;
 pub mod local_time;
 pub mod menu;
+pub mod random;
 pub mod process_mem;
 pub mod scroll_input;
 pub mod selected_files;

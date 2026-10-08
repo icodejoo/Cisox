@@ -22,7 +22,7 @@
 2. G04 表格 / LaTeX / Markdown：不捆模型，按 ADR-5 做「未配置引导卡片」，模型来源仍待你定，**未实现**。
 3. A09 自动更新：配置键 `updates/manifest_url`（默认空）+ 地址解析已做；**设置页「更新」分组已有“检查更新”入口**（只检查，不下载安装；清单最小格式 `{"version","url","notes"}`，细节见审计 A09）。
 4. A10 代理：`network/proxy` 支持 `none` / `system`（环境变量）或直接填地址（`http` / `https` / `socks5` / `socks5h`），转成 curl `--proxy`。
-5. A12 MCP：只有设计文档 [design/mcp-subsystem.md](design/mcp-subsystem.md)，单独立项，未实现。
+5. A12 MCP：第一期（M0 骨架，5/101 个 tool）已实现，余下分期见 [design/mcp-subsystem.md](design/mcp-subsystem.md) §8。
 6. 托盘默认菜单：维持 Qt 的 12 项默认，不改。
 
 **技术上还能继续、但量大的**：聚光灯 / 水印（要先让 `snow-canvas-raster` 会画图层级配置）、自动滤镜 / 智能擦除 D12（OpenCV 依赖）、翻译页 G07、主窗口 A18、配置归档 A06、A15 剩余（`ocr_client`、`ocr_download`、`stitch_service`、`translate_flow`、`stt_download`、`scroll_view`、`pinned_shared`、`recording/*` 等的错误串与下载文案，需连带重构错误类型）、剩余 78 个设置键、各项真机验证。

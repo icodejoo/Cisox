@@ -17,6 +17,10 @@ use std::sync::Mutex;
 #[cfg(windows)]
 mod win_pipe;
 
+/// 按行收发文本的命名管道（复用本模块的当前用户 ACL 与重叠 IO；MCP 等长连接用）。
+#[cfg(windows)]
+pub use win_pipe::line_pipe;
+
 #[cfg(windows)]
 use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE};
 #[cfg(windows)]

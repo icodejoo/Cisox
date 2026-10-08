@@ -38,6 +38,7 @@ pub mod history_store;
 pub mod history_view;
 pub mod main_window_model;
 pub mod main_window_view;
+pub mod mcp_host;
 pub mod mouse_gesture;
 pub mod net_settings;
 pub mod ocr_assets;
@@ -291,6 +292,7 @@ fn run_primary(ctx: &AppBootstrap, guard: &SingleInstanceGuard) -> ExitCode {
             &data_root,
         );
         app_runtime::start_mouse_gesture(&mut state);
+        state.sync_mcp();
         tracing::info!("event loop started (resident, QuitMode::Explicit)");
         cx.run_inbox(inbox, move |cx, event| {
             app_runtime::handle_event(cx, &mut state, event);
