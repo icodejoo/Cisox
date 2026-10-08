@@ -1,6 +1,6 @@
 # MCP 子系统设计（A12）
 
-> 状态：**草案，待批准，不实现**（2026-10-08 决策）。目标是给后续落地定边界：先把形状钉住，免得做到一半返工。
+> 状态：**第一期（M0 骨架）已实现（2026-10-08）**，M1 起待做。实现细节与偏差见文末 §8。原为草案阶段的目标：给后续落地定边界，免得做到一半返工。
 > 依据：总原则见 [../principles.md](../principles.md)（高性能 > 低内存 > 高 fps > 少编译依赖 > 多用系统能力）；审计行见 [../research/qt-parity-audit.md](../research/qt-parity-audit.md) A11 / A12。
 
 ## 1. 现状与范围
@@ -59,3 +59,20 @@
 - 桥接进程是否接受多一个小 exe（替代方案：主程序自身以 `--mcp-stdio` 参数兼任桥接，省一个文件，但会让主程序入口变复杂）。
 - 默认授权域（本文建议只读 + 截图）。
 - 是否要保留旧版“远程 / HTTP”形态：本文认为不需要（只有本机同用户）。
+
+## 8. 第一期（M0）实现状态与偏差（2026-10-08）
+
+已落地：`snow-mcp` 的 JSON-RPC 2.0 骨架（`initialize` / `ping` / `tools/list` / `tools/call`）、令牌鉴权、数据驱动注册表（旧清单 101 个 tool 全部登记，与 `mcp-capabilities.json` 逐域逐项对照测试）、`snow-platform` 的 `line_pipe`（按行收发、当前用户 ACL、首实例防抢占、复用单实例的重叠 IO）与 `random`（系统 RNG）、`snow-shot` 的 `mcp_host`（`mcp/enabled` 打开才启动，关闭即断开并删描述符）。
+
+已实现 5 个 tool（共 101）：`snow_shot_mcp_status`、`snow_shot_app_status`、`snow_shot_settings_get`、`snow_shot_permissions_get`、`snow_shot_updates_status`；其余 96 个调用返回 `isError: true` 的结构化结果（`error.code = "not_implemented"`，带 `tool` / `domain` / `milestone`）。
+
+与本文前文的差异：
+
+- **鉴权握手**：连接的第一行必须是 `cisox/auth`（`params.token`），失败统一回 `-32001 unauthorized` 并断开，失败按 50ms 起指数退避（上限 5s）。握手本身由未来的桥接进程发送，MCP 客户端不可见。
+- **授权域**：固定 `read_only` + `capture`（默认值），暂无设置项可勾选其余域；控制类 tool（写设置、删数据、录制等）被拒（`-32003`）。scope 由 tool 名后缀推导，表在 `registry.rs`。
+- **传输**：同一时刻只服务一个连接（单管道实例，空闲 5 分钟断开）；桥接进程 `snow-mcp-bridge` 属 M4，尚未做。
+- **描述符**：写在 `<数据根>/mcp/descriptor.json`，依赖数据根目录自身的用户私有 ACL，未单独收紧文件 ACL。
+- **入参 schema**：旧清单没有逐 tool 的 schema，只有名称；未实现的 tool 用开放的 `{"type":"object"}`，已实现的写了严格 schema，校验器是自带的极简子集（`schema.rs`）。`settings_get` 的参数是 `section`（键前缀）/ `key`，不同于旧版的页面 / 分组 id，敏感键（含 `api_key` / `token` / `secret` 等）输出 `<redacted>`。
+- **依赖**：未新增 crate；`snow-platform` 的 `windows` 依赖新增 `Win32_Security_Cryptography` 特性（`BCryptGenRandom`）。
+
+剩余未实现 tool 数随期数递减：M1 截图域 27（`mcp_status` 已实现）、M2 应用域 23 + 文档域 33、M3 媒体域 13；`registry.rs` 的测试固定“已实现 + 未实现 = 101”。

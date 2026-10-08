@@ -38,6 +38,8 @@ use windows::Win32::System::Threading::{
 };
 use windows::core::{HSTRING, PCWSTR, PWSTR};
 
+pub mod line_pipe;
+
 /// 管道命名空间前缀。
 const PIPE_NAMESPACE: &str = r"\\.\pipe\";
 /// 管道收发缓冲区字节数。
