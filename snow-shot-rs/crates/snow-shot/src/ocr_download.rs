@@ -242,6 +242,8 @@ pub enum DownloadStep {
     OrtDownload,
     /// 正在解压 onnxruntime 运行时。
     OrtExtract,
+    /// 正在下载表格识别模型。
+    TableModel,
 }
 
 impl DownloadStep {
@@ -261,6 +263,7 @@ impl DownloadStep {
             ),
             Self::OrtDownload => i18n.tr("fetch-step-ort-download"),
             Self::OrtExtract => i18n.tr("fetch-step-ort-extract"),
+            Self::TableModel => i18n.tr("fetch-step-table-model"),
         }
     }
 }

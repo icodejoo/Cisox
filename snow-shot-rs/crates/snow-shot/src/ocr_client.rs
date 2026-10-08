@@ -135,6 +135,12 @@ pub enum OcrError {
     Io(String),
     /// 输入图像不合法。
     InvalidImage(String),
+    /// 表格识别组件不可用（模型 / 运行时缺失等）。
+    TableUnavailable(crate::table_assets::TableUnavailable),
+    /// 表格识别失败（附技术细节）。
+    Table(String),
+    /// 图里没有找到表格。
+    NoTable,
 }
 
 impl OcrError {
@@ -170,19 +176,32 @@ impl OcrError {
             Self::Protocol(e) => with_detail("ocr-err-protocol", e),
             Self::Io(e) => with_detail("ocr-err-io", e),
             Self::InvalidImage(e) => with_detail("ocr-err-invalid-image", e),
+            Self::TableUnavailable(u) => u.message(i18n),
+            Self::Table(e) => with_detail("table-err-failed", e),
+            Self::NoTable => i18n.tr("table-err-no-table"),
         }
     }
 
     /// 是否可以通过下载资产解决。
     pub fn can_download(&self) -> bool {
-        matches!(self, Self::Unavailable(u) if u.can_download())
+        match self {
+            Self::Unavailable(u) => u.can_download(),
+            Self::TableUnavailable(u) => u.can_download(),
+            _ => false,
+        }
     }
 
     /// 出错后 worker 是否已不可继续使用（需要丢弃并重启）。
     pub fn is_fatal_for_worker(&self) -> bool {
         !matches!(
             self,
-            Self::Failed(_) | Self::Cancelled(_) | Self::InvalidImage(_) | Self::Unavailable(_)
+            Self::Failed(_)
+                | Self::Cancelled(_)
+                | Self::InvalidImage(_)
+                | Self::Unavailable(_)
+                | Self::TableUnavailable(_)
+                | Self::Table(_)
+                | Self::NoTable
         )
     }
 }

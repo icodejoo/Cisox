@@ -106,6 +106,8 @@ pub enum OverlayKeyAction {
     ToggleCoordinateMode,
     /// 二维码识别：对选区解码，结果复制到剪贴板并显示在结果面板。
     QrCodeRecognition,
+    /// 表格识别：OCR 文字框 + 表格结构模型，结果以 TSV 复制并显示在结果面板。
+    TableRecognition,
     /// 尚未实现：携带配置键，用来取动作名给出提示。
     Unimplemented(&'static str),
 }
@@ -191,7 +193,7 @@ const SCREENSHOT_KEYS: &[(&str, OverlayKeyAction)] = &[
     ("screenshot_shortcuts/text_recognition", OverlayKeyAction::TextRecognition),
     ("screenshot_shortcuts/text_translation", OverlayKeyAction::TextTranslation),
     ("screenshot_shortcuts/scrolling_screenshot", OverlayKeyAction::ScrollingScreenshot),
-    ("screenshot_shortcuts/table_recognition", OverlayKeyAction::Unimplemented("screenshot_shortcuts/table_recognition")),
+    ("screenshot_shortcuts/table_recognition", OverlayKeyAction::TableRecognition),
     ("screenshot_shortcuts/qr_code_recognition", OverlayKeyAction::QrCodeRecognition),
     ("screenshot_shortcuts/undo", OverlayKeyAction::Undo),
     ("screenshot_shortcuts/redo", OverlayKeyAction::Redo),
@@ -347,7 +349,7 @@ mod tests {
             ("s", true, true, false, QuickSave),
             ("r", false, false, true, Recapture),
             ("p", true, false, false, ToggleCoordinateMode),
-            ("x", true, false, false, Unimplemented("screenshot_shortcuts/table_recognition")),
+            ("x", true, false, false, TableRecognition),
         ];
         for (key, ctrl, shift, alt, want) in cases {
             assert_eq!(map.resolve(key, *ctrl, *shift, *alt), Some(*want), "{key}");

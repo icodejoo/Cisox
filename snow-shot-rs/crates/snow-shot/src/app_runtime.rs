@@ -451,6 +451,19 @@ pub enum UiEvent {
         /// RGBA 像素。
         rgba: Vec<u8>,
     },
+    /// 覆盖窗请求表格识别（OCR + 结构推理，在后台线程执行）。
+    TableRequested {
+        /// 请求序号（回传结果时带回，走 `OcrFinished`）。
+        serial: u64,
+        /// 图像宽。
+        width: u32,
+        /// 图像高。
+        height: u32,
+        /// RGBA 像素。
+        rgba: Vec<u8>,
+    },
+    /// 覆盖窗请求下载表格识别组件（进度与结果复用 OCR 下载事件）。
+    TableDownloadRequested,
     /// 文字识别完成（成功或失败）。
     OcrFinished {
         /// 对应的请求序号。
@@ -1995,6 +2008,8 @@ fn open_overlays(cx: &mut ShellContext, state: &mut AppState, payloads: Vec<Capt
     let pin_inbox = state.inbox.clone();
     let ocr_inbox = state.inbox.clone();
     let ocr_download_inbox = state.inbox.clone();
+    let table_inbox = state.inbox.clone();
+    let table_download_inbox = state.inbox.clone();
     let recognition_inbox = state.inbox.clone();
     let translate_inbox = state.inbox.clone();
     let translate_download_inbox = state.inbox.clone();
@@ -2030,6 +2045,17 @@ fn open_overlays(cx: &mut ShellContext, state: &mut AppState, payloads: Vec<Capt
             })
             .with_ocr_download(move || {
                 ocr_download_inbox.push(UiEvent::OcrDownloadRequested);
+            })
+            .with_table(move |serial, width, height, rgba| {
+                table_inbox.push(UiEvent::TableRequested {
+                    serial,
+                    width,
+                    height,
+                    rgba,
+                });
+            })
+            .with_table_download(move || {
+                table_download_inbox.push(UiEvent::TableDownloadRequested);
             })
             .with_recognition_window(move |data| {
                 recognition_inbox.push(UiEvent::OpenRecognitionWindow(Box::new(data)));
@@ -2714,6 +2740,103 @@ fn spawn_translate_runtime_download(state: &AppState) {
     }
 }
 
+/// 在后台线程做表格识别：先查组件是否齐全，再跑 OCR 取文字框，最后拉起 `snow-table` 做结构推理并合并。
+///
+/// 结果走 `OcrFinished`（同文字识别），缺组件时给出可下载的引导。
+///
+/// # 参数
+/// - `state`：运行时状态。
+/// - `serial`：请求序号。
+/// - `width` / `height` / `rgba`：选区图像。
+fn spawn_table(state: &AppState, serial: u64, width: u32, height: u32, rgba: Vec<u8>) {
+    let selection = select_from_document(state.config.borrow().document(), Arc::clone(&state.ocr));
+    let engine = selection.engine;
+    let data_root = state.data_root.clone();
+    let inbox = state.inbox.clone();
+    let spawned = std::thread::Builder::new()
+        .name("snow-table-request".into())
+        .spawn(move || {
+            let result = run_table(&data_root, &*engine, width, height, &rgba);
+            inbox.push(UiEvent::OcrFinished { serial, result });
+        });
+    if let Err(e) = spawned {
+        tracing::error!(error = %e, "无法创建表格识别线程");
+        state.inbox.push(UiEvent::OcrFinished {
+            serial,
+            result: Err(OcrError::SpawnFailed(e.to_string())),
+        });
+    }
+}
+
+/// 表格识别的阻塞主体（后台线程里调用）。
+///
+/// # 参数
+/// - `data_root`：数据根目录。
+/// - `engine`：当前选中的 OCR 后端。
+/// - `width` / `height` / `rgba`：选区图像。
+fn run_table(
+    data_root: &std::path::Path,
+    engine: &dyn crate::ocr_backend::OcrEngine,
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+) -> Result<OcrResult, OcrError> {
+    let beside = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf));
+    let assets = crate::table_assets::resolve_assets(
+        data_root,
+        std::env::var(crate::table_assets::ENV_TABLE_ASSET_DIR)
+            .ok()
+            .as_deref(),
+        std::env::var_os(crate::table_assets::ENV_TABLE_EXE)
+            .map(PathBuf::from)
+            .as_deref(),
+        std::env::var(snow_translate::worker::ENV_ORT_DYLIB)
+            .ok()
+            .as_deref(),
+        beside.as_deref(),
+    )
+    .map_err(OcrError::TableUnavailable)?;
+    let ocr = engine.recognize(&OcrInput { width, height, rgba })?;
+    let runner = crate::table_service::ProcessRunner::new(assets);
+    crate::table_service::table_result(&runner, width, height, rgba, ocr)
+}
+
+/// 在后台线程下载表格识别组件（模型与缺失的 onnxruntime），进度与结果复用 OCR 下载事件。
+///
+/// # 参数
+/// - `state`：运行时状态。
+fn spawn_table_download(state: &AppState) {
+    let data_root = state.data_root.clone();
+    let inbox = state.inbox.clone();
+    let i18n = crate::ocr_backend::i18n_for(
+        ui_prefs_from_document(state.config.borrow().document()).locale,
+    );
+    let spawned = std::thread::Builder::new()
+        .name("snow-table-download".into())
+        .spawn(move || {
+            let env_root = std::env::var(crate::table_assets::ENV_TABLE_ASSET_DIR).ok();
+            tracing::info!(root = %crate::table_assets::table_root(&data_root, env_root.as_deref()).display(), "开始下载表格识别组件");
+            let cancel = AtomicBool::new(false);
+            let progress_inbox = inbox.clone();
+            let result = crate::table_assets::download_missing(
+                &data_root,
+                env_root.as_deref(),
+                &cancel,
+                |step| {
+                    progress_inbox.push(UiEvent::OcrDownloadProgress(step.message(i18n)));
+                },
+            )
+            .map_err(|e| e.message(i18n));
+            inbox.push(UiEvent::OcrDownloadFinished(result));
+        });
+    if let Err(e) = spawned {
+        let message = ocr_download::FetchError::TaskStart(e.to_string()).message(i18n);
+        state.inbox.push(UiEvent::OcrDownloadFinished(Err(message)));
+    }
+}
+
 /// 在后台线程下载缺失的 OCR 组件（curl + 哈希校验），进度与结果经收件箱回到主线程。
 ///
 /// # 参数
@@ -3378,6 +3501,9 @@ fn open_recognition_window(
     data: crate::recognition_view::RecognitionData,
 ) {
     use crate::recognition_view::{RecognitionView, WINDOW_HEIGHT, WINDOW_WIDTH};
+    let mut data = data;
+    data.conversion =
+        crate::conversion_guide::ConversionGuide::from_document(state.config.borrow().document());
     let prefs = ui_prefs_from_config(&state.config);
     let title = crate::ocr_backend::i18n_for(prefs.locale).tr("recwin-window-title");
     let spec = WindowSpec::normal(title, LogicalSize::new(WINDOW_WIDTH, WINDOW_HEIGHT));
@@ -4501,6 +4627,13 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
             height,
             rgba,
         } => spawn_ocr(state, serial, width, height, rgba),
+        UiEvent::TableRequested {
+            serial,
+            width,
+            height,
+            rgba,
+        } => spawn_table(state, serial, width, height, rgba),
+        UiEvent::TableDownloadRequested => spawn_table_download(state),
         UiEvent::OcrFinished { serial, result } => {
             if let Some(view) = &state.overlay_view {
                 view.update(cx.app(), |v, vcx| {

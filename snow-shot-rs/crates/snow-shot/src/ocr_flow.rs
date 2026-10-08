@@ -208,6 +208,7 @@ mod tests {
             full_text: lines.join("\n"),
             boxes,
             elapsed_ms: 1,
+            table: None,
         }
     }
 

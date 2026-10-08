@@ -1404,6 +1404,7 @@ mod tests {
             full_text: lines.iter().map(|l| l.0).collect::<Vec<_>>().join("\n"),
             boxes,
             elapsed_ms: 7,
+            table: None,
         }
     }
 
