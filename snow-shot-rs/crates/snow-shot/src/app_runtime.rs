@@ -2866,7 +2866,8 @@ fn run_config_transfer(
             }
         }
     };
-    if let Some(view) = &state.settings_view {
+    for view in settings_views(state, cx.app()) {
+        let ui_state = ui_state.clone();
         view.update(cx.app(), |v, vcx| v.finish_transfer(ui_state, reload, vcx));
     }
 }
@@ -3068,40 +3069,15 @@ fn open_or_focus_settings(cx: &mut ShellContext, state: &mut AppState) {
         };
     }
     let config = Rc::clone(&state.config);
-    let notify_inbox = state.inbox.clone();
-    let notify: Rc<dyn Fn(ConfigChange)> = Rc::new(move |change: ConfigChange| {
-        notify_inbox.push(UiEvent::ConfigChanged {
-            key: change.key.to_string(),
-            previous: change.previous,
-        });
-    });
+    let inbox = state.inbox.clone();
+    let data_root = state.data_root.clone();
     match cx.open_window(&spec, move |window, app| {
-        SettingsView::create(window, app, config, system, notify)
+        build_settings_view(window, app, config, system, inbox, data_root)
     }) {
         Ok((window, view)) => {
             state.settings = Some(window);
             state.settings_view = Some(view.clone());
             apply_chrome_theme(state);
-            let stt_inbox = state.inbox.clone();
-            let stt_hooks = SttHooks {
-                data_root: state.data_root.clone(),
-                request: std::sync::Arc::new(move |model_id, cancel| {
-                    stt_inbox.push(UiEvent::SttDownloadRequested { model_id, cancel });
-                }),
-            };
-            view.update(cx.app(), |v, _| v.set_stt_hooks(stt_hooks));
-            let transfer_inbox = state.inbox.clone();
-            view.update(cx.app(), |v, _| {
-                v.set_transfer_hook(Rc::new(move |action| {
-                    transfer_inbox.push(UiEvent::ConfigTransferRequested(action));
-                }));
-            });
-            let update_inbox = state.inbox.clone();
-            view.update(cx.app(), |v, _| {
-                v.set_update_hook(Rc::new(move || {
-                    update_inbox.push(UiEvent::UpdateCheckRequested);
-                }));
-            });
             tracing::info!("settings window opened");
             if let Ok(path) = std::env::var(ENV_SETTINGS_AUTOTEST) {
                 spawn_settings_autotest(cx, window, view, &path);
@@ -3109,6 +3085,67 @@ fn open_or_focus_settings(cx: &mut ShellContext, state: &mut AppState) {
         }
         Err(e) => tracing::error!(error = %e, "打开设置窗口失败"),
     }
+}
+
+/// 创建设置页视图并接好配置变更 / 语音模型 / 导入导出 / 更新检查回调（独立设置窗口与主窗口内嵌共用）。
+///
+/// # 参数
+/// - `window`：视图所在窗口。
+/// - `app`：应用上下文。
+/// - `config`：共享配置。
+/// - `system`：系统偏好快照。
+/// - `inbox`：主线程收件箱（各回调经它回到主线程）。
+/// - `data_root`：数据根目录（语音模型下载位置）。
+fn build_settings_view(
+    window: &mut snow_ui::ui::Window,
+    app: &mut snow_ui::ui::App,
+    config: SharedConfig,
+    system: SystemPrefs,
+    inbox: MainThreadInbox<UiEvent>,
+    data_root: PathBuf,
+) -> Entity<SettingsView> {
+    let notify_inbox = inbox.clone();
+    let notify: Rc<dyn Fn(ConfigChange)> = Rc::new(move |change: ConfigChange| {
+        notify_inbox.push(UiEvent::ConfigChanged {
+            key: change.key.to_string(),
+            previous: change.previous,
+        });
+    });
+    let view = SettingsView::create(window, app, config, system, notify);
+    let stt_inbox = inbox.clone();
+    let stt_hooks = SttHooks {
+        data_root,
+        request: std::sync::Arc::new(move |model_id, cancel| {
+            stt_inbox.push(UiEvent::SttDownloadRequested { model_id, cancel });
+        }),
+    };
+    let transfer_inbox = inbox.clone();
+    let update_inbox = inbox;
+    view.update(app, |v, _| {
+        v.set_stt_hooks(stt_hooks);
+        v.set_transfer_hook(Rc::new(move |action| {
+            transfer_inbox.push(UiEvent::ConfigTransferRequested(action));
+        }));
+        v.set_update_hook(Rc::new(move || {
+            update_inbox.push(UiEvent::UpdateCheckRequested);
+        }));
+    });
+    view
+}
+
+/// 当前存活的设置页视图：独立设置窗口与主窗口内嵌的各一份，设置结果要同步给所有可见的设置页。
+///
+/// # 参数
+/// - `state`：运行时状态。
+/// - `app`：应用上下文（读取主窗口里内嵌的视图）。
+fn settings_views(state: &AppState, app: &snow_ui::ui::App) -> Vec<Entity<SettingsView>> {
+    let mut views: Vec<Entity<SettingsView>> = state.settings_view.iter().cloned().collect();
+    if let Some((_, main)) = &state.main_window
+        && let Some(embedded) = main.read(app).settings_view()
+    {
+        views.push(embedded);
+    }
+    views
 }
 
 /// 打开主窗口；已打开则激活到前台。窗口关闭即释放，不做后台常驻。
@@ -3133,8 +3170,23 @@ fn open_or_focus_main_window(cx: &mut ShellContext, state: &mut AppState) {
     );
     let config = Rc::clone(&state.config);
     let inbox = state.inbox.clone();
+    let factory: crate::main_window_view::SettingsFactory = {
+        let config = Rc::clone(&state.config);
+        let inbox = state.inbox.clone();
+        let data_root = state.data_root.clone();
+        Rc::new(move |window, app| {
+            build_settings_view(
+                window,
+                app,
+                Rc::clone(&config),
+                SystemPrefs::query(),
+                inbox.clone(),
+                data_root.clone(),
+            )
+        })
+    };
     match cx.open_window(&spec, move |_window, app| {
-        MainWindowView::create(app, &config, prefs, inbox)
+        MainWindowView::create(app, &config, prefs, inbox, factory)
     }) {
         Ok((window, view)) => {
             state.main_window = Some((window, view));
@@ -3796,6 +3848,12 @@ fn on_config_changed(cx: &mut ShellContext, state: &mut AppState, key: &str, pre
         }
         return;
     }
+    if key == LANGUAGE_KEY || key == THEME_MODE_KEY {
+        let prefs = ui_prefs_from_config(&state.config);
+        if let Some((_, view)) = &state.main_window {
+            view.update(cx.app(), |v, cx| v.set_prefs(prefs, cx));
+        }
+    }
     if key == LANGUAGE_KEY
         || key == DELAY_SECONDS_CONFIG_KEY
         || key == crate::tray_config::KEY_MENU_OPTIONS
@@ -3870,7 +3928,7 @@ fn on_config_changed(cx: &mut ShellContext, state: &mut AppState, key: &str, pre
         "已恢复回滚后的全局热键"
     );
     state.hotkey_handles = restored.handles;
-    if let Some(view) = state.settings_view.clone() {
+    for view in settings_views(state, cx.app()) {
         let message = format!(
             "{}: {reason}",
             crate::settings_text::t(
@@ -4604,7 +4662,8 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
             let locale = ui_prefs_from_document(state.config.borrow().document()).locale;
             let ui_state = crate::net_settings::update_outcome_state(&outcome, locale);
             tracing::info!(?outcome, "检查更新结束");
-            if let Some(view) = &state.settings_view {
+            for view in settings_views(state, cx.app()) {
+                let ui_state = ui_state.clone();
                 view.update(cx.app(), |v, vcx| v.finish_update_check(ui_state, vcx));
             }
         }
@@ -4612,7 +4671,8 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
             spawn_stt_download(state, model_id, cancel)
         }
         UiEvent::SttDownloadProgress(progress) => {
-            if let Some(view) = &state.settings_view {
+            for view in settings_views(state, cx.app()) {
+                let progress = progress.clone();
                 view.update(cx.app(), |v, vcx| v.update_stt_download(progress, vcx));
             }
         }
@@ -4633,7 +4693,8 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
                 ui_prefs_from_document(state.config.borrow().document()).locale,
             );
             let result = result.map_err(|e| e.message(i18n));
-            if let Some(view) = &state.settings_view {
+            for view in settings_views(state, cx.app()) {
+                let (model_id, result) = (model_id.clone(), result.clone());
                 view.update(cx.app(), |v, vcx| {
                     v.finish_stt_download(model_id, result, vcx)
                 });

@@ -3,19 +3,20 @@
 //! 渲染只读取 [`SettingsState`] 里预先构建好的行模型；列表使用定高虚拟滚动，
 //! 每帧只构建屏幕内可见的几行，与配置项总数无关。
 
+use crate::config_transfer::{TRANSFER_GROUP_ID, TransferAction, TransferUiState, transfer_panel};
 use crate::dictation::status::backend_notice as dictation_backend_notice;
+use crate::dictation::translate::ModelSupport;
+use crate::language_names::{is_language_key, language_option_label};
+use crate::net_settings::{UPDATES_GROUP_ID, UpdateUiState, update_panel};
+use crate::ocr_backend::{OcrBackend, OcrNotice};
 use crate::settings_model::{
-    Control, SLIDER_CELLS, edit_text, parse_hex_color, preview_text,
-    slider_active_cell, slider_cell_value, step_int, window_text,
+    Control, SLIDER_CELLS, edit_text, parse_hex_color, preview_text, slider_active_cell,
+    slider_cell_value, step_int, window_text,
 };
 use crate::settings_state::{
     ConfigChange, EditTarget, KeyMods, RowModel, Scope, SettingsAction, SettingsState,
     SharedConfig, StatusKind, SystemPrefs, read_only_note,
 };
-use crate::config_transfer::{TRANSFER_GROUP_ID, TransferAction, TransferUiState, transfer_panel};
-use crate::net_settings::{UPDATES_GROUP_ID, UpdateUiState, update_panel};
-use crate::language_names::{is_language_key, language_option_label};
-use crate::ocr_backend::{OcrBackend, OcrNotice};
 use crate::settings_text::{Lang, Text, group_title, item_desc, item_label, option_text, t};
 use crate::stt_download::{self, Progress};
 use crate::stt_models::{self, mode_as_str};
@@ -25,20 +26,21 @@ use crate::stt_settings::{
     option_label as stt_option_label, option_value, rescans_translate_support,
     scan_translate_support, selector_note, translate_note,
 };
-use crate::dictation::translate::ModelSupport;
 use crate::translate_settings::{
     HYMT2_LINE_COUNT, Hymt2Button, Hymt2Click, Hymt2Row, Hymt2View, hymt2_click, hymt2_rows,
     hymt2_view, route_hint, route_mode_label, split_list_index,
 };
+use serde_json::{Value, json};
 use snow_config::extensions::{
     KEY_DICTATION_BACKEND, KEY_DICTATION_MODEL_ID, KEY_LOCAL_MODEL_ID, KEY_LOCAL_ROUTE_MODE,
     KEY_OCR_BACKEND,
 };
-use serde_json::{Value, json};
 use snow_ui::ui::component::button::Button;
 use snow_ui::ui::component::searchable_list::{SearchableListItem, SearchableVec};
 use snow_ui::ui::component::select::{Select, SelectEvent, SelectState};
-use snow_ui::ui::component::{Disableable, IndexPath, Sizable, Size as ComponentSize, Theme, ThemeMode};
+use snow_ui::ui::component::{
+    Disableable, IndexPath, Sizable, Size as ComponentSize, Theme, ThemeMode,
+};
 use snow_ui::ui::*;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
@@ -262,14 +264,19 @@ fn parse_autotest_op(item: &Value) -> Result<AutotestOp, String> {
         "reset" => AutotestOp::Reset(need("key")?),
         "shortcut" => AutotestOp::Shortcut {
             key: need("key")?,
-            index: item.get("index").and_then(Value::as_u64).map(|n| n as usize),
+            index: item
+                .get("index")
+                .and_then(Value::as_u64)
+                .map(|n| n as usize),
             text: need("text")?,
         },
         "type" => AutotestOp::Type {
             key: need("key")?,
             text: need("text")?,
         },
-        "scroll" => AutotestOp::Scroll(item.get("index").and_then(Value::as_u64).unwrap_or(0) as usize),
+        "scroll" => {
+            AutotestOp::Scroll(item.get("index").and_then(Value::as_u64).unwrap_or(0) as usize)
+        }
         "perf" => AutotestOp::Perf,
         "state" => AutotestOp::State,
         other => return Err(format!("未知操作: {other}")),
@@ -320,6 +327,8 @@ pub struct SettingsView {
     translate_support: Option<ModelSupport>,
     /// 模型下拉当前选项的签名，变化时重建选项。
     model_signature: String,
+    /// 内嵌在主窗口内容区：不画左侧分组栏，也不改窗口标题。
+    embedded: bool,
 }
 
 /// 选项的显示标签：OCR 后端与本地路由模式有专用本地化，语言类选项固定显示各语言自称，其余原样显示。
@@ -407,6 +416,7 @@ impl SettingsView {
             stt_vad_installed: false,
             translate_support: None,
             model_signature: String::new(),
+            embedded: false,
         });
         let handle = view.read(app).focus.clone();
         window.focus(&handle, app);
@@ -440,7 +450,10 @@ impl SettingsView {
                       cx| {
                     if let SelectEvent::Confirm(Some(value)) = event {
                         this.act(
-                            SettingsAction::Change { key, value: json!(value) },
+                            SettingsAction::Change {
+                                key,
+                                value: json!(value),
+                            },
                             window,
                             cx,
                         );
@@ -522,7 +535,12 @@ impl SettingsView {
     /// - `state`：结果状态
     /// - `reload`：是否需要从配置重建界面（导入成功）
     /// - `cx`：视图上下文
-    pub fn finish_transfer(&mut self, state: TransferUiState, reload: bool, cx: &mut Context<Self>) {
+    pub fn finish_transfer(
+        &mut self,
+        state: TransferUiState,
+        reload: bool,
+        cx: &mut Context<Self>,
+    ) {
         if reload {
             self.state.reload();
         }
@@ -620,8 +638,14 @@ impl SettingsView {
         let cancelled = self.stt_cancel.take().is_some_and(|c| c.is_cancelled());
         self.stt_download = match result {
             Ok(()) => DownloadState::Done { model_id },
-            Err(_) if cancelled => DownloadState::Failed { model_id, message: None },
-            Err(message) => DownloadState::Failed { model_id, message: Some(message) },
+            Err(_) if cancelled => DownloadState::Failed {
+                model_id,
+                message: None,
+            },
+            Err(message) => DownloadState::Failed {
+                model_id,
+                message: Some(message),
+            },
         };
         self.refresh_stt_cache();
         cx.notify();
@@ -673,7 +697,14 @@ impl SettingsView {
                       window,
                       cx| {
                     if let SelectEvent::Confirm(Some(value)) = event {
-                        this.act(SettingsAction::Change { key, value: json!(value) }, window, cx);
+                        this.act(
+                            SettingsAction::Change {
+                                key,
+                                value: json!(value),
+                            },
+                            window,
+                            cx,
+                        );
                     }
                 },
             )
@@ -699,11 +730,40 @@ impl SettingsView {
         }
     }
 
+    /// 切换为内嵌模式（主窗口里复用本视图时调用）：隐藏左侧分组栏，窗口标题归宿主管。
+    ///
+    /// # 参数
+    /// - `embedded`：是否内嵌。
+    pub fn set_embedded(&mut self, embedded: bool) {
+        self.embedded = embedded;
+    }
+
+    /// 按分组 id 切到某个设置分组（不抢焦点，宿主跳转用）；id 不存在时忽略。
+    ///
+    /// # 参数
+    /// - `group_id`：设置分组 id，如 `screenshot_ui`。
+    pub fn show_group_id(&mut self, group_id: &str, cx: &mut Context<Self>) {
+        let Some(index) = crate::settings_model::groups()
+            .iter()
+            .position(|g| g.id == group_id)
+        else {
+            return;
+        };
+        self.state.dispatch(SettingsAction::SwitchGroup(index));
+        self.refresh_stt_cache();
+        self.scroll_to_top();
+        self.flush_changes();
+        cx.notify();
+    }
+
     /// 执行动作：抢焦点、更新状态、转发变更、重绘。
     fn act(&mut self, action: SettingsAction, window: &mut Window, cx: &mut Context<Self>) {
         cx.stop_propagation();
         window.focus(&self.focus, cx);
-        let switched = matches!(action, SettingsAction::SwitchGroup(_) | SettingsAction::SetSearch(_));
+        let switched = matches!(
+            action,
+            SettingsAction::SwitchGroup(_) | SettingsAction::SetSearch(_)
+        );
         let recheck = matches!(&action, SettingsAction::SwitchGroup(_));
         self.state.dispatch(action);
         if recheck {
@@ -729,7 +789,8 @@ impl SettingsView {
     /// 列表滚回顶部。
     fn scroll_to_top(&self) {
         if self.state.visible_len() + self.header_len() > 0 {
-            self.list_scroll.scroll_to_item_strict(0, ScrollStrategy::Top);
+            self.list_scroll
+                .scroll_to_item_strict(0, ScrollStrategy::Top);
         }
     }
 
@@ -755,7 +816,12 @@ impl SettingsView {
     /// - `op`：操作
     /// - `window`：所属窗口
     /// - `cx`：视图上下文
-    pub fn run_autotest_op(&mut self, op: &AutotestOp, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn run_autotest_op(
+        &mut self,
+        op: &AutotestOp,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         use crate::settings_model::groups;
         let static_key = |key: &str| snow_config::schema::entry_for(key).map(|e| e.key);
         match op {
@@ -767,7 +833,14 @@ impl SettingsView {
             AutotestOp::Search(q) => self.act(SettingsAction::SetSearch(q.clone()), window, cx),
             AutotestOp::Set { key, value } => {
                 if let Some(key) = static_key(key) {
-                    self.act(SettingsAction::Change { key, value: value.clone() }, window, cx);
+                    self.act(
+                        SettingsAction::Change {
+                            key,
+                            value: value.clone(),
+                        },
+                        window,
+                        cx,
+                    );
                 }
             }
             AutotestOp::Reset(key) => {
@@ -801,7 +874,8 @@ impl SettingsView {
             AutotestOp::Scroll(index) => {
                 if *index < self.state.visible_len() {
                     let target = self.header_len() + *index;
-                    self.list_scroll.scroll_to_item_strict(target, ScrollStrategy::Top);
+                    self.list_scroll
+                        .scroll_to_item_strict(target, ScrollStrategy::Top);
                     cx.notify();
                 }
             }
@@ -886,7 +960,13 @@ impl SettingsView {
     }
 
     /// 渲染一行右侧的控件。
-    fn render_control(&self, row: &RowModel, p: &Palette, lang: Lang, cx: &mut Context<Self>) -> Div {
+    fn render_control(
+        &self,
+        row: &RowModel,
+        p: &Palette,
+        lang: Lang,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let key = row.key;
         let row_div = div().flex().items_center().gap_2();
         if key == KEY_DICTATION_MODEL_ID {
@@ -914,7 +994,13 @@ impl SettingsView {
                         )
                         .on_mouse_down(
                             MouseButton::Left,
-                            Self::click(cx, SettingsAction::Change { key, value: json!(!on) }),
+                            Self::click(
+                                cx,
+                                SettingsAction::Change {
+                                    key,
+                                    value: json!(!on),
+                                },
+                            ),
                         ),
                 )
             }
@@ -933,7 +1019,13 @@ impl SettingsView {
                             .bg(if cell <= active { p.accent } else { p.control })
                             .on_mouse_down(
                                 MouseButton::Left,
-                                Self::click(cx, SettingsAction::Change { key, value: json!(value) }),
+                                Self::click(
+                                    cx,
+                                    SettingsAction::Change {
+                                        key,
+                                        value: json!(value),
+                                    },
+                                ),
                             ),
                     );
                 }
@@ -942,7 +1034,14 @@ impl SettingsView {
                         MouseButton::Left,
                         cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                             let value = step_int(current, range, direction, event.modifiers.shift);
-                            this.act(SettingsAction::Change { key, value: json!(value) }, window, cx);
+                            this.act(
+                                SettingsAction::Change {
+                                    key,
+                                    value: json!(value),
+                                },
+                                window,
+                                cx,
+                            );
                         }),
                     )
                 };
@@ -959,7 +1058,14 @@ impl SettingsView {
                 let swatch = parse_hex_color(row.value.as_str().unwrap_or_default())
                     .map_or(p.control, |c| rgba(u32::from_be_bytes(c)));
                 row_div
-                    .child(div().size(px(22.0)).rounded_md().border_1().border_color(p.border).bg(swatch))
+                    .child(
+                        div()
+                            .size(px(22.0))
+                            .rounded_md()
+                            .border_1()
+                            .border_color(p.border)
+                            .bg(swatch),
+                    )
                     .child(self.text_field(row, FIELD_WIDTH - 30.0, p, lang, cx))
             }
             Control::Choice(_) => {
@@ -974,7 +1080,9 @@ impl SettingsView {
                 });
                 row_div.children(select)
             }
-            Control::Shortcuts { max_items, .. } => self.shortcut_editor(row, max_items, p, lang, cx),
+            Control::Shortcuts { max_items, .. } => {
+                self.shortcut_editor(row, max_items, p, lang, cx)
+            }
             Control::ReadOnly(reason) => {
                 let note = read_only_note(lang, reason);
                 let preview = if matches!(reason, crate::settings_model::ReadOnlyReason::Secret) {
@@ -1001,12 +1109,15 @@ impl SettingsView {
         let locked = inputs.lock_reason().is_some();
         match self.dropdowns.get(KEY_DICTATION_MODEL_ID) {
             Some(dropdown) if !inputs.options().is_empty() => row_div.child(
-                div().w(px(MODEL_DROPDOWN_WIDTH)).h(px(DROPDOWN_HEIGHT)).child(
-                    Select::new(&dropdown.state)
-                        .with_size(ComponentSize::Small)
-                        .menu_max_h(px(DROPDOWN_MENU_MAX_HEIGHT))
-                        .disabled(locked),
-                ),
+                div()
+                    .w(px(MODEL_DROPDOWN_WIDTH))
+                    .h(px(DROPDOWN_HEIGHT))
+                    .child(
+                        Select::new(&dropdown.state)
+                            .with_size(ComponentSize::Small)
+                            .menu_max_h(px(DROPDOWN_MENU_MAX_HEIGHT))
+                            .disabled(locked),
+                    ),
             ),
             _ => row_div.child(
                 div()
@@ -1018,7 +1129,14 @@ impl SettingsView {
     }
 
     /// 单行文本框：编辑中显示带插入符的窗口化文本，否则显示预览，点击进入编辑。
-    fn text_field(&self, row: &RowModel, width: f32, p: &Palette, lang: Lang, cx: &mut Context<Self>) -> Div {
+    fn text_field(
+        &self,
+        row: &RowModel,
+        width: f32,
+        p: &Palette,
+        lang: Lang,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let key = row.key;
         let editing = self
             .state
@@ -1031,7 +1149,13 @@ impl SettingsView {
                 let right: String = visible.chars().skip(cursor).collect();
                 (format!("{left}{CARET}{right}"), true)
             }
-            None => (preview_text(&Value::String(edit_text(row.control, &row.value)), FIELD_VISIBLE_CHARS), false),
+            None => (
+                preview_text(
+                    &Value::String(edit_text(row.control, &row.value)),
+                    FIELD_VISIBLE_CHARS,
+                ),
+                false,
+            ),
         };
         let _ = lang;
         div()
@@ -1049,7 +1173,10 @@ impl SettingsView {
             .bg(p.control)
             .text_size(px(12.0))
             .child(shown)
-            .on_mouse_down(MouseButton::Left, Self::click(cx, SettingsAction::BeginEdit(key)))
+            .on_mouse_down(
+                MouseButton::Left,
+                Self::click(cx, SettingsAction::BeginEdit(key)),
+            )
     }
 
     /// 快捷键编辑器：已有绑定的芯片（点击替换、× 删除）与添加按钮。
@@ -1067,16 +1194,33 @@ impl SettingsView {
         let mut list = div().flex().items_center().gap_2();
         for (index, text) in row.shortcuts.iter().take(SHORTCUT_CHIPS_MAX).enumerate() {
             let capturing_this = capture.is_some_and(|c| c.index == Some(index));
-            let label = if capturing_this { prompt.to_string() } else { text.clone() };
+            let label = if capturing_this {
+                prompt.to_string()
+            } else {
+                text.clone()
+            };
             let chip = Self::chip(label, capturing_this, p).on_mouse_down(
                 MouseButton::Left,
-                Self::click(cx, SettingsAction::BeginCapture { key, index: Some(index) }),
+                Self::click(
+                    cx,
+                    SettingsAction::BeginCapture {
+                        key,
+                        index: Some(index),
+                    },
+                ),
             );
             let remove = Self::button("x", true, p).on_mouse_down(
                 MouseButton::Left,
                 Self::click(cx, SettingsAction::RemoveShortcut { key, index }),
             );
-            list = list.child(div().flex().items_center().gap_1().child(chip).child(remove));
+            list = list.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(chip)
+                    .child(remove),
+            );
         }
         let full = max_items.is_some_and(|m| row.shortcuts.len() >= m);
         if capture.is_some_and(|c| c.index.is_none()) {
@@ -1101,16 +1245,25 @@ impl SettingsView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let cycle = self.state.visible_row(position).and_then(|row| match row.control {
-            Control::Choice(options) => {
-                Some((row.key, options, self.state.choice_value(row.key, &row.value)))
-            }
-            _ => None,
-        });
+        let cycle = self
+            .state
+            .visible_row(position)
+            .and_then(|row| match row.control {
+                Control::Choice(options) => Some((
+                    row.key,
+                    options,
+                    self.state.choice_value(row.key, &row.value),
+                )),
+                _ => None,
+            });
         if let Some((key, options, current)) = cycle {
             self.ensure_dropdown(key, options, &current, window, cx);
         }
-        if self.state.visible_row(position).is_some_and(|row| row.key == KEY_DICTATION_MODEL_ID) {
+        if self
+            .state
+            .visible_row(position)
+            .is_some_and(|row| row.key == KEY_DICTATION_MODEL_ID)
+        {
             let inputs = self.stt_inputs();
             self.ensure_model_dropdown(&inputs, window, cx);
         }
@@ -1123,12 +1276,19 @@ impl SettingsView {
         let reset = {
             let button = Self::button(t(lang, Text::ResetItem), resettable, p);
             if resettable {
-                button.on_mouse_down(MouseButton::Left, Self::click(cx, SettingsAction::Reset(key)))
+                button.on_mouse_down(
+                    MouseButton::Left,
+                    Self::click(cx, SettingsAction::Reset(key)),
+                )
             } else {
                 button
             }
         };
-        let backend_notice = if key == KEY_OCR_BACKEND { OcrNotice::for_config_value(&row.value) } else { None };
+        let backend_notice = if key == KEY_OCR_BACKEND {
+            OcrNotice::for_config_value(&row.value)
+        } else {
+            None
+        };
         let route_note = route_hint(key, &row.value, self.state.prefs().locale);
         let dictation_notice = if key == KEY_DICTATION_BACKEND {
             dictation_backend_notice(&row.value, self.state.prefs().locale)
@@ -1142,14 +1302,20 @@ impl SettingsView {
             .and_then(|format| crate::recording::audio::mp4_only_note(key, &format.value))
             .map(|id| crate::ocr_backend::i18n_for(lang.locale()).tr(id));
         let route_note = route_note.or(audio_note);
-        let sub = match (&row.error, stt_note, backend_notice, dictation_notice, route_note) {
+        let sub = match (
+            &row.error,
+            stt_note,
+            backend_notice,
+            dictation_notice,
+            route_note,
+        ) {
             (Some(error), ..) => div().text_color(p.danger).child(error.clone()),
-            (None, Some((text, danger)), ..) => {
-                div().text_color(if danger { p.danger } else { p.dim }).child(text)
-            }
-            (None, None, Some(notice), ..) => {
-                div().text_color(p.danger).child(notice.message(self.state.prefs().locale))
-            }
+            (None, Some((text, danger)), ..) => div()
+                .text_color(if danger { p.danger } else { p.dim })
+                .child(text),
+            (None, None, Some(notice), ..) => div()
+                .text_color(p.danger)
+                .child(notice.message(self.state.prefs().locale)),
             (None, None, None, Some(notice), _) => div().text_color(p.danger).child(notice),
             (None, None, None, None, Some(note)) => div().text_color(p.dim).child(note),
             (None, None, None, None, None) => div()
@@ -1168,7 +1334,13 @@ impl SettingsView {
                     .whitespace_nowrap()
                     .child(item_label(lang, key)),
             )
-            .child(div().text_size(px(11.0)).max_h(px(SUB_MAX_HEIGHT)).overflow_hidden().child(sub));
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .max_h(px(SUB_MAX_HEIGHT))
+                    .overflow_hidden()
+                    .child(sub),
+            );
         div()
             .h(px(ROW_HEIGHT))
             .w_full()
@@ -1218,7 +1390,11 @@ impl SettingsView {
                     .rounded_md()
                     .cursor_pointer()
                     .text_size(px(13.0))
-                    .bg(if is_active { p.accent } else { rgba(0x00000000) })
+                    .bg(if is_active {
+                        p.accent
+                    } else {
+                        rgba(0x00000000)
+                    })
                     .text_color(if is_active { p.on_accent } else { p.text })
                     .child(group_title(lang, group.id))
                     .child(
@@ -1227,7 +1403,10 @@ impl SettingsView {
                             .text_color(if is_active { p.on_accent } else { p.dim })
                             .child(item_count.to_string()),
                     )
-                    .on_mouse_down(MouseButton::Left, Self::click(cx, SettingsAction::SwitchGroup(index))),
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        Self::click(cx, SettingsAction::SwitchGroup(index)),
+                    ),
             );
         }
         div()
@@ -1290,9 +1469,14 @@ impl SettingsView {
             .text_size(px(12.0))
             .text_color(if dim_placeholder { p.dim } else { p.text })
             .child(search_text)
-            .on_mouse_down(MouseButton::Left, Self::click(cx, SettingsAction::BeginSearch));
-        let reset_group = Self::button(t(lang, Text::ResetGroup), true, p)
-            .on_mouse_down(MouseButton::Left, Self::click(cx, SettingsAction::ResetScope));
+            .on_mouse_down(
+                MouseButton::Left,
+                Self::click(cx, SettingsAction::BeginSearch),
+            );
+        let reset_group = Self::button(t(lang, Text::ResetGroup), true, p).on_mouse_down(
+            MouseButton::Left,
+            Self::click(cx, SettingsAction::ResetScope),
+        );
         div()
             .h(px(56.0))
             .px_4()
@@ -1313,14 +1497,20 @@ impl SettingsView {
                             .font_weight(FontWeight::BOLD)
                             .child(self.state.scope_title()),
                     )
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .text_color(p.dim)
-                            .child(format!("{} {}", self.state.visible_len(), t(lang, Text::ItemsCount))),
-                    ),
+                    .child(div().text_size(px(12.0)).text_color(p.dim).child(format!(
+                        "{} {}",
+                        self.state.visible_len(),
+                        t(lang, Text::ItemsCount)
+                    ))),
             )
-            .child(div().flex().items_center().gap_3().child(search).child(reset_group))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(search)
+                    .child(reset_group),
+            )
     }
 
     /// 当前分组顶部说明区占的列表行数（翻译分组的 Hy-MT2 说明、语音分组的模型面板）；其它范围为 0。
@@ -1338,13 +1528,19 @@ impl SettingsView {
 
     /// 当前所在分组 id；搜索范围为 `None`。
     fn current_group_id(&self) -> Option<&'static str> {
-        let Scope::Group(index) = self.state.scope() else { return None };
-        crate::settings_model::groups().get(index).map(|group| group.id)
+        let Scope::Group(index) = self.state.scope() else {
+            return None;
+        };
+        crate::settings_model::groups()
+            .get(index)
+            .map(|group| group.id)
     }
 
     /// 翻译分组下说明区占的列表行数；其它范围为 0。
     fn hymt2_header_len(&self) -> usize {
-        let Scope::Group(index) = self.state.scope() else { return 0 };
+        let Scope::Group(index) = self.state.scope() else {
+            return 0;
+        };
         match crate::settings_model::groups().get(index) {
             Some(group) if group.id == TRANSLATION_GROUP_ID => hymt2_rows(HYMT2_LINE_COUNT).len(),
             _ => 0,
@@ -1352,7 +1548,12 @@ impl SettingsView {
     }
 
     /// 渲染 Hy-MT2 说明区的第 `row_index` 个定高行（与普通行同高，随列表滚动）。
-    fn render_hymt2_row(&self, row_index: usize, p: &Palette, cx: &mut Context<Self>) -> AnyElement {
+    fn render_hymt2_row(
+        &self,
+        row_index: usize,
+        p: &Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let locale = self.state.prefs().locale;
         let current = self
             .state
@@ -1371,40 +1572,66 @@ impl SettingsView {
             .overflow_hidden()
             .text_size(px(12.0))
             .line_height(px(16.0));
-        let Some(row) = rows.get(row_index) else { return frame.into_any_element() };
+        let Some(row) = rows.get(row_index) else {
+            return frame.into_any_element();
+        };
         match row {
             Hymt2Row::Text { title, lines } => {
                 let mut block = frame;
                 if *title {
-                    block = block.child(div().font_weight(FontWeight::BOLD).child(panel.title.clone()));
+                    block = block.child(
+                        div()
+                            .font_weight(FontWeight::BOLD)
+                            .child(panel.title.clone()),
+                    );
                 }
                 for line in &panel.lines[lines.clone()] {
-                    block = block.child(div().text_color(p.dim).whitespace_nowrap().child(line.clone()));
+                    block = block.child(
+                        div()
+                            .text_color(p.dim)
+                            .whitespace_nowrap()
+                            .child(line.clone()),
+                    );
                 }
                 block.into_any_element()
             }
             Hymt2Row::Actions => {
                 // 用 gpui-component 的 Button；已选中时禁用并显示“使用中”。
                 let use_button = match hymt2_click(Hymt2Button::Use, locale) {
-                    _ if in_use => Button::new("hymt2-use").small().label(panel.in_use_label).disabled(true),
-                    Hymt2Click::SetConfig { key, value } => {
-                        Button::new("hymt2-use").small().label(panel.use_label).on_click(cx.listener(
-                            move |this, _event: &ClickEvent, window, cx| {
-                                this.act(SettingsAction::Change { key, value: json!(value) }, window, cx);
-                            },
-                        ))
+                    _ if in_use => Button::new("hymt2-use")
+                        .small()
+                        .label(panel.in_use_label)
+                        .disabled(true),
+                    Hymt2Click::SetConfig { key, value } => Button::new("hymt2-use")
+                        .small()
+                        .label(panel.use_label)
+                        .on_click(cx.listener(move |this, _event: &ClickEvent, window, cx| {
+                            this.act(
+                                SettingsAction::Change {
+                                    key,
+                                    value: json!(value),
+                                },
+                                window,
+                                cx,
+                            );
+                        })),
+                    Hymt2Click::ShowNotice(_) => {
+                        Button::new("hymt2-use").small().label(panel.use_label)
                     }
-                    Hymt2Click::ShowNotice(_) => Button::new("hymt2-use").small().label(panel.use_label),
                 };
-                let download = Button::new("hymt2-download").small().outline().label(panel.download_label).on_click(
-                    cx.listener(move |this, _event: &ClickEvent, _window, cx| {
-                        if let Hymt2Click::ShowNotice(text) = hymt2_click(Hymt2Button::Download, locale) {
+                let download = Button::new("hymt2-download")
+                    .small()
+                    .outline()
+                    .label(panel.download_label)
+                    .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
+                        if let Hymt2Click::ShowNotice(text) =
+                            hymt2_click(Hymt2Button::Download, locale)
+                        {
                             this.hymt2_notice = Some(text);
                         }
                         cx.stop_propagation();
                         cx.notify();
-                    }),
-                );
+                    }));
                 let mut block = frame
                     .py_0()
                     .pt(px(2.0))
@@ -1415,7 +1642,11 @@ impl SettingsView {
                 // 提示放在按钮下方并用中性色，出现时不挤动按钮。
                 if let Some(notice) = &self.hymt2_notice {
                     block = block.child(
-                        div().text_size(px(11.0)).line_height(px(14.0)).text_color(p.text).child(notice.clone()),
+                        div()
+                            .text_size(px(11.0))
+                            .line_height(px(14.0))
+                            .text_color(p.text)
+                            .child(notice.clone()),
                     );
                 }
                 block.into_any_element()
@@ -1430,7 +1661,11 @@ impl SettingsView {
     fn stt_row_note(&self, key: &str) -> Option<(String, bool)> {
         if is_translate_note_key(key) {
             let (config, _) = self.state.translate_snapshot();
-            return translate_note(&config, self.translate_support.as_ref(), self.state.prefs().locale);
+            return translate_note(
+                &config,
+                self.translate_support.as_ref(),
+                self.state.prefs().locale,
+            );
         }
         if !is_selector_key(key) {
             return None;
@@ -1453,11 +1688,19 @@ impl SettingsView {
             return Some((text, false));
         }
         let spec = inputs.selected()?;
-        Some((model_row_status(spec, self.stt_installed.contains(&spec.id), locale), false))
+        Some((
+            model_row_status(spec, self.stt_installed.contains(&spec.id), locale),
+            false,
+        ))
     }
 
     /// 渲染说明区的第 `row_index` 个定高行：翻译分组走 Hy-MT2 说明，语音分组走模型面板。
-    fn render_header_row(&self, row_index: usize, p: &Palette, cx: &mut Context<Self>) -> AnyElement {
+    fn render_header_row(
+        &self,
+        row_index: usize,
+        p: &Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         match self.current_group_id() {
             Some(DICTATION_GROUP_ID) => self.render_stt_row(row_index, p, cx),
             Some(UPDATES_GROUP_ID) => self.render_update_row(row_index, p, cx),
@@ -1467,7 +1710,12 @@ impl SettingsView {
     }
 
     /// 渲染“检查更新”说明区的第 `row_index` 个定高行（当前版本行与按钮行）。
-    fn render_update_row(&self, row_index: usize, p: &Palette, cx: &mut Context<Self>) -> AnyElement {
+    fn render_update_row(
+        &self,
+        row_index: usize,
+        p: &Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let panel = update_panel(self.state.prefs().locale, &self.update_state);
         let frame = div()
             .h(px(ROW_HEIGHT))
@@ -1480,23 +1728,34 @@ impl SettingsView {
             .text_size(px(12.0))
             .line_height(px(16.0));
         let rows = hymt2_rows(UPDATE_PANEL_LINES);
-        let Some(row) = rows.get(row_index) else { return frame.into_any_element() };
+        let Some(row) = rows.get(row_index) else {
+            return frame.into_any_element();
+        };
         match row {
             Hymt2Row::Text { .. } => frame
                 .child(div().font_weight(FontWeight::BOLD).child(panel.title))
-                .child(div().text_color(p.dim).whitespace_nowrap().child(panel.current_line))
+                .child(
+                    div()
+                        .text_color(p.dim)
+                        .whitespace_nowrap()
+                        .child(panel.current_line),
+                )
                 .into_any_element(),
             Hymt2Row::Actions => {
                 let running = self.update_state == UpdateUiState::Running;
-                let mut button = Button::new("update-check").small().label(panel.button_label);
+                let mut button = Button::new("update-check")
+                    .small()
+                    .label(panel.button_label);
                 button = match &self.update_hook {
                     Some(hook) if !running => {
                         let hook = Rc::clone(hook);
-                        button.on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
-                            this.update_state = UpdateUiState::Running;
-                            hook();
-                            cx.notify();
-                        }))
+                        button.on_click(cx.listener(
+                            move |this, _event: &ClickEvent, _window, cx| {
+                                this.update_state = UpdateUiState::Running;
+                                hook();
+                                cx.notify();
+                            },
+                        ))
                     }
                     _ => button.disabled(true),
                 };
@@ -1512,14 +1771,26 @@ impl SettingsView {
                     .pt(px(2.0))
                     .border_b_1()
                     .border_color(p.border)
-                    .child(div().flex().items_center().gap_3().child(button).children(notice))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .child(button)
+                            .children(notice),
+                    )
                     .into_any_element()
             }
         }
     }
 
     /// 渲染“导出 / 导入设置”说明区的第 `row_index` 个定高行（说明行与按钮行）。
-    fn render_transfer_row(&self, row_index: usize, p: &Palette, cx: &mut Context<Self>) -> AnyElement {
+    fn render_transfer_row(
+        &self,
+        row_index: usize,
+        p: &Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let panel = transfer_panel(self.state.prefs().locale, &self.transfer_state);
         let frame = div()
             .h(px(ROW_HEIGHT))
@@ -1532,11 +1803,18 @@ impl SettingsView {
             .text_size(px(12.0))
             .line_height(px(16.0));
         let rows = hymt2_rows(TRANSFER_PANEL_LINES);
-        let Some(row) = rows.get(row_index) else { return frame.into_any_element() };
+        let Some(row) = rows.get(row_index) else {
+            return frame.into_any_element();
+        };
         match row {
             Hymt2Row::Text { .. } => frame
                 .child(div().font_weight(FontWeight::BOLD).child(panel.title))
-                .child(div().text_color(p.dim).whitespace_nowrap().child(panel.description))
+                .child(
+                    div()
+                        .text_color(p.dim)
+                        .whitespace_nowrap()
+                        .child(panel.description),
+                )
                 .into_any_element(),
             Hymt2Row::Actions => {
                 let mut buttons = Vec::new();
@@ -1548,9 +1826,11 @@ impl SettingsView {
                     button = match &self.transfer_hook {
                         Some(hook) => {
                             let hook = Rc::clone(hook);
-                            button.on_click(cx.listener(move |_this, _event: &ClickEvent, _window, _cx| {
-                                hook(action);
-                            }))
+                            button.on_click(cx.listener(
+                                move |_this, _event: &ClickEvent, _window, _cx| {
+                                    hook(action);
+                                },
+                            ))
                         }
                         None => button.disabled(true),
                     };
@@ -1568,7 +1848,14 @@ impl SettingsView {
                     .pt(px(2.0))
                     .border_b_1()
                     .border_color(p.border)
-                    .child(div().flex().items_center().gap_3().children(buttons).children(notice))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .children(buttons)
+                            .children(notice),
+                    )
                     .into_any_element()
             }
         }
@@ -1586,24 +1873,39 @@ impl SettingsView {
             .overflow_hidden()
             .text_size(px(12.0))
             .line_height(px(16.0));
-        let Some(panel) = self.stt_panel() else { return frame.into_any_element() };
+        let Some(panel) = self.stt_panel() else {
+            return frame.into_any_element();
+        };
         let rows = hymt2_rows(panel.lines.len());
-        let Some(row) = rows.get(row_index) else { return frame.into_any_element() };
+        let Some(row) = rows.get(row_index) else {
+            return frame.into_any_element();
+        };
         match row {
             Hymt2Row::Text { title, lines } => {
                 let mut block = frame;
                 if *title {
-                    block = block.child(div().font_weight(FontWeight::BOLD).child(panel.title.clone()));
+                    block = block.child(
+                        div()
+                            .font_weight(FontWeight::BOLD)
+                            .child(panel.title.clone()),
+                    );
                 }
                 for line in &panel.lines[lines.clone()] {
-                    block = block.child(div().text_color(p.dim).whitespace_nowrap().child(line.clone()));
+                    block = block.child(
+                        div()
+                            .text_color(p.dim)
+                            .whitespace_nowrap()
+                            .child(line.clone()),
+                    );
                 }
                 block.into_any_element()
             }
             Hymt2Row::Actions => {
                 let action = panel.action;
                 let model_id = panel.model_id.clone();
-                let mut button = Button::new("stt-action").small().label(panel.action_label.clone());
+                let mut button = Button::new("stt-action")
+                    .small()
+                    .label(panel.action_label.clone());
                 button = match action {
                     PanelAction::Download => button.on_click(cx.listener(
                         move |this, _event: &ClickEvent, _window, cx| {
@@ -1619,7 +1921,8 @@ impl SettingsView {
                     )),
                     PanelAction::Installed | PanelAction::Busy => button.disabled(true),
                 };
-                let button = button.disabled(action == PanelAction::Download && self.stt_hooks.is_none());
+                let button =
+                    button.disabled(action == PanelAction::Download && self.stt_hooks.is_none());
                 let notice = panel.notice.map(|(text, danger)| {
                     div()
                         .text_size(px(11.0))
@@ -1632,7 +1935,14 @@ impl SettingsView {
                     .pt(px(2.0))
                     .border_b_1()
                     .border_color(p.border)
-                    .child(div().flex().items_center().gap_3().child(button).children(notice))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .child(button)
+                            .children(notice),
+                    )
                     .into_any_element()
             }
         }
@@ -1675,7 +1985,7 @@ impl Render for SettingsView {
             }
         }
         let prefs = self.state.prefs();
-        if self.titled_locale != Some(prefs.locale) {
+        if !self.embedded && self.titled_locale != Some(prefs.locale) {
             // 窗口标题跟随界面语言（首帧与语言切换后各设一次）。
             self.titled_locale = Some(prefs.locale);
             window.set_window_title(&crate::settings_text::window_title(prefs.lang));
@@ -1683,7 +1993,15 @@ impl Render for SettingsView {
         if self.themed_dark != Some(prefs.dark) {
             // 组件库（下拉选择器）的主题跟随设置页深浅色。
             self.themed_dark = Some(prefs.dark);
-            Theme::change(if prefs.dark { ThemeMode::Dark } else { ThemeMode::Light }, None, cx);
+            Theme::change(
+                if prefs.dark {
+                    ThemeMode::Dark
+                } else {
+                    ThemeMode::Light
+                },
+                None,
+                cx,
+            );
         }
         let p = palette(prefs.dark, prefs.accent);
         let lang = prefs.lang;
@@ -1755,16 +2073,21 @@ impl Render for SettingsView {
                 let paste = (m.control && key == "v")
                     .then(|| cx.read_from_clipboard().and_then(|item| item.text()))
                     .flatten();
-                let handled = this
-                    .state
-                    .on_key(key, event.keystroke.key_char.as_deref(), mods, paste.as_deref());
+                let handled = this.state.on_key(
+                    key,
+                    event.keystroke.key_char.as_deref(),
+                    mods,
+                    paste.as_deref(),
+                );
                 if handled {
                     this.flush_changes();
                     cx.stop_propagation();
                     cx.notify();
                 }
             }))
-            .child(self.render_sidebar(&p, lang, cx))
+            .when(!self.embedded, |root| {
+                root.child(self.render_sidebar(&p, lang, cx))
+            })
             .child(
                 div()
                     .flex_1()
@@ -1799,20 +2122,41 @@ mod tests {
     /// 选项标签：路由模式本地化，其余原样；下拉与平铺共用。
     #[test]
     fn option_labels_localized() {
-        assert_eq!(option_label("screenshot/image_format", "png", "zh-CN"), "PNG");
-        assert_eq!(option_label("screen_recording/output_format", "mp4", "zh-CN"), "mp4");
+        assert_eq!(
+            option_label("screenshot/image_format", "png", "zh-CN"),
+            "PNG"
+        );
+        assert_eq!(
+            option_label("screen_recording/output_format", "mp4", "zh-CN"),
+            "mp4"
+        );
         assert_eq!(option_label("tray/icon", "dark", "zh-CN"), "深色");
         assert_eq!(option_label("tray/icon", "dark", "en-US"), "Dark");
         let mode = option_label(KEY_LOCAL_ROUTE_MODE, "single", "zh-CN");
         assert_ne!(mode, "single");
         assert_eq!(option_label("other/key", "single", "zh-CN"), "single");
         for info in snow_i18n::locales() {
-            assert_eq!(option_label("screenshot_translation/target_language", "ja", info.code), "日本語");
-            assert_eq!(option_label("interface/language", "zh_CN", info.code), "简体中文");
-            assert_eq!(option_label("interface/language", "en_US", info.code), "English");
+            assert_eq!(
+                option_label("screenshot_translation/target_language", "ja", info.code),
+                "日本語"
+            );
+            assert_eq!(
+                option_label("interface/language", "zh_CN", info.code),
+                "简体中文"
+            );
+            assert_eq!(
+                option_label("interface/language", "en_US", info.code),
+                "English"
+            );
         }
-        assert_eq!(option_label("screenshot_translation/source_language", "auto", "en-US"), "Auto detect");
-        assert_eq!(option_label("screenshot_translation/source_language", "auto", "zh-CN"), "自动识别");
+        assert_eq!(
+            option_label("screenshot_translation/source_language", "auto", "en-US"),
+            "Auto detect"
+        );
+        assert_eq!(
+            option_label("screenshot_translation/source_language", "auto", "zh-CN"),
+            "自动识别"
+        );
     }
 
     /// 下拉选项保持候选顺序，值与标签一一对应；选中值只认候选内的值。
@@ -1848,11 +2192,18 @@ mod tests {
         assert_eq!(ops[0], AutotestOp::Group("screenshot".into()));
         assert_eq!(
             ops[2],
-            AutotestOp::Set { key: "screenshot/image_quality".into(), value: json!(80) }
+            AutotestOp::Set {
+                key: "screenshot/image_quality".into(),
+                value: json!(80)
+            }
         );
         assert_eq!(
             ops[4],
-            AutotestOp::Shortcut { key: "global_shortcuts/screenshot".into(), index: Some(0), text: "F5".into() }
+            AutotestOp::Shortcut {
+                key: "global_shortcuts/screenshot".into(),
+                index: Some(0),
+                text: "F5".into()
+            }
         );
         assert_eq!(ops[6], AutotestOp::Scroll(3));
         assert!(parse_autotest_ops("not json").is_err());
