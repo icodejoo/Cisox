@@ -70,12 +70,40 @@ pub fn focused_fullscreen_window_exists() -> bool {
     imp::focused_fullscreen_window_exists()
 }
 
+/// 把系统鼠标指针按物理像素偏移（键盘微调指针用）。
+///
+/// # 参数
+/// - `dx` / `dy`：横纵偏移，正向为右 / 下。
+///
+/// # 返回
+/// 成功 `true`；读取或设置失败、非 Windows 为 `false`。
+///
+/// ```ignore
+/// nudge_cursor(1, 0);
+/// ```
+pub fn nudge_cursor(dx: i32, dy: i32) -> bool {
+    imp::nudge_cursor(dx, dy)
+}
+
 #[cfg(windows)]
 mod imp {
     use super::{ScreenRect, rect_from_edges};
     use windows::Win32::Foundation::RECT;
     use windows::Win32::Graphics::Dwm::{DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute};
     use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowRect, IsIconic};
+
+    /// 指针偏移（Windows 实现）。
+    pub fn nudge_cursor(dx: i32, dy: i32) -> bool {
+        use windows::Win32::Foundation::POINT;
+        use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, SetCursorPos};
+        let mut p = POINT::default();
+        // SAFETY: p 是大小正好为 POINT 的输出缓冲。
+        if unsafe { GetCursorPos(&mut p) }.is_err() {
+            return false;
+        }
+        // SAFETY: 无内存前置条件，坐标越界由系统钳制。
+        unsafe { SetCursorPos(p.x + dx, p.y + dy) }.is_ok()
+    }
 
     /// 读取前台窗口矩形（Windows 实现）。
     pub fn foreground_window_rect() -> Option<ScreenRect> {
@@ -191,6 +219,11 @@ mod imp {
 
     /// 非 Windows 平台没有实现。
     pub fn focused_fullscreen_window_exists() -> bool {
+        false
+    }
+
+    /// 非 Windows 平台没有实现。
+    pub fn nudge_cursor(_dx: i32, _dy: i32) -> bool {
         false
     }
 }

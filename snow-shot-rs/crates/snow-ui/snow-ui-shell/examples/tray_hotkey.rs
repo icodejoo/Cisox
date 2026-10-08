@@ -70,6 +70,7 @@ fn demo_tray_spec() -> Result<TraySpec, ShellError> {
         ],
         on_left_click: None,
         on_double_click: None,
+        on_middle_click: None,
     })
 }
 

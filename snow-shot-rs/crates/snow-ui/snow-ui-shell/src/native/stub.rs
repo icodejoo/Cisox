@@ -71,6 +71,16 @@ pub(crate) fn set_capture_excluded(_hwnd: isize, _excluded: bool) -> Result<(), 
     Err(unsupported(Capability::OverlayClickThrough))
 }
 
+/// 显示或隐藏窗口：桩返回不支持。
+pub(crate) fn set_window_visible(_hwnd: isize, _visible: bool) -> Result<(), ShellError> {
+    Err(unsupported(Capability::OverlayClickThrough))
+}
+
+/// 设置窗口输入透明：桩返回不支持。
+pub(crate) fn set_input_transparent(_hwnd: isize, _transparent: bool) -> Result<(), ShellError> {
+    Err(unsupported(Capability::OverlayClickThrough))
+}
+
 /// 设置窗口标题栏深浅色：桩返回不支持。
 pub(crate) fn set_window_dark_title(_hwnd: isize, _dark: bool) -> Result<(), ShellError> {
     Err(unsupported(Capability::OverlayClickThrough))

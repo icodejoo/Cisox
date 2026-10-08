@@ -245,6 +245,44 @@ pub(crate) fn set_capture_excluded(hwnd: isize, excluded: bool) -> Result<(), Sh
         .map_err(|e| platform_err("SetWindowDisplayAffinity", e))
 }
 
+/// 设置窗口是否对输入透明（鼠标点击穿过窗口落到下层窗口，且窗口不抢焦点）。
+///
+/// 实现为 `WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE`；开启分层样式后补一次
+/// `SetLayeredWindowAttributes`（整窗不透明），否则分层窗口不会显示。
+pub(crate) fn set_input_transparent(hwnd: isize, transparent: bool) -> Result<(), ShellError> {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GWL_EXSTYLE, GetWindowLongPtrW, LWA_ALPHA, SetLayeredWindowAttributes, SetWindowLongPtrW,
+        WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TRANSPARENT,
+    };
+    let hwnd = to_hwnd(hwnd);
+    let mask = (WS_EX_LAYERED.0 | WS_EX_TRANSPARENT.0 | WS_EX_NOACTIVATE.0) as isize;
+    // SAFETY: 纯值参数；句柄无效时返回 0 并设置错误，下面按样式读回结果判断。
+    let current = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) };
+    let wanted = if transparent { current | mask } else { current & !mask };
+    // SAFETY: 同上。
+    unsafe { SetWindowLongPtrW(hwnd, GWL_EXSTYLE, wanted) };
+    // SAFETY: 同上。
+    let applied = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) };
+    if applied != wanted {
+        return Err(platform_err("SetWindowLongPtrW(EXSTYLE)", "样式未生效"));
+    }
+    if transparent {
+        // SAFETY: 句柄已确认可设置样式；参数为纯值。
+        unsafe { SetLayeredWindowAttributes(hwnd, Default::default(), 255, LWA_ALPHA) }
+            .map_err(|e| platform_err("SetLayeredWindowAttributes", e))?;
+    }
+    Ok(())
+}
+
+/// 显示或隐藏窗口（显示时不激活）。
+pub(crate) fn set_window_visible(hwnd: isize, visible: bool) -> Result<(), ShellError> {
+    use windows::Win32::UI::WindowsAndMessaging::{SW_HIDE, SW_SHOWNOACTIVATE, ShowWindow};
+    let cmd = if visible { SW_SHOWNOACTIVATE } else { SW_HIDE };
+    // SAFETY: 纯值参数；返回值是“之前是否可见”，不是错误码。
+    let _ = unsafe { ShowWindow(to_hwnd(hwnd), cmd) };
+    Ok(())
+}
+
 /// 后台消息循环的唤醒/退出句柄，可跨线程使用。
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct LoopWaker {
@@ -424,4 +462,50 @@ pub(crate) fn set_popup_menu_dark(dark: Option<bool>) -> Result<(), ShellError> 
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DestroyWindow, GWL_EXSTYLE, GetWindowLongPtrW, WINDOW_EX_STYLE, WINDOW_STYLE,
+        WS_EX_LAYERED, WS_EX_TRANSPARENT,
+    };
+    use windows::core::w;
+
+    /// 开启输入透明会带上 LAYERED / TRANSPARENT 样式，关闭后恢复。
+    #[test]
+    fn input_transparent_toggles_ex_style() {
+        // SAFETY: 系统预定义的 STATIC 窗口类，建一个不显示的小窗口，用完销毁。
+        let hwnd = unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                w!("STATIC"),
+                w!("probe"),
+                WINDOW_STYLE(0),
+                0,
+                0,
+                10,
+                10,
+                None,
+                None,
+                None,
+                None,
+            )
+        }
+        .expect("建测试窗口");
+        let id = hwnd.0 as isize;
+        let style = || {
+            // SAFETY: hwnd 在本测试内有效。
+            unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32 }
+        };
+        assert_eq!(style() & WS_EX_TRANSPARENT.0, 0);
+        set_input_transparent(id, true).unwrap();
+        assert_ne!(style() & WS_EX_TRANSPARENT.0, 0);
+        assert_ne!(style() & WS_EX_LAYERED.0, 0);
+        set_input_transparent(id, false).unwrap();
+        assert_eq!(style() & WS_EX_TRANSPARENT.0, 0);
+        // SAFETY: 销毁本测试创建的窗口。
+        unsafe { DestroyWindow(hwnd) }.ok();
+    }
 }

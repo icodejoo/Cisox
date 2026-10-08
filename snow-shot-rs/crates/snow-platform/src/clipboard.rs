@@ -121,6 +121,59 @@ pub fn copy_text_to_clipboard(text: &str) -> Result<(), String> {
     }
 }
 
+/// 把若干文件以「文件列表」（CF_HDROP）写入系统剪贴板，资源管理器里粘贴即复制这些文件。
+///
+/// # 参数
+/// - `paths`: 文件路径；为空返回错误。
+///
+/// # 返回
+/// 成功返回 `Ok(())`，失败返回错误说明。非 Windows 平台恒为 `Ok(())`。
+///
+/// # 示例
+/// ```no_run
+/// use snow_platform::clipboard::copy_files_to_clipboard;
+/// copy_files_to_clipboard(&[std::path::PathBuf::from(r"C:\Windows\notepad.exe")]).ok();
+/// ```
+pub fn copy_files_to_clipboard(paths: &[std::path::PathBuf]) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let data = build_drop_files(paths).ok_or_else(|| "没有可复制的文件".to_string())?;
+        win32_clipboard::copy_hdrop_win32(&data)
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = paths;
+        Ok(())
+    }
+}
+
+/// `DROPFILES` 头部大小（字节）：偏移 + 点 + 非客户区标志 + 宽字符标志。
+#[cfg_attr(not(windows), allow(dead_code))]
+const DROPFILES_HEADER_SIZE: usize = 20;
+
+/// 构造 CF_HDROP 数据：`DROPFILES` 头 + 以 0 结尾的宽字符路径依次排列 + 末尾额外一个 0。
+///
+/// 路径列表为空返回 `None`。
+#[cfg_attr(not(windows), allow(dead_code))]
+fn build_drop_files(paths: &[std::path::PathBuf]) -> Option<Vec<u8>> {
+    if paths.is_empty() {
+        return None;
+    }
+    let mut out = Vec::with_capacity(DROPFILES_HEADER_SIZE + paths.len() * 64);
+    out.extend_from_slice(&(DROPFILES_HEADER_SIZE as u32).to_le_bytes()); // pFiles
+    out.extend_from_slice(&[0u8; 8]); // pt.x / pt.y
+    out.extend_from_slice(&0u32.to_le_bytes()); // fNC
+    out.extend_from_slice(&1u32.to_le_bytes()); // fWide
+    for path in paths {
+        for unit in path.as_os_str().to_string_lossy().encode_utf16().chain(std::iter::once(0)) {
+            out.extend_from_slice(&unit.to_le_bytes());
+        }
+    }
+    out.extend_from_slice(&0u16.to_le_bytes());
+    Some(out)
+}
+
 /// 读取系统剪贴板里的图像（CF_DIB，系统会自动从 CF_BITMAP 等格式合成）。
 ///
 /// # 返回
@@ -253,6 +306,8 @@ mod win32_clipboard {
     const CF_DIBV5: u32 = 17;
     /// 剪贴板格式：UTF-16 文本。
     const CF_UNICODETEXT: u32 = 13;
+    /// 剪贴板格式：文件列表。
+    const CF_HDROP: u32 = 15;
     /// 打开剪贴板的最大尝试次数（剪贴板常被其他进程短暂占用）。
     const OPEN_ATTEMPTS: u32 = 8;
     /// 两次尝试之间的等待毫秒数。
@@ -411,6 +466,11 @@ mod win32_clipboard {
         }
     }
 
+    /// 将构造好的 `DROPFILES` 数据以 CF_HDROP 写入 Win32 剪贴板。
+    pub fn copy_hdrop_win32(data: &[u8]) -> Result<(), String> {
+        set_clipboard(CF_HDROP, data, "CF_HDROP")
+    }
+
     /// 将文本以 CF_UNICODETEXT 写入 Win32 剪贴板。
     pub fn copy_text_win32(text: &str) -> Result<(), String> {
         let bytes: Vec<u8> = text
@@ -466,6 +526,25 @@ mod win32_clipboard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 真实剪贴板：写入文件列表后系统能读回同一路径。会覆盖用户剪贴板，默认忽略；需要时用 `--ignored` 手动跑。
+    #[test]
+    #[ignore = "会覆盖用户的剪贴板"]
+    fn real_clipboard_hdrop() {
+        copy_files_to_clipboard(&[std::path::PathBuf::from("C:\\Windows\\notepad.exe")]).unwrap();
+    }
+
+    /// CF_HDROP 数据：头部偏移为 20、宽字符标志置位，路径以 0 分隔、整体以双 0 结尾；空列表无数据。
+    #[test]
+    fn drop_files_layout() {
+        assert!(build_drop_files(&[]).is_none());
+        let data = build_drop_files(&[std::path::PathBuf::from("a.mp4"), std::path::PathBuf::from("b")]).unwrap();
+        assert_eq!(u32::from_le_bytes(data[0..4].try_into().unwrap()), 20);
+        assert_eq!(u32::from_le_bytes(data[16..20].try_into().unwrap()), 1);
+        let units: Vec<u16> = data[20..].chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+        let text: Vec<String> = units.split(|&u| u == 0).map(String::from_utf16_lossy).collect();
+        assert_eq!(text, vec!["a.mp4".to_string(), "b".to_string(), String::new(), String::new()]);
+    }
 
     /// 校验数据有效性检查。
     #[test]

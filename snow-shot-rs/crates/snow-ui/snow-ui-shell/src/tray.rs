@@ -117,6 +117,8 @@ pub struct TraySpec {
     pub on_left_click: Option<TrayAction>,
     /// 左键双击动作（Windows）。
     pub on_double_click: Option<TrayAction>,
+    /// 中键单击动作。
+    pub on_middle_click: Option<TrayAction>,
 }
 
 /// 菜单构建计划中的一项（已分配稳定 id）。
@@ -286,6 +288,8 @@ mod backend {
         on_left: Option<TrayAction>,
         /// 双击动作。
         on_double: Option<TrayAction>,
+        /// 中键单击动作。
+        on_middle: Option<TrayAction>,
         /// 命令出口。
         dispatcher: Dispatcher,
         /// 信号发送端。
@@ -348,6 +352,11 @@ mod backend {
                         button: MouseButton::Left,
                         ..
                     } => self.on_double.as_ref(),
+                    TrayIconEvent::Click {
+                        button: MouseButton::Middle,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } => self.on_middle.as_ref(),
                     _ => None,
                 };
                 if let Some(a) = action {
@@ -385,6 +394,7 @@ mod backend {
                         actions,
                         on_left: spec.on_left_click,
                         on_double: spec.on_double_click,
+                        on_middle: spec.on_middle_click,
                         dispatcher,
                         signals: sig_tx,
                         sink: None,
@@ -547,12 +557,13 @@ impl TrayService {
     ///     tooltip: "Cisox".into(),
     ///     icon: TrayIconImage::solid(32, 32, [0, 120, 255, 255]).unwrap(),
     ///     menu: vec![
-    ///         TrayMenuEntry::Item { label: "取消".into(), enabled: true, action: TrayAction::Command(AppCommand::Cancel(Default::default())) },
+    ///         TrayMenuEntry::Item { label: "取消".into(), enabled: true, checked: None, icon: None, action: TrayAction::Command(AppCommand::Cancel(Default::default())) },
     ///         TrayMenuEntry::Separator,
-    ///         TrayMenuEntry::Item { label: "退出".into(), enabled: true, action: TrayAction::Signal("quit".into()) },
+    ///         TrayMenuEntry::Item { label: "退出".into(), enabled: true, checked: None, icon: None, action: TrayAction::Signal("quit".into()) },
     ///     ],
     ///     on_left_click: None,
     ///     on_double_click: None,
+    ///     on_middle_click: None,
     /// };
     /// let caps = CapabilityRegistry::for_current_platform();
     /// let tray = TrayService::start(&caps, spec, Dispatcher::from_bus(CommandBus::new())).unwrap();
@@ -683,6 +694,7 @@ mod tests {
             menu: vec![],
             on_left_click: None,
             on_double_click: None,
+            on_middle_click: None,
         };
         let d = crate::dispatch::Dispatcher::from_fn(|_, _| {});
         assert!(matches!(

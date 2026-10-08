@@ -23,7 +23,7 @@ pub use gpui_kit::{
     Anchor, AnyElement, App, AppContext, Bounds, ClickEvent, Context, CursorStyle, Div, Element,
     ElementId, ElementInputHandler, Entity, EntityInputHandler, FocusHandle, Focusable, FontWeight,
     PathBuilder,
-    Hsla, ImageSource, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
+    Hsla, ImageSource, InteractiveElement, IntoElement, KeyDownEvent, KeyUpEvent, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, ObjectFit, ParentElement, Pixels, Point, QuitMode, Render,
     RenderImage, RenderOnce, Rgba, SharedString, Size, StatefulInteractiveElement, Styled,
     StyledImage, TextAlign, TextRun, UTF16Selection, UnderlineStyle, ViewElement, WeakEntity,
@@ -138,6 +138,29 @@ impl ShellWindow {
     /// ```
     pub fn set_dark_title(&self, dark: bool) -> Result<(), ShellError> {
         native::set_window_dark_title(self.native_hwnd()?, dark)
+    }
+
+    /// 显示或隐藏窗口（显示时不激活）；与 [`ShellWindow::set_rect`] 一样不能在 App 被借用时直接调用。
+    ///
+    /// # 参数
+    /// - `visible`：`true` 显示，`false` 隐藏。
+    pub fn set_visible(&self, visible: bool) -> Result<(), ShellError> {
+        native::set_window_visible(self.native_hwnd()?, visible)
+    }
+
+    /// 设置窗口对输入透明：开启后鼠标点击穿过本窗口，窗口也不再抢焦点。
+    ///
+    /// # 参数
+    /// - `transparent`：`true` 穿透，`false` 恢复。
+    ///
+    /// # 返回
+    /// 取不到原生句柄或平台调用失败返回错误（失败时调用方应保持“未穿透”状态）。
+    ///
+    /// ```ignore
+    /// window.set_input_transparent(true)?;
+    /// ```
+    pub fn set_input_transparent(&self, transparent: bool) -> Result<(), ShellError> {
+        native::set_input_transparent(self.native_hwnd()?, transparent)
     }
 
     /// 原生窗口句柄整数值；取不到返回 `Platform` 错误。

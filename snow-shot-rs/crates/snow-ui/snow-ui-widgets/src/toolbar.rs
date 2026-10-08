@@ -33,6 +33,10 @@ pub enum AnnotationTool {
     Highlighter,
     /// 步骤序号标记球。
     Counter,
+    /// 橡皮：拖过的标注被擦除。
+    Eraser,
+    /// 选择对象：点选、移动、缩放已画的标注。
+    Select,
 }
 
 impl AnnotationTool {
@@ -60,6 +64,8 @@ impl AnnotationTool {
             Self::Blur => "模糊",
             Self::Highlighter => "高亮",
             Self::Counter => "序号",
+            Self::Eraser => "橡皮",
+            Self::Select => "选对象",
         }
     }
 }
@@ -166,7 +172,7 @@ const TOOLBAR_ACTIONS: [(&str, ToolbarAction); 8] = [
 ];
 
 /// 可选标注工具的显示顺序。
-const TOOLBAR_TOOLS: [AnnotationTool; 10] = [
+const TOOLBAR_TOOLS: [AnnotationTool; 12] = [
     AnnotationTool::Rectangle,
     AnnotationTool::Ellipse,
     AnnotationTool::Arrow,
@@ -177,6 +183,8 @@ const TOOLBAR_TOOLS: [AnnotationTool; 10] = [
     AnnotationTool::Text,
     AnnotationTool::Mosaic,
     AnnotationTool::Blur,
+    AnnotationTool::Eraser,
+    AnnotationTool::Select,
 ];
 
 /// 主色（选中 / 主按钮）。
