@@ -18,10 +18,10 @@
 - i18n A15：覆盖窗与贴图窗全部走 `.ftl`。
 
 **原「待拍板 6 项」已按总原则裁决（2026-10-08，`b3011642`）**
-1. G03 二维码：引入纯 Rust `rqrr`，覆盖窗识别键已接线（只复制，不打开链接；无真机验证）。
+1. G03 二维码：引入纯 Rust `rqrr`，覆盖窗识别键已接线；内容是 http / https 链接时按 O 用默认浏览器打开（无真机验证）。
 2. G04 表格 / LaTeX / Markdown：不捆模型，按 ADR-5 做「未配置引导卡片」，模型来源仍待你定，**未实现**。
-3. A09 自动更新：配置键 `updates/manifest_url`（默认空）+ 地址解析已做，**还没有界面入口**。
-4. A10 代理：`network/proxy` 只支持 `none` / `system`（环境变量），转成 curl `--proxy`；不能填地址。
+3. A09 自动更新：配置键 `updates/manifest_url`（默认空）+ 地址解析已做；**设置页「更新」分组已有“检查更新”入口**（只检查，不下载安装；清单最小格式 `{"version","url","notes"}`，细节见审计 A09）。
+4. A10 代理：`network/proxy` 支持 `none` / `system`（环境变量）或直接填地址（`http` / `https` / `socks5` / `socks5h`），转成 curl `--proxy`。
 5. A12 MCP：只有设计文档 [design/mcp-subsystem.md](design/mcp-subsystem.md)，单独立项，未实现。
 6. 托盘默认菜单：维持 Qt 的 12 项默认，不改。
 

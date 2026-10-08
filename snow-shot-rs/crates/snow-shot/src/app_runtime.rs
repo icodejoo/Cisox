@@ -463,6 +463,10 @@ pub enum UiEvent {
         /// 结果。
         result: Result<(), String>,
     },
+    /// 设置页请求检查更新。
+    UpdateCheckRequested,
+    /// 检查更新结束（未本地化的结果）。
+    UpdateCheckFinished(crate::net_settings::UpdateCheckOutcome),
     /// 快捷动作（来自全局热键 / 总线）。
     QuickAction(QuickAction),
     /// 延迟截图的倒计时到点（携带倒计时序号，过期序号会被丢弃）。
@@ -2504,6 +2508,32 @@ fn spawn_stt_download(state: &AppState, model_id: String, cancel: CancelFlag) {
     }
 }
 
+/// 开始检查更新：先解析配置里的清单地址（未配置 / 非法直接回结果），再起后台线程下载比对。
+///
+/// # 参数
+/// - `state`：运行时状态。
+fn start_update_check(state: &AppState) {
+    let locale = ui_prefs_from_document(state.config.borrow().document()).locale;
+    let url = match crate::net_settings::update_target(state.config.borrow().document(), locale) {
+        Ok(url) => url,
+        Err(text) => {
+            state.inbox.push(UiEvent::UpdateCheckFinished(crate::net_settings::UpdateCheckOutcome::Config(text)));
+            return;
+        }
+    };
+    let inbox = state.inbox.clone();
+    let spawned = std::thread::Builder::new().name("snow-update-check".into()).spawn({
+        let inbox = inbox.clone();
+        move || {
+            let outcome = crate::net_settings::run_update_check(&url, crate::net_settings::APP_VERSION);
+            inbox.push(UiEvent::UpdateCheckFinished(outcome));
+        }
+    });
+    if let Err(e) = spawned {
+        inbox.push(UiEvent::UpdateCheckFinished(crate::net_settings::UpdateCheckOutcome::FetchFailed(e.to_string())));
+    }
+}
+
 /// 启动覆盖窗性能基准：约 60Hz 驱动模拟框选（或指定工具的标注绘制），结束后关闭窗口（探针汇总写入日志）。
 ///
 /// 这是直接驱动视图状态，不经过操作系统输入，不属于输入模拟。
@@ -2686,6 +2716,12 @@ fn open_or_focus_settings(cx: &mut ShellContext, state: &mut AppState) {
                 }),
             };
             view.update(cx.app(), |v, _| v.set_stt_hooks(stt_hooks));
+            let update_inbox = state.inbox.clone();
+            view.update(cx.app(), |v, _| {
+                v.set_update_hook(Rc::new(move || {
+                    update_inbox.push(UiEvent::UpdateCheckRequested);
+                }));
+            });
             tracing::info!("settings window opened");
             if let Ok(path) = std::env::var(ENV_SETTINGS_AUTOTEST) {
                 spawn_settings_autotest(cx, window, view, &path);
@@ -3847,6 +3883,15 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
                     v.finish_ocr_download(result);
                     vcx.notify();
                 });
+            }
+        }
+        UiEvent::UpdateCheckRequested => start_update_check(state),
+        UiEvent::UpdateCheckFinished(outcome) => {
+            let locale = ui_prefs_from_document(state.config.borrow().document()).locale;
+            let ui_state = crate::net_settings::update_outcome_state(&outcome, locale);
+            tracing::info!(?outcome, "检查更新结束");
+            if let Some(view) = &state.settings_view {
+                view.update(cx.app(), |v, vcx| v.finish_update_check(ui_state, vcx));
             }
         }
         UiEvent::SttDownloadRequested { model_id, cancel } => spawn_stt_download(state, model_id, cancel),

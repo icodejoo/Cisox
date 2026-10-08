@@ -36,6 +36,8 @@
 - [guides/snow-stt-worker.md](guides/snow-stt-worker.md) — 语音转文字 worker（snow-stt）：行协议、构建（短 target、联网下载、DLL 同目录）、模型放置、wav 自检脚本、espeak-ng GPL 声明注意。已接主程序：协议扩展（离线模式、模型类型、VAD、ITN）、模型清单与按需下载、设置页、语音翻译级联、离线模型放置约定与自检脚本用法。真机麦克风验证未做。
 
 - [research/qt-parity-audit.md](research/qt-parity-audit.md) — **Qt 功能清单 vs Rust 实现对照审计（2026-10-03，读代码）**：82 项状态、配置键消费情况、缺口前十、真机验证清单。功能对齐程度以它为准。有效。
+- [research/g04-structured-recognition-selection.md](research/g04-structured-recognition-selection.md) — G04 表格 / LaTeX / Markdown 选型（2026-10-08）：表格先做 SLANet_plus，公式二期，Markdown 走自定义模型通道；待批准模型下载与许可核对。
+- [research/spotlight-watermark-selection.md](research/spotlight-watermark-selection.md) — 聚光灯 / 水印选型（2026-10-08）：复用 tiny-skia + GDI 文字，0 新依赖，自写约 300 行；含黄金对照做法。
 ## 调研
 - [research/cross-monitor-recording-hw.md](research/cross-monitor-recording-hw.md) — 跨屏/双屏选区录屏硬编方案，含裁决记录。探针已实现，跨屏 16/20（单屏对照 18/20），接缝与光标已验证；跨适配器待验证。
 - [research/video-editor-backends.md](research/video-editor-backends.md) — 视频编辑器后端调研。

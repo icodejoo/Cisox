@@ -106,7 +106,7 @@ pub(crate) fn raw_entries() -> Vec<SchemaEntry> {
             json!("none"),
             ValueKind::String,
             None,
-            &["none", "system"],
+            &[],
             None,
         ),
         entry(

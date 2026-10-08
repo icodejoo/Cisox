@@ -79,6 +79,20 @@ fn string_of(value: &Value) -> Option<&str> {
     value.as_str()
 }
 
+/// 代理：`none` / `system` / `http|https|socks5|socks5h://地址`，其余无效；空串规整为 `none`。
+fn normalize_proxy(value: &Value) -> Normalization {
+    let Some(original) = string_of(value) else {
+        return Normalization::invalid();
+    };
+    match snow_net::validate_proxy(original) {
+        Ok(normalized) => {
+            let changed = normalized != original;
+            Normalization::ok(Value::String(normalized), changed)
+        }
+        Err(_) => Normalization::invalid(),
+    }
+}
+
 /// 主题：去空白、转小写后必须是 system/light/dark。
 fn normalize_theme(value: &Value) -> Normalization {
     let Some(original) = string_of(value) else {
@@ -392,6 +406,7 @@ pub fn normalize(key: &str, value: &Value) -> Normalization {
     match key {
         "api_configuration/custom_models" => return normalize_custom_models(value),
         "interface/theme_mode" => return normalize_theme(value),
+        "network/proxy" => return normalize_proxy(value),
         "interface/language" => return normalize_language(value),
         "screenshot_selection/previous_selection" => return normalize_selection(value),
         "screenshot_selection/selection_rect_presets" => return normalize_presets(value),
@@ -613,6 +628,16 @@ mod tests {
             true,
         );
         check_invalid("network/proxy", json!(5));
+        check("network/proxy", json!("  "), json!("none"), true);
+        check("network/proxy", json!(" system "), json!("system"), true);
+        check(
+            "network/proxy",
+            json!("socks5h://127.0.0.1:1080"),
+            json!("socks5h://127.0.0.1:1080"),
+            false,
+        );
+        check_invalid("network/proxy", json!("ftp://x:1"));
+        check_invalid("network/proxy", json!("127.0.0.1:7890"));
     }
 
     /// 主题：忽略大小写与空白。

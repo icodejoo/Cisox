@@ -6885,6 +6885,7 @@ dependencies = [
  "serde",
  "serde_json",
  "snow-app-core",
+ "snow-net",
 ]
 
 [[package]]
@@ -7133,6 +7134,7 @@ dependencies = [
 name = "snow-update"
 version = "0.1.0"
 dependencies = [
+ "serde_json",
  "snow-net",
 ]
 

@@ -37,10 +37,9 @@ pub fn decode_qr_codes(width: u32, height: u32, rgba: &[u8]) -> Vec<String> {
         .collect()
 }
 
+/// 测试共用的二维码样本（也供覆盖窗接线测试使用）。
 #[cfg(test)]
-mod tests {
-    use super::*;
-
+pub(crate) mod test_support {
     /// 固定样本：由独立编码器生成的 25x25 码（版本 2、纠错 M），内容见 [`SAMPLE_TEXT`]。
     const SAMPLE_ROWS: [&str; 25] = [
         "#######.....##..#.#######",
@@ -70,10 +69,10 @@ mod tests {
         "#######.#######..########",
     ];
     /// 样本二维码的内容。
-    const SAMPLE_TEXT: &str = "https://example.com/cisox";
+    pub(crate) const SAMPLE_TEXT: &str = "https://example.com/cisox";
 
     /// 把样本矩阵渲染成带静区的 RGBA 图（每模块 `scale` 像素，黑码白底）。
-    fn render_sample(scale: usize, quiet: usize) -> (u32, u32, Vec<u8>) {
+    pub(crate) fn render_sample(scale: usize, quiet: usize) -> (u32, u32, Vec<u8>) {
         let side = (SAMPLE_ROWS.len() + quiet * 2) * scale;
         let mut rgba = vec![255u8; side * side * 4];
         for (r, row) in SAMPLE_ROWS.iter().enumerate() {
@@ -92,6 +91,12 @@ mod tests {
         }
         (side as u32, side as u32, rgba)
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_support::{SAMPLE_TEXT, render_sample};
+    use super::*;
 
     /// 标准样本能解出原文。
     #[test]

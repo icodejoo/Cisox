@@ -12,6 +12,7 @@ use crate::settings_state::{
     ConfigChange, EditTarget, KeyMods, RowModel, Scope, SettingsAction, SettingsState,
     SharedConfig, StatusKind, SystemPrefs, read_only_note,
 };
+use crate::net_settings::{UPDATES_GROUP_ID, UpdateUiState, update_panel};
 use crate::language_names::{is_language_key, language_option_label};
 use crate::ocr_backend::{OcrBackend, OcrNotice};
 use crate::settings_text::{Lang, Text, group_title, item_desc, item_label, option_text, t};
@@ -298,6 +299,10 @@ pub struct SettingsView {
     last_scroll_y: f32,
     /// 语音模型下载入口与数据根（未接入时为 `None`，面板按钮不可用）。
     stt_hooks: Option<SttHooks>,
+    /// “检查更新”的界面状态。
+    update_state: UpdateUiState,
+    /// 请求检查更新的入口（未接入时为 `None`，按钮不可用）。
+    update_hook: Option<Rc<dyn Fn()>>,
     /// 语音模型下载任务的界面状态。
     stt_download: DownloadState,
     /// 进行中下载的取消标记。
@@ -350,6 +355,9 @@ fn dropdown_index(options: &[&'static str], current: &str) -> Option<usize> {
     options.iter().position(|option| *option == current)
 }
 
+/// 更新分组说明区的文本行数（只有“当前版本”一行）。
+const UPDATE_PANEL_LINES: usize = 1;
+
 /// 翻译设置所在分组的 id。
 const TRANSLATION_GROUP_ID: &str = "screenshot_translation";
 
@@ -381,6 +389,8 @@ impl SettingsView {
             titled_locale: None,
             last_scroll_y: 0.0,
             stt_hooks: None,
+            update_state: UpdateUiState::Idle,
+            update_hook: None,
             stt_download: DownloadState::Idle,
             stt_cancel: None,
             stt_installed: HashSet::new(),
@@ -468,6 +478,24 @@ impl SettingsView {
                 .row_by_key(key)
                 .map_or(Value::Null, |row| row.value.clone())
         })
+    }
+
+    /// 接入“检查更新”入口。
+    ///
+    /// # 参数
+    /// - `hook`：点击按钮时调用，由上层起后台线程检查
+    pub fn set_update_hook(&mut self, hook: Rc<dyn Fn()>) {
+        self.update_hook = Some(hook);
+    }
+
+    /// 收到检查更新的结果（经主线程收件箱转入）。
+    ///
+    /// # 参数
+    /// - `state`：结果状态
+    /// - `cx`：视图上下文
+    pub fn finish_update_check(&mut self, state: UpdateUiState, cx: &mut Context<Self>) {
+        self.update_state = state;
+        cx.notify();
     }
 
     /// 接入语音模型下载入口与数据根目录，并刷新安装状态缓存。
@@ -1270,6 +1298,7 @@ impl SettingsView {
             Some(DICTATION_GROUP_ID) => self
                 .stt_panel()
                 .map_or(0, |panel| hymt2_rows(panel.lines.len()).len()),
+            Some(UPDATES_GROUP_ID) => hymt2_rows(UPDATE_PANEL_LINES).len(),
             _ => 0,
         }
     }
@@ -1398,7 +1427,60 @@ impl SettingsView {
     fn render_header_row(&self, row_index: usize, p: &Palette, cx: &mut Context<Self>) -> AnyElement {
         match self.current_group_id() {
             Some(DICTATION_GROUP_ID) => self.render_stt_row(row_index, p, cx),
+            Some(UPDATES_GROUP_ID) => self.render_update_row(row_index, p, cx),
             _ => self.render_hymt2_row(row_index, p, cx),
+        }
+    }
+
+    /// 渲染“检查更新”说明区的第 `row_index` 个定高行（当前版本行与按钮行）。
+    fn render_update_row(&self, row_index: usize, p: &Palette, cx: &mut Context<Self>) -> AnyElement {
+        let panel = update_panel(self.state.prefs().locale, &self.update_state);
+        let frame = div()
+            .h(px(ROW_HEIGHT))
+            .w_full()
+            .px_4()
+            .py_1()
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .text_size(px(12.0))
+            .line_height(px(16.0));
+        let rows = hymt2_rows(UPDATE_PANEL_LINES);
+        let Some(row) = rows.get(row_index) else { return frame.into_any_element() };
+        match row {
+            Hymt2Row::Text { .. } => frame
+                .child(div().font_weight(FontWeight::BOLD).child(panel.title))
+                .child(div().text_color(p.dim).whitespace_nowrap().child(panel.current_line))
+                .into_any_element(),
+            Hymt2Row::Actions => {
+                let running = self.update_state == UpdateUiState::Running;
+                let mut button = Button::new("update-check").small().label(panel.button_label);
+                button = match &self.update_hook {
+                    Some(hook) if !running => {
+                        let hook = Rc::clone(hook);
+                        button.on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
+                            this.update_state = UpdateUiState::Running;
+                            hook();
+                            cx.notify();
+                        }))
+                    }
+                    _ => button.disabled(true),
+                };
+                let notice = panel.notice.map(|(text, danger)| {
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(if danger { p.danger } else { p.dim })
+                        .whitespace_nowrap()
+                        .child(text)
+                });
+                frame
+                    .py_0()
+                    .pt(px(2.0))
+                    .border_b_1()
+                    .border_color(p.border)
+                    .child(div().flex().items_center().gap_3().child(button).children(notice))
+                    .into_any_element()
+            }
         }
     }
 

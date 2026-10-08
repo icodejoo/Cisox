@@ -69,3 +69,7 @@ overlay-msg-record-start-failed = 启动录屏失败：{ $arg1 }
 overlay-msg-qr-none = 选区里没找到二维码
 
 overlay-msg-qr-found = 识别到 { $arg1 } 个二维码，内容已复制
+
+overlay-msg-open-link-failed = 无法打开链接：{ $arg1 }
+
+overlay-qr-open-link-hint = 按 O 用浏览器打开链接

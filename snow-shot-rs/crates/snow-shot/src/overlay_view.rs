@@ -450,6 +450,14 @@ pub trait OutputSink {
     /// 把文本写入剪贴板。
     fn copy_text(&mut self, text: &str) -> Result<(), String>;
 
+    /// 用系统默认浏览器打开网页链接；默认不支持。
+    ///
+    /// # 参数
+    /// - `url`：http / https 链接。
+    fn open_url(&mut self, _url: &str) -> Result<(), String> {
+        Err("打开链接功能未接入".to_string())
+    }
+
     /// 把 RGBA 图像快速保存为文件（按配置的目录 / 文件名 / 格式），返回写入的路径。
     fn save_image(&mut self, width: u32, height: u32, rgba: &[u8]) -> Result<PathBuf, String>;
 
@@ -755,6 +763,11 @@ impl OutputSink for SystemOutput {
     /// 写入系统剪贴板（Unicode 文本）。
     fn copy_text(&mut self, text: &str) -> Result<(), String> {
         copy_text_to_clipboard(text)
+    }
+
+    /// 用系统默认浏览器打开链接。
+    fn open_url(&mut self, url: &str) -> Result<(), String> {
+        snow_platform::shell::open_url(url)
     }
 
     /// 快速保存：按配置的目录、文件名模板与格式直接落盘。
@@ -1077,6 +1090,8 @@ pub struct ScreenshotOverlayView {
     locale: String,
     /// OCR 交互状态。
     ocr: OcrUiState,
+    /// 二维码识别结果里第一个网页链接（有则结果面板提供“打开链接”）。
+    qr_link: Option<String>,
     /// 最近一次 OCR 请求序号（过期结果据此丢弃）。
     ocr_serial: u64,
     /// 文字翻译交互状态。
@@ -1196,6 +1211,7 @@ impl ScreenshotOverlayView {
             keymap: OverlayKeymap::default(),
             locale: snow_i18n::FALLBACK_LOCALE.to_string(),
             ocr: OcrUiState::Idle,
+            qr_link: None,
             ocr_serial: 0,
             translate: TranslateUiState::Idle,
             translate_serial: 0,
@@ -1776,6 +1792,9 @@ impl ScreenshotOverlayView {
             ("e", false) if matches!(self.ocr, OcrUiState::Done { ref text, .. } if !text.is_empty()) => {
                 self.open_recognition_window();
                 OverlayOutcome::Stay
+            }
+            ("o", false) if self.qr_link.is_some() && matches!(self.ocr, OcrUiState::Done { .. }) => {
+                self.open_qr_link()
             }
             ("enter", _) if matches!(self.ocr, OcrUiState::Done { .. }) => self.copy_ocr_text_and_close(),
             ("enter", _) if matches!(self.translate, TranslateUiState::Done { .. }) => {
@@ -3438,13 +3457,34 @@ impl ScreenshotOverlayView {
         let copied = self.output.copy_text(&text).is_ok();
         tracing::info!(count = codes.len(), copied, "二维码识别完成");
         let message = self.i18n.tr_with("overlay-msg-qr-found", &Args::new().arg(1, codes.len().to_string()));
+        let link = codes.iter().find_map(|code| snow_platform::shell::web_link(code));
         self.set_ocr_state(OcrUiState::Done { text, boxes: Vec::new(), copied });
+        self.qr_link = link;
         self.status_message = Some(message);
         OverlayOutcome::Stay
     }
 
+    /// 用系统默认浏览器打开二维码里的网页链接；成功后关闭覆盖窗，失败保留窗口并提示。
+    fn open_qr_link(&mut self) -> OverlayOutcome {
+        let Some(url) = self.qr_link.clone() else {
+            return OverlayOutcome::Stay;
+        };
+        match self.output.open_url(&url) {
+            Ok(()) => {
+                tracing::info!("已用默认浏览器打开二维码链接");
+                OverlayOutcome::Close
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "打开二维码链接失败");
+                self.status_message = Some(self.i18n.tr_with("overlay-msg-open-link-failed", &Args::new().arg(1, e)));
+                OverlayOutcome::Stay
+            }
+        }
+    }
+
     /// 切换 OCR 状态，同时刷新底部状态条。
     fn set_ocr_state(&mut self, state: OcrUiState) {
+        self.qr_link = None;
         self.status_message = state.status_text();
         self.ocr = state;
     }
@@ -3453,6 +3493,7 @@ impl ScreenshotOverlayView {
     fn dismiss_ocr(&mut self) {
         self.ocr_serial += 1;
         self.ocr = OcrUiState::Idle;
+        self.qr_link = None;
         self.status_message = None;
     }
 
@@ -3870,6 +3911,9 @@ impl ScreenshotOverlayView {
                 .text_xs();
             for line in lines {
                 panel = panel.child(div().child(line));
+            }
+            if self.qr_link.is_some() {
+                panel = panel.child(div().child(self.i18n.tr("overlay-qr-open-link-hint")));
             }
             parts.push(panel.into_any_element());
         }
@@ -4877,6 +4921,8 @@ mod tests {
         images: Vec<(u32, u32, Vec<u8>)>,
         /// 复制的文本。
         texts: Vec<String>,
+        /// 打开的链接。
+        urls: Vec<String>,
         /// 保存的图像 `(宽, 高)`。
         saved: Vec<(u32, u32)>,
         /// 录屏选区。
@@ -4918,6 +4964,14 @@ mod tests {
                 return Err("boom".into());
             }
             self.rec.borrow_mut().texts.push(text.to_string());
+            Ok(())
+        }
+        /// 记录打开的链接。
+        fn open_url(&mut self, url: &str) -> Result<(), String> {
+            if self.fail {
+                return Err("boom".into());
+            }
+            self.rec.borrow_mut().urls.push(url.to_string());
             Ok(())
         }
         /// 记录保存动作。
@@ -6680,6 +6734,67 @@ mod tests {
         view.finish_ocr(view.ocr_serial, Ok(ocr_result(&["x"])));
         assert!(matches!(view.ocr_state(), OcrUiState::Done { copied: false, .. }));
         assert!(view.status_message.as_deref().is_some_and(|s| s.contains("失败")));
+    }
+
+    /// 构造一个底图为二维码样本的视图，并拖出覆盖整张码的选区。
+    fn view_with_qr(fail: bool) -> (ScreenshotOverlayView, Rc<RefCell<Recorded>>) {
+        let (w, h, data) = crate::qr_decode::test_support::render_sample(6, 4);
+        let frame = FrozenFrame::from_captured(CapturedScreen { width: w, height: h, data }).unwrap();
+        let rec = Rc::new(RefCell::new(Recorded::default()));
+        let sink = RecordingSink { rec: Rc::clone(&rec), fail };
+        let mut view = ScreenshotOverlayView::new(frame, 1.0, PhysicalPoint::new(0, 0), Box::new(sink));
+        drag(&mut view, (2, 2), (w as i32 - 2, h as i32 - 2));
+        (view, rec)
+    }
+
+    /// 二维码内容是网页链接：识别后复制内容、面板出现“打开链接”提示，按 O 交给系统浏览器并关闭覆盖窗。
+    #[test]
+    fn qr_link_can_be_opened() {
+        let sample = crate::qr_decode::test_support::SAMPLE_TEXT;
+        let (mut view, rec) = view_with_qr(false);
+        assert_eq!(view.recognize_qr_code(), OverlayOutcome::Stay);
+        assert_eq!(rec.borrow().texts, vec![sample.to_string()]);
+        assert!(matches!(view.ocr_state(), OcrUiState::Done { text, copied: true, .. } if text == sample));
+        assert_eq!(view.qr_link.as_deref(), Some(sample));
+        assert_eq!(view.handle_key("o", false, false), OverlayOutcome::Close);
+        assert_eq!(rec.borrow().urls, vec![sample.to_string()]);
+    }
+
+    /// 打开链接失败：覆盖窗保留并提示原因，链接仍可重试。
+    #[test]
+    fn qr_link_open_failure_keeps_overlay() {
+        let (mut view, rec) = view_with_qr(false);
+        view.recognize_qr_code();
+        // 复制成功后再让输出通道失败：直接换成会失败的通道
+        let fail_rec = Rc::new(RefCell::new(Recorded::default()));
+        view.output = Box::new(RecordingSink { rec: Rc::clone(&fail_rec), fail: true });
+        assert_eq!(view.handle_key("o", false, false), OverlayOutcome::Stay);
+        assert!(view.status_message.as_deref().is_some_and(|s| s.contains("boom")));
+        assert!(view.qr_link.is_some());
+        assert!(rec.borrow().urls.is_empty() && fail_rec.borrow().urls.is_empty());
+    }
+
+    /// 没有二维码链接时按 O 不会打开任何东西：普通 OCR 结果、识别不到码、退出 OCR 界面后都一样。
+    #[test]
+    fn open_link_key_needs_a_qr_link() {
+        let (mut view, rec) = view_with_qr(false);
+        // 普通文字识别结果里即使有链接也不提供打开
+        view.ocr = OcrUiState::Done { text: "https://a.b".into(), boxes: Vec::new(), copied: true };
+        view.handle_key("o", false, false);
+        assert!(rec.borrow().urls.is_empty());
+        // 识别到码后退出 OCR 界面，链接被清掉
+        view.recognize_qr_code();
+        assert!(view.qr_link.is_some());
+        view.dismiss_ocr();
+        assert!(view.qr_link.is_none());
+        view.handle_key("o", false, false);
+        assert!(rec.borrow().urls.is_empty());
+        // 选区里没有码：失败提示，没有链接
+        let (mut blank, _) = view_with(100, 80, 1.0, false);
+        drag(&mut blank, (5, 5), (44, 34));
+        blank.recognize_qr_code();
+        assert!(matches!(blank.ocr_state(), OcrUiState::Failed { .. }));
+        assert!(blank.qr_link.is_none());
     }
 
     /// 失败分支：缺资产提示可下载，其它失败给出各自文案；提交失败也是明确提示而不是静默。

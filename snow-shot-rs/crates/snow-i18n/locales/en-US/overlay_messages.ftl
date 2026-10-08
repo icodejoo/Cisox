@@ -69,3 +69,7 @@ overlay-msg-record-start-failed = Could not start recording: { $arg1 }
 overlay-msg-qr-none = No QR code found in the selection.
 
 overlay-msg-qr-found = Found { $arg1 } QR code(s); content copied.
+
+overlay-msg-open-link-failed = Could not open the link: { $arg1 }
+
+overlay-qr-open-link-hint = O to open the link in the browser

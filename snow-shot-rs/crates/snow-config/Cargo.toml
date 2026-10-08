@@ -9,6 +9,7 @@ rust-version.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 snow-app-core = { path = "../snow-app-core" }
+snow-net = { path = "../snow-net" }
 
 [lints]
 workspace = true
