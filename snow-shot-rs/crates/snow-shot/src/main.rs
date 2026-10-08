@@ -309,6 +309,10 @@ fn run_primary(ctx: &AppBootstrap, guard: &SingleInstanceGuard) -> ExitCode {
         });
         // 启动即恢复上次遗留的贴图窗口
         restore_inbox.push(app_runtime::UiEvent::RestorePins);
+        // 后台自动检查更新（按 updates/mode 与最小间隔，不阻塞启动）
+        restore_inbox.push(app_runtime::UiEvent::AutoUpdateCheck);
+        // 模型热启动：开启时后台预加载 OCR 模型
+        restore_inbox.push(app_runtime::UiEvent::OcrWarmUp);
     });
     tracing::info!("event loop ended");
     ExitCode::SUCCESS
