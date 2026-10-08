@@ -1,10 +1,39 @@
-# Cisox 进度交接（2026-10-03 暂停点；2026-10-08 收口见 §0.0）
+# Cisox 进度交接（2026-10-03 暂停点；2026-10-09 收口见 §0.0）
 
 > 本文记录 2026-10-03 暂停时的真实状态与续做入口。方案主文档：`docs/cisox-gpui-migration-plan.md`。
 > **功能对齐程度以 [`research/qt-parity-audit.md`](research/qt-parity-audit.md)（2026-10-03，读代码得出）为准**；方案 P2~P7 与旧验收报告里的「已完成」没按现状重核，别直接引用。
 > 最新待办清单在 §5.1；§5 及之前的清单是 09-29 旧稿，仍有效的条目已在 §5 开头标出。
 
-## 0.0 2026-10-08 收口（最新，先读这里）
+## 0.0 2026-10-09 收口（最新，先读这里）
+
+**状态**：全部已合入 `main`（以 `git log` 为准）；合并后 `snow-shot` 整个 bin 986 个测试通过，相关 crate `clippy -D warnings`、`workspace-guard`、i18n `check` 与 `extract --strict-refs`（引用 397 处、缺失 0）通过。均为离屏验证，**新做的界面都没有真机点过**。
+
+**本轮落地（详见审计表对应行，状态多为 🟡）**
+- **聚光灯 / 水印**：装饰层 pass（`snow-canvas-raster/src/decoration.rs`，0 新依赖，预览与导出共用）+ 工具栏入口 + 设置面板（模板、字体族、取色器、DPR 换算）。旧版黄金对照没做（本机没有旧版渲染器基线）。
+- **A06 配置归档**：导出 / 导入（读存储与 deflate，写存储），导出可选是否带密钥。
+- **A18 主窗口**：侧栏导航、内嵌设置页与翻译页、窗口位置记忆、关于页。自绘标题栏不做（GPUI 无边框窗口需自补拖动区与缩放，只能真机验证）。
+- **G07 翻译页**：独立窗口 + 主窗口内嵌，历史列表（50 条）、防抖自动翻译（默认关）。流式输出不做（后端协议整段返回）。
+- **G04**：表格识别（官方 SLANet_plus，Ctrl+X / 工具栏）；公式识别（RapidLaTeXOCR，**用户自行下载模型、程序不内置不托管不下载**，设置 `screenshot_conversion/latex_model_dir`，Ctrl+L / 工具栏）；Markdown / HTML 仅未配置引导。
+- **A12 MCP**：一、二期，已实现 12 / 101 个 tool，控制类默认拒绝，授权域开关；桥接进程 M4 未做。
+- **D12 自动滤镜（P1）**：复用仓库内 `visual-region-detector`（path 依赖，无新第三方包）；**智能擦除 P2 / P3 未做**，保持占位。选型见 [research/d12-auto-filter-erase-selection.md](research/d12-auto-filter-erase-selection.md)。
+- **A09 / A05 / A15**：更新下载续传与 `updates/mode`；录屏 5 个键（清晰度、动图清晰度、编码器、预设、动图循环）经协议 `QualityRequest` 接通；未消费键剩 **22 个**；覆盖窗工具栏文案与放大镜提示走 `.ftl`。
+- **发布前**：STT 13 个模型包 sha256 固定、许可核对（两个 paraformer 仍 `unverified`）、CI `workers` 任务覆盖 `snow-table` / `snow-stt`。
+
+**用户已批准的依赖 / 结构决定（2026-10-08）**：`windows` 的 `Win32_Security_Cryptography` 特性；独立 workspace `tools/snow-table`；`miniz_oxide`（仅 `snow-config` 读 deflate 归档）；`rqrr`；`snow-shot` 对仓库内 `visual-region-detector` 与 `snow-draw-engine-document` 的 path 依赖。新增独立 workspace `tools/snow-latex`（沿用 snow-table 的 ort 版本，无新第三方 crate）。
+
+**待用户拍板**
+1. `screen_recording/capture_toolbar_in_recording` 的语义：录制窗目前一律排除在捕获之外，该键默认 `true`，照字面做会让成片带控制条。
+2. `updates/mode = download` 目前与 `check` 一样只检查不自动下载（旧版会自动下载）；要不要自动下载。
+
+**仍未做 / 已知缺口**
+- 智能擦除（D12 P2 / P3：Lab 多尺度 PatchMatch 自写，零新依赖）；MCP 余下 89 个 tool 与桥接进程；G04 Markdown / HTML 调用。
+- 打包：`snow-table.exe` / `snow-latex.exe` / `snow-stt.exe` 入安装包（Rust 版打包脚本尚不存在）；`snow-stt` CI 里没有 test。
+- 聚光灯 / 水印黄金对照、水印模板删除与弹窗命名；录屏默认软件编码预设由 superfast 变为 veryfast（CPU 略高）。
+- 真机验证清单：本轮所有新界面（设置内嵌页、翻译窗口、检查更新、归档对话框、表格 / 公式 / 自动滤镜 / 水印面板）、录屏控制条键盘焦点、G02 结果窗渲染、多屏混合 DPI 与负原点副屏；鼠标钩子全流程这台机器测不了。
+
+**协作备忘**：并发子代理用独立 worktree + 独立 `CARGO_TARGET_DIR`；合并多分支时冲突集中在 `overlay_view.rs`、`settings_view.rs`、`toolbar.rs`、`extensions.rs`（`EXTENSION_ENTRY_COUNT`）、两份 `settings_items.ftl` 与审计表。录屏 worker 构建不能直接用 `scripts/build-snow-recorder.ps1`（它会强制覆盖 `CARGO_TARGET_DIR`），FFmpeg 实际目录是 `.tools/vcpkg/installed/static-nox265/x64-windows-static`。
+
+## 0.1 2026-10-08 收口（旧一轮，数字以 §0.0 为准）
 
 **状态**：2026-10-07/08 的改动已全部提交（最新 `b3011642`）。
 
@@ -22,7 +51,7 @@
 2. G04 表格 / LaTeX / Markdown：**表格已做**（官方 SLANet_plus ONNX，`tools/snow-table` 工作进程 + 纯函数管线，Ctrl+X）；Markdown / HTML 仅做未配置引导；公式识别已做（RapidLaTeXOCR，用户自行下载模型、不内置，`tools/snow-latex`，覆盖窗 Ctrl+L）；`snow-table.exe` 待纳入安装包。详见 research/qt-parity-audit.md G04。
 3. A09 自动更新：配置键 `updates/manifest_url`（默认空）+ 地址解析已做；**设置页「更新」分组有“检查更新”入口，发现新版本后显示更新说明并可“下载”到数据目录、校验清单里的 `sha256`、提示“打开所在目录”，不自动安装**；下载支持 `.part` 断点续传，启动后按 `updates/mode`（手动 / 检查）在后台自动检查（间隔至少一天，只在托盘提示新版本）（清单格式 `{"version","url","notes","sha256"}`，细节见审计 A09）。
 4. A10 代理：`network/proxy` 支持 `none` / `system`（环境变量）或直接填地址（`http` / `https` / `socks5` / `socks5h`），转成 curl `--proxy`。
-5. A12 MCP：第一期（M0 骨架，5/101 个 tool）已实现，余下分期见 [design/mcp-subsystem.md](design/mcp-subsystem.md) §8。
+5. A12 MCP：第一期（M0 骨架）与二期已实现（合计 12/101 个 tool，见 §0.0），余下分期见 [design/mcp-subsystem.md](design/mcp-subsystem.md) §8。
 6. 托盘默认菜单：维持 Qt 的 12 项默认，不改。
 
 **用户已批准的依赖 / 结构决定（2026-10-08）**
@@ -31,7 +60,7 @@
 
 **STT 清单收尾（2026-10-08）**：13 个模型压缩包 sha256 已全部固定；许可证核对见 `stt-model-manifest.json` 的 `license_source` 与 `licenses/runtime-components.md`（x-asr 三款 Apache-2.0、SenseVoice 为 FunASR 许可，paraformer-zh-small 与 trilingual 仍 `unverified`）。`collect-third-party-licenses.ps1` 新增 `-ExtraNotices` 参数承载非 Cargo 组件声明；Rust 版安装包脚本尚不存在（`package-snow-shot.ps1` 仍是 Qt 版），`snow-table.exe` / `snow-stt.exe` 入包待该脚本出现后接入。
 
-**技术上还能继续、但量大的**：聚光灯 / 水印（要先让 `snow-canvas-raster` 会画图层级配置）、自动滤镜 / 智能擦除 D12（OpenCV 依赖）、翻译页 G07、主窗口 A18、配置归档 A06、A15 剩余（`ocr_client`、`ocr_download`、`stitch_service`、`translate_flow`、`stt_download`、`scroll_view`、`pinned_shared`、`recording/*` 等的错误串与下载文案，需连带重构错误类型）、剩余 78 个设置键、各项真机验证。
+**技术上还能继续、但量大的**：见 §0.0「仍未做 / 已知缺口」（本段 2026-10-08 的清单已大部分完成，不再列）。
 
 **构建环境补充**：worker 构建需要 `libclang.dll`（已用 PyPI `libclang` 轮子里的 DLL 放在 `.tools/llvm/bin/`，被 gitignore）；`sccache` 在 vcvars 环境下会启动失败，需 `RUSTC_WRAPPER=""`；E: 盘慢，建议把 `CARGO_TARGET_DIR` 指到 C: 盘。
 
