@@ -307,3 +307,5 @@ setting-dictation-translate-enabled-desc = Shows a translation under each senten
 setting-dictation-translate-target-desc = Auto: Chinese is translated to English, anything else to Simplified Chinese
 setting-screen-recording-enable-microphone-desc = Mix the microphone into MP4 recordings
 setting-screen-recording-enable-system-audio-desc = Mix system sound into MP4 recordings
+setting-updates-manifest-url = Update manifest URL
+setting-updates-manifest-url-desc = Where to check for new versions; empty means not configured and update checks stay off

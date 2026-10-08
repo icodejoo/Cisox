@@ -65,3 +65,7 @@ overlay-msg-color-copied = 已复制颜色 { $arg1 }
 overlay-msg-color-copy-failed = 复制颜色失败：{ $arg1 }
 
 overlay-msg-record-start-failed = 启动录屏失败：{ $arg1 }
+
+overlay-msg-qr-none = 选区里没找到二维码
+
+overlay-msg-qr-found = 识别到 { $arg1 } 个二维码，内容已复制

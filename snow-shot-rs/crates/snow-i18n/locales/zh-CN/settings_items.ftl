@@ -307,3 +307,5 @@ setting-dictation-translate-enabled-desc = 每句定稿后翻译，显示在原�
 setting-dictation-translate-target-desc = 自动：中文译成英文，其它语言译成简体中文
 setting-screen-recording-enable-microphone-desc = 把麦克风录进 MP4 视频
 setting-screen-recording-enable-system-audio-desc = 把系统播放的声音录进 MP4 视频
+setting-updates-manifest-url = 更新清单地址
+setting-updates-manifest-url-desc = 检查新版本的地址；留空表示未配置，不会检查更新

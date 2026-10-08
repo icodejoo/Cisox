@@ -21,6 +21,8 @@ const PART_SUFFIX: &str = ".part";
 const CURL_CONNECT_TIMEOUT: &str = "20";
 /// curl 失败重试次数。
 const CURL_RETRIES: &str = "3";
+/// 追加给 curl 的代理参数（由 `network/proxy` 配置算出，空表示不走代理）。
+static CURL_PROXY_ARGS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 /// 完成标记的内容。
 const MARKER_CONTENT: &str = "{\"schema\":1}";
 
@@ -187,15 +189,27 @@ pub fn verify_file(path: &Path, file: &AssetFile) -> Result<(), String> {
     Ok(())
 }
 
+/// 设置此后所有 curl 下载追加的代理参数。
+///
+/// # 参数
+/// - `args`：形如 `["--proxy", 地址]`；传空表示不走代理。
+pub fn set_curl_proxy_args(args: Vec<String>) {
+    if let Ok(mut guard) = CURL_PROXY_ARGS.lock() {
+        *guard = args;
+    }
+}
+
 /// 构造 curl 下载命令（写 `part`，支持续传、重试，带 `--ssl-no-revoke`）；OCR 与语音模型下载共用。
 pub(crate) fn curl_command(url: &str, part: &Path) -> Command {
     let mut command = quiet_command(&system_tool("curl.exe"));
     command
         .args(["--fail", "--location", "--silent", "--show-error", "--ssl-no-revoke"])
         .args(["--connect-timeout", CURL_CONNECT_TIMEOUT])
-        .args(["--retry", CURL_RETRIES, "-C", "-", "-o"])
-        .arg(part)
-        .arg(url);
+        .args(["--retry", CURL_RETRIES, "-C", "-"]);
+    if let Ok(guard) = CURL_PROXY_ARGS.lock() {
+        command.args(guard.iter());
+    }
+    command.arg("-o").arg(part).arg(url);
     command
 }
 
@@ -340,6 +354,24 @@ pub fn download_missing(
 
 #[cfg(test)]
 mod tests {
+    /// 代理参数追加到 curl 命令里：设置后出现在 `-o` 之前，清空后消失。
+    #[test]
+    fn curl_command_appends_proxy_args() {
+        let args_of = || {
+            super::curl_command("https://a.b/x", std::path::Path::new("x.part"))
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        };
+        super::set_curl_proxy_args(vec!["--proxy".into(), "http://127.0.0.1:7890".into()]);
+        let with = args_of();
+        let at = with.iter().position(|a| a == "--proxy").expect("应带 --proxy");
+        assert_eq!(with[at + 1], "http://127.0.0.1:7890");
+        assert!(at < with.iter().position(|a| a == "-o").unwrap());
+        super::set_curl_proxy_args(Vec::new());
+        assert!(!args_of().iter().any(|a| a == "--proxy"));
+    }
+
     use super::*;
     use crate::ocr_assets::{ModelSpec, RuntimeSpec};
 

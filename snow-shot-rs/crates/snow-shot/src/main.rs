@@ -35,6 +35,7 @@ pub mod fullscreen_gate;
 pub mod history_store;
 pub mod history_view;
 pub mod mouse_gesture;
+pub mod net_settings;
 pub mod ocr_assets;
 pub mod ocr_backend;
 pub mod ocr_client;
@@ -82,6 +83,7 @@ pub mod translate_settings;
 pub mod desktop_frames;
 pub mod history_nav;
 pub mod previous_selection;
+pub mod qr_decode;
 pub mod recognition_view;
 pub mod region_select;
 pub mod window_pick;
@@ -270,6 +272,7 @@ fn run_primary(ctx: &AppBootstrap, guard: &SingleInstanceGuard) -> ExitCode {
         let restore_inbox = inbox.clone();
         let config = app_runtime::open_shared_config(&data_root);
         system_settings::apply(config.borrow().document());
+        net_settings::apply_proxy(config.borrow().document());
         let (tray, hotkeys, hotkey_handles) =
             app_runtime::start_services(&caps, &bus, &inbox, config.borrow().document());
         let mut state = app_runtime::AppState::new(

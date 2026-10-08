@@ -1893,6 +1893,8 @@ impl ScreenshotOverlayView {
                 self.toggle_coordinate_mode();
                 OverlayOutcome::Stay
             }
+            OverlayKeyAction::QrCodeRecognition if selecting_mode => OverlayOutcome::Stay,
+            OverlayKeyAction::QrCodeRecognition => self.recognize_qr_code(),
             OverlayKeyAction::Unimplemented(config_key) => {
                 self.show_not_implemented(config_key);
                 OverlayOutcome::Stay
@@ -3404,6 +3406,40 @@ impl ScreenshotOverlayView {
                 });
             }
         }
+        OverlayOutcome::Stay
+    }
+
+    /// 对选区做二维码识别：同步解码，成功则复制内容并复用文字结果面板展示，找不到码给出提示。
+    fn recognize_qr_code(&mut self) -> OverlayOutcome {
+        if !self.has_committed_selection() {
+            self.status_message = Some(self.i18n.tr("overlay-msg-select-area-first"));
+            return OverlayOutcome::Stay;
+        }
+        if self.ocr.is_busy() || self.translate.is_busy() {
+            return OverlayOutcome::Stay;
+        }
+        if self.translate.is_visible() {
+            self.dismiss_translate();
+        }
+        let Some((w, h, rgba)) = self.selection_image() else {
+            self.status_message = Some(self.i18n.tr("overlay-msg-selection-invalid"));
+            return OverlayOutcome::Stay;
+        };
+        let codes = crate::qr_decode::decode_qr_codes(w, h, &rgba);
+        if codes.is_empty() {
+            self.set_ocr_state(OcrUiState::Failed {
+                message: self.i18n.tr("overlay-msg-qr-none"),
+                can_download: false,
+            });
+            return OverlayOutcome::Stay;
+        }
+        let text = codes.join("
+");
+        let copied = self.output.copy_text(&text).is_ok();
+        tracing::info!(count = codes.len(), copied, "二维码识别完成");
+        let message = self.i18n.tr_with("overlay-msg-qr-found", &Args::new().arg(1, codes.len().to_string()));
+        self.set_ocr_state(OcrUiState::Done { text, boxes: Vec::new(), copied });
+        self.status_message = Some(message);
         OverlayOutcome::Stay
     }
 

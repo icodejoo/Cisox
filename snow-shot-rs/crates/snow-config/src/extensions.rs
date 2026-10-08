@@ -8,7 +8,7 @@ use crate::schema::{IntRange, SchemaEntry, ValueKind, entry};
 use serde_json::json;
 
 /// 扩展项数量（`schema::entries()` 在原 238 项之后追加的条目数）。
-pub const EXTENSION_ENTRY_COUNT: usize = 26;
+pub const EXTENSION_ENTRY_COUNT: usize = 27;
 
 /// 翻译后端：`local` 本地 NMT worker，`openai` OpenAI 兼容通道。
 pub const KEY_TRANSLATION_BACKEND: &str = "screenshot_translation/backend";
@@ -27,6 +27,9 @@ pub const KEY_LOCAL_LOW_MEMORY: &str = "screenshot_translation/local_low_memory"
 pub const KEY_LOCAL_ROUTE_MODE: &str = "screenshot_translation/local_route_mode";
 /// 本地最多同时常驻内存的翻译包个数（要加载新包时先卸载空闲的旧包）。
 pub const KEY_LOCAL_MAX_RESIDENT: &str = "screenshot_translation/local_max_resident_models";
+
+/// 更新清单地址；空串表示未配置（不硬编码任何端点，检查更新时给出“未配置”提示）。
+pub const KEY_UPDATE_MANIFEST_URL: &str = "updates/manifest_url";
 
 /// 输入框翻译浮窗的全局热键（默认不绑定，未绑定时不注册）。
 pub const KEY_TRANSLATE_INPUT_HOTKEY: &str = "global_shortcuts/translate_input";
@@ -260,6 +263,7 @@ pub(crate) fn extension_entries() -> Vec<SchemaEntry> {
             &[],
             None,
         ),
+        entry(KEY_UPDATE_MANIFEST_URL, json!(""), ValueKind::String, None, &[], None),
         entry(KEY_OCR_BACKEND, json!(default_ocr_backend()), ValueKind::String, None, OCR_BACKEND_VALUES, None),
         entry(KEY_TRANSLATE_INPUT_HOTKEY, json!([]), ValueKind::StringList, None, &[], Some(2)),
         entry(KEY_DICTATION_TOGGLE_HOTKEY, json!([]), ValueKind::StringList, None, &[], Some(2)),
@@ -314,6 +318,7 @@ mod tests {
             assert!(
                 item.key.starts_with("screenshot_translation/")
                     || item.key == KEY_OCR_BACKEND
+                    || item.key == KEY_UPDATE_MANIFEST_URL
                     || item.key == KEY_TRANSLATE_INPUT_HOTKEY
                     || item.key == KEY_DICTATION_TOGGLE_HOTKEY
                     || item.key == KEY_DICTATION_HOLD_HOTKEY

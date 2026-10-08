@@ -104,6 +104,8 @@ pub enum OverlayKeyAction {
     Recapture,
     /// 切换放大镜坐标显示：全局（桌面）/ 相对。
     ToggleCoordinateMode,
+    /// 二维码识别：对选区解码，结果复制到剪贴板并显示在结果面板。
+    QrCodeRecognition,
     /// 尚未实现：携带配置键，用来取动作名给出提示。
     Unimplemented(&'static str),
 }
@@ -190,7 +192,7 @@ const SCREENSHOT_KEYS: &[(&str, OverlayKeyAction)] = &[
     ("screenshot_shortcuts/text_translation", OverlayKeyAction::TextTranslation),
     ("screenshot_shortcuts/scrolling_screenshot", OverlayKeyAction::ScrollingScreenshot),
     ("screenshot_shortcuts/table_recognition", OverlayKeyAction::Unimplemented("screenshot_shortcuts/table_recognition")),
-    ("screenshot_shortcuts/qr_code_recognition", OverlayKeyAction::Unimplemented("screenshot_shortcuts/qr_code_recognition")),
+    ("screenshot_shortcuts/qr_code_recognition", OverlayKeyAction::QrCodeRecognition),
     ("screenshot_shortcuts/undo", OverlayKeyAction::Undo),
     ("screenshot_shortcuts/redo", OverlayKeyAction::Redo),
     ("screenshot_shortcuts/copy_color", OverlayKeyAction::CopyColor),

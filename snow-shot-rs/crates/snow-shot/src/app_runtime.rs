@@ -3190,6 +3190,10 @@ fn on_config_changed(cx: &mut ShellContext, state: &mut AppState, key: &str, pre
         crate::system_settings::apply(state.config.borrow().document());
         return;
     }
+    if key == crate::net_settings::KEY_PROXY {
+        crate::net_settings::apply_proxy(state.config.borrow().document());
+        return;
+    }
     let Some(config_key) = hotkey_config_key(key) else {
         if key.starts_with("global_shortcuts/") {
             tracing::info!(key, "该全局快捷键的动作尚未接线，配置已保存但不会注册热键");
