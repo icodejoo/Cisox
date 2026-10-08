@@ -6,7 +6,7 @@
 //! 坐标约定：选区与鼠标坐标均为“底图像素坐标”（物理像素，原点在覆盖窗左上角）；
 //! 绘制时统一除以窗口缩放比换算成 GPUI 的逻辑像素。
 
-use crate::annotation::{AnnotationLayer, LayerUpdate, TileImage};
+use crate::annotation::{AnnotationLayer, FilterOverrides, LayerUpdate, TileImage};
 use crate::annotation_style::{
     ArrowheadChoice, FONT_PRESETS, PALETTE, Rgba, ToolStyle, ToolStyleStore, WIDTH_PRESETS,
     config_key, nearest_index, panel_placement, style_fields,
@@ -200,6 +200,10 @@ const BENCH_TEXT: &str = "Snow Shot 标注文字 Text 12345";
 const REMEMBER_TOOL_KEY: &str = "drawing/remember_last_used_tool";
 /// 上次使用的绘图工具（工具栏项 id）配置键。
 const LAST_TOOL_KEY: &str = "screenshot_toolbar/last_drawing_tool";
+/// 矩形滤镜（马赛克 / 模糊）样式配置键。
+const FILTER_RECTANGLE_STYLE_KEY: &str = "drawing/rectangle_filter_style";
+/// 画笔滤镜样式配置键（只取其强度作为矩形滤镜强度的后备）。
+const FILTER_PEN_STYLE_KEY: &str = "drawing/pen_filter_style";
 /// 文字识别完成后的自动动作配置键。
 const OCR_AUTO_ACTION_KEY: &str = "screenshot/auto_execute_after_text_recognition";
 /// 框选完成后自动识别二维码的配置键。
@@ -2573,6 +2577,7 @@ impl ScreenshotOverlayView {
                 self.tool = next;
                 self.status_message = None;
                 self.apply_stored_style(next);
+                self.apply_stored_filter(next);
                 self.apply_stored_decoration(next);
                 self.remember_last_tool(next);
             }
@@ -2747,6 +2752,29 @@ impl ScreenshotOverlayView {
     /// - `tool`：工具栏工具。
     pub fn tool_style(&self, tool: AnnotationTool) -> ToolStyle {
         self.styles.style(tool)
+    }
+
+    /// 把配置里的滤镜样式（强度 / 不透明度 / 描边宽度）下发给标注层（只对马赛克 / 模糊生效）。
+    ///
+    /// # 参数
+    /// - `tool`：刚选中的工具。
+    fn apply_stored_filter(&mut self, tool: AnnotationTool) {
+        if !matches!(tool, AnnotationTool::Mosaic | AnnotationTool::Blur) {
+            return;
+        }
+        let (Some(config), Some(layer)) = (&self.style_config, self.annotations.as_mut()) else {
+            return;
+        };
+        let overrides = {
+            let store = config.borrow();
+            FilterOverrides::from_config(
+                &store.value(FILTER_RECTANGLE_STYLE_KEY),
+                &store.value(FILTER_PEN_STYLE_KEY),
+            )
+        };
+        if let Err(e) = layer.apply_filter_overrides(tool, &overrides) {
+            tracing::warn!(error = %e, "应用滤镜样式配置失败");
+        }
     }
 
     /// 把工具已记忆的样式下发给标注层（切换工具时调用；没有样式的工具忽略）。

@@ -575,6 +575,12 @@ pub enum UiEvent {
     ),
     /// 检查更新结束（未本地化的结果）。
     UpdateCheckFinished(crate::net_settings::UpdateCheckOutcome),
+    /// 启动后的自动检查更新请求（按 `updates/mode` 与最小间隔决定是否真查）。
+    AutoUpdateCheck,
+    /// 启动后的 OCR 模型预加载请求（`model_hot_start` 与常驻进程同时开启才执行）。
+    OcrWarmUp,
+    /// 自动检查结束：只在有新版本时提示，失败只记日志。
+    AutoUpdateFinished(crate::net_settings::UpdateCheckOutcome),
     /// 快捷动作（来自全局热键 / 总线）。
     QuickAction(QuickAction),
     /// 延迟截图的倒计时到点（携带倒计时序号，过期序号会被丢弃）。
@@ -3246,6 +3252,57 @@ fn start_update_check(state: &AppState) {
     }
 }
 
+/// 启动时的自动检查更新：策略 / 间隔 / 地址都满足才起后台线程；先记录检查时间，失败也按间隔节流。
+///
+/// # 参数
+/// - `state`：运行时状态。
+fn start_auto_update_check(state: &AppState) {
+    let now = crate::net_settings::unix_now();
+    let Some(url) = crate::net_settings::auto_check_target(
+        state.config.borrow().document(),
+        &state.data_root,
+        now,
+    ) else {
+        return;
+    };
+    crate::net_settings::write_last_check(&state.data_root, now);
+    let inbox = state.inbox.clone();
+    let spawned = std::thread::Builder::new()
+        .name("snow-update-auto".into())
+        .spawn(move || {
+            let outcome =
+                crate::net_settings::run_update_check(&url, crate::net_settings::APP_VERSION);
+            inbox.push(UiEvent::AutoUpdateFinished(outcome));
+        });
+    if let Err(e) = spawned {
+        tracing::warn!(error = %e, "启动自动检查更新线程失败");
+    }
+}
+
+/// 模型热启动：配置开启时在后台线程预加载 OCR 模型；失败（如组件未下载）只记日志。
+///
+/// # 参数
+/// - `state`：运行时状态。
+fn start_ocr_warm_up(state: &AppState) {
+    let config = {
+        let store = state.config.borrow();
+        if !crate::ocr_service::hot_start_enabled(store.document()) {
+            return;
+        }
+        OcrRequestConfig::from_document(store.document())
+    };
+    let ocr = state.ocr.clone();
+    let spawned = std::thread::Builder::new()
+        .name("snow-ocr-warm".into())
+        .spawn(move || match ocr.warm_up(&config) {
+            Ok(()) => tracing::info!("OCR 模型已预加载"),
+            Err(e) => tracing::info!(error = ?e, "OCR 模型预加载跳过"),
+        });
+    if let Err(e) = spawned {
+        tracing::warn!(error = %e, "启动 OCR 预加载线程失败");
+    }
+}
+
 /// 启动覆盖窗性能基准：约 60Hz 驱动模拟框选（或指定工具的标注绘制），结束后关闭窗口（探针汇总写入日志）。
 ///
 /// 这是直接驱动视图状态，不经过操作系统输入，不属于输入模拟。
@@ -5270,6 +5327,17 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
             let ui_state = crate::net_settings::update_outcome_state(&outcome, locale);
             tracing::info!(?outcome, "检查更新结束");
             publish_update_state(state, cx, ui_state);
+        }
+        UiEvent::AutoUpdateCheck => start_auto_update_check(state),
+        UiEvent::OcrWarmUp => start_ocr_warm_up(state),
+        UiEvent::AutoUpdateFinished(outcome) => {
+            tracing::info!(?outcome, "自动检查更新结束");
+            let locale = ui_prefs_from_document(state.config.borrow().document()).locale;
+            if let Some(text) = crate::net_settings::auto_check_notice(&outcome, locale) {
+                show_notice(state, &text);
+                let ui_state = crate::net_settings::update_outcome_state(&outcome, locale);
+                publish_update_state(state, cx, ui_state);
+            }
         }
         UiEvent::SttDownloadRequested { model_id, cancel } => {
             spawn_stt_download(state, model_id, cancel)

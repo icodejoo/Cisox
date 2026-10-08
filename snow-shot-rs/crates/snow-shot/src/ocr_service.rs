@@ -25,6 +25,8 @@ pub const KEY_DIRECT_ML: &str = "text_recognition/direct_ml_acceleration";
 pub const KEY_RESIZE_POLICY: &str = "text_recognition/detector_resize_policy";
 /// 配置键：常驻进程（开启后不做空闲退出）。
 pub const KEY_RESIDENT: &str = "text_recognition/resident_process";
+/// 配置键：模型热启动（常驻进程开启时，启动即预加载模型）。
+pub const KEY_HOT_START: &str = "text_recognition/model_hot_start";
 /// 默认空闲退出时间。
 pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 /// 检测缩放策略：取较大边（与上游默认一致）。
@@ -100,6 +102,15 @@ impl OcrRequestConfig {
             resident: flag(KEY_RESIDENT),
         }
     }
+}
+
+/// 启动时是否应预加载 OCR 模型：与旧版一致，只有「常驻进程」与「模型热启动」同时开启才生效。
+///
+/// # 参数
+/// - `document`：配置文档。
+pub fn hot_start_enabled(document: &ConfigDocument) -> bool {
+    let flag = |key: &str| document.value(key).as_bool().unwrap_or(false);
+    flag(KEY_RESIDENT) && flag(KEY_HOT_START)
 }
 
 /// worker 的拉起方式（便于测试注入假 worker）。
@@ -195,6 +206,21 @@ pub fn lines_to_boxes(lines: &[OcrLine], scale: (f32, f32), bounds: (u32, u32)) 
             }
         })
         .collect()
+}
+
+/// 由请求配置与已就绪资产生成 worker 会话配置。
+///
+/// # 参数
+/// - `config`：请求配置。
+/// - `assets`：已就绪的资产。
+fn session_for(config: &OcrRequestConfig, assets: &OcrAssets) -> SessionConfig {
+    SessionConfig {
+        directml: config.directml,
+        resize_policy: config.resize_policy,
+        detector: assets.detector.clone(),
+        recognizer: assets.recognizer.clone(),
+        dictionary: assets.dictionary.clone(),
+    }
 }
 
 /// OCR 识别服务。
@@ -339,13 +365,7 @@ impl OcrService {
                 (width as f32 / sw as f32, height as f32 / sh as f32),
             )
         };
-        let session = SessionConfig {
-            directml: config.directml,
-            resize_policy: config.resize_policy,
-            detector: assets.detector.clone(),
-            recognizer: assets.recognizer.clone(),
-            dictionary: assets.dictionary.clone(),
-        };
+        let session = session_for(config, &assets);
         let lines = self.run_with_worker(&assets, &session, config.resident, sw, sh, image)?;
         let boxes = lines_to_boxes(&lines, scale, (width, height));
         let full_text = boxes
@@ -360,6 +380,44 @@ impl OcrService {
             table: None,
             latex: None,
         })
+    }
+
+    /// 预加载模型：拉起 worker 并准备会话，但不识别任何图像（模型热启动用，阻塞，须在后台线程调用）。
+    ///
+    /// # 参数
+    /// - `config`：识别配置（决定模型与加速方式）。
+    ///
+    /// # 返回
+    /// 资产缺失或进程失败时返回错误；成功后 worker 常驻，首次识别不再等待模型加载。
+    ///
+    /// ```ignore
+    /// service.warm_up(&OcrRequestConfig::from_document(doc))?;
+    /// ```
+    pub fn warm_up(&self, config: &OcrRequestConfig) -> Result<(), OcrError> {
+        let assets = self.resolve(&config.model_kind)?;
+        let session = session_for(config, &assets);
+        let mut guard = lock(&self.inner);
+        if guard.worker.is_none() {
+            guard.worker = Some(self.launcher.launch(&assets)?);
+        }
+        let prepared = match guard.worker.as_mut() {
+            Some(worker) => worker.prepare(&session),
+            None => Err(OcrError::ProcessDied(String::new())),
+        };
+        guard.last_used = Instant::now();
+        if let Err(e) = prepared {
+            if e.is_fatal_for_worker()
+                && let Some(mut dead) = guard.worker.take()
+            {
+                dead.shutdown();
+            }
+            return Err(e);
+        }
+        if !config.resident && !guard.monitor_running {
+            guard.monitor_running = true;
+            spawn_idle_monitor(Arc::clone(&self.inner), self.idle_timeout);
+        }
+        Ok(())
     }
 
     /// 取（或拉起）worker 并识别；复用的 worker 中途死亡时重启并重试一次。
@@ -813,6 +871,37 @@ mod tests {
         assert_eq!(c.model_kind, "small");
         assert!(!c.directml && !c.resident);
         assert_eq!(c.resize_policy, RESIZE_POLICY_MAX);
+    }
+
+    /// 热启动：只有常驻进程与热启动都开才生效；预加载只拉起 worker 不识别，资产缺失时报错且不拉起。
+    #[test]
+    fn warm_up_preloads_without_recognizing() {
+        let mut doc = ConfigDocument::from_bytes(None);
+        assert!(!hot_start_enabled(&doc));
+        doc.set_value(KEY_HOT_START, serde_json::json!(true))
+            .unwrap();
+        assert!(!hot_start_enabled(&doc), "没开常驻进程不生效");
+        doc.set_value(KEY_RESIDENT, serde_json::json!(true))
+            .unwrap();
+        assert!(hot_start_enabled(&doc));
+
+        let empty = temp_root("warm-empty");
+        let launcher = FakeLauncher::new(vec![FakeScript::ok()]);
+        let svc = service(empty.clone(), Arc::clone(&launcher), DEFAULT_IDLE_TIMEOUT);
+        assert!(matches!(svc.warm_up(&cfg()), Err(OcrError::Unavailable(_))));
+        assert_eq!(launcher.launches.load(Ordering::SeqCst), 0);
+        let _ = std::fs::remove_dir_all(&empty);
+
+        let root = fake_assets("warm");
+        let launcher = FakeLauncher::new(vec![FakeScript::ok()]);
+        let svc = service(root.clone(), Arc::clone(&launcher), DEFAULT_IDLE_TIMEOUT);
+        svc.warm_up(&cfg()).expect("预加载");
+        assert!(svc.is_worker_running());
+        // 之后的识别复用同一个 worker，不再拉起
+        svc.recognize_rgba(&cfg(), 4, 4, &[255; 64]).expect("识别");
+        assert_eq!(launcher.launches.load(Ordering::SeqCst), 1);
+        svc.shutdown();
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
 

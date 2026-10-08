@@ -7,13 +7,17 @@ use snow_config::document::ConfigDocument;
 use snow_config::extensions::KEY_UPDATE_MANIFEST_URL;
 use snow_i18n::Args;
 use snow_update::{
-    MAX_MANIFEST_BYTES, ManifestError, UpdateConfigError, UpdateStatus, check_manifest,
-    resolve_manifest_url,
+    AUTO_CHECK_MIN_INTERVAL_SECS, MAX_MANIFEST_BYTES, ManifestError, UpdateConfigError, UpdateMode,
+    UpdateStatus, check_manifest, resolve_manifest_url, should_auto_check,
 };
 use std::path::{Path, PathBuf};
 
 /// 代理配置键。
 pub const KEY_PROXY: &str = "network/proxy";
+/// 更新策略配置键（`manual` / `check` / `download`）。
+pub const KEY_UPDATE_MODE: &str = "updates/mode";
+/// 记录上次自动检查时间的文件名（放在 `<数据根>/updates/` 下）。
+const LAST_CHECK_FILE: &str = "last_check.txt";
 /// 当前应用版本（来自 Cargo 包版本）。
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// 设置页里“更新”分组的 id。
@@ -354,16 +358,13 @@ pub fn download_update(info: &UpdateInfo, data_root: &Path) -> UpdateDownloadOut
     }
 }
 
-/// 下载到 `.part`、校验、改名为 `dest`；返回是否做过哈希校验。
-fn fetch_package(info: &UpdateInfo, dest: &Path) -> Result<bool, FetchError> {
-    let dir = dest.parent().unwrap_or(Path::new("."));
-    std::fs::create_dir_all(dir).map_err(|_| FetchError::CreateDir(dir.display().to_string()))?;
-    let mut part = dest.as_os_str().to_owned();
-    part.push(".part");
-    let part = PathBuf::from(part);
-    // 旧的残留可能已是完整文件，续传会被服务器拒绝，所以每次从头下
-    let _ = std::fs::remove_file(&part);
-    let output = curl_command(&info.url, &part)
+/// 用 curl 下载到 `part`（带续传参数）；失败返回错误，并在没产出文件时视为失败。
+///
+/// # 参数
+/// - `url`：下载地址。
+/// - `part`：`.part` 文件路径（已存在则从其末尾续传）。
+fn run_curl(url: &str, part: &Path) -> Result<(), FetchError> {
+    let output = curl_command(url, part)
         .stderr(std::process::Stdio::piped())
         .output()
         .map_err(|e| FetchError::RunTool {
@@ -372,12 +373,29 @@ fn fetch_package(info: &UpdateInfo, dest: &Path) -> Result<bool, FetchError> {
         })?;
     // 个别情况下 curl 报错却返回 0（如 file:// 源不存在），所以还要确认确实产出了文件
     if !output.status.success() || !part.is_file() {
-        let _ = std::fs::remove_file(&part);
         return Err(FetchError::DownloadFailed {
-            url: info.url.clone(),
+            url: url.to_string(),
             detail: String::from_utf8_lossy(&output.stderr).trim().to_string(),
         });
     }
+    Ok(())
+}
+
+/// 下载（可续传）到 `.part`、校验、改名为 `dest`；返回是否做过哈希校验。
+fn fetch_package(info: &UpdateInfo, dest: &Path) -> Result<bool, FetchError> {
+    let dir = dest.parent().unwrap_or(Path::new("."));
+    std::fs::create_dir_all(dir).map_err(|_| FetchError::CreateDir(dir.display().to_string()))?;
+    let mut part = dest.as_os_str().to_owned();
+    part.push(".part");
+    let part = PathBuf::from(part);
+    // 已有 `.part` 就续传（curl `-C -`）；续传被拒（残留已完整 / 源已变）时删掉残留从头再下一次
+    let resumed = part.is_file();
+    let mut result = run_curl(&info.url, &part);
+    if result.is_err() && resumed {
+        let _ = std::fs::remove_file(&part);
+        result = run_curl(&info.url, &part);
+    }
+    result?;
     let verified = !info.sha256.is_empty();
     if verified {
         let actual = sha256_file(&part).inspect_err(|_| {
@@ -398,6 +416,90 @@ fn fetch_package(info: &UpdateInfo, dest: &Path) -> Result<bool, FetchError> {
     let _ = std::fs::remove_file(dest);
     std::fs::rename(&part, dest).map_err(|_| FetchError::Rename(dest.display().to_string()))?;
     Ok(verified)
+}
+
+/// 上次自动检查时间记录文件的路径。
+///
+/// # 参数
+/// - `data_root`：应用数据根目录（只在 Cisox 自己的目录里读写）。
+pub fn last_check_path(data_root: &Path) -> PathBuf {
+    data_root.join(UPDATES_DIR).join(LAST_CHECK_FILE)
+}
+
+/// 读取上次自动检查的 Unix 秒；文件不存在或内容不是整数返回 `None`。
+///
+/// # 参数
+/// - `data_root`：应用数据根目录。
+pub fn read_last_check(data_root: &Path) -> Option<u64> {
+    std::fs::read_to_string(last_check_path(data_root))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// 记录本次自动检查时间（失败只记日志，不影响主流程）。
+///
+/// # 参数
+/// - `data_root`：应用数据根目录。
+/// - `now`：当前 Unix 秒。
+pub fn write_last_check(data_root: &Path, now: u64) {
+    let path = last_check_path(data_root);
+    let written = path
+        .parent()
+        .map_or(Ok(()), std::fs::create_dir_all)
+        .and_then(|()| std::fs::write(&path, now.to_string()));
+    if let Err(e) = written {
+        tracing::warn!(error = %e, "记录上次检查更新时间失败");
+    }
+}
+
+/// 当前 Unix 秒（时钟早于 1970 年时取 0）。
+pub fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// 启动时的自动检查方案：策略允许、已过最小间隔且清单地址可用时返回要拉取的地址。
+///
+/// 未配置地址、地址非法、策略为手动或间隔未满都返回 `None`（静默，不提示）。
+///
+/// # 参数
+/// - `document`：配置文档。
+/// - `data_root`：应用数据根目录（读取上次检查时间）。
+/// - `now`：当前 Unix 秒。
+pub fn auto_check_target(document: &ConfigDocument, data_root: &Path, now: u64) -> Option<String> {
+    let mode = UpdateMode::parse(document.value(KEY_UPDATE_MODE).as_str().unwrap_or_default());
+    if !should_auto_check(
+        mode,
+        read_last_check(data_root),
+        now,
+        AUTO_CHECK_MIN_INTERVAL_SECS,
+    ) {
+        return None;
+    }
+    resolve_manifest_url(
+        document
+            .value(KEY_UPDATE_MANIFEST_URL)
+            .as_str()
+            .unwrap_or_default(),
+    )
+    .ok()
+}
+
+/// 自动检查发现新版本时的托盘提示文案；其它结果（含失败）返回 `None`，由调用方只记日志。
+///
+/// # 参数
+/// - `outcome`：检查结果。
+/// - `locale`：界面语言。
+pub fn auto_check_notice(outcome: &UpdateCheckOutcome, locale: &str) -> Option<String> {
+    match outcome {
+        UpdateCheckOutcome::Available(info) => Some(
+            i18n_for(locale).tr_with("update-check-available", &Args::new().arg(1, &info.version)),
+        ),
+        _ => None,
+    }
 }
 
 /// 把下载结果转成界面状态（本地化文案）。
@@ -784,6 +886,110 @@ mod tests {
             download_update(&update, &root),
             UpdateDownloadOutcome::Failed(FetchError::DownloadFailed { .. })
         ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 把本地路径转成 `file:///` 地址。
+    #[cfg(windows)]
+    fn file_url(path: &Path) -> String {
+        format!(
+            "file:///{}",
+            path.to_string_lossy()
+                .replace(std::path::MAIN_SEPARATOR, "/")
+        )
+    }
+
+    /// 续传（Windows，file:// 源走真实 curl）：已有截断的 `.part` 时只补后半段；残留前缀被污染则哈希不符并删除 `.part`。
+    #[cfg(windows)]
+    #[test]
+    fn download_update_resumes_part() {
+        let dir = std::env::temp_dir().join(format!("cisox-update-resume-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("big.bin");
+        let body: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
+        std::fs::write(&src, &body).unwrap();
+        let root = dir.join("data");
+        let mut update = info("4.0.0", &file_url(&src));
+        update.sha256 = sha256_file(&src).unwrap();
+        let half = body.len() / 2;
+        // 前缀正确：续传后补全，校验通过并改名，`.part` 消失
+        let dest = update_package_path(&root, &update);
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        let part = PathBuf::from(format!("{}.part", dest.display()));
+        std::fs::write(&part, &body[..half]).unwrap();
+        let UpdateDownloadOutcome::Done { path, verified } = download_update(&update, &root) else {
+            panic!("续传应成功");
+        };
+        assert!(verified && !part.exists());
+        assert_eq!(std::fs::read(&path).unwrap(), body);
+        // 前缀被污染：若真是续传，拼出来的内容哈希必不符；失败后 `.part` 被删除
+        update.version = "4.0.1".into();
+        let dest = update_package_path(&root, &update);
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        let part = PathBuf::from(format!("{}.part", dest.display()));
+        std::fs::write(&part, vec![0xAAu8; half]).unwrap();
+        assert!(matches!(
+            download_update(&update, &root),
+            UpdateDownloadOutcome::Failed(FetchError::HashMismatch { .. })
+        ));
+        assert!(!part.exists() && !dest.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 自动检查：手动不查、无地址静默、间隔内不查、过期查；提示只在有新版本时出现，且已本地化。
+    #[test]
+    fn auto_check_plan_and_notice() {
+        let dir = std::env::temp_dir().join(format!("cisox-auto-check-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut doc = ConfigDocument::from_bytes(None);
+        let set = |doc: &mut ConfigDocument, k: &str, v: &str| {
+            doc.set_value(k, json!(v)).expect("写配置");
+        };
+        let now = 1_000_000;
+        // 未配置地址：静默不查
+        assert_eq!(auto_check_target(&doc, &dir, now), None);
+        set(
+            &mut doc,
+            KEY_UPDATE_MANIFEST_URL,
+            "https://example.com/m.json",
+        );
+        set(&mut doc, KEY_UPDATE_MODE, "check");
+        assert_eq!(
+            auto_check_target(&doc, &dir, now).as_deref(),
+            Some("https://example.com/m.json")
+        );
+        // 间隔内不查，过期再查
+        write_last_check(&dir, now - 10);
+        assert_eq!(read_last_check(&dir), Some(now - 10));
+        assert_eq!(auto_check_target(&doc, &dir, now), None);
+        assert!(auto_check_target(&doc, &dir, now + AUTO_CHECK_MIN_INTERVAL_SECS).is_some());
+        // 手动模式不查
+        set(&mut doc, KEY_UPDATE_MODE, "manual");
+        assert_eq!(
+            auto_check_target(&doc, &dir, now + AUTO_CHECK_MIN_INTERVAL_SECS),
+            None
+        );
+        // 提示
+        let found = UpdateCheckOutcome::Available(info("9.9.9", ""));
+        assert!(
+            auto_check_notice(&found, "zh-CN")
+                .unwrap()
+                .contains("9.9.9")
+        );
+        assert!(
+            auto_check_notice(&found, "en-US")
+                .unwrap()
+                .contains("9.9.9")
+        );
+        assert_eq!(
+            auto_check_notice(&UpdateCheckOutcome::UpToDate, "zh-CN"),
+            None
+        );
+        assert_eq!(
+            auto_check_notice(&UpdateCheckOutcome::FetchFailed("x".into()), "zh-CN"),
+            None
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -203,6 +203,74 @@ pub fn check_manifest(current: &str, manifest_text: &str) -> Result<UpdateStatus
     }
 }
 
+/// 自动检查之间的最小间隔（秒）：一天。
+pub const AUTO_CHECK_MIN_INTERVAL_SECS: u64 = 24 * 60 * 60;
+
+/// 更新策略（对应配置 `updates/mode`，取值语义沿用旧版）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdateMode {
+    /// 手动：启动时不检查，只在用户点“检查更新”时检查。
+    Manual,
+    /// 自动检查：启动后台检查并提示新版本。
+    Check,
+    /// 自动检查并下载：检查行为同 `Check`（本端不自动下载，下载由用户在设置页触发）。
+    Download,
+}
+
+impl UpdateMode {
+    /// 解析配置值；空串或未知值回落到默认的 `Download`（与配置默认值一致）。
+    ///
+    /// # 参数
+    /// - `raw`：`updates/mode` 配置值。
+    ///
+    /// ```ignore
+    /// assert_eq!(UpdateMode::parse("manual"), UpdateMode::Manual);
+    /// ```
+    pub fn parse(raw: &str) -> Self {
+        match raw.trim() {
+            "manual" => Self::Manual,
+            "check" => Self::Check,
+            _ => Self::Download,
+        }
+    }
+
+    /// 启动时是否要自动检查。
+    pub fn checks_automatically(self) -> bool {
+        !matches!(self, Self::Manual)
+    }
+}
+
+/// 判断启动时是否应当自动检查更新。
+///
+/// # 参数
+/// - `mode`：更新策略。
+/// - `last_check`：上次检查的 Unix 秒（没记录传 `None`）。
+/// - `now`：当前 Unix 秒。
+/// - `min_interval`：最小间隔秒数。
+///
+/// # 返回
+/// 策略允许且距上次已满间隔（或系统时钟回拨、没有记录）时为真。
+///
+/// ```ignore
+/// assert!(should_auto_check(UpdateMode::Check, None, 1000, 60));
+/// ```
+pub fn should_auto_check(
+    mode: UpdateMode,
+    last_check: Option<u64>,
+    now: u64,
+    min_interval: u64,
+) -> bool {
+    if !mode.checks_automatically() {
+        return false;
+    }
+    match last_check {
+        None => true,
+        // 时钟回拨时 last 在未来，放行以免永远卡住
+        Some(last) if last > now => true,
+        Some(last) => now - last >= min_interval,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -322,5 +390,41 @@ mod tests {
             check_manifest("oops", text),
             Err(ManifestError::BadVersion("oops".into()))
         );
+    }
+
+    /// 策略解析：三种取值与回落。
+    #[test]
+    fn update_mode_parses() {
+        assert_eq!(UpdateMode::parse("manual"), UpdateMode::Manual);
+        assert_eq!(UpdateMode::parse(" check "), UpdateMode::Check);
+        assert_eq!(UpdateMode::parse("download"), UpdateMode::Download);
+        assert_eq!(UpdateMode::parse(""), UpdateMode::Download);
+        assert_eq!(UpdateMode::parse("???"), UpdateMode::Download);
+    }
+
+    /// 自动检查判定：手动不查、无记录查、间隔未满不查、满了查、时钟回拨查。
+    #[test]
+    fn auto_check_decision() {
+        let day = AUTO_CHECK_MIN_INTERVAL_SECS;
+        assert!(!should_auto_check(UpdateMode::Manual, None, 10 * day, day));
+        assert!(should_auto_check(UpdateMode::Check, None, 10 * day, day));
+        assert!(!should_auto_check(
+            UpdateMode::Check,
+            Some(10 * day - 1),
+            10 * day,
+            day
+        ));
+        assert!(should_auto_check(
+            UpdateMode::Download,
+            Some(9 * day),
+            10 * day,
+            day
+        ));
+        assert!(should_auto_check(
+            UpdateMode::Check,
+            Some(20 * day),
+            10 * day,
+            day
+        ));
     }
 }

@@ -59,6 +59,18 @@ const COUNTER_RING_LOGICAL: u32 = 2;
 const MOSAIC_STRENGTH: f64 = 1.0;
 /// 模糊强度（0..=1）。
 const BLUR_STRENGTH: f64 = 0.6;
+/// 滤镜强度配置允许范围（含端点）。
+const FILTER_STRENGTH_RANGE: (f64, f64) = (0.0, 1.0);
+/// 滤镜不透明度配置允许范围（含端点）。
+const FILTER_OPACITY_RANGE: (f64, f64) = (0.0, 1.0);
+/// 滤镜描边宽度配置允许范围（含端点）。
+const FILTER_STROKE_RANGE: (f64, f64) = (1.0, 72.0);
+/// 滤镜样式配置里的强度字段名。
+const FILTER_FIELD_STRENGTH: &str = "strength";
+/// 滤镜样式配置里的不透明度字段名。
+const FILTER_FIELD_OPACITY: &str = "opacity";
+/// 滤镜样式配置里的描边宽度字段名。
+const FILTER_FIELD_STROKE: &str = "stroke_width";
 /// 指针编号（鼠标固定为 1）。
 const POINTER_ID: u32 = 1;
 /// 滤镜最大外扩采样半径（像素），防止异常参数造成巨型拷贝。
@@ -548,6 +560,72 @@ fn deferred_hits(item: &SceneDisplayItem, rect: IntRect) -> bool {
     intersect(rect, bounds).is_some()
 }
 
+/// 滤镜工具（马赛克 / 模糊）的样式覆盖，取自旧版配置 `drawing/rectangle_filter_style` 与 `drawing/pen_filter_style`。
+///
+/// 字段为 `None` 表示配置里没有合法值，沿用内置默认。
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct FilterOverrides {
+    /// 强度（0..=1）。
+    pub strength: Option<f64>,
+    /// 不透明度（0..=1）。
+    pub opacity: Option<f64>,
+    /// 描边宽度（1..=72）。
+    pub stroke_width: Option<f64>,
+}
+
+impl FilterOverrides {
+    /// 从两份配置值解析覆盖项。
+    ///
+    /// 与旧版一致：强度优先取矩形滤镜样式，非法或缺失时取画笔滤镜样式；
+    /// 不透明度与描边宽度只取矩形滤镜样式（马赛克 / 模糊对应的是矩形滤镜）。
+    ///
+    /// # 参数
+    /// - `rectangle`：`drawing/rectangle_filter_style` 的值。
+    /// - `pen`：`drawing/pen_filter_style` 的值。
+    ///
+    /// ```ignore
+    /// let o = FilterOverrides::from_config(&json!({"strength": 0.3}), &json!({}));
+    /// assert_eq!(o.strength, Some(0.3));
+    /// ```
+    pub fn from_config(rectangle: &serde_json::Value, pen: &serde_json::Value) -> Self {
+        let read = |value: &serde_json::Value, field: &str, range: (f64, f64)| {
+            value
+                .get(field)
+                .and_then(serde_json::Value::as_f64)
+                .filter(|v| v.is_finite() && (range.0..=range.1).contains(v))
+        };
+        Self {
+            strength: read(rectangle, FILTER_FIELD_STRENGTH, FILTER_STRENGTH_RANGE)
+                .or_else(|| read(pen, FILTER_FIELD_STRENGTH, FILTER_STRENGTH_RANGE)),
+            opacity: read(rectangle, FILTER_FIELD_OPACITY, FILTER_OPACITY_RANGE),
+            stroke_width: read(rectangle, FILTER_FIELD_STROKE, FILTER_STROKE_RANGE),
+        }
+    }
+}
+
+/// 给定滤镜工具与覆盖项，算出要下发给引擎的滤镜样式；非滤镜工具返回 `None`。
+///
+/// # 参数
+/// - `tool`：标注工具（只认马赛克 / 模糊）。
+/// - `overrides`：配置覆盖项。
+pub fn filter_style_for(tool: AnnotationTool, overrides: &FilterOverrides) -> Option<FilterStyle> {
+    let (filter_type, default_strength) = match tool {
+        AnnotationTool::Blur => (
+            snow_draw_engine::CanvasFilterType::GaussianBlur,
+            BLUR_STRENGTH,
+        ),
+        AnnotationTool::Mosaic => (snow_draw_engine::CanvasFilterType::Mosaic, MOSAIC_STRENGTH),
+        _ => return None,
+    };
+    let base = FilterStyle::default();
+    Some(FilterStyle {
+        filter_type,
+        strength: overrides.strength.unwrap_or(default_strength),
+        opacity: overrides.opacity.unwrap_or(base.opacity),
+        stroke_width: overrides.stroke_width.unwrap_or(base.stroke_width),
+    })
+}
+
 /// 标注层。
 pub struct AnnotationLayer {
     /// 标注引擎。
@@ -876,6 +954,28 @@ impl AnnotationLayer {
         self.raster.item_count()
     }
 
+    /// 按配置覆盖项重设滤镜工具（马赛克 / 模糊）的创建样式；其它工具忽略。
+    ///
+    /// # 参数
+    /// - `tool`：滤镜工具。
+    /// - `overrides`：配置覆盖项（`None` 字段沿用内置默认）。
+    ///
+    /// # 返回
+    /// 引擎拒绝时返回错误说明。
+    pub fn apply_filter_overrides(
+        &mut self,
+        tool: AnnotationTool,
+        overrides: &FilterOverrides,
+    ) -> Result<(), String> {
+        let Some(style) = filter_style_for(tool, overrides) else {
+            return Ok(());
+        };
+        self.engine
+            .set_viewport_filter_style(self.viewport, style, FILTER_STYLE_PROPERTY_ALL)
+            .map(|_| ())
+            .map_err(|e| format!("设置滤镜样式失败: {e:?}"))
+    }
+
     /// 切换工具；矩形 / 椭圆共用引擎的形状工具，滤镜工具按马赛克 / 模糊切换类型。
     ///
     /// # 参数
@@ -908,25 +1008,7 @@ impl AnnotationLayer {
                     .map_err(err)?;
             }
             AnnotationTool::Mosaic | AnnotationTool::Blur => {
-                let (filter_type, strength) = if tool == AnnotationTool::Blur {
-                    (
-                        snow_draw_engine::CanvasFilterType::GaussianBlur,
-                        BLUR_STRENGTH,
-                    )
-                } else {
-                    (snow_draw_engine::CanvasFilterType::Mosaic, MOSAIC_STRENGTH)
-                };
-                self.engine
-                    .set_viewport_filter_style(
-                        self.viewport,
-                        FilterStyle {
-                            filter_type,
-                            strength,
-                            ..FilterStyle::default()
-                        },
-                        FILTER_STYLE_PROPERTY_ALL,
-                    )
-                    .map_err(err)?;
+                self.apply_filter_overrides(tool, &FilterOverrides::default())?;
             }
             _ => {}
         }
@@ -2435,5 +2517,68 @@ mod tests {
             )
             .unwrap();
         assert!(update.is_empty());
+    }
+
+    /// 滤镜覆盖项：矩形样式优先、非法值被忽略、强度回落到画笔样式。
+    #[test]
+    fn filter_overrides_parse() {
+        use serde_json::json;
+        let o = FilterOverrides::from_config(
+            &json!({"strength": 0.3, "opacity": 0.5, "stroke_width": 4}),
+            &json!({"strength": 0.9}),
+        );
+        assert_eq!(o.strength, Some(0.3));
+        assert_eq!(o.opacity, Some(0.5));
+        assert_eq!(o.stroke_width, Some(4.0));
+        // 矩形强度非法：回落到画笔
+        let o = FilterOverrides::from_config(&json!({"strength": 2.0}), &json!({"strength": 0.9}));
+        assert_eq!(o.strength, Some(0.9));
+        // 都没有：全部沿用默认
+        assert_eq!(
+            FilterOverrides::from_config(&json!({}), &json!(null)),
+            FilterOverrides::default()
+        );
+        let bad =
+            FilterOverrides::from_config(&json!({"opacity": -1, "stroke_width": 0}), &json!({}));
+        assert_eq!((bad.opacity, bad.stroke_width), (None, None));
+        // 样式换算：默认保持内置强度，覆盖后生效；非滤镜工具没有样式
+        let d = filter_style_for(AnnotationTool::Mosaic, &FilterOverrides::default()).unwrap();
+        assert_eq!(d.strength, MOSAIC_STRENGTH);
+        let b = filter_style_for(AnnotationTool::Blur, &FilterOverrides::default()).unwrap();
+        assert_eq!(b.strength, BLUR_STRENGTH);
+        let custom = filter_style_for(AnnotationTool::Blur, &o).unwrap();
+        assert_eq!(custom.strength, 0.9);
+        assert!(filter_style_for(AnnotationTool::Arrow, &o).is_none());
+    }
+
+    /// 配置的强度真正作用于马赛克：强度不同，导出的像素不同。
+    #[test]
+    fn mosaic_strength_override_changes_output() {
+        let (w, h) = (300, 200);
+        let data = gradient(w, h);
+        let base = BaseView {
+            width: w,
+            height: h,
+            bgra: &data,
+        };
+        let export = |strength: Option<f64>| {
+            let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
+            layer.set_tool(AnnotationTool::Mosaic).unwrap();
+            layer
+                .apply_filter_overrides(
+                    AnnotationTool::Mosaic,
+                    &FilterOverrides {
+                        strength,
+                        ..FilterOverrides::default()
+                    },
+                )
+                .unwrap();
+            drag(&mut layer, base, (50.0, 40.0), (200.0, 150.0));
+            layer
+                .export_rgba([0, 0, w as i32, h as i32], base)
+                .unwrap()
+                .2
+        };
+        assert_ne!(export(Some(0.1)), export(None));
     }
 }
