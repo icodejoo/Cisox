@@ -489,6 +489,21 @@ pub enum UiEvent {
     },
     /// 覆盖窗请求下载表格识别组件（进度与结果复用 OCR 下载事件）。
     TableDownloadRequested,
+    /// 覆盖窗请求公式识别（RapidLaTeXOCR 本地模型，在后台线程执行）。
+    LatexRequested {
+        /// 请求序号（回传结果时带回，走 `OcrFinished`）。
+        serial: u64,
+        /// 图像宽。
+        width: u32,
+        /// 图像高。
+        height: u32,
+        /// RGBA 像素。
+        rgba: Vec<u8>,
+    },
+    /// 覆盖窗请求下载公式识别所需的 onnxruntime 运行时（进度与结果复用 OCR 下载事件）。
+    LatexDownloadRequested,
+    /// 设置页“公式模型”面板上的按钮动作。
+    LatexActionRequested(crate::latex_assets::LatexAction),
     /// 文字识别完成（成功或失败）。
     OcrFinished {
         /// 对应的请求序号。
@@ -2050,6 +2065,8 @@ fn open_overlays(cx: &mut ShellContext, state: &mut AppState, payloads: Vec<Capt
     let ocr_download_inbox = state.inbox.clone();
     let table_inbox = state.inbox.clone();
     let table_download_inbox = state.inbox.clone();
+    let latex_inbox = state.inbox.clone();
+    let latex_download_inbox = state.inbox.clone();
     let recognition_inbox = state.inbox.clone();
     let translate_inbox = state.inbox.clone();
     let translate_download_inbox = state.inbox.clone();
@@ -2096,6 +2113,17 @@ fn open_overlays(cx: &mut ShellContext, state: &mut AppState, payloads: Vec<Capt
             })
             .with_table_download(move || {
                 table_download_inbox.push(UiEvent::TableDownloadRequested);
+            })
+            .with_latex(move |serial, width, height, rgba| {
+                latex_inbox.push(UiEvent::LatexRequested {
+                    serial,
+                    width,
+                    height,
+                    rgba,
+                });
+            })
+            .with_latex_download(move || {
+                latex_download_inbox.push(UiEvent::LatexDownloadRequested);
             })
             .with_recognition_window(move |data| {
                 recognition_inbox.push(UiEvent::OpenRecognitionWindow(Box::new(data)));
@@ -2843,6 +2871,118 @@ fn run_table(
     crate::table_service::table_result(&runner, width, height, rgba, ocr)
 }
 
+/// 在后台线程做公式识别：按配置里的模型目录定位资产，拉起 `snow-latex` 跑 RapidLaTeXOCR。
+///
+/// 结果走 `OcrFinished`（同文字识别）；模型由用户自行下载，缺文件时给出本地化引导。
+///
+/// # 参数
+/// - `state`：运行时状态。
+/// - `serial`：请求序号。
+/// - `width` / `height` / `rgba`：选区图像。
+fn spawn_latex(state: &AppState, serial: u64, width: u32, height: u32, rgba: Vec<u8>) {
+    let model_dir = crate::latex_assets::model_dir_from_document(state.config.borrow().document());
+    let data_root = state.data_root.clone();
+    let inbox = state.inbox.clone();
+    let spawned = std::thread::Builder::new()
+        .name("snow-latex-request".into())
+        .spawn(move || {
+            let result = run_latex_job(&model_dir, &data_root, width, height, &rgba);
+            inbox.push(UiEvent::OcrFinished { serial, result });
+        });
+    if let Err(e) = spawned {
+        tracing::error!(error = %e, "无法创建公式识别线程");
+        state.inbox.push(UiEvent::OcrFinished {
+            serial,
+            result: Err(OcrError::SpawnFailed(e.to_string())),
+        });
+    }
+}
+
+/// 公式识别的阻塞主体（后台线程里调用）。
+///
+/// # 参数
+/// - `model_dir`：配置里的公式模型目录。
+/// - `data_root`：数据根目录。
+/// - `width` / `height` / `rgba`：选区图像。
+fn run_latex_job(
+    model_dir: &str,
+    data_root: &std::path::Path,
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+) -> Result<OcrResult, OcrError> {
+    let beside = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf));
+    let assets = crate::latex_assets::resolve_assets(
+        model_dir,
+        data_root,
+        std::env::var(snow_translate::worker::ENV_ORT_DYLIB)
+            .ok()
+            .as_deref(),
+        std::env::var_os(crate::latex_assets::ENV_LATEX_EXE)
+            .map(PathBuf::from)
+            .as_deref(),
+        beside.as_deref(),
+    )
+    .map_err(OcrError::LatexUnavailable)?;
+    crate::latex_service::run_latex(&assets, width, height, rgba)
+}
+
+/// 在后台线程下载公式识别缺的 onnxruntime 运行时（模型由用户自行下载，这里不碰），进度与结果复用 OCR 下载事件。
+///
+/// # 参数
+/// - `state`：运行时状态。
+fn spawn_latex_download(state: &AppState) {
+    let data_root = state.data_root.clone();
+    let inbox = state.inbox.clone();
+    let i18n = crate::ocr_backend::i18n_for(
+        ui_prefs_from_document(state.config.borrow().document()).locale,
+    );
+    let spawned = std::thread::Builder::new()
+        .name("snow-latex-download".into())
+        .spawn(move || {
+            let cancel = AtomicBool::new(false);
+            let progress_inbox = inbox.clone();
+            let result = ort_runtime::install(&data_root, &cancel, |step| {
+                progress_inbox.push(UiEvent::OcrDownloadProgress(step.message(i18n)));
+            })
+            .map(|_| ())
+            .map_err(|e| e.message(i18n));
+            inbox.push(UiEvent::OcrDownloadFinished(result));
+        });
+    if let Err(e) = spawned {
+        let message = ocr_download::FetchError::TaskStart(e.to_string()).message(i18n);
+        state.inbox.push(UiEvent::OcrDownloadFinished(Err(message)));
+    }
+}
+
+/// 处理设置页“公式模型”面板的按钮：打开模型目录，或用浏览器打开官方来源。
+///
+/// # 参数
+/// - `state`：运行时状态。
+/// - `action`：按钮动作。
+fn run_latex_action(state: &AppState, action: crate::latex_assets::LatexAction) {
+    use crate::latex_assets::LatexAction;
+    let document = state.config.borrow();
+    let result = match action {
+        LatexAction::OpenFolder => {
+            let dir = crate::latex_assets::model_dir_from_document(document.document());
+            if dir.is_empty() {
+                return;
+            }
+            snow_platform::shell::open_directory(std::path::Path::new(&dir))
+        }
+        LatexAction::OpenSource => {
+            let i18n = crate::ocr_backend::i18n_for(ui_prefs_from_document(document.document()).locale);
+            snow_platform::shell::open_url(&i18n.tr("latex-source-url"))
+        }
+    };
+    if let Err(e) = result {
+        tracing::warn!(error = %e, ?action, "公式面板动作失败");
+    }
+}
+
 /// 在后台线程下载表格识别组件（模型与缺失的 onnxruntime），进度与结果复用 OCR 下载事件。
 ///
 /// # 参数
@@ -3322,6 +3462,7 @@ fn build_settings_view(
         }),
     };
     let transfer_inbox = inbox.clone();
+    let latex_action_inbox = inbox.clone();
     let update_inbox = inbox;
     let mcp_descriptor = snow_mcp::descriptor::descriptor_path(&mcp_data_root);
     view.update(app, |v, _| {
@@ -3332,6 +3473,9 @@ fn build_settings_view(
         v.set_stt_hooks(stt_hooks);
         v.set_transfer_hook(Rc::new(move |action| {
             transfer_inbox.push(UiEvent::ConfigTransferRequested(action));
+        }));
+        v.set_latex_hook(Rc::new(move |action| {
+            latex_action_inbox.push(UiEvent::LatexActionRequested(action));
         }));
         v.set_update_hook(Rc::new(move |action| {
             update_inbox.push(UiEvent::UpdateActionRequested(action));
@@ -5003,6 +5147,14 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
             rgba,
         } => spawn_table(state, serial, width, height, rgba),
         UiEvent::TableDownloadRequested => spawn_table_download(state),
+        UiEvent::LatexRequested {
+            serial,
+            width,
+            height,
+            rgba,
+        } => spawn_latex(state, serial, width, height, rgba),
+        UiEvent::LatexDownloadRequested => spawn_latex_download(state),
+        UiEvent::LatexActionRequested(action) => run_latex_action(state, action),
         UiEvent::OcrFinished { serial, result } => {
             let outcome = state.overlay_view.as_ref().map(|view| {
                 view.update(cx.app(), |v, vcx| {

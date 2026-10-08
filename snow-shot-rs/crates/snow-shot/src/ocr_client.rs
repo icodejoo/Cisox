@@ -141,6 +141,14 @@ pub enum OcrError {
     Table(String),
     /// 图里没有找到表格。
     NoTable,
+    /// 公式识别组件不可用（模型目录没设置 / 缺文件、运行时缺失等）。
+    LatexUnavailable(crate::latex_assets::LatexUnavailable),
+    /// 公式识别失败（附技术细节）。
+    Latex(String),
+    /// 图里没有可识别的内容（纯色图）。
+    NoLatex,
+    /// 模型没有产出任何公式文本。
+    EmptyLatex,
 }
 
 impl OcrError {
@@ -179,6 +187,10 @@ impl OcrError {
             Self::TableUnavailable(u) => u.message(i18n),
             Self::Table(e) => with_detail("table-err-failed", e),
             Self::NoTable => i18n.tr("table-err-no-table"),
+            Self::LatexUnavailable(u) => u.message(i18n),
+            Self::Latex(e) => with_detail("latex-err-failed", e),
+            Self::NoLatex => i18n.tr("latex-err-blank"),
+            Self::EmptyLatex => i18n.tr("latex-err-empty"),
         }
     }
 
@@ -187,6 +199,7 @@ impl OcrError {
         match self {
             Self::Unavailable(u) => u.can_download(),
             Self::TableUnavailable(u) => u.can_download(),
+            Self::LatexUnavailable(u) => u.can_download(),
             _ => false,
         }
     }
@@ -202,6 +215,10 @@ impl OcrError {
                 | Self::TableUnavailable(_)
                 | Self::Table(_)
                 | Self::NoTable
+                | Self::LatexUnavailable(_)
+                | Self::Latex(_)
+                | Self::NoLatex
+                | Self::EmptyLatex
         )
     }
 }

@@ -145,21 +145,23 @@ const TEXT_LINE_HEIGHT: f32 = 1.25;
 /// 尚未接入的工具栏动作（普通截图模式下已全部接入，故为空）。
 const DISABLED_TOOLBAR_ACTIONS: [ToolbarAction; 0] = [];
 /// 录屏选区模式下置灰的动作（只保留“录屏”与“取消”）。
-const RECORD_MODE_DISABLED_ACTIONS: [ToolbarAction; 7] = [
+const RECORD_MODE_DISABLED_ACTIONS: [ToolbarAction; 8] = [
     ToolbarAction::Pin,
     ToolbarAction::Ocr,
     ToolbarAction::Translate,
     ToolbarAction::Table,
+    ToolbarAction::Latex,
     ToolbarAction::ScrollCapture,
     ToolbarAction::Save,
     ToolbarAction::Copy,
 ];
 /// 长截图选区模式下置灰的动作（只保留“长图”与“取消”）。
-const SCROLL_MODE_DISABLED_ACTIONS: [ToolbarAction; 7] = [
+const SCROLL_MODE_DISABLED_ACTIONS: [ToolbarAction; 8] = [
     ToolbarAction::Pin,
     ToolbarAction::Ocr,
     ToolbarAction::Translate,
     ToolbarAction::Table,
+    ToolbarAction::Latex,
     ToolbarAction::Record,
     ToolbarAction::Save,
     ToolbarAction::Copy,
@@ -363,6 +365,7 @@ fn toolbar_label_id(key: ToolbarLabel) -> &'static str {
             ToolbarAction::Ocr => "overlay-toolbar-ocr",
             ToolbarAction::Translate => "overlay-toolbar-translate",
             ToolbarAction::Table => "overlay-toolbar-table",
+            ToolbarAction::Latex => "overlay-toolbar-latex",
             ToolbarAction::Record => "overlay-toolbar-record",
             ToolbarAction::ScrollCapture => "overlay-toolbar-scroll",
             ToolbarAction::Save => "overlay-toolbar-save",
@@ -782,6 +785,27 @@ pub trait OutputSink {
         Err("table download is not wired up".to_string())
     }
 
+    /// 对选区图像发起公式识别（异步：结果稍后经 [`ScreenshotOverlayView::finish_ocr`] 回来）；默认不支持。
+    ///
+    /// # 参数
+    /// - `serial`：本次请求序号，回传结果时原样带回（过期结果据此丢弃）。
+    /// - `width` / `height`：图像尺寸。
+    /// - `rgba`：选区（含标注合成）的 RGBA 像素。
+    fn start_latex(
+        &mut self,
+        _serial: u64,
+        _width: u32,
+        _height: u32,
+        _rgba: Vec<u8>,
+    ) -> Result<(), String> {
+        Err("formula recognition is not wired up".to_string())
+    }
+
+    /// 触发公式识别所需的 onnxruntime 运行时下载（异步）；默认不支持。
+    fn start_latex_download(&mut self) -> Result<(), String> {
+        Err("formula runtime download is not wired up".to_string())
+    }
+
     /// 打开文字识别结果窗（图片 + 文字块 + 可编辑全文）；默认不支持。
     ///
     /// # 参数
@@ -843,6 +867,10 @@ pub struct SystemOutput {
     on_table: Option<OcrCallback>,
     /// 表格识别组件下载回调。
     on_table_download: Option<Box<dyn Fn()>>,
+    /// 公式识别回调：`(序号, 宽, 高, RGBA)`。
+    on_latex: Option<OcrCallback>,
+    /// 公式识别运行时下载回调。
+    on_latex_download: Option<Box<dyn Fn()>>,
     /// 打开识别结果窗的回调。
     on_recognition_window: Option<Box<dyn Fn(crate::recognition_view::RecognitionData)>>,
     /// 文字翻译回调：`(序号, 宽, 高, RGBA)`。
@@ -880,6 +908,8 @@ impl SystemOutput {
             on_ocr_download: None,
             on_table: None,
             on_table_download: None,
+            on_latex: None,
+            on_latex_download: None,
             on_recognition_window: None,
             on_translate: None,
             on_translate_download: None,
@@ -972,6 +1002,21 @@ impl SystemOutput {
     /// 设置表格识别组件下载回调。
     pub fn with_table_download(mut self, callback: impl Fn() + 'static) -> Self {
         self.on_table_download = Some(Box::new(callback));
+        self
+    }
+
+    /// 设置公式识别回调：用户触发公式识别时调用（模型推理在后台线程执行）。
+    ///
+    /// # 参数
+    /// - `callback`：接收请求序号、图像尺寸与 RGBA 像素。
+    pub fn with_latex(mut self, callback: impl Fn(u64, u32, u32, Vec<u8>) + 'static) -> Self {
+        self.on_latex = Some(Box::new(callback));
+        self
+    }
+
+    /// 设置公式识别运行时下载回调。
+    pub fn with_latex_download(mut self, callback: impl Fn() + 'static) -> Self {
+        self.on_latex_download = Some(Box::new(callback));
         self
     }
 
@@ -1244,6 +1289,34 @@ impl OutputSink for SystemOutput {
         }
     }
 
+    /// 触发公式识别回调；未设置回调时报错。
+    fn start_latex(
+        &mut self,
+        serial: u64,
+        width: u32,
+        height: u32,
+        rgba: Vec<u8>,
+    ) -> Result<(), String> {
+        match &self.on_latex {
+            Some(callback) => {
+                callback(serial, width, height, rgba);
+                Ok(())
+            }
+            None => Err("formula recognition is not wired up".to_string()),
+        }
+    }
+
+    /// 触发公式识别运行时下载回调；未设置回调时报错。
+    fn start_latex_download(&mut self) -> Result<(), String> {
+        match &self.on_latex_download {
+            Some(callback) => {
+                callback();
+                Ok(())
+            }
+            None => Err("formula runtime download is not wired up".to_string()),
+        }
+    }
+
     /// 触发文字翻译回调；未设置回调时报错。
     fn start_translate(
         &mut self,
@@ -1446,8 +1519,12 @@ pub struct ScreenshotOverlayView {
     ocr_serial: u64,
     /// 当前这轮识别是不是表格识别（决定缺组件时按 D 下载哪一套）。
     table_mode: bool,
+    /// 当前这轮识别是不是公式识别（缺运行时时按 D 下载 onnxruntime）。
+    latex_mode: bool,
     /// 表格识别结果的 Markdown / TSV / HTML（打开结果窗时带上）。
     table_texts: Option<crate::table_structure::TableTexts>,
+    /// 公式识别结果的纯 LaTeX（打开结果窗时带上）。
+    latex_text: Option<String>,
     /// 文字翻译交互状态。
     translate: TranslateUiState,
     /// 最近一次翻译请求序号（过期结果据此丢弃）。
@@ -1582,7 +1659,9 @@ impl ScreenshotOverlayView {
             qr_link: None,
             ocr_serial: 0,
             table_mode: false,
+            latex_mode: false,
             table_texts: None,
+            latex_text: None,
             translate: TranslateUiState::Idle,
             translate_serial: 0,
             window_hover: None,
@@ -2242,7 +2321,9 @@ impl ScreenshotOverlayView {
                     }
                 ) =>
             {
-                if self.table_mode {
+                if self.latex_mode {
+                    self.start_latex_download();
+                } else if self.table_mode {
                     self.start_table_download();
                 } else {
                     self.start_ocr_download();
@@ -2364,6 +2445,8 @@ impl ScreenshotOverlayView {
             OverlayKeyAction::QrCodeRecognition => self.recognize_qr_code(),
             OverlayKeyAction::TableRecognition if selecting_mode => OverlayOutcome::Stay,
             OverlayKeyAction::TableRecognition => self.start_table(),
+            OverlayKeyAction::LatexRecognition if selecting_mode => OverlayOutcome::Stay,
+            OverlayKeyAction::LatexRecognition => self.start_latex(),
             OverlayKeyAction::Unimplemented(config_key) => {
                 self.show_not_implemented(config_key);
                 OverlayOutcome::Stay
@@ -2447,6 +2530,7 @@ impl ScreenshotOverlayView {
             ToolbarAction::Ocr => self.start_ocr(),
             ToolbarAction::Translate => self.start_translate(),
             ToolbarAction::Table => self.start_table(),
+            ToolbarAction::Latex => self.start_latex(),
             ToolbarAction::ScrollCapture => self.start_scroll_capture_and_close(),
             ToolbarAction::Cancel => OverlayOutcome::Close,
             ToolbarAction::Undo => {
@@ -4092,6 +4176,7 @@ impl ScreenshotOverlayView {
         };
         self.ocr_serial += 1;
         self.table_mode = false;
+        self.latex_mode = false;
         match self.output.start_ocr(self.ocr_serial, w, h, rgba) {
             Ok(()) => {
                 tracing::info!(
@@ -4134,6 +4219,7 @@ impl ScreenshotOverlayView {
         };
         self.ocr_serial += 1;
         self.table_mode = true;
+        self.latex_mode = false;
         match self.output.start_table(self.ocr_serial, w, h, rgba) {
             Ok(()) => {
                 tracing::info!(
@@ -4156,6 +4242,60 @@ impl ScreenshotOverlayView {
             }
         }
         OverlayOutcome::Stay
+    }
+
+    /// 对选区（含标注合成结果）发起公式识别；识别在后台进行，结果经 [`Self::finish_ocr`] 回来。
+    fn start_latex(&mut self) -> OverlayOutcome {
+        if !self.has_committed_selection() {
+            self.status_message = Some(self.i18n.tr("overlay-msg-select-area-first"));
+            return OverlayOutcome::Stay;
+        }
+        if self.ocr.is_busy() || self.translate.is_busy() {
+            return OverlayOutcome::Stay;
+        }
+        if self.translate.is_visible() {
+            self.dismiss_translate();
+        }
+        let Some((w, h, rgba)) = self.selection_image() else {
+            self.status_message = Some(self.i18n.tr("overlay-msg-selection-invalid"));
+            return OverlayOutcome::Stay;
+        };
+        self.ocr_serial += 1;
+        self.table_mode = false;
+        self.latex_mode = true;
+        match self.output.start_latex(self.ocr_serial, w, h, rgba) {
+            Ok(()) => {
+                tracing::info!(serial = self.ocr_serial, width = w, height = h, "已提交公式识别");
+                self.set_ocr_state(OcrUiState::Running);
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "提交公式识别失败");
+                self.set_ocr_state(OcrUiState::Failed {
+                    message: self.i18n.tr_with(
+                        "overlay-msg-ocr-unavailable",
+                        &Args::new().arg(1, e.to_string()),
+                    ),
+                    can_download: false,
+                });
+            }
+        }
+        OverlayOutcome::Stay
+    }
+
+    /// 触发公式识别所需的 onnxruntime 运行时下载（仅缺运行时可用）。
+    fn start_latex_download(&mut self) {
+        match self.output.start_latex_download() {
+            Ok(()) => self.set_ocr_state(OcrUiState::Downloading(
+                self.i18n.tr("overlay-msg-ocr-download-preparing"),
+            )),
+            Err(e) => self.set_ocr_state(OcrUiState::Failed {
+                message: self.i18n.tr_with(
+                    "overlay-msg-ocr-download-start-failed",
+                    &Args::new().arg(1, e.to_string()),
+                ),
+                can_download: false,
+            }),
+        }
     }
 
     /// 触发表格识别组件下载（仅缺组件时可用）。
@@ -4220,6 +4360,7 @@ impl ScreenshotOverlayView {
             return OverlayOutcome::Stay;
         };
         self.table_mode = false;
+        self.latex_mode = false;
         let codes = crate::qr_decode::decode_qr_codes(w, h, &rgba);
         if codes.is_empty() {
             self.set_ocr_state(OcrUiState::Failed {
@@ -4293,6 +4434,7 @@ impl ScreenshotOverlayView {
     fn set_ocr_state(&mut self, state: OcrUiState) {
         self.qr_link = None;
         self.table_texts = None;
+        self.latex_text = None;
         self.qr_auto_panel = false;
         self.status_message = state.status_text(self.i18n);
         self.ocr = state;
@@ -4326,6 +4468,7 @@ impl ScreenshotOverlayView {
             return OverlayOutcome::Stay;
         }
         let mut table = None;
+        let mut latex = None;
         let action = self.ocr_auto_action;
         let mut outcome = OverlayOutcome::Stay;
         let mut open_window = false;
@@ -4341,6 +4484,7 @@ impl ScreenshotOverlayView {
                     "文字识别完成"
                 );
                 table = r.table.clone();
+                latex = r.latex.clone();
                 if !r.full_text.is_empty() {
                     if copied && action.ends_screenshot() {
                         outcome = OverlayOutcome::Close;
@@ -4361,6 +4505,7 @@ impl ScreenshotOverlayView {
         };
         self.set_ocr_state(state);
         self.table_texts = table;
+        self.latex_text = latex;
         if open_window {
             self.open_recognition_window();
         }
@@ -4720,6 +4865,7 @@ impl ScreenshotOverlayView {
             text,
             boxes,
             table: self.table_texts.clone(),
+            latex: self.latex_text.clone(),
             conversion: crate::conversion_guide::ConversionGuide::NotConfigured,
         };
         if let Err(e) = self.output.open_recognition_window(data) {
@@ -6574,6 +6720,10 @@ mod tests {
         tables: Vec<(u64, u32, u32, Vec<u8>)>,
         /// 表格识别组件下载请求次数。
         table_downloads: u32,
+        /// 公式识别请求 `(序号, 宽, 高, RGBA)`。
+        latexes: Vec<(u64, u32, u32, Vec<u8>)>,
+        /// 公式识别运行时下载请求次数。
+        latex_downloads: u32,
         /// 文字翻译请求 `(序号, 宽, 高, RGBA)`。
         translates: Vec<(u64, u32, u32, Vec<u8>)>,
         /// 翻译运行时下载请求次数。
@@ -6675,6 +6825,22 @@ mod tests {
                 return Err("boom".into());
             }
             self.rec.borrow_mut().table_downloads += 1;
+            Ok(())
+        }
+        /// 记录公式识别请求。
+        fn start_latex(&mut self, serial: u64, w: u32, h: u32, rgba: Vec<u8>) -> Result<(), String> {
+            if self.fail {
+                return Err("boom".into());
+            }
+            self.rec.borrow_mut().latexes.push((serial, w, h, rgba));
+            Ok(())
+        }
+        /// 记录公式识别运行时下载请求。
+        fn start_latex_download(&mut self) -> Result<(), String> {
+            if self.fail {
+                return Err("boom".into());
+            }
+            self.rec.borrow_mut().latex_downloads += 1;
             Ok(())
         }
         /// 记录打开识别结果窗的请求。
@@ -8534,6 +8700,7 @@ mod tests {
                 .collect(),
             elapsed_ms: 3,
             table: None,
+            latex: None,
         }
     }
 
@@ -9100,6 +9267,57 @@ mod tests {
         view.dismiss_ocr();
         view.set_ocr_state(OcrUiState::Idle);
         assert!(view.table_texts.is_none());
+    }
+
+    /// 公式识别：快捷键与工具栏动作都能提交；缺模型给引导（不可下载）；缺运行时按 D 走专属下载。
+    #[test]
+    fn latex_recognition_flow() {
+        use crate::latex_assets::LatexUnavailable;
+        let (mut view, rec) = view_with(100, 80, 1.0, false);
+        view.handle_key("l", true, false);
+        assert!(rec.borrow().latexes.is_empty(), "没有选区不提交");
+        drag(&mut view, (5, 5), (44, 34));
+        view.handle_key("l", true, false);
+        assert_eq!(rec.borrow().latexes.len(), 1);
+        let (serial, w, h, rgba) = rec.borrow().latexes[0].clone();
+        assert_eq!((w, h), (40, 30));
+        assert_eq!(rgba.len(), 40 * 30 * 4);
+        assert_eq!(view.ocr_state(), &OcrUiState::Running);
+        // 识别中再次触发（含工具栏动作）不重复提交
+        view.apply_action(ToolbarAction::Latex);
+        assert_eq!(rec.borrow().latexes.len(), 1);
+        // 缺模型：引导卡片文案含官方来源与文件名，且不提供下载
+        view.finish_ocr(serial, Err(OcrError::LatexUnavailable(LatexUnavailable::NoDir)));
+        let OcrUiState::Failed { message, can_download } = view.ocr_state().clone() else {
+            panic!("应为失败态");
+        };
+        assert!(!can_download);
+        assert!(message.contains("RapidLaTeXOCR") && message.contains("encoder.onnx"), "{message}");
+        view.handle_key("d", false, false);
+        assert_eq!(rec.borrow().latex_downloads, 0, "模型缺失不下载");
+        // 缺运行时：按 D 走公式专属下载，不碰表格与 OCR 的下载
+        view.apply_action(ToolbarAction::Latex);
+        let serial = view.ocr_serial;
+        view.finish_ocr(serial, Err(OcrError::LatexUnavailable(LatexUnavailable::NoRuntime)));
+        view.handle_key("d", false, false);
+        assert_eq!(rec.borrow().latex_downloads, 1);
+        assert_eq!(rec.borrow().table_downloads + rec.borrow().ocr_downloads, 0);
+    }
+
+    /// 公式结果：纯 LaTeX 被复制并保留给结果窗，切回普通识别后清掉。
+    #[test]
+    fn latex_result_keeps_text() {
+        let (mut view, _) = view_with(100, 80, 1.0, false);
+        drag(&mut view, (5, 5), (44, 34));
+        view.handle_key("l", true, false);
+        let mut result = ocr_result(&[]);
+        result.full_text = "\\frac{a}{b}".into();
+        result.latex = Some("\\frac{a}{b}".into());
+        view.finish_ocr(view.ocr_serial, Ok(result));
+        assert!(matches!(view.ocr_state(), OcrUiState::Done { copied: true, .. }));
+        assert_eq!(view.latex_text.as_deref(), Some("\\frac{a}{b}"));
+        view.set_ocr_state(OcrUiState::Idle);
+        assert!(view.latex_text.is_none());
     }
 
     /// 按 D 触发下载；下载进度与结果更新状态；成功后回到待命，失败可再次重试。

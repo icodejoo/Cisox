@@ -2,7 +2,7 @@
 title: G04 表格 / LaTeX / Markdown 识别转换选型
 status: active
 updated: 2026-10-08
-summary: 表格用 SLANet+ 经 RapidTable 思路接 ORT 独立 worker；公式先走 PP-FormulaNet_plus-S（备选 RapidLaTeXOCR）；Markdown/HTML 沿用自定义 OpenAI 兼容模型通道，不做本地模型
+summary: 表格用 SLANet+ 经 RapidTable 思路接 ORT 独立 worker；公式已定用 RapidLaTeXOCR 且由用户自行下载、不内置（见 §8）；Markdown/HTML 沿用自定义 OpenAI 兼容模型通道，不做本地模型
 ---
 # G04 表格 / LaTeX / Markdown 识别转换选型
 
@@ -92,6 +92,15 @@ summary: 表格用 SLANet+ 经 RapidTable 思路接 ORT 独立 worker；公式�
 - 下载器：设置页"下载"按钮，**反复验证 sha256**，失败删除半成品；大文件（PP-FormulaNet_plus-S 约 248MB）用多连接下载；断点续传；用户也可手动放入目录。**镜像**：ModelScope（国内快）与 GitHub release 互为备份。
 - 加载：首次使用才起 worker，空闲 N 分钟退出（与翻译 worker 同策略），不预载。
 - 未安装 → 引导卡片（能力降级，见 [principles.md](../principles.md) §5）。
+
+## 8. 公式识别最终决定（2026-10-08，用户拍板）
+
+**状态：已实现。公式用 RapidLaTeXOCR，模型由用户自行下载，我们不内置、不托管、不写默认下载地址、不做下载器**（本文 §3 的 PP-FormulaNet 推荐与 §6 的下载器 / 托管方案对公式不再适用）。
+
+- 官方来源：https://github.com/RapidAI/RapidLaTeXOCR （MIT），ONNX 文件在其 Releases 的 v0.0.0。文件：`image_resizer.onnx`（38,967,751 字节）、`encoder.onnx`（89,008,136）、`decoder.onnx`（50,952,726）、`tokenizer.json`（24,174）。
+- 推理流程（对照上游 `rapid_latex_ocr`）：灰度 → 裁边补齐到 32 倍数 → 限制在 672x192 → 宽度分类器迭代（最多 10 轮）→ 编码器 → 解码器自回归（输入 `x` int64、`mask` bool、`context`，BOS=1、EOS=2、最长 512，上游温度 1e-5 等价贪心）→ tokenizer.json（BPE 词表，直接按 id 查词、`Ġ` 还原空格）→ 后处理去多余空格。
+- 落地：`snow-shot/src/latex_ocr.rs`（纯函数）、`latex_assets.rs`（目录校验与引导）、`latex_service.rs`（进程后端）、`tools/snow-latex`（ORT 工作进程，沿用 snow-table 的 ort 版本与补丁，无新依赖）。
+- 已知局限：上游中文公式弱（官方表中文 BLEU 约 40）；像素字体等非印刷体样图识别质量差，只证明链路通。
 
 ## 7. 来源
 

@@ -1405,6 +1405,7 @@ mod tests {
             boxes,
             elapsed_ms: 7,
             table: None,
+            latex: None,
         }
     }
 

@@ -304,6 +304,7 @@ mod tests {
             boxes,
             elapsed_ms: 5,
             table: None,
+            latex: None,
         }
     }
 

@@ -47,6 +47,8 @@ pub struct RecognitionData {
     pub boxes: Vec<OcrTextBox>,
     /// 表格识别的 Markdown / TSV / HTML；普通文字识别为 `None`。
     pub table: Option<TableTexts>,
+    /// 公式识别的纯 LaTeX；非公式识别为 `None`。
+    pub latex: Option<String>,
     /// Markdown / HTML 模型转换通道的配置状态（只用于未配置引导）。
     pub conversion: ConversionGuide,
 }
@@ -201,6 +203,22 @@ impl Render for RecognitionView {
                         .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| this.copy(&html, cx))),
                 );
         }
+        if let Some(latex) = self.data.latex.clone() {
+            let block = crate::latex_ocr::wrap_display(&latex);
+            format_row = format_row
+                .child(
+                    Button::new("recwin-copy-latex")
+                        .with_size(ComponentSize::Small)
+                        .label(i18n.tr("recwin-copy-latex"))
+                        .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| this.copy(&latex, cx))),
+                )
+                .child(
+                    Button::new("recwin-copy-latex-block")
+                        .with_size(ComponentSize::Small)
+                        .label(i18n.tr("recwin-copy-latex-block"))
+                        .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| this.copy(&block, cx))),
+                );
+        }
         for (id, key) in [
             ("recwin-convert-markdown", "recwin-convert-markdown"),
             ("recwin-convert-html", "recwin-convert-html"),
@@ -218,7 +236,13 @@ impl Render for RecognitionView {
             .flex_col()
             .gap(px(GAP))
             .child(div().text_size(px(TEXT_SIZE)).child(i18n.tr_with(
-                if self.data.table.is_some() { "recwin-table-title" } else { "recwin-title" },
+                if self.data.table.is_some() {
+                    "recwin-table-title"
+                } else if self.data.latex.is_some() {
+                    "recwin-latex-title"
+                } else {
+                    "recwin-title"
+                },
                 &Args::new().arg(1, self.data.boxes.len()),
             )))
             .child(div().flex_1().child(Textarea::new(&self.text)))
@@ -262,9 +286,11 @@ mod tests {
             text: "a	b".into(),
             boxes: Vec::new(),
             table: None,
+            latex: None,
             conversion: ConversionGuide::NotConfigured,
         };
         assert!(data.table.is_none());
+        assert!(data.latex.is_none());
         assert_eq!(data.conversion, ConversionGuide::NotConfigured);
     }
 

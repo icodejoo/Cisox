@@ -116,6 +116,8 @@ overlay-toolbar-translate = 翻译
 
 overlay-toolbar-table = 表格识别
 
+overlay-toolbar-latex = 公式
+
 overlay-toolbar-record = 录屏
 
 overlay-toolbar-scroll = 长图
