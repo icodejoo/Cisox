@@ -62,7 +62,7 @@
         "name": "sherpa-onnx-streaming-zipformer-en-2023-06-26.tar.bz2",
         "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-en-2023-06-26.tar.bz2",
         "size": 310414022,
-        "sha256": ""
+        "sha256": "639e25b578e9e997131402199419c13a941f8e4e198e2da1ce57dbf5cf401282"
       },
       "files": [
         "encoder-epoch-99-avg-1-chunk-16-left-128.int8.onnx",
@@ -84,7 +84,7 @@
         "name": "sherpa-onnx-streaming-zipformer-en-2023-06-21.tar.bz2",
         "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-en-2023-06-21.tar.bz2",
         "size": 506956414,
-        "sha256": ""
+        "sha256": "455f40e556aa2b20ac9d3bffd603b58002075c1193b4070938540c11efe0a4da"
       },
       "files": [
         "encoder-epoch-99-avg-1.int8.onnx",
@@ -115,7 +115,8 @@
         "tokens.txt",
         "bpe.model"
       ],
-      "license": "unverified",
+      "license": "apache-2.0",
+      "license_source": "https://huggingface.co/GilgameshWind/X-ASR-zh-en (upstream model card: Apache-2.0; the sherpa-onnx export repo declares no license)",
       "size_bytes": 169347218,
       "peak_mem_mb": 269
     },
@@ -138,7 +139,8 @@
         "tokens.txt",
         "bpe.model"
       ],
-      "license": "unverified",
+      "license": "apache-2.0",
+      "license_source": "https://huggingface.co/GilgameshWind/X-ASR-zh-en (upstream model card: Apache-2.0; the sherpa-onnx export repo declares no license)",
       "size_bytes": 169347218,
       "peak_mem_mb": 268,
       "notes_key": "stt-note-low-latency"
@@ -153,7 +155,7 @@
         "name": "sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20.tar.bz2",
         "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20.tar.bz2",
         "size": 511274346,
-        "sha256": ""
+        "sha256": "27ffbd9ee24ad186d99acc2f6354d7992b27bcab490812510665fa8f9389c5f8"
       },
       "files": [
         "encoder-epoch-99-avg-1.int8.onnx",
@@ -176,13 +178,14 @@
         "name": "sherpa-onnx-paraformer-zh-small-2024-03-09.tar.bz2",
         "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-paraformer-zh-small-2024-03-09.tar.bz2",
         "size": 77920048,
-        "sha256": ""
+        "sha256": "da92b3db5218c5be53aad53e57d1b6e63e7fc98a0e054fbdd6dbe18e9c6b1450"
       },
       "files": [
         "model.int8.onnx",
         "tokens.txt"
       ],
       "license": "unverified",
+      "license_source": "no license declared on the sherpa-onnx export repo; upstream ModelScope model card declares none either; upstream is presumed FunASR (MODEL_LICENSE) but not confirmed",
       "size_bytes": 81904027,
       "peak_mem_mb": 186
     },
@@ -196,13 +199,14 @@
         "name": "sherpa-onnx-paraformer-trilingual-zh-cantonese-en.tar.bz2",
         "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-paraformer-trilingual-zh-cantonese-en.tar.bz2",
         "size": 1059453702,
-        "sha256": ""
+        "sha256": "78359a14d367407c9a0b4122daffe367399f8342ac1e55f93a5490dd5895c100"
       },
       "files": [
         "model.int8.onnx",
         "tokens.txt"
       ],
       "license": "unverified",
+      "license_source": "no license declared on the sherpa-onnx export repo; upstream ModelScope model card declares none either; upstream is presumed FunASR (MODEL_LICENSE) but not confirmed",
       "size_bytes": 244803083,
       "peak_mem_mb": 369,
       "notes_key": "stt-note-multilingual"
@@ -217,7 +221,7 @@
         "name": "sherpa-onnx-zipformer-small-en-2023-06-26.tar.bz2",
         "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-zipformer-small-en-2023-06-26.tar.bz2",
         "size": 112232184,
-        "sha256": ""
+        "sha256": "c8bff1091c26c49731cddbcd60ef18061142ea11523df1b73bf1b14451b9c15e"
       },
       "files": [
         "encoder-epoch-99-avg-1.int8.onnx",
@@ -239,7 +243,7 @@
         "name": "sherpa-onnx-zipformer-en-2023-06-26.tar.bz2",
         "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-zipformer-en-2023-06-26.tar.bz2",
         "size": 307666046,
-        "sha256": ""
+        "sha256": "652181d80dfe0e8e0659cf32036d1d6ef56fa2f1ab5b35c54d0cee8a663e8954"
       },
       "files": [
         "encoder-epoch-99-avg-1.int8.onnx",
@@ -270,7 +274,8 @@
         "tokens.txt",
         "bpe.model"
       ],
-      "license": "unverified",
+      "license": "apache-2.0",
+      "license_source": "https://huggingface.co/GilgameshWind/X-ASR-zh-en (upstream model card: Apache-2.0; the sherpa-onnx export repo declares no license)",
       "size_bytes": 175084290,
       "peak_mem_mb": 667,
       "notes_key": "stt-note-high-memory"
@@ -292,6 +297,7 @@
         "tokens.txt"
       ],
       "license": "funasr-model-license",
+      "license_source": "https://github.com/modelscope/FunASR/blob/main/MODEL_LICENSE (FunASR Model Open Source License; per https://github.com/FunAudioLLM/SenseVoice, commercial use allowed when its terms are followed)",
       "size_bytes": 239549735,
       "peak_mem_mb": 415,
       "notes_key": "stt-note-itn"

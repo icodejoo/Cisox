@@ -25,6 +25,12 @@
 5. A12 MCP：第一期（M0 骨架，5/101 个 tool）已实现，余下分期见 [design/mcp-subsystem.md](design/mcp-subsystem.md) §8。
 6. 托盘默认菜单：维持 Qt 的 12 项默认，不改。
 
+**用户已批准的依赖 / 结构决定（2026-10-08）**
+- `windows` crate 的 `Win32_Security_Cryptography` 特性（`snow-platform`，MCP 令牌随机数 `BCryptGenRandom`），详见 [design/mcp-subsystem.md](design/mcp-subsystem.md)。
+- 独立 workspace `snow-shot-rs/tools/snow-table`（表格识别工作进程，自带 `[workspace]` 与 `Cargo.lock`，ort load-dynamic）。构建脚本 `scripts/build-snow-table.ps1`，CI `workers` 任务覆盖它与 `snow-stt`。
+
+**STT 清单收尾（2026-10-08）**：13 个模型压缩包 sha256 已全部固定；许可证核对见 `stt-model-manifest.json` 的 `license_source` 与 `licenses/runtime-components.md`（x-asr 三款 Apache-2.0、SenseVoice 为 FunASR 许可，paraformer-zh-small 与 trilingual 仍 `unverified`）。`collect-third-party-licenses.ps1` 新增 `-ExtraNotices` 参数承载非 Cargo 组件声明；Rust 版安装包脚本尚不存在（`package-snow-shot.ps1` 仍是 Qt 版），`snow-table.exe` / `snow-stt.exe` 入包待该脚本出现后接入。
+
 **技术上还能继续、但量大的**：聚光灯 / 水印（要先让 `snow-canvas-raster` 会画图层级配置）、自动滤镜 / 智能擦除 D12（OpenCV 依赖）、翻译页 G07、主窗口 A18、配置归档 A06、A15 剩余（`ocr_client`、`ocr_download`、`stitch_service`、`translate_flow`、`stt_download`、`scroll_view`、`pinned_shared`、`recording/*` 等的错误串与下载文案，需连带重构错误类型）、剩余 78 个设置键、各项真机验证。
 
 **构建环境补充**：worker 构建需要 `libclang.dll`（已用 PyPI `libclang` 轮子里的 DLL 放在 `.tools/llvm/bin/`，被 gitignore）；`sccache` 在 vcvars 环境下会启动失败，需 `RUSTC_WRAPPER=""`；E: 盘慢，建议把 `CARGO_TARGET_DIR` 指到 C: 盘。
@@ -251,11 +257,11 @@ Windows 主线已经能跑通「热键 / 托盘 / IPC → 截图覆盖窗（单�
 - [x] 设置页与下载真机截图验证（2026-10-04，本机 Windows 11、2560x1600、缩放 1.5）：模式/维度/模型联动、置灰、itn 显隐、中英文、真实下载与取消续传均已验证；顺带修了六处界面问题（英文说明截断、模型下拉标签截断、下载行显示长 id、中文标点孤立成行、分组数量与侧栏徽标不一致、取消下载记 WARN），并加固了 `settings_state` 测试夹具（临时目录改为唯一名并自动清理）。浮窗按工作区定位无误（本机被搜狗输入法悬浮条遮挡，非定位问题）。
 - [ ] 仍未做真机验证：热键 Released 实机、键入到真实应用/IME/游戏/远程桌面/Chrome、管理员窗口、浮窗不抢焦点与多屏 DPI、麦克风实录识别质量、翻译级联浮窗与翻译模型联调。
 - [ ] VAD 参数复测：默认 threshold 0.5 / 静音 500ms / 最短 250ms / 最长 20000ms 未经评测，会把中文长句切成两段。
-- [ ] 许可证：清单里 5 个模型标 `unverified`（x-asr 流式 480ms/160ms、x-asr 离线、paraformer-zh-small、paraformer-trilingual），SenseVoice 为 FunASR 模型许可，未逐条核对；评测过但未入清单的模型也没核。此前记录为「7 个未核实」，以清单现状为准。
-- [ ] sha256 固定：7 个模型压缩包 sha256 为空（GitHub 未返回 digest），下载器放行并提示，发布前必须固定。
+- [ ] 许可证（2026-10-08 已核）：x-asr 三款 Apache-2.0、SenseVoice 为 FunASR 许可；仅 paraformer-zh-small 与 paraformer-trilingual 仍 `unverified`（官方页均未声明）。评测过但未入清单的模型没核。
+- [x] sha256 固定（2026-10-08）：原 7 个空 sha256 已实际下载并填入清单。
 - [ ] 翻译上下文：首版每句独立翻译，`snow-translate` 接口不支持上下文。
-- [ ] 打包脚本与 CI 不覆盖独立 workspace `snow-stt`（需要后续处理）。
-- [ ] 第三方声明：espeak-ng GPL 声明沿用原有记录；`collect-third-party-licenses.ps1` 是否覆盖 sherpa 预编译库与各模型许可证未确认。
+- [x] CI 已覆盖 `snow-stt`（fmt+clippy）与 `snow-table`（fmt+clippy+test+release 构建）；`snow-stt` 测试因缺 onnxruntime 1.28 DLL 暂不在 CI 跑；Rust 版打包脚本待做。
+- [x] 第三方声明：`licenses/runtime-components.md` + 收集器 `-ExtraNotices` 参数（2026-10-08）；调用方（Rust 版打包脚本）待接入。
 
 **文本输入翻译浮窗**
 - [x] 快捷键唤起的文本输入翻译浮窗（2026-10-03，提交 07b5e518）：配置键 `global_shortcuts/translate_input`、`AppCommand::OpenTranslateInput`、模型下拉=已装包+自动、点击译文复制。

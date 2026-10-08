@@ -76,3 +76,44 @@ jobs:
         run: |
           cargo run -q -p snow-i18n --bin snow-i18n-tool -- check crates/snow-i18n/locales
           cargo run -q -p snow-i18n --bin snow-i18n-tool -- extract crates --exclude crates/snow-i18n --strict-refs --min-refs 10
+
+  # 独立 workspace 的工作进程（不在主 workspace 内，上面的 --workspace 覆盖不到），仅 Windows 验证
+  workers:
+    name: workers (windows)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.1
+          components: rustfmt, clippy
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            snow-shot-rs/tools/snow-table
+            snow-shot-rs/tools/snow-stt
+          cache-on-failure: true
+
+      # snow-table：构建 + clippy + test（ort load-dynamic，测试不需要 onnxruntime.dll）
+      - name: snow-table fmt
+        run: cargo fmt --manifest-path snow-shot-rs/tools/snow-table/Cargo.toml -- --check
+      - name: snow-table clippy
+        run: ./scripts/build-snow-table.ps1 -Profile debug -Clippy
+      - name: snow-table test
+        run: ./scripts/build-snow-table.ps1 -Profile debug -Test
+      - name: snow-table build (release)
+        run: ./scripts/build-snow-table.ps1 -Profile release
+
+      # snow-stt：构建 + clippy；测试要仓库同版 onnxruntime 1.28 DLL，CI 里没有，暂不跑
+      - name: snow-stt fmt
+        run: cargo fmt --manifest-path snow-shot-rs/tools/snow-stt/Cargo.toml -- --check
+      - name: snow-stt clippy
+        run: ./scripts/build-snow-stt.ps1 -Profile debug -Clippy
