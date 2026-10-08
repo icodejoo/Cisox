@@ -1,6 +1,6 @@
 # MCP 子系统设计（A12）
 
-> 状态：**第一期（M0 骨架）已实现（2026-10-08）**，M1 起待做。实现细节与偏差见文末 §8。原为草案阶段的目标：给后续落地定边界，免得做到一半返工。
+> 状态：**第一期（M0 骨架）与二期（应用域子集 + 授权域管理）已实现（2026-10-08）**，M1 截图域、文档域、媒体域待做。实现细节与偏差见文末 §8。原为草案阶段的目标：给后续落地定边界，免得做到一半返工。
 > 依据：总原则见 [../principles.md](../principles.md)（高性能 > 低内存 > 高 fps > 少编译依赖 > 多用系统能力）；审计行见 [../research/qt-parity-audit.md](../research/qt-parity-audit.md) A11 / A12。
 
 ## 1. 现状与范围
@@ -76,3 +76,32 @@
 - **依赖**：未新增 crate；`snow-platform` 的 `windows` 依赖新增 `Win32_Security_Cryptography` 特性（`BCryptGenRandom`）。
 
 剩余未实现 tool 数随期数递减：M1 截图域 27（`mcp_status` 已实现）、M2 应用域 23 + 文档域 33、M3 媒体域 13；`registry.rs` 的测试固定“已实现 + 未实现 = 101”。
+
+## 9. 第二期（M2 应用域子集 + 授权域管理）实现状态与偏差（2026-10-08）
+
+已实现 tool 12 / 101（应用域 27 个里已有 11 个，加 `mcp_status`）。本期新增 7 个：
+
+| tool | 权限域 | 落点 |
+|---|---|---|
+| `snow_shot_app_displays` | 只读 | 主线程请求-响应（`mcp_host::round_trip`，5 秒超时）枚举显示器 |
+| `snow_shot_app_action` | 控制 | 白名单动作（`APP_ACTIONS`：开设置 / 主窗口 / 历史 / 贴图管理 / 翻译输入、贴剪贴板）直接投已有的 `UiEvent`；不含退出 / 重启 |
+| `snow_shot_settings_update` | 控制 | 主线程请求-响应；整体校验后才写，写盘失败整体回滚；写入后广播 `ConfigChanged`，热键重注册与失败回滚沿用设置页同一通路 |
+| `snow_shot_settings_reset` | 控制 | 同上，值取 schema 默认值 |
+| `snow_shot_permissions_request` | 控制 | 当前平台不需要弹授权，只回报状态，`prompted` 恒为 false |
+| `snow_shot_storage_status` | 只读 | 数据根一级子项占用，遍历 20 万条目封顶并标 `truncated` |
+| `snow_shot_translation_catalog` | 只读 | 14 种语言的代码与名称 |
+
+仍返回 `not_implemented` 的应用域 tool 16 个：`app_status` 之外的 `settings_action`、`models_list` / `models_update`、`credentials_set`、`history_*`（5）、`configuration_export` / `configuration_import`、`storage_cleanup`、`updates_action`、`templates_*`（2）、`translation_start`。原因：历史库与模板由别的线程 / 视图持有，需要先定主线程读取接口；导入导出、清理、凭据写入是破坏性动作，需要单独的确认流程；`translation_start` 属异步 job（M2 文档域的 job 注册表）。
+
+授权域管理：
+
+- 新增两个扩展配置键 `mcp/allow_capture`（默认开）与 `mcp/allow_control`（默认关）；只读域恒开、不可关。设置页 MCP 分组里是普通开关行，顶部多一个说明区带“复制客户端配置”按钮。
+- 授权域变化时宿主会重启服务（旧令牌随之作废，描述符里的 scope 列表同步更新），不做运行中热改。
+- MCP 自己不能改自己的授权：`mcp/*`、`updates/manifest_url` 与含 `api_key` / `token` / `secret` / `password` / `credential` 的键在 `settings_update` / `settings_reset` 里一律被拒（`protected_setting`）。
+- 复制出的配置是 `mcpServers` 结构，命令为 `snow-mcp-bridge --descriptor <描述符路径>`，不含令牌；桥接进程仍属 M4 未做，面板文案已注明。
+
+偏差与限制：
+
+- `MCP_TOOL_MAP` 是截图域的 28 项，本期没有动它；设计文档原写的“应用域接命令总线”实际落在 `UiEvent`（`app_action`）与请求-响应（`settings_*`、`displays`），因为总线的 `CommandKind` 里没有应用域命令。
+- 请求-响应期间主线程若被长任务占住，会返回 `main_thread_timeout`，调用方可重试。
+

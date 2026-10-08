@@ -488,4 +488,46 @@ mod tests {
         let v = call(&mut s, "snow_shot_screenshot_begin", json!({}));
         assert_eq!(v["error"]["code"], ERR_FORBIDDEN);
     }
+
+    /// 默认授权下，所有控制类应用域 tool 都被拒；开了控制域后才能执行，且受保护键仍被拒。
+    #[test]
+    fn control_tools_denied_by_default_and_policed_when_granted() {
+        let control_tools = [
+            ("snow_shot_app_action", json!({"action": "open_settings"})),
+            ("snow_shot_settings_update", json!({"settings": {"a/b": 1}})),
+            ("snow_shot_settings_reset", json!({"keys": ["a/b"]})),
+            ("snow_shot_permissions_request", json!({})),
+        ];
+        let mut s = ready(shared(Scope::DEFAULT_GRANTED));
+        for (name, args) in &control_tools {
+            let v = call(&mut s, name, args.clone());
+            assert_eq!(v["error"]["code"], ERR_FORBIDDEN, "{name}");
+        }
+        let all = [Scope::ReadOnly, Scope::Capture, Scope::Control];
+        let mut s = ready(shared(&all));
+        let v = call(
+            &mut s,
+            "snow_shot_settings_update",
+            json!({"settings": {"mcp/allow_control": true}}),
+        );
+        assert_eq!(v["result"]["isError"], true);
+        assert_eq!(
+            v["result"]["structuredContent"]["error"]["code"],
+            "protected_setting"
+        );
+        let v = call(&mut s, "snow_shot_app_action", json!({"action": "quit"}));
+        assert_eq!(v["error"]["code"], ERR_INVALID_PARAMS);
+        let v = call(
+            &mut s,
+            "snow_shot_app_action",
+            json!({"action": "open_settings"}),
+        );
+        assert_eq!(v["result"]["isError"], false);
+        // 仍未实现的控制类 tool 在有授权时返回结构化 not_implemented
+        let v = call(&mut s, "snow_shot_credentials_set", json!({}));
+        assert_eq!(
+            v["result"]["structuredContent"]["error"]["code"],
+            "not_implemented"
+        );
+    }
 }

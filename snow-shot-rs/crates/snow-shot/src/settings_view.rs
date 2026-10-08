@@ -7,6 +7,7 @@ use crate::config_transfer::{TRANSFER_GROUP_ID, TransferAction, TransferUiState,
 use crate::dictation::status::backend_notice as dictation_backend_notice;
 use crate::dictation::translate::ModelSupport;
 use crate::language_names::{is_language_key, language_option_label};
+use crate::mcp_settings::{MCP_GROUP_ID, McpUiState, copy_result_state, mcp_panel};
 use crate::net_settings::{UPDATES_GROUP_ID, UpdateAction, UpdateUiState, update_panel};
 use crate::ocr_backend::{OcrBackend, OcrNotice};
 use crate::settings_model::{
@@ -318,6 +319,10 @@ pub struct SettingsView {
     transfer_include_keys: bool,
     /// 请求导出 / 导入的入口（未接入时为 `None`，按钮不可用）。
     transfer_hook: Option<Rc<dyn Fn(TransferAction)>>,
+    /// MCP 说明区的界面状态（复制客户端配置的结果）。
+    mcp_state: McpUiState,
+    /// 复制客户端配置入口；由上层写剪贴板并返回结果。
+    mcp_hook: Option<Rc<dyn Fn() -> Result<(), String>>>,
     /// 语音模型下载任务的界面状态。
     stt_download: DownloadState,
     /// 进行中下载的取消标记。
@@ -375,6 +380,9 @@ fn dropdown_index(options: &[&'static str], current: &str) -> Option<usize> {
 /// 更新分组说明区的文本行数（只有“当前版本”一行）。
 const UPDATE_PANEL_LINES: usize = 1;
 
+/// MCP 说明区的文本行数（只有一行说明）。
+const MCP_PANEL_LINES: usize = 1;
+
 /// 导出 / 导入说明区的文本行数（只有一行说明）。
 const TRANSFER_PANEL_LINES: usize = 1;
 
@@ -414,6 +422,8 @@ impl SettingsView {
             transfer_state: TransferUiState::Idle,
             transfer_include_keys: false,
             transfer_hook: None,
+            mcp_state: McpUiState::Idle,
+            mcp_hook: None,
             stt_download: DownloadState::Idle,
             stt_cancel: None,
             stt_installed: HashSet::new(),
@@ -523,6 +533,14 @@ impl SettingsView {
     pub fn finish_update_check(&mut self, state: UpdateUiState, cx: &mut Context<Self>) {
         self.update_state = state;
         cx.notify();
+    }
+
+    /// 接入“复制 MCP 客户端配置”入口。
+    ///
+    /// # 参数
+    /// - `hook`：点击按钮时调用，写剪贴板并返回结果（错误为原因文本）
+    pub fn set_mcp_hook(&mut self, hook: Rc<dyn Fn() -> Result<(), String>>) {
+        self.mcp_hook = Some(hook);
     }
 
     /// 接入设置导出 / 导入入口。
@@ -1526,6 +1544,7 @@ impl SettingsView {
                 .map_or(0, |panel| hymt2_rows(panel.lines.len()).len()),
             Some(UPDATES_GROUP_ID) => hymt2_rows(UPDATE_PANEL_LINES).len(),
             Some(TRANSFER_GROUP_ID) => hymt2_rows(TRANSFER_PANEL_LINES).len(),
+            Some(MCP_GROUP_ID) => hymt2_rows(MCP_PANEL_LINES).len(),
             _ => 0,
         }
     }
@@ -1709,6 +1728,7 @@ impl SettingsView {
             Some(DICTATION_GROUP_ID) => self.render_stt_row(row_index, p, cx),
             Some(UPDATES_GROUP_ID) => self.render_update_row(row_index, p, cx),
             Some(TRANSFER_GROUP_ID) => self.render_transfer_row(row_index, p, cx),
+            Some(MCP_GROUP_ID) => self.render_mcp_row(row_index, p, cx),
             _ => self.render_hymt2_row(row_index, p, cx),
         }
     }
@@ -1803,6 +1823,64 @@ impl SettingsView {
                     .border_b_1()
                     .border_color(p.border)
                     .child(div().flex().items_center().gap_3().child(button).children(extra).children(notice))
+                    .into_any_element()
+            }
+        }
+    }
+
+    /// 渲染“MCP”说明区的第 `row_index` 个定高行（说明行与复制按钮行）。
+    fn render_mcp_row(&self, row_index: usize, p: &Palette, cx: &mut Context<Self>) -> AnyElement {
+        let panel = mcp_panel(self.state.prefs().locale, &self.mcp_state);
+        let frame = div()
+            .h(px(ROW_HEIGHT))
+            .w_full()
+            .px_4()
+            .py_1()
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .text_size(px(12.0))
+            .line_height(px(16.0));
+        let rows = hymt2_rows(MCP_PANEL_LINES);
+        let Some(row) = rows.get(row_index) else {
+            return frame.into_any_element();
+        };
+        match row {
+            Hymt2Row::Text { .. } => frame
+                .child(div().font_weight(FontWeight::BOLD).child(panel.title))
+                .child(
+                    div()
+                        .text_color(p.dim)
+                        .whitespace_nowrap()
+                        .child(panel.description),
+                )
+                .into_any_element(),
+            Hymt2Row::Actions => {
+                let mut button = Button::new("mcp-copy-config").small().label(panel.copy_label);
+                button = match &self.mcp_hook {
+                    Some(hook) => {
+                        let hook = Rc::clone(hook);
+                        button.on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
+                            let result = hook();
+                            this.mcp_state = copy_result_state(this.state.prefs().locale, &result);
+                            cx.notify();
+                        }))
+                    }
+                    None => button.disabled(true),
+                };
+                let notice = panel.notice.map(|(text, danger)| {
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(if danger { p.danger } else { p.dim })
+                        .whitespace_nowrap()
+                        .child(text)
+                });
+                frame
+                    .py_0()
+                    .pt(px(2.0))
+                    .border_b_1()
+                    .border_color(p.border)
+                    .child(div().flex().items_center().gap_3().child(button).children(notice))
                     .into_any_element()
             }
         }

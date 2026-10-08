@@ -204,6 +204,8 @@ pub enum UiEvent {
     OverlayClosed,
     /// 打开（或激活）设置窗口。
     OpenSettings,
+    /// MCP 请求：需要主线程数据或能力，处理后经请求自带的通道回复。
+    Mcp(crate::mcp_host::McpRequest),
     /// 重启应用：先拉起延迟启动的新实例，再正常退出。
     Restart,
     /// 请求录制：进入选区，确认后拉起独立的录制进程。
@@ -1618,6 +1620,7 @@ impl AppState {
             control_inbox.push(UiEvent::PinControl(event));
         }));
         let translator = Arc::new(TranslateHost::new(data_root));
+        let mcp_inbox = inbox.clone();
         Self {
             pins,
             ocr: Arc::new(OcrService::new(data_root)),
@@ -1658,7 +1661,7 @@ impl AppState {
             record_copy_pending: false,
             mouse_service: None,
             gesture: None,
-            mcp: crate::mcp_host::McpHost::new(),
+            mcp: crate::mcp_host::McpHost::new(mcp_inbox),
         }
     }
 
@@ -1675,7 +1678,7 @@ impl AppState {
     /// 释放托盘与热键（移除图标、注销热键）。
     pub fn shutdown_services(&mut self) {
         self.mouse_service.take();
-        self.mcp = crate::mcp_host::McpHost::new();
+        self.mcp = crate::mcp_host::McpHost::new(self.inbox.clone());
         self.tray.take();
         self.hotkeys.take();
     }
@@ -3288,6 +3291,7 @@ fn build_settings_view(
     });
     let view = SettingsView::create(window, app, config, system, notify);
     let stt_inbox = inbox.clone();
+    let mcp_data_root = data_root.clone();
     let stt_hooks = SttHooks {
         data_root,
         request: std::sync::Arc::new(move |model_id, cancel| {
@@ -3296,7 +3300,12 @@ fn build_settings_view(
     };
     let transfer_inbox = inbox.clone();
     let update_inbox = inbox;
+    let mcp_descriptor = snow_mcp::descriptor::descriptor_path(&mcp_data_root);
     view.update(app, |v, _| {
+        v.set_mcp_hook(Rc::new(move || {
+            let text = crate::mcp_settings::client_config_json(&mcp_descriptor);
+            snow_platform::clipboard::copy_text_to_clipboard(&text)
+        }));
         v.set_stt_hooks(stt_hooks);
         v.set_transfer_hook(Rc::new(move |action| {
             transfer_inbox.push(UiEvent::ConfigTransferRequested(action));
@@ -4011,6 +4020,28 @@ fn hotkey_config_key(key: &str) -> Option<&'static str> {
     .find(|k| *k == key)
 }
 
+/// 主线程处理一个 MCP 请求（枚举显示器 / 写设置），回复后把配置变更广播给运行时。
+///
+/// # 参数
+/// - `cx`：外壳上下文。
+/// - `state`：运行时状态。
+/// - `request`：MCP 请求。
+fn handle_mcp_request(
+    cx: &mut ShellContext,
+    state: &mut AppState,
+    request: &crate::mcp_host::McpRequest,
+) {
+    let (reply, changed) = crate::mcp_host::handle_request(
+        request,
+        || cx.monitors().map(|m| m.all().to_vec()),
+        &state.config,
+    );
+    request.respond(reply);
+    for (key, previous) in changed {
+        state.inbox.push(UiEvent::ConfigChanged { key, previous });
+    }
+}
+
 /// 设置页写入配置后的响应：全局热键类配置变更时重新注册并在失败时回滚。
 ///
 /// # 参数
@@ -4514,6 +4545,7 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
         UiEvent::Export(target) => export_from_overlay(cx, state, &target),
         UiEvent::DirectCapture(request) => direct_capture(cx, state, request),
         UiEvent::OpenSettings => open_or_focus_settings(cx, state),
+        UiEvent::Mcp(request) => handle_mcp_request(cx, state, &request),
         UiEvent::OpenMainWindow => open_or_focus_main_window(cx, state),
         UiEvent::MainWindowSidebarCollapsed(collapsed) => save_sidebar_collapsed(state, collapsed),
         UiEvent::OpenHistory => open_or_focus_history(cx, state),
