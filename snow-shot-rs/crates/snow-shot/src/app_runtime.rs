@@ -19,6 +19,8 @@ use crate::history_store::{
     HistoryRecorder, HistorySource, HistoryStore, Thumbnail, policy_from_document,
 };
 use crate::history_view::{HistoryAction, HistoryView};
+use crate::main_window_model::{SIDEBAR_COLLAPSED_KEY, TRANSLATION_PAGE_ENABLED_KEY};
+use crate::main_window_view::MainWindowView;
 use crate::ocr_assets::{ENV_OCR_ASSET_DIR, ocr_root};
 use crate::ocr_backend::{OcrInput, select_from_document};
 use crate::ocr_client::OcrError;
@@ -68,6 +70,7 @@ use crate::window_pick::{
     WindowHover, selection_target, start_window_hover, transition_animation_enabled,
 };
 use serde_json::Value;
+use snow_app_core::PRODUCT_NAME;
 use snow_app_core::bus::{CommandBus, CommandError, CommandOutcome};
 use snow_app_core::command::{
     AppCommand, CaptureRequest, CommandKind, CommandSource, DirectCaptureRequest, DirectOutput,
@@ -107,6 +110,8 @@ pub(crate) const TRAY_TOOLTIP: &str = "Cisox";
 pub const TRAY_SIGNAL_PIN_CLIPBOARD: &str = "pin_clipboard";
 /// 托盘信号：打开截图历史。
 pub const TRAY_SIGNAL_HISTORY: &str = "history";
+/// 托盘信号：打开主窗口。
+pub const TRAY_SIGNAL_MAIN_WINDOW: &str = "main_window";
 /// 托盘信号：打开设置。
 pub const TRAY_SIGNAL_SETTINGS: &str = "settings";
 /// 托盘信号：退出。
@@ -276,6 +281,10 @@ pub enum UiEvent {
     },
     /// 把剪贴板里的图像贴到屏幕上。
     PinFromClipboard,
+    /// 打开（或激活）主窗口。
+    OpenMainWindow,
+    /// 主窗口侧栏折叠状态变化（需要落盘）。
+    MainWindowSidebarCollapsed(bool),
     /// 打开（或激活）截图历史窗口。
     OpenHistory,
     /// 截图历史有新记录写入（刷新已打开的历史窗口）。
@@ -520,8 +529,8 @@ pub fn map_ipc_command(cmd: &IpcCommand) -> Option<UiEvent> {
         IpcCommand::TriggerRecording => Some(UiEvent::StartRecording),
         IpcCommand::ScrollCapture => Some(UiEvent::StartScrollCapture),
         IpcCommand::PinClipboard => Some(UiEvent::PinFromClipboard),
-        // 目前唯一的窗口是设置窗，"唤醒主窗口"即打开/激活它
-        IpcCommand::OpenSettings | IpcCommand::ShowMainWindow => Some(UiEvent::OpenSettings),
+        IpcCommand::OpenSettings => Some(UiEvent::OpenSettings),
+        IpcCommand::ShowMainWindow => Some(UiEvent::OpenMainWindow),
         IpcCommand::Quit => Some(UiEvent::Quit),
         IpcCommand::Custom(_) => None,
     }
@@ -536,6 +545,7 @@ pub fn map_tray_signal(signal: &str) -> Option<UiEvent> {
     match signal {
         TRAY_SIGNAL_PIN_CLIPBOARD => Some(UiEvent::PinFromClipboard),
         TRAY_SIGNAL_HISTORY => Some(UiEvent::OpenHistory),
+        TRAY_SIGNAL_MAIN_WINDOW => Some(UiEvent::OpenMainWindow),
         TRAY_SIGNAL_SETTINGS => Some(UiEvent::OpenSettings),
         TRAY_SIGNAL_QUIT => Some(UiEvent::Quit),
         TRAY_SIGNAL_RESTART => Some(UiEvent::Restart),
@@ -795,7 +805,7 @@ pub fn build_tray_spec_with_groups(
             item(
                 "tray-show-main",
                 "home",
-                TrayAction::Signal(TRAY_SIGNAL_SETTINGS.into()),
+                TrayAction::Signal(TRAY_SIGNAL_MAIN_WINDOW.into()),
             ),
         ),
         (
@@ -872,9 +882,8 @@ pub fn build_tray_spec_with_groups(
             TrayClick::Screenshot => {
                 TrayAction::Command(AppCommand::Capture(CaptureRequest::default()))
             }
-            TrayClick::ShowMainWindow | TrayClick::OpenFunctionSettings => {
-                TrayAction::Signal(TRAY_SIGNAL_SETTINGS.into())
-            }
+            TrayClick::ShowMainWindow => TrayAction::Signal(TRAY_SIGNAL_MAIN_WINDOW.into()),
+            TrayClick::OpenFunctionSettings => TrayAction::Signal(TRAY_SIGNAL_SETTINGS.into()),
             TrayClick::ScreenshotCopy => quick(QuickAction::ScreenshotCopy),
             TrayClick::ScreenshotFixed => quick(QuickAction::ScreenshotFixed),
         }
@@ -952,6 +961,7 @@ fn apply_chrome_theme(state: &AppState) {
         .settings
         .as_ref()
         .into_iter()
+        .chain(state.main_window.as_ref().map(|(window, _)| window))
         .chain(state.history_window.as_ref().map(|(window, _)| window));
     for window in windows {
         if let Err(e) = window.set_dark_title(dark) {
@@ -1458,6 +1468,8 @@ pub struct AppState {
     translate_input: Option<(ShellWindow, Entity<TranslateInputView>)>,
     /// 截图历史后台写入器（启动失败时为 `None`，历史功能降级）。
     history: Option<Arc<HistoryRecorder>>,
+    /// 主窗口（若已打开）与其视图；关闭即释放。
+    main_window: Option<(ShellWindow, Entity<MainWindowView>)>,
     /// 截图历史窗口（若已打开）与其视图。
     history_window: Option<(ShellWindow, Entity<HistoryView>)>,
     /// 贴图管理窗口（打开时有值）。
@@ -1578,6 +1590,7 @@ impl AppState {
             settings_view: None,
             translate_input: None,
             history,
+            main_window: None,
             history_window: None,
             pin_manage_window: None,
             capture_requests: 0,
@@ -2975,6 +2988,54 @@ fn open_or_focus_settings(cx: &mut ShellContext, state: &mut AppState) {
     }
 }
 
+/// 打开主窗口；已打开则激活到前台。窗口关闭即释放，不做后台常驻。
+///
+/// # 参数
+/// - `cx`：外壳上下文。
+/// - `state`：运行时状态。
+fn open_or_focus_main_window(cx: &mut ShellContext, state: &mut AppState) {
+    if let Some((window, _)) = &state.main_window
+        && cx.is_window_open(window)
+    {
+        cx.activate_window(window);
+        return;
+    }
+    let prefs = ui_prefs_from_config(&state.config);
+    let spec = WindowSpec::normal(
+        PRODUCT_NAME.to_string(),
+        LogicalSize::new(
+            crate::main_window_view::WINDOW_WIDTH,
+            crate::main_window_view::WINDOW_HEIGHT,
+        ),
+    );
+    let config = Rc::clone(&state.config);
+    let inbox = state.inbox.clone();
+    match cx.open_window(&spec, move |_window, app| {
+        MainWindowView::create(app, &config, prefs, inbox)
+    }) {
+        Ok((window, view)) => {
+            state.main_window = Some((window, view));
+            apply_chrome_theme(state);
+            tracing::info!("主窗口已打开");
+        }
+        Err(e) => tracing::error!(error = %e, "打开主窗口失败"),
+    }
+}
+
+/// 把主窗口侧栏折叠状态写回配置并落盘；失败只记日志。
+///
+/// # 参数
+/// - `state`：运行时状态。
+/// - `collapsed`：新的折叠状态。
+fn save_sidebar_collapsed(state: &AppState, collapsed: bool) {
+    let mut store = state.config.borrow_mut();
+    if let Err(e) = store.set_value(SIDEBAR_COLLAPSED_KEY, serde_json::json!(collapsed)) {
+        tracing::warn!(error = %e, "写入侧栏折叠状态失败");
+    } else if let Err(e) = store.flush() {
+        tracing::warn!(error = %e, "侧栏折叠状态落盘失败");
+    }
+}
+
 /// 打开截图历史窗口；已打开则激活到前台。
 ///
 /// # 参数
@@ -3527,6 +3588,13 @@ fn hotkey_config_key(key: &str) -> Option<&'static str> {
 /// - `key`：变更的配置键。
 /// - `previous`：变更前的值。
 fn on_config_changed(cx: &mut ShellContext, state: &mut AppState, key: &str, previous: Value) {
+    if key == TRANSLATION_PAGE_ENABLED_KEY {
+        let enabled = state.config.borrow().value(key).as_bool().unwrap_or(false);
+        if let Some((_, view)) = &state.main_window {
+            view.update(cx.app(), |v, cx| v.set_translation_enabled(enabled, cx));
+        }
+        return;
+    }
     if key == LANGUAGE_KEY
         || key == DELAY_SECONDS_CONFIG_KEY
         || key == crate::tray_config::KEY_MENU_OPTIONS
@@ -4006,6 +4074,8 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
         UiEvent::Export(target) => export_from_overlay(cx, state, &target),
         UiEvent::DirectCapture(request) => direct_capture(cx, state, request),
         UiEvent::OpenSettings => open_or_focus_settings(cx, state),
+        UiEvent::OpenMainWindow => open_or_focus_main_window(cx, state),
+        UiEvent::MainWindowSidebarCollapsed(collapsed) => save_sidebar_collapsed(state, collapsed),
         UiEvent::OpenHistory => open_or_focus_history(cx, state),
         UiEvent::HistoryChanged => {
             if let Some((_, view)) = &state.history_window {
@@ -4513,7 +4583,7 @@ mod tests {
         );
         assert_eq!(
             map_ipc_command(&IpcCommand::ShowMainWindow),
-            Some(UiEvent::OpenSettings)
+            Some(UiEvent::OpenMainWindow)
         );
         assert_eq!(map_ipc_command(&IpcCommand::Quit), Some(UiEvent::Quit));
         assert_eq!(map_ipc_command(&IpcCommand::Custom("x".into())), None);
@@ -4523,6 +4593,10 @@ mod tests {
     #[test]
     fn tray_signal_mapping() {
         assert_eq!(map_tray_signal("settings"), Some(UiEvent::OpenSettings));
+        assert_eq!(
+            map_tray_signal("main_window"),
+            Some(UiEvent::OpenMainWindow)
+        );
         assert_eq!(map_tray_signal("history"), Some(UiEvent::OpenHistory));
         assert_eq!(map_tray_signal("quit"), Some(UiEvent::Quit));
         assert_eq!(map_tray_signal("restart"), Some(UiEvent::Restart));
@@ -4637,7 +4711,7 @@ mod tests {
         assert!(matches!(spec.menu[1], TrayMenuEntry::Separator));
         assert!(has_signal(&spec, TRAY_SIGNAL_HISTORY) && has_signal(&spec, TRAY_SIGNAL_QUIT));
         assert!(
-            matches!(spec.on_left_click, Some(TrayAction::Signal(ref s)) if s == TRAY_SIGNAL_SETTINGS)
+            matches!(spec.on_left_click, Some(TrayAction::Signal(ref s)) if s == TRAY_SIGNAL_MAIN_WINDOW)
         );
     }
 
