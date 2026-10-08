@@ -55,6 +55,8 @@ if (-not $env:INCLUDE) {
 }
 
 # 静态 CRT 与静态 FFmpeg 匹配；独立 target 目录避免与其它 workspace 混用
+# 根目录 .cargo/config.toml 为主工作区指定了 rust-lld，但静态 FFmpeg 库用 /GL 编译，只能由 MSVC link.exe 链接
+$env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER = "link.exe"
 $env:RUSTFLAGS = "-C target-feature=+crt-static"
 $env:CARGO_TARGET_DIR = Join-Path $repoRoot "snow-shot-rs/tools/snow-recorder/target"
 
