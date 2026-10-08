@@ -325,6 +325,20 @@ impl SettingsState {
         state
     }
 
+    /// 配置被整体替换（导入）后，从共享配置重建全部行与界面偏好；保留当前分组。
+    pub fn reload(&mut self) {
+        let guard = self.store.borrow();
+        self.all_rows = (0..entries().len())
+            .map(|index| build_row(index, &guard))
+            .collect();
+        self.prefs = resolve_prefs(&guard, &self.system);
+        drop(guard);
+        self.edit = None;
+        self.capture = None;
+        self.status = None;
+        self.rebuild_group_rows();
+    }
+
     /// 全部行数（等于 schema 条目数）。
     pub fn total_rows(&self) -> usize {
         self.all_rows.len()

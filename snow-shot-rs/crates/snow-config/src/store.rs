@@ -117,27 +117,60 @@ impl ConfigStore {
                 "Configuration storage is read-only",
             ));
         }
-        if let Some(parent) = self
-            .path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-        {
-            fs::create_dir_all(parent)?;
-        }
-        let temporary = self.path.with_extension("json.tmp");
-        let write_result = (|| {
-            let mut file = fs::File::create(&temporary)?;
-            file.write_all(&self.document.to_bytes())?;
-            file.sync_all()?;
-            fs::rename(&temporary, &self.path)
-        })();
-        if write_result.is_err() {
-            let _ = fs::remove_file(&temporary);
-            return write_result;
-        }
+        write_atomic(&self.path, &self.document.to_bytes())?;
         self.document.mark_clean();
         Ok(())
     }
+
+    /// 以快照整体替换配置（导入）：先在副本上套用并落盘，成功后才换入内存，失败原配置不变。
+    ///
+    /// # 参数
+    /// - `values`：扁平键值（缺失键取默认）
+    /// - `schema_version`：快照的 schema 版本
+    ///
+    /// # 返回
+    /// 版本过新、只读或写盘失败时返回 `Err`，此时内存与磁盘都保持原样。
+    pub fn import_snapshot(
+        &mut self,
+        values: &std::collections::BTreeMap<String, Value>,
+        schema_version: i32,
+    ) -> Result<(), ImportError> {
+        let mut staged = self.document.clone();
+        staged
+            .apply_snapshot(values, schema_version)
+            .map_err(ImportError::Rejected)?;
+        write_atomic(&self.path, &staged.to_bytes()).map_err(ImportError::Io)?;
+        staged.mark_clean();
+        self.document = staged;
+        Ok(())
+    }
+}
+
+/// 配置导入失败原因。
+#[derive(Debug)]
+pub enum ImportError {
+    /// 文档拒绝套用（版本过新或只读）。
+    Rejected(SetError),
+    /// 写盘失败。
+    Io(io::Error),
+}
+
+/// 原子写文件：同目录临时文件写完并落盘后改名覆盖，失败时清理临时文件。
+fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+        fs::create_dir_all(parent)?;
+    }
+    let temporary = path.with_extension("json.tmp");
+    let result = (|| {
+        let mut file = fs::File::create(&temporary)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        fs::rename(&temporary, path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
 }
 
 /// 生成损坏备份路径：`<config>.corrupt.<yyyyMMddTHHmmssmmmZ>.json`，重名则追加序号。
@@ -335,5 +368,28 @@ mod tests {
         assert_eq!(utc_timestamp(UNIX_EPOCH), "19700101T000000000Z");
         let leap_day = UNIX_EPOCH + Duration::from_millis(1_709_210_096_789);
         assert_eq!(utc_timestamp(leap_day), "20240229T123456789Z");
+    }
+
+    /// 导入快照：成功后落盘并可重开读回；版本过新时内存与磁盘都不变。
+    #[test]
+    fn import_snapshot_is_atomic() {
+        let dir = temp_dir("import");
+        let path = dir.join("config.json");
+        let mut store = ConfigStore::open(&path);
+        store.set_value("screenshot/image_quality", json!(50)).unwrap();
+        store.flush().unwrap();
+        let original = fs::read(&path).unwrap();
+
+        let mut values = std::collections::BTreeMap::new();
+        values.insert("screenshot/image_quality".to_string(), json!(90));
+        let future = crate::schema::current_version() + 1;
+        assert!(store.import_snapshot(&values, future).is_err());
+        assert_eq!(store.value("screenshot/image_quality"), json!(50));
+        assert_eq!(fs::read(&path).unwrap(), original);
+
+        store.import_snapshot(&values, 0).unwrap();
+        assert!(!store.is_dirty());
+        assert_eq!(ConfigStore::open(&path).value("screenshot/image_quality"), json!(90));
+        fs::remove_dir_all(dir).unwrap();
     }
 }
