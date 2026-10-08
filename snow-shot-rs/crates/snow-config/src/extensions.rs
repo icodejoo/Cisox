@@ -8,7 +8,7 @@ use crate::schema::{IntRange, SchemaEntry, ValueKind, entry};
 use serde_json::json;
 
 /// 扩展项数量（`schema::entries()` 在原 238 项之后追加的条目数）。
-pub const EXTENSION_ENTRY_COUNT: usize = 27;
+pub const EXTENSION_ENTRY_COUNT: usize = 29;
 
 /// 翻译后端：`local` 本地 NMT worker，`openai` OpenAI 兼容通道。
 pub const KEY_TRANSLATION_BACKEND: &str = "screenshot_translation/backend";
@@ -66,6 +66,11 @@ pub const KEY_DICTATION_OUTPUT_MODE: &str = "dictation/output_mode";
 pub const KEY_DICTATION_TYPE_WITH_OVERLAY: &str = "dictation/type_with_overlay";
 /// 单次语音转文字最长秒数（0 为不限），超时自动结束。
 pub const KEY_DICTATION_MAX_SECONDS: &str = "dictation/max_seconds";
+
+/// MCP 授权域：是否允许截图类 tool（只读域恒开，不可关）。
+pub const KEY_MCP_ALLOW_CAPTURE: &str = "mcp/allow_capture";
+/// MCP 授权域：是否允许控制类 tool（写设置、开窗口、录制等；默认关闭）。
+pub const KEY_MCP_ALLOW_CONTROL: &str = "mcp/allow_control";
 
 /// 语音转文字后端取值：本地模型。
 pub const DICTATION_BACKEND_LOCAL_MODEL: &str = "local-model";
@@ -296,6 +301,8 @@ pub(crate) fn extension_entries() -> Vec<SchemaEntry> {
             &[],
             None,
         ),
+        entry(KEY_MCP_ALLOW_CAPTURE, json!(true), ValueKind::Boolean, None, &[], None),
+        entry(KEY_MCP_ALLOW_CONTROL, json!(false), ValueKind::Boolean, None, &[], None),
     ]
 }
 
@@ -322,7 +329,8 @@ mod tests {
                     || item.key == KEY_TRANSLATE_INPUT_HOTKEY
                     || item.key == KEY_DICTATION_TOGGLE_HOTKEY
                     || item.key == KEY_DICTATION_HOLD_HOTKEY
-                    || item.key.starts_with("dictation/"),
+                    || item.key.starts_with("dictation/")
+                    || item.key.starts_with("mcp/"),
                 "{}",
                 item.key
             );
@@ -508,6 +516,15 @@ mod tests {
         assert!(normalize(KEY_DICTATION_MAX_SECONDS, &json!(0)).valid);
         assert!(!normalize(KEY_DICTATION_MAX_SECONDS, &json!(MAX_DICTATION_MAX_SECONDS + 1)).valid);
         assert!(!normalize(KEY_DICTATION_TYPE_WITH_OVERLAY, &json!("yes")).valid);
+    }
+
+    /// MCP 授权域：截图默认开、控制默认关，非布尔被拒。
+    #[test]
+    fn mcp_scope_defaults() {
+        let doc = ConfigDocument::from_bytes(None);
+        assert_eq!(doc.value(KEY_MCP_ALLOW_CAPTURE), json!(true));
+        assert_eq!(doc.value(KEY_MCP_ALLOW_CONTROL), json!(false));
+        assert!(!normalize(KEY_MCP_ALLOW_CONTROL, &json!("yes")).valid);
     }
 
     /// 语音转文字：热键可读写；旧配置（没有 dictation 分组与这两个热键）读到默认值。

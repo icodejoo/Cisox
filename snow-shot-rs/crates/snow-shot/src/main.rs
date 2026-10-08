@@ -39,6 +39,7 @@ pub mod history_view;
 pub mod main_window_model;
 pub mod main_window_view;
 pub mod mcp_host;
+pub mod mcp_settings;
 pub mod mouse_gesture;
 pub mod net_settings;
 pub mod conversion_guide;

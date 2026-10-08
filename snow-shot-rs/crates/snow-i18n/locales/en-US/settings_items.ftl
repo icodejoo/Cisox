@@ -309,3 +309,7 @@ setting-screen-recording-enable-microphone-desc = Mix the microphone into MP4 re
 setting-screen-recording-enable-system-audio-desc = Mix system sound into MP4 recordings
 setting-updates-manifest-url = Update manifest URL
 setting-updates-manifest-url-desc = Where to check for new versions; empty means not configured and update checks stay off
+setting-mcp-allow-capture = Allow screenshot tools
+setting-mcp-allow-control = Allow control tools
+setting-mcp-allow-capture-desc = Let MCP clients take and annotate screenshots. Read-only queries are always allowed
+setting-mcp-allow-control-desc = Let MCP clients change settings and open windows. Off by default; the service restarts by itself to apply it
