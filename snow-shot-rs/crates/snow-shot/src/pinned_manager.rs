@@ -30,8 +30,13 @@ use std::time::Duration;
 pub const ENV_PIN_AUTOTEST: &str = "SNOW_PIN_AUTOTEST";
 /// 贴图自动调整窗口大小的配置键。
 const AUTO_RESIZE_KEY: &str = "pin_to_screen/auto_resize_window";
-/// 贴图窗口标题（无边框，仅供系统识别）。
-const PIN_WINDOW_TITLE: &str = "Cisox Pin";
+/// 贴图窗口标题后缀（前面接产品名常量；无边框，标题仅供系统识别）。
+const PIN_WINDOW_TITLE_SUFFIX: &str = "Pin";
+
+/// 贴图窗口标题：产品名常量 + 后缀。
+fn pin_window_title() -> String {
+    format!("{} {PIN_WINDOW_TITLE_SUFFIX}", snow_app_core::PRODUCT_NAME)
+}
 /// 自动化脚本首步之前等待窗口稳定的时间。
 const AUTOTEST_START_DELAY: Duration = Duration::from_millis(1500);
 /// 自动化脚本两步之间的间隔。
@@ -160,7 +165,7 @@ impl PinnedManager {
                     return;
                 };
                 let spec = WindowSpec {
-                    title: PIN_WINDOW_TITLE.to_string(),
+                    title: pin_window_title(),
                     placement: Placement::Physical(handle),
                     transparent: false,
                     always_on_top: topmost,
@@ -201,7 +206,7 @@ impl PinnedManager {
                     return;
                 };
                 let spec = WindowSpec {
-                    title: PIN_WINDOW_TITLE.to_string(),
+                    title: pin_window_title(),
                     placement: Placement::Physical(target),
                     transparent: false,
                     always_on_top: topmost,
@@ -615,7 +620,7 @@ impl PinnedManager {
         let geometry = init.geometry;
         let id = init.id.clone();
         let spec = WindowSpec {
-            title: PIN_WINDOW_TITLE.to_string(),
+            title: pin_window_title(),
             placement: Placement::Physical(geometry.rect()),
             transparent: true,
             always_on_top: geometry.topmost,

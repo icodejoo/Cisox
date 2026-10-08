@@ -12,25 +12,25 @@ const POSITIONS_KEY: &str = "positions";
 /// 布局对象里隐藏项列表的键名
 const HIDDEN_KEY: &str = "hidden";
 /// 工具栏项标识 `shape`
-const ID_SHAPE: &str = "shape";
+pub const ID_SHAPE: &str = "shape";
 /// 工具栏项标识 `arrow`
-const ID_ARROW: &str = "arrow";
+pub const ID_ARROW: &str = "arrow";
 /// 工具栏项标识 `line`
-const ID_LINE: &str = "line";
+pub const ID_LINE: &str = "line";
 /// 工具栏项标识 `free-draw`
-const ID_FREE_DRAW: &str = "free-draw";
+pub const ID_FREE_DRAW: &str = "free-draw";
 /// 工具栏项标识 `highlighter`
-const ID_HIGHLIGHTER: &str = "highlighter";
+pub const ID_HIGHLIGHTER: &str = "highlighter";
 /// 工具栏项标识 `spotlight`
 const ID_SPOTLIGHT: &str = "spotlight";
 /// 工具栏项标识 `text`
-const ID_TEXT: &str = "text";
+pub const ID_TEXT: &str = "text";
 /// 工具栏项标识 `serial-number`
-const ID_SERIAL_NUMBER: &str = "serial-number";
+pub const ID_SERIAL_NUMBER: &str = "serial-number";
 /// 工具栏项标识 `filter`
-const ID_FILTER: &str = "filter";
+pub const ID_FILTER: &str = "filter";
 /// 工具栏项标识 `eraser`
-const ID_ERASER: &str = "eraser";
+pub const ID_ERASER: &str = "eraser";
 /// 工具栏项标识 `watermark`
 const ID_WATERMARK: &str = "watermark";
 /// 工具栏项标识 `separator`

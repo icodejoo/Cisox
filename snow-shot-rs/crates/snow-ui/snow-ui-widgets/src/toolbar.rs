@@ -4,8 +4,8 @@
 //! 撤销/重做堆栈操作以及导出动作（钉图、OCR、翻译、复制、保存、取消）。
 
 use snow_ui_shell::geometry::{PhysicalPoint, PhysicalRect};
-use std::rc::Rc;
 use snow_ui_shell::ui::*;
+use std::rc::Rc;
 
 /// 标注工具种类枚举。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -152,6 +152,43 @@ pub fn calculate_toolbar_placement(
     PhysicalPoint::new(x, y)
 }
 
+/// 工具栏上一个需要文案的位置：标注工具按钮或动作按钮（含撤销 / 重做）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ToolbarLabel {
+    /// 标注工具按钮。
+    Tool(AnnotationTool),
+    /// 动作按钮（含撤销 / 重做）。
+    Action(ToolbarAction),
+}
+
+impl ToolbarLabel {
+    /// 工具栏上所有需要文案的位置（供调用方核对文案是否齐全）。
+    ///
+    /// # 返回
+    /// 全部标注工具按钮与动作按钮。
+    pub fn all() -> Vec<ToolbarLabel> {
+        let tools = TOOLBAR_TOOLS.iter().map(|t| Self::Tool(*t));
+        let actions = TOOLBAR_ACTIONS.iter().map(|(_, a)| Self::Action(*a));
+        let history = [ToolbarAction::Undo, ToolbarAction::Redo].map(Self::Action);
+        tools.chain(history).chain(actions).collect()
+    }
+
+    /// 内置的默认文案（中文；界面应通过 [`ScreenshotToolbar::labels`] 提供本地化文案）。
+    fn default_text(self) -> &'static str {
+        match self {
+            Self::Tool(tool) => tool.label(),
+            Self::Action(ToolbarAction::Undo) => "撤销",
+            Self::Action(ToolbarAction::Redo) => "重做",
+            Self::Action(action) => TOOLBAR_ACTIONS
+                .iter()
+                .find(|(_, a)| *a == action)
+                .map_or("", |(text, _)| text),
+        }
+    }
+}
+
+/// 文案提供者：按位置给出本地化文案。
+type LabelProvider = Rc<dyn Fn(ToolbarLabel) -> String>;
 
 /// 工具栏动作回调：参数为被点击的动作与窗口 / 应用上下文。
 type ActionHandler = Rc<dyn Fn(ToolbarAction, &mut Window, &mut App)>;
@@ -204,6 +241,7 @@ pub struct ScreenshotToolbar {
     disabled_actions: Vec<ToolbarAction>,
     on_tool_change: Option<ToolHandler>,
     on_action: Option<ActionHandler>,
+    labels: Option<LabelProvider>,
 }
 
 impl ScreenshotToolbar {
@@ -230,6 +268,31 @@ impl ScreenshotToolbar {
             disabled_actions: Vec::new(),
             on_tool_change: None,
             on_action: None,
+            labels: None,
+        }
+    }
+
+    /// 设置按钮文案提供者（本地化入口）；不设置时用内置中文文案。
+    ///
+    /// # 参数
+    /// - `provider`: 按位置返回文案的闭包。
+    ///
+    /// # 示例
+    /// ```rust
+    /// use snow_ui_widgets::{ScreenshotToolbar, ToolbarLabel};
+    /// let tb = ScreenshotToolbar::new("t").labels(|key| format!("{key:?}"));
+    /// assert_eq!(tb.label_text(ToolbarLabel::Action(snow_ui_widgets::ToolbarAction::Copy)), "Action(Copy)");
+    /// ```
+    pub fn labels(mut self, provider: impl Fn(ToolbarLabel) -> String + 'static) -> Self {
+        self.labels = Some(Rc::new(provider));
+        self
+    }
+
+    /// 某个位置当前要显示的文案（提供者优先，缺省用内置文案）。
+    pub fn label_text(&self, key: ToolbarLabel) -> String {
+        match &self.labels {
+            Some(provider) => provider(key),
+            None => key.default_text().to_string(),
         }
     }
 
@@ -324,15 +387,16 @@ impl RenderOnce for ScreenshotToolbar {
             if let Some(handler) = self.on_tool_change.clone() {
                 btn = btn.on_click(move |_, window, cx| handler(tool, window, cx));
             }
-            tool_group = tool_group.child(btn.child(tool.label()));
+            tool_group = tool_group.child(btn.child(self.label_text(ToolbarLabel::Tool(tool))));
         }
 
         // 撤销 / 重做：不可用时置灰且不注册点击
         let mut history_group = div().flex().flex_row().items_center().gap_1();
-        for (label, act, enabled) in [
-            ("撤销", ToolbarAction::Undo, self.can_undo),
-            ("重做", ToolbarAction::Redo, self.can_redo),
+        for (act, enabled) in [
+            (ToolbarAction::Undo, self.can_undo),
+            (ToolbarAction::Redo, self.can_redo),
         ] {
+            let label = self.label_text(ToolbarLabel::Action(act));
             let mut btn = div()
                 .id(SharedString::from(format!("tb-history-{act:?}")))
                 .px_2()
@@ -360,7 +424,8 @@ impl RenderOnce for ScreenshotToolbar {
         // 动作按钮组
         let mut action_group = div().flex().flex_row().items_center().gap_1();
 
-        for (label, act) in TOOLBAR_ACTIONS {
+        for (_, act) in TOOLBAR_ACTIONS {
+            let label = self.label_text(ToolbarLabel::Action(act));
             let disabled = self.is_action_disabled(act);
             let mut btn = div()
                 .id(SharedString::from(format!("tb-action-{act:?}")))
@@ -486,7 +551,11 @@ mod tests {
     #[test]
     fn disabled_actions_are_selective() {
         let tb = ScreenshotToolbar::new("t");
-        assert!(TOOLBAR_ACTIONS.iter().all(|(_, a)| !tb.is_action_disabled(*a)));
+        assert!(
+            TOOLBAR_ACTIONS
+                .iter()
+                .all(|(_, a)| !tb.is_action_disabled(*a))
+        );
         let tb = tb.disabled_actions(&[ToolbarAction::Pin, ToolbarAction::Ocr]);
         assert!(tb.is_action_disabled(ToolbarAction::Pin));
         assert!(tb.is_action_disabled(ToolbarAction::Ocr));

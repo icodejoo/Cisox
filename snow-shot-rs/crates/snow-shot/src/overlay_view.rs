@@ -16,7 +16,7 @@ use crate::frozen_frame::FrozenFrame;
 use crate::history_nav::{FinishStep, HistoryNav, HistoryProvider, LoadOutcome, NavStep};
 use crate::history_store::{HistorySnapshot, HistorySource, LoadedEntry};
 use crate::ocr_client::OcrError;
-use crate::ocr_flow::{OcrUiState, panel_lines};
+use crate::ocr_flow::{OcrAutoAction, OcrUiState, panel_lines};
 use crate::ocr_service::OcrResult;
 use crate::overlay_keymap::{DrawingKey, OverlayKeyAction, OverlayKeymap};
 use crate::overlay_probe::FrameProbe;
@@ -56,7 +56,7 @@ use snow_ui::ui::component::{IndexPath, Sizable, Size as ComponentSize, Theme, T
 use snow_ui::ui::*;
 use snow_ui::widgets::{
     AnnotationTool, ColorFormat, Magnifier, MagnifierGrid, ScreenshotToolbar, ToolbarAction,
-    calculate_magnifier_placement, calculate_toolbar_placement,
+    ToolbarLabel, calculate_magnifier_placement, calculate_toolbar_placement,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -171,6 +171,16 @@ const BENCH_MIN_MARGIN: i32 = 4;
 /// 标注基准的示例文字。
 const BENCH_TEXT: &str = "Snow Shot 标注文字 Text 12345";
 
+/// 是否记住上次使用的绘图工具的配置键。
+const REMEMBER_TOOL_KEY: &str = "drawing/remember_last_used_tool";
+/// 上次使用的绘图工具（工具栏项 id）配置键。
+const LAST_TOOL_KEY: &str = "screenshot_toolbar/last_drawing_tool";
+/// 文字识别完成后的自动动作配置键。
+const OCR_AUTO_ACTION_KEY: &str = "screenshot/auto_execute_after_text_recognition";
+/// 框选完成后自动识别二维码的配置键。
+const AUTO_QR_KEY: &str = "screenshot/auto_recognize_qr_code";
+/// 自动识别二维码时选区像素数上限（超过则跳过，避免大选区松手时卡顿；手动识别不受限）。
+const AUTO_QR_MAX_PIXELS: i64 = 4_000_000;
 /// 双击选区内部的动作配置键。
 const DOUBLE_CLICK_ACTION_KEY: &str = "screenshot/double_click_action";
 /// 鼠标中键的动作配置键。
@@ -295,6 +305,89 @@ const COORDINATE_MODE_KEY: &str = "screenshot_ui/color_picker_coordinate_mode";
 const COORDINATE_MODE_GLOBAL: &str = "global";
 /// 坐标显示模式：画布内相对坐标。
 const COORDINATE_MODE_RELATIVE: &str = "relative";
+
+/// 工具栏文案提供者：每个按钮位置对应一条 `.ftl` 消息。
+///
+/// # 参数
+/// - `i18n`：界面语料。
+fn toolbar_labels(i18n: &'static snow_i18n::I18n) -> impl Fn(ToolbarLabel) -> String + 'static {
+    move |key| i18n.tr(toolbar_label_id(key))
+}
+
+/// 工具栏按钮位置对应的消息 id。
+fn toolbar_label_id(key: ToolbarLabel) -> &'static str {
+    match key {
+        ToolbarLabel::Tool(tool) => match tool {
+            AnnotationTool::None | AnnotationTool::Select => "overlay-toolbar-tool-select",
+            AnnotationTool::Rectangle => "overlay-toolbar-tool-rectangle",
+            AnnotationTool::Ellipse => "overlay-toolbar-tool-ellipse",
+            AnnotationTool::Arrow => "overlay-toolbar-tool-arrow",
+            AnnotationTool::Line => "overlay-toolbar-tool-line",
+            AnnotationTool::Pencil => "overlay-toolbar-tool-pencil",
+            AnnotationTool::Text => "overlay-toolbar-tool-text",
+            AnnotationTool::Mosaic => "overlay-toolbar-tool-mosaic",
+            AnnotationTool::Blur => "overlay-toolbar-tool-blur",
+            AnnotationTool::Highlighter => "overlay-toolbar-tool-highlighter",
+            AnnotationTool::Counter => "overlay-toolbar-tool-counter",
+            AnnotationTool::Eraser => "overlay-toolbar-tool-eraser",
+        },
+        ToolbarLabel::Action(action) => match action {
+            ToolbarAction::Undo => "overlay-toolbar-undo",
+            ToolbarAction::Redo => "overlay-toolbar-redo",
+            ToolbarAction::Pin => "overlay-toolbar-pin",
+            ToolbarAction::Ocr => "overlay-toolbar-ocr",
+            ToolbarAction::Translate => "overlay-toolbar-translate",
+            ToolbarAction::Record => "overlay-toolbar-record",
+            ToolbarAction::ScrollCapture => "overlay-toolbar-scroll",
+            ToolbarAction::Save => "overlay-toolbar-save",
+            ToolbarAction::Copy => "overlay-toolbar-copy",
+            ToolbarAction::Cancel => "overlay-toolbar-cancel",
+        },
+    }
+}
+
+/// 标注工具对应的“上次使用的工具”配置值（工具栏项 id）。
+///
+/// 工具栏按组记忆：矩形与椭圆同属 `shape`，马赛克与模糊同属 `filter`，所以恢复时只能回到组的首选工具；
+/// 选择对象 / 无工具没有对应项，返回 `None`（不记）。
+///
+/// # 参数
+/// - `tool`：标注工具。
+fn last_tool_id(tool: AnnotationTool) -> Option<&'static str> {
+    use snow_config::toolbar::*;
+    Some(match tool {
+        AnnotationTool::Rectangle | AnnotationTool::Ellipse => ID_SHAPE,
+        AnnotationTool::Arrow => ID_ARROW,
+        AnnotationTool::Line => ID_LINE,
+        AnnotationTool::Pencil => ID_FREE_DRAW,
+        AnnotationTool::Highlighter => ID_HIGHLIGHTER,
+        AnnotationTool::Text => ID_TEXT,
+        AnnotationTool::Counter => ID_SERIAL_NUMBER,
+        AnnotationTool::Mosaic | AnnotationTool::Blur => ID_FILTER,
+        AnnotationTool::Eraser => ID_ERASER,
+        AnnotationTool::None | AnnotationTool::Select => return None,
+    })
+}
+
+/// 把“上次使用的工具”配置值还原成标注工具（组内取首选：`shape` 为矩形、`filter` 为马赛克）。
+///
+/// # 参数
+/// - `id`：配置里的工具栏项 id；空串或没有对应工具（聚光灯、水印）返回 `None`。
+fn tool_from_last_id(id: &str) -> Option<AnnotationTool> {
+    use snow_config::toolbar::*;
+    Some(match id {
+        ID_SHAPE => AnnotationTool::Rectangle,
+        ID_ARROW => AnnotationTool::Arrow,
+        ID_LINE => AnnotationTool::Line,
+        ID_FREE_DRAW => AnnotationTool::Pencil,
+        ID_HIGHLIGHTER => AnnotationTool::Highlighter,
+        ID_TEXT => AnnotationTool::Text,
+        ID_SERIAL_NUMBER => AnnotationTool::Counter,
+        ID_FILTER => AnnotationTool::Mosaic,
+        ID_ERASER => AnnotationTool::Eraser,
+        _ => return None,
+    })
+}
 
 /// 用户操作处理后的窗口去向。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1114,6 +1207,14 @@ pub struct ScreenshotOverlayView {
     canvas_origin: PhysicalPoint,
     /// 放大镜坐标是否显示为桌面全局坐标（否则为画布内相对坐标）。
     coordinate_global: bool,
+    /// 文字识别完成后的自动动作（未读配置的会话保持“识别后复制”）。
+    ocr_auto_action: OcrAutoAction,
+    /// 框选完成后是否自动识别二维码。
+    auto_qr: bool,
+    /// 是否记住并在下次截图时恢复上次使用的绘图工具。
+    remember_tool: bool,
+    /// 当前 OCR 面板是由自动二维码识别弹出的（再次框选时要先收掉）。
+    qr_auto_panel: bool,
     /// 双击选区内部的动作。
     double_click_action: ClickAction,
     /// 鼠标中键的动作。
@@ -1278,6 +1379,10 @@ impl ScreenshotOverlayView {
             close_hook: None,
             canvas_origin: PhysicalPoint::new(0, 0),
             coordinate_global: true,
+            ocr_auto_action: OcrAutoAction::CopyText,
+            auto_qr: false,
+            remember_tool: false,
+            qr_auto_panel: false,
             double_click_action: ClickAction::Copy,
             middle_click_action: ClickAction::Pin,
             border_color: (ACCENT_COLOR << 8) | 0xFF,
@@ -1770,6 +1875,15 @@ impl ScreenshotOverlayView {
     /// # 返回
     /// 这次释放是否确认了一个选区（框选或调整结束且尺寸有效）；标注拖动与无效选区为 `false`。
     pub fn handle_mouse_up(&mut self, point: PhysicalPoint) -> bool {
+        let confirmed = self.handle_mouse_up_inner(point);
+        if confirmed {
+            self.auto_recognize_qr_code();
+        }
+        confirmed
+    }
+
+    /// [`Self::handle_mouse_up`] 的实际处理（不含框选完成后的自动二维码识别）。
+    fn handle_mouse_up_inner(&mut self, point: PhysicalPoint) -> bool {
         let point = self.clamp_point(point);
         self.cursor_pos = point;
         self.move_held = false;
@@ -2213,6 +2327,7 @@ impl ScreenshotOverlayView {
                 self.tool = next;
                 self.status_message = None;
                 self.apply_stored_style(next);
+                self.remember_last_tool(next);
             }
             Err(e) => {
                 tracing::error!(error = %e, tool = ?next, "切换标注工具失败");
@@ -2221,6 +2336,29 @@ impl ScreenshotOverlayView {
                     &Args::new().arg(1, e.to_string()),
                 ));
             }
+        }
+    }
+
+    /// 记住最近使用的绘图工具（开启 `drawing/remember_last_used_tool` 时写入配置；没有对应工具栏项的不记）。
+    ///
+    /// # 参数
+    /// - `tool`：刚选中的工具。
+    fn remember_last_tool(&self, tool: AnnotationTool) {
+        let (true, Some(id), Some(config)) =
+            (self.remember_tool, last_tool_id(tool), &self.style_config)
+        else {
+            return;
+        };
+        let mut store = config.borrow_mut();
+        if store.value(LAST_TOOL_KEY).as_str() == Some(id) {
+            return;
+        }
+        if let Err(e) = store.set_value(LAST_TOOL_KEY, serde_json::json!(id)) {
+            tracing::warn!(error = %e, "记住上次工具失败");
+            return;
+        }
+        if let Err(e) = store.flush() {
+            tracing::warn!(error = %e, "上次工具落盘失败");
         }
     }
 
@@ -2246,6 +2384,13 @@ impl ScreenshotOverlayView {
                     .and_then(ClickAction::parse)
                     .unwrap_or(default)
             };
+            self.ocr_auto_action = store
+                .value(OCR_AUTO_ACTION_KEY)
+                .as_str()
+                .and_then(OcrAutoAction::parse)
+                .unwrap_or_default();
+            self.auto_qr = store.value(AUTO_QR_KEY).as_bool().unwrap_or(false);
+            self.remember_tool = store.value(REMEMBER_TOOL_KEY).as_bool().unwrap_or(false);
             self.double_click_action = action(DOUBLE_CLICK_ACTION_KEY, ClickAction::Copy);
             self.middle_click_action = action(MIDDLE_CLICK_ACTION_KEY, ClickAction::Pin);
             self.border_color = color_setting(
@@ -2266,8 +2411,17 @@ impl ScreenshotOverlayView {
             self.resize_follow_position =
                 store.value(RESIZE_MODE_KEY).as_str() == Some(RESIZE_FOLLOW_POSITION);
         }
+        let remembered = self
+            .remember_tool
+            .then(|| config.borrow().value(LAST_TOOL_KEY))
+            .and_then(|v| v.as_str().and_then(tool_from_last_id));
         self.style_config = Some(config);
         self.i18n = crate::ocr_backend::i18n_for(locale);
+        if let Some(tool) = remembered
+            && tool != self.tool
+        {
+            self.select_tool(tool);
+        }
     }
 
     /// 同步修饰键状态：按住 Shift 且配置把它绑给「保持宽高一致」时才锁比例。
@@ -3792,6 +3946,35 @@ impl ScreenshotOverlayView {
         OverlayOutcome::Stay
     }
 
+    /// 框选完成后的自动二维码识别（`screenshot/auto_recognize_qr_code`）：只在找到码时静默弹出结果面板，
+    /// 不复制、不提示“没找到”；按 Enter 复制并关闭，按 O 打开链接。
+    ///
+    /// 已有别的识别 / 翻译结果面板时不打扰；上一次自动识别留下的面板会先收掉。
+    fn auto_recognize_qr_code(&mut self) {
+        if !self.auto_qr {
+            return;
+        }
+        if self.qr_auto_panel && self.ocr.is_visible() {
+            self.dismiss_ocr();
+        }
+        if self.ocr.is_visible() || self.translate.is_visible() || !self.has_committed_selection() {
+            return;
+        }
+        let too_big = self
+            .current_selection()
+            .is_none_or(|r| i64::from(r.width) * i64::from(r.height) > AUTO_QR_MAX_PIXELS);
+        if too_big {
+            return;
+        }
+        let Some((w, h, rgba)) = self.selection_image() else {
+            return;
+        };
+        let codes = crate::qr_decode::decode_qr_codes(w, h, &rgba);
+        if !codes.is_empty() {
+            self.show_qr_codes(codes, false);
+        }
+    }
+
     /// 对选区做二维码识别：同步解码，成功则复制内容并复用文字结果面板展示，找不到码给出提示。
     fn recognize_qr_code(&mut self) -> OverlayOutcome {
         if !self.has_committed_selection() {
@@ -3816,27 +3999,44 @@ impl ScreenshotOverlayView {
             });
             return OverlayOutcome::Stay;
         }
-        let text = codes.join(
-            "
-",
-        );
-        let copied = self.output.copy_text(&text).is_ok();
-        tracing::info!(count = codes.len(), copied, "二维码识别完成");
+        self.show_qr_codes(codes, true);
+        OverlayOutcome::Stay
+    }
+
+    /// 把识别到的二维码内容放进文字结果面板。
+    ///
+    /// # 参数
+    /// - `codes`：识别到的内容（非空）。
+    /// - `copy`：是否同时复制到剪贴板（手动识别为真，自动识别为假、留给 Enter）。
+    fn show_qr_codes(&mut self, codes: Vec<String>, copy: bool) {
+        let text = codes.join("\n");
+        let copied = copy && self.output.copy_text(&text).is_ok();
+        tracing::info!(count = codes.len(), copied, auto = !copy, "二维码识别完成");
         let message = self.i18n.tr_with(
-            "overlay-msg-qr-found",
+            if copy {
+                "overlay-msg-qr-found"
+            } else {
+                "overlay-msg-qr-found-auto"
+            },
             &Args::new().arg(1, codes.len().to_string()),
         );
         let link = codes
             .iter()
             .find_map(|code| snow_platform::shell::web_link(code));
-        self.set_ocr_state(OcrUiState::Done {
+        let state = OcrUiState::Done {
             text,
             boxes: Vec::new(),
             copied,
+            skipped: false,
+        };
+        self.set_ocr_state(if copy {
+            state
+        } else {
+            state.without_auto_copy()
         });
         self.qr_link = link;
+        self.qr_auto_panel = !copy;
         self.status_message = Some(message);
-        OverlayOutcome::Stay
     }
 
     /// 用系统默认浏览器打开二维码里的网页链接；成功后关闭覆盖窗，失败保留窗口并提示。
@@ -3863,6 +4063,7 @@ impl ScreenshotOverlayView {
     /// 切换 OCR 状态，同时刷新底部状态条。
     fn set_ocr_state(&mut self, state: OcrUiState) {
         self.qr_link = None;
+        self.qr_auto_panel = false;
         self.status_message = state.status_text(self.i18n);
         self.ocr = state;
     }
@@ -3872,29 +4073,54 @@ impl ScreenshotOverlayView {
         self.ocr_serial += 1;
         self.ocr = OcrUiState::Idle;
         self.qr_link = None;
+        self.qr_auto_panel = false;
         self.status_message = None;
     }
 
-    /// 收到识别结果：成功则把文本复制到剪贴板并展示，失败则展示原因；过期结果被丢弃。
+    /// 收到识别结果并按配置的自动动作处理：展示结果，按需复制 / 复制并结束 / 打开结果窗；失败则展示原因；
+    /// 过期结果被丢弃。
     ///
     /// # 参数
     /// - `serial`：结果对应的请求序号。
     /// - `result`：识别结果或失败原因。
-    pub fn finish_ocr(&mut self, serial: u64, result: Result<OcrResult, OcrError>) {
+    ///
+    /// # 返回
+    /// `Close` 表示动作要求结束截图（复制成功且配置为“复制并结束”），调用方应关闭覆盖窗。
+    pub fn finish_ocr(
+        &mut self,
+        serial: u64,
+        result: Result<OcrResult, OcrError>,
+    ) -> OverlayOutcome {
         if serial != self.ocr_serial || !matches!(self.ocr, OcrUiState::Running) {
             tracing::info!(serial, current = self.ocr_serial, "丢弃过期的识别结果");
-            return;
+            return OverlayOutcome::Stay;
         }
+        let action = self.ocr_auto_action;
+        let mut outcome = OverlayOutcome::Stay;
+        let mut open_window = false;
         let state = match result {
             Ok(r) => {
-                let copied = r.full_text.is_empty() || self.output.copy_text(&r.full_text).is_ok();
+                let copied = action.copies()
+                    && (r.full_text.is_empty() || self.output.copy_text(&r.full_text).is_ok());
                 tracing::info!(
                     lines = r.boxes.len(),
                     elapsed_ms = r.elapsed_ms,
                     copied,
+                    ?action,
                     "文字识别完成"
                 );
-                OcrUiState::from_result(&r, copied)
+                if !r.full_text.is_empty() {
+                    if copied && action.ends_screenshot() {
+                        outcome = OverlayOutcome::Close;
+                    }
+                    open_window = action == OcrAutoAction::EnableEditMode;
+                }
+                let state = OcrUiState::from_result(&r, copied);
+                if action.copies() {
+                    state
+                } else {
+                    state.without_auto_copy()
+                }
             }
             Err(e) => {
                 tracing::warn!(error = ?e, "文字识别失败");
@@ -3902,6 +4128,10 @@ impl ScreenshotOverlayView {
             }
         };
         self.set_ocr_state(state);
+        if open_window {
+            self.open_recognition_window();
+        }
+        outcome
     }
 
     /// 触发 OCR 组件下载（仅缺资产时可用）。
@@ -5109,6 +5339,7 @@ impl ScreenshotOverlayView {
                 let tb = ScreenshotToolbar::new("overlay-toolbar")
                     .active_tool(self.tool)
                     .undo_redo_state(can_undo, can_redo)
+                    .labels(toolbar_labels(self.i18n))
                     .show_tools(!self.record_mode && !self.scroll_mode)
                     .disabled_actions(if self.record_mode {
                         &RECORD_MODE_DISABLED_ACTIONS[..]
@@ -5219,7 +5450,8 @@ impl ScreenshotOverlayView {
             };
             let mag = Magnifier::new("cursor-mag", self.magnifier_grid.clone(), shown_cursor)
                 .selection_rect(sel)
-                .color_format(self.color_format);
+                .color_format(self.color_format)
+                .hint(self.i18n.tr("overlay-magnifier-hint"));
             root = root.child(
                 div()
                     .absolute()
@@ -5456,6 +5688,8 @@ mod tests {
         translate_downloads: u32,
         /// 长截图选区。
         scrolls: Vec<PhysicalRect>,
+        /// 打开识别结果窗的次数。
+        recognition_windows: u32,
     }
 
     /// 记录型输出通道；`fail` 为真时所有操作返回错误。
@@ -5527,6 +5761,17 @@ mod tests {
                 return Err("boom".into());
             }
             self.rec.borrow_mut().ocrs.push((serial, w, h, rgba));
+            Ok(())
+        }
+        /// 记录打开识别结果窗的请求。
+        fn open_recognition_window(
+            &mut self,
+            _data: crate::recognition_view::RecognitionData,
+        ) -> Result<(), String> {
+            if self.fail {
+                return Err("boom".into());
+            }
+            self.rec.borrow_mut().recognition_windows += 1;
             Ok(())
         }
         /// 记录 OCR 下载请求。
@@ -7696,6 +7941,24 @@ mod tests {
         );
     }
 
+    /// 构造一个底图为二维码样本、还没有选区的视图。
+    fn view_with_qr_unselected() -> (ScreenshotOverlayView, Rc<RefCell<Recorded>>) {
+        let (w, h, data) = crate::qr_decode::test_support::render_sample(6, 4);
+        let frame = FrozenFrame::from_captured(CapturedScreen {
+            width: w,
+            height: h,
+            data,
+        })
+        .unwrap();
+        let rec = Rc::new(RefCell::new(Recorded::default()));
+        let sink = RecordingSink {
+            rec: Rc::clone(&rec),
+            fail: false,
+        };
+        let view = ScreenshotOverlayView::new(frame, 1.0, PhysicalPoint::new(0, 0), Box::new(sink));
+        (view, rec)
+    }
+
     /// 构造一个底图为二维码样本的视图，并拖出覆盖整张码的选区。
     fn view_with_qr(fail: bool) -> (ScreenshotOverlayView, Rc<RefCell<Recorded>>) {
         let (w, h, data) = crate::qr_decode::test_support::render_sample(6, 4);
@@ -7758,6 +8021,7 @@ mod tests {
         let (mut view, rec) = view_with_qr(false);
         // 普通文字识别结果里即使有链接也不提供打开
         view.ocr = OcrUiState::Done {
+            skipped: false,
             text: "https://a.b".into(),
             boxes: Vec::new(),
             copied: true,
@@ -8045,5 +8309,278 @@ mod tests {
         assert!(view.style_panel_origin((10, 10), (300, 200)).is_some());
         view.set_record_mode(true);
         assert_eq!(view.style_panel_origin((10, 10), (300, 200)), None);
+    }
+
+    /// 建一个带配置的视图：键值对写入临时配置后注入。
+    fn view_with_config(tag: &str, entries: &[(&str, serde_json::Value)]) -> ScreenshotOverlayView {
+        let dir = std::env::temp_dir().join(format!("snow-ovl-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut store = ConfigStore::open(dir.join("config.json"));
+        for (key, value) in entries {
+            store.set_value(key, value.clone()).unwrap();
+        }
+        let (mut view, _) = view_with(100, 80, 1.0, false);
+        view.set_style_config(Rc::new(RefCell::new(store)), "en-US");
+        view
+    }
+
+    /// 文字识别后的自动动作：六个配置值各自的行为（复制 / 不复制 / 复制并结束 / 打开结果窗）。
+    #[test]
+    fn ocr_auto_action_follows_config() {
+        let run = |value: &str| {
+            let (mut view, rec) = view_with(100, 80, 1.0, false);
+            view.ocr_auto_action = OcrAutoAction::parse(value).unwrap();
+            drag(&mut view, (5, 5), (44, 34));
+            view.apply_action(ToolbarAction::Ocr);
+            let outcome = view.finish_ocr(1, Ok(ocr_result(&["hello"])));
+            let texts = rec.borrow().texts.len();
+            let windows = rec.borrow().recognition_windows;
+            (outcome, texts, windows, view.ocr_state().clone())
+        };
+        // 不做任何事：结果留在面板里，没有复制，状态是“未复制”而不是“复制失败”
+        let (outcome, texts, windows, state) = run("no_action");
+        assert_eq!((outcome, texts, windows), (OverlayOutcome::Stay, 0, 0));
+        assert!(matches!(
+            state,
+            OcrUiState::Done {
+                copied: false,
+                skipped: true,
+                ..
+            }
+        ));
+        // 只复制
+        let (outcome, texts, windows, state) = run("copy_text");
+        assert_eq!((outcome, texts, windows), (OverlayOutcome::Stay, 1, 0));
+        assert!(matches!(
+            state,
+            OcrUiState::Done {
+                copied: true,
+                skipped: false,
+                ..
+            }
+        ));
+        // 复制并结束截图
+        let (outcome, texts, _, _) = run("copy_text_and_end_screenshot");
+        assert_eq!((outcome, texts), (OverlayOutcome::Close, 1));
+        // 快速变体只对“快速识别”生效，这里没有快速入口：与不做任何事一致
+        for quick in ["quick_copy_text", "quick_copy_text_and_end_screenshot"] {
+            let (outcome, texts, windows, _) = run(quick);
+            assert_eq!(
+                (outcome, texts, windows),
+                (OverlayOutcome::Stay, 0, 0),
+                "{quick}"
+            );
+        }
+        // 编辑模式：打开结果窗，不复制
+        let (outcome, texts, windows, _) = run("enable_edit_mode");
+        assert_eq!((outcome, texts, windows), (OverlayOutcome::Stay, 0, 1));
+    }
+
+    /// “复制并结束”遇到复制失败：不关闭，留在结果态让用户处理；空结果也不会关闭。
+    #[test]
+    fn ocr_copy_and_end_needs_a_successful_copy() {
+        let (mut view, _) = view_with(100, 80, 1.0, true);
+        view.ocr_auto_action = OcrAutoAction::CopyTextAndEnd;
+        drag(&mut view, (5, 5), (44, 34));
+        view.ocr = OcrUiState::Running;
+        assert_eq!(
+            view.finish_ocr(view.ocr_serial, Ok(ocr_result(&["x"]))),
+            OverlayOutcome::Stay
+        );
+        assert!(matches!(
+            view.ocr_state(),
+            OcrUiState::Done {
+                copied: false,
+                skipped: false,
+                ..
+            }
+        ));
+        let (mut empty, _) = view_with(100, 80, 1.0, false);
+        empty.ocr_auto_action = OcrAutoAction::CopyTextAndEnd;
+        drag(&mut empty, (5, 5), (44, 34));
+        empty.apply_action(ToolbarAction::Ocr);
+        assert_eq!(
+            empty.finish_ocr(1, Ok(ocr_result(&[]))),
+            OverlayOutcome::Stay
+        );
+    }
+
+    /// 配置键 `auto_execute_after_text_recognition` 被读取（默认 no_action，非法值回落默认）。
+    #[test]
+    fn ocr_auto_action_is_read_from_config() {
+        let view = view_with_config(
+            "ocr-act",
+            &[(
+                OCR_AUTO_ACTION_KEY,
+                serde_json::json!("copy_text_and_end_screenshot"),
+            )],
+        );
+        assert_eq!(view.ocr_auto_action, OcrAutoAction::CopyTextAndEnd);
+        let default = view_with_config("ocr-act-default", &[]);
+        assert_eq!(default.ocr_auto_action, OcrAutoAction::NoAction);
+    }
+
+    /// 自动二维码识别：开启后框选完成就弹出结果（不复制，Enter 才复制），能开链接；没有码时安静不打扰。
+    #[test]
+    fn auto_qr_recognizes_after_selection() {
+        let sample = crate::qr_decode::test_support::SAMPLE_TEXT;
+        let (mut view, rec) = view_with_qr_unselected();
+        view.auto_qr = true;
+        let (w, h) = (view.frame_size().0 as i32, view.frame_size().1 as i32);
+        drag(&mut view, (2, 2), (w - 2, h - 2));
+        assert!(rec.borrow().texts.is_empty(), "自动识别不复制");
+        assert!(matches!(
+            view.ocr_state(),
+            OcrUiState::Done { text, copied: false, skipped: true, .. } if text == sample
+        ));
+        assert_eq!(view.qr_link.as_deref(), Some(sample));
+        assert!(
+            view.status_message
+                .as_deref()
+                .is_some_and(|s| s.contains("Enter"))
+        );
+        // Enter 复制并关闭
+        assert_eq!(
+            view.handle_key("enter", false, false),
+            OverlayOutcome::Close
+        );
+        assert_eq!(rec.borrow().texts, vec![sample.to_string()]);
+        // 关闭开关：同样的操作不弹面板
+        let (mut off, _) = view_with_qr_unselected();
+        off.auto_qr = false;
+        drag(&mut off, (2, 2), (w - 2, h - 2));
+        assert_eq!(off.ocr_state(), &OcrUiState::Idle);
+        // 选区里没有码：开着也不弹任何提示
+        let (mut blank, _) = view_with(100, 80, 1.0, false);
+        blank.auto_qr = true;
+        drag(&mut blank, (5, 5), (44, 34));
+        assert_eq!(blank.ocr_state(), &OcrUiState::Idle);
+        assert!(blank.status_message.is_none());
+    }
+
+    /// 自动二维码识别不打扰已有的识别面板，重新框选后上一次自动弹出的面板被收掉。
+    #[test]
+    fn auto_qr_panel_is_replaced_on_reselect() {
+        let (mut view, _) = view_with_qr_unselected();
+        view.auto_qr = true;
+        let (w, h) = (view.frame_size().0 as i32, view.frame_size().1 as i32);
+        drag(&mut view, (2, 2), (w - 2, h - 2));
+        assert!(view.qr_link.is_some());
+        // 再框一个没有码的小选区：旧面板消失
+        view.handle_right_click();
+        drag(&mut view, (1, 1), (20, 20));
+        assert_eq!(view.ocr_state(), &OcrUiState::Idle);
+        assert!(view.qr_link.is_none());
+        // 已有手动 OCR 结果时不覆盖
+        let (mut busy, _) = view_with_qr_unselected();
+        busy.auto_qr = true;
+        busy.ocr = OcrUiState::Running;
+        drag(&mut busy, (2, 2), (w - 2, h - 2));
+        assert_eq!(busy.ocr_state(), &OcrUiState::Running);
+    }
+
+    /// 配置键 `auto_recognize_qr_code` 被读取。
+    #[test]
+    fn auto_qr_is_read_from_config() {
+        assert!(view_with_config("qr-on", &[(AUTO_QR_KEY, serde_json::json!(true))]).auto_qr);
+        assert!(!view_with_config("qr-off", &[(AUTO_QR_KEY, serde_json::json!(false))]).auto_qr);
+    }
+
+    /// 工具与“上次使用的工具”配置值互相映射：同组工具共用一个 id，没有工具栏项的不记。
+    #[test]
+    fn last_tool_ids_round_trip() {
+        for tool in [
+            AnnotationTool::Rectangle,
+            AnnotationTool::Arrow,
+            AnnotationTool::Line,
+            AnnotationTool::Pencil,
+            AnnotationTool::Highlighter,
+            AnnotationTool::Text,
+            AnnotationTool::Counter,
+            AnnotationTool::Mosaic,
+            AnnotationTool::Eraser,
+        ] {
+            let id = last_tool_id(tool).expect("应有工具栏项");
+            assert_eq!(tool_from_last_id(id), Some(tool), "{tool:?}");
+        }
+        assert_eq!(
+            last_tool_id(AnnotationTool::Ellipse),
+            last_tool_id(AnnotationTool::Rectangle)
+        );
+        assert_eq!(
+            last_tool_id(AnnotationTool::Blur),
+            last_tool_id(AnnotationTool::Mosaic)
+        );
+        assert_eq!(last_tool_id(AnnotationTool::Select), None);
+        assert_eq!(last_tool_id(AnnotationTool::None), None);
+        for id in ["", "spotlight", "watermark", "bogus"] {
+            assert_eq!(tool_from_last_id(id), None, "{id}");
+        }
+    }
+
+    /// 记住上次工具：开启后选工具会写入配置，下一次会话恢复；关闭时既不写也不恢复。
+    #[test]
+    fn remember_last_tool_persists_and_restores() {
+        let dir = std::env::temp_dir().join(format!("snow-last-tool-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        let open = |remember: bool| {
+            let mut store = ConfigStore::open(&path);
+            store
+                .set_value(REMEMBER_TOOL_KEY, serde_json::json!(remember))
+                .unwrap();
+            Rc::new(RefCell::new(store))
+        };
+        // 开启：选箭头 → 写入 arrow；下一个会话直接恢复为箭头
+        let (mut first, _) = view_with(100, 80, 1.0, false);
+        first.set_style_config(open(true), "en-US");
+        first.select_tool(AnnotationTool::Arrow);
+        let (mut second, _) = view_with(100, 80, 1.0, false);
+        second.set_style_config(open(true), "en-US");
+        assert_eq!(second.current_tool(), AnnotationTool::Arrow);
+        // 选椭圆 → 记成 shape 组；恢复时回到该组的首选工具（矩形）
+        second.select_tool(AnnotationTool::Ellipse);
+        let (mut third, _) = view_with(100, 80, 1.0, false);
+        third.set_style_config(open(true), "en-US");
+        assert_eq!(third.current_tool(), AnnotationTool::Rectangle);
+        // 取消选择（回到无工具）不改写记录
+        third.select_tool(AnnotationTool::Rectangle);
+        let (mut fourth, _) = view_with(100, 80, 1.0, false);
+        fourth.set_style_config(open(true), "en-US");
+        assert_eq!(fourth.current_tool(), AnnotationTool::Rectangle);
+        // 关闭：不恢复，也不写入
+        let (mut off, _) = view_with(100, 80, 1.0, false);
+        off.set_style_config(open(false), "en-US");
+        assert_eq!(off.current_tool(), AnnotationTool::None);
+        off.select_tool(AnnotationTool::Text);
+        let reread = ConfigStore::open(&path);
+        assert_eq!(reread.value(LAST_TOOL_KEY).as_str(), Some("shape"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 工具栏文案：每个按钮位置都有消息，中英文都齐全，英文界面不夹中文，且按钮之间不重名。
+    #[test]
+    fn toolbar_labels_are_localized() {
+        let zh = crate::ocr_backend::i18n_for("zh-CN");
+        let en = crate::ocr_backend::i18n_for("en-US");
+        let mut seen = std::collections::HashSet::new();
+        for key in ToolbarLabel::all() {
+            let id = toolbar_label_id(key);
+            let (zh_text, en_text) = (zh.tr(id), en.tr(id));
+            assert!(!zh_text.is_empty() && zh_text != id, "{id} 缺中文");
+            assert!(!en_text.is_empty() && en_text != id, "{id} 缺英文");
+            assert!(en_text.is_ascii(), "{id}: {en_text}");
+            seen.insert(id);
+        }
+        assert!(seen.len() >= 22);
+        assert_eq!(
+            en.tr("overlay-magnifier-hint"),
+            "Press C to copy the color value"
+        );
+        assert_eq!(zh.tr("overlay-magnifier-hint"), "按 C 复制颜色值");
+        let provider = toolbar_labels(en);
+        assert_eq!(provider(ToolbarLabel::Action(ToolbarAction::Copy)), "Copy");
     }
 }

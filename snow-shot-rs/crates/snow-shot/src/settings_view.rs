@@ -13,7 +13,7 @@ use crate::settings_state::{
     SharedConfig, StatusKind, SystemPrefs, read_only_note,
 };
 use crate::config_transfer::{TRANSFER_GROUP_ID, TransferAction, TransferUiState, transfer_panel};
-use crate::net_settings::{UPDATES_GROUP_ID, UpdateUiState, update_panel};
+use crate::net_settings::{UPDATES_GROUP_ID, UpdateAction, UpdateUiState, update_panel};
 use crate::language_names::{is_language_key, language_option_label};
 use crate::ocr_backend::{OcrBackend, OcrNotice};
 use crate::settings_text::{Lang, Text, group_title, item_desc, item_label, option_text, t};
@@ -302,8 +302,8 @@ pub struct SettingsView {
     stt_hooks: Option<SttHooks>,
     /// “检查更新”的界面状态。
     update_state: UpdateUiState,
-    /// 请求检查更新的入口（未接入时为 `None`，按钮不可用）。
-    update_hook: Option<Rc<dyn Fn()>>,
+    /// “更新”分组动作（检查 / 下载 / 打开目录）的入口（未接入时为 `None`，按钮不可用）。
+    update_hook: Option<Rc<dyn Fn(UpdateAction)>>,
     /// 设置导出 / 导入的界面状态。
     transfer_state: TransferUiState,
     /// 请求导出 / 导入的入口（未接入时为 `None`，按钮不可用）。
@@ -490,11 +490,11 @@ impl SettingsView {
         })
     }
 
-    /// 接入“检查更新”入口。
+    /// 接入“更新”分组入口（检查、下载、打开所在目录）。
     ///
     /// # 参数
-    /// - `hook`：点击按钮时调用，由上层起后台线程检查
-    pub fn set_update_hook(&mut self, hook: Rc<dyn Fn()>) {
+    /// - `hook`：点击按钮时带动作调用，由上层起后台线程执行
+    pub fn set_update_hook(&mut self, hook: Rc<dyn Fn(UpdateAction)>) {
         self.update_hook = Some(hook);
     }
 
@@ -1487,18 +1487,49 @@ impl SettingsView {
                 .child(div().text_color(p.dim).whitespace_nowrap().child(panel.current_line))
                 .into_any_element(),
             Hymt2Row::Actions => {
-                let running = self.update_state == UpdateUiState::Running;
+                let running = matches!(
+                    self.update_state,
+                    UpdateUiState::Running | UpdateUiState::Downloading
+                );
                 let mut button = Button::new("update-check").small().label(panel.button_label);
                 button = match &self.update_hook {
                     Some(hook) if !running => {
                         let hook = Rc::clone(hook);
                         button.on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
                             this.update_state = UpdateUiState::Running;
-                            hook();
+                            hook(UpdateAction::Check);
                             cx.notify();
                         }))
                     }
                     _ => button.disabled(true),
+                };
+                // 发现新版本且有下载地址时给“下载”；下载完成后给“打开所在目录”
+                let extra = match (&self.update_state, &self.update_hook) {
+                    (UpdateUiState::Available { info, .. }, Some(hook)) if !info.url.is_empty() => {
+                        let (hook, info) = (Rc::clone(hook), info.clone());
+                        Some(
+                            Button::new("update-download")
+                                .small()
+                                .label(panel.download_label)
+                                .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
+                                    this.update_state = UpdateUiState::Downloading;
+                                    hook(UpdateAction::Download(info.clone()));
+                                    cx.notify();
+                                })),
+                        )
+                    }
+                    (UpdateUiState::Downloaded { dir, .. }, Some(hook)) => {
+                        let (hook, dir) = (Rc::clone(hook), dir.clone());
+                        Some(
+                            Button::new("update-open-folder")
+                                .small()
+                                .label(panel.open_folder_label)
+                                .on_click(move |_event: &ClickEvent, _window, _cx| {
+                                    hook(UpdateAction::OpenFolder(dir.clone()));
+                                }),
+                        )
+                    }
+                    _ => None,
                 };
                 let notice = panel.notice.map(|(text, danger)| {
                     div()
@@ -1512,7 +1543,7 @@ impl SettingsView {
                     .pt(px(2.0))
                     .border_b_1()
                     .border_color(p.border)
-                    .child(div().flex().items_center().gap_3().child(button).children(notice))
+                    .child(div().flex().items_center().gap_3().child(button).children(extra).children(notice))
                     .into_any_element()
             }
         }

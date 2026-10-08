@@ -73,3 +73,51 @@ overlay-msg-qr-found = 识别到 { $arg1 } 个二维码，内容已复制
 overlay-msg-open-link-failed = 无法打开链接：{ $arg1 }
 
 overlay-qr-open-link-hint = 按 O 用浏览器打开链接
+
+overlay-msg-qr-found-auto = 识别到 { $arg1 } 个二维码，按 Enter 复制内容
+
+overlay-toolbar-tool-select = 选对象
+
+overlay-toolbar-tool-rectangle = 矩形
+
+overlay-toolbar-tool-ellipse = 椭圆
+
+overlay-toolbar-tool-arrow = 箭头
+
+overlay-toolbar-tool-line = 直线
+
+overlay-toolbar-tool-pencil = 画笔
+
+overlay-toolbar-tool-text = 文字
+
+overlay-toolbar-tool-mosaic = 马赛克
+
+overlay-toolbar-tool-blur = 模糊
+
+overlay-toolbar-tool-highlighter = 高亮
+
+overlay-toolbar-tool-counter = 序号
+
+overlay-toolbar-tool-eraser = 橡皮
+
+overlay-toolbar-undo = 撤销
+
+overlay-toolbar-redo = 重做
+
+overlay-toolbar-pin = 贴图
+
+overlay-toolbar-ocr = OCR
+
+overlay-toolbar-translate = 翻译
+
+overlay-toolbar-record = 录屏
+
+overlay-toolbar-scroll = 长图
+
+overlay-toolbar-save = 保存
+
+overlay-toolbar-copy = 复制
+
+overlay-toolbar-cancel = 取消
+
+overlay-magnifier-hint = 按 C 复制颜色值

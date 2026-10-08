@@ -73,3 +73,51 @@ overlay-msg-qr-found = Found { $arg1 } QR code(s); content copied.
 overlay-msg-open-link-failed = Could not open the link: { $arg1 }
 
 overlay-qr-open-link-hint = O to open the link in the browser
+
+overlay-msg-qr-found-auto = Found { $arg1 } QR code(s); press Enter to copy the content.
+
+overlay-toolbar-tool-select = Select
+
+overlay-toolbar-tool-rectangle = Rectangle
+
+overlay-toolbar-tool-ellipse = Ellipse
+
+overlay-toolbar-tool-arrow = Arrow
+
+overlay-toolbar-tool-line = Line
+
+overlay-toolbar-tool-pencil = Pen
+
+overlay-toolbar-tool-text = Text
+
+overlay-toolbar-tool-mosaic = Mosaic
+
+overlay-toolbar-tool-blur = Blur
+
+overlay-toolbar-tool-highlighter = Highlight
+
+overlay-toolbar-tool-counter = Counter
+
+overlay-toolbar-tool-eraser = Eraser
+
+overlay-toolbar-undo = Undo
+
+overlay-toolbar-redo = Redo
+
+overlay-toolbar-pin = Pin
+
+overlay-toolbar-ocr = OCR
+
+overlay-toolbar-translate = Translate
+
+overlay-toolbar-record = Record
+
+overlay-toolbar-scroll = Long shot
+
+overlay-toolbar-save = Save
+
+overlay-toolbar-copy = Copy
+
+overlay-toolbar-cancel = Cancel
+
+overlay-magnifier-hint = Press C to copy the color value
