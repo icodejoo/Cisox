@@ -60,6 +60,10 @@ use crate::translate_input_view::{
     TranslateInputView, WINDOW_HEIGHT as TRANSLATE_INPUT_HEIGHT,
     WINDOW_WIDTH as TRANSLATE_INPUT_WIDTH,
 };
+use crate::translate_page::page_config;
+use crate::translate_page_view::{
+    TranslatePageView, WINDOW_HEIGHT as TRANSLATE_PAGE_HEIGHT, WINDOW_WIDTH as TRANSLATE_PAGE_WIDTH,
+};
 use crate::translate_service::{
     TranslateConfig, TranslateFlowError, TranslateHost, TranslateOutcome, TranslateStage,
     Translated, run_flow,
@@ -205,6 +209,28 @@ pub enum UiEvent {
     DirectCapture(DirectCaptureRequest),
     /// 打开（或激活）输入框翻译浮窗。
     OpenTranslateInput,
+    /// 打开（或激活）翻译页窗口（主窗口导航等入口投递此事件）。
+    OpenTranslatePage,
+    /// 翻译页请求翻译（在后台线程执行）。
+    TranslatePageRequested {
+        /// 请求序号（回传结果时带回）。
+        serial: u64,
+        /// 用户输入的原文。
+        text: String,
+        /// 下拉选中的包 ID（空串为自动）。
+        model_id: String,
+        /// 页面上选的源语言。
+        source: snow_translate::Lang,
+        /// 页面上选的目标语言。
+        target: snow_translate::Lang,
+    },
+    /// 翻译页翻译完成（成功或失败）。
+    TranslatePageFinished {
+        /// 对应的请求序号。
+        serial: u64,
+        /// 译文或失败原因。
+        result: Result<Translated, InputError>,
+    },
     /// 语音转文字命令（来自热键或总线）。
     Dictation(DictationCommand),
     /// 语音转文字：工作进程有新事件，或定时器到点（取事件、查超时、重试键入）。
@@ -1456,6 +1482,8 @@ pub struct AppState {
     settings_view: Option<Entity<SettingsView>>,
     /// 输入框翻译浮窗（若已打开）与其视图。
     translate_input: Option<(ShellWindow, Entity<TranslateInputView>)>,
+    /// 翻译页窗口（若已打开）与其视图。
+    translate_page: Option<(ShellWindow, Entity<TranslatePageView>)>,
     /// 截图历史后台写入器（启动失败时为 `None`，历史功能降级）。
     history: Option<Arc<HistoryRecorder>>,
     /// 截图历史窗口（若已打开）与其视图。
@@ -1577,6 +1605,7 @@ impl AppState {
             settings: None,
             settings_view: None,
             translate_input: None,
+            translate_page: None,
             history,
             history_window: None,
             pin_manage_window: None,
@@ -3344,6 +3373,84 @@ fn spawn_translate_input(state: &AppState, serial: u64, text: String, model_id: 
     }
 }
 
+/// 打开翻译页窗口；已打开则只激活，不重复创建。供主窗口导航等入口通过
+/// [`UiEvent::OpenTranslatePage`] 调用。
+///
+/// # 参数
+/// - `cx`：外壳上下文。
+/// - `state`：运行时状态。
+fn open_or_focus_translate_page(cx: &mut ShellContext, state: &mut AppState) {
+    if let Some((window, _)) = &state.translate_page
+        && cx.is_window_open(window)
+    {
+        cx.activate_window(window);
+        return;
+    }
+    let prefs = ui_prefs_from_config(&state.config);
+    let (translate_config, packs) = {
+        let config = state.config.borrow();
+        let translate_config =
+            TranslateConfig::from_document(config.document(), &system_ui_language());
+        let packs = crate::translate_input::installed_packs(
+            &state.translator.scan(&translate_config).models,
+        );
+        (translate_config, packs)
+    };
+    let title = crate::ocr_backend::i18n_for(prefs.locale).tr("translate-page-title");
+    let spec = WindowSpec::normal(
+        title,
+        LogicalSize::new(TRANSLATE_PAGE_WIDTH, TRANSLATE_PAGE_HEIGHT),
+    );
+    let inbox = state.inbox.clone();
+    match cx.open_window(&spec, move |window, app| {
+        TranslatePageView::create(window, app, &translate_config, packs, prefs, inbox)
+    }) {
+        Ok((window, view)) => {
+            state.translate_page = Some((window, view));
+            tracing::info!("翻译页窗口已打开");
+        }
+        Err(e) => tracing::error!(error = %e, "打开翻译页窗口失败"),
+    }
+}
+
+/// 在后台线程执行翻译页的请求，结果经收件箱回到主线程。
+///
+/// # 参数
+/// - `state`：运行时状态。
+/// - `serial`：请求序号。
+/// - `text`：原文。
+/// - `model_id`：下拉选中的包 ID（空串为自动）。
+/// - `source` / `target`：页面上选的语言。
+fn spawn_translate_page(
+    state: &AppState,
+    serial: u64,
+    text: String,
+    model_id: String,
+    source: snow_translate::Lang,
+    target: snow_translate::Lang,
+) {
+    let base =
+        TranslateConfig::from_document(state.config.borrow().document(), &system_ui_language());
+    let config = page_config(&base, source, target);
+    let translator = Arc::clone(&state.translator);
+    let inbox = state.inbox.clone();
+    let spawned = std::thread::Builder::new()
+        .name("snow-translate-page".into())
+        .spawn(move || {
+            let result = translate_text(translator.as_ref(), &config, &model_id, &text);
+            inbox.push(UiEvent::TranslatePageFinished { serial, result });
+        });
+    if let Err(e) = spawned {
+        tracing::error!(error = %e, "无法创建翻译页翻译线程");
+        state.inbox.push(UiEvent::TranslatePageFinished {
+            serial,
+            result: Err(InputError::Translate(snow_translate::TranslateError::Io(
+                e.to_string(),
+            ))),
+        });
+    }
+}
+
 /// 读取环境变量 `SNOW_SETTINGS_MONITOR`（设备名子串，如 `DISPLAY2`），选择设置窗所在显示器。
 ///
 /// # 参数
@@ -4038,6 +4145,21 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
             }
         }
         UiEvent::OpenTranslateInput => open_or_focus_translate_input(cx, state),
+        UiEvent::OpenTranslatePage => open_or_focus_translate_page(cx, state),
+        UiEvent::TranslatePageRequested {
+            serial,
+            text,
+            model_id,
+            source,
+            target,
+        } => spawn_translate_page(state, serial, text, model_id, source, target),
+        UiEvent::TranslatePageFinished { serial, result } => {
+            if let Some((window, view)) = &state.translate_page
+                && cx.is_window_open(window)
+            {
+                view.update(cx.app(), |v, vcx| v.finish(serial, result, vcx));
+            }
+        }
         UiEvent::Dictation(command) => state.dictation.command(cx, state.tray.as_ref(), command),
         UiEvent::DictationPoll => state.dictation.tick(cx, state.tray.as_ref()),
         UiEvent::DictationProbed { round, verdict } => {

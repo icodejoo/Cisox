@@ -97,7 +97,7 @@ pub struct TranslateConfig {
 }
 
 /// 设置页提供的具体目标语言及其配置值拼写（不含 `auto`、韩语与繁体）。
-const SUPPORTED_TARGETS: [(Lang, &str); 11] = [
+pub(crate) const SUPPORTED_TARGETS: [(Lang, &str); 11] = [
     (Lang::Ar, "ar"),
     (Lang::De, "de"),
     (Lang::En, "en"),

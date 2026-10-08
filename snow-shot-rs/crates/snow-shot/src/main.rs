@@ -77,6 +77,8 @@ pub mod system_settings;
 pub mod translate_flow;
 pub mod translate_input;
 pub mod translate_input_view;
+pub mod translate_page;
+pub mod translate_page_view;
 pub mod translate_layout;
 pub mod translate_service;
 pub mod language_names;
