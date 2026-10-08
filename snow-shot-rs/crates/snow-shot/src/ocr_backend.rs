@@ -235,7 +235,11 @@ fn map_system_error(error: WinOcrError) -> OcrError {
 /// - `lines`：系统返回的行（提交图像坐标）。
 /// - `scale`：`(x 还原比, y 还原比)`，未缩放为 `(1.0, 1.0)`。
 /// - `bounds`：原图尺寸。
-fn system_lines_to_boxes(lines: &[WinOcrLine], scale: (f32, f32), bounds: (u32, u32)) -> Vec<OcrTextBox> {
+fn system_lines_to_boxes(
+    lines: &[WinOcrLine],
+    scale: (f32, f32),
+    bounds: (u32, u32),
+) -> Vec<OcrTextBox> {
     let (max_x, max_y) = (bounds.0 as f32, bounds.1 as f32);
     lines
         .iter()
@@ -248,7 +252,12 @@ fn system_lines_to_boxes(lines: &[WinOcrLine], scale: (f32, f32), bounds: (u32, 
             let bottom = ((y + h) * scale.1).clamp(0.0, max_y);
             let (ix, iy) = (left.floor() as i32, top.floor() as i32);
             OcrTextBox {
-                rect: PhysicalRect::new(ix, iy, (right.ceil() as i32 - ix).max(0), (bottom.ceil() as i32 - iy).max(0)),
+                rect: PhysicalRect::new(
+                    ix,
+                    iy,
+                    (right.ceil() as i32 - ix).max(0),
+                    (bottom.ceil() as i32 - iy).max(0),
+                ),
                 text: line.text.clone(),
                 confidence: None,
             }
@@ -272,36 +281,58 @@ impl OcrEngine for SystemOcr {
         SYSTEM_PROBE
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .get_or_probe(Instant::now(), SYSTEM_PROBE_TTL, || availability_from_status(&win_ocr::probe()))
+            .get_or_probe(Instant::now(), SYSTEM_PROBE_TTL, || {
+                availability_from_status(&win_ocr::probe())
+            })
     }
 
     /// 经系统 OCR 识别；图像边长超过系统上限时先等比缩小，结果坐标还原到原图。
     fn recognize(&self, input: &OcrInput<'_>) -> Result<OcrResult, OcrError> {
         let started = Instant::now();
-        let expected = (input.width as usize).checked_mul(input.height as usize).and_then(|p| p.checked_mul(4));
+        let expected = (input.width as usize)
+            .checked_mul(input.height as usize)
+            .and_then(|p| p.checked_mul(4));
         if input.width == 0 || input.height == 0 || expected != Some(input.rgba.len()) {
             return Err(OcrError::InvalidImage(format!(
-                "尺寸 {}x{} 与像素长度 {} 不符",
+                "size {}x{} does not match the pixel length {}",
                 input.width,
                 input.height,
                 input.rgba.len()
             )));
         }
-        let fitted = win_ocr::max_image_dimension().and_then(|max| win_ocr::fit_dimension(input.width, input.height, max));
+        let fitted = win_ocr::max_image_dimension()
+            .and_then(|max| win_ocr::fit_dimension(input.width, input.height, max));
         let output = match fitted {
             None => win_ocr::recognize(input.width, input.height, input.rgba, None),
             Some((sw, sh)) => {
                 let source = RgbaImage::from_raw(input.width, input.height, input.rgba.to_vec())
-                    .ok_or_else(|| OcrError::InvalidImage("无法构造缩放源图".to_string()))?;
+                    .ok_or_else(|| {
+                        OcrError::InvalidImage(
+                            "could not build the source image for scaling".to_string(),
+                        )
+                    })?;
                 let small = imageops::resize(&source, sw, sh, imageops::FilterType::Triangle);
                 win_ocr::recognize(sw, sh, small.as_raw(), None)
             }
         }
         .map_err(map_system_error)?;
-        let scale = fitted.map_or((1.0, 1.0), |(sw, sh)| (input.width as f32 / sw as f32, input.height as f32 / sh as f32));
+        let scale = fitted.map_or((1.0, 1.0), |(sw, sh)| {
+            (
+                input.width as f32 / sw as f32,
+                input.height as f32 / sh as f32,
+            )
+        });
         let boxes = system_lines_to_boxes(&output.lines, scale, (input.width, input.height));
-        let full_text = boxes.iter().map(|b| b.text.as_str()).collect::<Vec<_>>().join("\n");
-        Ok(OcrResult { boxes, full_text, elapsed_ms: started.elapsed().as_millis() as u64 })
+        let full_text = boxes
+            .iter()
+            .map(|b| b.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        Ok(OcrResult {
+            boxes,
+            full_text,
+            elapsed_ms: started.elapsed().as_millis() as u64,
+        })
     }
 }
 
@@ -386,7 +417,11 @@ impl std::fmt::Debug for OcrSelection {
 
 /// 请求系统后端但其不可用时的提示（按不可用原因区分）。
 fn notice_if_unavailable(requested: OcrBackend, system: &dyn OcrEngine) -> Option<OcrNotice> {
-    if requested == OcrBackend::System { OcrNotice::from_availability(system.availability()) } else { None }
+    if requested == OcrBackend::System {
+        OcrNotice::from_availability(system.availability())
+    } else {
+        None
+    }
 }
 
 /// 由请求的后端与两个候选引擎决定实际引擎：系统不可用时回落本地模型并给出提示。
@@ -569,18 +604,35 @@ mod tests {
     #[test]
     fn unavailable_system_falls_back_with_matching_notice() {
         let cases = [
-            (OcrAvailability::NotImplemented, OcrNotice::SystemNotImplemented),
-            (OcrAvailability::NoLanguagePack, OcrNotice::SystemNoLanguagePack),
+            (
+                OcrAvailability::NotImplemented,
+                OcrNotice::SystemNotImplemented,
+            ),
+            (
+                OcrAvailability::NoLanguagePack,
+                OcrNotice::SystemNoLanguagePack,
+            ),
             (OcrAvailability::EngineFailed, OcrNotice::SystemEngineFailed),
         ];
         for (availability, notice) in cases {
             let local = fake(OcrBackend::LocalModel, OcrAvailability::Ready);
-            let sel = select_engine(OcrBackend::System, local, fake(OcrBackend::System, availability));
+            let sel = select_engine(
+                OcrBackend::System,
+                local,
+                fake(OcrBackend::System, availability),
+            );
             assert_eq!(sel.requested, OcrBackend::System);
             assert_eq!(sel.effective, OcrBackend::LocalModel);
             assert_eq!(sel.notice, Some(notice));
-            let input = OcrInput { width: 1, height: 1, rgba: &[0; 4] };
-            assert_eq!(sel.engine.recognize(&input).expect("回落到本地").full_text, "LocalModel");
+            let input = OcrInput {
+                width: 1,
+                height: 1,
+                rgba: &[0; 4],
+            };
+            assert_eq!(
+                sel.engine.recognize(&input).expect("回落到本地").full_text,
+                "LocalModel"
+            );
         }
     }
 
@@ -597,11 +649,22 @@ mod tests {
     /// 平台探测结果映射成可用性。
     #[test]
     fn status_maps_to_availability() {
-        let ready = WinOcrStatus::Ready { languages: vec!["en-US".into()] };
+        let ready = WinOcrStatus::Ready {
+            languages: vec!["en-US".into()],
+        };
         assert_eq!(availability_from_status(&ready), OcrAvailability::Ready);
-        assert_eq!(availability_from_status(&WinOcrStatus::NoLanguagePack), OcrAvailability::NoLanguagePack);
-        assert_eq!(availability_from_status(&WinOcrStatus::UnsupportedPlatform), OcrAvailability::NotImplemented);
-        assert_eq!(availability_from_status(&WinOcrStatus::EngineFailed("x".into())), OcrAvailability::EngineFailed);
+        assert_eq!(
+            availability_from_status(&WinOcrStatus::NoLanguagePack),
+            OcrAvailability::NoLanguagePack
+        );
+        assert_eq!(
+            availability_from_status(&WinOcrStatus::UnsupportedPlatform),
+            OcrAvailability::NotImplemented
+        );
+        assert_eq!(
+            availability_from_status(&WinOcrStatus::EngineFailed("x".into())),
+            OcrAvailability::EngineFailed
+        );
     }
 
     /// 可用性与提示一一对应，可用时没有提示。
@@ -617,18 +680,34 @@ mod tests {
     /// 平台错误映射：尺寸问题是 InvalidImage，其余是 Failed 且保留原因。
     #[test]
     fn system_errors_are_mapped() {
-        assert!(matches!(map_system_error(WinOcrError::InvalidImage("x".into())), OcrError::InvalidImage(_)));
-        assert!(matches!(map_system_error(WinOcrError::NoLanguagePack), OcrError::Failed(m) if m.contains("language pack")));
-        assert!(matches!(map_system_error(WinOcrError::ImageTooLarge { max: 7 }), OcrError::Failed(m) if m.contains('7')));
+        assert!(matches!(
+            map_system_error(WinOcrError::InvalidImage("x".into())),
+            OcrError::InvalidImage(_)
+        ));
+        assert!(
+            matches!(map_system_error(WinOcrError::NoLanguagePack), OcrError::Failed(m) if m.contains("language pack"))
+        );
+        assert!(
+            matches!(map_system_error(WinOcrError::ImageTooLarge { max: 7 }), OcrError::Failed(m) if m.contains('7'))
+        );
     }
 
     /// 系统行转文本块：置信度为 None、按缩放还原、夹到图内、丢弃空白行。
     #[test]
     fn system_lines_become_boxes() {
         let lines = vec![
-            WinOcrLine { text: "ab".into(), rect: [10.4, 20.0, 30.2, 8.0] },
-            WinOcrLine { text: "   ".into(), rect: [0.0, 0.0, 5.0, 5.0] },
-            WinOcrLine { text: "edge".into(), rect: [90.0, 90.0, 40.0, 40.0] },
+            WinOcrLine {
+                text: "ab".into(),
+                rect: [10.4, 20.0, 30.2, 8.0],
+            },
+            WinOcrLine {
+                text: "   ".into(),
+                rect: [0.0, 0.0, 5.0, 5.0],
+            },
+            WinOcrLine {
+                text: "edge".into(),
+                rect: [90.0, 90.0, 40.0, 40.0],
+            },
         ];
         let boxes = system_lines_to_boxes(&lines, (1.0, 1.0), (100, 100));
         assert_eq!(boxes.len(), 2);
@@ -651,18 +730,38 @@ mod tests {
             value
         };
         assert_eq!(cache.get_or_probe(t0, ttl, || probe(1)), 1);
-        assert_eq!(cache.get_or_probe(t0 + Duration::from_secs(4), ttl, || probe(2)), 1);
-        assert_eq!(cache.get_or_probe(t0 + Duration::from_secs(5), ttl, || probe(3)), 3);
+        assert_eq!(
+            cache.get_or_probe(t0 + Duration::from_secs(4), ttl, || probe(2)),
+            1
+        );
+        assert_eq!(
+            cache.get_or_probe(t0 + Duration::from_secs(5), ttl, || probe(3)),
+            3
+        );
         assert_eq!(calls, 2);
     }
 
     /// 系统引擎对非法图像直接报 InvalidImage，不触碰系统接口（离屏可跑）。
     #[test]
     fn system_engine_rejects_invalid_image() {
-        let bad = OcrInput { width: 2, height: 2, rgba: &[0; 3] };
-        assert!(matches!(SystemOcr.recognize(&bad), Err(OcrError::InvalidImage(_))));
-        let zero = OcrInput { width: 0, height: 5, rgba: &[] };
-        assert!(matches!(SystemOcr.recognize(&zero), Err(OcrError::InvalidImage(_))));
+        let bad = OcrInput {
+            width: 2,
+            height: 2,
+            rgba: &[0; 3],
+        };
+        assert!(matches!(
+            SystemOcr.recognize(&bad),
+            Err(OcrError::InvalidImage(_))
+        ));
+        let zero = OcrInput {
+            width: 0,
+            height: 5,
+            rgba: &[],
+        };
+        assert!(matches!(
+            SystemOcr.recognize(&zero),
+            Err(OcrError::InvalidImage(_))
+        ));
         assert_eq!(SystemOcr.backend(), OcrBackend::System);
     }
 
@@ -674,7 +773,8 @@ mod tests {
     fn system_ocr_real_recognizes_rendered_text() {
         use snow_platform::text_raster::{DEFAULT_FONT_FAMILY, rasterize_text};
         assert_eq!(SystemOcr.availability(), OcrAvailability::Ready);
-        let bmp = rasterize_text("Hello Snow Shot", DEFAULT_FONT_FAMILY, 32.0, false).expect("光栅化");
+        let bmp =
+            rasterize_text("Hello Snow Shot", DEFAULT_FONT_FAMILY, 32.0, false).expect("光栅化");
         let (w, h) = (bmp.width + 40, bmp.height + 40);
         let mut rgba = vec![255u8; (w * h * 4) as usize];
         for y in 0..bmp.height {
@@ -684,7 +784,13 @@ mod tests {
                 rgba[at..at + 4].copy_from_slice(&[v, v, v, 255]);
             }
         }
-        let result = SystemOcr.recognize(&OcrInput { width: w, height: h, rgba: &rgba }).expect("识别");
+        let result = SystemOcr
+            .recognize(&OcrInput {
+                width: w,
+                height: h,
+                rgba: &rgba,
+            })
+            .expect("识别");
         println!("{result:?}");
         assert!(result.full_text.contains("Snow"), "{}", result.full_text);
         assert!(result.boxes.iter().all(|b| b.confidence.is_none()));
@@ -714,7 +820,11 @@ mod tests {
                 assert!(!label.contains("[!"), "{locale} {backend:?}: {label}");
                 labels.push(label);
             }
-            for kind in [OcrNotice::SystemNotImplemented, OcrNotice::SystemNoLanguagePack, OcrNotice::SystemEngineFailed] {
+            for kind in [
+                OcrNotice::SystemNotImplemented,
+                OcrNotice::SystemNoLanguagePack,
+                OcrNotice::SystemEngineFailed,
+            ] {
                 let notice = kind.message(locale);
                 assert!(!notice.contains("[!"), "{locale} {kind:?}: {notice}");
                 notices.push(notice);
@@ -788,7 +898,11 @@ mod tests {
         let local = fake(OcrBackend::LocalModel, OcrAvailability::Ready);
         let text = format!(
             "{:?}",
-            select_engine(OcrBackend::System, local, fake(OcrBackend::System, OcrAvailability::NotImplemented))
+            select_engine(
+                OcrBackend::System,
+                local,
+                fake(OcrBackend::System, OcrAvailability::NotImplemented)
+            )
         );
         assert_eq!(
             text,

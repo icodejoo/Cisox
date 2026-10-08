@@ -219,6 +219,10 @@ pub enum TranslateError {
     Inference(String),
     /// 内存不足。
     OutOfMemory(String),
+    /// 尚未配置任何自定义 AI 模型。
+    NoCustomModel,
+    /// 配置里没有选中（或选中了不存在的）自定义 AI 模型。
+    CustomModelNotSelected,
 }
 
 impl TranslateError {
@@ -238,20 +242,28 @@ impl TranslateError {
 impl fmt::Display for TranslateError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NoModelFound(msg) => write!(f, "未检测到可用翻译模型: {msg}"),
+            // 技术性英文说明（日志 / 排错用）；面向用户的文案由界面层按语言翻译
+            Self::NoModelFound(msg) => write!(f, "no usable translation model: {msg}"),
             Self::UnsupportedLanguagePair(src, tgt) => {
-                write!(f, "不支持的翻译语言对: {} -> {}", src.display_name(), tgt.display_name())
+                write!(
+                    f,
+                    "unsupported language pair: {} -> {}",
+                    src.code(),
+                    tgt.code()
+                )
             }
-            Self::InvalidRequest(msg) => write!(f, "翻译请求不合法: {msg}"),
-            Self::Network(msg) => write!(f, "翻译端点连接失败: {msg}"),
-            Self::Io(msg) => write!(f, "模型文件读取错误: {msg}"),
-            Self::Timeout => write!(f, "翻译执行超时"),
-            Self::RuntimeMissing(msg) => write!(f, "缺少 onnxruntime 运行时: {msg}"),
-            Self::WorkerUnavailable(msg) => write!(f, "翻译组件不可用: {msg}"),
-            Self::WorkerDied(msg) => write!(f, "翻译进程异常退出: {msg}"),
-            Self::ModelLoad(msg) => write!(f, "翻译模型加载失败: {msg}"),
-            Self::Inference(msg) => write!(f, "翻译推理失败: {msg}"),
-            Self::OutOfMemory(msg) => write!(f, "翻译内存不足: {msg}"),
+            Self::InvalidRequest(msg) => write!(f, "invalid translation request: {msg}"),
+            Self::Network(msg) => write!(f, "translation endpoint unreachable: {msg}"),
+            Self::Io(msg) => write!(f, "model file I/O error: {msg}"),
+            Self::Timeout => write!(f, "translation timed out"),
+            Self::RuntimeMissing(msg) => write!(f, "onnxruntime runtime missing: {msg}"),
+            Self::WorkerUnavailable(msg) => write!(f, "translation worker unavailable: {msg}"),
+            Self::WorkerDied(msg) => write!(f, "translation worker exited unexpectedly: {msg}"),
+            Self::ModelLoad(msg) => write!(f, "translation model failed to load: {msg}"),
+            Self::Inference(msg) => write!(f, "translation inference failed: {msg}"),
+            Self::OutOfMemory(msg) => write!(f, "translation ran out of memory: {msg}"),
+            Self::NoCustomModel => write!(f, "no custom AI model is configured"),
+            Self::CustomModelNotSelected => write!(f, "no custom AI model is selected"),
         }
     }
 }
@@ -338,7 +350,9 @@ impl ModelManifest {
             return Err(TranslateError::InvalidRequest("模型 ID 不能为空".into()));
         }
         if self.languages.is_empty() && self.pairs.is_empty() {
-            return Err(TranslateError::InvalidRequest("模型支持语言列表不能为空".into()));
+            return Err(TranslateError::InvalidRequest(
+                "模型支持语言列表不能为空".into(),
+            ));
         }
         Ok(())
     }
@@ -357,7 +371,10 @@ impl ModelManifest {
             let relative = Path::new(&self.files[name]);
             let escapes = relative.is_absolute()
                 || relative.components().any(|c| {
-                    matches!(c, Component::ParentDir | Component::RootDir | Component::Prefix(_))
+                    matches!(
+                        c,
+                        Component::ParentDir | Component::RootDir | Component::Prefix(_)
+                    )
                 });
             if escapes {
                 return Err(format!("文件 {name} 的路径必须是模型目录内的相对路径"));
@@ -390,7 +407,11 @@ impl ModelManifest {
             }
         };
         if self.pairs.is_empty() {
-            let langs: Vec<Lang> = self.languages.iter().filter_map(|c| Lang::from_code(c)).collect();
+            let langs: Vec<Lang> = self
+                .languages
+                .iter()
+                .filter_map(|c| Lang::from_code(c))
+                .collect();
             for src in &langs {
                 for tgt in &langs {
                     push(*src, *tgt);
@@ -533,14 +554,17 @@ impl ModelScanner {
                 Err(reason) => report.issues.push(ManifestIssue { dir_name, reason }),
             }
         }
-        report.models.sort_by(|a, b| a.manifest.id.cmp(&b.manifest.id));
+        report
+            .models
+            .sort_by(|a, b| a.manifest.id.cmp(&b.manifest.id));
         report.issues.sort_by(|a, b| a.dir_name.cmp(&b.dir_name));
         report
     }
 
     /// 读取并校验一份清单。
     fn load_manifest(path: &Path, dir: &Path) -> Result<ModelManifest, String> {
-        let text = fs::read_to_string(path).map_err(|e| format!("无法读取 {MANIFEST_FILE}: {e}"))?;
+        let text =
+            fs::read_to_string(path).map_err(|e| format!("无法读取 {MANIFEST_FILE}: {e}"))?;
         let manifest: ModelManifest = serde_json::from_str(text.trim_start_matches('\u{feff}'))
             .map_err(|e| format!("{MANIFEST_FILE} 解析失败: {e}"))?;
         manifest.validate().map_err(|e| e.to_string())?;
@@ -613,13 +637,18 @@ pub fn pick_model_routed<'a>(
     mode: router::RouteMode,
 ) -> Result<(&'a ScannedModel, Lang), TranslateError> {
     if models.is_empty() {
-        return Err(TranslateError::NoModelFound("模型目录里没有可用的模型".into()));
+        return Err(TranslateError::NoModelFound(
+            "the model directory has no usable model".into(),
+        ));
     }
     let manifests: Vec<&ModelManifest> = models.iter().map(|m| &m.manifest).collect();
     let index = router::pick_index(&manifests, preferred_id, src, tgt, mode)
         .ok_or(TranslateError::UnsupportedLanguagePair(src, tgt))?;
     let model = &models[index];
-    let resolved = model.manifest.resolve_source(src, tgt).ok_or(TranslateError::UnsupportedLanguagePair(src, tgt))?;
+    let resolved = model
+        .manifest
+        .resolve_source(src, tgt)
+        .ok_or(TranslateError::UnsupportedLanguagePair(src, tgt))?;
     Ok((model, resolved))
 }
 
@@ -724,12 +753,18 @@ impl TranslationService {
     /// - `engine`：新的后端。旧后端的最后一个引用释放时，其 worker 进程随之退出。
     pub fn set_engine(&self, engine: Option<Arc<dyn TranslationEngine>>) {
         *self.engine.write().unwrap_or_else(PoisonError::into_inner) = engine;
-        self.cache.lock().unwrap_or_else(PoisonError::into_inner).clear();
+        self.cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
     }
 
     /// 当前引擎（克隆的共享引用）。
     pub fn engine(&self) -> Option<Arc<dyn TranslationEngine>> {
-        self.engine.read().unwrap_or_else(PoisonError::into_inner).clone()
+        self.engine
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     /// 当前翻译引擎名称；没有后端时为 `None`。
@@ -762,9 +797,9 @@ impl TranslationService {
         src: Lang,
         tgt: Lang,
     ) -> Result<Vec<String>, TranslateError> {
-        let engine = self
-            .engine()
-            .ok_or_else(|| TranslateError::NoModelFound("尚未配置翻译后端".into()))?;
+        let engine = self.engine().ok_or_else(|| {
+            TranslateError::NoModelFound("no translation backend is configured".into())
+        })?;
         let id = engine.cache_id();
         let key_of = |text: &str| format!("{id}|{}>{}|{}", src.code(), tgt.code(), text.trim());
         let mut results: Vec<Option<String>> = vec![None; texts.len()];
@@ -866,7 +901,10 @@ mod tests {
         assert_eq!(Lang::from_code("tr"), Some(Lang::Tr));
         assert_eq!(Lang::Auto.display_name(), "自动检测");
         // 配置白名单里的每种语言都必须能解析
-        for code in ["auto", "ar", "de", "en", "es", "fr", "it", "ja", "pt", "ru", "tr", "zh-Hans", "zh-Hant"] {
+        for code in [
+            "auto", "ar", "de", "en", "es", "fr", "it", "ja", "pt", "ru", "tr", "zh-Hans",
+            "zh-Hant",
+        ] {
             assert!(Lang::from_code(code).is_some(), "{code}");
         }
     }
@@ -881,9 +919,10 @@ mod tests {
         .expect("旧格式");
         assert!(manifest.validate().is_ok());
         assert!(manifest.pairs.is_empty() && manifest.sha256.is_empty());
-        let minimal: ModelManifest =
-            serde_json::from_str(r#"{"schema_version":1,"id":"m","family":"marian","languages":["en"]}"#)
-                .expect("最小清单");
+        let minimal: ModelManifest = serde_json::from_str(
+            r#"{"schema_version":1,"id":"m","family":"marian","languages":["en"]}"#,
+        )
+        .expect("最小清单");
         assert_eq!(minimal.max_input_tokens, 512);
         assert!(minimal.display_name.is_empty());
     }
@@ -923,7 +962,10 @@ mod tests {
         );
         assert!(directed.supports(Lang::En, Lang::ZhHant));
         assert!(!directed.supports(Lang::ZhHans, Lang::En));
-        assert_eq!(directed.resolve_source(Lang::Auto, Lang::ZhHans), Some(Lang::En));
+        assert_eq!(
+            directed.resolve_source(Lang::Auto, Lang::ZhHans),
+            Some(Lang::En)
+        );
         assert_eq!(directed.resolve_source(Lang::Auto, Lang::Ja), None);
         assert!(!directed.supports(Lang::Auto, Lang::En));
     }
@@ -932,16 +974,33 @@ mod tests {
     #[test]
     fn validate_files_reports_reasons() {
         let root = temp_dir("files");
-        write_model(&root, "ok", &manifest_text("ok", ""), &["e.onnx", "d.onnx", "t.json"]);
+        write_model(
+            &root,
+            "ok",
+            &manifest_text("ok", ""),
+            &["e.onnx", "d.onnx", "t.json"],
+        );
         let ok: ModelManifest = serde_json::from_str(&manifest_text("ok", "")).expect("清单");
         assert!(ok.validate_files(&root.join("ok")).is_ok());
         assert!(ok.validate_files(&root).unwrap_err().contains("不存在"));
         let mut escaping = ok.clone();
         escaping.files.insert("encoder".into(), "../e.onnx".into());
-        assert!(escaping.validate_files(&root.join("ok")).unwrap_err().contains("相对路径"));
+        assert!(
+            escaping
+                .validate_files(&root.join("ok"))
+                .unwrap_err()
+                .contains("相对路径")
+        );
         let mut absolute = ok.clone();
-        absolute.files.insert("encoder".into(), "C:/Windows/notepad.exe".into());
-        assert!(absolute.validate_files(&root.join("ok")).unwrap_err().contains("相对路径"));
+        absolute
+            .files
+            .insert("encoder".into(), "C:/Windows/notepad.exe".into());
+        assert!(
+            absolute
+                .validate_files(&root.join("ok"))
+                .unwrap_err()
+                .contains("相对路径")
+        );
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -956,11 +1015,25 @@ mod tests {
             "execution":{"prepacking":true}}"#;
         let manifest: ModelManifest = serde_json::from_str(text).expect("m2m100 清单");
         assert!(manifest.validate().is_ok());
-        assert_eq!(manifest.supported_pairs(), vec![(Lang::ZhHans, Lang::En), (Lang::En, Lang::ZhHans)]);
+        assert_eq!(
+            manifest.supported_pairs(),
+            vec![(Lang::ZhHans, Lang::En), (Lang::En, Lang::ZhHans)]
+        );
         let root = temp_dir("m2m100");
-        let all = ["encoder.onnx", "encoder.onnx_data", "decoder.onnx", "decoder.onnx_data", "tokenizer.json"];
+        let all = [
+            "encoder.onnx",
+            "encoder.onnx_data",
+            "decoder.onnx",
+            "decoder.onnx_data",
+            "tokenizer.json",
+        ];
         write_model(&root, "full", text, &all);
-        write_model(&root, "no-data", text, &["encoder.onnx", "decoder.onnx", "tokenizer.json"]);
+        write_model(
+            &root,
+            "no-data",
+            text,
+            &["encoder.onnx", "decoder.onnx", "tokenizer.json"],
+        );
         let report = ModelScanner::new(&root).scan();
         assert_eq!(report.models.len(), 1);
         assert_eq!(report.models[0].manifest.family, "m2m100");
@@ -973,15 +1046,34 @@ mod tests {
     #[test]
     fn scanner_reports_models_and_issues() {
         let root = temp_dir("scan");
-        write_model(&root, "b-model", &manifest_text("b", ""), &["e.onnx", "d.onnx", "t.json"]);
-        write_model(&root, "a-model", &manifest_text("a", ""), &["e.onnx", "d.onnx", "t.json"]);
+        write_model(
+            &root,
+            "b-model",
+            &manifest_text("b", ""),
+            &["e.onnx", "d.onnx", "t.json"],
+        );
+        write_model(
+            &root,
+            "a-model",
+            &manifest_text("a", ""),
+            &["e.onnx", "d.onnx", "t.json"],
+        );
         write_model(&root, "broken-json", "{not json", &[]);
         write_model(&root, "missing-file", &manifest_text("mf", ""), &["e.onnx"]);
-        write_model(&root, "bad-version", &manifest_text("bv", "").replace("\"schema_version\":1", "\"schema_version\":9"), &[]);
+        write_model(
+            &root,
+            "bad-version",
+            &manifest_text("bv", "").replace("\"schema_version\":1", "\"schema_version\":9"),
+            &[],
+        );
         fs::create_dir_all(root.join("unrelated")).expect("无关目录");
         fs::write(root.join("stray.txt"), b"x").expect("散文件");
         let report = ModelScanner::new(&root).scan();
-        let ids: Vec<&str> = report.models.iter().map(|m| m.manifest.id.as_str()).collect();
+        let ids: Vec<&str> = report
+            .models
+            .iter()
+            .map(|m| m.manifest.id.as_str())
+            .collect();
         assert_eq!(ids, ["a", "b"]);
         let names: Vec<&str> = report.issues.iter().map(|i| i.dir_name.as_str()).collect();
         assert_eq!(names, ["bad-version", "broken-json", "missing-file"]);
@@ -989,7 +1081,10 @@ mod tests {
         assert!(report.issues.iter().any(|i| i.reason.contains("不存在")));
         assert_eq!(ModelScanner::new(&root).scan_models().len(), 2);
         assert_eq!(report.models[0].dir, root.join("a-model"));
-        assert_eq!(ModelScanner::new(&root.join("nope")).scan(), ScanReport::default());
+        assert_eq!(
+            ModelScanner::new(&root.join("nope")).scan(),
+            ScanReport::default()
+        );
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -1006,24 +1101,37 @@ mod tests {
     /// 选模型：偏好优先；偏好不支持时退回第一个支持的；Auto 被解析；无模型/不支持分别报错。
     #[test]
     fn pick_model_rules() {
-        let en_zh: ModelManifest = serde_json::from_str(&manifest_text("en-zh", r#","pairs":[["en","zh-CN"]]"#)).expect("清单");
-        let en_zh_b: ModelManifest = serde_json::from_str(&manifest_text("z-en-zh", r#","pairs":[["en","zh-CN"]]"#)).expect("清单");
-        let zh_en: ModelManifest = serde_json::from_str(&manifest_text("zh-en", r#","pairs":[["zh-CN","en"]]"#)).expect("清单");
+        let en_zh: ModelManifest =
+            serde_json::from_str(&manifest_text("en-zh", r#","pairs":[["en","zh-CN"]]"#))
+                .expect("清单");
+        let en_zh_b: ModelManifest =
+            serde_json::from_str(&manifest_text("z-en-zh", r#","pairs":[["en","zh-CN"]]"#))
+                .expect("清单");
+        let zh_en: ModelManifest =
+            serde_json::from_str(&manifest_text("zh-en", r#","pairs":[["zh-CN","en"]]"#))
+                .expect("清单");
         let models: Vec<ScannedModel> = [en_zh, en_zh_b, zh_en]
             .into_iter()
-            .map(|manifest| ScannedModel { manifest, dir: PathBuf::from("d") })
+            .map(|manifest| ScannedModel {
+                manifest,
+                dir: PathBuf::from("d"),
+            })
             .collect();
         let (m, src) = pick_model(&models, "", Lang::Auto, Lang::ZhHans).expect("auto");
         assert_eq!((m.manifest.id.as_str(), src), ("en-zh", Lang::En));
         let (m, _) = pick_model(&models, "z-en-zh", Lang::En, Lang::ZhHans).expect("偏好");
         assert_eq!(m.manifest.id, "z-en-zh");
-        let (m, _) = pick_model(&models, "zh-en", Lang::En, Lang::ZhHans).expect("偏好不支持时退回");
+        let (m, _) =
+            pick_model(&models, "zh-en", Lang::En, Lang::ZhHans).expect("偏好不支持时退回");
         assert_eq!(m.manifest.id, "en-zh");
         assert!(matches!(
             pick_model(&models, "", Lang::En, Lang::Ja),
             Err(TranslateError::UnsupportedLanguagePair(Lang::En, Lang::Ja))
         ));
-        assert!(matches!(pick_model(&[], "", Lang::En, Lang::ZhHans), Err(TranslateError::NoModelFound(_))));
+        assert!(matches!(
+            pick_model(&[], "", Lang::En, Lang::ZhHans),
+            Err(TranslateError::NoModelFound(_))
+        ));
     }
 
     /// 按路由模式选包：专用包（显式 pairs）优先于通用多语包；指定包仍被尊重；single 同旧行为。
@@ -1032,21 +1140,49 @@ mod tests {
         let general: ModelManifest =
             serde_json::from_str(&manifest_text("a-general", "")).expect("清单");
         let opus: ModelManifest =
-            serde_json::from_str(&manifest_text("z-opus", r#","pairs":[["en","zh-CN"]]"#)).expect("清单");
+            serde_json::from_str(&manifest_text("z-opus", r#","pairs":[["en","zh-CN"]]"#))
+                .expect("清单");
         let models: Vec<ScannedModel> = [general, opus]
             .into_iter()
-            .map(|manifest| ScannedModel { manifest, dir: PathBuf::from("d") })
+            .map(|manifest| ScannedModel {
+                manifest,
+                dir: PathBuf::from("d"),
+            })
             .collect();
         let id = |mode, preferred: &str, src, tgt| {
-            pick_model_routed(&models, preferred, src, tgt, mode).map(|(m, s)| (m.manifest.id.clone(), s))
+            pick_model_routed(&models, preferred, src, tgt, mode)
+                .map(|(m, s)| (m.manifest.id.clone(), s))
         };
         use router::RouteMode::{MixedSplit, Single, SpecializedFirst};
-        assert_eq!(id(Single, "", Lang::En, Lang::ZhHans).unwrap().0, "a-general");
-        assert_eq!(id(SpecializedFirst, "", Lang::En, Lang::ZhHans).unwrap(), ("z-opus".into(), Lang::En));
-        assert_eq!(id(SpecializedFirst, "", Lang::Auto, Lang::ZhHans).unwrap(), ("z-opus".into(), Lang::En));
-        assert_eq!(id(SpecializedFirst, "a-general", Lang::En, Lang::ZhHans).unwrap().0, "a-general");
-        assert_eq!(id(MixedSplit, "a-general", Lang::En, Lang::ZhHans).unwrap().0, "z-opus");
-        assert_eq!(id(SpecializedFirst, "", Lang::ZhHans, Lang::En).unwrap().0, "a-general", "专用包不覆盖时用通用包");
+        assert_eq!(
+            id(Single, "", Lang::En, Lang::ZhHans).unwrap().0,
+            "a-general"
+        );
+        assert_eq!(
+            id(SpecializedFirst, "", Lang::En, Lang::ZhHans).unwrap(),
+            ("z-opus".into(), Lang::En)
+        );
+        assert_eq!(
+            id(SpecializedFirst, "", Lang::Auto, Lang::ZhHans).unwrap(),
+            ("z-opus".into(), Lang::En)
+        );
+        assert_eq!(
+            id(SpecializedFirst, "a-general", Lang::En, Lang::ZhHans)
+                .unwrap()
+                .0,
+            "a-general"
+        );
+        assert_eq!(
+            id(MixedSplit, "a-general", Lang::En, Lang::ZhHans)
+                .unwrap()
+                .0,
+            "z-opus"
+        );
+        assert_eq!(
+            id(SpecializedFirst, "", Lang::ZhHans, Lang::En).unwrap().0,
+            "a-general",
+            "专用包不覆盖时用通用包"
+        );
         assert!(matches!(
             id(SpecializedFirst, "", Lang::En, Lang::Ja),
             Err(TranslateError::UnsupportedLanguagePair(Lang::En, Lang::Ja))
@@ -1088,15 +1224,33 @@ mod tests {
             svc.translate("a", Lang::En, Lang::ZhHans),
             Err(TranslateError::NoModelFound(_))
         ));
-        let engine = Arc::new(CountingEngine { calls: AtomicUsize::new(0), id: "m1".into() });
+        let engine = Arc::new(CountingEngine {
+            calls: AtomicUsize::new(0),
+            id: "m1".into(),
+        });
         svc.set_engine(Some(engine.clone()));
-        assert_eq!(svc.translate("copy", Lang::En, Lang::ZhHans).unwrap(), "T:copy");
-        assert_eq!(svc.translate(" copy ", Lang::En, Lang::ZhHans).unwrap(), "T:copy");
+        assert_eq!(
+            svc.translate("copy", Lang::En, Lang::ZhHans).unwrap(),
+            "T:copy"
+        );
+        assert_eq!(
+            svc.translate(" copy ", Lang::En, Lang::ZhHans).unwrap(),
+            "T:copy"
+        );
         assert_eq!(engine.calls.load(Ordering::SeqCst), 1);
-        let batch = vec!["x".to_string(), "copy".to_string(), "x".to_string(), "y".to_string()];
+        let batch = vec![
+            "x".to_string(),
+            "copy".to_string(),
+            "x".to_string(),
+            "y".to_string(),
+        ];
         let out = svc.translate_batch(&batch, Lang::En, Lang::ZhHans).unwrap();
         assert_eq!(out, ["T:x", "T:copy", "T:x", "T:y"]);
-        assert_eq!(engine.calls.load(Ordering::SeqCst), 3, "只新增 x 与 y 两次调用");
+        assert_eq!(
+            engine.calls.load(Ordering::SeqCst),
+            3,
+            "只新增 x 与 y 两次调用"
+        );
         assert_eq!(svc.current_engine_name(), Some("counting"));
     }
 
@@ -1104,10 +1258,16 @@ mod tests {
     #[test]
     fn service_cache_is_per_engine() {
         let svc = TranslationService::new();
-        let first = Arc::new(CountingEngine { calls: AtomicUsize::new(0), id: "m1".into() });
+        let first = Arc::new(CountingEngine {
+            calls: AtomicUsize::new(0),
+            id: "m1".into(),
+        });
         svc.set_engine(Some(first));
         svc.translate("a", Lang::En, Lang::ZhHans).unwrap();
-        let second = Arc::new(CountingEngine { calls: AtomicUsize::new(0), id: "m2".into() });
+        let second = Arc::new(CountingEngine {
+            calls: AtomicUsize::new(0),
+            id: "m2".into(),
+        });
         svc.set_engine(Some(second.clone()));
         svc.translate("a", Lang::En, Lang::ZhHans).unwrap();
         assert_eq!(second.calls.load(Ordering::SeqCst), 1);
@@ -1146,6 +1306,7 @@ mod tests {
         }
         assert!(errors[3].can_download_runtime());
         assert!(!errors[0].can_download_runtime());
-        assert!(errors[1].to_string().contains("英语"));
+        assert!(errors[1].to_string().contains("en -> ja"));
+        assert!(TranslateError::NoCustomModel.to_string().is_ascii());
     }
 }

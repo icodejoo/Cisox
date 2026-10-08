@@ -5,6 +5,7 @@
 //! 2. 守住资源边界：画布高度上限、不克隆输入帧、分块导出（避免 `finish()` 的双份峰值）；
 //! 3. 提供重复帧指纹，采集线程可在送入拼接前就丢掉静止帧。
 
+use snow_i18n::I18n;
 use snow_platform::capture::CapturedScreen;
 use snow_stitch_images::{
     Frame, MotionOutcome, MotionStage, PixelFormat, StitchBranch, StitchDecision, StitchOptions,
@@ -55,21 +56,24 @@ pub enum RejectReason {
 impl RejectReason {
     /// 面向用户的简短提示。
     ///
+    /// # 参数
+    /// - `i18n`：界面语料。
+    ///
     /// # 返回
-    /// 一句中文提示。
+    /// 一句提示。
     ///
     /// ```ignore
-    /// assert!(RejectReason::TooFast { offset: 900 }.hint().contains("太快"));
+    /// let text = RejectReason::TooFast { offset: 900 }.message(i18n);
     /// ```
-    pub fn hint(&self) -> &'static str {
-        match self {
-            Self::NoFeatures => "画面内容太少，无法对齐，请换一个有文字或图案的区域",
-            Self::NoMatches => "前后画面对不上，请放慢滚动",
-            Self::LowConfidence => "对齐把握不足（重复纹理或动画），请放慢滚动",
-            Self::SceneCut => "画面整体变化，可能切换了页面",
-            Self::TooFast { .. } => "滚动太快，请放慢（每次不超过半屏）",
-            Self::Unknown => "该帧未能拼入",
-        }
+    pub fn message(&self, i18n: &I18n) -> String {
+        i18n.tr(match self {
+            Self::NoFeatures => "scroll-reject-no-features",
+            Self::NoMatches => "scroll-reject-no-matches",
+            Self::LowConfidence => "scroll-reject-low-confidence",
+            Self::SceneCut => "scroll-reject-scene-cut",
+            Self::TooFast { .. } => "scroll-reject-too-fast",
+            Self::Unknown => "scroll-reject-unknown",
+        })
     }
 }
 
@@ -367,7 +371,7 @@ impl StitchService {
     ///
     /// ```ignore
     /// let outcome = svc.push_frame(w, h, bgra)?;
-    /// if let FrameOutcome::Rejected(reason) = outcome { println!("{}", reason.hint()); }
+    /// if let FrameOutcome::Rejected(reason) = outcome { println!("{:?}", reason); }
     /// ```
     pub fn push_frame(
         &mut self,
@@ -376,14 +380,14 @@ impl StitchService {
         pixels: Vec<u8>,
     ) -> Result<FrameOutcome, String> {
         if frame_len(width, height) != Some(pixels.len()) || width == 0 || height == 0 {
-            return Err("切片图像尺寸非法或数据不完整".to_string());
+            return Err("invalid slice size or incomplete pixel data".to_string());
         }
         self.stats.input += 1;
         let fingerprint = frame_fingerprint(&pixels);
         if self.stitcher.is_some() {
             if width != self.width || height != self.frame_height {
                 return Err(format!(
-                    "切片尺寸与首帧不一致: 期望 {}x{} 实际 {width}x{height}",
+                    "slice size differs from the first frame: expected {}x{}, got {width}x{height}",
                     self.width, self.frame_height
                 ));
             }
@@ -400,7 +404,7 @@ impl StitchService {
             }
         }
         let frame = Frame::new(width, height, PixelFormat::Rgba8, pixels)
-            .map_err(|e| format!("构造帧失败: {e}"))?;
+            .map_err(|e| format!("could not build the frame: {e}"))?;
         self.last_fingerprint = Some(fingerprint);
         self.push_to_library(frame)
     }
@@ -434,16 +438,19 @@ impl StitchService {
                 record_decisions: true,
                 ..StitchOptions::default()
             };
-            self.stitcher = Some(Stitcher::new(options).map_err(|e| format!("创建拼接器失败: {e}"))?);
+            self.stitcher = Some(
+                Stitcher::new(options)
+                    .map_err(|e| format!("could not create the stitcher: {e}"))?,
+            );
             self.width = frame.width();
             self.frame_height = frame.height();
         }
         let Some(stitcher) = self.stitcher.as_mut() else {
-            return Err("拼接器未初始化".to_string());
+            return Err("the stitcher is not initialized".to_string());
         };
         let decision = stitcher
             .push(frame)
-            .map_err(|e| format!("拼接失败: {e}"))?;
+            .map_err(|e| format!("stitching failed: {e}"))?;
         stitcher.clear_decisions();
         if let Some((_, canvas_height)) = stitcher.image_dimensions() {
             self.height = canvas_height;
@@ -527,16 +534,19 @@ impl StitchService {
     /// # 返回
     /// `rows * 宽 * 4` 字节；范围非法或库报错返回 `Err`。
     pub fn export_rows(&self, top: u32, rows: u32) -> Result<Vec<u8>, String> {
-        let stitcher = self.stitcher.as_ref().ok_or("尚无可导出的内容")?;
-        let end = top.checked_add(rows).ok_or("导出范围溢出")?;
+        let stitcher = self.stitcher.as_ref().ok_or("nothing to export yet")?;
+        let end = top.checked_add(rows).ok_or("export range overflow")?;
         if rows == 0 || end > self.height {
-            return Err(format!("导出范围 {top}..{end} 超出画布高度 {}", self.height));
+            return Err(format!(
+                "export range {top}..{end} exceeds the canvas height {}",
+                self.height
+            ));
         }
-        let len = frame_len(self.width, rows).ok_or("导出缓冲大小溢出")?;
+        let len = frame_len(self.width, rows).ok_or("export buffer size overflow")?;
         let mut out = vec![0u8; len];
         stitcher
             .copy_rows(top, rows, &mut out)
-            .map_err(|e| format!("导出失败: {e}"))?;
+            .map_err(|e| format!("export failed: {e}"))?;
         Ok(out)
     }
 
@@ -558,7 +568,9 @@ impl StitchService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use snow_stitch_images::{MotionDiagnostics, ReferenceMode, RegionDiagnostics, StitchProgressState};
+    use snow_stitch_images::{
+        MotionDiagnostics, ReferenceMode, RegionDiagnostics, StitchProgressState,
+    };
 
     /// 生成带哈希噪声的“文档”某行某列的 BGRA 像素。
     fn doc_pixel(x: u32, y: u32) -> [u8; 4] {
@@ -566,7 +578,12 @@ mod tests {
         hash ^= hash >> 16;
         hash = hash.wrapping_mul(0x7feb_352d);
         hash ^= hash >> 15;
-        [(hash >> 24) as u8, (hash >> 16) as u8, (hash >> 8) as u8, 255]
+        [
+            (hash >> 24) as u8,
+            (hash >> 16) as u8,
+            (hash >> 8) as u8,
+            255,
+        ]
     }
 
     /// 截取文档第 `scroll` 行起、高 `h` 的一帧。
@@ -643,7 +660,9 @@ mod tests {
         for w in [320u32, 1280, 1920, 3840, 7680] {
             let rows = export_part_rows(w);
             assert!((EXPORT_PART_MIN_ROWS..=EXPORT_PART_ROWS).contains(&rows));
-            assert!(rows as usize * w as usize * 4 <= EXPORT_PART_BYTES || rows == EXPORT_PART_MIN_ROWS);
+            assert!(
+                rows as usize * w as usize * 4 <= EXPORT_PART_BYTES || rows == EXPORT_PART_MIN_ROWS
+            );
         }
     }
 
@@ -662,21 +681,46 @@ mod tests {
     fn classify_maps_branches_and_reasons() {
         let d = decision(StitchBranch::Skip, None, None, None);
         assert_eq!(classify_decision(&d), FrameOutcome::Duplicate);
-        let d = decision(StitchBranch::Append, Some(MotionOutcome::Motion { offset: -40 }), None, Some(-40));
+        let d = decision(
+            StitchBranch::Append,
+            Some(MotionOutcome::Motion { offset: -40 }),
+            None,
+            Some(-40),
+        );
         assert_eq!(
             classify_decision(&d),
-            FrameOutcome::Appended { growth: 40, height: 640, offset: -40 }
+            FrameOutcome::Appended {
+                growth: 40,
+                height: 640,
+                offset: -40
+            }
         );
         let d = decision(StitchBranch::Prepend, None, None, Some(40));
-        assert!(matches!(classify_decision(&d), FrameOutcome::Prepended { .. }));
+        assert!(matches!(
+            classify_decision(&d),
+            FrameOutcome::Prepended { .. }
+        ));
         let d = decision(StitchBranch::Contained, None, None, Some(30));
-        assert_eq!(classify_decision(&d), FrameOutcome::Contained { offset: 30 });
-        let d = decision(StitchBranch::NoMovement, Some(MotionOutcome::Motion { offset: 700 }), None, None);
+        assert_eq!(
+            classify_decision(&d),
+            FrameOutcome::Contained { offset: 30 }
+        );
+        let d = decision(
+            StitchBranch::NoMovement,
+            Some(MotionOutcome::Motion { offset: 700 }),
+            None,
+            None,
+        );
         assert_eq!(
             classify_decision(&d),
             FrameOutcome::Rejected(RejectReason::TooFast { offset: 700 })
         );
-        let d = decision(StitchBranch::NoMovement, Some(MotionOutcome::NoMotion), None, None);
+        let d = decision(
+            StitchBranch::NoMovement,
+            Some(MotionOutcome::NoMotion),
+            None,
+            None,
+        );
         assert_eq!(classify_decision(&d), FrameOutcome::NoChange);
         for (stage, expected) in [
             (MotionStage::EmptyDescriptors, RejectReason::NoFeatures),
@@ -686,11 +730,28 @@ mod tests {
             (MotionStage::SceneCut, RejectReason::SceneCut),
             (MotionStage::InputTooSmall, RejectReason::Unknown),
         ] {
-            let d = decision(StitchBranch::NoMovement, Some(MotionOutcome::Indeterminate), Some(stage), None);
-            assert_eq!(classify_decision(&d), FrameOutcome::Rejected(expected), "{stage:?}");
+            let d = decision(
+                StitchBranch::NoMovement,
+                Some(MotionOutcome::Indeterminate),
+                Some(stage),
+                None,
+            );
+            assert_eq!(
+                classify_decision(&d),
+                FrameOutcome::Rejected(expected),
+                "{stage:?}"
+            );
         }
-        let d = decision(StitchBranch::NoMovement, Some(MotionOutcome::Indeterminate), None, None);
-        assert_eq!(classify_decision(&d), FrameOutcome::Rejected(RejectReason::Unknown));
+        let d = decision(
+            StitchBranch::NoMovement,
+            Some(MotionOutcome::Indeterminate),
+            None,
+            None,
+        );
+        assert_eq!(
+            classify_decision(&d),
+            FrameOutcome::Rejected(RejectReason::Unknown)
+        );
     }
 
     /// 进展判定与提示文案非空。
@@ -709,7 +770,8 @@ mod tests {
             RejectReason::TooFast { offset: 1 },
             RejectReason::Unknown,
         ] {
-            assert!(!r.hint().is_empty());
+            assert!(!r.message(crate::ocr_backend::i18n_for("zh-CN")).is_empty());
+            assert!(r.message(crate::ocr_backend::i18n_for("en-US")).is_ascii());
         }
     }
 
@@ -738,9 +800,15 @@ mod tests {
             outcomes.push(svc.push_frame(w, h, frame_at(w, h, s)).expect("push"));
         }
         assert!(matches!(outcomes[0], FrameOutcome::Started { .. }));
-        assert!(matches!(outcomes[1], FrameOutcome::Appended { growth: 60, .. }), "{outcomes:?}");
+        assert!(
+            matches!(outcomes[1], FrameOutcome::Appended { growth: 60, .. }),
+            "{outcomes:?}"
+        );
         assert_eq!(outcomes[2], FrameOutcome::Duplicate);
-        assert!(matches!(outcomes[3], FrameOutcome::Appended { growth: 60, .. }), "{outcomes:?}");
+        assert!(
+            matches!(outcomes[3], FrameOutcome::Appended { growth: 60, .. }),
+            "{outcomes:?}"
+        );
         assert_eq!(svc.height(), h + 120);
         let (_, _, all) = svc.export_all_rgba().expect("export");
         assert_eq!(all, frame_at(w, h + 120, 0));
@@ -754,7 +822,10 @@ mod tests {
         let mut svc = StitchService::with_max_height(420);
         let mut limit_seen = false;
         for i in 0..10u32 {
-            if matches!(svc.push_frame(w, h, frame_at(w, h, i * 60)).expect("push"), FrameOutcome::LimitReached { .. }) {
+            if matches!(
+                svc.push_frame(w, h, frame_at(w, h, i * 60)).expect("push"),
+                FrameOutcome::LimitReached { .. }
+            ) {
                 limit_seen = true;
             }
             assert!(svc.height() <= 420, "height {}", svc.height());
@@ -825,7 +896,11 @@ mod capture_order_tests {
             data.extend_from_slice(&[i as u8, 100, 200, 255]);
         }
         let mut svc = StitchService::new();
-        let screen = CapturedScreen { width: w, height: h, data };
+        let screen = CapturedScreen {
+            width: w,
+            height: h,
+            data,
+        };
         assert!(matches!(
             svc.push_captured(screen),
             Ok(FrameOutcome::Started { .. })

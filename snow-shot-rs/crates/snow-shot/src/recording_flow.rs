@@ -3,12 +3,13 @@
 //! 所有 GPUI 对象只在主线程使用；录制进程的事件经 `wake` 回调投递 [`UiEvent::RecorderPoll`] 回到主线程。
 
 use crate::app_runtime::UiEvent;
-use crate::settings_state::SharedConfig;
-use crate::recording::client::{ProcessRecorderLink, locate_recorder_exe};
 use crate::recording::audio::restrict_to_format;
+use crate::recording::client::{ProcessRecorderLink, locate_recorder_exe};
+use crate::recording::model::RecordingFailure;
 use crate::recording::output::build_recording_config;
 use crate::recording::{AutoPlan, RecordingAreaView, RecordingFormat, RecordingState};
 use crate::screenshot_output::home_directory;
+use crate::settings_state::SharedConfig;
 use snow_capability::CapabilityRegistry;
 use snow_platform::local_time;
 use snow_ui::shell::geometry::{PhysicalPoint, PhysicalRect, Region};
@@ -128,7 +129,11 @@ impl RecordingHost {
     /// - `caps`：能力表。
     /// - `inbox`：主线程收件箱。
     /// - `config`：共享配置存储。
-    pub fn new(caps: CapabilityRegistry, inbox: MainThreadInbox<UiEvent>, config: SharedConfig) -> Self {
+    pub fn new(
+        caps: CapabilityRegistry,
+        inbox: MainThreadInbox<UiEvent>,
+        config: SharedConfig,
+    ) -> Self {
         Self {
             caps,
             inbox,
@@ -143,7 +148,9 @@ impl RecordingHost {
     /// - `cx`：外壳上下文。
     pub fn mark_copy_on_finish(&self, cx: &mut ShellContext) {
         if let Some(active) = &self.active {
-            active.view.update(cx.app(), |v, _| v.set_copy_on_finish(true));
+            active
+                .view
+                .update(cx.app(), |v, _| v.set_copy_on_finish(true));
         }
     }
 
@@ -195,7 +202,8 @@ impl RecordingHost {
             config.audio = restrict_to_format(std::mem::take(&mut config.audio), format);
         }
         if autotest.is_some()
-            && let Some(dir) = std::env::var_os(ENV_RECORDING_AUTOTEST_DIR).filter(|d| !d.is_empty())
+            && let Some(dir) =
+                std::env::var_os(ENV_RECORDING_AUTOTEST_DIR).filter(|d| !d.is_empty())
             && let Some(name) = config.output_path.file_name().map(|n| n.to_owned())
         {
             config.output_path = PathBuf::from(dir).join(name);
@@ -210,8 +218,12 @@ impl RecordingHost {
         );
         let countdown = config.countdown_secs;
         let mut view = RecordingAreaView::new(config, monitor.bounds, monitor.scale.value());
-        view.set_locale(crate::app_runtime::ui_prefs_from_document(self.config.borrow().document()).locale);
-        view.set_keymap(crate::recording::keymap::RecordKeymap::from_document(self.config.borrow().document()));
+        view.set_locale(
+            crate::app_runtime::ui_prefs_from_document(self.config.borrow().document()).locale,
+        );
+        view.set_keymap(crate::recording::keymap::RecordKeymap::from_document(
+            self.config.borrow().document(),
+        ));
         if let Some(a) = autotest {
             view.set_auto_plan(a.plan);
         }
@@ -245,8 +257,7 @@ impl RecordingHost {
     fn attach_recorder(&self, view: &mut RecordingAreaView, countdown: u32) {
         let Some(exe) = locate_recorder_exe() else {
             tracing::error!("找不到录制进程 snow-recorder（可用环境变量 SNOW_RECORDER_EXE 指定）");
-            view.session
-                .abort("找不到录制进程 snow-recorder，请先构建 scripts/build-snow-recorder.ps1".to_string());
+            view.session.abort(RecordingFailure::RecorderMissing);
             return;
         };
         let inbox = self.inbox.clone();
@@ -256,7 +267,7 @@ impl RecordingHost {
         match ProcessRecorderLink::spawn(&exe, wake) {
             Ok(link) => view.session.begin(Box::new(link), countdown),
             Err(e) => {
-                tracing::error!(error = %e, "启动录制进程失败");
+                tracing::error!(error = ?e, "启动录制进程失败");
                 view.session.abort(e);
             }
         }
@@ -311,7 +322,12 @@ impl RecordingHost {
                 RecordingState::Finished { file_path, .. } => Some(file_path.clone()),
                 _ => None,
             };
-            (v.layout().hit_rects(), v.is_over(now), finished, v.copy_on_finish())
+            (
+                v.layout().hit_rects(),
+                v.is_over(now),
+                finished,
+                v.copy_on_finish(),
+            )
         });
         if layout_rects != active.applied_hit {
             let mut region = Region::new();
@@ -340,12 +356,17 @@ impl RecordingHost {
             Some(path) => {
                 tracing::info!(path = %path.display(), "录屏完成");
                 if copy {
-                    match snow_platform::clipboard::copy_files_to_clipboard(std::slice::from_ref(&path)) {
+                    match snow_platform::clipboard::copy_files_to_clipboard(std::slice::from_ref(
+                        &path,
+                    )) {
                         Ok(()) => tracing::info!(path = %path.display(), "录制文件已复制到剪贴板"),
                         Err(e) => tracing::warn!(error = %e, "复制录制文件到剪贴板失败"),
                     }
                 }
-                if reveal && !copy && let Err(e) = snow_platform::shell::reveal_in_explorer(&path) {
+                if reveal
+                    && !copy
+                    && let Err(e) = snow_platform::shell::reveal_in_explorer(&path)
+                {
                     tracing::warn!(error = %e, "无法在资源管理器中定位录制文件");
                 }
             }
@@ -377,19 +398,36 @@ mod tests {
     fn autotest_parsing() {
         let s = parse_autotest("10,20,800,600,5").unwrap();
         assert_eq!(s.region, PhysicalRect::new(10, 20, 800, 600));
-        assert_eq!(s.plan, AutoPlan { stop_after_secs: 5, pause: None });
+        assert_eq!(
+            s.plan,
+            AutoPlan {
+                stop_after_secs: 5,
+                pause: None
+            }
+        );
         assert_eq!(s.format, None);
         let s = parse_autotest("0,0,100,100,6,gif,2:3").unwrap();
         assert_eq!(s.format, Some(RecordingFormat::Gif));
         assert_eq!(s.plan.pause, Some((2, 3)));
         // webm 归一化为默认格式
-        assert_eq!(parse_autotest("0,0,10,10,1,webm").unwrap().format, Some(RecordingFormat::Mp4));
+        assert_eq!(
+            parse_autotest("0,0,10,10,1,webm").unwrap().format,
+            Some(RecordingFormat::Mp4)
+        );
     }
 
     /// 非法自动化参数被拒绝而不是 panic。
     #[test]
     fn autotest_rejects_bad_input() {
-        for bad in ["", "1,2,3", "a,b,c,d,e", "0,0,0,10,5", "0,0,10,10,0", "0,0,10,10,5,mp4,2", "0,0,10,10,5,mp4,x:y"] {
+        for bad in [
+            "",
+            "1,2,3",
+            "a,b,c,d,e",
+            "0,0,0,10,5",
+            "0,0,10,10,0",
+            "0,0,10,10,5,mp4,2",
+            "0,0,10,10,5,mp4,x:y",
+        ] {
             assert_eq!(parse_autotest(bad), None, "应拒绝 {bad:?}");
         }
     }
@@ -400,9 +438,18 @@ mod tests {
         let left = monitor(1, PhysicalRect::new(-1920, 0, 1920, 1080), false);
         let main = monitor(2, PhysicalRect::new(0, 0, 2560, 1440), true);
         let list = [left.clone(), main.clone()];
-        assert_eq!(monitor_for_region(&list, PhysicalRect::new(-100, 10, 50, 50)).map(|m| m.id), Some(left.id));
-        assert_eq!(monitor_for_region(&list, PhysicalRect::new(100, 10, 50, 50)).map(|m| m.id), Some(main.id));
-        assert_eq!(monitor_for_region(&list, PhysicalRect::new(9999, 9999, 5, 5)).map(|m| m.id), Some(main.id));
+        assert_eq!(
+            monitor_for_region(&list, PhysicalRect::new(-100, 10, 50, 50)).map(|m| m.id),
+            Some(left.id)
+        );
+        assert_eq!(
+            monitor_for_region(&list, PhysicalRect::new(100, 10, 50, 50)).map(|m| m.id),
+            Some(main.id)
+        );
+        assert_eq!(
+            monitor_for_region(&list, PhysicalRect::new(9999, 9999, 5, 5)).map(|m| m.id),
+            Some(main.id)
+        );
         assert!(monitor_for_region(&[], PhysicalRect::new(0, 0, 1, 1)).is_none());
     }
 }

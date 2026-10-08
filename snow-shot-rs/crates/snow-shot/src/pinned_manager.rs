@@ -3,15 +3,15 @@
 //! 每张贴图是一个独立的置顶无边框窗口（`PinnedWindowView`），持久化经 `PinShared` 的
 //! `PinnedStore`（崩溃安全提交）。窗口关闭即从存储移除；进程退出不动存储，下次启动自动恢复。
 
-use crate::capture_flow::pick_monitor;
-use crate::pinned_model::{
-    PinGeometry, flatten_alpha_on_white, initial_clipboard_rect, visible_rect,
-};
 use crate::app_runtime::UiEvent;
-use crate::pinned_controls::{CONTROL_SIZE, PinExitControl, PinHideHandle, exit_button_rect, hide_handle_rect};
-use crate::pinned_shared::{PinControlEvent, PinShared};
+use crate::capture_flow::pick_monitor;
+use crate::pinned_controls::{
+    CONTROL_SIZE, PinExitControl, PinHideHandle, exit_button_rect, hide_handle_rect,
+};
+use crate::pinned_model::{PinGeometry, flatten_alpha_on_white, initial_pin_rect, visible_rect};
+use crate::pinned_shared::{PinControlEvent, PinError, PinShared};
 use crate::pinned_view::{PinInit, PinOp, PinnedWindowView, frame_from_rgba};
-use crate::screenshot_output::encode_png;
+use crate::screenshot_output::encode_png_with_level;
 use crate::settings_state::SharedConfig;
 use snow_history::timeutil::now_utc_ms;
 use snow_platform::clipboard::read_image_from_clipboard;
@@ -28,6 +28,8 @@ use std::time::Duration;
 
 /// 贴图脚本自动化环境变量：值为 JSON 操作数组文件路径，对新创建的贴图逐步执行（验收用）。
 pub const ENV_PIN_AUTOTEST: &str = "SNOW_PIN_AUTOTEST";
+/// 贴图自动调整窗口大小的配置键。
+const AUTO_RESIZE_KEY: &str = "pin_to_screen/auto_resize_window";
 /// 贴图窗口标题（无边框，仅供系统识别）。
 const PIN_WINDOW_TITLE: &str = "Cisox Pin";
 /// 自动化脚本首步之前等待窗口稳定的时间。
@@ -124,7 +126,12 @@ impl PinnedManager {
     /// - `cx`：外壳上下文。
     /// - `inbox`：主线程收件箱（小窗按钮的点击出口）。
     /// - `event`：控制事件。
-    pub fn handle_control(&mut self, cx: &mut ShellContext, inbox: &MainThreadInbox<UiEvent>, event: PinControlEvent) {
+    pub fn handle_control(
+        &mut self,
+        cx: &mut ShellContext,
+        inbox: &MainThreadInbox<UiEvent>,
+        event: PinControlEvent,
+    ) {
         match event {
             // 文字识别请求由主程序的后台线程处理，这里不需要动作
             PinControlEvent::OcrRequested { .. } => {}
@@ -164,12 +171,15 @@ impl PinnedManager {
                 };
                 let view_id = id.clone();
                 let view_inbox = inbox.clone();
-                match cx.open_window(&spec, move |_window, app| app.new(|_| PinHideHandle::new(view_id, view_inbox))) {
+                match cx.open_window(&spec, move |_window, app| {
+                    app.new(|_| PinHideHandle::new(view_id, view_inbox))
+                }) {
                     Ok((window, _view)) => {
                         self.hide_handles.insert(id.clone(), window);
                         if let Some(pin) = self.windows.get(&id) {
                             let _ = pin.window.gpui_handle().update(cx.app(), |_, _, app| {
-                                pin.view.update(app, |v, cx| v.enter_hide_to_top(handle, work, cx));
+                                pin.view
+                                    .update(app, |v, cx| v.enter_hide_to_top(handle, work, cx));
                             });
                         }
                     }
@@ -185,7 +195,8 @@ impl PinnedManager {
                 let Some(monitor) = monitors.best_for_rect(rect) else {
                     return;
                 };
-                let Some(target) = exit_button_rect(rect, monitor.work_area, monitor.scale.value()) else {
+                let Some(target) = exit_button_rect(rect, monitor.work_area, monitor.scale.value())
+                else {
                     tracing::warn!(id = %id, "显示器放不下穿透退出按钮");
                     return;
                 };
@@ -260,7 +271,8 @@ impl PinnedManager {
             return;
         };
         let _ = pin.window.gpui_handle().update(cx.app(), |_, window, app| {
-            pin.view.update(app, |v, cx| v.set_click_through(false, window, cx));
+            pin.view
+                .update(app, |v, cx| v.set_click_through(false, window, cx));
         });
     }
 
@@ -272,12 +284,12 @@ impl PinnedManager {
     ///
     /// # 返回
     /// 成功返回恢复出的窗口数；分组不存在返回错误说明。
-    pub fn switch_group(&mut self, cx: &mut ShellContext, group: &str) -> Result<usize, String> {
+    pub fn switch_group(&mut self, cx: &mut ShellContext, group: &str) -> Result<usize, PinError> {
         if self.shared.active_group_id() == group {
             return Ok(self.windows.len());
         }
         if !self.shared.groups().iter().any(|g| g.id == group) {
-            return Err("分组不存在".into());
+            return Err(PinError::GroupMissing);
         }
         self.persist_all(cx);
         let open: Vec<String> = self.windows.keys().cloned().collect();
@@ -294,7 +306,12 @@ impl PinnedManager {
     /// - `cx`：外壳上下文。
     /// - `id`：贴图 ID。
     /// - `group`：目标分组 ID。
-    pub fn move_to_group(&mut self, cx: &mut ShellContext, id: &str, group: &str) -> Result<(), String> {
+    pub fn move_to_group(
+        &mut self,
+        cx: &mut ShellContext,
+        id: &str,
+        group: &str,
+    ) -> Result<(), PinError> {
         self.persist_all(cx);
         self.shared.move_pin(id, group)?;
         if group != self.shared.active_group_id() {
@@ -311,7 +328,7 @@ impl PinnedManager {
     ///
     /// # 返回
     /// 被删除的贴图数。
-    pub fn delete_group(&mut self, cx: &mut ShellContext, group: &str) -> Result<usize, String> {
+    pub fn delete_group(&mut self, cx: &mut ShellContext, group: &str) -> Result<usize, PinError> {
         let was_active = self.shared.active_group_id() == group;
         let victims = self.shared.delete_group(group)?;
         for id in &victims {
@@ -329,7 +346,12 @@ impl PinnedManager {
     /// - `cx`：外壳上下文。
     /// - `id`：贴图 ID。
     /// - `result`：识别结果或失败原因。
-    pub fn deliver_ocr(&mut self, cx: &mut ShellContext, id: &str, result: Result<crate::ocr_service::OcrResult, String>) {
+    pub fn deliver_ocr(
+        &mut self,
+        cx: &mut ShellContext,
+        id: &str,
+        result: Result<crate::ocr_service::OcrResult, String>,
+    ) {
         if let Some(pin) = self.windows.get(id) {
             let _ = pin.window.gpui_handle().update(cx.app(), |_, _, app| {
                 pin.view.update(app, |v, cx| v.set_ocr_result(result, cx));
@@ -362,8 +384,8 @@ impl PinnedManager {
     /// # 参数
     /// - `cx`：外壳上下文。
     /// - `id`：贴图 ID。
-    pub fn show_pin(&mut self, cx: &mut ShellContext, id: &str) -> Result<(), String> {
-        let group = self.shared.pin_group(id).ok_or_else(|| "贴图不存在".to_string())?;
+    pub fn show_pin(&mut self, cx: &mut ShellContext, id: &str) -> Result<(), PinError> {
+        let group = self.shared.pin_group(id).ok_or(PinError::PinMissing)?;
         if group != self.shared.active_group_id() {
             self.switch_group(cx, &group)?;
         }
@@ -442,7 +464,12 @@ impl PinnedManager {
         let work_area = pick_monitor(&monitors, cursor)
             .map(|m| m.work_area)
             .ok_or_else(|| "系统没有可用显示器".to_string())?;
-        let (rect, zoom) = initial_clipboard_rect(width, height, work_area);
+        let (rect, zoom) = initial_pin_rect(
+            width,
+            height,
+            work_area,
+            self.shared.config_bool(AUTO_RESIZE_KEY),
+        );
         let geometry = PinGeometry::new(rect, zoom, 1.0, true);
         self.create(cx, width, height, rgba, geometry)
     }
@@ -473,7 +500,12 @@ impl PinnedManager {
         let work_area = pick_monitor(&monitors, cursor)
             .map(|m| m.work_area)
             .ok_or_else(|| "系统没有可用显示器".to_string())?;
-        let (rect, zoom) = initial_clipboard_rect(width, height, work_area);
+        let (rect, zoom) = initial_pin_rect(
+            width,
+            height,
+            work_area,
+            self.shared.config_bool(AUTO_RESIZE_KEY),
+        );
         let geometry = PinGeometry::new(rect, zoom, 1.0, true);
         self.create(cx, width, height, rgba, geometry)
     }
@@ -495,14 +527,26 @@ impl PinnedManager {
         let (width, height) = decoded.dimensions();
         let monitors = cx.monitors().unwrap_or_default();
         let mut geometry = closed.geometry.unwrap_or_else(|| {
-            PinGeometry::new(PhysicalRect::new(0, 0, width as i32, height as i32), 1.0, 1.0, true)
+            PinGeometry::new(
+                PhysicalRect::new(0, 0, width as i32, height as i32),
+                1.0,
+                1.0,
+                true,
+            )
         });
         let rect = visible_rect(geometry.rect(), &monitor_rects(&monitors), 0);
         geometry.x = rect.x;
         geometry.y = rect.y;
         geometry.width = rect.width;
         geometry.height = rect.height;
-        let id = self.create_with_session(cx, width, height, decoded.into_raw(), geometry, closed.session)?;
+        let id = self.create_with_session(
+            cx,
+            width,
+            height,
+            decoded.into_raw(),
+            geometry,
+            closed.session,
+        )?;
         Ok(Some(id))
     }
 
@@ -530,7 +574,7 @@ impl PinnedManager {
     ) -> Result<String, String> {
         let id = self.shared.new_id()?;
         let created_ms = now_utc_ms();
-        let png = encode_png(width, height, &rgba)?;
+        let png = encode_png_with_level(width, height, &rgba, self.shared.compression())?;
         let payload_bytes = png.len() as u64;
         if let Err(e) = self
             .shared
@@ -550,7 +594,9 @@ impl PinnedManager {
             dpr: 1.0,
         };
         if !session.is_empty()
-            && let Err(e) = self.shared.persist_session(&id, &geometry, created_ms, session)
+            && let Err(e) = self
+                .shared
+                .persist_session(&id, &geometry, created_ms, session)
         {
             tracing::warn!(id = %id, error = %e, "恢复的贴图标注会话落盘失败");
         }
@@ -630,7 +676,12 @@ impl PinnedManager {
         let monitor_bounds = monitor_rects(&monitors);
         let mut restored = 0;
         let active_group = self.shared.active_group_id();
-        for (index, id) in self.shared.ids_in_group(&active_group).into_iter().enumerate() {
+        for (index, id) in self
+            .shared
+            .ids_in_group(&active_group)
+            .into_iter()
+            .enumerate()
+        {
             self.shared.adopt_id(&id);
             let pin = match self.shared.load(&id) {
                 Ok(pin) => pin,

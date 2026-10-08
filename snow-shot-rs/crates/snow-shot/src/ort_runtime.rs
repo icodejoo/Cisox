@@ -7,7 +7,10 @@
 //! 下载复用 OCR 资产下载的 curl / 哈希校验 / 解压工具，不新增任何依赖。
 
 use crate::ocr_assets::{AssetFile, COMPLETE_MARKER};
-use crate::ocr_download::{DownloadItem, extract_members, fetch_verified, verify_file, write_marker};
+use crate::ocr_download::{
+    DownloadItem, DownloadStep, FetchError, extract_members, fetch_verified, verify_file,
+    write_marker,
+};
 use serde::Deserialize;
 use snow_translate::worker::ENV_ORT_DYLIB;
 use std::path::{Path, PathBuf};
@@ -59,17 +62,20 @@ pub struct OrtManifest {
 /// 解析内置清单（只解析一次）。
 ///
 /// # 返回
-/// 清单引用；内置 JSON 损坏时返回错误说明。
+/// 清单引用；内置 JSON 损坏时返回解析器给出的原因（技术信息，不翻译）。
 ///
 /// ```ignore
 /// assert_eq!(manifest().unwrap().version, "1.28.0");
 /// ```
 pub fn manifest() -> Result<&'static OrtManifest, String> {
     static CELL: OnceLock<Result<OrtManifest, String>> = OnceLock::new();
-    CELL.get_or_init(|| serde_json::from_str(MANIFEST_JSON).map_err(|e| format!("onnxruntime 清单损坏: {e}")))
+    CELL.get_or_init(|| serde_json::from_str(MANIFEST_JSON).map_err(|e| e.to_string()))
         .as_ref()
         .map_err(Clone::clone)
 }
+
+/// onnxruntime 清单的组件名（错误文案里的技术名词）。
+const ORT_MANIFEST_NAME: &str = "onnxruntime";
 
 /// 运行时目录：`<数据根>/runtime/onnxruntime/<版本>`。
 ///
@@ -77,7 +83,10 @@ pub fn manifest() -> Result<&'static OrtManifest, String> {
 /// - `data_root`：应用数据根目录。
 /// - `manifest`：清单（取版本号）。
 pub fn runtime_dir(data_root: &Path, manifest: &OrtManifest) -> PathBuf {
-    data_root.join(RUNTIME_DIR).join(ORT_DIR).join(&manifest.version)
+    data_root
+        .join(RUNTIME_DIR)
+        .join(ORT_DIR)
+        .join(&manifest.version)
 }
 
 /// 目录里的运行时是否齐全：有完成标记且每个文件大小与清单一致。
@@ -87,9 +96,9 @@ pub fn runtime_dir(data_root: &Path, manifest: &OrtManifest) -> PathBuf {
 /// - `members`：清单里的文件。
 pub fn runtime_complete(dir: &Path, members: &[OrtMember]) -> bool {
     dir.join(COMPLETE_MARKER).is_file()
-        && members
-            .iter()
-            .all(|m| std::fs::metadata(dir.join(&m.name)).is_ok_and(|f| f.is_file() && f.len() == m.size))
+        && members.iter().all(|m| {
+            std::fs::metadata(dir.join(&m.name)).is_ok_and(|f| f.is_file() && f.len() == m.size)
+        })
 }
 
 /// onnxruntime 不可用的原因。
@@ -104,11 +113,14 @@ pub enum OrtUnavailable {
 }
 
 impl OrtUnavailable {
-    /// 面向用户的提示。
-    pub fn message(&self) -> String {
+    /// 技术说明（英文，给日志与上层错误的附带细节用；面向用户的文案由调用方按场景选择）。
+    pub fn detail(&self) -> String {
         match self {
-            Self::NotInstalled => "未安装 onnxruntime 运行时，请先下载（约 14 MB）".to_string(),
-            Self::EnvMissing(path) => format!("{ENV_ORT_DYLIB} 指向的文件不存在: {}", path.display()),
+            Self::NotInstalled => "the onnxruntime runtime is not installed".to_string(),
+            Self::EnvMissing(path) => format!(
+                "{ENV_ORT_DYLIB} points to a file that does not exist: {}",
+                path.display()
+            ),
             Self::Manifest(detail) => detail.clone(),
         }
     }
@@ -131,10 +143,17 @@ impl OrtUnavailable {
 /// ```ignore
 /// let dll = resolve_ort_dylib(&data_root, std::env::var(ENV_ORT_DYLIB).ok().as_deref())?;
 /// ```
-pub fn resolve_ort_dylib(data_root: &Path, env_value: Option<&str>) -> Result<PathBuf, OrtUnavailable> {
+pub fn resolve_ort_dylib(
+    data_root: &Path,
+    env_value: Option<&str>,
+) -> Result<PathBuf, OrtUnavailable> {
     if let Some(value) = env_value.map(str::trim).filter(|v| !v.is_empty()) {
         let path = PathBuf::from(value);
-        return if path.is_file() { Ok(path) } else { Err(OrtUnavailable::EnvMissing(path)) };
+        return if path.is_file() {
+            Ok(path)
+        } else {
+            Err(OrtUnavailable::EnvMissing(path))
+        };
     }
     let manifest = manifest().map_err(OrtUnavailable::Manifest)?;
     let dir = runtime_dir(data_root, manifest);
@@ -159,8 +178,8 @@ pub fn install_with(
     manifest: &OrtManifest,
     data_root: &Path,
     cancel: &AtomicBool,
-    mut progress: impl FnMut(&str),
-) -> Result<PathBuf, String> {
+    mut progress: impl FnMut(DownloadStep),
+) -> Result<PathBuf, FetchError> {
     let dir = runtime_dir(data_root, manifest);
     if runtime_complete(&dir, &manifest.members) {
         return Ok(dir.join(ORT_DLL_NAME));
@@ -168,7 +187,7 @@ pub fn install_with(
     let download_dir = dir.join(DOWNLOAD_SUBDIR);
     let extract_dir = dir.join(EXTRACT_SUBDIR);
     let result = (|| {
-        progress("正在下载 onnxruntime 运行时…");
+        progress(DownloadStep::OrtDownload);
         let archive = fetch_verified(
             &DownloadItem {
                 file: manifest.archive.clone(),
@@ -176,10 +195,14 @@ pub fn install_with(
             },
             cancel,
         )?;
-        progress("正在解压 onnxruntime 运行时…");
+        progress(DownloadStep::OrtExtract);
         let _ = std::fs::remove_dir_all(&extract_dir);
-        std::fs::create_dir_all(&extract_dir).map_err(|e| format!("创建目录失败: {e}"))?;
-        let members: Vec<&str> = manifest.members.iter().map(|m| m.path_in_archive.as_str()).collect();
+        std::fs::create_dir_all(&extract_dir).map_err(|e| FetchError::CreateDir(e.to_string()))?;
+        let members: Vec<&str> = manifest
+            .members
+            .iter()
+            .map(|m| m.path_in_archive.as_str())
+            .collect();
         extract_members(&archive, &extract_dir, &members)?;
         for member in &manifest.members {
             let extracted = extract_dir.join(&member.path_in_archive);
@@ -192,7 +215,10 @@ pub fn install_with(
             verify_file(&extracted, &expected)?;
             let target = dir.join(&member.name);
             let _ = std::fs::remove_file(&target);
-            std::fs::rename(&extracted, &target).map_err(|e| format!("安装 {} 失败: {e}", member.name))?;
+            std::fs::rename(&extracted, &target).map_err(|e| FetchError::InstallMember {
+                name: member.name.clone(),
+                detail: e.to_string(),
+            })?;
         }
         write_marker(&dir)?;
         Ok(dir.join(ORT_DLL_NAME))
@@ -210,8 +236,16 @@ pub fn install_with(
 ///
 /// # 返回
 /// `onnxruntime.dll` 的最终路径。
-pub fn install(data_root: &Path, cancel: &AtomicBool, progress: impl FnMut(&str)) -> Result<PathBuf, String> {
-    install_with(manifest()?, data_root, cancel, progress)
+pub fn install(
+    data_root: &Path,
+    cancel: &AtomicBool,
+    progress: impl FnMut(DownloadStep),
+) -> Result<PathBuf, FetchError> {
+    let manifest = manifest().map_err(|detail| FetchError::Manifest {
+        what: ORT_MANIFEST_NAME,
+        detail,
+    })?;
+    install_with(manifest, data_root, cancel, progress)
 }
 
 #[cfg(test)]
@@ -250,13 +284,19 @@ mod tests {
         let root = temp_root("env");
         let dll = root.join("custom.dll");
         std::fs::write(&dll, b"x").expect("写 dll");
-        assert_eq!(resolve_ort_dylib(&root, Some(dll.to_str().unwrap())).unwrap(), dll);
+        assert_eq!(
+            resolve_ort_dylib(&root, Some(dll.to_str().unwrap())).unwrap(),
+            dll
+        );
         let missing = root.join("missing.dll");
         let err = resolve_ort_dylib(&root, Some(missing.to_str().unwrap())).unwrap_err();
         assert_eq!(err, OrtUnavailable::EnvMissing(missing));
         assert!(!err.can_download());
-        assert!(err.message().contains(ENV_ORT_DYLIB));
-        assert_eq!(resolve_ort_dylib(&root, Some("  ")), Err(OrtUnavailable::NotInstalled));
+        assert!(err.detail().contains(ENV_ORT_DYLIB));
+        assert_eq!(
+            resolve_ort_dylib(&root, Some("  ")),
+            Err(OrtUnavailable::NotInstalled)
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -267,15 +307,21 @@ mod tests {
         let m = manifest().expect("清单");
         let err = resolve_ort_dylib(&root, None).unwrap_err();
         assert_eq!(err, OrtUnavailable::NotInstalled);
-        assert!(err.can_download() && err.message().contains("下载"));
+        assert!(err.can_download() && err.detail().contains("not installed"));
         let dir = runtime_dir(&root, m);
         std::fs::create_dir_all(&dir).expect("建目录");
         for member in &m.members {
-            std::fs::File::create(dir.join(&member.name)).expect("建文件").set_len(member.size).expect("定长");
+            std::fs::File::create(dir.join(&member.name))
+                .expect("建文件")
+                .set_len(member.size)
+                .expect("定长");
         }
         assert!(resolve_ort_dylib(&root, None).is_err(), "缺标记");
         std::fs::write(dir.join(COMPLETE_MARKER), b"{}").expect("标记");
-        assert_eq!(resolve_ort_dylib(&root, None).unwrap(), dir.join(ORT_DLL_NAME));
+        assert_eq!(
+            resolve_ort_dylib(&root, None).unwrap(),
+            dir.join(ORT_DLL_NAME)
+        );
         std::fs::write(dir.join(ORT_DLL_NAME), b"short").expect("改小");
         assert!(resolve_ort_dylib(&root, None).is_err(), "大小不符");
         let _ = std::fs::remove_dir_all(&root);
@@ -284,7 +330,9 @@ mod tests {
     /// 用本机 tar 造一个假 wheel（zip），走完整的 下载(file://) → 校验 → 解压 → 落地 流程；哈希不符则拒绝安装。
     #[test]
     fn install_flow_with_local_archive() {
-        let system_root = std::env::var_os("SystemRoot").map(PathBuf::from).unwrap_or_default();
+        let system_root = std::env::var_os("SystemRoot")
+            .map(PathBuf::from)
+            .unwrap_or_default();
         let tar = system_root.join("System32").join("tar.exe");
         if !tar.is_file() {
             return;
@@ -294,7 +342,11 @@ mod tests {
         let capi = src.join("onnxruntime").join("capi");
         std::fs::create_dir_all(&capi).expect("建包内目录");
         std::fs::write(capi.join("onnxruntime.dll"), b"fake-dll-bytes").expect("写");
-        std::fs::write(capi.join("onnxruntime_providers_shared.dll"), b"fake-shared").expect("写");
+        std::fs::write(
+            capi.join("onnxruntime_providers_shared.dll"),
+            b"fake-shared",
+        )
+        .expect("写");
         let wheel = root.join("fake.whl");
         let status = Command::new(&tar)
             .args(["-a", "-c", "-f"])
@@ -333,22 +385,28 @@ mod tests {
         let data_root = root.join("data");
         let cancel = AtomicBool::new(false);
         let mut steps = Vec::new();
-        let dll = install_with(&manifest, &data_root, &cancel, |s| steps.push(s.to_string())).expect("安装");
+        let dll = install_with(&manifest, &data_root, &cancel, |s| steps.push(s)).expect("安装");
         assert_eq!(std::fs::read(&dll).unwrap(), b"fake-dll-bytes");
         assert_eq!(steps.len(), 2);
         let dir = runtime_dir(&data_root, &manifest);
         assert!(runtime_complete(&dir, &manifest.members));
-        assert!(!dir.join(DOWNLOAD_SUBDIR).exists() && !dir.join(EXTRACT_SUBDIR).exists(), "临时目录应清理");
+        assert!(
+            !dir.join(DOWNLOAD_SUBDIR).exists() && !dir.join(EXTRACT_SUBDIR).exists(),
+            "临时目录应清理"
+        );
         // 已安装：直接返回，不再走下载
         let mut again = Vec::new();
-        install_with(&manifest, &data_root, &cancel, |s| again.push(s.to_string())).expect("幂等");
+        install_with(&manifest, &data_root, &cancel, |s| again.push(s)).expect("幂等");
         assert!(again.is_empty());
         // 成员哈希被篡改：拒绝安装且不写标记
         let bad_root = root.join("bad");
         manifest.members[0].sha256 = "0".repeat(64);
         let err = install_with(&manifest, &bad_root, &cancel, |_| {}).unwrap_err();
-        assert!(err.contains("哈希不符"), "{err}");
-        assert!(!runtime_complete(&runtime_dir(&bad_root, &manifest), &manifest.members));
+        assert!(matches!(err, FetchError::HashMismatch { .. }), "{err:?}");
+        assert!(!runtime_complete(
+            &runtime_dir(&bad_root, &manifest),
+            &manifest.members
+        ));
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -362,16 +420,29 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let started = std::time::Instant::now();
         let mut steps = Vec::new();
-        let dll = install(&root, &cancel, |s| steps.push(s.to_string())).expect("真实安装");
-        eprintln!("NET install ok in {:?}: {} steps={steps:?}", started.elapsed(), dll.display());
+        let dll = install(&root, &cancel, |s| steps.push(s)).expect("真实安装");
+        eprintln!(
+            "NET install ok in {:?}: {} steps={steps:?}",
+            started.elapsed(),
+            dll.display()
+        );
         for member in &manifest.members {
             let path = dll.parent().expect("目录").join(&member.name);
-            assert_eq!(sha256_file(&path).expect("哈希"), member.sha256, "{}", member.name);
+            assert_eq!(
+                sha256_file(&path).expect("哈希"),
+                member.sha256,
+                "{}",
+                member.name
+            );
         }
         assert_eq!(resolve_ort_dylib(&root, None).expect("已安装"), dll);
         assert!(install(&root, &cancel, |_| {}).is_ok());
         eprintln!("NET dll={}", dll.display());
-        std::fs::write(std::env::temp_dir().join("snow-ort-last-install.txt"), dll.to_string_lossy().as_bytes()).ok();
+        std::fs::write(
+            std::env::temp_dir().join("snow-ort-last-install.txt"),
+            dll.to_string_lossy().as_bytes(),
+        )
+        .ok();
     }
 
     /// 已取消：不会发起下载。
@@ -381,7 +452,7 @@ mod tests {
         let m = manifest().expect("清单");
         let cancel = AtomicBool::new(true);
         let err = install_with(m, &root, &cancel, |_| {}).unwrap_err();
-        assert!(err.contains("取消"));
+        assert_eq!(err, FetchError::Cancelled);
         let _ = std::fs::remove_dir_all(&root);
     }
 }

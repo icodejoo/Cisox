@@ -7,6 +7,7 @@
 use crate::recording::keymap::{RecordKeyAction, RecordKeymap};
 use crate::recording::model::{RecordingConfig, RecordingFormat, RecordingState};
 use crate::recording::runtime::ScreenRecordingSession;
+use snow_i18n::Args;
 use snow_ui::shell::geometry::{PhysicalPoint, PhysicalRect};
 use snow_ui::ui::*;
 use snow_ui::widgets::calculate_toolbar_placement;
@@ -126,13 +127,11 @@ pub fn compute_layout(
         PhysicalRect::new(region.x - t, region.y, t, region.height),
         PhysicalRect::new(region.right(), region.y, t, region.height),
     ];
-    let border = strips
-        .iter()
-        .filter_map(|s| s.intersect(&window))
-        .collect();
+    let border = strips.iter().filter_map(|s| s.intersect(&window)).collect();
     let size = PhysicalPoint::new(
         (TOOLBAR_LOGICAL_WIDTH * scale).round() as i32,
-        ((TOOLBAR_LOGICAL_HEIGHT + if notice { NOTICE_LOGICAL_HEIGHT } else { 0.0 }) * scale).round() as i32,
+        ((TOOLBAR_LOGICAL_HEIGHT + if notice { NOTICE_LOGICAL_HEIGHT } else { 0.0 }) * scale)
+            .round() as i32,
     );
     let margin = (TOOLBAR_LOGICAL_MARGIN * scale).round() as i32;
     let pos = calculate_toolbar_placement(region, size, window, margin);
@@ -204,7 +203,11 @@ impl RecordingAreaView {
     /// - `monitor_bounds`：窗口所在显示器的物理范围。
     /// - `scale`：显示器缩放比。
     pub fn new(config: RecordingConfig, monitor_bounds: PhysicalRect, scale: f32) -> Self {
-        let scale = if scale.is_finite() && scale > 0.0 { scale } else { 1.0 };
+        let scale = if scale.is_finite() && scale > 0.0 {
+            scale
+        } else {
+            1.0
+        };
         Self {
             session: ScreenRecordingSession::new(config),
             origin: PhysicalPoint::new(monitor_bounds.x, monitor_bounds.y),
@@ -255,8 +258,12 @@ impl RecordingAreaView {
     pub fn handle_key_action(&mut self, action: RecordKeyAction) {
         let recording = matches!(self.session.state(), RecordingState::Recording { .. });
         match action {
-            RecordKeyAction::Export if recording => self.handle_action(RecordingAreaAction::StopAndSave),
-            RecordKeyAction::ToggleRecording if recording => self.handle_action(RecordingAreaAction::TogglePause),
+            RecordKeyAction::Export if recording => {
+                self.handle_action(RecordingAreaAction::StopAndSave)
+            }
+            RecordKeyAction::ToggleRecording if recording => {
+                self.handle_action(RecordingAreaAction::TogglePause)
+            }
             RecordKeyAction::CopyToClipboard if recording => {
                 self.copy_on_finish = true;
                 self.handle_action(RecordingAreaAction::StopAndSave);
@@ -282,7 +289,9 @@ impl RecordingAreaView {
     pub fn audio_notice_text(&self) -> Option<String> {
         if !matches!(
             self.session.state(),
-            RecordingState::Countdown { .. } | RecordingState::Recording { .. } | RecordingState::Saving
+            RecordingState::Countdown { .. }
+                | RecordingState::Recording { .. }
+                | RecordingState::Saving
         ) {
             return None;
         }
@@ -374,9 +383,11 @@ impl RecordingAreaView {
         if let RecordingState::Error { reason } = self.session.state()
             && self.error_since.is_none()
         {
-            tracing::error!(%reason, "录制出错");
+            tracing::error!(reason = ?reason, "录制出错");
         }
-        if matches!(self.session.state(), RecordingState::Error { .. }) && self.error_since.is_none() {
+        if matches!(self.session.state(), RecordingState::Error { .. })
+            && self.error_since.is_none()
+        {
             self.error_since = Some(now);
         }
         changed
@@ -413,7 +424,10 @@ impl RecordingAreaView {
         }
         let paused_now = matches!(
             self.session.state(),
-            RecordingState::Recording { is_paused: true, .. }
+            RecordingState::Recording {
+                is_paused: true,
+                ..
+            }
         );
         if !acted && !paused_now && elapsed_secs >= auto.plan.stop_after_secs {
             self.handle_action(RecordingAreaAction::StopAndSave);
@@ -454,7 +468,7 @@ impl RecordingAreaView {
     fn button(
         &self,
         id: &'static str,
-        label: &'static str,
+        label: String,
         bg: u32,
         text: u32,
         action: RecordingAreaAction,
@@ -484,8 +498,13 @@ impl Render for RecordingAreaView {
         let layout = self.layout();
         let bounds = self.bounds();
         let accent = match state {
-            RecordingState::Recording { is_paused: false, .. } | RecordingState::Saving => COLOR_RECORDING,
-            RecordingState::Recording { is_paused: true, .. } => COLOR_PAUSED,
+            RecordingState::Recording {
+                is_paused: false, ..
+            }
+            | RecordingState::Saving => COLOR_RECORDING,
+            RecordingState::Recording {
+                is_paused: true, ..
+            } => COLOR_PAUSED,
             _ => COLOR_IDLE,
         };
 
@@ -495,7 +514,10 @@ impl Render for RecordingAreaView {
             .h_full()
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _window, cx| {
                 let m = ev.keystroke.modifiers;
-                if let Some(action) = this.keymap.resolve(ev.keystroke.key.as_str(), m.control, m.shift, m.alt) {
+                if let Some(action) =
+                    this.keymap
+                        .resolve(ev.keystroke.key.as_str(), m.control, m.shift, m.alt)
+                {
                     this.handle_key_action(action);
                     cx.notify();
                     cx.stop_propagation();
@@ -517,7 +539,9 @@ impl Render for RecordingAreaView {
             root = root.child(div().absolute().left(l).top(t).w(w).h(h).bg(rgba(accent)));
         }
 
-        if let (Some(boxr), RecordingState::Countdown { seconds_left }) = (layout.countdown_box, &state) {
+        if let (Some(boxr), RecordingState::Countdown { seconds_left }) =
+            (layout.countdown_box, &state)
+        {
             let (l, t, w, h) = self.logical(boxr);
             root = root.child(
                 div()
@@ -540,6 +564,7 @@ impl Render for RecordingAreaView {
 
         let (l, t, w, h) = self.logical(layout.toolbar);
         let notice_text = self.audio_notice_text();
+        let i18n = crate::ocr_backend::i18n_for(self.locale);
         let mut bar = div()
             .w_full()
             .h(px(TOOLBAR_LOGICAL_HEIGHT))
@@ -547,7 +572,13 @@ impl Render for RecordingAreaView {
             .items_center()
             .gap_2()
             .px_3()
-            .child(div().w(px(10.0)).h(px(10.0)).rounded_full().bg(rgba(accent)));
+            .child(
+                div()
+                    .w(px(10.0))
+                    .h(px(10.0))
+                    .rounded_full()
+                    .bg(rgba(accent)),
+            );
         let label_style = |text: String| {
             div()
                 .text_size(px(13.0))
@@ -558,8 +589,18 @@ impl Render for RecordingAreaView {
         match &state {
             RecordingState::Countdown { seconds_left } => {
                 bar = bar
-                    .child(label_style(format!("{seconds_left} 秒后开始")))
-                    .child(self.button("rec-cancel", "放弃", 0x434343FF, 0xFF4D4FFF, RecordingAreaAction::Cancel, cx));
+                    .child(label_style(i18n.tr_with(
+                        "recording-ui-countdown",
+                        &Args::new().named("seconds", seconds_left.to_string()),
+                    )))
+                    .child(self.button(
+                        "rec-cancel",
+                        i18n.tr("recording-ui-cancel"),
+                        0x434343FF,
+                        0xFF4D4FFF,
+                        RecordingAreaAction::Cancel,
+                        cx,
+                    ));
             }
             RecordingState::Recording {
                 elapsed_secs,
@@ -577,20 +618,48 @@ impl Render for RecordingAreaView {
                     )
                     .child(self.button(
                         "rec-pause",
-                        if *is_paused { "继续" } else { "暂停" },
+                        i18n.tr(if *is_paused {
+                            "recording-ui-resume"
+                        } else {
+                            "recording-ui-pause"
+                        }),
                         0x303030FF,
                         0xFFFFFFFF,
                         RecordingAreaAction::TogglePause,
                         cx,
                     ))
-                    .child(self.button("rec-stop", "完成", COLOR_IDLE, 0xFFFFFFFF, RecordingAreaAction::StopAndSave, cx))
-                    .child(self.button("rec-cancel", "放弃", 0x434343FF, 0xFF4D4FFF, RecordingAreaAction::Cancel, cx));
+                    .child(self.button(
+                        "rec-stop",
+                        i18n.tr("recording-ui-finish"),
+                        COLOR_IDLE,
+                        0xFFFFFFFF,
+                        RecordingAreaAction::StopAndSave,
+                        cx,
+                    ))
+                    .child(self.button(
+                        "rec-cancel",
+                        i18n.tr("recording-ui-cancel"),
+                        0x434343FF,
+                        0xFF4D4FFF,
+                        RecordingAreaAction::Cancel,
+                        cx,
+                    ));
             }
-            RecordingState::Saving => bar = bar.child(label_style("正在保存…".to_string())),
+            RecordingState::Saving => bar = bar.child(label_style(i18n.tr("recording-ui-saving"))),
             RecordingState::Error { reason } => {
                 bar = bar
-                    .child(label_style(format!("录制失败: {}", shorten_reason(reason))))
-                    .child(self.button("rec-dismiss", "关闭", 0x434343FF, 0xFFFFFFFF, RecordingAreaAction::Dismiss, cx));
+                    .child(label_style(i18n.tr_with(
+                        "recording-ui-failed",
+                        &Args::new().named("reason", shorten_reason(&reason.message(i18n))),
+                    )))
+                    .child(self.button(
+                        "rec-dismiss",
+                        i18n.tr("recording-ui-close"),
+                        0x434343FF,
+                        0xFFFFFFFF,
+                        RecordingAreaAction::Dismiss,
+                        cx,
+                    ));
             }
             RecordingState::Idle | RecordingState::Finished { .. } => {}
         }
@@ -669,7 +738,10 @@ mod tests {
     #[test]
     fn key_actions_follow_state() {
         let shared = Rc::new(RefCell::new((Vec::new(), Vec::new())));
-        let config = RecordingConfig { region: PhysicalRect::new(100, 100, 800, 600), ..RecordingConfig::default() };
+        let config = RecordingConfig {
+            region: PhysicalRect::new(100, 100, 800, 600),
+            ..RecordingConfig::default()
+        };
         let mut v = RecordingAreaView::new(config, PhysicalRect::new(0, 0, 1920, 1080), 1.0);
         // 空闲时导出 / Esc 都不起作用
         v.handle_key_action(RecordKeyAction::Export);
@@ -678,12 +750,18 @@ mod tests {
 
         v.session.begin(Box::new(Link(shared.clone())), 3);
         v.handle_key_action(RecordKeyAction::Export);
-        assert!(shared.borrow().0.is_empty(), "倒计时中不能导出，也还没发过 START");
+        assert!(
+            shared.borrow().0.is_empty(),
+            "倒计时中不能导出，也还没发过 START"
+        );
         v.handle_key_action(RecordKeyAction::EndRecording);
         assert!(v.cancelled, "倒计时中 Esc 放弃");
 
         let shared = Rc::new(RefCell::new((Vec::new(), Vec::new())));
-        let config = RecordingConfig { region: PhysicalRect::new(100, 100, 800, 600), ..RecordingConfig::default() };
+        let config = RecordingConfig {
+            region: PhysicalRect::new(100, 100, 800, 600),
+            ..RecordingConfig::default()
+        };
         let mut v = RecordingAreaView::new(config, PhysicalRect::new(0, 0, 1920, 1080), 1.0);
         v.session.begin(Box::new(Link(shared.clone())), 0);
         v.handle_key_action(RecordKeyAction::ToggleRecording);
@@ -702,7 +780,11 @@ mod tests {
         let shared = Rc::new(RefCell::new((Vec::new(), Vec::new())));
         let config = RecordingConfig {
             region: PhysicalRect::new(100, 100, 800, 600),
-            audio: AudioRequest { microphone: true, system: true, ..AudioRequest::default() },
+            audio: AudioRequest {
+                microphone: true,
+                system: true,
+                ..AudioRequest::default()
+            },
             ..RecordingConfig::default()
         };
         let mut v = RecordingAreaView::new(config, PhysicalRect::new(0, 0, 1920, 1080), 1.0);
@@ -711,22 +793,37 @@ mod tests {
         let plain_h = v.layout().toolbar.height;
         assert_eq!(v.audio_notice_text(), None);
         let event = |source, status| LinkEvent::Event(Event::AudioState { source, status });
-        shared.borrow_mut().1.push(event(AudioSource::Microphone, AudioStatus::Unavailable));
+        shared
+            .borrow_mut()
+            .1
+            .push(event(AudioSource::Microphone, AudioStatus::Unavailable));
         assert!(v.advance(Instant::now()));
         assert_eq!(v.audio_notice_text().as_deref(), Some("麦克风不可用"));
         assert!(v.layout().toolbar.height > plain_h);
-        shared.borrow_mut().1.push(event(AudioSource::System, AudioStatus::Unavailable));
+        shared
+            .borrow_mut()
+            .1
+            .push(event(AudioSource::System, AudioStatus::Unavailable));
         v.advance(Instant::now());
         assert_eq!(v.audio_notice_text().as_deref(), Some("本次录制没有声音"));
         v.set_locale("en-US");
-        assert_eq!(v.audio_notice_text().as_deref(), Some("This recording has no sound"));
+        assert_eq!(
+            v.audio_notice_text().as_deref(),
+            Some("This recording has no sound")
+        );
     }
 
     /// 边框画在选区外侧且不与选区相交（不会进入被录制画面）。
     #[test]
     fn border_stays_outside_region() {
         let region = PhysicalRect::new(100, 100, 400, 300);
-        let l = compute_layout(region, PhysicalRect::new(0, 0, 1920, 1080), 1.0, false, false);
+        let l = compute_layout(
+            region,
+            PhysicalRect::new(0, 0, 1920, 1080),
+            1.0,
+            false,
+            false,
+        );
         assert_eq!(l.border.len(), 4);
         for strip in &l.border {
             assert!(strip.intersect(&region).is_none(), "{strip:?} 侵入选区");
@@ -752,7 +849,11 @@ mod tests {
         assert_eq!(win.intersect(&l.toolbar), Some(l.toolbar));
         let b = l.countdown_box.unwrap();
         assert_eq!(b.x + b.width / 2, region.x + region.width / 2);
-        assert!(compute_layout(region, win, 1.0, false, false).countdown_box.is_none());
+        assert!(
+            compute_layout(region, win, 1.0, false, false)
+                .countdown_box
+                .is_none()
+        );
         assert_eq!(l.hit_rects().len(), l.border.len() + 2);
     }
 
@@ -774,7 +875,10 @@ mod tests {
         let t0 = Instant::now();
         assert!(!v.advance(t0));
         assert!(v.advance(t0 + COUNTDOWN_STEP));
-        assert!(matches!(v.session.state(), RecordingState::Countdown { seconds_left: 1 }));
+        assert!(matches!(
+            v.session.state(),
+            RecordingState::Countdown { seconds_left: 1 }
+        ));
         assert!(v.advance(t0 + 2 * COUNTDOWN_STEP));
         assert!(v.session.state().is_active());
         assert!(matches!(shared.borrow().0.first(), Some(Command::Start(_))));
@@ -804,7 +908,10 @@ mod tests {
         assert!(!v.is_over(t0));
         assert!(v.is_over(t0 + ERROR_DISPLAY));
         let (mut v2, shared2) = view(0);
-        shared2.borrow_mut().1.push(LinkEvent::Event(Event::Error { reason: "x".into() }));
+        shared2
+            .borrow_mut()
+            .1
+            .push(LinkEvent::Event(Event::Error { reason: "x".into() }));
         v2.advance(t0);
         v2.handle_action(RecordingAreaAction::Dismiss);
         assert!(v2.is_over(t0));
@@ -814,15 +921,27 @@ mod tests {
     #[test]
     fn auto_plan_pauses_resumes_and_stops() {
         let (mut v, shared) = view(0);
-        v.set_auto_plan(AutoPlan { stop_after_secs: 4, pause: Some((2, 3)) });
+        v.set_auto_plan(AutoPlan {
+            stop_after_secs: 4,
+            pause: Some((2, 3)),
+        });
         let t0 = Instant::now();
-        let recording = |ms: u64| LinkEvent::Event(Event::Recording { elapsed_ms: ms, frames: 0 });
+        let recording = |ms: u64| {
+            LinkEvent::Event(Event::Recording {
+                elapsed_ms: ms,
+                frames: 0,
+            })
+        };
         shared.borrow_mut().1.push(recording(2100));
         v.advance(t0);
         assert_eq!(shared.borrow().0.last(), Some(&Command::Pause));
         shared.borrow_mut().1.push(LinkEvent::Event(Event::Paused));
         v.advance(t0 + Duration::from_secs(1));
-        assert_eq!(shared.borrow().0.last(), Some(&Command::Pause), "暂停未满不应恢复");
+        assert_eq!(
+            shared.borrow().0.last(),
+            Some(&Command::Pause),
+            "暂停未满不应恢复"
+        );
         v.advance(t0 + Duration::from_secs(4));
         assert_eq!(shared.borrow().0.last(), Some(&Command::Resume));
         shared.borrow_mut().1.push(LinkEvent::Event(Event::Resumed));

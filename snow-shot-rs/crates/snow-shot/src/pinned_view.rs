@@ -10,14 +10,14 @@
 
 use crate::annotation::{AnnotationLayer, LayerUpdate};
 use crate::frozen_frame::FrozenFrame;
+use crate::ocr_service::{OcrResult, OcrTextBox};
 use crate::overlay_view::TileSprite;
+use crate::pinned_controls::revealed_rect;
+use crate::pinned_keymap::PinKeyAction;
 use crate::pinned_model::{
     EDGE_MARGIN, HANDLE_SIZE, PinClickAction, PinGeometry, apply_wheel, drag_rect,
     premultiply_alpha_in_place, swap_rb_in_place, wheel_anchor, wheel_steps,
 };
-use crate::ocr_service::{OcrResult, OcrTextBox};
-use crate::pinned_controls::revealed_rect;
-use crate::pinned_keymap::PinKeyAction;
 use crate::pinned_shared::{PinControlEvent, PinInteraction, PinShared};
 use crate::screenshot_output::encode_png;
 use serde::Deserialize;
@@ -139,7 +139,11 @@ const HIDE_POLL_INTERVAL: Duration = Duration::from_millis(150);
 /// ```
 pub fn thumbnail_rect(normal: PhysicalRect, scale: f32, cursor: PhysicalPoint) -> PhysicalRect {
     let side = ((THUMBNAIL_SIZE * scale).round() as i32).max(1);
-    anchored_scale_rect(normal, PhysicalPoint::new(side, side), ScaleAnchor::MousePoint(cursor))
+    anchored_scale_rect(
+        normal,
+        PhysicalPoint::new(side, side),
+        ScaleAnchor::MousePoint(cursor),
+    )
 }
 
 /// 菜单里可选的标注工具（顺序即菜单顺序）。
@@ -549,7 +553,11 @@ impl PinnedWindowView {
     /// 当前窗口几何与显示状态。
     pub fn geometry(&self) -> PinGeometry {
         // 缩略图 / 隐藏到顶部期间落盘原外框：重启后恢复为正常状态
-        let saved = self.hide.map(|h| h.normal).or(self.pre_thumbnail).unwrap_or(self.bounds);
+        let saved = self
+            .hide
+            .map(|h| h.normal)
+            .or(self.pre_thumbnail)
+            .unwrap_or(self.bounds);
         PinGeometry::new(saved, self.zoom, self.opacity, self.topmost)
     }
 
@@ -578,7 +586,8 @@ impl PinnedWindowView {
 
     /// 取带一个参数的文案。
     fn t_with(&self, id: &str, arg: &str) -> String {
-        crate::ocr_backend::i18n_for(self.interaction.locale).tr_with(id, &snow_i18n::Args::new().arg(1, arg.to_string()))
+        crate::ocr_backend::i18n_for(self.interaction.locale)
+            .tr_with(id, &snow_i18n::Args::new().arg(1, arg.to_string()))
     }
 
     /// 按 message id 设置状态提示。
@@ -817,9 +826,10 @@ impl PinnedWindowView {
         let session = self.layer.as_ref().map(AnnotationLayer::serialize_session);
         match session {
             Some(Ok(bytes)) => {
-                self.payload_bytes =
-                    self.shared
-                        .persist_session(&self.id, geometry, self.created_ms, bytes)?;
+                self.payload_bytes = self
+                    .shared
+                    .persist_session(&self.id, geometry, self.created_ms, bytes)
+                    .map_err(|e| e.to_string())?;
                 Ok(())
             }
             Some(Err(e)) => {
@@ -1314,8 +1324,11 @@ impl PinnedWindowView {
         if self.editing {
             for (i, (tool, label)) in MENU_TOOLS.iter().enumerate() {
                 entries.push(MenuEntry::Item(
-                    MenuItem::new(MENU_TOOL_BASE + i as u32, self.t_with("pinned-menu-tool", &self.t(label)))
-                        .checked(self.tool == *tool),
+                    MenuItem::new(
+                        MENU_TOOL_BASE + i as u32,
+                        self.t_with("pinned-menu-tool", &self.t(label)),
+                    )
+                    .checked(self.tool == *tool),
                 ));
             }
             entries.push(MenuEntry::Separator);
@@ -1338,23 +1351,35 @@ impl PinnedWindowView {
         ));
         entries.push(item(MENU_RESET_ZOOM, &self.t("pinned-menu-reset-zoom")));
         entries.push(MenuEntry::Item(
-            MenuItem::new(MENU_THUMBNAIL, self.t("pinned-menu-thumbnail")).checked(self.pre_thumbnail.is_some()),
+            MenuItem::new(MENU_THUMBNAIL, self.t("pinned-menu-thumbnail"))
+                .checked(self.pre_thumbnail.is_some()),
         ));
         entries.push(MenuEntry::Item(
-            MenuItem::new(MENU_RECOGNIZE, self.t("pinned-menu-recognize")).checked(self.ocr_visible),
+            MenuItem::new(MENU_RECOGNIZE, self.t("pinned-menu-recognize"))
+                .checked(self.ocr_visible),
         ));
         if self.ocr_full_text().is_some() {
             entries.push(item(MENU_COPY_TEXT, &self.t("pinned-menu-copy-text")));
         }
-        entries.push(item(MENU_CLICK_THROUGH, &self.t("pinned-menu-click-through")));
+        entries.push(item(
+            MENU_CLICK_THROUGH,
+            &self.t("pinned-menu-click-through"),
+        ));
         entries.push(item(MENU_HIDE_TO_TOP, &self.t("pinned-menu-hide-to-top")));
         let current = self.shared.pin_group(&self.id);
         for (i, group) in self.shared.groups().iter().enumerate() {
             if current.as_deref() == Some(group.id.as_str()) {
                 continue;
             }
-            let name = if group.built_in { self.t("pinned-menu-default-group") } else { group.name.clone() };
-            entries.push(item(MENU_GROUP_BASE + i as u32, &self.t_with("pinned-menu-move-to-group", &name)));
+            let name = if group.built_in {
+                self.t("pinned-menu-default-group")
+            } else {
+                group.name.clone()
+            };
+            entries.push(item(
+                MENU_GROUP_BASE + i as u32,
+                &self.t_with("pinned-menu-move-to-group", &name),
+            ));
         }
         entries.push(MenuEntry::Separator);
         entries.push(item(MENU_CLOSE, &self.t("pinned-menu-close")));
@@ -1418,7 +1443,11 @@ impl PinnedWindowView {
             cx.stop_propagation();
             return;
         }
-        if let Some(action) = self.interaction.keymap.resolve(key, mods.control, mods.shift, mods.alt) {
+        if let Some(action) =
+            self.interaction
+                .keymap
+                .resolve(key, mods.control, mods.shift, mods.alt)
+        {
             self.run_key_action(action, window, cx);
             return;
         }
@@ -1481,7 +1510,12 @@ impl PinnedWindowView {
             return;
         };
         self.ocr = OcrPhase::Running;
-        self.shared.emit_control(PinControlEvent::OcrRequested { id: self.id.clone(), width, height, rgba });
+        self.shared.emit_control(PinControlEvent::OcrRequested {
+            id: self.id.clone(),
+            width,
+            height,
+            rgba,
+        });
         if self.ocr_visible {
             self.say("pinned-msg-recognizing", cx);
         }
@@ -1515,9 +1549,13 @@ impl PinnedWindowView {
     /// 全部识别文字（行序，行间换行）；未完成或没有文字时为 `None`。
     fn ocr_full_text(&self) -> Option<String> {
         match &self.ocr {
-            OcrPhase::Done(boxes) if !boxes.is_empty() => {
-                Some(boxes.iter().map(|b| b.text.as_str()).collect::<Vec<_>>().join("\n"))
-            }
+            OcrPhase::Done(boxes) if !boxes.is_empty() => Some(
+                boxes
+                    .iter()
+                    .map(|b| b.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
             _ => None,
         }
     }
@@ -1557,11 +1595,12 @@ impl PinnedWindowView {
         if normal != self.bounds {
             self.set_bounds(normal, cx);
         }
-        self.shared.emit_control(PinControlEvent::HideToTopRequested {
-            id: self.id.clone(),
-            rect: normal,
-            topmost: self.topmost,
-        });
+        self.shared
+            .emit_control(PinControlEvent::HideToTopRequested {
+                id: self.id.clone(),
+                rect: normal,
+                topmost: self.topmost,
+            });
     }
 
     /// 管理器放好把手后调用：记录状态并隐藏窗口。
@@ -1569,8 +1608,18 @@ impl PinnedWindowView {
     /// # 参数
     /// - `handle`：把手外框。
     /// - `work`：所在显示器工作区。
-    pub fn enter_hide_to_top(&mut self, handle: PhysicalRect, work: PhysicalRect, cx: &mut Context<Self>) {
-        self.hide = Some(HideState { normal: self.bounds, handle, work, revealed: false });
+    pub fn enter_hide_to_top(
+        &mut self,
+        handle: PhysicalRect,
+        work: PhysicalRect,
+        cx: &mut Context<Self>,
+    ) {
+        self.hide = Some(HideState {
+            normal: self.bounds,
+            handle,
+            work,
+            revealed: false,
+        });
         self.set_native_visible(false, cx);
         cx.notify();
     }
@@ -1613,7 +1662,9 @@ impl PinnedWindowView {
         let Ok(cursor) = cursor_screen_position() else {
             return false;
         };
-        let inside = |r: PhysicalRect| cursor.x >= r.x && cursor.x < r.right() && cursor.y >= r.y && cursor.y < r.bottom();
+        let inside = |r: PhysicalRect| {
+            cursor.x >= r.x && cursor.x < r.right() && cursor.y >= r.y && cursor.y < r.bottom()
+        };
         if inside(self.bounds) || inside(state.handle) {
             return false;
         }
@@ -1629,7 +1680,9 @@ impl PinnedWindowView {
         };
         self.set_bounds(state.normal, cx);
         self.set_native_visible(true, cx);
-        self.shared.emit_control(PinControlEvent::HideToTopExited { id: self.id.clone() });
+        self.shared.emit_control(PinControlEvent::HideToTopExited {
+            id: self.id.clone(),
+        });
         self.geometry_changed(cx);
     }
 
@@ -1657,7 +1710,12 @@ impl PinnedWindowView {
     /// # 参数
     /// - `enabled`：`true` 进入穿透，`false` 退出。
     /// - `window`：当前窗口。
-    pub fn set_click_through(&mut self, enabled: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn set_click_through(
+        &mut self,
+        enabled: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.closed || enabled == self.click_through {
             return;
         }
@@ -1677,13 +1735,20 @@ impl PinnedWindowView {
         }
         cx.spawn(async move |this, cx| {
             let result = shell.set_input_transparent(enabled);
-            let _ = this.update(cx, |v, cx| v.finish_click_through(enabled, result.err().map(|e| e.to_string()), cx));
+            let _ = this.update(cx, |v, cx| {
+                v.finish_click_through(enabled, result.err().map(|e| e.to_string()), cx)
+            });
         })
         .detach();
     }
 
     /// 原生穿透样式设置完成后的收尾：成功则记录状态并通知管理器，失败只提示。
-    fn finish_click_through(&mut self, enabled: bool, error: Option<String>, cx: &mut Context<Self>) {
+    fn finish_click_through(
+        &mut self,
+        enabled: bool,
+        error: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(e) = error {
             tracing::error!(id = %self.id, error = %e, enabled, "设置点击穿透失败");
             self.say("pinned-msg-click-through-failed", cx);
@@ -1694,9 +1759,15 @@ impl PinnedWindowView {
         }
         self.click_through = enabled;
         let event = if enabled {
-            PinControlEvent::ClickThroughEntered { id: self.id.clone(), rect: self.bounds, topmost: self.topmost }
+            PinControlEvent::ClickThroughEntered {
+                id: self.id.clone(),
+                rect: self.bounds,
+                topmost: self.topmost,
+            }
         } else {
-            PinControlEvent::ClickThroughExited { id: self.id.clone() }
+            PinControlEvent::ClickThroughExited {
+                id: self.id.clone(),
+            }
         };
         self.shared.emit_control(event);
         cx.notify();
@@ -1707,7 +1778,12 @@ impl PinnedWindowView {
     /// # 参数
     /// - `action`：键位表解析出的动作。
     /// - `window`：当前窗口。
-    fn run_key_action(&mut self, action: PinKeyAction, window: &mut Window, cx: &mut Context<Self>) {
+    fn run_key_action(
+        &mut self,
+        action: PinKeyAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         match action {
             PinKeyAction::CopyToClipboard => self.copy_to_clipboard(cx),
             PinKeyAction::CopyOriginal => self.copy_original(cx),
@@ -1760,10 +1836,15 @@ impl PinnedWindowView {
         }
         self.closed = true;
         if self.click_through {
-            self.shared.emit_control(PinControlEvent::ClickThroughExited { id: self.id.clone() });
+            self.shared
+                .emit_control(PinControlEvent::ClickThroughExited {
+                    id: self.id.clone(),
+                });
         }
         if self.hide.is_some() {
-            self.shared.emit_control(PinControlEvent::HideToTopExited { id: self.id.clone() });
+            self.shared.emit_control(PinControlEvent::HideToTopExited {
+                id: self.id.clone(),
+            });
         }
         tracing::info!(id = %self.id, renders = self.render_count, remove_from_store, "贴图窗口关闭");
         if remove_from_store {
@@ -2247,7 +2328,12 @@ mod tests {
     fn context_menu_uses_localized_labels() {
         let dir = temp_dir("menu-i18n");
         let mut store = ConfigStore::open(dir.join("cfg.json"));
-        store.set_value(crate::settings_model::LANGUAGE_KEY, serde_json::json!("en-US")).unwrap();
+        store
+            .set_value(
+                crate::settings_model::LANGUAGE_KEY,
+                serde_json::json!("en-US"),
+            )
+            .unwrap();
         let config: SharedConfig = Rc::new(RefCell::new(store));
         let shared = PinShared::open(&dir, config, Box::new(|_| {}));
         let view = view_in(&shared, 32, 32);
@@ -2261,7 +2347,12 @@ mod tests {
             .collect();
         assert!(labels.iter().any(|l| l == "Copy"), "{labels:?}");
         assert!(labels.iter().any(|l| l == "Close"), "{labels:?}");
-        assert!(labels.iter().all(|l| !l.is_empty() && !l.contains("[!") && l.is_ascii()), "{labels:?}");
+        assert!(
+            labels
+                .iter()
+                .all(|l| !l.is_empty() && !l.contains("[!") && l.is_ascii()),
+            "{labels:?}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2280,8 +2371,13 @@ mod tests {
             confidence: None,
         };
         view.ocr = OcrPhase::Done(vec![text_box(0, "第一行"), text_box(10, "second")]);
-        assert_eq!(view.ocr_full_text().as_deref(), Some("第一行
-second"));
+        assert_eq!(
+            view.ocr_full_text().as_deref(),
+            Some(
+                "第一行
+second"
+            )
+        );
         view.ocr = OcrPhase::Failed;
         assert_eq!(view.ocr_full_text(), None);
         let _ = std::fs::remove_dir_all(&dir);

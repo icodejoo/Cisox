@@ -6,7 +6,8 @@
 
 use crate::ocr_client::OcrError;
 use crate::translate_service::{TranslateFlowError, TranslateOutcome, TranslateStage};
-use snow_translate::TranslateError;
+use snow_i18n::{Args, I18n};
+use snow_translate::{Lang, TranslateError};
 
 /// 结果面板最多显示的段落数。
 pub const PANEL_MAX_PARAGRAPHS: usize = 8;
@@ -50,14 +51,55 @@ pub enum TranslateUiState {
 ///
 /// # 参数
 /// - `stage`：流程阶段。
+/// - `i18n`：界面语料。
 ///
 /// ```ignore
-/// assert_eq!(stage_text(TranslateStage::Translating), "正在翻译…");
+/// let text = stage_text(TranslateStage::Translating, i18n);
 /// ```
-pub fn stage_text(stage: TranslateStage) -> &'static str {
+pub fn stage_text(stage: TranslateStage, i18n: &I18n) -> String {
     match stage {
-        TranslateStage::Recognizing => "正在识别文字…",
-        TranslateStage::Translating => "正在翻译…（首次会加载模型，稍等片刻）",
+        TranslateStage::Recognizing => i18n.tr("translate-flow-stage-recognizing"),
+        TranslateStage::Translating => i18n.tr("translate-flow-stage-translating"),
+    }
+}
+
+/// 语言在界面里的显示名（各语言自称，不随界面语言变化）。
+fn lang_name(lang: Lang) -> String {
+    crate::language_names::endonym(lang.code())
+        .map_or_else(|| lang.code().to_string(), str::to_string)
+}
+
+/// 把翻译后端的结构化错误翻成界面语言下的说明（技术细节原样附带）。
+///
+/// # 参数
+/// - `error`：后端错误。
+/// - `i18n`：界面语料。
+fn translate_error_text(error: &TranslateError, i18n: &I18n) -> String {
+    let detail = |id: &str, text: &str| i18n.tr_with(id, &Args::new().named("detail", text));
+    match error {
+        TranslateError::NoModelFound(d) => detail("translate-flow-error-no-model", d),
+        TranslateError::UnsupportedLanguagePair(source, target) => i18n.tr_with(
+            "translate-flow-error-pair",
+            &Args::new()
+                .named("source", lang_name(*source))
+                .named("target", lang_name(*target)),
+        ),
+        TranslateError::InvalidRequest(d) => detail("translate-flow-error-invalid-request", d),
+        TranslateError::Network(d) => detail("translate-flow-error-network", d),
+        TranslateError::Io(d) => detail("translate-flow-error-io", d),
+        TranslateError::Timeout => i18n.tr("translate-flow-error-timeout"),
+        TranslateError::RuntimeMissing(d) => detail("translate-flow-error-runtime-missing", d),
+        TranslateError::WorkerUnavailable(d) => {
+            detail("translate-flow-error-worker-unavailable", d)
+        }
+        TranslateError::WorkerDied(d) => detail("translate-flow-error-worker-died", d),
+        TranslateError::ModelLoad(d) => detail("translate-flow-error-model-load", d),
+        TranslateError::Inference(d) => detail("translate-flow-error-inference", d),
+        TranslateError::OutOfMemory(d) => detail("translate-flow-error-oom", d),
+        TranslateError::NoCustomModel => i18n.tr("translate-flow-error-no-custom-model"),
+        TranslateError::CustomModelNotSelected => {
+            i18n.tr("translate-flow-error-custom-model-not-selected")
+        }
     }
 }
 
@@ -65,30 +107,43 @@ pub fn stage_text(stage: TranslateStage) -> &'static str {
 ///
 /// # 参数
 /// - `error`：流程失败原因。
+/// - `i18n`：界面语料。
 ///
 /// # 返回
 /// `(说明, 是否可按 D 下载运行时)`。
 ///
 /// ```ignore
-/// let (msg, can_download) = failure_message(&TranslateFlowError::NoText);
-/// assert!(!can_download && msg.contains("文字"));
+/// let (msg, can_download) = failure_message(&TranslateFlowError::NoText, i18n);
+/// assert!(!can_download && !msg.is_empty());
 /// ```
-pub fn failure_message(error: &TranslateFlowError) -> (String, bool) {
+pub fn failure_message(error: &TranslateFlowError, i18n: &I18n) -> (String, bool) {
     match error {
         TranslateFlowError::Ocr(e) => {
-            let message = e.message();
+            let message = e.message(i18n);
             if matches!(e, OcrError::Unavailable(_)) && e.can_download() {
-                (format!("{message}。请先点击“OCR”按钮并按 D 下载 OCR 组件，再回来翻译"), false)
+                (
+                    i18n.tr_with(
+                        "translate-flow-ocr-hint",
+                        &Args::new().named("message", message),
+                    ),
+                    false,
+                )
             } else {
                 (message, false)
             }
         }
-        TranslateFlowError::NoText => ("未识别到可翻译的文字".to_string(), false),
+        TranslateFlowError::NoText => (i18n.tr("translate-flow-no-text"), false),
         TranslateFlowError::AlreadyTarget(lang) => (
-            format!("原文已经是{}，无需翻译（可在设置里更改目标语言）", lang.display_name()),
+            i18n.tr_with(
+                "translate-flow-already-target",
+                &Args::new().named("lang", lang_name(*lang)),
+            ),
             false,
         ),
-        TranslateFlowError::Translate(e) => (e.to_string(), matches!(e, TranslateError::RuntimeMissing(_))),
+        TranslateFlowError::Translate(e) => (
+            translate_error_text(e, i18n),
+            matches!(e, TranslateError::RuntimeMissing(_)),
+        ),
     }
 }
 
@@ -122,22 +177,37 @@ impl TranslateUiState {
     ///
     /// # 参数
     /// - `error`：失败原因。
-    pub fn from_error(error: &TranslateFlowError) -> Self {
-        let (message, can_download) = failure_message(error);
-        Self::Failed { message, can_download }
+    /// - `i18n`：界面语料（在界面边界把结构化错误翻成文案）。
+    pub fn from_error(error: &TranslateFlowError, i18n: &I18n) -> Self {
+        let (message, can_download) = failure_message(error, i18n);
+        Self::Failed {
+            message,
+            can_download,
+        }
     }
 
     /// 底部状态条文案。
-    pub fn status_text(&self) -> Option<String> {
+    ///
+    /// # 参数
+    /// - `i18n`：界面语料。
+    pub fn status_text(&self, i18n: &I18n) -> Option<String> {
         match self {
             Self::Idle => None,
             Self::Running(step) | Self::Downloading(step) => Some(step.clone()),
-            Self::Done { translated, copied: true, .. } if !translated.is_empty() => {
-                Some("已翻译，译文已复制到剪贴板".to_string())
-            }
-            Self::Done { copied: false, .. } => Some("已翻译（复制到剪贴板失败）".to_string()),
-            Self::Done { .. } => Some("译文为空".to_string()),
-            Self::Failed { message, can_download: true } => Some(format!("{message} · 按 D 下载")),
+            Self::Done {
+                translated,
+                copied: true,
+                ..
+            } if !translated.is_empty() => Some(i18n.tr("translate-flow-done-copied")),
+            Self::Done { copied: false, .. } => Some(i18n.tr("translate-flow-done-copy-failed")),
+            Self::Done { .. } => Some(i18n.tr("translate-flow-empty")),
+            Self::Failed {
+                message,
+                can_download: true,
+            } => Some(i18n.tr_with(
+                "translate-flow-press-d",
+                &Args::new().named("message", message.as_str()),
+            )),
             Self::Failed { message, .. } => Some(message.clone()),
         }
     }
@@ -161,44 +231,65 @@ pub fn truncate_text(text: &str, max_chars: usize) -> String {
 ///
 /// # 参数
 /// - `state`：翻译状态。
+/// - `i18n`：界面语料。
 ///
 /// # 返回
 /// 空表示不显示面板；否则依次是标题 / 正文 / 操作提示。
 ///
 /// ```ignore
-/// assert!(panel_lines(&TranslateUiState::Idle).is_empty());
+/// assert!(panel_lines(&TranslateUiState::Idle, i18n).is_empty());
 /// ```
-pub fn panel_lines(state: &TranslateUiState) -> Vec<String> {
+pub fn panel_lines(state: &TranslateUiState, i18n: &I18n) -> Vec<String> {
     match state {
         TranslateUiState::Idle => Vec::new(),
         TranslateUiState::Running(step) => vec![step.clone()],
-        TranslateUiState::Downloading(step) => vec![step.clone(), "下载完成后请再次点击“翻译”".to_string()],
-        TranslateUiState::Done { translated, .. } if translated.trim().is_empty() => {
-            vec!["译文为空".to_string(), "Esc 返回".to_string()]
+        TranslateUiState::Downloading(step) => {
+            vec![step.clone(), i18n.tr("translate-flow-downloading-hint")]
         }
-        TranslateUiState::Done { translated, label, copied, .. } => {
+        TranslateUiState::Done { translated, .. } if translated.trim().is_empty() => {
+            vec![
+                i18n.tr("translate-flow-empty"),
+                i18n.tr("translate-flow-esc"),
+            ]
+        }
+        TranslateUiState::Done {
+            translated,
+            label,
+            copied,
+            ..
+        } => {
             let all: Vec<&str> = translated.lines().collect();
-            let mut lines = vec![format!("译文 · {label}")];
-            lines.extend(all.iter().take(PANEL_MAX_PARAGRAPHS).map(|l| truncate_text(l, PANEL_MAX_CHARS)));
-            if all.len() > PANEL_MAX_PARAGRAPHS {
-                lines.push(format!("…（另有 {} 段）", all.len() - PANEL_MAX_PARAGRAPHS));
-            }
-            lines.push(
-                if *copied {
-                    "已复制 · Enter 复制并关闭 · Esc 返回"
-                } else {
-                    "复制失败 · Enter 重试并关闭 · Esc 返回"
-                }
-                .to_string(),
+            let mut lines = vec![i18n.tr_with(
+                "translate-flow-title",
+                &Args::new().named("label", label.as_str()),
+            )];
+            lines.extend(
+                all.iter()
+                    .take(PANEL_MAX_PARAGRAPHS)
+                    .map(|l| truncate_text(l, PANEL_MAX_CHARS)),
             );
+            if all.len() > PANEL_MAX_PARAGRAPHS {
+                lines.push(i18n.tr_with(
+                    "translate-flow-more-paragraphs",
+                    &Args::new().named("count", (all.len() - PANEL_MAX_PARAGRAPHS).to_string()),
+                ));
+            }
+            lines.push(i18n.tr(if *copied {
+                "translate-flow-footer-copied"
+            } else {
+                "translate-flow-footer-copy-failed"
+            }));
             lines
         }
-        TranslateUiState::Failed { message, can_download } => {
+        TranslateUiState::Failed {
+            message,
+            can_download,
+        } => {
             let mut lines = vec![truncate_text(message, FAILURE_MAX_CHARS)];
             if *can_download {
-                lines.push("按 D 下载 onnxruntime 运行时（约 14 MB，官方发布并校验哈希）".to_string());
+                lines.push(i18n.tr("translate-flow-download-hint"));
             }
-            lines.push("Esc 返回".to_string());
+            lines.push(i18n.tr("translate-flow-esc"));
             lines
         }
     }
@@ -210,12 +301,25 @@ mod tests {
     use crate::ocr_assets::OcrUnavailable;
     use snow_translate::Lang;
 
+    /// 中文语料。
+    fn zh() -> &'static I18n {
+        crate::ocr_backend::i18n_for("zh-CN")
+    }
+
+    /// 英文语料。
+    fn en() -> &'static I18n {
+        crate::ocr_backend::i18n_for("en-US")
+    }
+
     /// 造翻译产出。
     fn outcome(translated: &[&str]) -> TranslateOutcome {
         TranslateOutcome {
             source: "src".into(),
             translated: translated.join("\n"),
-            pairs: translated.iter().map(|t| ("s".to_string(), (*t).to_string())).collect(),
+            pairs: translated
+                .iter()
+                .map(|t| ("s".to_string(), (*t).to_string()))
+                .collect(),
             label: "OPUS-MT".into(),
             ocr_ms: 1,
             translate_ms: 2,
@@ -229,24 +333,42 @@ mod tests {
         assert!(TranslateUiState::Running("x".into()).is_busy());
         assert!(TranslateUiState::Downloading("x".into()).is_busy());
         assert!(!TranslateUiState::from_outcome(&outcome(&["a"]), true).is_busy());
-        assert!(TranslateUiState::Idle.status_text().is_none());
-        assert_ne!(stage_text(TranslateStage::Recognizing), stage_text(TranslateStage::Translating));
+        assert!(TranslateUiState::Idle.status_text(zh()).is_none());
+        assert_ne!(
+            stage_text(TranslateStage::Recognizing, zh()),
+            stage_text(TranslateStage::Translating, zh())
+        );
     }
 
     /// 完成态：状态条、面板标题含模型名、提示随复制结果变化。
     #[test]
     fn done_state_texts() {
         let done = TranslateUiState::from_outcome(&outcome(&["你好", "再见"]), true);
-        assert_eq!(done.status_text().as_deref(), Some("已翻译，译文已复制到剪贴板"));
-        let lines = panel_lines(&done);
+        assert_eq!(
+            done.status_text(zh()).as_deref(),
+            Some("已翻译，译文已复制到剪贴板")
+        );
+        let lines = panel_lines(&done, zh());
         assert_eq!(lines[0], "译文 · OPUS-MT");
         assert_eq!(&lines[1..3], ["你好", "再见"]);
         assert!(lines.last().is_some_and(|l| l.contains("Enter")));
         let failed_copy = TranslateUiState::from_outcome(&outcome(&["a"]), false);
-        assert!(failed_copy.status_text().is_some_and(|s| s.contains("失败")));
-        assert!(panel_lines(&failed_copy).last().is_some_and(|l| l.contains("重试")));
+        assert!(
+            failed_copy
+                .status_text(zh())
+                .is_some_and(|s| s.contains("失败"))
+        );
+        assert!(
+            panel_lines(&failed_copy, zh())
+                .last()
+                .is_some_and(|l| l.contains("重试"))
+        );
         let empty = TranslateUiState::from_outcome(&outcome(&[""]), true);
-        assert_eq!(empty.status_text().as_deref(), Some("译文为空"));
+        assert_eq!(empty.status_text(zh()).as_deref(), Some("译文为空"));
+        assert_eq!(
+            empty.status_text(en()).as_deref(),
+            Some("The translation is empty")
+        );
     }
 
     /// 面板段落数与长度受限。
@@ -254,11 +376,14 @@ mod tests {
     fn panel_is_bounded() {
         let many: Vec<String> = (0..12).map(|i| format!("段{i}")).collect();
         let refs: Vec<&str> = many.iter().map(String::as_str).collect();
-        let lines = panel_lines(&TranslateUiState::from_outcome(&outcome(&refs), true));
+        let lines = panel_lines(&TranslateUiState::from_outcome(&outcome(&refs), true), zh());
         assert_eq!(lines.len(), PANEL_MAX_PARAGRAPHS + 3);
         assert!(lines[PANEL_MAX_PARAGRAPHS + 1].contains("另有 4 段"));
         let long = "长".repeat(PANEL_MAX_CHARS + 20);
-        let lines = panel_lines(&TranslateUiState::from_outcome(&outcome(&[long.as_str()]), true));
+        let lines = panel_lines(
+            &TranslateUiState::from_outcome(&outcome(&[long.as_str()]), true),
+            zh(),
+        );
         assert_eq!(lines[1].chars().count(), PANEL_MAX_CHARS + 1);
         assert_eq!(truncate_text("abc", 5), "abc");
     }
@@ -266,36 +391,92 @@ mod tests {
     /// 各类失败文案不同：缺运行时可下载，其余不可；OCR 缺资产指引去点 OCR 按钮。
     #[test]
     fn failure_messages_are_distinct() {
-        let runtime = TranslateUiState::from_error(&TranslateFlowError::Translate(TranslateError::RuntimeMissing(
-            "未安装 onnxruntime 运行时，请先下载".into(),
-        )));
-        assert!(matches!(runtime, TranslateUiState::Failed { can_download: true, .. }));
-        assert!(runtime.status_text().is_some_and(|s| s.contains("按 D 下载")));
-        assert!(panel_lines(&runtime).iter().any(|l| l.contains("14 MB")));
-        let no_model = TranslateUiState::from_error(&TranslateFlowError::Translate(TranslateError::NoModelFound(
-            "模型目录 D:/m 里没有可用的翻译模型".into(),
-        )));
-        assert!(matches!(no_model, TranslateUiState::Failed { can_download: false, .. }));
-        assert!(no_model.status_text().is_some_and(|s| s.contains("D:/m")));
-        let ocr = TranslateUiState::from_error(&TranslateFlowError::Ocr(OcrError::Unavailable(OcrUnavailable::NoRuntime)));
-        assert!(ocr.status_text().is_some_and(|s| s.contains("OCR") && !s.contains("按 D 下载 ·")));
-        let (msg, dl) = failure_message(&TranslateFlowError::AlreadyTarget(Lang::ZhHans));
+        let runtime = TranslateUiState::from_error(
+            &TranslateFlowError::Translate(TranslateError::RuntimeMissing(
+                "the onnxruntime runtime is not installed".into(),
+            )),
+            zh(),
+        );
+        assert!(matches!(
+            runtime,
+            TranslateUiState::Failed {
+                can_download: true,
+                ..
+            }
+        ));
+        assert!(
+            runtime
+                .status_text(zh())
+                .is_some_and(|s| s.contains("按 D 下载"))
+        );
+        assert!(
+            panel_lines(&runtime, zh())
+                .iter()
+                .any(|l| l.contains("14 MB"))
+        );
+        let no_model = TranslateUiState::from_error(
+            &TranslateFlowError::Translate(TranslateError::NoModelFound(
+                "no usable translation model in D:/m".into(),
+            )),
+            zh(),
+        );
+        assert!(matches!(
+            no_model,
+            TranslateUiState::Failed {
+                can_download: false,
+                ..
+            }
+        ));
+        assert!(
+            no_model
+                .status_text(zh())
+                .is_some_and(|s| s.contains("D:/m"))
+        );
+        let ocr = TranslateUiState::from_error(
+            &TranslateFlowError::Ocr(OcrError::Unavailable(OcrUnavailable::NoRuntime)),
+            zh(),
+        );
+        assert!(
+            ocr.status_text(zh())
+                .is_some_and(|s| s.contains("OCR") && !s.contains("按 D 下载 ·"))
+        );
+        let (msg, dl) = failure_message(&TranslateFlowError::AlreadyTarget(Lang::ZhHans), zh());
         assert!(msg.contains("简体中文") && !dl);
-        let (msg, _) = failure_message(&TranslateFlowError::NoText);
+        let (msg, _) = failure_message(&TranslateFlowError::NoText, zh());
         assert!(msg.contains("文字"));
-        let timeout = TranslateUiState::from_error(&TranslateFlowError::Translate(TranslateError::Timeout));
-        assert_ne!(timeout.status_text(), no_model.status_text());
+        let timeout = TranslateUiState::from_error(
+            &TranslateFlowError::Translate(TranslateError::Timeout),
+            zh(),
+        );
+        assert_ne!(timeout.status_text(zh()), no_model.status_text(zh()));
+        // 英文界面：结构化错误换成英文说明，没有中文残留
+        for error in [
+            TranslateFlowError::NoText,
+            TranslateFlowError::Translate(TranslateError::NoCustomModel),
+            TranslateFlowError::Translate(TranslateError::CustomModelNotSelected),
+            TranslateFlowError::Translate(TranslateError::UnsupportedLanguagePair(
+                Lang::En,
+                Lang::Ja,
+            )),
+            TranslateFlowError::Translate(TranslateError::Timeout),
+        ] {
+            let (text, _) = failure_message(&error, en());
+            assert!(text.is_ascii() || text.contains("日本語"), "{text}");
+            assert!(!text.contains("[!"), "{text}");
+        }
     }
 
     /// 下载与运行中的文案。
     #[test]
     fn progress_states() {
         assert_eq!(
-            TranslateUiState::Running("正在翻译…".into()).status_text().as_deref(),
+            TranslateUiState::Running("正在翻译…".into())
+                .status_text(zh())
+                .as_deref(),
             Some("正在翻译…")
         );
         let d = TranslateUiState::Downloading("正在下载 onnxruntime 运行时…".into());
-        assert_eq!(panel_lines(&d).len(), 2);
-        assert!(panel_lines(&TranslateUiState::Idle).is_empty());
+        assert_eq!(panel_lines(&d, zh()).len(), 2);
+        assert!(panel_lines(&TranslateUiState::Idle, zh()).is_empty());
     }
 }

@@ -5,8 +5,10 @@
 //! 帧来源、自动滚动与输出都是可注入的，因此整条流水线可以用合成滚动帧序列离线验证。
 
 use crate::stitch_service::{
-    FrameOutcome, RejectReason, StitchService, StitchStats, export_part_rows, frame_fingerprint, plan_parts,
+    FrameOutcome, RejectReason, StitchService, StitchStats, export_part_rows, frame_fingerprint,
+    plan_parts,
 };
+use snow_i18n::{Args, I18n};
 use snow_platform::capture::{CapturedScreen, capture_display};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -101,15 +103,113 @@ impl ScrollControl {
     }
 }
 
+/// 没有复制到剪贴板的原因。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CopySkip {
+    /// 设置里没启用复制。
+    Disabled,
+    /// 图像太大，只保存文件。
+    TooLarge {
+        /// 图像大小（MB）。
+        megabytes: usize,
+    },
+}
+
+impl CopySkip {
+    /// 面向用户的原因说明。
+    ///
+    /// # 参数
+    /// - `i18n`：界面语料。
+    pub fn message(&self, i18n: &I18n) -> String {
+        match self {
+            Self::Disabled => i18n.tr("scroll-copy-disabled"),
+            Self::TooLarge { megabytes } => i18n.tr_with(
+                "scroll-copy-too-large",
+                &Args::new().named("size", megabytes.to_string()),
+            ),
+        }
+    }
+}
+
 /// 剪贴板复制结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CopyStatus {
     /// 已复制。
     Copied,
     /// 跳过（附原因，例如图太大）。
-    Skipped(String),
-    /// 复制失败。
+    Skipped(CopySkip),
+    /// 复制失败（附系统给出的原因）。
     Failed(String),
+}
+
+/// 采集过程中需要提示用户的信息（界面边界再翻译）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScrollHint {
+    /// 一帧被拒（滚太快、内容太少等）。
+    Rejected(RejectReason),
+    /// 到达高度上限，自动完成。
+    LimitReached {
+        /// 当前画布高度（像素）。
+        height: u32,
+    },
+    /// 自动滚动投递失败。
+    AutoScrollFailed(String),
+    /// 当前环境不支持自动滚动。
+    AutoScrollUnsupported,
+    /// 读取屏幕失败。
+    ReadFailed(String),
+    /// 已滚动到底部，自动完成。
+    ReachedBottom,
+}
+
+impl ScrollHint {
+    /// 面向用户的提示。
+    ///
+    /// # 参数
+    /// - `i18n`：界面语料。
+    pub fn message(&self, i18n: &I18n) -> String {
+        let detail = |id: &str, text: &str| i18n.tr_with(id, &Args::new().named("detail", text));
+        match self {
+            Self::Rejected(reason) => reason.message(i18n),
+            Self::LimitReached { height } => i18n.tr_with(
+                "scroll-hint-limit",
+                &Args::new().named("height", height.to_string()),
+            ),
+            Self::AutoScrollFailed(e) => detail("scroll-hint-auto-failed", e),
+            Self::AutoScrollUnsupported => i18n.tr("scroll-hint-auto-unsupported"),
+            Self::ReadFailed(e) => detail("scroll-hint-read-failed", e),
+            Self::ReachedBottom => i18n.tr("scroll-hint-bottom"),
+        }
+    }
+}
+
+/// 长截图失败的原因（界面边界再翻译，附带的技术细节原样保留）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScrollFailure {
+    /// 拼接层报错。
+    Stitch(String),
+    /// 连续读取屏幕失败。
+    CaptureFailed(String),
+    /// 没有采集到任何内容。
+    NothingCaptured,
+    /// 导出 / 保存失败。
+    Output(String),
+}
+
+impl ScrollFailure {
+    /// 面向用户的失败说明。
+    ///
+    /// # 参数
+    /// - `i18n`：界面语料。
+    pub fn message(&self, i18n: &I18n) -> String {
+        let detail = |id: &str, text: &str| i18n.tr_with(id, &Args::new().named("detail", text));
+        match self {
+            Self::Stitch(e) => detail("scroll-fail-stitch", e),
+            Self::CaptureFailed(e) => detail("scroll-fail-capture", e),
+            Self::NothingCaptured => i18n.tr("scroll-fail-nothing"),
+            Self::Output(e) => detail("scroll-fail-output", e),
+        }
+    }
 }
 
 /// 一次长截图的最终产出。
@@ -135,7 +235,7 @@ pub enum ScrollPhase {
     /// 已完成。
     Done(ScrollDone),
     /// 失败（附原因）。
-    Failed(String),
+    Failed(ScrollFailure),
     /// 已取消。
     Cancelled,
 }
@@ -152,7 +252,7 @@ pub struct ScrollProgress {
     /// 当前画布高。
     pub height: u32,
     /// 需要提示用户的信息（滚太快 / 内容太少等）。
-    pub hint: Option<String>,
+    pub hint: Option<ScrollHint>,
     /// 拼接统计。
     pub stats: StitchStats,
 }
@@ -221,10 +321,10 @@ impl Default for CaptureTiming {
 ///
 /// # 参数
 /// - `outcome`：帧结果。
-pub fn hint_for(outcome: &FrameOutcome) -> Option<String> {
+pub fn hint_for(outcome: &FrameOutcome) -> Option<ScrollHint> {
     match outcome {
-        FrameOutcome::Rejected(reason) => Some(reason.hint().to_string()),
-        FrameOutcome::LimitReached { height } => Some(format!("已达到高度上限（{height} 像素），自动完成")),
+        FrameOutcome::Rejected(reason) => Some(ScrollHint::Rejected(*reason)),
+        FrameOutcome::LimitReached { height } => Some(ScrollHint::LimitReached { height: *height }),
         _ => None,
     }
 }
@@ -271,12 +371,12 @@ pub fn run_capture(
                 Some(scroll) => {
                     if let Err(e) = scroll() {
                         control.set_auto_scroll(false);
-                        set_hint(progress, Some(format!("自动滚动不可用: {e}，请手动滚动")), wake);
+                        set_hint(progress, Some(ScrollHint::AutoScrollFailed(e)), wake);
                     }
                 }
                 None => {
                     control.set_auto_scroll(false);
-                    set_hint(progress, Some("当前环境不支持自动滚动，请手动滚动".to_string()), wake);
+                    set_hint(progress, Some(ScrollHint::AutoScrollUnsupported), wake);
                 }
             }
         }
@@ -290,14 +390,22 @@ pub fn run_capture(
                     last_fingerprint = Some(fingerprint);
                     match service.push_captured(screen) {
                         Ok(outcome) => {
-                            stalled = if outcome.is_progress() { 0 } else { stalled + 1 };
+                            stalled = if outcome.is_progress() {
+                                0
+                            } else {
+                                stalled + 1
+                            };
                             update_progress(progress, &service, &outcome, wake);
                             if matches!(outcome, FrameOutcome::LimitReached { .. }) {
                                 break;
                             }
                         }
                         Err(e) => {
-                            set_phase(progress, ScrollPhase::Failed(e), wake);
+                            set_phase(
+                                progress,
+                                ScrollPhase::Failed(ScrollFailure::Stitch(e)),
+                                wake,
+                            );
                             return;
                         }
                     }
@@ -305,21 +413,28 @@ pub fn run_capture(
             }
             Err(e) => {
                 errors += 1;
-                set_hint(progress, Some(format!("读取屏幕失败: {e}")), wake);
+                set_hint(progress, Some(ScrollHint::ReadFailed(e.clone())), wake);
                 if errors >= MAX_CAPTURE_ERRORS {
-                    set_phase(progress, ScrollPhase::Failed(format!("连续读取屏幕失败: {e}")), wake);
+                    set_phase(
+                        progress,
+                        ScrollPhase::Failed(ScrollFailure::CaptureFailed(e)),
+                        wake,
+                    );
                     return;
                 }
             }
         }
-        if auto_on && stalled >= AUTO_STALL_FRAMES && service.stats().appended + service.stats().prepended > 0 {
+        if auto_on
+            && stalled >= AUTO_STALL_FRAMES
+            && service.stats().appended + service.stats().prepended > 0
+        {
             auto_finished = true;
             break;
         }
         std::thread::sleep(timing.capture_interval);
     }
     if auto_finished {
-        set_hint(progress, Some("已滚动到底部，自动完成".to_string()), wake);
+        set_hint(progress, Some(ScrollHint::ReachedBottom), wake);
     }
     set_phase(progress, ScrollPhase::Saving, wake);
     let phase = match finalize(&service, sink, copy_to_clipboard) {
@@ -338,8 +453,17 @@ pub fn run_capture(
 ///
 /// # 返回
 /// 产出信息；没有任何内容或保存失败返回错误。
-pub fn finalize(service: &StitchService, sink: &mut dyn ScrollSink, copy_to_clipboard: bool) -> Result<ScrollDone, String> {
-    finalize_with_part_rows(service, sink, copy_to_clipboard, export_part_rows(service.width()))
+pub fn finalize(
+    service: &StitchService,
+    sink: &mut dyn ScrollSink,
+    copy_to_clipboard: bool,
+) -> Result<ScrollDone, ScrollFailure> {
+    finalize_with_part_rows(
+        service,
+        sink,
+        copy_to_clipboard,
+        export_part_rows(service.width()),
+    )
 }
 
 /// 同 [`finalize`]，但可指定分块行数（测试用小值验证超长图分块）。
@@ -352,21 +476,30 @@ pub fn finalize_with_part_rows(
     sink: &mut dyn ScrollSink,
     copy_to_clipboard: bool,
     part_rows: u32,
-) -> Result<ScrollDone, String> {
+) -> Result<ScrollDone, ScrollFailure> {
     let (width, height) = (service.width(), service.height());
     if service.is_empty() || height == 0 {
-        return Err("没有采集到任何内容".to_string());
+        return Err(ScrollFailure::NothingCaptured);
     }
     let mut files = Vec::new();
     for (top, rows) in plan_parts(height, part_rows) {
-        let rgba = service.export_rows(top, rows)?;
-        files.push(sink.save_png(width, rows, &rgba)?);
+        let rgba = service
+            .export_rows(top, rows)
+            .map_err(ScrollFailure::Output)?;
+        files.push(
+            sink.save_png(width, rows, &rgba)
+                .map_err(ScrollFailure::Output)?,
+        );
     }
-    let bytes = (width as usize).saturating_mul(height as usize).saturating_mul(BYTES_PER_PIXEL);
+    let bytes = (width as usize)
+        .saturating_mul(height as usize)
+        .saturating_mul(BYTES_PER_PIXEL);
     let copied = if !copy_to_clipboard {
-        CopyStatus::Skipped("未启用".to_string())
+        CopyStatus::Skipped(CopySkip::Disabled)
     } else if bytes > CLIPBOARD_MAX_BYTES {
-        CopyStatus::Skipped(format!("图像过大（{} MB），仅保存文件", bytes / (1024 * 1024)))
+        CopyStatus::Skipped(CopySkip::TooLarge {
+            megabytes: bytes / (1024 * 1024),
+        })
     } else {
         match service.export_all_rgba() {
             Ok((w, h, rgba)) => match sink.copy_image(w, h, &rgba) {
@@ -391,7 +524,7 @@ fn set_phase(progress: &SharedProgress, phase: ScrollPhase, wake: &dyn Fn()) {
 }
 
 /// 更新提示并唤醒界面。
-fn set_hint(progress: &SharedProgress, hint: Option<String>, wake: &dyn Fn()) {
+fn set_hint(progress: &SharedProgress, hint: Option<ScrollHint>, wake: &dyn Fn()) {
     let mut guard = lock(progress);
     if guard.hint != hint {
         guard.hint = hint;
@@ -401,14 +534,19 @@ fn set_hint(progress: &SharedProgress, hint: Option<String>, wake: &dyn Fn()) {
 }
 
 /// 一帧拼入（或被拒）后更新进度快照并唤醒界面。
-fn update_progress(progress: &SharedProgress, service: &StitchService, outcome: &FrameOutcome, wake: &dyn Fn()) {
+fn update_progress(
+    progress: &SharedProgress,
+    service: &StitchService,
+    outcome: &FrameOutcome,
+    wake: &dyn Fn(),
+) {
     {
         let mut guard = lock(progress);
         guard.frames += 1;
         guard.width = service.width();
         guard.height = service.height();
         guard.stats = service.stats();
-        guard.hint = hint_for(outcome).or_else(|| service.attention().map(|r: RejectReason| r.hint().to_string()));
+        guard.hint = hint_for(outcome).or_else(|| service.attention().map(ScrollHint::Rejected));
     }
     wake();
 }
@@ -424,7 +562,12 @@ mod tests {
         hash ^= hash >> 16;
         hash = hash.wrapping_mul(0x7feb_352d);
         hash ^= hash >> 15;
-        [(hash >> 24) as u8, (hash >> 16) as u8, (hash >> 8) as u8, 255]
+        [
+            (hash >> 24) as u8,
+            (hash >> 16) as u8,
+            (hash >> 8) as u8,
+            255,
+        ]
     }
 
     /// 截取文档第 `scroll` 行起的一帧。
@@ -435,7 +578,11 @@ mod tests {
                 data.extend_from_slice(&doc_pixel(x, y + scroll));
             }
         }
-        CapturedScreen { width: w, height: h, data }
+        CapturedScreen {
+            width: w,
+            height: h,
+            data,
+        }
     }
 
     /// 合成滚动来源：按脚本依次给出滚动位置，脚本用完后请求完成（或保持最后一帧）。
@@ -532,12 +679,19 @@ mod tests {
             h,
             script,
             next: 0,
-            finish_at_end: if auto_on { None } else { Some(Arc::clone(&control)) },
+            finish_at_end: if auto_on {
+                None
+            } else {
+                Some(Arc::clone(&control))
+            },
             grabs: Arc::new(AtomicUsize::new(0)),
         };
         let progress: SharedProgress = Arc::new(Mutex::new(ScrollProgress::new()));
         let wakes = AtomicUsize::new(0);
-        let mut sink = RecordingSink { fail_copy, ..RecordingSink::default() };
+        let mut sink = RecordingSink {
+            fail_copy,
+            ..RecordingSink::default()
+        };
         run_capture(
             source,
             &control,
@@ -547,7 +701,10 @@ mod tests {
             },
             auto,
             &mut sink,
-            CaptureOptions { copy_to_clipboard: true, timing: fast() },
+            CaptureOptions {
+                copy_to_clipboard: true,
+                timing: fast(),
+            },
         );
         let snapshot = lock(&progress).clone();
         (snapshot, sink, wakes.load(Ordering::SeqCst))
@@ -557,7 +714,8 @@ mod tests {
     #[test]
     fn manual_scroll_sequence_produces_exact_image() {
         let (w, h) = (320, 200);
-        let (progress, sink, wakes) = run(vec![0, 0, 60, 60, 60, 120, 180], w, h, None, false, false);
+        let (progress, sink, wakes) =
+            run(vec![0, 0, 60, 60, 60, 120, 180], w, h, None, false, false);
         let ScrollPhase::Done(done) = &progress.phase else {
             panic!("应完成: {:?}", progress.phase);
         };
@@ -587,7 +745,11 @@ mod tests {
     fn too_fast_scrolling_is_reported_and_not_misplaced() {
         let (w, h) = (320, 200);
         let (progress, sink, _) = run(vec![0, 150, 300, 450], w, h, None, false, false);
-        assert!(matches!(progress.phase, ScrollPhase::Done(_)), "{:?}", progress.phase);
+        assert!(
+            matches!(progress.phase, ScrollPhase::Done(_)),
+            "{:?}",
+            progress.phase
+        );
         assert!(progress.stats.rejected >= 1, "{:?}", progress.stats);
         assert!(progress.hint.is_some());
         // 成图必须是文档前缀
@@ -607,10 +769,14 @@ mod tests {
         });
         // 滚动 3 步后内容不再变化（到底）
         let (progress, sink, _) = run(vec![0, 60, 120, 120], 320, 200, Some(scroller), true, false);
-        assert!(matches!(progress.phase, ScrollPhase::Done(_)), "{:?}", progress.phase);
+        assert!(
+            matches!(progress.phase, ScrollPhase::Done(_)),
+            "{:?}",
+            progress.phase
+        );
         assert!(calls.load(Ordering::SeqCst) > 0);
         assert_eq!(sink.saved[0].1, 200 + 120);
-        assert_eq!(progress.hint.as_deref(), Some("已滚动到底部，自动完成"));
+        assert_eq!(progress.hint, Some(ScrollHint::ReachedBottom));
     }
 
     /// 自动滚动投递失败：关闭自动滚动并提示改为手动，不崩溃。
@@ -634,7 +800,7 @@ mod tests {
         // 另一个线程在看到提示后请求完成
         let helper = std::thread::spawn(move || {
             for _ in 0..500 {
-                if lock(&watch).hint.as_deref().is_some_and(|h| h.contains("自动滚动不可用")) {
+                if matches!(lock(&watch).hint, Some(ScrollHint::AutoScrollFailed(_))) {
                     finisher.request_finish();
                     return true;
                 }
@@ -643,7 +809,18 @@ mod tests {
             finisher.request_finish();
             false
         });
-        run_capture(source, &control, &progress, &|| {}, Some(scroller), &mut sink, CaptureOptions { copy_to_clipboard: true, timing: fast() });
+        run_capture(
+            source,
+            &control,
+            &progress,
+            &|| {},
+            Some(scroller),
+            &mut sink,
+            CaptureOptions {
+                copy_to_clipboard: true,
+                timing: fast(),
+            },
+        );
         assert!(helper.join().expect("辅助线程"));
         assert!(!control.auto_scroll());
         assert!(matches!(lock(&progress).phase, ScrollPhase::Done(_)));
@@ -655,9 +832,27 @@ mod tests {
         let control = ScrollControl::default();
         control.request_cancel();
         let progress: SharedProgress = Arc::new(Mutex::new(ScrollProgress::new()));
-        let source = ScriptSource { w: 64, h: 64, script: vec![0], next: 0, finish_at_end: None, grabs: Arc::new(AtomicUsize::new(0)) };
+        let source = ScriptSource {
+            w: 64,
+            h: 64,
+            script: vec![0],
+            next: 0,
+            finish_at_end: None,
+            grabs: Arc::new(AtomicUsize::new(0)),
+        };
         let mut sink = RecordingSink::default();
-        run_capture(source, &control, &progress, &|| {}, None, &mut sink, CaptureOptions { copy_to_clipboard: true, timing: fast() });
+        run_capture(
+            source,
+            &control,
+            &progress,
+            &|| {},
+            None,
+            &mut sink,
+            CaptureOptions {
+                copy_to_clipboard: true,
+                timing: fast(),
+            },
+        );
         assert_eq!(lock(&progress).phase, ScrollPhase::Cancelled);
         assert!(sink.saved.is_empty() && sink.copied.is_empty());
     }
@@ -677,7 +872,16 @@ mod tests {
         let done = finalize(&service, &mut sink, true).expect("输出");
         assert_eq!(done.height, service.height());
         assert!(!done.files.is_empty());
-        assert_eq!(hint_for(&FrameOutcome::LimitReached { height: 1520 }).as_deref(), Some("已达到高度上限（1520 像素），自动完成"));
+        let limit = hint_for(&FrameOutcome::LimitReached { height: 1520 }).expect("高度上限提示");
+        assert_eq!(
+            limit.message(crate::ocr_backend::i18n_for("zh-CN")),
+            "已达到高度上限（1520 像素），自动完成。"
+        );
+        assert!(
+            limit
+                .message(crate::ocr_backend::i18n_for("en-US"))
+                .contains("1520")
+        );
     }
 
     /// 超长图分块保存：每块不超过分块行数，拼起来等于整图；剪贴板复制失败时只标记失败。
@@ -689,7 +893,10 @@ mod tests {
             service.push_captured(frame(w, h, i * 60)).expect("push");
         }
         assert_eq!(service.height(), 200 + 240);
-        let mut sink = RecordingSink { fail_copy: true, ..RecordingSink::default() };
+        let mut sink = RecordingSink {
+            fail_copy: true,
+            ..RecordingSink::default()
+        };
         let done = finalize(&service, &mut sink, true).expect("输出");
         assert_eq!(done.copied, CopyStatus::Failed("剪贴板被占用".into()));
         assert_eq!(done.files.len(), 1);
@@ -697,8 +904,17 @@ mod tests {
         let mut parted = RecordingSink::default();
         let done = finalize_with_part_rows(&service, &mut parted, false, 128).expect("分块输出");
         assert_eq!(done.files.len(), 4);
-        assert!(parted.saved.iter().all(|(sw, sh, _)| *sw == w && *sh <= 128));
-        let joined: Vec<u8> = parted.saved.iter().flat_map(|(_, _, d)| d.iter().copied()).collect();
+        assert!(
+            parted
+                .saved
+                .iter()
+                .all(|(sw, sh, _)| *sw == w && *sh <= 128)
+        );
+        let joined: Vec<u8> = parted
+            .saved
+            .iter()
+            .flat_map(|(_, _, d)| d.iter().copied())
+            .collect();
         assert_eq!(joined, expected_rgba(w, 440, 0));
         let mut skipped = RecordingSink::default();
         let done = finalize(&service, &mut skipped, false).expect("输出");
@@ -720,15 +936,42 @@ mod tests {
         let control = ScrollControl::default();
         let progress: SharedProgress = Arc::new(Mutex::new(ScrollProgress::new()));
         let mut sink = RecordingSink::default();
-        run_capture(Broken, &control, &progress, &|| {}, None, &mut sink, CaptureOptions { copy_to_clipboard: true, timing: fast() });
-        assert!(matches!(&lock(&progress).phase, ScrollPhase::Failed(e) if e.contains("拒绝访问")));
+        run_capture(
+            Broken,
+            &control,
+            &progress,
+            &|| {},
+            None,
+            &mut sink,
+            CaptureOptions {
+                copy_to_clipboard: true,
+                timing: fast(),
+            },
+        );
+        assert!(
+            matches!(&lock(&progress).phase, ScrollPhase::Failed(ScrollFailure::CaptureFailed(e)) if e.contains("拒绝访问"))
+        );
     }
 
     /// 提示翻译：被拒给出原因文案，普通帧无提示。
     #[test]
     fn hints_only_for_problems() {
-        assert!(hint_for(&FrameOutcome::Rejected(RejectReason::TooFast { offset: 500 })).is_some_and(|h| h.contains("太快")));
+        assert!(
+            hint_for(&FrameOutcome::Rejected(RejectReason::TooFast {
+                offset: 500
+            }))
+            .is_some_and(|h| h
+                .message(crate::ocr_backend::i18n_for("zh-CN"))
+                .contains("太快"))
+        );
         assert!(hint_for(&FrameOutcome::Duplicate).is_none());
-        assert!(hint_for(&FrameOutcome::Appended { growth: 1, height: 2, offset: -1 }).is_none());
+        assert!(
+            hint_for(&FrameOutcome::Appended {
+                growth: 1,
+                height: 2,
+                offset: -1
+            })
+            .is_none()
+        );
     }
 }

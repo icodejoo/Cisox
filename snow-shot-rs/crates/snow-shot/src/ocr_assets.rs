@@ -5,6 +5,7 @@
 //! 清单是上游的原样副本（`resources/ocr-asset-manifest.json`），下载后的哈希校验以它为准。
 
 use serde::Deserialize;
+use snow_i18n::{Args, I18n};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -88,14 +89,14 @@ pub struct Manifest {
 /// 解析内置清单（只解析一次）。
 ///
 /// # 返回
-/// 清单引用；内置 JSON 损坏时返回错误说明。
+/// 清单引用；内置 JSON 损坏时返回解析器给出的原因（技术信息，不翻译）。
 ///
 /// ```ignore
 /// assert_eq!(manifest().unwrap().default_model, "small");
 /// ```
 pub fn manifest() -> Result<&'static Manifest, String> {
     static CELL: OnceLock<Result<Manifest, String>> = OnceLock::new();
-    CELL.get_or_init(|| serde_json::from_str(MANIFEST_JSON).map_err(|e| format!("OCR 清单损坏: {e}")))
+    CELL.get_or_init(|| serde_json::from_str(MANIFEST_JSON).map_err(|e| e.to_string()))
         .as_ref()
         .map_err(Clone::clone)
 }
@@ -136,14 +137,28 @@ pub enum OcrUnavailable {
 impl OcrUnavailable {
     /// 面向用户的提示文案。
     ///
+    /// # 参数
+    /// - `i18n`：界面语料。
+    ///
     /// # 返回
-    /// 一句中文说明，含下一步（下载）指引。
-    pub fn message(&self) -> String {
+    /// 一句说明，含下一步（下载）指引。
+    pub fn message(&self, i18n: &I18n) -> String {
         match self {
-            Self::NoRuntime => "未安装 OCR 运行时，请先下载（约 17 MB）".to_string(),
-            Self::NoModel { id } => format!("未安装 OCR 模型 {id}，请先下载"),
-            Self::UnknownModel(kind) => format!("未知的 OCR 模型类型: {kind}"),
-            Self::Manifest(detail) => detail.clone(),
+            Self::NoRuntime => i18n.tr("ocr-unavailable-no-runtime"),
+            Self::NoModel { id } => i18n.tr_with(
+                "ocr-unavailable-no-model",
+                &Args::new().named("id", id.as_str()),
+            ),
+            Self::UnknownModel(kind) => i18n.tr_with(
+                "ocr-unavailable-unknown-model",
+                &Args::new().named("kind", kind.as_str()),
+            ),
+            Self::Manifest(detail) => i18n.tr_with(
+                "fetch-manifest-corrupt",
+                &Args::new()
+                    .named("what", crate::ocr_download::OCR_MANIFEST_NAME)
+                    .named("detail", detail.as_str()),
+            ),
         }
     }
 
@@ -171,7 +186,9 @@ pub fn ocr_root(data_root: &Path, env_override: Option<&str>) -> PathBuf {
 
 /// 运行时目录。
 pub fn runtime_dir(root: &Path, runtime: &RuntimeSpec) -> PathBuf {
-    root.join(RUNTIMES_DIR).join(&runtime.version).join(&runtime.platform)
+    root.join(RUNTIMES_DIR)
+        .join(&runtime.version)
+        .join(&runtime.platform)
 }
 
 /// 模型目录。
@@ -202,7 +219,11 @@ pub fn dir_complete(dir: &Path, files: &[AssetFile]) -> bool {
 /// - `manifest`：清单。
 /// - `kind`：配置里的模型类型。
 pub fn find_model<'a>(manifest: &'a Manifest, kind: &str) -> Result<&'a ModelSpec, OcrUnavailable> {
-    let wanted = if kind.trim().is_empty() { manifest.default_model.as_str() } else { kind };
+    let wanted = if kind.trim().is_empty() {
+        manifest.default_model.as_str()
+    } else {
+        kind
+    };
     manifest
         .models
         .iter()
@@ -253,7 +274,9 @@ pub fn resolve_assets(
     };
     let dir = model_dir(root, model);
     if !dir_complete(&dir, &model.files) {
-        return Err(OcrUnavailable::NoModel { id: model.id.clone() });
+        return Err(OcrUnavailable::NoModel {
+            id: model.id.clone(),
+        });
     }
     Ok(OcrAssets {
         exe,
@@ -281,7 +304,8 @@ mod tests {
 
     /// 生成唯一临时目录。
     fn temp_root(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("snow-ocr-assets-{tag}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("snow-ocr-assets-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("建根目录");
         dir
@@ -307,19 +331,36 @@ mod tests {
     #[test]
     fn find_model_by_kind() {
         let m = manifest().expect("清单");
-        for kind in ["extra_small", "small", "medium", "small_v5", "medium_v5", "small_v4", "medium_v4"] {
+        for kind in [
+            "extra_small",
+            "small",
+            "medium",
+            "small_v5",
+            "medium_v5",
+            "small_v4",
+            "medium_v4",
+        ] {
             assert_eq!(find_model(m, kind).expect(kind).kind, kind);
         }
         assert_eq!(find_model(m, "").expect("默认").kind, "small");
-        assert_eq!(find_model(m, "nope"), Err(OcrUnavailable::UnknownModel("nope".into())));
+        assert_eq!(
+            find_model(m, "nope"),
+            Err(OcrUnavailable::UnknownModel("nope".into()))
+        );
     }
 
     /// 环境变量覆盖根目录；空白视为未设置。
     #[test]
     fn root_override() {
         assert_eq!(ocr_root(Path::new("D"), Some("X")), PathBuf::from("X"));
-        assert_eq!(ocr_root(Path::new("D"), Some("  ")), Path::new("D").join("assets").join("ocr"));
-        assert_eq!(ocr_root(Path::new("D"), None), Path::new("D").join("assets").join("ocr"));
+        assert_eq!(
+            ocr_root(Path::new("D"), Some("  ")),
+            Path::new("D").join("assets").join("ocr")
+        );
+        assert_eq!(
+            ocr_root(Path::new("D"), None),
+            Path::new("D").join("assets").join("ocr")
+        );
     }
 
     /// 什么都没有：缺运行时；运行时齐全但没模型：缺模型；都齐：解析出路径。
@@ -327,12 +368,17 @@ mod tests {
     fn resolve_progression() {
         let root = temp_root("resolve");
         let m = manifest().expect("清单");
-        assert_eq!(resolve_assets(&root, None, "small"), Err(OcrUnavailable::NoRuntime));
+        assert_eq!(
+            resolve_assets(&root, None, "small"),
+            Err(OcrUnavailable::NoRuntime)
+        );
         fake_complete_dir(&runtime_dir(&root, &m.runtime), &m.runtime.files);
         let model = find_model(m, "small").expect("模型");
         assert_eq!(
             resolve_assets(&root, None, "small"),
-            Err(OcrUnavailable::NoModel { id: model.id.clone() })
+            Err(OcrUnavailable::NoModel {
+                id: model.id.clone()
+            })
         );
         fake_complete_dir(&model_dir(&root, model), &model.files);
         let assets = resolve_assets(&root, None, "small").expect("齐全");
@@ -368,9 +414,17 @@ mod tests {
         fake_complete_dir(&model_dir(&root, model), &model.files);
         let exe = root.join("custom-ocr.exe");
         std::fs::write(&exe, b"x").expect("写 exe");
-        assert_eq!(resolve_assets(&root, Some(&exe), "small").expect("齐全").exe, exe);
+        assert_eq!(
+            resolve_assets(&root, Some(&exe), "small")
+                .expect("齐全")
+                .exe,
+            exe
+        );
         let missing = root.join("missing.exe");
-        assert_eq!(resolve_assets(&root, Some(&missing), "small"), Err(OcrUnavailable::NoRuntime));
+        assert_eq!(
+            resolve_assets(&root, Some(&missing), "small"),
+            Err(OcrUnavailable::NoRuntime)
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -381,7 +435,14 @@ mod tests {
         assert!(OcrUnavailable::NoModel { id: "m".into() }.can_download());
         assert!(!OcrUnavailable::UnknownModel("x".into()).can_download());
         assert!(!OcrUnavailable::Manifest("e".into()).can_download());
-        assert!(OcrUnavailable::NoRuntime.message().contains("运行时"));
-        assert!(OcrUnavailable::NoModel { id: "m1".into() }.message().contains("m1"));
+        let zh = crate::ocr_backend::i18n_for("zh-CN");
+        let en = crate::ocr_backend::i18n_for("en-US");
+        assert!(OcrUnavailable::NoRuntime.message(zh).contains("运行时"));
+        assert!(OcrUnavailable::NoRuntime.message(en).is_ascii());
+        assert!(
+            OcrUnavailable::NoModel { id: "m1".into() }
+                .message(en)
+                .contains("m1")
+        );
     }
 }

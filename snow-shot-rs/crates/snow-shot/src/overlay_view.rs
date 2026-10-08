@@ -18,41 +18,41 @@ use crate::history_store::{HistorySnapshot, HistorySource, LoadedEntry};
 use crate::ocr_client::OcrError;
 use crate::ocr_flow::{OcrUiState, panel_lines};
 use crate::ocr_service::OcrResult;
-use crate::translate_flow::{TranslateUiState, panel_lines as translate_panel_lines, stage_text};
-use crate::translate_service::{TranslateFlowError, TranslateOutcome, TranslateStage};
-use crate::overlay_probe::FrameProbe;
 use crate::overlay_keymap::{DrawingKey, OverlayKeyAction, OverlayKeymap};
+use crate::overlay_probe::FrameProbe;
 use crate::previous_selection::{PREVIOUS_SELECTION_KEY, SelectionStyle, decode, encode};
 use crate::region_select::{RegionDraft, RegionType};
-use snow_canvas_raster::region::{
-    PathCommand, RegionMask, RegionOp, RegionShape, flatten_commands, shape_commands,
-};
 use crate::screenshot_output::{
     self, ExportOverrides, ExportSettings, ManualSaveJob, SaveMode, SaveOutcome, home_directory,
 };
 use crate::settings_state::SharedConfig;
+use crate::translate_flow::{TranslateUiState, panel_lines as translate_panel_lines, stage_text};
+use crate::translate_service::{TranslateFlowError, TranslateOutcome, TranslateStage};
 use crate::window_pick::{
-    DRAG_THRESHOLD_LOGICAL, HighlightTransition, PickPath, PickTarget, SELECTION_TARGET_KEY, WindowHover,
-    exceeds_drag_threshold,
+    DRAG_THRESHOLD_LOGICAL, HighlightTransition, PickPath, PickTarget, SELECTION_TARGET_KEY,
+    WindowHover, exceeds_drag_threshold,
 };
 use image::{Frame, RgbaImage};
 use snow_app_core::command::SaveRequest;
 use snow_canvas_raster::TileKey;
+use snow_canvas_raster::region::{
+    PathCommand, RegionMask, RegionOp, RegionShape, flatten_commands, shape_commands,
+};
+use snow_canvas_text::{CanvasTextInput, CanvasTextStyle, EditKeyOutcome};
 use snow_config::store::ConfigStore;
 use snow_i18n::{Args, I18n};
-use snow_canvas_text::{CanvasTextInput, CanvasTextStyle, EditKeyOutcome};
-use snow_platform::text_raster::DEFAULT_FONT_FAMILY;
 use snow_platform::clipboard::{copy_image_to_clipboard, copy_text_to_clipboard};
+use snow_platform::text_raster::DEFAULT_FONT_FAMILY;
 use snow_ui::shell::geometry::{PhysicalPoint, PhysicalRect};
+use snow_ui::shell::selection::{
+    DEFAULT_EDGE_TOLERANCE, DEFAULT_HANDLE_SIZE, DEFAULT_MINIMUM_SELECTION_SIZE, SelectionDragMode,
+    SelectionState, dragged_selection_rect, handle_rects, hit_test_drag_mode,
+    marquee_selection_rect, selection_size_label,
+};
 use snow_ui::ui::component::checkbox::Checkbox;
 use snow_ui::ui::component::searchable_list::{SearchableListItem, SearchableVec};
 use snow_ui::ui::component::select::{Select, SelectEvent, SelectState};
 use snow_ui::ui::component::{IndexPath, Sizable, Size as ComponentSize, Theme, ThemeMode};
-use snow_ui::shell::selection::{
-    DEFAULT_EDGE_TOLERANCE, DEFAULT_HANDLE_SIZE, DEFAULT_MINIMUM_SELECTION_SIZE,
-    SelectionDragMode, SelectionState, dragged_selection_rect, handle_rects, hit_test_drag_mode,
-    marquee_selection_rect, selection_size_label,
-};
 use snow_ui::ui::*;
 use snow_ui::widgets::{
     AnnotationTool, ColorFormat, Magnifier, MagnifierGrid, ScreenshotToolbar, ToolbarAction,
@@ -245,6 +245,50 @@ fn color_setting(config: &ConfigStore, key: &str, default: u32) -> u32 {
         .unwrap_or(default)
 }
 
+/// 放大镜取色格式配置键。
+const COLOR_FORMAT_KEY: &str = "screenshot_ui/color_picker_format";
+/// 放大镜显示模式配置键。
+const COLOR_PICKER_MODE_KEY: &str = "screenshot_ui/color_picker_display_mode";
+/// 放大镜显示模式：始终隐藏。
+const COLOR_PICKER_ALWAYS_HIDE: &str = "always_hide";
+/// 调整选区方式配置键。
+const RESIZE_MODE_KEY: &str = "screenshot/selection_resize_mode";
+/// 调整选区方式：被抓的边跟随鼠标位置。
+const RESIZE_FOLLOW_POSITION: &str = "follow_mouse_position";
+
+/// 让被抓住的边（或角）直接落在鼠标所在像素：左 / 上边取该像素起点，右 / 下边取其终点。
+///
+/// # 参数
+/// - `mode`：抓住的手柄；非调整手柄原样返回。
+/// - `rect`：当前选区。
+/// - `point`：鼠标所在的底图像素。
+fn grab_adjusted_rect(
+    mode: SelectionDragMode,
+    rect: PhysicalRect,
+    point: PhysicalPoint,
+) -> PhysicalRect {
+    if !mode.is_resize() {
+        return rect;
+    }
+    let (mut left, mut top, mut right, mut bottom) = (rect.x, rect.y, rect.right(), rect.bottom());
+    match mode.horizontal_direction() {
+        -1 => left = point.x,
+        1 => right = point.x + 1,
+        _ => {}
+    }
+    match mode.vertical_direction() {
+        -1 => top = point.y,
+        1 => bottom = point.y + 1,
+        _ => {}
+    }
+    PhysicalRect::new(
+        left.min(right),
+        top.min(bottom),
+        (right - left).abs().max(1),
+        (bottom - top).abs().max(1),
+    )
+}
+
 /// 放大镜坐标显示模式的配置键。
 const COORDINATE_MODE_KEY: &str = "screenshot_ui/color_picker_coordinate_mode";
 /// 坐标显示模式：桌面全局坐标。
@@ -374,7 +418,12 @@ impl TileSprite {
     /// 图像资源；缓冲长度与尺寸不符返回 `None`。
     pub(crate) fn from_tile(tile: TileImage) -> Option<(TileKey, Self)> {
         let TileImage {
-            key, x, y, w, h, bgra,
+            key,
+            x,
+            y,
+            w,
+            h,
+            bgra,
         } = tile;
         // GPUI 的 RenderImage 约定缓冲为（预乘）BGRA，这里把 BGRA 字节直接装进 RgbaImage 容器
         let buffer = RgbaImage::from_raw(w, h, bgra)?;
@@ -455,7 +504,7 @@ pub trait OutputSink {
     /// # 参数
     /// - `url`：http / https 链接。
     fn open_url(&mut self, _url: &str) -> Result<(), String> {
-        Err("打开链接功能未接入".to_string())
+        Err("opening links is not wired up".to_string())
     }
 
     /// 把 RGBA 图像快速保存为文件（按配置的目录 / 文件名 / 格式），返回写入的路径。
@@ -504,7 +553,7 @@ pub trait OutputSink {
     /// # 参数
     /// - `region`：选区（覆盖窗底图坐标，原点为该显示器左上角）。
     fn start_recording(&mut self, _region: PhysicalRect) -> Result<(), String> {
-        Err("录屏功能未接入".to_string())
+        Err("recording is not wired up".to_string())
     }
 
     /// 把选区（含标注合成结果）贴到屏幕上；默认不支持。
@@ -520,7 +569,7 @@ pub trait OutputSink {
         _height: u32,
         _rgba: Vec<u8>,
     ) -> Result<(), String> {
-        Err("贴图功能未接入".to_string())
+        Err("pinning is not wired up".to_string())
     }
 
     /// 对选区图像发起文字识别（异步：结果稍后经 [`ScreenshotOverlayView::finish_ocr`] 回来）；默认不支持。
@@ -529,21 +578,30 @@ pub trait OutputSink {
     /// - `serial`：本次请求序号，回传结果时原样带回（过期结果据此丢弃）。
     /// - `width` / `height`：图像尺寸。
     /// - `rgba`：选区（含标注合成）的 RGBA 像素。
-    fn start_ocr(&mut self, _serial: u64, _width: u32, _height: u32, _rgba: Vec<u8>) -> Result<(), String> {
-        Err("文字识别功能未接入".to_string())
+    fn start_ocr(
+        &mut self,
+        _serial: u64,
+        _width: u32,
+        _height: u32,
+        _rgba: Vec<u8>,
+    ) -> Result<(), String> {
+        Err("text recognition is not wired up".to_string())
     }
 
     /// 触发 OCR 组件下载（异步）；默认不支持。
     fn start_ocr_download(&mut self) -> Result<(), String> {
-        Err("OCR 下载功能未接入".to_string())
+        Err("OCR download is not wired up".to_string())
     }
 
     /// 打开文字识别结果窗（图片 + 文字块 + 可编辑全文）；默认不支持。
     ///
     /// # 参数
     /// - `data`：结果窗需要的图片、全文与文字块。
-    fn open_recognition_window(&mut self, _data: crate::recognition_view::RecognitionData) -> Result<(), String> {
-        Err("识别结果窗未接入".to_string())
+    fn open_recognition_window(
+        &mut self,
+        _data: crate::recognition_view::RecognitionData,
+    ) -> Result<(), String> {
+        Err("the recognition window is not wired up".to_string())
     }
 
     /// 对选区图像发起“识别 + 翻译”（异步：结果稍后经 [`ScreenshotOverlayView::finish_translate`] 回来）；默认不支持。
@@ -552,13 +610,19 @@ pub trait OutputSink {
     /// - `serial`：本次请求序号，回传结果时原样带回（过期结果据此丢弃）。
     /// - `width` / `height`：图像尺寸。
     /// - `rgba`：选区（含标注合成）的 RGBA 像素。
-    fn start_translate(&mut self, _serial: u64, _width: u32, _height: u32, _rgba: Vec<u8>) -> Result<(), String> {
-        Err("文字翻译功能未接入".to_string())
+    fn start_translate(
+        &mut self,
+        _serial: u64,
+        _width: u32,
+        _height: u32,
+        _rgba: Vec<u8>,
+    ) -> Result<(), String> {
+        Err("text translation is not wired up".to_string())
     }
 
     /// 触发 onnxruntime 运行时下载（异步）；默认不支持。
     fn start_translate_download(&mut self) -> Result<(), String> {
-        Err("翻译运行时下载功能未接入".to_string())
+        Err("translation runtime download is not wired up".to_string())
     }
 
     /// 以选区（底图物理坐标）启动长截图；默认不支持。
@@ -566,7 +630,7 @@ pub trait OutputSink {
     /// # 参数
     /// - `region`：选区（覆盖窗底图坐标，原点为该显示器左上角）。
     fn start_scroll_capture(&mut self, _region: PhysicalRect) -> Result<(), String> {
-        Err("长截图功能未接入".to_string())
+        Err("scrolling capture is not wired up".to_string())
     }
 }
 
@@ -633,7 +697,10 @@ impl SystemOutput {
     ///
     /// # 参数
     /// - `callback`：接收来源、图像尺寸与 RGBA 像素。
-    pub fn with_history(mut self, callback: impl Fn(HistorySource, u32, u32, &[u8]) + 'static) -> Self {
+    pub fn with_history(
+        mut self,
+        callback: impl Fn(HistorySource, u32, u32, &[u8]) + 'static,
+    ) -> Self {
         self.on_history = Some(Box::new(callback));
         self
     }
@@ -732,7 +799,10 @@ impl SystemOutput {
     ///
     /// # 参数
     /// - `callback`：接收选区（覆盖窗底图坐标）、图像尺寸与不透明 RGBA 像素。
-    pub fn with_pin(mut self, callback: impl Fn(PhysicalRect, u32, u32, Vec<u8>) + 'static) -> Self {
+    pub fn with_pin(
+        mut self,
+        callback: impl Fn(PhysicalRect, u32, u32, Vec<u8>) + 'static,
+    ) -> Self {
         self.on_pin = Some(Box::new(callback));
         self
     }
@@ -854,7 +924,9 @@ impl OutputSink for SystemOutput {
             snow_platform::local_time::now(),
         ) {
             Ok(path) => tracing::info!(path = %path.display(), "复制后已自动保存"),
-            Err(e) => tracing::warn!(error = %e, message = %e.auto_message(&locale), "复制后自动保存失败"),
+            Err(e) => {
+                tracing::warn!(error = %e, message = %e.auto_message(&locale), "复制后自动保存失败")
+            }
         }
     }
 
@@ -870,7 +942,7 @@ impl OutputSink for SystemOutput {
                 callback(region);
                 Ok(())
             }
-            None => Err("录屏功能未接入".to_string()),
+            None => Err("recording is not wired up".to_string()),
         }
     }
 
@@ -888,29 +960,38 @@ impl OutputSink for SystemOutput {
                 callback(region, width, height, rgba);
                 Ok(())
             }
-            None => Err("贴图功能未接入".to_string()),
+            None => Err("pinning is not wired up".to_string()),
         }
     }
 
     /// 触发文字识别回调；未设置回调时报错。
-    fn start_ocr(&mut self, serial: u64, width: u32, height: u32, rgba: Vec<u8>) -> Result<(), String> {
+    fn start_ocr(
+        &mut self,
+        serial: u64,
+        width: u32,
+        height: u32,
+        rgba: Vec<u8>,
+    ) -> Result<(), String> {
         match &self.on_ocr {
             Some(callback) => {
                 callback(serial, width, height, rgba);
                 Ok(())
             }
-            None => Err("文字识别功能未接入".to_string()),
+            None => Err("text recognition is not wired up".to_string()),
         }
     }
 
     /// 触发打开识别结果窗回调；未设置回调时报错。
-    fn open_recognition_window(&mut self, data: crate::recognition_view::RecognitionData) -> Result<(), String> {
+    fn open_recognition_window(
+        &mut self,
+        data: crate::recognition_view::RecognitionData,
+    ) -> Result<(), String> {
         match &self.on_recognition_window {
             Some(callback) => {
                 callback(data);
                 Ok(())
             }
-            None => Err("识别结果窗未接入".to_string()),
+            None => Err("the recognition window is not wired up".to_string()),
         }
     }
 
@@ -921,18 +1002,24 @@ impl OutputSink for SystemOutput {
                 callback();
                 Ok(())
             }
-            None => Err("OCR 下载功能未接入".to_string()),
+            None => Err("OCR download is not wired up".to_string()),
         }
     }
 
     /// 触发文字翻译回调；未设置回调时报错。
-    fn start_translate(&mut self, serial: u64, width: u32, height: u32, rgba: Vec<u8>) -> Result<(), String> {
+    fn start_translate(
+        &mut self,
+        serial: u64,
+        width: u32,
+        height: u32,
+        rgba: Vec<u8>,
+    ) -> Result<(), String> {
         match &self.on_translate {
             Some(callback) => {
                 callback(serial, width, height, rgba);
                 Ok(())
             }
-            None => Err("文字翻译功能未接入".to_string()),
+            None => Err("text translation is not wired up".to_string()),
         }
     }
 
@@ -943,7 +1030,7 @@ impl OutputSink for SystemOutput {
                 callback();
                 Ok(())
             }
-            None => Err("翻译运行时下载功能未接入".to_string()),
+            None => Err("translation runtime download is not wired up".to_string()),
         }
     }
 
@@ -954,7 +1041,7 @@ impl OutputSink for SystemOutput {
                 callback(region);
                 Ok(())
             }
-            None => Err("长截图功能未接入".to_string()),
+            None => Err("scrolling capture is not wired up".to_string()),
         }
     }
 }
@@ -987,7 +1074,12 @@ pub fn cursor_for_mode(mode: SelectionDragMode, dragging: bool) -> CursorStyle {
 /// 把物理像素矩形按缩放比换算成逻辑像素矩形（四舍五入到整数，供避让计算）。
 fn logical_rect(rect: PhysicalRect, scale: f32) -> PhysicalRect {
     let l = |v: i32| (v as f32 / scale).round() as i32;
-    PhysicalRect::new(l(rect.x), l(rect.y), l(rect.width).max(1), l(rect.height).max(1))
+    PhysicalRect::new(
+        l(rect.x),
+        l(rect.y),
+        l(rect.width).max(1),
+        l(rect.height).max(1),
+    )
 }
 
 /// 截图覆盖窗主视图组件。
@@ -1032,6 +1124,10 @@ pub struct ScreenshotOverlayView {
     mask_color: u32,
     /// 选区尺寸标签是否用逻辑像素显示。
     logical_size_label: bool,
+    /// 放大镜是否被配置为始终隐藏。
+    magnifier_hidden: bool,
+    /// 调整选区时是否让被抓的边直接跟随鼠标位置（而非跟随位移）。
+    resize_follow_position: bool,
     /// 按住「移动整个选区」键：框选拖动变成平移。
     move_held: bool,
     /// 按住 Shift（且已绑定「保持宽高一致」）：框选保持正方形、调整选区保持原宽高比。
@@ -1152,7 +1248,11 @@ impl ScreenshotOverlayView {
         output: Box<dyn OutputSink>,
     ) -> Self {
         let screen_bounds = frame.bounds();
-        let scale = if scale.is_finite() && scale > 0.0 { scale } else { 1.0 };
+        let scale = if scale.is_finite() && scale > 0.0 {
+            scale
+        } else {
+            1.0
+        };
         let (frame_w, frame_h) = frame.size();
         let annotations = match AnnotationLayer::new(frame_w, frame_h, scale) {
             Ok(layer) => Some(layer),
@@ -1183,6 +1283,8 @@ impl ScreenshotOverlayView {
             border_color: (ACCENT_COLOR << 8) | 0xFF,
             mask_color: MASK_COLOR,
             logical_size_label: false,
+            magnifier_hidden: false,
+            resize_follow_position: false,
             move_held: false,
             keep_ratio: false,
             recapture: Rc::new(Cell::new(false)),
@@ -1266,7 +1368,12 @@ impl ScreenshotOverlayView {
     /// ```ignore
     /// view.set_window_hover(Some(Box::new(picker)), PickTarget::WindowSubElement, true);
     /// ```
-    pub fn set_window_hover(&mut self, source: Option<Box<dyn WindowHover>>, target: PickTarget, animate: bool) {
+    pub fn set_window_hover(
+        &mut self,
+        source: Option<Box<dyn WindowHover>>,
+        target: PickTarget,
+        animate: bool,
+    ) {
         self.window_hover = source;
         self.pick = PickPath::new(target);
         self.highlight_transition = HighlightTransition::new(animate);
@@ -1294,7 +1401,8 @@ impl ScreenshotOverlayView {
         };
         match source.hover(point, self.pick.target()) {
             Some(path) => {
-                self.pick.apply_hit_path(&path, bounds, DEFAULT_MINIMUM_SELECTION_SIZE);
+                self.pick
+                    .apply_hit_path(&path, bounds, DEFAULT_MINIMUM_SELECTION_SIZE);
             }
             None => self.pick.clear(),
         }
@@ -1310,7 +1418,8 @@ impl ScreenshotOverlayView {
         let Some(refined) = self.window_hover.as_mut().and_then(|s| s.refinement()) else {
             return false;
         };
-        self.pick.apply_refinement(&refined, bounds, DEFAULT_MINIMUM_SELECTION_SIZE)
+        self.pick
+            .apply_refinement(&refined, bounds, DEFAULT_MINIMUM_SELECTION_SIZE)
     }
 
     /// 渲染前轮询后台细化：空闲时吸收新路径，并在细化仍在进行时返回 `true`，让调用方继续请求下一帧。
@@ -1321,7 +1430,9 @@ impl ScreenshotOverlayView {
         if self.state == SelectionState::Idle {
             self.absorb_refinement();
         }
-        self.window_hover.as_ref().is_some_and(|s| s.refinement_pending())
+        self.window_hover
+            .as_ref()
+            .is_some_and(|s| s.refinement_pending())
     }
 
     /// 滚轮切换智能选区层级：向上（`lines_y > 0`）向外，向下向内；仅空闲且开启智能选区时生效。
@@ -1371,7 +1482,8 @@ impl ScreenshotOverlayView {
             return;
         };
         let mut store = config.borrow_mut();
-        if let Err(e) = store.set_value(SELECTION_TARGET_KEY, serde_json::json!(target.as_config())) {
+        if let Err(e) = store.set_value(SELECTION_TARGET_KEY, serde_json::json!(target.as_config()))
+        {
             tracing::warn!(error = %e, "写入选区目标配置失败");
             return;
         }
@@ -1454,7 +1566,9 @@ impl ScreenshotOverlayView {
     /// let p = view.canvas_point(1, point(px(30.0), px(40.0)));
     /// ```
     pub fn canvas_point(&self, index: usize, logical: Point<Pixels>) -> PhysicalPoint {
-        let origin = self.frame.rect(index.min(self.frame.count().saturating_sub(1)));
+        let origin = self
+            .frame
+            .rect(index.min(self.frame.count().saturating_sub(1)));
         self.clamp_point(PhysicalPoint::new(
             origin.x + (logical.x.as_f32() * self.scale).round() as i32,
             origin.y + (logical.y.as_f32() * self.scale).round() as i32,
@@ -1467,7 +1581,12 @@ impl ScreenshotOverlayView {
             return false;
         };
         (0..self.frame.count())
-            .filter(|&i| self.frame.rect(i).intersect(&selection).is_some_and(|r| !r.is_empty()))
+            .filter(|&i| {
+                self.frame
+                    .rect(i)
+                    .intersect(&selection)
+                    .is_some_and(|r| !r.is_empty())
+            })
             .count()
             > 1
     }
@@ -1504,7 +1623,11 @@ impl ScreenshotOverlayView {
     /// ```ignore
     /// view.handle_mouse_down(PhysicalPoint::new(100, 100), 1);
     /// ```
-    pub fn handle_mouse_down(&mut self, point: PhysicalPoint, click_count: usize) -> OverlayOutcome {
+    pub fn handle_mouse_down(
+        &mut self,
+        point: PhysicalPoint,
+        click_count: usize,
+    ) -> OverlayOutcome {
         let point = self.clamp_point(point);
         self.cursor_pos = point;
         match self.state {
@@ -1556,9 +1679,14 @@ impl ScreenshotOverlayView {
                         current: point,
                     }
                 } else {
+                    let origin_rect = if self.resize_follow_position {
+                        grab_adjusted_rect(mode, rect, point)
+                    } else {
+                        rect
+                    };
                     SelectionState::Reshaping {
                         mode,
-                        origin_rect: rect,
+                        origin_rect,
                         origin_pos: point,
                         current_pos: point,
                     }
@@ -1588,11 +1716,16 @@ impl ScreenshotOverlayView {
                 let dx = point.x - previous.x;
                 let dy = point.y - previous.y;
                 let start = self.clamp_point(PhysicalPoint::new(start.x + dx, start.y + dy));
-                self.state = SelectionState::MarqueeDragging { start, current: point };
+                self.state = SelectionState::MarqueeDragging {
+                    start,
+                    current: point,
+                };
             }
             SelectionState::MarqueeDragging { start, .. } => {
                 let point = self.constrained_end(start, point);
-                if self.click_window.is_some() && exceeds_drag_threshold(start, point, self.drag_threshold()) {
+                if self.click_window.is_some()
+                    && exceeds_drag_threshold(start, point, self.drag_threshold())
+                {
                     // 位移超过阈值：放弃窗口选区，转为手动框选
                     self.click_window = None;
                     self.pick.clear();
@@ -1773,7 +1906,13 @@ impl ScreenshotOverlayView {
     ///
     /// # 返回
     /// 窗口去向。Enter 固定为确认（复制 / 录屏 / 长截图）；Ctrl+Shift+Z 固定为重做；其余按键位表。
-    pub fn handle_keystroke(&mut self, key: &str, control: bool, shift: bool, alt: bool) -> OverlayOutcome {
+    pub fn handle_keystroke(
+        &mut self,
+        key: &str,
+        control: bool,
+        shift: bool,
+        alt: bool,
+    ) -> OverlayOutcome {
         match (key, control) {
             ("enter", _) if self.region_draft.is_some() => {
                 self.finish_region_draft();
@@ -1789,22 +1928,43 @@ impl ScreenshotOverlayView {
                 self.cycle_region_type(shift);
                 OverlayOutcome::Stay
             }
-            ("e", false) if matches!(self.ocr, OcrUiState::Done { ref text, .. } if !text.is_empty()) => {
+            ("e", false) if matches!(self.ocr, OcrUiState::Done { ref text, .. } if !text.is_empty()) =>
+            {
                 self.open_recognition_window();
                 OverlayOutcome::Stay
             }
-            ("o", false) if self.qr_link.is_some() && matches!(self.ocr, OcrUiState::Done { .. }) => {
+            ("o", false)
+                if self.qr_link.is_some() && matches!(self.ocr, OcrUiState::Done { .. }) =>
+            {
                 self.open_qr_link()
             }
-            ("enter", _) if matches!(self.ocr, OcrUiState::Done { .. }) => self.copy_ocr_text_and_close(),
+            ("enter", _) if matches!(self.ocr, OcrUiState::Done { .. }) => {
+                self.copy_ocr_text_and_close()
+            }
             ("enter", _) if matches!(self.translate, TranslateUiState::Done { .. }) => {
                 self.copy_translation_and_close()
             }
-            ("d", false) if matches!(self.translate, TranslateUiState::Failed { can_download: true, .. }) => {
+            ("d", false)
+                if matches!(
+                    self.translate,
+                    TranslateUiState::Failed {
+                        can_download: true,
+                        ..
+                    }
+                ) =>
+            {
                 self.start_translate_download();
                 OverlayOutcome::Stay
             }
-            ("d", false) if matches!(self.ocr, OcrUiState::Failed { can_download: true, .. }) => {
+            ("d", false)
+                if matches!(
+                    self.ocr,
+                    OcrUiState::Failed {
+                        can_download: true,
+                        ..
+                    }
+                ) =>
+            {
                 self.start_ocr_download();
                 OverlayOutcome::Stay
             }
@@ -1856,7 +2016,9 @@ impl ScreenshotOverlayView {
             OverlayKeyAction::VideoRecording => self.apply_action(ToolbarAction::Record),
             OverlayKeyAction::TextRecognition => self.apply_action(ToolbarAction::Ocr),
             OverlayKeyAction::TextTranslation => self.apply_action(ToolbarAction::Translate),
-            OverlayKeyAction::ScrollingScreenshot => self.apply_action(ToolbarAction::ScrollCapture),
+            OverlayKeyAction::ScrollingScreenshot => {
+                self.apply_action(ToolbarAction::ScrollCapture)
+            }
             OverlayKeyAction::Undo => {
                 self.undo_annotation();
                 OverlayOutcome::Stay
@@ -1875,11 +2037,16 @@ impl ScreenshotOverlayView {
                 }
                 OverlayOutcome::Stay
             }
-            OverlayKeyAction::Tool(tool) if tools_ready && !selecting_mode => self.apply_drawing_key(tool),
+            OverlayKeyAction::Tool(tool) if tools_ready && !selecting_mode => {
+                self.apply_drawing_key(tool)
+            }
             OverlayKeyAction::MoveTool | OverlayKeyAction::Tool(_) => OverlayOutcome::Stay,
             OverlayKeyAction::MoveCursor(dir) => {
                 let (dx, dy) = dir.delta();
-                self.cursor_pos = self.clamp_point(PhysicalPoint::new(self.cursor_pos.x + dx, self.cursor_pos.y + dy));
+                self.cursor_pos = self.clamp_point(PhysicalPoint::new(
+                    self.cursor_pos.x + dx,
+                    self.cursor_pos.y + dy,
+                ));
                 OverlayOutcome::Stay
             }
             OverlayKeyAction::PreviousHistory => {
@@ -1936,7 +2103,9 @@ impl ScreenshotOverlayView {
             DrawingKey::SerialNumber => AnnotationTool::Counter,
             DrawingKey::Filter => AnnotationTool::Mosaic,
             DrawingKey::Eraser => AnnotationTool::Eraser,
-            DrawingKey::Watermark => return self.not_implemented_outcome("drawing_shortcuts/watermark"),
+            DrawingKey::Watermark => {
+                return self.not_implemented_outcome("drawing_shortcuts/watermark");
+            }
         };
         // 再按同一个键不取消工具（与点工具栏不同），只在工具变化时切换
         if tool == self.tool {
@@ -1955,7 +2124,10 @@ impl ScreenshotOverlayView {
     /// # 参数
     /// - `config_key`：键位的配置键（取设置页里的动作名）。
     fn show_not_implemented(&mut self, config_key: &str) {
-        let name = crate::settings_text::item_label(crate::settings_text::Lang::new(&self.locale), config_key);
+        let name = crate::settings_text::item_label(
+            crate::settings_text::Lang::new(&self.locale),
+            config_key,
+        );
         self.status_message = Some(crate::ocr_backend::i18n_for(&self.locale).tr_with(
             "overlay-key-not-implemented",
             &snow_i18n::Args::new().named("action", name),
@@ -2027,7 +2199,11 @@ impl ScreenshotOverlayView {
     /// # 参数
     /// - `tool`：工具栏点击的工具；与当前相同则回到无工具状态。
     pub fn select_tool(&mut self, tool: AnnotationTool) {
-        let next = if tool == self.tool { AnnotationTool::None } else { tool };
+        let next = if tool == self.tool {
+            AnnotationTool::None
+        } else {
+            tool
+        };
         let Some(layer) = self.annotations.as_mut() else {
             self.status_message = Some(self.i18n.tr("overlay-msg-annotation-unavailable"));
             return;
@@ -2040,7 +2216,10 @@ impl ScreenshotOverlayView {
             }
             Err(e) => {
                 tracing::error!(error = %e, tool = ?next, "切换标注工具失败");
-                self.status_message = Some(self.i18n.tr_with("overlay-msg-switch-tool-failed", &Args::new().arg(1, e.to_string())));
+                self.status_message = Some(self.i18n.tr_with(
+                    "overlay-msg-switch-tool-failed",
+                    &Args::new().arg(1, e.to_string()),
+                ));
             }
         }
     }
@@ -2056,17 +2235,36 @@ impl ScreenshotOverlayView {
     /// ```
     pub fn set_style_config(&mut self, config: Rc<RefCell<ConfigStore>>, locale: &str) {
         self.styles = ToolStyleStore::load(|key| config.borrow().value(key));
-        self.coordinate_global = config.borrow().value(COORDINATE_MODE_KEY).as_str() != Some(COORDINATE_MODE_RELATIVE);
+        self.coordinate_global =
+            config.borrow().value(COORDINATE_MODE_KEY).as_str() != Some(COORDINATE_MODE_RELATIVE);
         {
             let store = config.borrow();
             let action = |key: &str, default: ClickAction| {
-                store.value(key).as_str().and_then(ClickAction::parse).unwrap_or(default)
+                store
+                    .value(key)
+                    .as_str()
+                    .and_then(ClickAction::parse)
+                    .unwrap_or(default)
             };
             self.double_click_action = action(DOUBLE_CLICK_ACTION_KEY, ClickAction::Copy);
             self.middle_click_action = action(MIDDLE_CLICK_ACTION_KEY, ClickAction::Pin);
-            self.border_color = color_setting(&store, SELECTION_BORDER_COLOR_KEY, (ACCENT_COLOR << 8) | 0xFF);
+            self.border_color = color_setting(
+                &store,
+                SELECTION_BORDER_COLOR_KEY,
+                (ACCENT_COLOR << 8) | 0xFF,
+            );
             self.mask_color = color_setting(&store, SELECTION_MASK_COLOR_KEY, MASK_COLOR);
-            self.logical_size_label = store.value(SELECTION_UNIT_KEY).as_str() == Some(SELECTION_UNIT_LOGICAL);
+            self.logical_size_label =
+                store.value(SELECTION_UNIT_KEY).as_str() == Some(SELECTION_UNIT_LOGICAL);
+            self.color_format = store
+                .value(COLOR_FORMAT_KEY)
+                .as_str()
+                .and_then(ColorFormat::parse)
+                .unwrap_or_default();
+            self.magnifier_hidden =
+                store.value(COLOR_PICKER_MODE_KEY).as_str() == Some(COLOR_PICKER_ALWAYS_HIDE);
+            self.resize_follow_position =
+                store.value(RESIZE_MODE_KEY).as_str() == Some(RESIZE_FOLLOW_POSITION);
         }
         self.style_config = Some(config);
         self.i18n = crate::ocr_backend::i18n_for(locale);
@@ -2093,7 +2291,9 @@ impl ScreenshotOverlayView {
     /// # 参数
     /// - `key` / `control` / `shift` / `alt`：松开的按键与修饰键。
     pub fn handle_key_release(&mut self, key: &str, control: bool, shift: bool, alt: bool) {
-        if self.keymap.resolve(key, control, shift, alt) == Some(OverlayKeyAction::MoveEntireSelection) {
+        if self.keymap.resolve(key, control, shift, alt)
+            == Some(OverlayKeyAction::MoveEntireSelection)
+        {
             self.move_held = false;
         }
     }
@@ -2113,7 +2313,8 @@ impl ScreenshotOverlayView {
 
     /// 调整选区时要锁定的宽高比：按住 Shift 时取原选区宽高比，否则不锁。
     fn locked_ratio(&self, origin: PhysicalRect) -> Option<f64> {
-        (self.keep_ratio && origin.height > 0).then(|| f64::from(origin.width) / f64::from(origin.height))
+        (self.keep_ratio && origin.height > 0)
+            .then(|| f64::from(origin.width) / f64::from(origin.height))
     }
 
     /// 「重新截图」请求标志：关闭回调读取后清零，为真时再发起一次截图。
@@ -2124,7 +2325,11 @@ impl ScreenshotOverlayView {
     /// 切换放大镜坐标显示模式（全局 / 相对）并写回配置。
     fn toggle_coordinate_mode(&mut self) {
         self.coordinate_global = !self.coordinate_global;
-        let value = if self.coordinate_global { COORDINATE_MODE_GLOBAL } else { COORDINATE_MODE_RELATIVE };
+        let value = if self.coordinate_global {
+            COORDINATE_MODE_GLOBAL
+        } else {
+            COORDINATE_MODE_RELATIVE
+        };
         if let Some(config) = self.config_handle() {
             let mut store = config.borrow_mut();
             if let Err(e) = store.set_value(COORDINATE_MODE_KEY, serde_json::json!(value)) {
@@ -2197,7 +2402,10 @@ impl ScreenshotOverlayView {
             .iter()
             .map(|v| StyleItem {
                 value: v.to_string(),
-                label: self.i18n.tr_with("annot-size-px", &Args::new().arg(1, v)).into(),
+                label: self
+                    .i18n
+                    .tr_with("annot-size-px", &Args::new().arg(1, v))
+                    .into(),
             })
             .collect()
     }
@@ -2237,8 +2445,13 @@ impl ScreenshotOverlayView {
             made.push(state);
         }
         let mut made = made.into_iter();
-        if let (Some(width), Some(font), Some(arrowhead)) = (made.next(), made.next(), made.next()) {
-            self.style_ui = Some(StyleUi { width, font, arrowhead });
+        if let (Some(width), Some(font), Some(arrowhead)) = (made.next(), made.next(), made.next())
+        {
+            self.style_ui = Some(StyleUi {
+                width,
+                font,
+                arrowhead,
+            });
         }
         self.sync_style_selects(window, cx);
     }
@@ -2252,15 +2465,26 @@ impl ScreenshotOverlayView {
         let pick = |index: usize| Some(IndexPath::default().row(index));
         let width = pick(nearest_index(&WIDTH_PRESETS, style.width));
         let font = pick(nearest_index(&FONT_PRESETS, style.font_size));
-        let head = ArrowheadChoice::ALL.iter().position(|c| *c == style.arrowhead);
-        ui.width.update(cx, |s, cx| s.set_selected_index(width, window, cx));
-        ui.font.update(cx, |s, cx| s.set_selected_index(font, window, cx));
-        ui.arrowhead
-            .update(cx, |s, cx| s.set_selected_index(head.and_then(pick), window, cx));
+        let head = ArrowheadChoice::ALL
+            .iter()
+            .position(|c| *c == style.arrowhead);
+        ui.width
+            .update(cx, |s, cx| s.set_selected_index(width, window, cx));
+        ui.font
+            .update(cx, |s, cx| s.set_selected_index(font, window, cx));
+        ui.arrowhead.update(cx, |s, cx| {
+            s.set_selected_index(head.and_then(pick), window, cx)
+        });
     }
 
     /// 样式下拉选中：先提交进行中的文字输入，再改当前工具样式。
-    fn on_style_select(&mut self, kind: StyleSelectKind, value: &str, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_style_select(
+        &mut self,
+        kind: StyleSelectKind,
+        value: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.commit_text_edit(window, cx);
         let tool = self.tool;
         match kind {
@@ -2300,7 +2524,13 @@ impl ScreenshotOverlayView {
     }
 
     /// 一排可点击的色块；当前色带高亮边框。
-    fn swatch_row(&self, id: &'static str, colors: &[Rgba], current: Rgba, cx: &mut Context<Self>) -> Div {
+    fn swatch_row(
+        &self,
+        id: &'static str,
+        colors: &[Rgba],
+        current: Rgba,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let mut row = div().flex().flex_row().items_center().gap_1();
         for (index, color) in colors.iter().copied().enumerate() {
             let picked = color == current;
@@ -2311,7 +2541,11 @@ impl ScreenshotOverlayView {
                     .rounded_sm()
                     .cursor_pointer()
                     .border_1()
-                    .border_color(if picked { rgb(0xFFFFFF) } else { rgba(0xFFFFFF40) })
+                    .border_color(if picked {
+                        rgb(0xFFFFFF)
+                    } else {
+                        rgba(0xFFFFFF40)
+                    })
                     .bg(rgba(u32::from_be_bytes(color)))
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                         this.on_style_color(color, window, cx);
@@ -2342,7 +2576,10 @@ impl ScreenshotOverlayView {
             || self.text_edit.is_some()
             || self.ocr.is_visible()
             || self.translate.is_visible()
-            || self.history_host.as_ref().is_some_and(|h| h.nav.in_history())
+            || self
+                .history_host
+                .as_ref()
+                .is_some_and(|h| h.nav.in_history())
         {
             return None;
         }
@@ -2356,7 +2593,11 @@ impl ScreenshotOverlayView {
                 .text_xs()
                 .cursor(CursorStyle::PointingHand)
                 .text_color(rgba(0xFFFFFFFF))
-                .bg(if active { rgb(ACCENT_COLOR) } else { rgb(0x2B2B2B) })
+                .bg(if active {
+                    rgb(ACCENT_COLOR)
+                } else {
+                    rgb(0x2B2B2B)
+                })
                 .child(label)
         };
         let mut row = div()
@@ -2371,8 +2612,14 @@ impl ScreenshotOverlayView {
             .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation());
         if selected {
             for (op, id) in [
-                (RegionOp::Add, "screenshot-tool-palette-add-screenshot-region-4f7ae0d9"),
-                (RegionOp::Subtract, "screenshot-tool-palette-subtract-screenshot-region-c0df476a"),
+                (
+                    RegionOp::Add,
+                    "screenshot-tool-palette-add-screenshot-region-4f7ae0d9",
+                ),
+                (
+                    RegionOp::Subtract,
+                    "screenshot-tool-palette-subtract-screenshot-region-c0df476a",
+                ),
             ] {
                 row = row.child(button(i18n.tr(id).to_string(), false).on_mouse_down(
                     MouseButton::Left,
@@ -2385,23 +2632,43 @@ impl ScreenshotOverlayView {
             }
         }
         for (region_type, id) in [
-            (RegionType::Rectangle, "screenshot-tool-palette-rectangle-region-86f2b03d"),
-            (RegionType::Polyline, "screenshot-tool-palette-polyline-region-4f71de1a"),
-            (RegionType::Curve, "screenshot-tool-palette-curve-region-7a0abb9b"),
-            (RegionType::Freehand, "screenshot-tool-palette-freehand-region-c5a700ff"),
+            (
+                RegionType::Rectangle,
+                "screenshot-tool-palette-rectangle-region-86f2b03d",
+            ),
+            (
+                RegionType::Polyline,
+                "screenshot-tool-palette-polyline-region-4f71de1a",
+            ),
+            (
+                RegionType::Curve,
+                "screenshot-tool-palette-curve-region-7a0abb9b",
+            ),
+            (
+                RegionType::Freehand,
+                "screenshot-tool-palette-freehand-region-c5a700ff",
+            ),
         ] {
-            row = row.child(button(i18n.tr(id).to_string(), self.region_type == region_type).on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _: &MouseDownEvent, _window, cx| {
-                    this.switch_region_type(region_type);
-                    cx.stop_propagation();
-                    cx.notify();
-                }),
-            ));
+            row = row.child(
+                button(i18n.tr(id).to_string(), self.region_type == region_type).on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _: &MouseDownEvent, _window, cx| {
+                        this.switch_region_type(region_type);
+                        cx.stop_propagation();
+                        cx.notify();
+                    }),
+                ),
+            );
         }
         let (top, left) = match toolbar_pos {
-            Some(pos) if selected => ((pos.y as f32 - REGION_BAR_HEIGHT - 4.0).max(4.0), pos.x as f32),
-            _ => (monitor.1 + 8.0, monitor.0 + (monitor.2 / 2.0 - REGION_BAR_HALF_WIDTH).max(4.0)),
+            Some(pos) if selected => (
+                (pos.y as f32 - REGION_BAR_HEIGHT - 4.0).max(4.0),
+                pos.x as f32,
+            ),
+            _ => (
+                monitor.1 + 8.0,
+                monitor.0 + (monitor.2 / 2.0 - REGION_BAR_HALF_WIDTH).max(4.0),
+            ),
         };
         Some(row.top(px(top)).left(px(left)))
     }
@@ -2415,13 +2682,21 @@ impl ScreenshotOverlayView {
         let fields = style_fields(tool);
         let style = self.styles.style(tool);
         let i18n = self.i18n;
-        let label = move |id: &str| div().text_xs().text_color(rgba(STYLE_LABEL_COLOR)).child(i18n.tr(id));
+        let label = move |id: &str| {
+            div()
+                .text_xs()
+                .text_color(rgba(STYLE_LABEL_COLOR))
+                .child(i18n.tr(id))
+        };
         let select = |state: &Entity<StyleSelect>| {
-            div().w(px(STYLE_SELECT_WIDTH)).h(px(STYLE_SELECT_HEIGHT)).child(
-                Select::new(state)
-                    .with_size(ComponentSize::Small)
-                    .menu_max_h(px(STYLE_SELECT_MENU_MAX_HEIGHT)),
-            )
+            div()
+                .w(px(STYLE_SELECT_WIDTH))
+                .h(px(STYLE_SELECT_HEIGHT))
+                .child(
+                    Select::new(state)
+                        .with_size(ComponentSize::Small)
+                        .menu_max_h(px(STYLE_SELECT_MENU_MAX_HEIGHT)),
+                )
         };
         let mut panel = div()
             .absolute()
@@ -2455,13 +2730,19 @@ impl ScreenshotOverlayView {
         }
         if let Some(ui) = &self.style_ui {
             if fields.width {
-                panel = panel.child(label("annot-style-width")).child(select(&ui.width));
+                panel = panel
+                    .child(label("annot-style-width"))
+                    .child(select(&ui.width));
             }
             if fields.font_size {
-                panel = panel.child(label("annot-style-font-size")).child(select(&ui.font));
+                panel = panel
+                    .child(label("annot-style-font-size"))
+                    .child(select(&ui.font));
             }
             if fields.arrowhead {
-                panel = panel.child(label("annot-style-arrowhead")).child(select(&ui.arrowhead));
+                panel = panel
+                    .child(label("annot-style-arrowhead"))
+                    .child(select(&ui.arrowhead));
             }
         }
         if fields.fill {
@@ -2488,7 +2769,13 @@ impl ScreenshotOverlayView {
         if style_fields(self.tool).is_empty() || self.record_mode || self.scroll_mode {
             return None;
         }
-        Some(panel_placement(toolbar, TOOLBAR_LOGICAL_SIZE.1, STYLE_PANEL_SIZE, screen, STYLE_PANEL_GAP))
+        Some(panel_placement(
+            toolbar,
+            TOOLBAR_LOGICAL_SIZE.1,
+            STYLE_PANEL_SIZE,
+            screen,
+            STYLE_PANEL_GAP,
+        ))
     }
 
     /// 把选区限制后的点夹进选区矩形，返回浮点画布坐标。
@@ -2501,7 +2788,10 @@ impl ScreenshotOverlayView {
     /// 在标注层上执行一次操作并把增量更新装进预览分块。
     fn run_layer(
         &mut self,
-        op: impl FnOnce(&mut AnnotationLayer, crate::annotation::BaseView<'_>) -> Result<LayerUpdate, String>,
+        op: impl FnOnce(
+            &mut AnnotationLayer,
+            crate::annotation::BaseView<'_>,
+        ) -> Result<LayerUpdate, String>,
     ) {
         let Some(layer) = self.annotations.as_mut() else {
             return;
@@ -2513,7 +2803,10 @@ impl ScreenshotOverlayView {
             Ok(update) => self.install_update(update, compute),
             Err(e) => {
                 tracing::error!(error = %e, "标注层操作失败");
-                self.status_message = Some(self.i18n.tr_with("overlay-msg-annotate-failed", &Args::new().arg(1, e.to_string())));
+                self.status_message = Some(self.i18n.tr_with(
+                    "overlay-msg-annotate-failed",
+                    &Args::new().arg(1, e.to_string()),
+                ));
             }
         }
     }
@@ -2544,7 +2837,8 @@ impl ScreenshotOverlayView {
             }
         }
         if tiles > 0 || compute.as_micros() > 0 {
-            self.probe.record_annotation(compute, started.elapsed(), tiles, bytes);
+            self.probe
+                .record_annotation(compute, started.elapsed(), tiles, bytes);
         }
     }
 
@@ -2709,7 +3003,10 @@ impl ScreenshotOverlayView {
         if region_type == self.region_type
             || self.annotating
             || self.text_edit.is_some()
-            || !matches!(self.state, SelectionState::Idle | SelectionState::Selected { .. })
+            || !matches!(
+                self.state,
+                SelectionState::Idle | SelectionState::Selected { .. }
+            )
         {
             return false;
         }
@@ -2802,7 +3099,10 @@ impl ScreenshotOverlayView {
     /// # 返回
     /// 是否合成成功；结果为空或太小时丢弃操作数，操作仍保持进行。
     fn merge_region_operand(&mut self, commands: &[PathCommand]) -> bool {
-        let (Some(op), Some(base)) = (self.region_op.as_ref().map(|o| o.op), self.region_mask.as_ref()) else {
+        let (Some(op), Some(base)) = (
+            self.region_op.as_ref().map(|o| o.op),
+            self.region_mask.as_ref(),
+        ) else {
             return false;
         };
         let mut merged = base.clone();
@@ -2836,7 +3136,10 @@ impl ScreenshotOverlayView {
             return;
         };
         let mut store = config.borrow_mut();
-        if let Err(e) = store.set_value(REGION_TYPE_KEY, serde_json::json!(self.region_type.as_config())) {
+        if let Err(e) = store.set_value(
+            REGION_TYPE_KEY,
+            serde_json::json!(self.region_type.as_config()),
+        ) {
             tracing::warn!(error = %e, "写入选区形状配置失败");
             return;
         }
@@ -2852,7 +3155,9 @@ impl ScreenshotOverlayView {
         };
         let p = (point.x as f32, point.y as f32);
         self.pick.clear();
-        let draft = self.region_draft.get_or_insert_with(|| RegionDraft::new(shape));
+        let draft = self
+            .region_draft
+            .get_or_insert_with(|| RegionDraft::new(shape));
         if click_count >= DOUBLE_CLICK_COUNT {
             if draft.double_click(p) {
                 self.commit_region_draft();
@@ -2926,9 +3231,19 @@ impl ScreenshotOverlayView {
     /// 选区内某点对应的拖动模式：自定义区域只能整体移动（框内为移动，框外为无）。
     fn drag_mode_for(&self, rect: PhysicalRect, point: PhysicalPoint) -> SelectionDragMode {
         if self.region_mask.is_some() {
-            return if rect.contains(point) { SelectionDragMode::All } else { SelectionDragMode::None };
+            return if rect.contains(point) {
+                SelectionDragMode::All
+            } else {
+                SelectionDragMode::None
+            };
         }
-        hit_test_drag_mode(rect, point, false, self.edge_tolerance(), DEFAULT_MINIMUM_SELECTION_SIZE)
+        hit_test_drag_mode(
+            rect,
+            point,
+            false,
+            self.edge_tolerance(),
+            DEFAULT_MINIMUM_SELECTION_SIZE,
+        )
     }
 
     /// 接入截图历史翻页的数据来源。
@@ -2952,7 +3267,10 @@ impl ScreenshotOverlayView {
         self.history_host.is_some()
             && !self.annotating
             && self.text_edit.is_none()
-            && matches!(self.state, SelectionState::Idle | SelectionState::Selected { .. })
+            && matches!(
+                self.state,
+                SelectionState::Idle | SelectionState::Selected { .. }
+            )
     }
 
     /// 翻到更旧的一条截图历史。
@@ -3021,7 +3339,11 @@ impl ScreenshotOverlayView {
             return false;
         };
         let prepared = entry.and_then(|e| self.prepare_entry(e));
-        let outcome = if prepared.is_some() { LoadOutcome::Loaded } else { LoadOutcome::Failed };
+        let outcome = if prepared.is_some() {
+            LoadOutcome::Loaded
+        } else {
+            LoadOutcome::Failed
+        };
         let Some(host) = self.history_host.as_mut() else {
             return false;
         };
@@ -3045,8 +3367,12 @@ impl ScreenshotOverlayView {
             pixel.swap(0, 2);
         }
         // 历史里是整张画布；按当前各显示器的矩形切回每屏一帧
-        let rects: Vec<PhysicalRect> = (0..self.frame.count()).map(|i| self.frame.rect(i)).collect();
-        let frame = DesktopFrames::from_canvas_bgra(entry.frame_width, entry.frame_height, data, &rects).ok()?;
+        let rects: Vec<PhysicalRect> = (0..self.frame.count())
+            .map(|i| self.frame.rect(i))
+            .collect();
+        let frame =
+            DesktopFrames::from_canvas_bgra(entry.frame_width, entry.frame_height, data, &rects)
+                .ok()?;
         let (w, h) = frame.size();
         let annotations = match &entry.canvas_history[..] {
             [] | b"{}" => AnnotationLayer::new(w, h, self.scale).ok(),
@@ -3055,7 +3381,9 @@ impl ScreenshotOverlayView {
                 .ok(),
         };
         let (x, y, sw, sh) = entry.selection;
-        let selection = self.screen_bounds.intersect(&PhysicalRect::new(x, y, sw, sh))?;
+        let selection = self
+            .screen_bounds
+            .intersect(&PhysicalRect::new(x, y, sw, sh))?;
         Some(PreparedEntry {
             frame,
             annotations,
@@ -3195,11 +3523,19 @@ impl ScreenshotOverlayView {
         };
         let mut store = config.borrow_mut();
         let doc = store.document();
-        let int = |key: &str| doc.value(key).as_i64().and_then(|n| i32::try_from(n).ok()).unwrap_or(0);
+        let int = |key: &str| {
+            doc.value(key)
+                .as_i64()
+                .and_then(|n| i32::try_from(n).ok())
+                .unwrap_or(0)
+        };
         let style = SelectionStyle {
             corner_radius: int("screenshot_selection/corner_radius"),
             shadow_width: int("screenshot_selection/shadow_width"),
-            lock_aspect_ratio: doc.value("screenshot_selection/lock_aspect_ratio").as_bool().unwrap_or(false),
+            lock_aspect_ratio: doc
+                .value("screenshot_selection/lock_aspect_ratio")
+                .as_bool()
+                .unwrap_or(false),
         };
         let desktop = rect.translate(self.canvas_origin.x, self.canvas_origin.y);
         let value = encode(desktop, self.scale, style);
@@ -3221,17 +3557,28 @@ impl ScreenshotOverlayView {
     /// view.select_previous_selection();
     /// ```
     pub fn select_previous_selection(&mut self) -> bool {
-        if self.annotating || !matches!(self.state, SelectionState::Idle | SelectionState::Selected { .. }) {
+        if self.annotating
+            || !matches!(
+                self.state,
+                SelectionState::Idle | SelectionState::Selected { .. }
+            )
+        {
             return false;
         }
         let Some(config) = self.config_handle() else {
             return false;
         };
         let value = config.borrow().document().value(PREVIOUS_SELECTION_KEY);
-        let desktop_bounds = self.screen_bounds.translate(self.canvas_origin.x, self.canvas_origin.y);
-        let Some(rect) = decode(&value, self.scale, desktop_bounds, DEFAULT_MINIMUM_SELECTION_SIZE)
-            .map(|r| r.translate(-self.canvas_origin.x, -self.canvas_origin.y))
-        else {
+        let desktop_bounds = self
+            .screen_bounds
+            .translate(self.canvas_origin.x, self.canvas_origin.y);
+        let Some(rect) = decode(
+            &value,
+            self.scale,
+            desktop_bounds,
+            DEFAULT_MINIMUM_SELECTION_SIZE,
+        )
+        .map(|r| r.translate(-self.canvas_origin.x, -self.canvas_origin.y)) else {
             return false;
         };
         self.pick.clear();
@@ -3240,7 +3587,6 @@ impl ScreenshotOverlayView {
         self.state = SelectionState::Selected { rect };
         true
     }
-
 
     /// 复制选区到剪贴板；成功后关闭覆盖窗，失败保留窗口并提示。
     fn copy_selection_and_close(&mut self) -> OverlayOutcome {
@@ -3263,7 +3609,10 @@ impl ScreenshotOverlayView {
             }
             Err(e) => {
                 tracing::error!(error = %e, "复制截图到剪贴板失败");
-                self.status_message = Some(self.i18n.tr_with("overlay-msg-copy-failed", &Args::new().arg(1, e.to_string())));
+                self.status_message = Some(self.i18n.tr_with(
+                    "overlay-msg-copy-failed",
+                    &Args::new().arg(1, e.to_string()),
+                ));
                 OverlayOutcome::Stay
             }
         }
@@ -3296,7 +3645,11 @@ impl ScreenshotOverlayView {
     }
 
     /// 保存选区；`quick` 为真时跳过另存为对话框，直接按配置同步保存。
-    fn save_selection_inner(&mut self, request: Option<&SaveRequest>, quick: bool) -> OverlayOutcome {
+    fn save_selection_inner(
+        &mut self,
+        request: Option<&SaveRequest>,
+        quick: bool,
+    ) -> OverlayOutcome {
         if !self.has_committed_selection() {
             self.status_message = Some(self.i18n.tr("overlay-msg-select-area-first"));
             return OverlayOutcome::Stay;
@@ -3389,7 +3742,10 @@ impl ScreenshotOverlayView {
             }
             Err(e) => {
                 tracing::error!(error = %e, "贴图失败");
-                self.status_message = Some(self.i18n.tr_with("overlay-msg-pin-failed", &Args::new().arg(1, e.to_string())));
+                self.status_message = Some(
+                    self.i18n
+                        .tr_with("overlay-msg-pin-failed", &Args::new().arg(1, e.to_string())),
+                );
                 OverlayOutcome::Stay
             }
         }
@@ -3414,13 +3770,21 @@ impl ScreenshotOverlayView {
         self.ocr_serial += 1;
         match self.output.start_ocr(self.ocr_serial, w, h, rgba) {
             Ok(()) => {
-                tracing::info!(serial = self.ocr_serial, width = w, height = h, "已提交文字识别");
+                tracing::info!(
+                    serial = self.ocr_serial,
+                    width = w,
+                    height = h,
+                    "已提交文字识别"
+                );
                 self.set_ocr_state(OcrUiState::Running);
             }
             Err(e) => {
                 tracing::error!(error = %e, "提交文字识别失败");
                 self.set_ocr_state(OcrUiState::Failed {
-                    message: self.i18n.tr_with("overlay-msg-ocr-unavailable", &Args::new().arg(1, e.to_string())),
+                    message: self.i18n.tr_with(
+                        "overlay-msg-ocr-unavailable",
+                        &Args::new().arg(1, e.to_string()),
+                    ),
                     can_download: false,
                 });
             }
@@ -3452,13 +3816,24 @@ impl ScreenshotOverlayView {
             });
             return OverlayOutcome::Stay;
         }
-        let text = codes.join("
-");
+        let text = codes.join(
+            "
+",
+        );
         let copied = self.output.copy_text(&text).is_ok();
         tracing::info!(count = codes.len(), copied, "二维码识别完成");
-        let message = self.i18n.tr_with("overlay-msg-qr-found", &Args::new().arg(1, codes.len().to_string()));
-        let link = codes.iter().find_map(|code| snow_platform::shell::web_link(code));
-        self.set_ocr_state(OcrUiState::Done { text, boxes: Vec::new(), copied });
+        let message = self.i18n.tr_with(
+            "overlay-msg-qr-found",
+            &Args::new().arg(1, codes.len().to_string()),
+        );
+        let link = codes
+            .iter()
+            .find_map(|code| snow_platform::shell::web_link(code));
+        self.set_ocr_state(OcrUiState::Done {
+            text,
+            boxes: Vec::new(),
+            copied,
+        });
         self.qr_link = link;
         self.status_message = Some(message);
         OverlayOutcome::Stay
@@ -3476,7 +3851,10 @@ impl ScreenshotOverlayView {
             }
             Err(e) => {
                 tracing::warn!(error = %e, "打开二维码链接失败");
-                self.status_message = Some(self.i18n.tr_with("overlay-msg-open-link-failed", &Args::new().arg(1, e)));
+                self.status_message = Some(
+                    self.i18n
+                        .tr_with("overlay-msg-open-link-failed", &Args::new().arg(1, e)),
+                );
                 OverlayOutcome::Stay
             }
         }
@@ -3485,7 +3863,7 @@ impl ScreenshotOverlayView {
     /// 切换 OCR 状态，同时刷新底部状态条。
     fn set_ocr_state(&mut self, state: OcrUiState) {
         self.qr_link = None;
-        self.status_message = state.status_text();
+        self.status_message = state.status_text(self.i18n);
         self.ocr = state;
     }
 
@@ -3510,12 +3888,17 @@ impl ScreenshotOverlayView {
         let state = match result {
             Ok(r) => {
                 let copied = r.full_text.is_empty() || self.output.copy_text(&r.full_text).is_ok();
-                tracing::info!(lines = r.boxes.len(), elapsed_ms = r.elapsed_ms, copied, "文字识别完成");
+                tracing::info!(
+                    lines = r.boxes.len(),
+                    elapsed_ms = r.elapsed_ms,
+                    copied,
+                    "文字识别完成"
+                );
                 OcrUiState::from_result(&r, copied)
             }
             Err(e) => {
                 tracing::warn!(error = ?e, "文字识别失败");
-                OcrUiState::from_error(&e)
+                OcrUiState::from_error(&e, self.i18n)
             }
         };
         self.set_ocr_state(state);
@@ -3524,9 +3907,14 @@ impl ScreenshotOverlayView {
     /// 触发 OCR 组件下载（仅缺资产时可用）。
     fn start_ocr_download(&mut self) {
         match self.output.start_ocr_download() {
-            Ok(()) => self.set_ocr_state(OcrUiState::Downloading(self.i18n.tr("overlay-msg-ocr-download-preparing"))),
+            Ok(()) => self.set_ocr_state(OcrUiState::Downloading(
+                self.i18n.tr("overlay-msg-ocr-download-preparing"),
+            )),
             Err(e) => self.set_ocr_state(OcrUiState::Failed {
-                message: self.i18n.tr_with("overlay-msg-ocr-download-start-failed", &Args::new().arg(1, e.to_string())),
+                message: self.i18n.tr_with(
+                    "overlay-msg-ocr-download-start-failed",
+                    &Args::new().arg(1, e.to_string()),
+                ),
                 can_download: false,
             }),
         }
@@ -3556,7 +3944,10 @@ impl ScreenshotOverlayView {
                 self.status_message = Some(self.i18n.tr("overlay-msg-ocr-download-ready"));
             }
             Err(e) => self.set_ocr_state(OcrUiState::Failed {
-                message: self.i18n.tr_with("overlay-msg-ocr-download-failed", &Args::new().arg(1, e.to_string())),
+                message: self.i18n.tr_with(
+                    "overlay-msg-ocr-download-failed",
+                    &Args::new().arg(1, e.to_string()),
+                ),
                 can_download: true,
             }),
         }
@@ -3584,15 +3975,29 @@ impl ScreenshotOverlayView {
             return OverlayOutcome::Stay;
         };
         self.translate_serial += 1;
-        match self.output.start_translate(self.translate_serial, w, h, rgba) {
+        match self
+            .output
+            .start_translate(self.translate_serial, w, h, rgba)
+        {
             Ok(()) => {
-                tracing::info!(serial = self.translate_serial, width = w, height = h, "已提交文字翻译");
-                self.set_translate_state(TranslateUiState::Running(stage_text(TranslateStage::Recognizing).to_string()));
+                tracing::info!(
+                    serial = self.translate_serial,
+                    width = w,
+                    height = h,
+                    "已提交文字翻译"
+                );
+                self.set_translate_state(TranslateUiState::Running(stage_text(
+                    TranslateStage::Recognizing,
+                    self.i18n,
+                )));
             }
             Err(e) => {
                 tracing::error!(error = %e, "提交文字翻译失败");
                 self.set_translate_state(TranslateUiState::Failed {
-                    message: self.i18n.tr_with("overlay-msg-translate-unavailable", &Args::new().arg(1, e.to_string())),
+                    message: self.i18n.tr_with(
+                        "overlay-msg-translate-unavailable",
+                        &Args::new().arg(1, e.to_string()),
+                    ),
                     can_download: false,
                 });
             }
@@ -3602,7 +4007,7 @@ impl ScreenshotOverlayView {
 
     /// 切换翻译状态，同时刷新底部状态条。
     fn set_translate_state(&mut self, state: TranslateUiState) {
-        self.status_message = state.status_text();
+        self.status_message = state.status_text(self.i18n);
         self.translate = state;
     }
 
@@ -3619,8 +4024,9 @@ impl ScreenshotOverlayView {
     /// - `serial`：请求序号。
     /// - `stage`：当前阶段。
     pub fn update_translate_stage(&mut self, serial: u64, stage: TranslateStage) {
-        if serial == self.translate_serial && matches!(self.translate, TranslateUiState::Running(_)) {
-            self.set_translate_state(TranslateUiState::Running(stage_text(stage).to_string()));
+        if serial == self.translate_serial && matches!(self.translate, TranslateUiState::Running(_))
+        {
+            self.set_translate_state(TranslateUiState::Running(stage_text(stage, self.i18n)));
         }
     }
 
@@ -3629,14 +4035,25 @@ impl ScreenshotOverlayView {
     /// # 参数
     /// - `serial`：结果对应的请求序号。
     /// - `result`：翻译产出或失败原因。
-    pub fn finish_translate(&mut self, serial: u64, result: Result<TranslateOutcome, TranslateFlowError>) {
-        if serial != self.translate_serial || !matches!(self.translate, TranslateUiState::Running(_)) {
-            tracing::info!(serial, current = self.translate_serial, "丢弃过期的翻译结果");
+    pub fn finish_translate(
+        &mut self,
+        serial: u64,
+        result: Result<TranslateOutcome, TranslateFlowError>,
+    ) {
+        if serial != self.translate_serial
+            || !matches!(self.translate, TranslateUiState::Running(_))
+        {
+            tracing::info!(
+                serial,
+                current = self.translate_serial,
+                "丢弃过期的翻译结果"
+            );
             return;
         }
         let state = match result {
             Ok(outcome) => {
-                let copied = outcome.translated.is_empty() || self.output.copy_text(&outcome.translated).is_ok();
+                let copied = outcome.translated.is_empty()
+                    || self.output.copy_text(&outcome.translated).is_ok();
                 tracing::info!(
                     paragraphs = outcome.pairs.len(),
                     ocr_ms = outcome.ocr_ms,
@@ -3648,7 +4065,7 @@ impl ScreenshotOverlayView {
             }
             Err(e) => {
                 tracing::warn!(error = ?e, "文字翻译失败");
-                TranslateUiState::from_error(&e)
+                TranslateUiState::from_error(&e, self.i18n)
             }
         };
         self.set_translate_state(state);
@@ -3657,9 +4074,14 @@ impl ScreenshotOverlayView {
     /// 触发翻译运行时下载（仅缺运行时可用）。
     fn start_translate_download(&mut self) {
         match self.output.start_translate_download() {
-            Ok(()) => self.set_translate_state(TranslateUiState::Downloading(self.i18n.tr("overlay-msg-runtime-download-preparing"))),
+            Ok(()) => self.set_translate_state(TranslateUiState::Downloading(
+                self.i18n.tr("overlay-msg-runtime-download-preparing"),
+            )),
             Err(e) => self.set_translate_state(TranslateUiState::Failed {
-                message: self.i18n.tr_with("overlay-msg-runtime-download-start-failed", &Args::new().arg(1, e.to_string())),
+                message: self.i18n.tr_with(
+                    "overlay-msg-runtime-download-start-failed",
+                    &Args::new().arg(1, e.to_string()),
+                ),
                 can_download: false,
             }),
         }
@@ -3689,7 +4111,10 @@ impl ScreenshotOverlayView {
                 self.status_message = Some(self.i18n.tr("overlay-msg-runtime-download-ready"));
             }
             Err(e) => self.set_translate_state(TranslateUiState::Failed {
-                message: self.i18n.tr_with("overlay-msg-runtime-download-failed", &Args::new().arg(1, e.to_string())),
+                message: self.i18n.tr_with(
+                    "overlay-msg-runtime-download-failed",
+                    &Args::new().arg(1, e.to_string()),
+                ),
                 can_download: true,
             }),
         }
@@ -3712,7 +4137,10 @@ impl ScreenshotOverlayView {
         match self.output.copy_text(&text) {
             Ok(()) => OverlayOutcome::Close,
             Err(e) => {
-                self.status_message = Some(self.i18n.tr_with("overlay-msg-copy-translation-failed", &Args::new().arg(1, e.to_string())));
+                self.status_message = Some(self.i18n.tr_with(
+                    "overlay-msg-copy-translation-failed",
+                    &Args::new().arg(1, e.to_string()),
+                ));
                 OverlayOutcome::Stay
             }
         }
@@ -3720,7 +4148,7 @@ impl ScreenshotOverlayView {
 
     /// 翻译结果面板叠加层（无翻译界面时为空）。
     fn translate_overlay(&self, selection: PhysicalRect) -> Vec<AnyElement> {
-        let lines = translate_panel_lines(&self.translate);
+        let lines = translate_panel_lines(&self.translate, self.i18n);
         if lines.is_empty() {
             return Vec::new();
         }
@@ -3822,10 +4250,19 @@ impl ScreenshotOverlayView {
             self.status_message = Some(self.i18n.tr("overlay-msg-selection-invalid"));
             return;
         };
-        let data = crate::recognition_view::RecognitionData { width, height, rgba, text, boxes };
+        let data = crate::recognition_view::RecognitionData {
+            width,
+            height,
+            rgba,
+            text,
+            boxes,
+        };
         if let Err(e) = self.output.open_recognition_window(data) {
             tracing::warn!(error = %e, "打开识别结果窗失败");
-            self.status_message = Some(self.i18n.tr_with("overlay-msg-recognition-window-failed", &Args::new().arg(1, e.to_string())));
+            self.status_message = Some(self.i18n.tr_with(
+                "overlay-msg-recognition-window-failed",
+                &Args::new().arg(1, e.to_string()),
+            ));
         }
     }
 
@@ -3841,7 +4278,10 @@ impl ScreenshotOverlayView {
         match self.output.copy_text(&text) {
             Ok(()) => OverlayOutcome::Close,
             Err(e) => {
-                self.status_message = Some(self.i18n.tr_with("overlay-msg-copy-text-failed", &Args::new().arg(1, e.to_string())));
+                self.status_message = Some(self.i18n.tr_with(
+                    "overlay-msg-copy-text-failed",
+                    &Args::new().arg(1, e.to_string()),
+                ));
                 OverlayOutcome::Stay
             }
         }
@@ -3871,7 +4311,10 @@ impl ScreenshotOverlayView {
             }
             Err(e) => {
                 tracing::error!(error = %e, "启动长截图失败");
-                self.status_message = Some(self.i18n.tr_with("overlay-msg-scroll-start-failed", &Args::new().arg(1, e.to_string())));
+                self.status_message = Some(self.i18n.tr_with(
+                    "overlay-msg-scroll-start-failed",
+                    &Args::new().arg(1, e.to_string()),
+                ));
                 OverlayOutcome::Stay
             }
         }
@@ -3895,7 +4338,7 @@ impl ScreenshotOverlayView {
                 );
             }
         }
-        let lines = panel_lines(&self.ocr);
+        let lines = panel_lines(&self.ocr, self.i18n);
         if !lines.is_empty() {
             let width = (selection.width as f32 / self.scale).clamp(160.0, OCR_PANEL_MAX_WIDTH);
             let mut panel = div()
@@ -3930,11 +4373,17 @@ impl ScreenshotOverlayView {
         match self.output.copy_text(&text) {
             Ok(()) => {
                 tracing::info!(color = %text, "已复制颜色值");
-                self.status_message = Some(self.i18n.tr_with("overlay-msg-color-copied", &Args::new().arg(1, text.clone())));
+                self.status_message = Some(self.i18n.tr_with(
+                    "overlay-msg-color-copied",
+                    &Args::new().arg(1, text.clone()),
+                ));
             }
             Err(e) => {
                 tracing::error!(error = %e, "复制颜色失败");
-                self.status_message = Some(self.i18n.tr_with("overlay-msg-color-copy-failed", &Args::new().arg(1, e.to_string())));
+                self.status_message = Some(self.i18n.tr_with(
+                    "overlay-msg-color-copy-failed",
+                    &Args::new().arg(1, e.to_string()),
+                ));
             }
         }
     }
@@ -4004,7 +4453,10 @@ impl ScreenshotOverlayView {
             }
             Err(e) => {
                 tracing::error!(error = %e, "启动录屏失败");
-                self.status_message = Some(self.i18n.tr_with("overlay-msg-record-start-failed", &Args::new().arg(1, e.to_string())));
+                self.status_message = Some(self.i18n.tr_with(
+                    "overlay-msg-record-start-failed",
+                    &Args::new().arg(1, e.to_string()),
+                ));
                 OverlayOutcome::Stay
             }
         }
@@ -4072,14 +4524,20 @@ impl ScreenshotOverlayView {
         let i = step - stroke * per_stroke;
         let last = step + 1 == total || i + 1 == per_stroke;
         let phase = i as f32 / (per_stroke - 1) as f32;
-        let (cx, cy) = (rect.x as f32 + rect.width as f32 / 2.0, rect.y as f32 + rect.height as f32 / 2.0);
+        let (cx, cy) = (
+            rect.x as f32 + rect.width as f32 / 2.0,
+            rect.y as f32 + rect.height as f32 / 2.0,
+        );
         let (rx, ry) = (rect.width as f32 * 0.4, rect.height as f32 * 0.4);
         let angle = std::f32::consts::TAU * (0.25 * stroke as f32 + 0.6 * phase);
         let start = PhysicalPoint::new(
             (cx - rx * 0.6 + stroke as f32 * 24.0) as i32,
             (cy - ry * 0.6 + stroke as f32 * 24.0) as i32,
         );
-        let end = PhysicalPoint::new((cx + rx * angle.cos()) as i32, (cy + ry * angle.sin()) as i32);
+        let end = PhysicalPoint::new(
+            (cx + rx * angle.cos()) as i32,
+            (cy + ry * angle.sin()) as i32,
+        );
         let started = Instant::now();
         if i == 0 {
             self.handle_mouse_down(start, 1);
@@ -4198,7 +4656,12 @@ impl ScreenshotOverlayView {
     }
 
     /// 工具栏工具入口（由按钮点击回调）。
-    fn on_tool_selected(&mut self, tool: AnnotationTool, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_tool_selected(
+        &mut self,
+        tool: AnnotationTool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.commit_text_edit(window, cx);
         self.select_tool(tool);
         if !style_fields(self.tool).is_empty() {
@@ -4216,7 +4679,12 @@ impl ScreenshotOverlayView {
     }
 
     /// 在底图物理坐标 `origin` 处开始文字输入；已有输入先提交。
-    fn begin_text_edit(&mut self, origin: PhysicalPoint, window: &mut Window, cx: &mut Context<Self>) {
+    fn begin_text_edit(
+        &mut self,
+        origin: PhysicalPoint,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.commit_text_edit(window, cx);
         let Some(style) = self.annotations.as_ref().map(|l| l.style()) else {
             return;
@@ -4229,7 +4697,8 @@ impl ScreenshotOverlayView {
             color: [style.color.r, style.color.g, style.color.b, style.color.a],
             ..CanvasTextStyle::default()
         };
-        let input = cx.new(|cx| CanvasTextInput::with_text_and_style("", text_style, None, window, cx));
+        let input =
+            cx.new(|cx| CanvasTextInput::with_text_and_style("", text_style, None, window, cx));
         self.text_edit = Some(TextEditSession { input, origin });
     }
 
@@ -4365,7 +4834,11 @@ impl ScreenshotOverlayView {
         }
         let scale = self.scale;
         // 窗口点击候选期间不画框选遮罩，改画窗口高亮
-        let sel = if self.click_window.is_some() { None } else { self.current_selection() };
+        let sel = if self.click_window.is_some() {
+            None
+        } else {
+            self.current_selection()
+        };
         // 加 / 减区域期间没有当前选区，用底区域的外接矩形来显示遮罩
         let sel = sel.or_else(|| {
             self.region_op.as_ref()?;
@@ -4378,14 +4851,18 @@ impl ScreenshotOverlayView {
         let (mon_w, mon_h) = (mon.width as f32 / scale, mon.height as f32 / scale);
         let cursor_here = self.frame.nearest_monitor(self.cursor_pos) == index;
         let anchor_here = sel.is_some_and(|s| {
-            self.frame.nearest_monitor(PhysicalPoint::new(s.right() - 1, s.bottom() - 1)) == index
+            self.frame
+                .nearest_monitor(PhysicalPoint::new(s.right() - 1, s.bottom() - 1))
+                == index
         });
         let loading_history = self.history_busy();
         if loading_history {
             self.poll_history();
         }
         let refining = self.poll_refinement() || self.history_busy();
-        let highlight = self.highlight_transition.advance(self.window_highlight(), Instant::now());
+        let highlight = self
+            .highlight_transition
+            .advance(self.window_highlight(), Instant::now());
         if refining || self.highlight_transition.is_running() {
             window.request_animation_frame();
         }
@@ -4443,7 +4920,9 @@ impl ScreenshotOverlayView {
                     |_, _, _| (),
                     move |bounds, (), window, _| {
                         let mut builder = PathBuilder::stroke(px(2.0));
-                        let at = |(x, y): (f32, f32)| snow_ui::ui::point(bounds.origin.x + px(x), bounds.origin.y + px(y));
+                        let at = |(x, y): (f32, f32)| {
+                            snow_ui::ui::point(bounds.origin.x + px(x), bounds.origin.y + px(y))
+                        };
                         if let Some(first) = outline.first() {
                             builder.move_to(at(*first));
                             for p in &outline[1..] {
@@ -4495,7 +4974,11 @@ impl ScreenshotOverlayView {
                     .border_2()
                     .border_color(rgb(ACCENT_COLOR)),
             );
-            let label_top = if wy >= LABEL_OFFSET { wy - LABEL_OFFSET } else { wy + 4.0 };
+            let label_top = if wy >= LABEL_OFFSET {
+                wy - LABEL_OFFSET
+            } else {
+                wy + 4.0
+            };
             root = root.child(
                 div()
                     .absolute()
@@ -4571,7 +5054,10 @@ impl ScreenshotOverlayView {
 
             // 八向手柄（边长保持约 8 个逻辑像素）
             let handle_size = (HANDLE_LOGICAL_SIZE * scale).round() as i32;
-            for (_, hr) in handle_rects(s, handle_size).into_iter().filter(|_| !custom_region) {
+            for (_, hr) in handle_rects(s, handle_size)
+                .into_iter()
+                .filter(|_| !custom_region)
+            {
                 root = root.child(
                     div()
                         .absolute()
@@ -4586,7 +5072,11 @@ impl ScreenshotOverlayView {
             }
 
             // 尺寸标签（选区左上方，贴近上沿时落到选区内侧）
-            let label_top = if sy >= LABEL_OFFSET { sy - LABEL_OFFSET } else { sy + 4.0 };
+            let label_top = if sy >= LABEL_OFFSET {
+                sy - LABEL_OFFSET
+            } else {
+                sy + 4.0
+            };
             root = root.child(
                 div()
                     .absolute()
@@ -4603,7 +5093,8 @@ impl ScreenshotOverlayView {
 
             // 浮动工具栏（选区确定后展示；标注工具未实现所以隐藏，贴图 / OCR / 翻译置灰）
             if matches!(self.state, SelectionState::Selected { .. }) && anchor_here {
-                let screen_logical = PhysicalRect::new(ox as i32, oy as i32, mon_w as i32, mon_h as i32);
+                let screen_logical =
+                    PhysicalRect::new(ox as i32, oy as i32, mon_w as i32, mon_h as i32);
                 let on_this_monitor = mon.intersect(&s).unwrap_or(s);
                 let pos = calculate_toolbar_placement(
                     logical_rect(on_this_monitor, scale),
@@ -4643,7 +5134,9 @@ impl ScreenshotOverlayView {
                 );
                 // 样式面板按本屏相对坐标摆放，再平移回画布坐标
                 let (mx, my) = (ox as i32, oy as i32);
-                if let Some(origin) = self.style_panel_origin((pos.x - mx, pos.y - my), (mon_w as i32, mon_h as i32)) {
+                if let Some(origin) =
+                    self.style_panel_origin((pos.x - mx, pos.y - my), (mon_w as i32, mon_h as i32))
+                {
                     let origin = (origin.0 + mx, origin.1 + my);
                     panel_pos = Some(PhysicalPoint::new(origin.0, origin.1));
                     root = root.child(self.render_style_panel(origin, cx));
@@ -4682,7 +5175,11 @@ impl ScreenshotOverlayView {
         }
 
         // 文字输入框：点击框内不冒泡到根节点（否则会被当成“点击别处”而提交）
-        if let Some(session) = self.text_edit.as_ref().filter(|s| self.frame.nearest_monitor(s.origin) == index) {
+        if let Some(session) = self
+            .text_edit
+            .as_ref()
+            .filter(|s| self.frame.nearest_monitor(s.origin) == index)
+        {
             root = root.child(
                 div()
                     .absolute()
@@ -4695,8 +5192,13 @@ impl ScreenshotOverlayView {
         }
 
         // 放大镜：跟随光标，光标压在工具栏上时隐藏
-        if cursor_here && !self.cursor_over_toolbar(toolbar_pos) && !self.cursor_over_style_panel(panel_pos) {
-            let screen_logical = PhysicalRect::new(ox as i32, oy as i32, mon_w as i32, mon_h as i32);
+        if cursor_here
+            && !self.magnifier_hidden
+            && !self.cursor_over_toolbar(toolbar_pos)
+            && !self.cursor_over_style_panel(panel_pos)
+        {
+            let screen_logical =
+                PhysicalRect::new(ox as i32, oy as i32, mon_w as i32, mon_h as i32);
             let cursor_logical = logical_rect(
                 PhysicalRect::new(self.cursor_pos.x, self.cursor_pos.y, 1, 1),
                 scale,
@@ -4708,7 +5210,10 @@ impl ScreenshotOverlayView {
                 MAGNIFIER_OFFSET,
             );
             let shown_cursor = if self.coordinate_global {
-                PhysicalPoint::new(self.cursor_pos.x + self.canvas_origin.x, self.cursor_pos.y + self.canvas_origin.y)
+                PhysicalPoint::new(
+                    self.cursor_pos.x + self.canvas_origin.x,
+                    self.cursor_pos.y + self.canvas_origin.y,
+                )
             } else {
                 self.cursor_pos
             };
@@ -4773,12 +5278,19 @@ impl ScreenshotOverlayView {
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
                 let mods = ev.keystroke.modifiers;
                 // 文字输入进行中：按键先交给输入框（字符本身走系统输入法通道）
-                if this.route_key_to_text_edit(&ev.keystroke.key, mods.shift, mods.control, window, cx) {
+                if this.route_key_to_text_edit(
+                    &ev.keystroke.key,
+                    mods.shift,
+                    mods.control,
+                    window,
+                    cx,
+                ) {
                     cx.stop_propagation();
                     return;
                 }
                 this.set_shift(mods.shift);
-                let outcome = this.handle_keystroke(&ev.keystroke.key, mods.control, mods.shift, mods.alt);
+                let outcome =
+                    this.handle_keystroke(&ev.keystroke.key, mods.control, mods.shift, mods.alt);
                 this.finish(outcome, window, cx);
             }))
             .on_key_up(cx.listener(|this, ev: &KeyUpEvent, _window, _cx| {
@@ -4889,7 +5401,11 @@ impl OverlayWindowView {
         window.focus(&focus, cx);
         // 共享视图的状态变化要让本窗口重绘
         cx.observe(&shared, |_, _, cx| cx.notify()).detach();
-        Self { shared, index, focus }
+        Self {
+            shared,
+            index,
+            focus,
+        }
     }
 
     /// 共享的覆盖窗逻辑视图。
@@ -4902,8 +5418,9 @@ impl Render for OverlayWindowView {
     /// 渲染：交给共享视图按本屏几何绘制。
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let (index, focus) = (self.index, self.focus.clone());
-        self.shared
-            .update(cx, |view, vcx| view.render_monitor(index, Some(&focus), window, vcx))
+        self.shared.update(cx, |view, vcx| {
+            view.render_monitor(index, Some(&focus), window, vcx)
+        })
     }
 }
 
@@ -4991,7 +5508,13 @@ mod tests {
             Ok(())
         }
         /// 记录贴图请求。
-        fn pin_image(&mut self, region: PhysicalRect, w: u32, h: u32, rgba: Vec<u8>) -> Result<(), String> {
+        fn pin_image(
+            &mut self,
+            region: PhysicalRect,
+            w: u32,
+            h: u32,
+            rgba: Vec<u8>,
+        ) -> Result<(), String> {
             if self.fail {
                 return Err("boom".into());
             }
@@ -5015,7 +5538,13 @@ mod tests {
             Ok(())
         }
         /// 记录文字翻译请求。
-        fn start_translate(&mut self, serial: u64, w: u32, h: u32, rgba: Vec<u8>) -> Result<(), String> {
+        fn start_translate(
+            &mut self,
+            serial: u64,
+            w: u32,
+            h: u32,
+            rgba: Vec<u8>,
+        ) -> Result<(), String> {
             if self.fail {
                 return Err("boom".into());
             }
@@ -5041,7 +5570,12 @@ mod tests {
     }
 
     /// 构造渐变底图视图：像素 `r = x, g = y, b = 9`。
-    fn view_with(w: u32, h: u32, scale: f32, fail: bool) -> (ScreenshotOverlayView, Rc<RefCell<Recorded>>) {
+    fn view_with(
+        w: u32,
+        h: u32,
+        scale: f32,
+        fail: bool,
+    ) -> (ScreenshotOverlayView, Rc<RefCell<Recorded>>) {
         let mut data = Vec::new();
         for y in 0..h {
             for x in 0..w {
@@ -5059,7 +5593,8 @@ mod tests {
             rec: Rc::clone(&rec),
             fail,
         };
-        let view = ScreenshotOverlayView::new(frame, scale, PhysicalPoint::new(0, 0), Box::new(sink));
+        let view =
+            ScreenshotOverlayView::new(frame, scale, PhysicalPoint::new(0, 0), Box::new(sink));
         (view, rec)
     }
 
@@ -5075,9 +5610,14 @@ mod tests {
 
     impl WindowHover for FakeHover {
         /// 点在矩形内返回单层路径，否则无窗口。
-        fn hover(&mut self, point: PhysicalPoint, _target: PickTarget) -> Option<Vec<PhysicalRect>> {
+        fn hover(
+            &mut self,
+            point: PhysicalPoint,
+            _target: PickTarget,
+        ) -> Option<Vec<PhysicalRect>> {
             let r = self.0;
-            (point.x >= r.x && point.x < r.right() && point.y >= r.y && point.y < r.bottom()).then(|| vec![r])
+            (point.x >= r.x && point.x < r.right() && point.y >= r.y && point.y < r.bottom())
+                .then(|| vec![r])
         }
     }
 
@@ -5121,7 +5661,11 @@ mod tests {
     /// 带三层假来源的视图。
     fn layered_view() -> ScreenshotOverlayView {
         let (mut view, _) = view_with(300, 200, 1.0, false);
-        view.set_window_hover(Some(Box::new(FakeLayers::default())), PickTarget::WindowSubElement, false);
+        view.set_window_hover(
+            Some(Box::new(FakeLayers::default())),
+            PickTarget::WindowSubElement,
+            false,
+        );
         view
     }
 
@@ -5131,13 +5675,25 @@ mod tests {
         let mut view = layered_view();
         let p = PhysicalPoint::new(65, 55);
         view.handle_mouse_move(p);
-        assert_eq!(view.window_highlight(), Some(PhysicalRect::new(60, 50, 20, 15)));
+        assert_eq!(
+            view.window_highlight(),
+            Some(PhysicalRect::new(60, 50, 20, 15))
+        );
         assert!(view.handle_scroll(1.0, p));
-        assert_eq!(view.window_highlight(), Some(PhysicalRect::new(50, 40, 80, 60)));
+        assert_eq!(
+            view.window_highlight(),
+            Some(PhysicalRect::new(50, 40, 80, 60))
+        );
         assert!(view.handle_scroll(1.0, p));
-        assert_eq!(view.window_highlight(), Some(PhysicalRect::new(40, 30, 150, 120)));
+        assert_eq!(
+            view.window_highlight(),
+            Some(PhysicalRect::new(40, 30, 150, 120))
+        );
         assert!(view.handle_scroll(-1.0, p));
-        assert_eq!(view.window_highlight(), Some(PhysicalRect::new(50, 40, 80, 60)));
+        assert_eq!(
+            view.window_highlight(),
+            Some(PhysicalRect::new(50, 40, 80, 60))
+        );
     }
 
     /// 滚轮选好的层级在同一路径内移动鼠标时保持，单击选中的就是它。
@@ -5149,7 +5705,12 @@ mod tests {
         view.handle_scroll(1.0, p);
         view.handle_mouse_move(PhysicalPoint::new(66, 56));
         drag(&mut view, (66, 56), (68, 57));
-        assert_eq!(view.state, SelectionState::Selected { rect: PhysicalRect::new(50, 40, 80, 60) });
+        assert_eq!(
+            view.state,
+            SelectionState::Selected {
+                rect: PhysicalRect::new(50, 40, 80, 60)
+            }
+        );
     }
 
     /// 后台细化到达后（无需鼠标事件）渲染前轮询即可吸收，高亮切到更深层；取走后不再待定。
@@ -5162,16 +5723,29 @@ mod tests {
             PhysicalRect::new(40, 30, 150, 120),
         ];
         let (mut view, _) = view_with(300, 200, 1.0, false);
-        let source = FakeLayers { deeper: Some(deeper) };
+        let source = FakeLayers {
+            deeper: Some(deeper),
+        };
         view.set_window_hover(Some(Box::new(source)), PickTarget::WindowSubElement, false);
         // 点落在三层内：先拿到前台结果，此时细化还没吸收
         let p = PhysicalPoint::new(65, 55);
         // 只取前台结果，不触发细化吸收
-        let path = view.window_hover.as_mut().unwrap().hover(p, PickTarget::WindowSubElement).unwrap();
+        let path = view
+            .window_hover
+            .as_mut()
+            .unwrap()
+            .hover(p, PickTarget::WindowSubElement)
+            .unwrap();
         view.pick.apply_hit_path(&path, view.screen_bounds, 1);
-        assert_eq!(view.window_highlight(), Some(PhysicalRect::new(60, 50, 20, 15)));
+        assert_eq!(
+            view.window_highlight(),
+            Some(PhysicalRect::new(60, 50, 20, 15))
+        );
         assert!(!view.poll_refinement());
-        assert_eq!(view.window_highlight(), Some(PhysicalRect::new(62, 52, 16, 12)));
+        assert_eq!(
+            view.window_highlight(),
+            Some(PhysicalRect::new(62, 52, 16, 12))
+        );
     }
 
     /// 右键回退到智能选区时立刻按光标位置命中，不必等下一次移动。
@@ -5184,7 +5758,10 @@ mod tests {
         // 光标回到控件上再右键：不再移动鼠标，高亮也应立刻出现
         view.handle_mouse_move(PhysicalPoint::new(65, 55));
         view.handle_right_click();
-        assert_eq!(view.window_highlight(), Some(PhysicalRect::new(60, 50, 20, 15)));
+        assert_eq!(
+            view.window_highlight(),
+            Some(PhysicalRect::new(60, 50, 20, 15))
+        );
     }
 
     /// 复制成功后历史出口收到完整现场：整帧底图、选区、标注历史与结果图；复制失败则不记录。
@@ -5260,12 +5837,28 @@ mod tests {
     fn history_view() -> ScreenshotOverlayView {
         let (mut view, _) = view_with(100, 80, 1.0, false);
         let mut entries = std::collections::HashMap::new();
-        entries.insert("c".to_string(), Some(history_entry(100, 80, 50, (10, 10, 30, 20))));
-        entries.insert("b".to_string(), Some(history_entry(100, 80, 90, (20, 20, 40, 30))));
+        entries.insert(
+            "c".to_string(),
+            Some(history_entry(100, 80, 50, (10, 10, 30, 20))),
+        );
+        entries.insert(
+            "b".to_string(),
+            Some(history_entry(100, 80, 90, (20, 20, 40, 30))),
+        );
         entries.insert("bad".to_string(), None);
-        entries.insert("big".to_string(), Some(history_entry(200, 160, 1, (0, 0, 10, 10))));
-        let ids = ["c", "b", "bad", "big"].iter().map(|s| s.to_string()).collect();
-        view.set_history_provider(Box::new(FakeHistory { ids, entries, ready: Vec::new() }));
+        entries.insert(
+            "big".to_string(),
+            Some(history_entry(200, 160, 1, (0, 0, 10, 10))),
+        );
+        let ids = ["c", "b", "bad", "big"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        view.set_history_provider(Box::new(FakeHistory {
+            ids,
+            entries,
+            ready: Vec::new(),
+        }));
         view
     }
 
@@ -5287,7 +5880,12 @@ mod tests {
         assert!(view.history_busy());
         assert!(view.poll_history());
         assert_eq!(center_red(&view), 50);
-        assert_eq!(view.state, SelectionState::Selected { rect: PhysicalRect::new(10, 10, 30, 20) });
+        assert_eq!(
+            view.state,
+            SelectionState::Selected {
+                rect: PhysicalRect::new(10, 10, 30, 20)
+            }
+        );
 
         assert!(view.history_previous());
         assert!(view.poll_history());
@@ -5380,7 +5978,11 @@ mod tests {
         let SelectionState::Selected { rect } = view.state else {
             panic!("应已确认选区: {:?}", view.state);
         };
-        assert!((rect.x - 20).abs() <= 1 && (rect.width - 80).abs() <= 2 && (rect.height - 80).abs() <= 2);
+        assert!(
+            (rect.x - 20).abs() <= 1
+                && (rect.width - 80).abs() <= 2
+                && (rect.height - 80).abs() <= 2
+        );
         let mask = view.region_mask.as_ref().unwrap();
         assert!(mask.contains(60, 40) && !mask.contains(25, 95));
         assert!(view.region_overlay.is_some());
@@ -5536,7 +6138,10 @@ mod tests {
         view.begin_region_op(RegionOp::Subtract);
         drag(&mut view, (0, 0), (150, 140));
         assert!(view.region_op.is_some(), "整块被减空：操作仍在进行");
-        assert!(view.region_mask.as_ref().is_some_and(|m| !m.is_empty()), "底区域没被破坏");
+        assert!(
+            view.region_mask.as_ref().is_some_and(|m| !m.is_empty()),
+            "底区域没被破坏"
+        );
     }
 
     /// 加减区域期间切换形状：保留操作与底区域，只丢草稿。
@@ -5549,7 +6154,10 @@ mod tests {
         assert!(view.switch_region_type(RegionType::Freehand));
         assert!(view.region_op.is_some() && view.region_mask.is_some());
         assert!(view.region_draft.is_none());
-        assert!(!view.switch_region_type(RegionType::Freehand), "形状没变不算切换");
+        assert!(
+            !view.switch_region_type(RegionType::Freehand),
+            "形状没变不算切换"
+        );
     }
 
     /// Ctrl+Tab 循环选区形状并写回配置；切换会丢弃当前选区；非矩形形状下智能选区不高亮。
@@ -5571,7 +6179,11 @@ mod tests {
         view.handle_keystroke("tab", true, false, false);
         assert_eq!(view.region_type(), RegionType::Polyline);
         assert_eq!(
-            config.borrow().document().value("screenshot_selection/region_type").as_str(),
+            config
+                .borrow()
+                .document()
+                .value("screenshot_selection/region_type")
+                .as_str(),
             Some("polyline")
         );
         view.handle_mouse_move(PhysicalPoint::new(61, 51));
@@ -5613,7 +6225,8 @@ mod tests {
             rec: Rc::clone(&rec),
             fail: false,
         };
-        let view = ScreenshotOverlayView::new_multi(frames, 1.0, PhysicalPoint::new(0, 0), Box::new(sink));
+        let view =
+            ScreenshotOverlayView::new_multi(frames, 1.0, PhysicalPoint::new(0, 0), Box::new(sink));
         (view, rec)
     }
 
@@ -5621,9 +6234,18 @@ mod tests {
     #[test]
     fn canvas_point_adds_the_monitor_origin() {
         let (view, _) = two_monitor_view();
-        assert_eq!(view.canvas_point(0, point(px(10.0), px(5.0))), PhysicalPoint::new(10, 5));
-        assert_eq!(view.canvas_point(1, point(px(10.0), px(5.0))), PhysicalPoint::new(110, 5));
-        assert_eq!(view.canvas_point(1, point(px(-30.0), px(5.0))), PhysicalPoint::new(70, 5));
+        assert_eq!(
+            view.canvas_point(0, point(px(10.0), px(5.0))),
+            PhysicalPoint::new(10, 5)
+        );
+        assert_eq!(
+            view.canvas_point(1, point(px(10.0), px(5.0))),
+            PhysicalPoint::new(110, 5)
+        );
+        assert_eq!(
+            view.canvas_point(1, point(px(-30.0), px(5.0))),
+            PhysicalPoint::new(70, 5)
+        );
         // 越过画布边界会被夹住
         assert_eq!(view.canvas_point(1, point(px(900.0), px(5.0))).x, 199);
     }
@@ -5650,14 +6272,23 @@ mod tests {
         let (mut view, rec) = two_monitor_view();
         drag(&mut view, (80, 10), (130, 50));
         assert!(view.selection_spans_monitors());
-        assert_eq!(view.apply_action(ToolbarAction::Record), OverlayOutcome::Stay);
-        assert_eq!(view.apply_action(ToolbarAction::ScrollCapture), OverlayOutcome::Stay);
+        assert_eq!(
+            view.apply_action(ToolbarAction::Record),
+            OverlayOutcome::Stay
+        );
+        assert_eq!(
+            view.apply_action(ToolbarAction::ScrollCapture),
+            OverlayOutcome::Stay
+        );
         assert!(rec.borrow().records.is_empty() && rec.borrow().scrolls.is_empty());
 
         let (mut single, rec) = two_monitor_view();
         drag(&mut single, (110, 10), (150, 50));
         assert!(!single.selection_spans_monitors());
-        assert_eq!(single.apply_action(ToolbarAction::Record), OverlayOutcome::Close);
+        assert_eq!(
+            single.apply_action(ToolbarAction::Record),
+            OverlayOutcome::Close
+        );
         assert_eq!(rec.borrow().records.len(), 1);
     }
 
@@ -5692,18 +6323,28 @@ mod tests {
         let (mut first, _) = two_monitor_view();
         first.set_style_config(open(), "en-US");
         first.set_canvas_origin(PhysicalPoint::new(-1920, 100));
-        first.state = SelectionState::Selected { rect: PhysicalRect::new(10, 10, 50, 40) };
+        first.state = SelectionState::Selected {
+            rect: PhysicalRect::new(10, 10, 50, 40),
+        };
         first.remember_selection();
 
         let (mut same, _) = two_monitor_view();
         same.set_style_config(open(), "en-US");
         same.set_canvas_origin(PhysicalPoint::new(-1920, 100));
         assert!(same.select_previous_selection());
-        assert_eq!(same.state, SelectionState::Selected { rect: PhysicalRect::new(10, 10, 50, 40) });
+        assert_eq!(
+            same.state,
+            SelectionState::Selected {
+                rect: PhysicalRect::new(10, 10, 50, 40)
+            }
+        );
 
         let (mut moved, _) = two_monitor_view();
         moved.set_style_config(open(), "en-US");
-        assert!(!moved.select_previous_selection(), "原点不同：存的桌面坐标落在画布外");
+        assert!(
+            !moved.select_previous_selection(),
+            "原点不同：存的桌面坐标落在画布外"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -5722,13 +6363,20 @@ mod tests {
 
         let (mut first, _) = view_with(300, 200, 1.0, false);
         first.set_style_config(Rc::new(RefCell::new(ConfigStore::open(&path))), "en-US");
-        first.state = SelectionState::Selected { rect: PhysicalRect::new(20, 30, 100, 80) };
+        first.state = SelectionState::Selected {
+            rect: PhysicalRect::new(20, 30, 100, 80),
+        };
         first.remember_selection();
 
         let (mut second, _) = view_with(300, 200, 1.0, false);
         second.set_style_config(Rc::new(RefCell::new(ConfigStore::open(&path))), "en-US");
         assert!(second.select_previous_selection());
-        assert_eq!(second.state, SelectionState::Selected { rect: PhysicalRect::new(20, 30, 100, 80) });
+        assert_eq!(
+            second.state,
+            SelectionState::Selected {
+                rect: PhysicalRect::new(20, 30, 100, 80)
+            }
+        );
 
         // 没有保存值（或在标注 / 拖动中）时返回 false
         let (mut empty, _) = view_with(300, 200, 1.0, false);
@@ -5743,7 +6391,9 @@ mod tests {
         assert!(!plain.handle_scroll(1.0, PhysicalPoint::new(5, 5)));
         let mut view = layered_view();
         view.handle_mouse_move(PhysicalPoint::new(65, 55));
-        view.state = SelectionState::Selected { rect: PhysicalRect::new(0, 0, 50, 50) };
+        view.state = SelectionState::Selected {
+            rect: PhysicalRect::new(0, 0, 50, 50),
+        };
         assert!(!view.handle_scroll(1.0, PhysicalPoint::new(65, 55)));
     }
 
@@ -5754,15 +6404,25 @@ mod tests {
         let p = PhysicalPoint::new(65, 55);
         view.handle_mouse_move(p);
         assert!(view.toggle_selection_target());
-        assert_eq!(view.window_highlight(), Some(PhysicalRect::new(40, 30, 150, 120)));
+        assert_eq!(
+            view.window_highlight(),
+            Some(PhysicalRect::new(40, 30, 150, 120))
+        );
         assert!(view.toggle_selection_target());
-        assert_eq!(view.window_highlight(), Some(PhysicalRect::new(60, 50, 20, 15)));
+        assert_eq!(
+            view.window_highlight(),
+            Some(PhysicalRect::new(60, 50, 20, 15))
+        );
     }
 
     /// 带假窗口来源（窗口 40,30 100x80）的视图。
     fn hover_view(scale: f32) -> ScreenshotOverlayView {
         let (mut view, _) = view_with(300, 200, scale, false);
-        view.set_window_hover(Some(Box::new(FakeHover(PhysicalRect::new(40, 30, 100, 80)))), PickTarget::WindowSubElement, false);
+        view.set_window_hover(
+            Some(Box::new(FakeHover(PhysicalRect::new(40, 30, 100, 80)))),
+            PickTarget::WindowSubElement,
+            false,
+        );
         view
     }
 
@@ -5771,7 +6431,10 @@ mod tests {
     fn idle_hover_highlights_window() {
         let mut view = hover_view(1.0);
         view.handle_mouse_move(PhysicalPoint::new(60, 50));
-        assert_eq!(view.window_highlight(), Some(PhysicalRect::new(40, 30, 100, 80)));
+        assert_eq!(
+            view.window_highlight(),
+            Some(PhysicalRect::new(40, 30, 100, 80))
+        );
         view.handle_mouse_move(PhysicalPoint::new(250, 150));
         assert_eq!(view.window_highlight(), None);
     }
@@ -5782,7 +6445,12 @@ mod tests {
         let mut view = hover_view(1.0);
         view.handle_mouse_move(PhysicalPoint::new(60, 50));
         drag(&mut view, (60, 50), (64, 53));
-        assert_eq!(view.state, SelectionState::Selected { rect: PhysicalRect::new(40, 30, 100, 80) });
+        assert_eq!(
+            view.state,
+            SelectionState::Selected {
+                rect: PhysicalRect::new(40, 30, 100, 80)
+            }
+        );
         assert_eq!(view.window_highlight(), None);
     }
 
@@ -5791,7 +6459,12 @@ mod tests {
     fn drag_past_threshold_falls_back_to_marquee() {
         let mut view = hover_view(1.0);
         drag(&mut view, (60, 50), (120, 100));
-        assert_eq!(view.state, SelectionState::Selected { rect: PhysicalRect::new(60, 50, 61, 51) });
+        assert_eq!(
+            view.state,
+            SelectionState::Selected {
+                rect: PhysicalRect::new(60, 50, 61, 51)
+            }
+        );
     }
 
     /// 拖出阈值后又回到起点附近，仍按手动框选处理（不再变回窗口选区）。
@@ -5833,7 +6506,10 @@ mod tests {
         assert_eq!(view.handle_right_click(), OverlayOutcome::Stay);
         assert_eq!(view.state, SelectionState::Idle);
         // 回到智能选区：光标仍在窗口内，立刻重新高亮该窗口（对齐 Qt）
-        assert_eq!(view.window_highlight(), Some(PhysicalRect::new(40, 30, 100, 80)));
+        assert_eq!(
+            view.window_highlight(),
+            Some(PhysicalRect::new(40, 30, 100, 80))
+        );
         assert_eq!(view.handle_right_click(), OverlayOutcome::Close);
     }
 
@@ -5845,10 +6521,16 @@ mod tests {
         view.handle_mouse_down(PhysicalPoint::new(20, 20), 1);
         assert!(matches!(view.state, SelectionState::MarqueeDragging { .. }));
         view.handle_mouse_move(PhysicalPoint::new(120, 90));
-        assert_eq!(view.current_selection(), Some(PhysicalRect::new(20, 20, 101, 71)));
+        assert_eq!(
+            view.current_selection(),
+            Some(PhysicalRect::new(20, 20, 101, 71))
+        );
         view.handle_mouse_up(PhysicalPoint::new(120, 90));
         assert!(matches!(view.state, SelectionState::Selected { .. }));
-        assert_eq!(view.current_selection(), Some(PhysicalRect::new(20, 20, 101, 71)));
+        assert_eq!(
+            view.current_selection(),
+            Some(PhysicalRect::new(20, 20, 101, 71))
+        );
     }
 
     /// 太小的框选被丢弃回到空闲态。
@@ -5865,7 +6547,10 @@ mod tests {
         let (mut view, _) = view_with(200, 150, 1.0, false);
         drag(&mut view, (100, 100), (900, -300));
         let sel = view.current_selection().unwrap();
-        assert!(view.screen_bounds.intersect(&sel) == Some(sel), "选区越界: {sel:?}");
+        assert!(
+            view.screen_bounds.intersect(&sel) == Some(sel),
+            "选区越界: {sel:?}"
+        );
         assert_eq!(sel.right(), 200);
         assert_eq!(sel.y, 0);
     }
@@ -5880,7 +6565,10 @@ mod tests {
         view.handle_mouse_down(PhysicalPoint::new(50, 40), 1);
         assert!(matches!(
             view.state,
-            SelectionState::Reshaping { mode: SelectionDragMode::All, .. }
+            SelectionState::Reshaping {
+                mode: SelectionDragMode::All,
+                ..
+            }
         ));
         view.handle_mouse_move(PhysicalPoint::new(199, 149));
         let live = view.current_selection().unwrap();
@@ -5900,13 +6588,19 @@ mod tests {
         view.handle_mouse_down(corner, 1);
         assert!(matches!(
             view.state,
-            SelectionState::Reshaping { mode: SelectionDragMode::BottomRight, .. }
+            SelectionState::Reshaping {
+                mode: SelectionDragMode::BottomRight,
+                ..
+            }
         ));
         view.handle_mouse_move(PhysicalPoint::new(corner.x + 40, corner.y + 30));
         view.handle_mouse_up(PhysicalPoint::new(corner.x + 40, corner.y + 30));
         let after = view.current_selection().unwrap();
         assert_eq!((after.x, after.y), (sel.x, sel.y));
-        assert_eq!((after.width, after.height), (sel.width + 40, sel.height + 30));
+        assert_eq!(
+            (after.width, after.height),
+            (sel.width + 40, sel.height + 30)
+        );
     }
 
     /// 点击选区外重新开始框选。
@@ -5959,7 +6653,10 @@ mod tests {
         view.handle_mouse_down(PhysicalPoint::new(20, 20), 1);
         view.handle_mouse_move(PhysicalPoint::new(60, 50));
         let before = view.current_selection().unwrap();
-        assert_eq!(view.handle_keystroke("space", false, false, false), OverlayOutcome::Stay);
+        assert_eq!(
+            view.handle_keystroke("space", false, false, false),
+            OverlayOutcome::Stay
+        );
         view.handle_mouse_move(PhysicalPoint::new(100, 90));
         let moved = view.current_selection().unwrap();
         assert_eq!((moved.width, moved.height), (before.width, before.height));
@@ -5976,7 +6673,10 @@ mod tests {
         let (mut view, rec) = view_with(100, 80, 1.0, false);
         let flag = view.recapture_flag();
         assert!(!flag.get());
-        assert_eq!(view.handle_keystroke("r", false, false, true), OverlayOutcome::Close);
+        assert_eq!(
+            view.handle_keystroke("r", false, false, true),
+            OverlayOutcome::Close
+        );
         assert!(flag.get());
         let r = rec.borrow();
         assert!(r.images.is_empty() && r.saved.is_empty());
@@ -5987,11 +6687,17 @@ mod tests {
     fn coordinate_mode_toggles_and_quick_save_needs_selection() {
         let (mut view, rec) = view_with(100, 80, 1.0, false);
         assert!(view.coordinate_global, "默认是全局坐标");
-        assert_eq!(view.handle_keystroke("p", true, false, false), OverlayOutcome::Stay);
+        assert_eq!(
+            view.handle_keystroke("p", true, false, false),
+            OverlayOutcome::Stay
+        );
         assert!(!view.coordinate_global);
         view.handle_keystroke("p", true, false, false);
         assert!(view.coordinate_global);
-        assert_eq!(view.handle_keystroke("s", true, true, false), OverlayOutcome::Stay);
+        assert_eq!(
+            view.handle_keystroke("s", true, true, false),
+            OverlayOutcome::Stay
+        );
         assert!(rec.borrow().saved.is_empty());
     }
 
@@ -6000,7 +6706,10 @@ mod tests {
     fn escape_closes_without_output() {
         let (mut view, rec) = view_with(100, 80, 1.0, false);
         drag(&mut view, (10, 10), (60, 50));
-        assert_eq!(view.handle_key("escape", false, false), OverlayOutcome::Close);
+        assert_eq!(
+            view.handle_key("escape", false, false),
+            OverlayOutcome::Close
+        );
         let r = rec.borrow();
         assert!(r.images.is_empty() && r.texts.is_empty() && r.saved.is_empty());
     }
@@ -6010,7 +6719,10 @@ mod tests {
     fn enter_copies_cropped_rgba() {
         let (mut view, rec) = view_with(100, 80, 1.0, false);
         drag(&mut view, (10, 20), (29, 39));
-        assert_eq!(view.handle_key("enter", false, false), OverlayOutcome::Close);
+        assert_eq!(
+            view.handle_key("enter", false, false),
+            OverlayOutcome::Close
+        );
         let r = rec.borrow();
         let (w, h, rgba) = &r.images[0];
         assert_eq!((*w, *h), (20, 20));
@@ -6036,9 +6748,18 @@ mod tests {
     fn toolbar_actions_reach_sink() {
         let (mut view, rec) = view_with(100, 80, 1.0, false);
         drag(&mut view, (5, 5), (44, 34));
-        assert_eq!(view.apply_action(ToolbarAction::Save), OverlayOutcome::Close);
-        assert_eq!(view.apply_action(ToolbarAction::Copy), OverlayOutcome::Close);
-        assert_eq!(view.apply_action(ToolbarAction::Cancel), OverlayOutcome::Close);
+        assert_eq!(
+            view.apply_action(ToolbarAction::Save),
+            OverlayOutcome::Close
+        );
+        assert_eq!(
+            view.apply_action(ToolbarAction::Copy),
+            OverlayOutcome::Close
+        );
+        assert_eq!(
+            view.apply_action(ToolbarAction::Cancel),
+            OverlayOutcome::Close
+        );
         let r = rec.borrow();
         assert_eq!(r.saved, vec![(40, 30)]);
         assert_eq!(r.images.len(), 1);
@@ -6079,12 +6800,19 @@ mod tests {
         let (mut view, rec) = view_with(160, 120, 1.0, false);
         drag(&mut view, (10, 10), (149, 109));
         view.select_tool(AnnotationTool::Rectangle);
-        view.start_annotation(PhysicalPoint::new(30, 30), view.current_selection().unwrap());
+        view.start_annotation(
+            PhysicalPoint::new(30, 30),
+            view.current_selection().unwrap(),
+        );
         view.finish_annotation(PhysicalPoint::new(120, 90));
         assert_eq!(view.apply_action(ToolbarAction::Pin), OverlayOutcome::Close);
         let r = rec.borrow();
         let (_, w, h, pinned) = &r.pins[0];
-        let plain = view.frame.crop_rgba(view.current_selection().unwrap()).unwrap().2;
+        let plain = view
+            .frame
+            .crop_rgba(view.current_selection().unwrap())
+            .unwrap()
+            .2;
         assert_eq!(pinned.len(), (*w * *h * 4) as usize);
         assert_ne!(pinned, &plain, "贴图像素应包含标注");
     }
@@ -6095,7 +6823,12 @@ mod tests {
         let (mut view, _) = view_with(100, 80, 1.0, true);
         drag(&mut view, (5, 5), (44, 34));
         assert_eq!(view.apply_action(ToolbarAction::Pin), OverlayOutcome::Stay);
-        assert!(view.status_message.as_deref().unwrap().contains("Pin failed"));
+        assert!(
+            view.status_message
+                .as_deref()
+                .unwrap()
+                .contains("Pin failed")
+        );
     }
 
     /// 输出失败时窗口保留并给出错误提示。
@@ -6104,7 +6837,12 @@ mod tests {
         let (mut view, _) = view_with(100, 80, 1.0, true);
         drag(&mut view, (5, 5), (44, 34));
         assert_eq!(view.handle_key("enter", false, false), OverlayOutcome::Stay);
-        assert!(view.status_message.as_deref().unwrap().contains("Copy failed"));
+        assert!(
+            view.status_message
+                .as_deref()
+                .unwrap()
+                .contains("Copy failed")
+        );
         assert_eq!(view.apply_action(ToolbarAction::Save), OverlayOutcome::Stay);
         assert!(view.status_message.as_deref().unwrap().contains("boom"));
     }
@@ -6125,27 +6863,106 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("snow-click-cfg-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let mut store = ConfigStore::open(dir.join("config.json"));
-        store.set_value(DOUBLE_CLICK_ACTION_KEY, serde_json::json!("none")).unwrap();
-        store.set_value(MIDDLE_CLICK_ACTION_KEY, serde_json::json!("quick_save")).unwrap();
-        store.set_value(SELECTION_BORDER_COLOR_KEY, serde_json::json!("#FF0000FF")).unwrap();
-        store.set_value(SELECTION_MASK_COLOR_KEY, serde_json::json!("#11223344")).unwrap();
-        store.set_value(SELECTION_UNIT_KEY, serde_json::json!("logical_pixels")).unwrap();
+        store
+            .set_value(DOUBLE_CLICK_ACTION_KEY, serde_json::json!("none"))
+            .unwrap();
+        store
+            .set_value(MIDDLE_CLICK_ACTION_KEY, serde_json::json!("quick_save"))
+            .unwrap();
+        store
+            .set_value(SELECTION_BORDER_COLOR_KEY, serde_json::json!("#FF0000FF"))
+            .unwrap();
+        store
+            .set_value(SELECTION_MASK_COLOR_KEY, serde_json::json!("#11223344"))
+            .unwrap();
+        store
+            .set_value(SELECTION_UNIT_KEY, serde_json::json!("logical_pixels"))
+            .unwrap();
         let (mut view, rec) = view_with(200, 150, 2.0, false);
         view.set_style_config(Rc::new(RefCell::new(store)), "en-US");
         assert_eq!(view.double_click_action, ClickAction::None);
         assert_eq!(view.middle_click_action, ClickAction::QuickSave);
-        assert_eq!((view.border_color, view.mask_color), (0xFF0000FF, 0x11223344));
+        assert_eq!(
+            (view.border_color, view.mask_color),
+            (0xFF0000FF, 0x11223344)
+        );
         assert!(view.logical_size_label);
         // 双击不再复制
         drag(&mut view, (20, 20), (120, 100));
-        assert_eq!(view.handle_mouse_down(PhysicalPoint::new(70, 60), 2), OverlayOutcome::Stay);
+        assert_eq!(
+            view.handle_mouse_down(PhysicalPoint::new(70, 60), 2),
+            OverlayOutcome::Stay
+        );
         assert!(rec.borrow().images.is_empty());
         // 逻辑像素标签：缩放 2 倍时数值减半
         let physical = view.size_label(PhysicalRect::new(0, 0, 100, 60));
-        assert_ne!(physical, selection_size_label(PhysicalRect::new(0, 0, 100, 60)));
+        assert_ne!(
+            physical,
+            selection_size_label(PhysicalRect::new(0, 0, 100, 60))
+        );
         assert_eq!(ClickAction::parse("pin"), Some(ClickAction::Pin));
         assert_eq!(ClickAction::parse("bogus"), None);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 取色格式、放大镜显示模式与调整选区方式跟随配置。
+    #[test]
+    fn picker_and_resize_settings_follow_config() {
+        let dir = std::env::temp_dir().join(format!("snow-picker-cfg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut store = ConfigStore::open(dir.join("config.json"));
+        store
+            .set_value(COLOR_FORMAT_KEY, serde_json::json!("hex_without_hash"))
+            .unwrap();
+        store
+            .set_value(COLOR_PICKER_MODE_KEY, serde_json::json!("always_hide"))
+            .unwrap();
+        store
+            .set_value(RESIZE_MODE_KEY, serde_json::json!("follow_mouse_position"))
+            .unwrap();
+        let (mut view, rec) = view_with(100, 80, 1.0, false);
+        view.set_style_config(Rc::new(RefCell::new(store)), "en-US");
+        assert!(view.magnifier_hidden && view.resize_follow_position);
+        view.handle_mouse_move(PhysicalPoint::new(0x12, 0x34));
+        view.handle_key("c", false, false);
+        assert_eq!(rec.borrow().texts, vec!["123409".to_string()]);
+        // 抓右下角（鼠标在角内偏 2 像素）：右下边直接落到鼠标所在像素
+        drag(&mut view, (10, 10), (50, 40));
+        let sel = view.current_selection().unwrap();
+        let grab = PhysicalPoint::new(sel.right() - 3, sel.bottom() - 3);
+        view.handle_mouse_down(grab, 1);
+        assert!(matches!(
+            view.state,
+            SelectionState::Reshaping {
+                mode: SelectionDragMode::BottomRight,
+                ..
+            }
+        ));
+        let live = view.current_selection().unwrap();
+        assert_eq!((live.right(), live.bottom()), (grab.x + 1, grab.y + 1));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 被抓的边落在鼠标像素上（纯函数）。
+    #[test]
+    fn grab_adjusted_rect_snaps_edges() {
+        let rect = PhysicalRect::new(10, 10, 40, 30);
+        let adjusted = grab_adjusted_rect(
+            SelectionDragMode::BottomRight,
+            rect,
+            PhysicalPoint::new(46, 36),
+        );
+        assert_eq!(
+            (adjusted.x, adjusted.y, adjusted.right(), adjusted.bottom()),
+            (10, 10, 47, 37)
+        );
+        let adjusted =
+            grab_adjusted_rect(SelectionDragMode::Left, rect, PhysicalPoint::new(12, 20));
+        assert_eq!((adjusted.x, adjusted.right()), (12, 50));
+        assert_eq!(
+            grab_adjusted_rect(SelectionDragMode::All, rect, PhysicalPoint::new(0, 0)),
+            rect
+        );
     }
 
     /// C 键复制光标处像素的颜色值（不关闭窗口）。
@@ -6199,10 +7016,22 @@ mod tests {
     /// 指针样式随拖拽模式变化。
     #[test]
     fn cursor_styles_follow_mode() {
-        assert_eq!(cursor_for_mode(SelectionDragMode::None, false), CursorStyle::Crosshair);
-        assert_eq!(cursor_for_mode(SelectionDragMode::All, false), CursorStyle::OpenHand);
-        assert_eq!(cursor_for_mode(SelectionDragMode::All, true), CursorStyle::ClosedHand);
-        assert_eq!(cursor_for_mode(SelectionDragMode::Top, false), CursorStyle::ResizeUpDown);
+        assert_eq!(
+            cursor_for_mode(SelectionDragMode::None, false),
+            CursorStyle::Crosshair
+        );
+        assert_eq!(
+            cursor_for_mode(SelectionDragMode::All, false),
+            CursorStyle::OpenHand
+        );
+        assert_eq!(
+            cursor_for_mode(SelectionDragMode::All, true),
+            CursorStyle::ClosedHand
+        );
+        assert_eq!(
+            cursor_for_mode(SelectionDragMode::Top, false),
+            CursorStyle::ResizeUpDown
+        );
         assert_eq!(
             cursor_for_mode(SelectionDragMode::TopLeft, false),
             CursorStyle::ResizeUpLeftDownRight
@@ -6233,7 +7062,10 @@ mod tests {
         for i in 0..50 {
             view.bench_step(i, 50);
         }
-        assert!(matches!(view.state, SelectionState::Selected { .. }) || view.state == SelectionState::Idle);
+        assert!(
+            matches!(view.state, SelectionState::Selected { .. })
+                || view.state == SelectionState::Idle
+        );
         assert_eq!(view.probe.summary().2.count, 50);
     }
 
@@ -6242,11 +7074,19 @@ mod tests {
     fn auto_confirm_copies_once_after_selection() {
         let (mut view, rec) = view_with(255, 200, 1.0, false);
         view.set_auto_confirm(Some(AutoConfirm::Copy));
-        assert_eq!(view.auto_confirm_outcome(), OverlayOutcome::Stay, "无选区不触发");
+        assert_eq!(
+            view.auto_confirm_outcome(),
+            OverlayOutcome::Stay,
+            "无选区不触发"
+        );
         drag(&mut view, (50, 50), (150, 120));
         assert_eq!(view.auto_confirm_outcome(), OverlayOutcome::Close);
         assert_eq!(rec.borrow().images.len(), 1);
-        assert_eq!(view.auto_confirm_outcome(), OverlayOutcome::Stay, "只触发一次");
+        assert_eq!(
+            view.auto_confirm_outcome(),
+            OverlayOutcome::Stay,
+            "只触发一次"
+        );
         let (mut plain, rec) = view_with(255, 200, 1.0, false);
         drag(&mut plain, (50, 50), (150, 120));
         assert_eq!(plain.auto_confirm_outcome(), OverlayOutcome::Stay);
@@ -6259,7 +7099,10 @@ mod tests {
         assert_eq!(AutoConfirm::Copy.toolbar_action(), ToolbarAction::Copy);
         assert_eq!(AutoConfirm::Pin.toolbar_action(), ToolbarAction::Pin);
         assert_eq!(AutoConfirm::Ocr.toolbar_action(), ToolbarAction::Ocr);
-        assert_eq!(AutoConfirm::Translate.toolbar_action(), ToolbarAction::Translate);
+        assert_eq!(
+            AutoConfirm::Translate.toolbar_action(),
+            ToolbarAction::Translate
+        );
     }
 
     /// 录屏选区模式：Enter 把选区交给录制流程并关闭；复制 / 保存快捷键不起作用。
@@ -6267,13 +7110,23 @@ mod tests {
     fn record_mode_enter_starts_recording() {
         let (mut view, rec) = view_with(255, 200, 1.0, false);
         view.set_record_mode(true);
-        assert_eq!(view.handle_key("enter", false, false), OverlayOutcome::Stay, "无选区先提示");
+        assert_eq!(
+            view.handle_key("enter", false, false),
+            OverlayOutcome::Stay,
+            "无选区先提示"
+        );
         drag(&mut view, (50, 50), (150, 120));
         assert_eq!(view.handle_key("c", true, false), OverlayOutcome::Stay);
         assert_eq!(view.handle_key("s", true, false), OverlayOutcome::Stay);
         assert!(rec.borrow().images.is_empty() && rec.borrow().saved.is_empty());
-        assert_eq!(view.handle_key("enter", false, false), OverlayOutcome::Close);
-        assert_eq!(rec.borrow().records, vec![PhysicalRect::new(50, 50, 101, 71)]);
+        assert_eq!(
+            view.handle_key("enter", false, false),
+            OverlayOutcome::Close
+        );
+        assert_eq!(
+            rec.borrow().records,
+            vec![PhysicalRect::new(50, 50, 101, 71)]
+        );
     }
 
     /// 工具栏“录屏”动作在截图模式下同样可用；输出失败时保留窗口。
@@ -6281,11 +7134,17 @@ mod tests {
     fn toolbar_record_action_and_failure() {
         let (mut view, rec) = view_with(255, 200, 1.0, false);
         drag(&mut view, (10, 10), (100, 100));
-        assert_eq!(view.apply_action(ToolbarAction::Record), OverlayOutcome::Close);
+        assert_eq!(
+            view.apply_action(ToolbarAction::Record),
+            OverlayOutcome::Close
+        );
         assert_eq!(rec.borrow().records.len(), 1);
         let (mut failing, _) = view_with(255, 200, 1.0, true);
         drag(&mut failing, (10, 10), (100, 100));
-        assert_eq!(failing.apply_action(ToolbarAction::Record), OverlayOutcome::Stay);
+        assert_eq!(
+            failing.apply_action(ToolbarAction::Record),
+            OverlayOutcome::Stay
+        );
     }
 
     /// 用当前工具在 `from`-`to` 之间拖动一次（按下 / 移动 / 松开）。
@@ -6350,7 +7209,10 @@ mod tests {
         drag(&mut view, (20, 20), (219, 149));
         view.select_tool(AnnotationTool::Rectangle);
         annotate(&mut view, (60, 50), (160, 110));
-        assert_eq!(view.handle_key("enter", false, false), OverlayOutcome::Close);
+        assert_eq!(
+            view.handle_key("enter", false, false),
+            OverlayOutcome::Close
+        );
         let r = rec.borrow();
         let (w, h, rgba) = &r.images[0];
         assert_eq!((*w, *h), (200, 130));
@@ -6439,7 +7301,10 @@ mod tests {
         let (compute, _, tiles, _) = view.probe.annotation_summary();
         assert!(compute.count > 0);
         let total_tiles = 4.0 * 3.0;
-        assert!(tiles < total_tiles / 2.0, "平均每次更新 {tiles} 块应远小于整屏 {total_tiles}");
+        assert!(
+            tiles < total_tiles / 2.0,
+            "平均每次更新 {tiles} 块应远小于整屏 {total_tiles}"
+        );
     }
 
     /// 标注基准驱动每个工具都能画出内容，并且产生可撤销的历史。
@@ -6551,11 +7416,20 @@ mod tests {
     #[test]
     fn translate_action_submits_selection_and_stays() {
         let (mut view, rec) = view_with(100, 80, 1.0, false);
-        assert_eq!(view.apply_action(ToolbarAction::Translate), OverlayOutcome::Stay);
+        assert_eq!(
+            view.apply_action(ToolbarAction::Translate),
+            OverlayOutcome::Stay
+        );
         assert!(rec.borrow().translates.is_empty());
         drag(&mut view, (5, 5), (44, 34));
-        assert_eq!(view.apply_action(ToolbarAction::Translate), OverlayOutcome::Stay);
-        assert!(matches!(view.translate_state(), TranslateUiState::Running(_)));
+        assert_eq!(
+            view.apply_action(ToolbarAction::Translate),
+            OverlayOutcome::Stay
+        );
+        assert!(matches!(
+            view.translate_state(),
+            TranslateUiState::Running(_)
+        ));
         {
             let r = rec.borrow();
             assert_eq!(r.translates.len(), 1);
@@ -6576,21 +7450,41 @@ mod tests {
         drag(&mut view, (5, 5), (44, 34));
         view.apply_action(ToolbarAction::Translate);
         view.update_translate_stage(1, TranslateStage::Translating);
-        assert!(view.status_message.as_deref().is_some_and(|s| s.contains("翻译")));
+        assert!(
+            view.status_message
+                .as_deref()
+                .is_some_and(|s| s.contains("Translating"))
+        );
         view.finish_translate(1, Ok(translate_outcome("你好")));
-        assert!(matches!(view.translate_state(), TranslateUiState::Done { copied: true, .. }));
+        assert!(matches!(
+            view.translate_state(),
+            TranslateUiState::Done { copied: true, .. }
+        ));
         assert_eq!(rec.borrow().texts, vec!["你好".to_string()]);
-        assert!(view.status_message.as_deref().is_some_and(|s| s.contains("已复制")));
-        assert_eq!(view.handle_key("enter", false, false), OverlayOutcome::Close);
+        assert!(
+            view.status_message
+                .as_deref()
+                .is_some_and(|s| s.contains("copied"))
+        );
+        assert_eq!(
+            view.handle_key("enter", false, false),
+            OverlayOutcome::Close
+        );
         assert_eq!(rec.borrow().texts.len(), 2);
 
         let (mut view, _) = view_with(100, 80, 1.0, false);
         drag(&mut view, (5, 5), (44, 34));
         view.apply_action(ToolbarAction::Translate);
         view.finish_translate(1, Ok(translate_outcome("a")));
-        assert_eq!(view.handle_key("escape", false, false), OverlayOutcome::Stay);
+        assert_eq!(
+            view.handle_key("escape", false, false),
+            OverlayOutcome::Stay
+        );
         assert_eq!(view.translate_state(), &TranslateUiState::Idle);
-        assert_eq!(view.handle_key("escape", false, false), OverlayOutcome::Close);
+        assert_eq!(
+            view.handle_key("escape", false, false),
+            OverlayOutcome::Close
+        );
     }
 
     /// 过期结果（用户已退出后才回来的）被丢弃，不会复活界面或改剪贴板。
@@ -6617,23 +7511,35 @@ mod tests {
         view.apply_action(ToolbarAction::Translate);
         view.finish_translate(
             1,
-            Err(TranslateFlowError::Translate(TranslateError::RuntimeMissing("未安装 onnxruntime 运行时".into()))),
+            Err(TranslateFlowError::Translate(
+                TranslateError::RuntimeMissing("未安装 onnxruntime 运行时".into()),
+            )),
         );
         let runtime = view.status_message.clone().unwrap_or_default();
-        assert!(runtime.contains("运行时") && runtime.contains("按 D 下载"), "{runtime}");
+        assert!(
+            runtime.contains("onnxruntime") && runtime.contains("press D"),
+            "{runtime}"
+        );
         view.dismiss_translate();
         view.apply_action(ToolbarAction::Translate);
         view.finish_translate(
             view.translate_serial,
-            Err(TranslateFlowError::Translate(TranslateError::NoModelFound("模型目录 D:/m 里没有可用的翻译模型".into()))),
+            Err(TranslateFlowError::Translate(TranslateError::NoModelFound(
+                "模型目录 D:/m 里没有可用的翻译模型".into(),
+            ))),
         );
         let no_model = view.status_message.clone().unwrap_or_default();
-        assert!(no_model.contains("D:/m") && !no_model.contains("按 D"), "{no_model}");
+        assert!(
+            no_model.contains("D:/m") && !no_model.contains("press D"),
+            "{no_model}"
+        );
         view.dismiss_translate();
         view.apply_action(ToolbarAction::Translate);
         view.finish_translate(
             view.translate_serial,
-            Err(TranslateFlowError::Ocr(OcrError::Unavailable(OcrUnavailable::NoRuntime))),
+            Err(TranslateFlowError::Ocr(OcrError::Unavailable(
+                OcrUnavailable::NoRuntime,
+            ))),
         );
         let ocr = view.status_message.clone().unwrap_or_default();
         assert!(ocr.contains("OCR"), "{ocr}");
@@ -6643,7 +7549,13 @@ mod tests {
         let (mut view, _) = view_with(100, 80, 1.0, true);
         drag(&mut view, (5, 5), (44, 34));
         view.apply_action(ToolbarAction::Translate);
-        assert!(matches!(view.translate_state(), TranslateUiState::Failed { can_download: false, .. }));
+        assert!(matches!(
+            view.translate_state(),
+            TranslateUiState::Failed {
+                can_download: false,
+                ..
+            }
+        ));
     }
 
     /// 缺运行时时按 D 触发下载；进度与结果更新状态；成功回到待命，失败可重试。
@@ -6653,24 +7565,46 @@ mod tests {
         let (mut view, rec) = view_with(100, 80, 1.0, false);
         drag(&mut view, (5, 5), (44, 34));
         view.handle_key("d", false, false);
-        assert_eq!(rec.borrow().translate_downloads, 0, "没有失败态时按 D 不下载");
+        assert_eq!(
+            rec.borrow().translate_downloads,
+            0,
+            "没有失败态时按 D 不下载"
+        );
         view.apply_action(ToolbarAction::Translate);
         view.finish_translate(
             1,
-            Err(TranslateFlowError::Translate(TranslateError::RuntimeMissing("缺运行时".into()))),
+            Err(TranslateFlowError::Translate(
+                TranslateError::RuntimeMissing("缺运行时".into()),
+            )),
         );
         assert_eq!(view.handle_key("d", false, false), OverlayOutcome::Stay);
         assert_eq!(rec.borrow().translate_downloads, 1);
-        assert!(matches!(view.translate_state(), TranslateUiState::Downloading(_)));
+        assert!(matches!(
+            view.translate_state(),
+            TranslateUiState::Downloading(_)
+        ));
         view.update_translate_download("正在下载 onnxruntime 运行时…");
-        assert_eq!(view.status_message.as_deref(), Some("正在下载 onnxruntime 运行时…"));
+        assert_eq!(
+            view.status_message.as_deref(),
+            Some("正在下载 onnxruntime 运行时…")
+        );
         view.finish_translate_download(Err("网络断了".into()));
-        assert!(matches!(view.translate_state(), TranslateUiState::Failed { can_download: true, .. }));
+        assert!(matches!(
+            view.translate_state(),
+            TranslateUiState::Failed {
+                can_download: true,
+                ..
+            }
+        ));
         view.handle_key("d", false, false);
         assert_eq!(rec.borrow().translate_downloads, 2);
         view.finish_translate_download(Ok(()));
         assert_eq!(view.translate_state(), &TranslateUiState::Idle);
-        assert!(view.status_message.as_deref().is_some_and(|s| s.contains("again")));
+        assert!(
+            view.status_message
+                .as_deref()
+                .is_some_and(|s| s.contains("again"))
+        );
     }
 
     /// OCR 与翻译互斥：翻译界面打开时点 OCR 会先退出翻译界面；反过来同理。
@@ -6686,7 +7620,10 @@ mod tests {
         view.finish_ocr(view.ocr_serial, Ok(ocr_result(&["a"])));
         view.apply_action(ToolbarAction::Translate);
         assert_eq!(view.ocr_state(), &OcrUiState::Idle);
-        assert!(matches!(view.translate_state(), TranslateUiState::Running(_)));
+        assert!(matches!(
+            view.translate_state(),
+            TranslateUiState::Running(_)
+        ));
         assert_eq!(rec.borrow().translates.len(), 2);
     }
 
@@ -6697,10 +7634,20 @@ mod tests {
         drag(&mut view, (5, 5), (44, 34));
         view.apply_action(ToolbarAction::Ocr);
         view.finish_ocr(1, Ok(ocr_result(&["hello", "世界"])));
-        assert!(matches!(view.ocr_state(), OcrUiState::Done { copied: true, .. }));
+        assert!(matches!(
+            view.ocr_state(),
+            OcrUiState::Done { copied: true, .. }
+        ));
         assert_eq!(rec.borrow().texts, vec!["hello\n世界".to_string()]);
-        assert!(view.status_message.as_deref().is_some_and(|s| s.contains("已复制")));
-        assert_eq!(view.handle_key("enter", false, false), OverlayOutcome::Close);
+        assert!(
+            view.status_message
+                .as_deref()
+                .is_some_and(|s| s.contains("copied"))
+        );
+        assert_eq!(
+            view.handle_key("enter", false, false),
+            OverlayOutcome::Close
+        );
         assert_eq!(rec.borrow().texts.len(), 2);
 
         // Esc：先退出 OCR 界面，再按一次才关闭
@@ -6708,9 +7655,15 @@ mod tests {
         drag(&mut view, (5, 5), (44, 34));
         view.apply_action(ToolbarAction::Ocr);
         view.finish_ocr(1, Ok(ocr_result(&["a"])));
-        assert_eq!(view.handle_key("escape", false, false), OverlayOutcome::Stay);
+        assert_eq!(
+            view.handle_key("escape", false, false),
+            OverlayOutcome::Stay
+        );
         assert_eq!(view.ocr_state(), &OcrUiState::Idle);
-        assert_eq!(view.handle_key("escape", false, false), OverlayOutcome::Close);
+        assert_eq!(
+            view.handle_key("escape", false, false),
+            OverlayOutcome::Close
+        );
     }
 
     /// 空结果不复制文本（不覆盖用户剪贴板），提示“未识别到文字”。
@@ -6721,7 +7674,7 @@ mod tests {
         view.apply_action(ToolbarAction::Ocr);
         view.finish_ocr(1, Ok(ocr_result(&[])));
         assert!(rec.borrow().texts.is_empty());
-        assert_eq!(view.status_message.as_deref(), Some("未识别到文字"));
+        assert_eq!(view.status_message.as_deref(), Some("No text found"));
     }
 
     /// 复制失败：仍展示结果，但状态条说明复制失败。
@@ -6732,17 +7685,33 @@ mod tests {
         drag(&mut view, (5, 5), (44, 34));
         view.ocr = OcrUiState::Running;
         view.finish_ocr(view.ocr_serial, Ok(ocr_result(&["x"])));
-        assert!(matches!(view.ocr_state(), OcrUiState::Done { copied: false, .. }));
-        assert!(view.status_message.as_deref().is_some_and(|s| s.contains("失败")));
+        assert!(matches!(
+            view.ocr_state(),
+            OcrUiState::Done { copied: false, .. }
+        ));
+        assert!(
+            view.status_message
+                .as_deref()
+                .is_some_and(|s| s.contains("failed"))
+        );
     }
 
     /// 构造一个底图为二维码样本的视图，并拖出覆盖整张码的选区。
     fn view_with_qr(fail: bool) -> (ScreenshotOverlayView, Rc<RefCell<Recorded>>) {
         let (w, h, data) = crate::qr_decode::test_support::render_sample(6, 4);
-        let frame = FrozenFrame::from_captured(CapturedScreen { width: w, height: h, data }).unwrap();
+        let frame = FrozenFrame::from_captured(CapturedScreen {
+            width: w,
+            height: h,
+            data,
+        })
+        .unwrap();
         let rec = Rc::new(RefCell::new(Recorded::default()));
-        let sink = RecordingSink { rec: Rc::clone(&rec), fail };
-        let mut view = ScreenshotOverlayView::new(frame, 1.0, PhysicalPoint::new(0, 0), Box::new(sink));
+        let sink = RecordingSink {
+            rec: Rc::clone(&rec),
+            fail,
+        };
+        let mut view =
+            ScreenshotOverlayView::new(frame, 1.0, PhysicalPoint::new(0, 0), Box::new(sink));
         drag(&mut view, (2, 2), (w as i32 - 2, h as i32 - 2));
         (view, rec)
     }
@@ -6754,7 +7723,9 @@ mod tests {
         let (mut view, rec) = view_with_qr(false);
         assert_eq!(view.recognize_qr_code(), OverlayOutcome::Stay);
         assert_eq!(rec.borrow().texts, vec![sample.to_string()]);
-        assert!(matches!(view.ocr_state(), OcrUiState::Done { text, copied: true, .. } if text == sample));
+        assert!(
+            matches!(view.ocr_state(), OcrUiState::Done { text, copied: true, .. } if text == sample)
+        );
         assert_eq!(view.qr_link.as_deref(), Some(sample));
         assert_eq!(view.handle_key("o", false, false), OverlayOutcome::Close);
         assert_eq!(rec.borrow().urls, vec![sample.to_string()]);
@@ -6767,9 +7738,16 @@ mod tests {
         view.recognize_qr_code();
         // 复制成功后再让输出通道失败：直接换成会失败的通道
         let fail_rec = Rc::new(RefCell::new(Recorded::default()));
-        view.output = Box::new(RecordingSink { rec: Rc::clone(&fail_rec), fail: true });
+        view.output = Box::new(RecordingSink {
+            rec: Rc::clone(&fail_rec),
+            fail: true,
+        });
         assert_eq!(view.handle_key("o", false, false), OverlayOutcome::Stay);
-        assert!(view.status_message.as_deref().is_some_and(|s| s.contains("boom")));
+        assert!(
+            view.status_message
+                .as_deref()
+                .is_some_and(|s| s.contains("boom"))
+        );
         assert!(view.qr_link.is_some());
         assert!(rec.borrow().urls.is_empty() && fail_rec.borrow().urls.is_empty());
     }
@@ -6779,7 +7757,11 @@ mod tests {
     fn open_link_key_needs_a_qr_link() {
         let (mut view, rec) = view_with_qr(false);
         // 普通文字识别结果里即使有链接也不提供打开
-        view.ocr = OcrUiState::Done { text: "https://a.b".into(), boxes: Vec::new(), copied: true };
+        view.ocr = OcrUiState::Done {
+            text: "https://a.b".into(),
+            boxes: Vec::new(),
+            copied: true,
+        };
         view.handle_key("o", false, false);
         assert!(rec.borrow().urls.is_empty());
         // 识别到码后退出 OCR 界面，链接被清掉
@@ -6806,19 +7788,31 @@ mod tests {
         view.apply_action(ToolbarAction::Ocr);
         view.finish_ocr(1, Err(OcrError::Unavailable(OcrUnavailable::NoRuntime)));
         let no_runtime = view.status_message.clone().unwrap_or_default();
-        assert!(no_runtime.contains("运行时") && no_runtime.contains("按 D 下载"), "{no_runtime}");
+        assert!(
+            no_runtime.contains("OCR runtime") && no_runtime.contains("press D"),
+            "{no_runtime}"
+        );
         view.dismiss_ocr();
         view.apply_action(ToolbarAction::Ocr);
         view.finish_ocr(view.ocr_serial, Err(OcrError::SessionNotReady));
         let not_ready = view.status_message.clone().unwrap_or_default();
-        assert!(not_ready.contains("模型加载失败") && !not_ready.contains("按 D"), "{not_ready}");
+        assert!(
+            not_ready.contains("failed to load") && !not_ready.contains("press D"),
+            "{not_ready}"
+        );
         assert_ne!(no_runtime, not_ready);
 
         // 输出通道拒绝提交：直接进入失败态
         let (mut view, _) = view_with(100, 80, 1.0, true);
         drag(&mut view, (5, 5), (44, 34));
         view.apply_action(ToolbarAction::Ocr);
-        assert!(matches!(view.ocr_state(), OcrUiState::Failed { can_download: false, .. }));
+        assert!(matches!(
+            view.ocr_state(),
+            OcrUiState::Failed {
+                can_download: false,
+                ..
+            }
+        ));
     }
 
     /// 按 D 触发下载；下载进度与结果更新状态；成功后回到待命，失败可再次重试。
@@ -6831,18 +7825,36 @@ mod tests {
         view.handle_key("d", false, false);
         assert_eq!(rec.borrow().ocr_downloads, 0);
         view.apply_action(ToolbarAction::Ocr);
-        view.finish_ocr(1, Err(OcrError::Unavailable(OcrUnavailable::NoModel { id: "m".into() })));
+        view.finish_ocr(
+            1,
+            Err(OcrError::Unavailable(OcrUnavailable::NoModel {
+                id: "m".into(),
+            })),
+        );
         assert_eq!(view.handle_key("d", false, false), OverlayOutcome::Stay);
         assert_eq!(rec.borrow().ocr_downloads, 1);
         assert!(matches!(view.ocr_state(), OcrUiState::Downloading(_)));
         view.update_ocr_download("正在下载 OCR 模型 (2/3)…");
-        assert_eq!(view.status_message.as_deref(), Some("正在下载 OCR 模型 (2/3)…"));
+        assert_eq!(
+            view.status_message.as_deref(),
+            Some("正在下载 OCR 模型 (2/3)…")
+        );
         view.finish_ocr_download(Err("网络不可达".into()));
-        assert!(matches!(view.ocr_state(), OcrUiState::Failed { can_download: true, .. }));
+        assert!(matches!(
+            view.ocr_state(),
+            OcrUiState::Failed {
+                can_download: true,
+                ..
+            }
+        ));
         view.handle_key("d", false, false);
         view.finish_ocr_download(Ok(()));
         assert_eq!(view.ocr_state(), &OcrUiState::Idle);
-        assert!(view.status_message.as_deref().is_some_and(|s| s.contains("again")));
+        assert!(
+            view.status_message
+                .as_deref()
+                .is_some_and(|s| s.contains("again"))
+        );
     }
 
     /// 过期结果（用户已退出 OCR 或又发起了新请求）被丢弃。
@@ -6861,16 +7873,29 @@ mod tests {
     #[test]
     fn scroll_capture_action_sends_region_and_closes() {
         let (mut view, rec) = view_with(100, 80, 1.0, false);
-        assert_eq!(view.apply_action(ToolbarAction::ScrollCapture), OverlayOutcome::Stay);
+        assert_eq!(
+            view.apply_action(ToolbarAction::ScrollCapture),
+            OverlayOutcome::Stay
+        );
         assert!(rec.borrow().scrolls.is_empty());
         drag(&mut view, (5, 5), (44, 34));
-        assert_eq!(view.apply_action(ToolbarAction::ScrollCapture), OverlayOutcome::Close);
+        assert_eq!(
+            view.apply_action(ToolbarAction::ScrollCapture),
+            OverlayOutcome::Close
+        );
         assert_eq!(rec.borrow().scrolls, vec![PhysicalRect::new(5, 5, 40, 30)]);
         // 输出通道失败：保留窗口并提示
         let (mut view, _) = view_with(100, 80, 1.0, true);
         drag(&mut view, (5, 5), (44, 34));
-        assert_eq!(view.apply_action(ToolbarAction::ScrollCapture), OverlayOutcome::Stay);
-        assert!(view.status_message.as_deref().is_some_and(|s| s.contains("scrolling capture")));
+        assert_eq!(
+            view.apply_action(ToolbarAction::ScrollCapture),
+            OverlayOutcome::Stay
+        );
+        assert!(
+            view.status_message
+                .as_deref()
+                .is_some_and(|s| s.contains("scrolling capture"))
+        );
     }
 
     /// 长截图选区模式：Enter 确认区域并交给长截图；复制 / 保存快捷键被禁用；Esc 仍可取消。
@@ -6879,16 +7904,26 @@ mod tests {
         let (mut view, rec) = view_with(100, 80, 1.0, false);
         view.set_scroll_mode(true);
         assert_eq!(view.handle_key("enter", false, false), OverlayOutcome::Stay);
-        assert!(view.status_message.as_deref().is_some_and(|s| s.contains("Select")));
+        assert!(
+            view.status_message
+                .as_deref()
+                .is_some_and(|s| s.contains("Select"))
+        );
         drag(&mut view, (5, 5), (44, 34));
         assert_eq!(view.handle_key("c", true, false), OverlayOutcome::Stay);
         assert_eq!(view.handle_key("s", true, false), OverlayOutcome::Stay);
         assert!(rec.borrow().images.is_empty() && rec.borrow().saved.is_empty());
-        assert_eq!(view.handle_key("enter", false, false), OverlayOutcome::Close);
+        assert_eq!(
+            view.handle_key("enter", false, false),
+            OverlayOutcome::Close
+        );
         assert_eq!(rec.borrow().scrolls, vec![PhysicalRect::new(5, 5, 40, 30)]);
         let (mut view, _) = view_with(100, 80, 1.0, false);
         view.set_scroll_mode(true);
-        assert_eq!(view.handle_key("escape", false, false), OverlayOutcome::Close);
+        assert_eq!(
+            view.handle_key("escape", false, false),
+            OverlayOutcome::Close
+        );
     }
 
     /// 改色 / 线宽后画的矩形按新样式出图（复制结果里左边线为蓝色）。
@@ -6902,7 +7937,10 @@ mod tests {
             s.width = 6;
         });
         annotate(&mut view, (60, 50), (160, 110));
-        assert_eq!(view.handle_key("enter", false, false), OverlayOutcome::Close);
+        assert_eq!(
+            view.handle_key("enter", false, false),
+            OverlayOutcome::Close
+        );
         let r = rec.borrow();
         let (w, _, rgba) = &r.images[0];
         let o = ((60 * *w + 40) * 4) as usize;
@@ -6918,10 +7956,16 @@ mod tests {
         view.select_tool(AnnotationTool::Line);
         view.update_tool_style(AnnotationTool::Line, |s| s.color = [0x16, 0x77, 0xFF, 0xFF]);
         view.select_tool(AnnotationTool::Arrow);
-        assert_eq!(view.tool_style(AnnotationTool::Arrow), crate::annotation_style::default_style(AnnotationTool::Arrow));
+        assert_eq!(
+            view.tool_style(AnnotationTool::Arrow),
+            crate::annotation_style::default_style(AnnotationTool::Arrow)
+        );
         // 再切回直线（选箭头会取消；再选直线）
         view.select_tool(AnnotationTool::Line);
-        assert_eq!(view.tool_style(AnnotationTool::Line).color, [0x16, 0x77, 0xFF, 0xFF]);
+        assert_eq!(
+            view.tool_style(AnnotationTool::Line).color,
+            [0x16, 0x77, 0xFF, 0xFF]
+        );
         annotate(&mut view, (40, 80), (180, 80));
         view.handle_key("enter", false, false);
         let r = rec.borrow();
@@ -6952,12 +7996,18 @@ mod tests {
             s.arrowhead = ArrowheadChoice::Dot;
         });
         let raw = std::fs::read_to_string(&path).unwrap();
-        assert!(raw.contains("arrow_style") && raw.contains("#010203FF"), "配置应含箭头样式: {raw}");
+        assert!(
+            raw.contains("arrow_style") && raw.contains("#010203FF"),
+            "配置应含箭头样式: {raw}"
+        );
 
         let (mut second, _) = view_with(100, 80, 1.0, false);
         second.set_style_config(Rc::new(RefCell::new(ConfigStore::open(&path))), "en-US");
         let arrow = second.tool_style(AnnotationTool::Arrow);
-        assert_eq!((arrow.width, arrow.color, arrow.arrowhead), (12, [1, 2, 3, 255], ArrowheadChoice::Dot));
+        assert_eq!(
+            (arrow.width, arrow.color, arrow.arrowhead),
+            (12, [1, 2, 3, 255], ArrowheadChoice::Dot)
+        );
         assert_eq!(second.styles.recent(), &[[1, 2, 3, 255]]);
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -4,7 +4,9 @@
 //! 没有资产、没有模型、进程崩溃时一律返回明确的 [`OcrError`]，**绝不编造识别文本**。
 //! 识别是阻塞调用，必须在后台线程里执行。
 
-use crate::ocr_assets::{ENV_OCR_ASSET_DIR, ENV_OCR_PROCESS_EXE, OcrAssets, ocr_root, resolve_assets};
+use crate::ocr_assets::{
+    ENV_OCR_ASSET_DIR, ENV_OCR_PROCESS_EXE, OcrAssets, ocr_root, resolve_assets,
+};
 use crate::ocr_client::{OcrError, OcrWorker, SessionConfig, Timeouts};
 use image::{RgbaImage, imageops};
 use serde_json::Value;
@@ -218,8 +220,15 @@ impl OcrService {
     /// ```
     pub fn new(data_root: &Path) -> Self {
         let env_root = std::env::var(ENV_OCR_ASSET_DIR).ok();
-        let exe = std::env::var_os(ENV_OCR_PROCESS_EXE).filter(|v| !v.is_empty()).map(PathBuf::from);
-        Self::with_parts(ocr_root(data_root, env_root.as_deref()), exe, Arc::new(ProcessLauncher), DEFAULT_IDLE_TIMEOUT)
+        let exe = std::env::var_os(ENV_OCR_PROCESS_EXE)
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from);
+        Self::with_parts(
+            ocr_root(data_root, env_root.as_deref()),
+            exe,
+            Arc::new(ProcessLauncher),
+            DEFAULT_IDLE_TIMEOUT,
+        )
     }
 
     /// 用显式部件创建服务（测试可注入假拉起方式与短空闲时间）。
@@ -263,7 +272,8 @@ impl OcrService {
     /// # 参数
     /// - `model_kind`：模型类型键。
     pub fn resolve(&self, model_kind: &str) -> Result<OcrAssets, OcrError> {
-        resolve_assets(&self.asset_root, self.exe_override.as_deref(), model_kind).map_err(OcrError::Unavailable)
+        resolve_assets(&self.asset_root, self.exe_override.as_deref(), model_kind)
+            .map_err(OcrError::Unavailable)
     }
 
     /// worker 进程当前是否在运行。
@@ -301,10 +311,12 @@ impl OcrService {
         rgba: &[u8],
     ) -> Result<OcrResult, OcrError> {
         let started = Instant::now();
-        let expected = (width as usize).checked_mul(height as usize).and_then(|p| p.checked_mul(4));
+        let expected = (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|p| p.checked_mul(4));
         if width == 0 || height == 0 || expected != Some(rgba.len()) {
             return Err(OcrError::InvalidImage(format!(
-                "尺寸 {width}x{height} 与像素长度 {} 不符",
+                "size {width}x{height} does not match the pixel length {}",
                 rgba.len()
             )));
         }
@@ -314,10 +326,14 @@ impl OcrService {
         let (image, scale) = if (sw, sh) == (width, height) {
             (rgba, (1.0, 1.0))
         } else {
-            let source = RgbaImage::from_raw(width, height, rgba.to_vec())
-                .ok_or_else(|| OcrError::InvalidImage("无法构造缩放源图".to_string()))?;
+            let source = RgbaImage::from_raw(width, height, rgba.to_vec()).ok_or_else(|| {
+                OcrError::InvalidImage("could not build the source image for scaling".to_string())
+            })?;
             scaled = imageops::resize(&source, sw, sh, imageops::FilterType::Triangle).into_raw();
-            (scaled.as_slice(), (width as f32 / sw as f32, height as f32 / sh as f32))
+            (
+                scaled.as_slice(),
+                (width as f32 / sw as f32, height as f32 / sh as f32),
+            )
         };
         let session = SessionConfig {
             directml: config.directml,
@@ -328,7 +344,11 @@ impl OcrService {
         };
         let lines = self.run_with_worker(&assets, &session, config.resident, sw, sh, image)?;
         let boxes = lines_to_boxes(&lines, scale, (width, height));
-        let full_text = boxes.iter().map(|b| b.text.as_str()).collect::<Vec<_>>().join("\n");
+        let full_text = boxes
+            .iter()
+            .map(|b| b.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
         Ok(OcrResult {
             boxes,
             full_text,
@@ -354,7 +374,9 @@ impl OcrService {
                 guard.worker = Some(self.launcher.launch(assets)?);
             }
             let outcome = match guard.worker.as_mut() {
-                Some(worker) => worker.prepare(session).and_then(|()| worker.recognize(width, height, rgba)),
+                Some(worker) => worker
+                    .prepare(session)
+                    .and_then(|()| worker.recognize(width, height, rgba)),
                 None => Err(OcrError::ProcessDied(String::new())),
             };
             guard.last_used = Instant::now();
@@ -469,10 +491,15 @@ mod tests {
         let root = temp_root(tag);
         let m = manifest().expect("清单");
         let model = find_model(m, "small").expect("模型");
-        for (dir, files) in [(runtime_dir(&root, &m.runtime), &m.runtime.files), (model_dir(&root, model), &model.files)] {
+        for (dir, files) in [
+            (runtime_dir(&root, &m.runtime), &m.runtime.files),
+            (model_dir(&root, model), &model.files),
+        ] {
             std::fs::create_dir_all(&dir).expect("建目录");
             for f in files {
-                std::fs::File::create(dir.join(&f.name)).and_then(|file| file.set_len(f.size)).expect("建文件");
+                std::fs::File::create(dir.join(&f.name))
+                    .and_then(|file| file.set_len(f.size))
+                    .expect("建文件");
             }
             std::fs::write(dir.join(COMPLETE_MARKER), b"{}").expect("标记");
         }
@@ -481,7 +508,12 @@ mod tests {
 
     /// 测试用请求配置。
     fn cfg() -> OcrRequestConfig {
-        OcrRequestConfig { model_kind: "small".into(), directml: false, resize_policy: 0, resident: false }
+        OcrRequestConfig {
+            model_kind: "small".into(),
+            directml: false,
+            resize_policy: 0,
+            resident: false,
+        }
     }
 
     /// 构造服务（假拉起方式）。
@@ -496,7 +528,10 @@ mod tests {
         let launcher = FakeLauncher::new(vec![FakeScript::ok()]);
         let svc = service(root.clone(), Arc::clone(&launcher), DEFAULT_IDLE_TIMEOUT);
         let err = svc.recognize_rgba(&cfg(), 4, 4, &[255; 64]).unwrap_err();
-        assert_eq!(err, OcrError::Unavailable(crate::ocr_assets::OcrUnavailable::NoRuntime));
+        assert_eq!(
+            err,
+            OcrError::Unavailable(crate::ocr_assets::OcrUnavailable::NoRuntime)
+        );
         assert!(err.can_download());
         assert_eq!(launcher.launches.load(Ordering::SeqCst), 0);
         let _ = std::fs::remove_dir_all(&root);
@@ -506,10 +541,23 @@ mod tests {
     #[test]
     fn invalid_input_is_an_error() {
         let root = fake_assets("invalid");
-        let svc = service(root.clone(), FakeLauncher::new(vec![]), DEFAULT_IDLE_TIMEOUT);
-        assert!(matches!(svc.recognize_rgba(&cfg(), 0, 0, &[]), Err(OcrError::InvalidImage(_))));
-        assert!(matches!(svc.recognize_rgba(&cfg(), 2, 2, &[0; 3]), Err(OcrError::InvalidImage(_))));
-        assert!(matches!(svc.recognize_rgba(&cfg(), u32::MAX, u32::MAX, &[0; 4]), Err(OcrError::InvalidImage(_))));
+        let svc = service(
+            root.clone(),
+            FakeLauncher::new(vec![]),
+            DEFAULT_IDLE_TIMEOUT,
+        );
+        assert!(matches!(
+            svc.recognize_rgba(&cfg(), 0, 0, &[]),
+            Err(OcrError::InvalidImage(_))
+        ));
+        assert!(matches!(
+            svc.recognize_rgba(&cfg(), 2, 2, &[0; 3]),
+            Err(OcrError::InvalidImage(_))
+        ));
+        assert!(matches!(
+            svc.recognize_rgba(&cfg(), u32::MAX, u32::MAX, &[0; 4]),
+            Err(OcrError::InvalidImage(_))
+        ));
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -519,14 +567,30 @@ mod tests {
         let root = fake_assets("ok");
         let script = FakeScript {
             result: CompleteResult::Success(vec![
-                OcrLine { text: "第一行".into(), score: 0.9, quad: [[10.0, 20.0], [110.0, 22.0], [108.0, 60.0], [8.0, 58.0]] },
-                OcrLine { text: "  ".into(), score: 0.5, quad: [[0.0; 2]; 4] },
-                OcrLine { text: "second".into(), score: 0.8, quad: [[10.0, 70.0], [90.0, 70.0], [90.0, 90.0], [10.0, 90.0]] },
+                OcrLine {
+                    text: "第一行".into(),
+                    score: 0.9,
+                    quad: [[10.0, 20.0], [110.0, 22.0], [108.0, 60.0], [8.0, 58.0]],
+                },
+                OcrLine {
+                    text: "  ".into(),
+                    score: 0.5,
+                    quad: [[0.0; 2]; 4],
+                },
+                OcrLine {
+                    text: "second".into(),
+                    score: 0.8,
+                    quad: [[10.0, 70.0], [90.0, 70.0], [90.0, 90.0], [10.0, 90.0]],
+                },
             ]),
             ..FakeScript::ok()
         };
         let log = Arc::clone(&script.log);
-        let svc = service(root.clone(), FakeLauncher::new(vec![script]), DEFAULT_IDLE_TIMEOUT);
+        let svc = service(
+            root.clone(),
+            FakeLauncher::new(vec![script]),
+            DEFAULT_IDLE_TIMEOUT,
+        );
         let image: Vec<u8> = (0..200 * 100).flat_map(|_| [7u8, 8, 9, 255]).collect();
         let result = svc.recognize_rgba(&cfg(), 200, 100, &image).expect("识别");
         assert_eq!(result.boxes.len(), 2, "空白行应被丢弃");
@@ -534,7 +598,12 @@ mod tests {
         assert_eq!(result.full_text, "第一行\nsecond");
         assert!(svc.is_worker_running());
         let entries = log.lock().expect("日志").clone();
-        assert!(entries.iter().any(|e| e == "slot header_ok=true first_pixel=[7, 8, 9, 255] size=200x100"), "{entries:?}");
+        assert!(
+            entries
+                .iter()
+                .any(|e| e == "slot header_ok=true first_pixel=[7, 8, 9, 255] size=200x100"),
+            "{entries:?}"
+        );
         svc.shutdown();
         assert!(!svc.is_worker_running());
         let _ = std::fs::remove_dir_all(&root);
@@ -544,8 +613,15 @@ mod tests {
     #[test]
     fn empty_result_is_success() {
         let root = fake_assets("empty-result");
-        let script = FakeScript { result: CompleteResult::Success(vec![]), ..FakeScript::ok() };
-        let svc = service(root.clone(), FakeLauncher::new(vec![script]), DEFAULT_IDLE_TIMEOUT);
+        let script = FakeScript {
+            result: CompleteResult::Success(vec![]),
+            ..FakeScript::ok()
+        };
+        let svc = service(
+            root.clone(),
+            FakeLauncher::new(vec![script]),
+            DEFAULT_IDLE_TIMEOUT,
+        );
         let result = svc.recognize_rgba(&cfg(), 4, 4, &[255; 64]).expect("识别");
         assert!(result.boxes.is_empty() && result.full_text.is_empty());
         let _ = std::fs::remove_dir_all(&root);
@@ -559,19 +635,33 @@ mod tests {
             result: CompleteResult::Success(vec![OcrLine {
                 text: "x".into(),
                 score: 1.0,
-                quad: [[100.0, 100.0], [200.0, 100.0], [200.0, 150.0], [100.0, 150.0]],
+                quad: [
+                    [100.0, 100.0],
+                    [200.0, 100.0],
+                    [200.0, 150.0],
+                    [100.0, 150.0],
+                ],
             }]),
             ..FakeScript::ok()
         };
         let log = Arc::clone(&script.log);
-        let svc = service(root.clone(), FakeLauncher::new(vec![script]), DEFAULT_IDLE_TIMEOUT);
+        let svc = service(
+            root.clone(),
+            FakeLauncher::new(vec![script]),
+            DEFAULT_IDLE_TIMEOUT,
+        );
         let (w, h) = (4000u32, 2200u32);
         let image = vec![128u8; w as usize * h as usize * 4];
         let result = svc.recognize_rgba(&cfg(), w, h, &image).expect("识别");
         let (sw, sh) = fit_within_limit(w, h);
         assert!(sw as usize * sh as usize <= MAX_PIXELS && (sw, sh) != (w, h));
         let entries = log.lock().expect("日志").clone();
-        assert!(entries.iter().any(|e| e.contains(&format!("size={sw}x{sh}"))), "{entries:?}");
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.contains(&format!("size={sw}x{sh}"))),
+            "{entries:?}"
+        );
         let fx = w as f32 / sw as f32;
         let expected_x = (100.0 * fx).floor() as i32;
         assert_eq!(result.boxes[0].rect.x, expected_x);
@@ -585,12 +675,17 @@ mod tests {
     fn worker_exits_when_idle_and_restarts_on_demand() {
         let root = fake_assets("idle");
         let launcher = FakeLauncher::new(vec![FakeScript::ok(), FakeScript::ok()]);
-        let svc = service(root.clone(), Arc::clone(&launcher), Duration::from_millis(150));
+        let svc = service(
+            root.clone(),
+            Arc::clone(&launcher),
+            Duration::from_millis(150),
+        );
         svc.recognize_rgba(&cfg(), 4, 4, &[255; 64]).expect("识别");
         assert!(svc.is_worker_running());
         std::thread::sleep(Duration::from_millis(700));
         assert!(!svc.is_worker_running(), "空闲后应已退出");
-        svc.recognize_rgba(&cfg(), 4, 4, &[255; 64]).expect("再次识别");
+        svc.recognize_rgba(&cfg(), 4, 4, &[255; 64])
+            .expect("再次识别");
         assert_eq!(launcher.launches.load(Ordering::SeqCst), 2);
         svc.shutdown();
         let _ = std::fs::remove_dir_all(&root);
@@ -600,7 +695,11 @@ mod tests {
     #[test]
     fn resident_mode_keeps_worker() {
         let root = fake_assets("resident");
-        let svc = service(root.clone(), FakeLauncher::new(vec![FakeScript::ok()]), Duration::from_millis(100));
+        let svc = service(
+            root.clone(),
+            FakeLauncher::new(vec![FakeScript::ok()]),
+            Duration::from_millis(100),
+        );
         let mut c = cfg();
         c.resident = true;
         svc.recognize_rgba(&c, 4, 4, &[255; 64]).expect("识别");
@@ -615,7 +714,10 @@ mod tests {
     fn crash_recovery_retries_once_only_for_reused_worker() {
         let root = fake_assets("crash");
         // 第一个 worker 在第二次识别时崩溃（第一次正常）；重启后的第二个 worker 正常
-        let first = FakeScript { die_on: Some(Kind::AttachBuffer), ..FakeScript::ok() };
+        let first = FakeScript {
+            die_on: Some(Kind::AttachBuffer),
+            ..FakeScript::ok()
+        };
         let launcher = FakeLauncher::new(vec![first, FakeScript::ok()]);
         let svc = service(root.clone(), Arc::clone(&launcher), DEFAULT_IDLE_TIMEOUT);
         // 第一次：新拉起的 worker 在 Attach 时崩溃 -> 不重试，直接报错
@@ -628,7 +730,10 @@ mod tests {
         svc.shutdown();
 
         // 复用场景：worker 第一次正常，之后进程被外部杀掉
-        let dying = FakeScript { die_on: None, ..FakeScript::ok() };
+        let dying = FakeScript {
+            die_on: None,
+            ..FakeScript::ok()
+        };
         let launcher = FakeLauncher::new(vec![dying, FakeScript::ok()]);
         let svc = service(root.clone(), Arc::clone(&launcher), DEFAULT_IDLE_TIMEOUT);
         svc.recognize_rgba(&cfg(), 4, 4, &[255; 64]).expect("首次");
@@ -638,7 +743,8 @@ mod tests {
             w.shutdown();
             lock(&svc.inner).worker = Some(w);
         }
-        svc.recognize_rgba(&cfg(), 4, 4, &[255; 64]).expect("重启后应成功");
+        svc.recognize_rgba(&cfg(), 4, 4, &[255; 64])
+            .expect("重启后应成功");
         assert_eq!(launcher.launches.load(Ordering::SeqCst), 2);
         svc.shutdown();
         let _ = std::fs::remove_dir_all(&root);
@@ -649,10 +755,19 @@ mod tests {
     fn fit_within_limit_rules() {
         assert_eq!(fit_within_limit(1920, 1080), (1920, 1080));
         assert_eq!(fit_within_limit(3840, 2160), (3840, 2160));
-        for (w, h) in [(7680, 4320), (4000, 2200), (10000, 100), (100, 100000), (u32::MAX, 2)] {
+        for (w, h) in [
+            (7680, 4320),
+            (4000, 2200),
+            (10000, 100),
+            (100, 100000),
+            (u32::MAX, 2),
+        ] {
             let (nw, nh) = fit_within_limit(w, h);
             assert!(nw >= 1 && nh >= 1);
-            assert!(nw as u64 * nh as u64 <= MAX_PIXELS as u64, "{w}x{h} -> {nw}x{nh}");
+            assert!(
+                nw as u64 * nh as u64 <= MAX_PIXELS as u64,
+                "{w}x{h} -> {nw}x{nh}"
+            );
         }
         let (nw, nh) = fit_within_limit(7680, 4320);
         assert_eq!((nw, nh), (3840, 2160));
@@ -662,9 +777,21 @@ mod tests {
     #[test]
     fn lines_to_boxes_maps_and_clamps() {
         let lines = vec![
-            OcrLine { text: "a".into(), score: 0.5, quad: [[-5.0, -5.0], [50.0, 0.0], [50.0, 30.0], [0.0, 30.0]] },
-            OcrLine { text: " ".into(), score: 0.5, quad: [[0.0; 2]; 4] },
-            OcrLine { text: "b".into(), score: 0.5, quad: [[90.0, 10.0], [500.0, 10.0], [500.0, 20.0], [90.0, 20.0]] },
+            OcrLine {
+                text: "a".into(),
+                score: 0.5,
+                quad: [[-5.0, -5.0], [50.0, 0.0], [50.0, 30.0], [0.0, 30.0]],
+            },
+            OcrLine {
+                text: " ".into(),
+                score: 0.5,
+                quad: [[0.0; 2]; 4],
+            },
+            OcrLine {
+                text: "b".into(),
+                score: 0.5,
+                quad: [[90.0, 10.0], [500.0, 10.0], [500.0, 20.0], [90.0, 20.0]],
+            },
         ];
         let boxes = lines_to_boxes(&lines, (2.0, 2.0), (200, 100));
         assert_eq!(boxes.len(), 2);
@@ -725,22 +852,41 @@ mod real_worker_tests {
     fn real_worker_recognizes_rendered_text() {
         let data_root = default_app_data_directory().expect("数据根目录");
         let svc = OcrService::new(&data_root);
-        let cfg = OcrRequestConfig { model_kind: "small".into(), directml: false, resize_policy: 0, resident: true };
+        let cfg = OcrRequestConfig {
+            model_kind: "small".into(),
+            directml: false,
+            resize_policy: 0,
+            resident: true,
+        };
         let assets = svc.resolve(&cfg.model_kind).expect("资产应已安装");
-        let (w, h, rgba) = render_text_image(&["Hello Snow Shot OCR 12345", "你好，截图识别测试"], 40.0);
+        let (w, h, rgba) =
+            render_text_image(&["Hello Snow Shot OCR 12345", "你好，截图识别测试"], 40.0);
 
         let cold = std::time::Instant::now();
-        let first = svc.recognize_rgba(&cfg, w, h, &rgba).expect("首次识别（含拉起与加载）");
+        let first = svc
+            .recognize_rgba(&cfg, w, h, &rgba)
+            .expect("首次识别（含拉起与加载）");
         let cold_ms = cold.elapsed().as_millis();
         let warm = std::time::Instant::now();
         let second = svc.recognize_rgba(&cfg, w, h, &rgba).expect("二次识别");
         let warm_ms = warm.elapsed().as_millis();
-        println!("REAL|image={w}x{h}|cold_ms={cold_ms}|warm_ms={warm_ms}|text1={:?}|text2={:?}", first.full_text, second.full_text);
+        println!(
+            "REAL|image={w}x{h}|cold_ms={cold_ms}|warm_ms={warm_ms}|text1={:?}|text2={:?}",
+            first.full_text, second.full_text
+        );
         for b in &first.boxes {
             println!("REAL|box|{:?}|{}|{:?}", b.rect, b.text, b.confidence);
         }
-        assert!(first.full_text.contains("Snow") || first.full_text.contains("Hello"), "{:?}", first.full_text);
-        assert!(first.full_text.contains("识别") || first.full_text.contains("你好"), "{:?}", first.full_text);
+        assert!(
+            first.full_text.contains("Snow") || first.full_text.contains("Hello"),
+            "{:?}",
+            first.full_text
+        );
+        assert!(
+            first.full_text.contains("识别") || first.full_text.contains("你好"),
+            "{:?}",
+            first.full_text
+        );
         assert_eq!(first.full_text, second.full_text);
 
         // 独立连接测内存：新拉起一个 worker，识别后读它的工作集

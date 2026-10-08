@@ -3,6 +3,7 @@
 //! 读线程把 stdout 事件转发到通道并唤醒主线程；stderr 由独立线程排空（否则编码器日志会写满管道卡死子进程）。
 //! 子进程崩溃或被杀时读线程见到 EOF，会话据此复位；`shutdown` 负责收尸并清理中间产物目录。
 
+use crate::recording::model::RecordingFailure;
 use crate::recording::runtime::{LinkEvent, RecorderLink};
 use snow_recorder_protocol::{Command, Event, scratch_dir};
 use std::io::{BufRead, BufReader, Write};
@@ -115,7 +116,7 @@ impl ProcessRecorderLink {
     /// ```ignore
     /// let link = ProcessRecorderLink::spawn(&exe, Arc::new(|| inbox.push(UiEvent::RecorderPoll)))?;
     /// ```
-    pub fn spawn(exe: &Path, wake: Arc<dyn Fn() + Send + Sync>) -> Result<Self, String> {
+    pub fn spawn(exe: &Path, wake: Arc<dyn Fn() + Send + Sync>) -> Result<Self, RecordingFailure> {
         let mut command = std::process::Command::new(exe);
         command
             .stdin(Stdio::piped())
@@ -126,9 +127,10 @@ impl ProcessRecorderLink {
             use std::os::windows::process::CommandExt;
             command.creation_flags(CREATE_NO_WINDOW);
         }
-        let mut child = command
-            .spawn()
-            .map_err(|e| format!("无法启动录制进程 {}: {e}", exe.display()))?;
+        let mut child = command.spawn().map_err(|e| RecordingFailure::SpawnFailed {
+            exe: exe.display().to_string(),
+            detail: e.to_string(),
+        })?;
         let stdin = child.stdin.take();
         let (tx, rx) = channel();
         if let Some(stdout) = child.stdout.take() {
@@ -166,7 +168,9 @@ impl ProcessRecorderLink {
             if dir.exists() {
                 match std::fs::remove_dir_all(&dir) {
                     Ok(()) => tracing::info!(dir = %dir.display(), "已清理录制中间产物"),
-                    Err(e) => tracing::warn!(dir = %dir.display(), error = %e, "清理录制中间产物失败"),
+                    Err(e) => {
+                        tracing::warn!(dir = %dir.display(), error = %e, "清理录制中间产物失败")
+                    }
                 }
             }
         }
@@ -174,7 +178,11 @@ impl ProcessRecorderLink {
 }
 
 /// 读线程：逐行解析 stdout，转发事件；EOF 时补一个 `Exited`。
-fn read_events(stdout: impl std::io::Read, tx: Sender<LinkEvent>, wake: Arc<dyn Fn() + Send + Sync>) {
+fn read_events(
+    stdout: impl std::io::Read,
+    tx: Sender<LinkEvent>,
+    wake: Arc<dyn Fn() + Send + Sync>,
+) {
     for line in BufReader::new(stdout).lines() {
         let Ok(line) = line else { break };
         match Event::parse(&line) {
@@ -205,7 +213,7 @@ impl RecorderLink for ProcessRecorderLink {
         if let Command::Start(request) = command {
             self.output = Some(request.output.clone());
         }
-        let stdin = self.stdin.as_mut().ok_or("录制进程输入已关闭")?;
+        let stdin = self.stdin.as_mut().ok_or("the recorder stdin is closed")?;
         writeln!(stdin, "{}", command.to_line())
             .and_then(|()| stdin.flush())
             .map_err(|e| e.to_string())
@@ -233,7 +241,9 @@ impl RecorderLink for ProcessRecorderLink {
         }
         self.closed = true;
         drop(self.stdin.take());
-        if self.wait_exit_code(SHUTDOWN_GRACE).is_none() && matches!(self.child.try_wait(), Ok(None)) {
+        if self.wait_exit_code(SHUTDOWN_GRACE).is_none()
+            && matches!(self.child.try_wait(), Ok(None))
+        {
             tracing::warn!(pid = self.child.id(), "录制进程未在宽限期内退出，强制终止");
             let _ = self.child.kill();
             let _ = self.child.wait();
@@ -283,20 +293,26 @@ mod tests {
     #[test]
     fn dev_layout_found_via_ancestors() {
         let exe = Path::new("C:/ws/snow-shot-rs/target/debug/snow-shot.exe");
-        let dev = format!("C:/ws/snow-shot-rs/tools/snow-recorder/target/release/{RECORDER_EXE_NAME}");
+        let dev =
+            format!("C:/ws/snow-shot-rs/tools/snow-recorder/target/release/{RECORDER_EXE_NAME}");
         let hit = find_recorder_exe(None, exe, fs(&[&dev]));
         assert_eq!(hit, Some(PathBuf::from(dev)));
         // 仓库根下的 snow-shot-rs 子目录布局（构建目录在仓库根的 build/ 下时）
         let exe2 = Path::new("C:/repo/build/cargo/debug/snow-shot.exe");
-        let dev2 = format!("C:/repo/snow-shot-rs/tools/snow-recorder/target/release/{RECORDER_EXE_NAME}");
-        assert_eq!(find_recorder_exe(None, exe2, fs(&[&dev2])), Some(PathBuf::from(dev2)));
+        let dev2 =
+            format!("C:/repo/snow-shot-rs/tools/snow-recorder/target/release/{RECORDER_EXE_NAME}");
+        assert_eq!(
+            find_recorder_exe(None, exe2, fs(&[&dev2])),
+            Some(PathBuf::from(dev2))
+        );
         assert_eq!(find_recorder_exe(None, exe, fs(&[])), None);
     }
 
     /// 启动不存在的可执行文件返回错误而非 panic。
     #[test]
     fn spawn_missing_exe_errors() {
-        let result = ProcessRecorderLink::spawn(Path::new("Z:/definitely/missing.exe"), Arc::new(|| {}));
+        let result =
+            ProcessRecorderLink::spawn(Path::new("Z:/definitely/missing.exe"), Arc::new(|| {}));
         assert!(result.is_err());
     }
 }

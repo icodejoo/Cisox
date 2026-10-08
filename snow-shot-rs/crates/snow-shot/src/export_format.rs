@@ -154,7 +154,7 @@ fn check_buffer(width: u32, height: u32, rgba: &[u8]) -> Result<(), String> {
 }
 
 /// 压缩级别到 PNG 压缩类型（低 = 最快，中 = 默认，高 = 最小）。
-fn png_compression(level: CompressionLevel) -> CompressionType {
+pub(crate) fn png_compression(level: CompressionLevel) -> CompressionType {
     match level {
         CompressionLevel::Low => CompressionType::Fast,
         CompressionLevel::Medium => CompressionType::Default,

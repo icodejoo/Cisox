@@ -5,6 +5,7 @@
 //! 传输层是泛型的（任意 `Read` / `Write`），测试用管道 + 假 worker 线程驱动，不需要真实模型。
 
 use crate::ocr_assets::{OcrAssets, OcrUnavailable};
+use snow_i18n::{Args, I18n};
 use snow_ocr_protocol::{
     CompleteResult, Frame, FrameReader, Kind, MAX_PIXELS, OcrLine, ProtocolError, SLOT_HEADER_LEN,
     VERSION, attach_buffer_payload, decode_complete, decode_image_consumed, decode_ready,
@@ -71,6 +72,37 @@ pub struct SessionConfig {
     pub dictionary: PathBuf,
 }
 
+/// OCR 流程里可能超时的步骤（界面边界再翻译）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OcrStep {
+    /// 加载模型。
+    LoadModel,
+    /// 关闭 worker。
+    Shutdown,
+    /// 挂接图像映射。
+    AttachImage,
+    /// 传输图像。
+    TransferImage,
+    /// 识别。
+    Recognize,
+    /// 解除图像映射。
+    DetachImage,
+}
+
+impl OcrStep {
+    /// 步骤名对应的文案 ID。
+    fn message_id(self) -> &'static str {
+        match self {
+            Self::LoadModel => "ocr-step-load-model",
+            Self::Shutdown => "ocr-step-shutdown",
+            Self::AttachImage => "ocr-step-attach-image",
+            Self::TransferImage => "ocr-step-transfer-image",
+            Self::Recognize => "ocr-step-recognize",
+            Self::DetachImage => "ocr-step-detach",
+        }
+    }
+}
+
 /// OCR 失败原因。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OcrError {
@@ -96,7 +128,7 @@ pub enum OcrError {
     /// worker 报告识别被取消。
     Cancelled(String),
     /// 某一步超时。
-    Timeout(&'static str),
+    Timeout(OcrStep),
     /// 协议错误（帧非法、序号不符等）。
     Protocol(String),
     /// 本地 IO 错误（临时文件等）。
@@ -106,29 +138,38 @@ pub enum OcrError {
 }
 
 impl OcrError {
-    /// 面向用户的提示文案。
+    /// 面向用户的提示文案（附带的技术细节原样保留，不翻译）。
+    ///
+    /// # 参数
+    /// - `i18n`：界面语料。
     ///
     /// # 返回
-    /// 一句中文说明。
-    pub fn message(&self) -> String {
+    /// 一句说明。
+    pub fn message(&self, i18n: &I18n) -> String {
+        let with_detail =
+            |id: &str, detail: &str| i18n.tr_with(id, &Args::new().named("detail", detail));
         match self {
-            Self::Unavailable(u) => u.message(),
-            Self::SpawnFailed(e) => format!("无法启动 OCR 进程: {e}"),
-            Self::ReadyTimeout => "OCR 进程启动超时".to_string(),
-            Self::VersionMismatch { expected, actual } => {
-                format!("OCR 运行时版本不匹配（需要协议 {expected}，实际 {actual}），请重新下载运行时")
-            }
-            Self::ProcessDied(tail) if tail.is_empty() => "OCR 进程意外退出".to_string(),
-            Self::ProcessDied(tail) => format!("OCR 进程意外退出: {tail}"),
-            Self::SessionNotReady => {
-                "OCR 模型加载失败（模型文件损坏或缺少 onnxruntime），请重新下载模型".to_string()
-            }
-            Self::Failed(e) => format!("识别失败: {e}"),
-            Self::Cancelled(_) => "识别已取消".to_string(),
-            Self::Timeout(step) => format!("OCR 超时（{step}）"),
-            Self::Protocol(e) => format!("OCR 通信错误: {e}"),
-            Self::Io(e) => format!("OCR 临时文件错误: {e}"),
-            Self::InvalidImage(e) => format!("无法识别该图像: {e}"),
+            Self::Unavailable(u) => u.message(i18n),
+            Self::SpawnFailed(e) => with_detail("ocr-err-spawn-failed", e),
+            Self::ReadyTimeout => i18n.tr("ocr-err-ready-timeout"),
+            Self::VersionMismatch { expected, actual } => i18n.tr_with(
+                "ocr-err-version-mismatch",
+                &Args::new()
+                    .named("expected", expected.to_string())
+                    .named("actual", actual.to_string()),
+            ),
+            Self::ProcessDied(tail) if tail.is_empty() => i18n.tr("ocr-err-died"),
+            Self::ProcessDied(tail) => with_detail("ocr-err-died-detail", tail),
+            Self::SessionNotReady => i18n.tr("ocr-err-session-not-ready"),
+            Self::Failed(e) => with_detail("ocr-err-failed", e),
+            Self::Cancelled(_) => i18n.tr("ocr-err-cancelled"),
+            Self::Timeout(step) => i18n.tr_with(
+                "ocr-err-timeout",
+                &Args::new().named("step", i18n.tr(step.message_id())),
+            ),
+            Self::Protocol(e) => with_detail("ocr-err-protocol", e),
+            Self::Io(e) => with_detail("ocr-err-io", e),
+            Self::InvalidImage(e) => with_detail("ocr-err-invalid-image", e),
         }
     }
 
@@ -223,12 +264,16 @@ impl OcrWorker {
             use std::os::windows::process::CommandExt;
             command.creation_flags(CREATE_NO_WINDOW);
         }
-        let mut child = command.spawn().map_err(|e| OcrError::SpawnFailed(e.to_string()))?;
+        let mut child = command
+            .spawn()
+            .map_err(|e| OcrError::SpawnFailed(e.to_string()))?;
         let (Some(stdin), Some(stdout), Some(stderr)) =
             (child.stdin.take(), child.stdout.take(), child.stderr.take())
         else {
             let _ = child.kill();
-            return Err(OcrError::SpawnFailed("无法接管子进程管道".to_string()));
+            return Err(OcrError::SpawnFailed(
+                "could not take over the child process pipes".to_string(),
+            ));
         };
         let stderr_tail = Arc::new(Mutex::new(String::new()));
         spawn_stderr_pump(stderr, Arc::clone(&stderr_tail));
@@ -288,7 +333,9 @@ impl OcrWorker {
         let frame = self.wait(Kind::Ready, 0, self.timeouts.ready, OcrError::ReadyTimeout)?;
         let ready = decode_ready(&frame.payload)?;
         if !ready.success {
-            return Err(OcrError::Protocol("worker 报告初始化失败".to_string()));
+            return Err(OcrError::Protocol(
+                "the worker reported an initialization failure".to_string(),
+            ));
         }
         if ready.protocol != u32::from(VERSION) {
             return Err(OcrError::VersionMismatch {
@@ -316,7 +363,12 @@ impl OcrWorker {
             &config.dictionary.to_string_lossy(),
         );
         self.send(Kind::PrepareSession, id, &payload)?;
-        let frame = self.wait(Kind::SessionReady, id, self.timeouts.prepare, OcrError::Timeout("加载模型"))?;
+        let frame = self.wait(
+            Kind::SessionReady,
+            id,
+            self.timeouts.prepare,
+            OcrError::Timeout(OcrStep::LoadModel),
+        )?;
         if !decode_session_ready(&frame.payload)? {
             self.prepared = None;
             return Err(OcrError::SessionNotReady);
@@ -333,12 +385,21 @@ impl OcrWorker {
     ///
     /// # 返回
     /// 识别出的行（坐标是提交图像的像素坐标）；会话须已 [`OcrWorker::prepare`]。
-    pub fn recognize(&mut self, width: u32, height: u32, rgba: &[u8]) -> Result<Vec<OcrLine>, OcrError> {
+    pub fn recognize(
+        &mut self,
+        width: u32,
+        height: u32,
+        rgba: &[u8],
+    ) -> Result<Vec<OcrLine>, OcrError> {
         let pixels = (width as usize).checked_mul(height as usize);
         let expected = pixels.and_then(|p| p.checked_mul(BYTES_PER_PIXEL));
-        if width == 0 || height == 0 || pixels.is_none_or(|p| p > MAX_PIXELS) || expected != Some(rgba.len()) {
+        if width == 0
+            || height == 0
+            || pixels.is_none_or(|p| p > MAX_PIXELS)
+            || expected != Some(rgba.len())
+        {
             return Err(OcrError::InvalidImage(format!(
-                "尺寸 {width}x{height} 与像素长度 {} 不符或超出 {MAX_PIXELS} 像素上限",
+                "size {width}x{height} does not match the pixel length {} or exceeds the {MAX_PIXELS} pixel limit",
                 rgba.len()
             )));
         }
@@ -346,7 +407,11 @@ impl OcrWorker {
         let generation = self.take_id();
         let result = self.run_recognition(&file, generation, width, height);
         // 无论成败都尽力解除映射，才能删除文件；进程已死则跳过
-        if !result.as_ref().err().is_some_and(OcrError::is_fatal_for_worker) {
+        if !result
+            .as_ref()
+            .err()
+            .is_some_and(OcrError::is_fatal_for_worker)
+        {
             let _ = self.detach(generation);
         }
         result
@@ -355,7 +420,12 @@ impl OcrWorker {
     /// 关闭 worker：发 `Shutdown`，短暂等待应答，然后确保进程结束。
     pub fn shutdown(&mut self) {
         let _ = self.send(Kind::Shutdown, 0, &[]);
-        let _ = self.wait(Kind::ShutdownAck, 0, SHUTDOWN_ACK_WAIT, OcrError::Timeout("关闭"));
+        let _ = self.wait(
+            Kind::ShutdownAck,
+            0,
+            SHUTDOWN_ACK_WAIT,
+            OcrError::Timeout(OcrStep::Shutdown),
+        );
         if let Some(mut child) = self.child.take() {
             let deadline = Instant::now() + SHUTDOWN_ACK_WAIT;
             while Instant::now() < deadline && child.try_wait().ok().flatten().is_none() {
@@ -372,19 +442,52 @@ impl OcrWorker {
     }
 
     /// 执行 Attach → Submit → Recognize → Complete。
-    fn run_recognition(&mut self, file: &TempFile, generation: u64, width: u32, height: u32) -> Result<Vec<OcrLine>, OcrError> {
-        let total = std::fs::metadata(&file.0).map_err(|e| OcrError::Io(e.to_string()))?.len();
-        self.send(Kind::AttachBuffer, generation, &attach_buffer_payload(&file.0.to_string_lossy(), total))?;
-        self.wait(Kind::BufferAttached, generation, self.timeouts.step, OcrError::Timeout("挂接图像"))?;
+    fn run_recognition(
+        &mut self,
+        file: &TempFile,
+        generation: u64,
+        width: u32,
+        height: u32,
+    ) -> Result<Vec<OcrLine>, OcrError> {
+        let total = std::fs::metadata(&file.0)
+            .map_err(|e| OcrError::Io(e.to_string()))?
+            .len();
+        self.send(
+            Kind::AttachBuffer,
+            generation,
+            &attach_buffer_payload(&file.0.to_string_lossy(), total),
+        )?;
+        self.wait(
+            Kind::BufferAttached,
+            generation,
+            self.timeouts.step,
+            OcrError::Timeout(OcrStep::AttachImage),
+        )?;
         let token = self.take_id();
         let stride = width * BYTES_PER_PIXEL as u32;
-        self.send(Kind::Submit, token, &submit_payload(generation, width, height, stride, 1))?;
-        let frame = self.wait(Kind::ImageConsumed, token, self.timeouts.step, OcrError::Timeout("传输图像"))?;
+        self.send(
+            Kind::Submit,
+            token,
+            &submit_payload(generation, width, height, stride, 1),
+        )?;
+        let frame = self.wait(
+            Kind::ImageConsumed,
+            token,
+            self.timeouts.step,
+            OcrError::Timeout(OcrStep::TransferImage),
+        )?;
         if decode_image_consumed(&frame.payload)? != (generation, 1) {
-            return Err(OcrError::Protocol("ImageConsumed 的代号或序号不符".to_string()));
+            return Err(OcrError::Protocol(
+                "the ImageConsumed generation or sequence number does not match".to_string(),
+            ));
         }
         self.send(Kind::Recognize, token, &[])?;
-        let frame = self.wait(Kind::Complete, token, self.timeouts.recognize, OcrError::Timeout("识别"))?;
+        let frame = self.wait(
+            Kind::Complete,
+            token,
+            self.timeouts.recognize,
+            OcrError::Timeout(OcrStep::Recognize),
+        )?;
         match decode_complete(&frame.payload)? {
             CompleteResult::Success(lines) => Ok(lines),
             CompleteResult::Failed(message) => Err(OcrError::Failed(message)),
@@ -395,7 +498,12 @@ impl OcrWorker {
     /// 解除映射并等待确认。
     fn detach(&mut self, generation: u64) -> Result<(), OcrError> {
         self.send(Kind::DetachBuffer, generation, &[])?;
-        self.wait(Kind::BufferDetached, generation, self.timeouts.step, OcrError::Timeout("解除映射"))?;
+        self.wait(
+            Kind::BufferDetached,
+            generation,
+            self.timeouts.step,
+            OcrError::Timeout(OcrStep::DetachImage),
+        )?;
         Ok(())
     }
 
@@ -416,11 +524,17 @@ impl OcrWorker {
     }
 
     /// 等待指定类型与操作号的应答；其它帧视为协议错误。
-    fn wait(&mut self, kind: Kind, id: u64, timeout: Duration, on_timeout: OcrError) -> Result<Frame, OcrError> {
+    fn wait(
+        &mut self,
+        kind: Kind,
+        id: u64,
+        timeout: Duration,
+        on_timeout: OcrError,
+    ) -> Result<Frame, OcrError> {
         match self.rx.recv_timeout(timeout) {
             Ok(Msg::Frame(frame)) if frame.kind == kind && frame.id == id => Ok(frame),
             Ok(Msg::Frame(frame)) => Err(OcrError::Protocol(format!(
-                "期望 {kind:?}#{id}，收到 {:?}#{}",
+                "expected {kind:?}#{id}, got {:?}#{}",
                 frame.kind, frame.id
             ))),
             Ok(Msg::Closed) | Err(RecvTimeoutError::Disconnected) => Err(self.died()),
@@ -430,7 +544,11 @@ impl OcrWorker {
 
     /// 构造“进程已死”错误，附 stderr 末尾内容。
     fn died(&self) -> OcrError {
-        let tail = self.stderr_tail.lock().map(|t| t.trim().to_string()).unwrap_or_default();
+        let tail = self
+            .stderr_tail
+            .lock()
+            .map(|t| t.trim().to_string())
+            .unwrap_or_default();
         OcrError::ProcessDied(tail)
     }
 }
@@ -473,7 +591,10 @@ fn write_mapping_file(width: u32, height: u32, rgba: &[u8]) -> Result<TempFile, 
     let mut slot = [0u8; SLOT_HEADER_LEN];
     write_slot_header(&mut slot, 1, width, height)?;
     let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
-    let path = std::env::temp_dir().join(format!("{TEMP_FILE_PREFIX}-{}-{seq}.bin", std::process::id()));
+    let path = std::env::temp_dir().join(format!(
+        "{TEMP_FILE_PREFIX}-{}-{seq}.bin",
+        std::process::id()
+    ));
     let file = TempFile(path);
     let mut out = std::fs::File::create(&file.0).map_err(|e| OcrError::Io(e.to_string()))?;
     out.write_all(&slot)
@@ -556,7 +677,13 @@ pub(crate) mod fake {
         let (ack_reader, ack_writer) = pipe().expect("应答管道");
         let s = script.clone();
         std::thread::spawn(move || run(s, cmd_reader, ack_writer));
-        OcrWorker::from_transport(ack_reader, cmd_writer, None, Arc::new(Mutex::new(String::new())), timeouts)
+        OcrWorker::from_transport(
+            ack_reader,
+            cmd_writer,
+            None,
+            Arc::new(Mutex::new(String::new())),
+            timeouts,
+        )
     }
 
     /// 假 worker 主循环。
@@ -601,7 +728,9 @@ pub(crate) mod fake {
                     let (directml, policy) = (p[0], p[1]);
                     p = &p[2..];
                     let det = read_str(&mut p);
-                    note(format!("prepare directml={directml} policy={policy} det={det}"));
+                    note(format!(
+                        "prepare directml={directml} policy={policy} det={det}"
+                    ));
                     reply(Kind::SessionReady, frame.id, &[u8::from(script.prepare_ok)]);
                 }
                 Kind::AttachBuffer => {
@@ -626,12 +755,22 @@ pub(crate) mod fake {
                             && u32::from_le_bytes(bytes[8..12].try_into().unwrap_or([0; 4])) == 1
                             && u32::from_le_bytes(bytes[12..16].try_into().unwrap_or([0; 4])) == w
                             && u32::from_le_bytes(bytes[16..20].try_into().unwrap_or([0; 4])) == h
-                            && u32::from_le_bytes(bytes[20..24].try_into().unwrap_or([0; 4])) == stride
+                            && u32::from_le_bytes(bytes[20..24].try_into().unwrap_or([0; 4]))
+                                == stride
                             && stride == w * 4;
-                        let first: Vec<u8> = bytes.get(SLOT_HEADER_LEN..SLOT_HEADER_LEN + 4).map(<[u8]>::to_vec).unwrap_or_default();
-                        note(format!("slot header_ok={header_ok} first_pixel={first:?} size={w}x{h}"));
+                        let first: Vec<u8> = bytes
+                            .get(SLOT_HEADER_LEN..SLOT_HEADER_LEN + 4)
+                            .map(<[u8]>::to_vec)
+                            .unwrap_or_default();
+                        note(format!(
+                            "slot header_ok={header_ok} first_pixel={first:?} size={w}x{h}"
+                        ));
                     }
-                    reply(Kind::ImageConsumed, frame.id, &image_consumed_payload(generation, seq));
+                    reply(
+                        Kind::ImageConsumed,
+                        frame.id,
+                        &image_consumed_payload(generation, seq),
+                    );
                 }
                 Kind::Recognize => {
                     std::thread::sleep(script.recognize_delay);
@@ -693,11 +832,25 @@ mod tests {
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].text, "hello");
         let log = script.entries();
-        assert!(log.contains(&"slot header_ok=true first_pixel=[11, 22, 33, 255] size=2x1".to_string()), "{log:?}");
-        let kinds: Vec<&str> = log.iter().map(String::as_str).filter(|s| !s.contains(' ')).collect();
+        assert!(
+            log.contains(&"slot header_ok=true first_pixel=[11, 22, 33, 255] size=2x1".to_string()),
+            "{log:?}"
+        );
+        let kinds: Vec<&str> = log
+            .iter()
+            .map(String::as_str)
+            .filter(|s| !s.contains(' '))
+            .collect();
         assert_eq!(
             kinds,
-            ["Hello", "PrepareSession", "AttachBuffer", "Submit", "Recognize", "DetachBuffer"]
+            [
+                "Hello",
+                "PrepareSession",
+                "AttachBuffer",
+                "Submit",
+                "Recognize",
+                "DetachBuffer"
+            ]
         );
         worker.shutdown();
     }
@@ -710,47 +863,85 @@ mod tests {
         worker.handshake(Path::new("s")).expect("握手");
         worker.prepare(&config()).expect("准备");
         worker.prepare(&config()).expect("再次准备");
-        let prepares = script.entries().iter().filter(|e| e.as_str() == "PrepareSession").count();
+        let prepares = script
+            .entries()
+            .iter()
+            .filter(|e| e.as_str() == "PrepareSession")
+            .count();
         assert_eq!(prepares, 1);
         let mut other = config();
         other.directml = true;
         worker.prepare(&other).expect("换配置重新准备");
-        assert_eq!(script.entries().iter().filter(|e| e.as_str() == "PrepareSession").count(), 2);
+        assert_eq!(
+            script
+                .entries()
+                .iter()
+                .filter(|e| e.as_str() == "PrepareSession")
+                .count(),
+            2
+        );
     }
 
     /// worker 不应答 Ready：超时返回 ReadyTimeout。
     #[test]
     fn ready_timeout() {
-        let script = FakeScript { ready: ReadyMode::Silent, ..FakeScript::ok() };
+        let script = FakeScript {
+            ready: ReadyMode::Silent,
+            ..FakeScript::ok()
+        };
         let mut worker = spawn_fake(script, fast());
-        assert_eq!(worker.handshake(Path::new("s")), Err(OcrError::ReadyTimeout));
+        assert_eq!(
+            worker.handshake(Path::new("s")),
+            Err(OcrError::ReadyTimeout)
+        );
     }
 
     /// 协议版本不符：给出版本不匹配错误。
     #[test]
     fn protocol_version_mismatch() {
-        let script = FakeScript { ready: ReadyMode::WrongProtocol(3), ..FakeScript::ok() };
+        let script = FakeScript {
+            ready: ReadyMode::WrongProtocol(3),
+            ..FakeScript::ok()
+        };
         let mut worker = spawn_fake(script, fast());
         assert_eq!(
             worker.handshake(Path::new("s")),
-            Err(OcrError::VersionMismatch { expected: 4, actual: 3 })
+            Err(OcrError::VersionMismatch {
+                expected: 4,
+                actual: 3
+            })
         );
     }
 
     /// 会话准备失败（模型加载失败）：返回 SessionNotReady，不是假文本。
     #[test]
     fn prepare_failure_is_reported() {
-        let script = FakeScript { prepare_ok: false, ..FakeScript::ok() };
+        let script = FakeScript {
+            prepare_ok: false,
+            ..FakeScript::ok()
+        };
         let mut worker = spawn_fake(script, fast());
         worker.handshake(Path::new("s")).expect("握手");
         assert_eq!(worker.prepare(&config()), Err(OcrError::SessionNotReady));
-        assert!(OcrError::SessionNotReady.message().contains("模型加载失败"));
+        assert!(
+            OcrError::SessionNotReady
+                .message(crate::ocr_backend::i18n_for("zh-CN"))
+                .contains("模型加载失败")
+        );
+        assert!(
+            OcrError::SessionNotReady
+                .message(crate::ocr_backend::i18n_for("en-US"))
+                .is_ascii()
+        );
     }
 
     /// 进程在识别中途退出：返回 ProcessDied，且判定 worker 不可继续使用。
     #[test]
     fn process_death_mid_recognition() {
-        let script = FakeScript { die_on: Some(Kind::Recognize), ..FakeScript::ok() };
+        let script = FakeScript {
+            die_on: Some(Kind::Recognize),
+            ..FakeScript::ok()
+        };
         let mut worker = spawn_fake(script, fast());
         worker.handshake(Path::new("s")).expect("握手");
         worker.prepare(&config()).expect("准备");
@@ -762,7 +953,10 @@ mod tests {
     /// worker 报告识别失败 / 取消：原样带回，worker 仍可继续使用。
     #[test]
     fn worker_reported_failure_and_cancel() {
-        let script = FakeScript { result: CompleteResult::Failed("boom".into()), ..FakeScript::ok() };
+        let script = FakeScript {
+            result: CompleteResult::Failed("boom".into()),
+            ..FakeScript::ok()
+        };
         let mut worker = spawn_fake(script, fast());
         worker.handshake(Path::new("s")).expect("握手");
         worker.prepare(&config()).expect("准备");
@@ -772,11 +966,17 @@ mod tests {
         // 失败后还能继续下一次
         assert!(worker.recognize(2, 1, &tiny_image()).is_err());
 
-        let script = FakeScript { result: CompleteResult::Cancelled("cancelled".into()), ..FakeScript::ok() };
+        let script = FakeScript {
+            result: CompleteResult::Cancelled("cancelled".into()),
+            ..FakeScript::ok()
+        };
         let mut worker = spawn_fake(script, fast());
         worker.handshake(Path::new("s")).expect("握手");
         worker.prepare(&config()).expect("准备");
-        assert!(matches!(worker.recognize(2, 1, &tiny_image()), Err(OcrError::Cancelled(_))));
+        assert!(matches!(
+            worker.recognize(2, 1, &tiny_image()),
+            Err(OcrError::Cancelled(_))
+        ));
     }
 
     /// 识别超时：返回 Timeout。
@@ -784,11 +984,17 @@ mod tests {
     fn recognition_timeout() {
         let mut t = fast();
         t.recognize = Duration::from_millis(100);
-        let script = FakeScript { recognize_delay: Duration::from_millis(600), ..FakeScript::ok() };
+        let script = FakeScript {
+            recognize_delay: Duration::from_millis(600),
+            ..FakeScript::ok()
+        };
         let mut worker = spawn_fake(script, t);
         worker.handshake(Path::new("s")).expect("握手");
         worker.prepare(&config()).expect("准备");
-        assert_eq!(worker.recognize(2, 1, &tiny_image()), Err(OcrError::Timeout("识别")));
+        assert_eq!(
+            worker.recognize(2, 1, &tiny_image()),
+            Err(OcrError::Timeout(OcrStep::Recognize))
+        );
     }
 
     /// 非法图像：零尺寸、长度不符、超上限、乘法溢出都在发送前被拒绝。
@@ -796,10 +1002,22 @@ mod tests {
     fn invalid_images_are_rejected_locally() {
         let mut worker = spawn_fake(FakeScript::ok(), fast());
         worker.handshake(Path::new("s")).expect("握手");
-        assert!(matches!(worker.recognize(0, 1, &[]), Err(OcrError::InvalidImage(_))));
-        assert!(matches!(worker.recognize(2, 1, &[0; 7]), Err(OcrError::InvalidImage(_))));
-        assert!(matches!(worker.recognize(3841, 2161, &[0; 16]), Err(OcrError::InvalidImage(_))));
-        assert!(matches!(worker.recognize(u32::MAX, u32::MAX, &[0; 4]), Err(OcrError::InvalidImage(_))));
+        assert!(matches!(
+            worker.recognize(0, 1, &[]),
+            Err(OcrError::InvalidImage(_))
+        ));
+        assert!(matches!(
+            worker.recognize(2, 1, &[0; 7]),
+            Err(OcrError::InvalidImage(_))
+        ));
+        assert!(matches!(
+            worker.recognize(3841, 2161, &[0; 16]),
+            Err(OcrError::InvalidImage(_))
+        ));
+        assert!(matches!(
+            worker.recognize(u32::MAX, u32::MAX, &[0; 4]),
+            Err(OcrError::InvalidImage(_))
+        ));
     }
 
     /// 真实进程：exe 不存在时拉起失败，不 panic。
@@ -813,7 +1031,10 @@ mod tests {
             state_dir: std::env::temp_dir().join("snow-ocr-missing-state"),
             model_id: "x".into(),
         };
-        assert!(matches!(OcrWorker::spawn(&assets, fast()), Err(OcrError::SpawnFailed(_))));
+        assert!(matches!(
+            OcrWorker::spawn(&assets, fast()),
+            Err(OcrError::SpawnFailed(_))
+        ));
     }
 
     /// 错误文案：区分各类原因且可下载性正确。
@@ -823,19 +1044,29 @@ mod tests {
             OcrError::Unavailable(OcrUnavailable::NoRuntime),
             OcrError::SpawnFailed("x".into()),
             OcrError::ReadyTimeout,
-            OcrError::VersionMismatch { expected: 4, actual: 3 },
+            OcrError::VersionMismatch {
+                expected: 4,
+                actual: 3,
+            },
             OcrError::ProcessDied("stderr tail".into()),
             OcrError::SessionNotReady,
             OcrError::Failed("f".into()),
-            OcrError::Timeout("识别"),
+            OcrError::Timeout(OcrStep::Recognize),
             OcrError::Protocol("p".into()),
             OcrError::Io("i".into()),
             OcrError::InvalidImage("v".into()),
         ];
-        let messages: std::collections::HashSet<String> = all.iter().map(OcrError::message).collect();
+        let messages: std::collections::HashSet<String> = all
+            .iter()
+            .map(|e| e.message(crate::ocr_backend::i18n_for("zh-CN")))
+            .collect();
         assert_eq!(messages.len(), all.len());
         assert!(OcrError::Unavailable(OcrUnavailable::NoRuntime).can_download());
         assert!(!OcrError::ReadyTimeout.can_download());
-        assert!(OcrError::ProcessDied("stderr tail".into()).message().contains("stderr tail"));
+        assert!(
+            OcrError::ProcessDied("stderr tail".into())
+                .message(crate::ocr_backend::i18n_for("en-US"))
+                .contains("stderr tail")
+        );
     }
 }

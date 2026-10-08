@@ -8,67 +8,76 @@
 
 use crate::capture_flow::{CaptureCollector, CapturePayload, pick_monitor, spawn_capture};
 use crate::desktop_frames::{DesktopFrames, MonitorFrame};
-use snow_ui::ui::AppContext;
+use crate::dictation::config::DictationConfig;
+use crate::dictation::focus::Verdict;
+use crate::dictation::translate::TranslationOutcome;
+use crate::dictation::{DictationCommand, DictationHost};
 use crate::direct_capture::{DirectHistory, DirectResult, spawn_direct_capture};
+use crate::frozen_frame::FrozenFrame;
 use crate::history_nav::ThreadedHistoryProvider;
 use crate::history_store::{
     HistoryRecorder, HistorySource, HistoryStore, Thumbnail, policy_from_document,
 };
 use crate::history_view::{HistoryAction, HistoryView};
-use crate::pinned_manage_view::PinManageView;
-use crate::quick_actions::{
-    DELAY_SECONDS_CONFIG_KEY, DelayGate, DirectKind, QUICK_ACTION_KEYS, QuickPlan, clip_to_monitor, delay_seconds,
-    direct_output_plan_from, full_monitor_region, plan_for, recording_directory, stays_registered_when_paused,
-    NOTICE_FULLSCREEN_GATE_OFF, NOTICE_FULLSCREEN_GATE_ON, NOTICE_NO_SELECTED_TEXT, NOTICE_PIN_SELECTED_FILES, NOTICE_RESTORE_CLOSED,
-};
-use crate::window_pick::{WindowHover, selection_target, start_window_hover, transition_animation_enabled};
-use crate::dictation::config::DictationConfig;
-use crate::dictation::translate::TranslationOutcome;
-use crate::dictation::focus::Verdict;
-use crate::dictation::{DictationCommand, DictationHost};
-use crate::frozen_frame::FrozenFrame;
 use crate::ocr_assets::{ENV_OCR_ASSET_DIR, ocr_root};
+use crate::ocr_backend::{OcrInput, select_from_document};
 use crate::ocr_client::OcrError;
 use crate::ocr_download;
-use crate::stt_download::{self, Progress as SttProgress};
-use crate::stt_models;
-use crate::stt_settings::{CancelFlag, SttHooks};
-use crate::ocr_backend::{OcrInput, select_from_document};
 use crate::ocr_service::{OcrRequestConfig, OcrResult, OcrService};
 use crate::ort_runtime;
-use crate::sys_prefs::system_ui_language;
-use crate::translate_flow::TranslateUiState;
-use crate::translate_input::{InputError, translate_text};
-use crate::translate_input_view::{TranslateInputView, WINDOW_HEIGHT as TRANSLATE_INPUT_HEIGHT, WINDOW_WIDTH as TRANSLATE_INPUT_WIDTH};
-use crate::translate_service::{
-    TranslateConfig, TranslateFlowError, TranslateHost, TranslateOutcome, TranslateStage, Translated, run_flow,
+use crate::overlay_view::{
+    AutoConfirm, OverlayOutcome, OverlayWindowView, ScreenshotOverlayView, SystemOutput,
 };
-use crate::overlay_view::{AutoConfirm, OverlayOutcome, OverlayWindowView, ScreenshotOverlayView, SystemOutput};
+use crate::pinned_manage_view::PinManageView;
 use crate::pinned_manager::PinnedManager;
+use crate::pinned_shared::PinError;
+use crate::quick_actions::{
+    DELAY_SECONDS_CONFIG_KEY, DelayGate, DirectKind, NOTICE_FULLSCREEN_GATE_OFF,
+    NOTICE_FULLSCREEN_GATE_ON, NOTICE_NO_SELECTED_TEXT, NOTICE_PIN_SELECTED_FILES,
+    NOTICE_RESTORE_CLOSED, QUICK_ACTION_KEYS, QuickPlan, clip_to_monitor, delay_seconds,
+    direct_output_plan_from, full_monitor_region, plan_for, recording_directory,
+    stays_registered_when_paused,
+};
 use crate::recording_flow::{
     ENV_RECORDING_AUTOTEST, RecordingHost, monitor_for_region, parse_autotest,
 };
-use snow_ui::widgets::{AnnotationTool, ToolbarAction};
 use crate::screenshot_output::{
     ExportSettings, configured_format, export_direct, home_directory, resolve_save_directory,
 };
 use crate::scroll_view::{ENV_SCROLL_AUTOTEST, ScrollHost, parse_scroll_autotest};
 use crate::settings_model::portable_to_hotkey_text;
-use crate::settings_state::{ConfigChange, SharedConfig, SystemPrefs, UiPrefs, restore_value};
 use crate::settings_model::{LANGUAGE_KEY, THEME_COLOR_KEY, THEME_MODE_KEY};
+use crate::settings_state::{ConfigChange, SharedConfig, SystemPrefs, UiPrefs, restore_value};
 use crate::settings_text::{Lang, window_title};
 use crate::settings_view::{AUTOTEST_STEP_INTERVAL, SettingsView, parse_autotest_ops};
+use crate::stt_download::{self, Progress as SttProgress};
+use crate::stt_models;
+use crate::stt_settings::{CancelFlag, SttHooks};
+use crate::sys_prefs::system_ui_language;
+use crate::translate_flow::TranslateUiState;
+use crate::translate_input::{InputError, translate_text};
+use crate::translate_input_view::{
+    TranslateInputView, WINDOW_HEIGHT as TRANSLATE_INPUT_HEIGHT,
+    WINDOW_WIDTH as TRANSLATE_INPUT_WIDTH,
+};
+use crate::translate_service::{
+    TranslateConfig, TranslateFlowError, TranslateHost, TranslateOutcome, TranslateStage,
+    Translated, run_flow,
+};
+use crate::window_pick::{
+    WindowHover, selection_target, start_window_hover, transition_animation_enabled,
+};
 use serde_json::Value;
 use snow_app_core::bus::{CommandBus, CommandError, CommandOutcome};
 use snow_app_core::command::{
     AppCommand, CaptureRequest, CommandKind, CommandSource, DirectCaptureRequest, DirectOutput,
     DirectTarget, ExportTarget, QuickAction, RecordingConfig as RecordingRequest,
 };
-use snow_i18n::Args;
 use snow_capability::CapabilityRegistry;
 use snow_config::document::ConfigDocument;
 use snow_config::paths::config_file_path;
 use snow_config::store::ConfigStore;
+use snow_i18n::Args;
 use snow_platform::single_instance::IpcCommand;
 use snow_ui::shell::dispatch::Dispatcher;
 use snow_ui::shell::geometry::{LogicalSize, PhysicalPoint, PhysicalRect};
@@ -76,11 +85,11 @@ use snow_ui::shell::hotkey::{Hotkey, HotkeyBinding, HotkeyHandle, HotkeyService}
 use snow_ui::shell::inbox::MainThreadInbox;
 use snow_ui::shell::monitor::{MonitorInfo, MonitorTarget};
 use snow_ui::shell::overlay::cursor_screen_position;
-use snow_ui::shell::tray::{
-    TrayAction, TrayIconImage, TrayMenuEntry, TraySpec, TrayService,
-};
-use snow_ui::ui::{Entity, ShellContext, ShellWindow};
+use snow_ui::shell::tray::{TrayAction, TrayIconImage, TrayMenuEntry, TrayService, TraySpec};
 use snow_ui::shell::window::{Placement, WindowSpec};
+use snow_ui::ui::AppContext;
+use snow_ui::ui::{Entity, ShellContext, ShellWindow};
+use snow_ui::widgets::{AnnotationTool, ToolbarAction};
 use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -121,13 +130,17 @@ pub const RECORDING_HOTKEY_CONFIG_KEY: &str = "global_shortcuts/screen_record";
 /// “贴图剪贴板内容”全局热键的配置键。
 pub const PIN_CLIPBOARD_HOTKEY_CONFIG_KEY: &str = "global_shortcuts/pin_clipboard_content";
 /// “输入框翻译浮窗”全局热键的配置键。
-pub const TRANSLATE_INPUT_HOTKEY_CONFIG_KEY: &str = snow_config::extensions::KEY_TRANSLATE_INPUT_HOTKEY;
+pub const TRANSLATE_INPUT_HOTKEY_CONFIG_KEY: &str =
+    snow_config::extensions::KEY_TRANSLATE_INPUT_HOTKEY;
 /// “语音转文字·切换式”全局热键的配置键。
-pub const DICTATION_TOGGLE_HOTKEY_CONFIG_KEY: &str = snow_config::extensions::KEY_DICTATION_TOGGLE_HOTKEY;
+pub const DICTATION_TOGGLE_HOTKEY_CONFIG_KEY: &str =
+    snow_config::extensions::KEY_DICTATION_TOGGLE_HOTKEY;
 /// “语音转文字·按住说话”全局热键的配置键。
-pub const DICTATION_HOLD_HOTKEY_CONFIG_KEY: &str = snow_config::extensions::KEY_DICTATION_HOLD_HOTKEY;
+pub const DICTATION_HOLD_HOTKEY_CONFIG_KEY: &str =
+    snow_config::extensions::KEY_DICTATION_HOLD_HOTKEY;
 /// 语音转文字触发模式的配置键（决定上面两个热键哪个生效）。
-pub const DICTATION_TRIGGER_MODE_CONFIG_KEY: &str = snow_config::extensions::KEY_DICTATION_TRIGGER_MODE;
+pub const DICTATION_TRIGGER_MODE_CONFIG_KEY: &str =
+    snow_config::extensions::KEY_DICTATION_TRIGGER_MODE;
 /// “语音转文字·切换式”全局热键的配置键。
 const PORTABLE_FIELD: &str = "portable";
 /// 事件来源标签：全局热键。
@@ -460,8 +473,8 @@ pub enum UiEvent {
     SttDownloadFinished {
         /// 模型 ID。
         model_id: String,
-        /// 结果。
-        result: Result<(), String>,
+        /// 结果（结构化错误，界面边界再翻译）。
+        result: Result<(), ocr_download::FetchError>,
     },
     /// 设置页请求检查更新。
     UpdateCheckRequested,
@@ -554,7 +567,10 @@ fn tray_menu_icon(renderer: &snow_ui::icons::IconRenderer, name: &str) -> Option
     if !icon.exists() {
         return None;
     }
-    let bitmap = renderer.render(&icon, &snow_ui::icons::IconRequest::square(TRAY_MENU_ICON_SIZE, 1.0))?;
+    let bitmap = renderer.render(
+        &icon,
+        &snow_ui::icons::IconRequest::square(TRAY_MENU_ICON_SIZE, 1.0),
+    )?;
     TrayIconImage::new(bitmap.to_straight_rgba(), bitmap.width, bitmap.height).ok()
 }
 
@@ -573,7 +589,11 @@ fn tray_menu_icon(renderer: &snow_ui::icons::IconRenderer, name: &str) -> Option
 /// let spec = build_tray_spec("zh-CN", &doc, false).unwrap();
 /// assert_eq!(spec.menu.len(), 25);
 /// ```
-pub fn build_tray_spec(locale: &str, doc: &ConfigDocument, hotkeys_paused: bool) -> Result<TraySpec, String> {
+pub fn build_tray_spec(
+    locale: &str,
+    doc: &ConfigDocument,
+    hotkeys_paused: bool,
+) -> Result<TraySpec, String> {
     build_tray_spec_with_groups(locale, doc, hotkeys_paused, &[], "")
 }
 
@@ -593,14 +613,18 @@ pub fn build_tray_spec_with_groups(
     let icon = crate::tray_config::tray_icon_image(doc);
     let enabled = crate::tray_config::menu_options(doc);
     let renderer = snow_ui::icons::IconRenderer::new();
-    let entry = |label: String, icon_name: &str, checked: Option<bool>, action: TrayAction| TrayMenuEntry::Item {
-        label,
-        enabled: true,
-        checked,
-        icon: tray_menu_icon(&renderer, icon_name),
-        action,
+    let entry = |label: String, icon_name: &str, checked: Option<bool>, action: TrayAction| {
+        TrayMenuEntry::Item {
+            label,
+            enabled: true,
+            checked,
+            icon: tray_menu_icon(&renderer, icon_name),
+            action,
+        }
     };
-    let item = |key: &str, icon_name: &str, action: TrayAction| entry(i18n.tr(key), icon_name, None, action);
+    let item = |key: &str, icon_name: &str, action: TrayAction| {
+        entry(i18n.tr(key), icon_name, None, action)
+    };
     let quick = |action: QuickAction| TrayAction::Command(AppCommand::QuickAction(action));
     let delay_label = i18n.tr_with(
         "tray-capture-delay",
@@ -621,36 +645,86 @@ pub fn build_tray_spec_with_groups(
         ),
         (
             Some("quick.screenshot-delay"),
-            entry(delay_label, "clock-circle", None, quick(QuickAction::ScreenshotDelay)),
+            entry(
+                delay_label,
+                "clock-circle",
+                None,
+                quick(QuickAction::ScreenshotDelay),
+            ),
         ),
-        (Some("quick.screenshot-fixed"), item("tray-capture-pin", "pushpin", quick(QuickAction::ScreenshotFixed))),
-        (Some("quick.screenshot-ocr"), item("tray-capture-ocr", "file-search", quick(QuickAction::ScreenshotOcr))),
+        (
+            Some("quick.screenshot-fixed"),
+            item(
+                "tray-capture-pin",
+                "pushpin",
+                quick(QuickAction::ScreenshotFixed),
+            ),
+        ),
+        (
+            Some("quick.screenshot-ocr"),
+            item(
+                "tray-capture-ocr",
+                "file-search",
+                quick(QuickAction::ScreenshotOcr),
+            ),
+        ),
         (
             Some("quick.screenshot-translation"),
-            item("tray-capture-translate", "translation", quick(QuickAction::ScreenshotTranslation)),
+            item(
+                "tray-capture-translate",
+                "translation",
+                quick(QuickAction::ScreenshotTranslation),
+            ),
         ),
-        (Some("quick.screenshot-copy"), item("tray-capture-copy", "copy", quick(QuickAction::ScreenshotCopy))),
+        (
+            Some("quick.screenshot-copy"),
+            item(
+                "tray-capture-copy",
+                "copy",
+                quick(QuickAction::ScreenshotCopy),
+            ),
+        ),
         (
             Some("quick.screenshot-full-screen"),
-            item("tray-capture-full-screen", "desktop", quick(QuickAction::ScreenshotFullScreen)),
+            item(
+                "tray-capture-full-screen",
+                "desktop",
+                quick(QuickAction::ScreenshotFullScreen),
+            ),
         ),
         (
             Some("quick.screenshot-focused-window"),
-            item("tray-capture-focused-window", "scan", quick(QuickAction::ScreenshotFocusedWindow)),
+            item(
+                "tray-capture-focused-window",
+                "scan",
+                quick(QuickAction::ScreenshotFocusedWindow),
+            ),
         ),
         sep(),
         // 贴图组
         (
             Some("quick.pin-clipboard-content"),
-            item("tray-pin-clipboard", "snippets", TrayAction::Signal(TRAY_SIGNAL_PIN_CLIPBOARD.into())),
+            item(
+                "tray-pin-clipboard",
+                "snippets",
+                TrayAction::Signal(TRAY_SIGNAL_PIN_CLIPBOARD.into()),
+            ),
         ),
         (
             Some("quick.pin-selected-files"),
-            item("tray-pin-selected-files", "paper-clip", quick(QuickAction::PinSelectedFiles)),
+            item(
+                "tray-pin-selected-files",
+                "paper-clip",
+                quick(QuickAction::PinSelectedFiles),
+            ),
         ),
         (
             Some("quick.restore-last-closed-windows"),
-            item("tray-restore-closed", "undo", quick(QuickAction::RestoreLastClosedWindows)),
+            item(
+                "tray-restore-closed",
+                "undo",
+                quick(QuickAction::RestoreLastClosedWindows),
+            ),
         ),
         sep(),
         // 录屏组
@@ -664,21 +738,37 @@ pub fn build_tray_spec_with_groups(
         ),
         (
             Some("quick.screen-record-copy"),
-            item("tray-record-copy", "export", quick(QuickAction::ScreenRecordCopy)),
+            item(
+                "tray-record-copy",
+                "export",
+                quick(QuickAction::ScreenRecordCopy),
+            ),
         ),
         (
             Some("quick.open-screen-recording-folder"),
-            item("tray-open-recordings", "folder-open", quick(QuickAction::OpenScreenRecordingFolder)),
+            item(
+                "tray-open-recordings",
+                "folder-open",
+                quick(QuickAction::OpenScreenRecordingFolder),
+            ),
         ),
         sep(),
         // 其他组
         (
             Some("quick.open-capture-history"),
-            item("tray-history", "history", TrayAction::Signal(TRAY_SIGNAL_HISTORY.into())),
+            item(
+                "tray-history",
+                "history",
+                TrayAction::Signal(TRAY_SIGNAL_HISTORY.into()),
+            ),
         ),
         (
             Some("quick.translate-selected-text"),
-            item("tray-translate-selected", "select", quick(QuickAction::TranslateSelectedText)),
+            item(
+                "tray-translate-selected",
+                "select",
+                quick(QuickAction::TranslateSelectedText),
+            ),
         ),
         (
             Some("quick.toggle-global-hotkeys"),
@@ -702,13 +792,28 @@ pub fn build_tray_spec_with_groups(
         // 系统组
         (
             Some("tray.show-main-window"),
-            item("tray-show-main", "home", TrayAction::Signal(TRAY_SIGNAL_SETTINGS.into())),
+            item(
+                "tray-show-main",
+                "home",
+                TrayAction::Signal(TRAY_SIGNAL_SETTINGS.into()),
+            ),
         ),
         (
             Some("tray.restart-app"),
-            item("tray-restart", "reload", TrayAction::Signal(TRAY_SIGNAL_RESTART.into())),
+            item(
+                "tray-restart",
+                "reload",
+                TrayAction::Signal(TRAY_SIGNAL_RESTART.into()),
+            ),
         ),
-        (Some("tray.exit"), item("tray-quit", "poweroff", TrayAction::Signal(TRAY_SIGNAL_QUIT.into()))),
+        (
+            Some("tray.exit"),
+            item(
+                "tray-quit",
+                "poweroff",
+                TrayAction::Signal(TRAY_SIGNAL_QUIT.into()),
+            ),
+        ),
     ];
     // 贴图分组块放在「贴图组」之后（第二条分隔线位置）；整块由 `tray.window-grouping` 控制
     if !groups.is_empty() {
@@ -734,15 +839,27 @@ pub fn build_tray_spec_with_groups(
             .collect();
         block.push((
             Some("tray.window-grouping"),
-            item("tray-group-new", "plus", TrayAction::Signal(TRAY_SIGNAL_GROUP_NEW.into())),
+            item(
+                "tray-group-new",
+                "plus",
+                TrayAction::Signal(TRAY_SIGNAL_GROUP_NEW.into()),
+            ),
         ));
         block.push((
             Some("tray.window-grouping"),
-            item("tray-group-delete-empty", "delete", TrayAction::Signal(TRAY_SIGNAL_GROUP_DELETE_EMPTY.into())),
+            item(
+                "tray-group-delete-empty",
+                "delete",
+                TrayAction::Signal(TRAY_SIGNAL_GROUP_DELETE_EMPTY.into()),
+            ),
         ));
         block.push((
             Some("tray.window-grouping"),
-            item("tray-pin-management", "appstore", TrayAction::Signal(TRAY_SIGNAL_PIN_MANAGE.into())),
+            item(
+                "tray-pin-management",
+                "appstore",
+                TrayAction::Signal(TRAY_SIGNAL_PIN_MANAGE.into()),
+            ),
         ));
         block.push(sep());
         menu.splice(at..at, block);
@@ -752,7 +869,9 @@ pub fn build_tray_spec_with_groups(
     let click_signal = |action: crate::tray_config::TrayClick| {
         use crate::tray_config::TrayClick;
         match action {
-            TrayClick::Screenshot => TrayAction::Command(AppCommand::Capture(CaptureRequest::default())),
+            TrayClick::Screenshot => {
+                TrayAction::Command(AppCommand::Capture(CaptureRequest::default()))
+            }
             TrayClick::ShowMainWindow | TrayClick::OpenFunctionSettings => {
                 TrayAction::Signal(TRAY_SIGNAL_SETTINGS.into())
             }
@@ -765,9 +884,17 @@ pub fn build_tray_spec_with_groups(
         tooltip: TRAY_TOOLTIP.to_string(),
         icon,
         menu,
-        on_left_click: Some(click_signal(click_action(doc, KEY_LEFT_CLICK, TrayClick::Screenshot))),
+        on_left_click: Some(click_signal(click_action(
+            doc,
+            KEY_LEFT_CLICK,
+            TrayClick::Screenshot,
+        ))),
         on_double_click: None,
-        on_middle_click: Some(click_signal(click_action(doc, KEY_MIDDLE_CLICK, TrayClick::ScreenshotFixed))),
+        on_middle_click: Some(click_signal(click_action(
+            doc,
+            KEY_MIDDLE_CLICK,
+            TrayClick::ScreenshotFixed,
+        ))),
     })
 }
 
@@ -945,7 +1072,10 @@ pub fn shortcut_strings(value: &Value) -> Vec<String> {
         .map(|items| {
             items
                 .iter()
-                .filter_map(|v| v.as_str().or_else(|| v.get(PORTABLE_FIELD).and_then(Value::as_str)))
+                .filter_map(|v| {
+                    v.as_str()
+                        .or_else(|| v.get(PORTABLE_FIELD).and_then(Value::as_str))
+                })
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .map(str::to_string)
@@ -1093,7 +1223,10 @@ fn register_hotkeys_with_release(
 /// ```ignore
 /// let result = register_capture_hotkeys(&service, &document);
 /// ```
-pub fn register_capture_hotkeys(service: &HotkeyService, document: &ConfigDocument) -> HotkeyRegistration {
+pub fn register_capture_hotkeys(
+    service: &HotkeyService,
+    document: &ConfigDocument,
+) -> HotkeyRegistration {
     register_hotkeys(
         service,
         document,
@@ -1115,7 +1248,10 @@ pub fn register_capture_hotkeys(service: &HotkeyService, document: &ConfigDocume
 /// ```ignore
 /// let result = register_recording_hotkeys(&service, &document);
 /// ```
-pub fn register_recording_hotkeys(service: &HotkeyService, document: &ConfigDocument) -> HotkeyRegistration {
+pub fn register_recording_hotkeys(
+    service: &HotkeyService,
+    document: &ConfigDocument,
+) -> HotkeyRegistration {
     register_hotkeys(
         service,
         document,
@@ -1240,7 +1376,10 @@ pub fn register_quick_action_hotkeys(
 /// # 参数
 /// - `service`：热键服务。
 /// - `document`：配置文档。
-pub fn register_all_hotkeys(service: &HotkeyService, document: &ConfigDocument) -> HotkeyRegistration {
+pub fn register_all_hotkeys(
+    service: &HotkeyService,
+    document: &ConfigDocument,
+) -> HotkeyRegistration {
     register_all_hotkeys_gated(service, document, false)
 }
 
@@ -1655,7 +1794,10 @@ fn request_capture(
     state.capture_mode = mode;
     // 基准合成底图模式：底图由 open_overlay 用合成渐变替换，不需要真实屏幕采集
     // （锁屏 / 屏保期间 GDI 采集必失败，此模式仍可跑标注性能基准）
-    let synth = std::env::var(ENV_OVERLAY_SYNTH).ok().and_then(|v| parse_size(&v)).is_some();
+    let synth = std::env::var(ENV_OVERLAY_SYNTH)
+        .ok()
+        .and_then(|v| parse_size(&v))
+        .is_some();
     // 所有显示器同时出覆盖窗；合成底图的性能基准只开光标所在屏
     let targets: Vec<MonitorInfo> = if synth {
         vec![monitor.clone()]
@@ -1767,7 +1909,12 @@ fn open_overlays(cx: &mut ShellContext, state: &mut AppState, payloads: Vec<Capt
         let rect = if synth.is_some() {
             PhysicalRect::new(0, 0, frame_w as i32, frame_h as i32)
         } else {
-            PhysicalRect::new(monitor.bounds.x - canvas.x, monitor.bounds.y - canvas.y, frame_w as i32, frame_h as i32)
+            PhysicalRect::new(
+                monitor.bounds.x - canvas.x,
+                monitor.bounds.y - canvas.y,
+                frame_w as i32,
+                frame_h as i32,
+            )
         };
         frames.push(MonitorFrame { rect, frame });
         monitors.push(monitor);
@@ -1830,7 +1977,12 @@ fn open_overlays(cx: &mut ShellContext, state: &mut AppState, payloads: Vec<Capt
                 });
             })
             .with_ocr(move |serial, width, height, rgba| {
-                ocr_inbox.push(UiEvent::OcrRequested { serial, width, height, rgba });
+                ocr_inbox.push(UiEvent::OcrRequested {
+                    serial,
+                    width,
+                    height,
+                    rgba,
+                });
             })
             .with_ocr_download(move || {
                 ocr_download_inbox.push(UiEvent::OcrDownloadRequested);
@@ -1839,7 +1991,12 @@ fn open_overlays(cx: &mut ShellContext, state: &mut AppState, payloads: Vec<Capt
                 recognition_inbox.push(UiEvent::OpenRecognitionWindow(Box::new(data)));
             })
             .with_translate(move |serial, width, height, rgba| {
-                translate_inbox.push(UiEvent::TranslateRequested { serial, width, height, rgba });
+                translate_inbox.push(UiEvent::TranslateRequested {
+                    serial,
+                    width,
+                    height,
+                    rgba,
+                });
             })
             .with_translate_download(move || {
                 translate_download_inbox.push(UiEvent::TranslateDownloadRequested);
@@ -1922,7 +2079,8 @@ fn canvas_bounds(bounds: impl IntoIterator<Item = PhysicalRect>) -> PhysicalRect
     let Some(first) = iter.next() else {
         return PhysicalRect::new(0, 0, 0, 0);
     };
-    let (mut left, mut top, mut right, mut bottom) = (first.x, first.y, first.right(), first.bottom());
+    let (mut left, mut top, mut right, mut bottom) =
+        (first.x, first.y, first.right(), first.bottom());
     for rect in iter {
         left = left.min(rect.x);
         top = top.min(rect.y);
@@ -2001,7 +2159,9 @@ fn configure_overlay(
         CaptureMode::Quick(action) => Some(action),
         _ => None,
     };
-    view.update(cx.app(), |v, _| v.set_canvas_origin(PhysicalPoint::new(canvas.x, canvas.y)));
+    view.update(cx.app(), |v, _| {
+        v.set_canvas_origin(PhysicalPoint::new(canvas.x, canvas.y))
+    });
     // 另存为对话框要以覆盖窗为所有者，否则会被置顶的覆盖窗盖住
     if let Some(id) = window.native_id() {
         view.update(cx.app(), |v, _| v.set_owner_window(id.0));
@@ -2028,7 +2188,9 @@ fn configure_overlay(
                 close_inbox.push(UiEvent::OverlayClosed);
                 // 「重新截图」：覆盖窗收尾后再发起一次普通截图
                 if recapture.take() {
-                    close_inbox.push(UiEvent::Capture { origin: ORIGIN_HOTKEY });
+                    close_inbox.push(UiEvent::Capture {
+                        origin: ORIGIN_HOTKEY,
+                    });
                 }
             });
         });
@@ -2036,7 +2198,9 @@ fn configure_overlay(
     // 标注样式：读取已保存的各工具样式，之后的修改写回同一份配置
     let style_locale = ui_prefs_from_document(state.config.borrow().document()).locale;
     let style_config = state.config.clone();
-    view.update(cx.app(), |v, _| v.set_style_config(style_config, style_locale));
+    view.update(cx.app(), |v, _| {
+        v.set_style_config(style_config, style_locale)
+    });
     // 选区形状：读取上次使用的形状（矩形 / 折线 / 曲线 / 自由绘制）
     {
         let region_type = crate::region_select::RegionType::from_config(
@@ -2073,9 +2237,14 @@ fn configure_overlay(
     if let Some(hover) = state.window_hover.take() {
         let (target, animate) = {
             let config = state.config.borrow();
-            (selection_target(config.document()), transition_animation_enabled(config.document()))
+            (
+                selection_target(config.document()),
+                transition_animation_enabled(config.document()),
+            )
         };
-        view.update(cx.app(), |v, _| v.set_window_hover(Some(hover), target, animate));
+        view.update(cx.app(), |v, _| {
+            v.set_window_hover(Some(hover), target, animate)
+        });
     }
     if record_mode {
         view.update(cx.app(), |v, _| v.set_record_mode(true));
@@ -2156,7 +2325,11 @@ fn direct_capture(cx: &mut ShellContext, state: &mut AppState, request: DirectCa
         tracing::warn!("直接截图的 render 输出需要会话返回通道，暂未支持");
         return;
     }
-    if request.scale.is_some_and(|s| (s - 1.0).abs() > f64::EPSILON) || request.capture_cursor == Some(true) {
+    if request
+        .scale
+        .is_some_and(|s| (s - 1.0).abs() > f64::EPSILON)
+        || request.capture_cursor == Some(true)
+    {
         tracing::warn!(scale = ?request.scale, cursor = ?request.capture_cursor, "直接截图的缩放与光标采集暂未支持，已忽略");
     }
     let region = match request.target {
@@ -2234,10 +2407,16 @@ fn spawn_ocr(state: &AppState, serial: u64, width: u32, height: u32, rgba: Vec<u
     }
     let engine = selection.engine;
     let inbox = state.inbox.clone();
-    let spawned = std::thread::Builder::new().name("snow-ocr-request".into()).spawn(move || {
-        let result = engine.recognize(&OcrInput { width, height, rgba: &rgba });
-        inbox.push(UiEvent::OcrFinished { serial, result });
-    });
+    let spawned = std::thread::Builder::new()
+        .name("snow-ocr-request".into())
+        .spawn(move || {
+            let result = engine.recognize(&OcrInput {
+                width,
+                height,
+                rgba: &rgba,
+            });
+            inbox.push(UiEvent::OcrFinished { serial, result });
+        });
     if let Err(e) = spawned {
         tracing::error!(error = %e, "无法创建 OCR 线程");
         state.inbox.push(UiEvent::OcrFinished {
@@ -2255,10 +2434,12 @@ fn spawn_ocr(state: &AppState, serial: u64, width: u32, height: u32, rgba: Vec<u
 /// - `state`：运行时状态（取收件箱）。
 fn spawn_selected_text_capture(state: &AppState) {
     let inbox = state.inbox.clone();
-    let spawned = std::thread::Builder::new().name("snow-selected-text".into()).spawn(move || {
-        let text = read_selected_text();
-        inbox.push(UiEvent::SelectedTextReady(text));
-    });
+    let spawned = std::thread::Builder::new()
+        .name("snow-selected-text".into())
+        .spawn(move || {
+            let text = read_selected_text();
+            inbox.push(UiEvent::SelectedTextReady(text));
+        });
     if let Err(e) = spawned {
         tracing::error!(error = %e, "无法创建读取选中文字的线程");
         state.inbox.push(UiEvent::SelectedTextReady(None));
@@ -2281,7 +2462,10 @@ fn read_selected_text() -> Option<String> {
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
         .into_iter()
         .collect();
-    let options = CaptureOptions { excluded_executables: own, ..CaptureOptions::default() };
+    let options = CaptureOptions {
+        excluded_executables: own,
+        ..CaptureOptions::default()
+    };
     let request = match service.start_capture(options) {
         Ok(r) => r,
         Err(e) => {
@@ -2327,32 +2511,40 @@ pub fn is_pinnable_image(path: &std::path::Path) -> bool {
 /// - `state`：运行时状态（取收件箱）。
 fn spawn_pin_selected_files(state: &AppState) {
     let inbox = state.inbox.clone();
-    let spawned = std::thread::Builder::new().name("snow-pin-files".into()).spawn(move || {
-        let files: Vec<_> = snow_platform::selected_files::foreground_selected_files()
-            .into_iter()
-            .filter(|p| is_pinnable_image(p))
-            .take(MAX_PIN_FILES)
-            .collect();
-        if files.is_empty() {
-            inbox.push(UiEvent::PinFilesEmpty);
-            return;
-        }
-        let mut pinned = 0usize;
-        for path in files {
-            match image::open(&path) {
-                Ok(img) => {
-                    let rgba = img.to_rgba8();
-                    let (width, height) = rgba.dimensions();
-                    inbox.push(UiEvent::PinImage { width, height, rgba: rgba.into_raw() });
-                    pinned += 1;
-                }
-                Err(e) => tracing::warn!(path = %path.display(), error = %e, "解码要贴的图片失败"),
+    let spawned = std::thread::Builder::new()
+        .name("snow-pin-files".into())
+        .spawn(move || {
+            let files: Vec<_> = snow_platform::selected_files::foreground_selected_files()
+                .into_iter()
+                .filter(|p| is_pinnable_image(p))
+                .take(MAX_PIN_FILES)
+                .collect();
+            if files.is_empty() {
+                inbox.push(UiEvent::PinFilesEmpty);
+                return;
             }
-        }
-        if pinned == 0 {
-            inbox.push(UiEvent::PinFilesEmpty);
-        }
-    });
+            let mut pinned = 0usize;
+            for path in files {
+                match image::open(&path) {
+                    Ok(img) => {
+                        let rgba = img.to_rgba8();
+                        let (width, height) = rgba.dimensions();
+                        inbox.push(UiEvent::PinImage {
+                            width,
+                            height,
+                            rgba: rgba.into_raw(),
+                        });
+                        pinned += 1;
+                    }
+                    Err(e) => {
+                        tracing::warn!(path = %path.display(), error = %e, "解码要贴的图片失败")
+                    }
+                }
+            }
+            if pinned == 0 {
+                inbox.push(UiEvent::PinFilesEmpty);
+            }
+        });
     if let Err(e) = spawned {
         tracing::error!(error = %e, "无法创建贴选中文件的线程");
     }
@@ -2372,13 +2564,27 @@ fn spawn_pin_ocr(state: &AppState, id: String, width: u32, height: u32, rgba: Ve
     let engine = selection.engine;
     let inbox = state.inbox.clone();
     let done_id = id.clone();
-    let spawned = std::thread::Builder::new().name("snow-pin-ocr".into()).spawn(move || {
-        let result = engine.recognize(&OcrInput { width, height, rgba: &rgba }).map_err(|e| format!("{e:?}"));
-        inbox.push(UiEvent::PinOcrFinished { id: done_id, result });
-    });
+    let spawned = std::thread::Builder::new()
+        .name("snow-pin-ocr".into())
+        .spawn(move || {
+            let result = engine
+                .recognize(&OcrInput {
+                    width,
+                    height,
+                    rgba: &rgba,
+                })
+                .map_err(|e| format!("{e:?}"));
+            inbox.push(UiEvent::PinOcrFinished {
+                id: done_id,
+                result,
+            });
+        });
     if let Err(e) = spawned {
         tracing::error!(error = %e, "无法创建贴图 OCR 线程");
-        state.inbox.push(UiEvent::PinOcrFinished { id, result: Err(e.to_string()) });
+        state.inbox.push(UiEvent::PinOcrFinished {
+            id,
+            result: Err(e.to_string()),
+        });
     }
 }
 
@@ -2402,23 +2608,33 @@ fn spawn_translate(state: &AppState, serial: u64, width: u32, height: u32, rgba:
     let ocr = selection.engine;
     let translator = Arc::clone(&state.translator);
     let inbox = state.inbox.clone();
-    let spawned = std::thread::Builder::new().name("snow-translate-request".into()).spawn(move || {
-        let progress_inbox = inbox.clone();
-        let result = run_flow(
-            || ocr.recognize(&OcrInput { width, height, rgba: &rgba }),
-            translator.as_ref(),
-            &translate_config,
-            |stage| {
-                progress_inbox.push(UiEvent::TranslateProgress { serial, stage });
-            },
-        );
-        inbox.push(UiEvent::TranslateFinished { serial, result });
-    });
+    let spawned = std::thread::Builder::new()
+        .name("snow-translate-request".into())
+        .spawn(move || {
+            let progress_inbox = inbox.clone();
+            let result = run_flow(
+                || {
+                    ocr.recognize(&OcrInput {
+                        width,
+                        height,
+                        rgba: &rgba,
+                    })
+                },
+                translator.as_ref(),
+                &translate_config,
+                |stage| {
+                    progress_inbox.push(UiEvent::TranslateProgress { serial, stage });
+                },
+            );
+            inbox.push(UiEvent::TranslateFinished { serial, result });
+        });
     if let Err(e) = spawned {
         tracing::error!(error = %e, "无法创建翻译线程");
         state.inbox.push(UiEvent::TranslateFinished {
             serial,
-            result: Err(TranslateFlowError::Ocr(OcrError::SpawnFailed(e.to_string()))),
+            result: Err(TranslateFlowError::Ocr(OcrError::SpawnFailed(
+                e.to_string(),
+            ))),
         });
     }
 }
@@ -2430,18 +2646,27 @@ fn spawn_translate(state: &AppState, serial: u64, width: u32, height: u32, rgba:
 fn spawn_translate_runtime_download(state: &AppState) {
     let data_root = state.data_root.clone();
     let inbox = state.inbox.clone();
-    let spawned = std::thread::Builder::new().name("snow-ort-download".into()).spawn(move || {
-        tracing::info!(root = %data_root.display(), "开始下载 onnxruntime 运行时");
-        let cancel = AtomicBool::new(false);
-        let progress_inbox = inbox.clone();
-        let result = ort_runtime::install(&data_root, &cancel, |step| {
-            progress_inbox.push(UiEvent::TranslateDownloadProgress(step.to_string()));
-        })
-        .map(|_| ());
-        inbox.push(UiEvent::TranslateDownloadFinished(result));
-    });
+    let i18n = crate::ocr_backend::i18n_for(
+        ui_prefs_from_document(state.config.borrow().document()).locale,
+    );
+    let spawned = std::thread::Builder::new()
+        .name("snow-ort-download".into())
+        .spawn(move || {
+            tracing::info!(root = %data_root.display(), "开始下载 onnxruntime 运行时");
+            let cancel = AtomicBool::new(false);
+            let progress_inbox = inbox.clone();
+            let result = ort_runtime::install(&data_root, &cancel, |step| {
+                progress_inbox.push(UiEvent::TranslateDownloadProgress(step.message(i18n)));
+            })
+            .map(|_| ())
+            .map_err(|e| e.message(i18n));
+            inbox.push(UiEvent::TranslateDownloadFinished(result));
+        });
     if let Err(e) = spawned {
-        state.inbox.push(UiEvent::TranslateDownloadFinished(Err(e.to_string())));
+        let message = ocr_download::FetchError::TaskStart(e.to_string()).message(i18n);
+        state
+            .inbox
+            .push(UiEvent::TranslateDownloadFinished(Err(message)));
     }
 }
 
@@ -2454,6 +2679,9 @@ fn spawn_ocr_download(state: &AppState) {
     let data_root = state.data_root.clone();
     let need_runtime = state.ocr.exe_override().is_none();
     let inbox = state.inbox.clone();
+    let i18n = crate::ocr_backend::i18n_for(
+        ui_prefs_from_document(state.config.borrow().document()).locale,
+    );
     let spawned = std::thread::Builder::new().name("snow-ocr-download".into()).spawn(move || {
         let env_root = std::env::var(ENV_OCR_ASSET_DIR).ok();
         tracing::info!(root = %ocr_root(&data_root, env_root.as_deref()).display(), model = %model_kind, "开始下载 OCR 组件");
@@ -2466,13 +2694,15 @@ fn spawn_ocr_download(state: &AppState) {
             need_runtime,
             &cancel,
             |step| {
-                progress_inbox.push(UiEvent::OcrDownloadProgress(step.to_string()));
+                progress_inbox.push(UiEvent::OcrDownloadProgress(step.message(i18n)));
             },
-        );
+        )
+        .map_err(|e| e.message(i18n));
         inbox.push(UiEvent::OcrDownloadFinished(result));
     });
     if let Err(e) = spawned {
-        state.inbox.push(UiEvent::OcrDownloadFinished(Err(e.to_string())));
+        let message = ocr_download::FetchError::TaskStart(e.to_string()).message(i18n);
+        state.inbox.push(UiEvent::OcrDownloadFinished(Err(message)));
     }
 }
 
@@ -2488,7 +2718,7 @@ fn spawn_stt_download(state: &AppState, model_id: String, cancel: CancelFlag) {
     let id = model_id.clone();
     let spawned = std::thread::Builder::new().name("snow-stt-download".into()).spawn(move || {
         let result = match stt_models::find(&id) {
-            None => Err(format!("unknown speech model: {id}")),
+            None => Err(ocr_download::FetchError::Technical(format!("unknown speech model: {id}"))),
             Some(spec) => {
                 let progress_inbox = inbox.clone();
                 stt_download::install(spec, &data_root, &cancel.0, |p| {
@@ -2504,7 +2734,10 @@ fn spawn_stt_download(state: &AppState, model_id: String, cancel: CancelFlag) {
         inbox.push(UiEvent::SttDownloadFinished { model_id: id, result });
     });
     if let Err(e) = spawned {
-        state.inbox.push(UiEvent::SttDownloadFinished { model_id, result: Err(e.to_string()) });
+        state.inbox.push(UiEvent::SttDownloadFinished {
+            model_id,
+            result: Err(ocr_download::FetchError::TaskStart(e.to_string())),
+        });
     }
 }
 
@@ -2517,20 +2750,27 @@ fn start_update_check(state: &AppState) {
     let url = match crate::net_settings::update_target(state.config.borrow().document(), locale) {
         Ok(url) => url,
         Err(text) => {
-            state.inbox.push(UiEvent::UpdateCheckFinished(crate::net_settings::UpdateCheckOutcome::Config(text)));
+            state.inbox.push(UiEvent::UpdateCheckFinished(
+                crate::net_settings::UpdateCheckOutcome::Config(text),
+            ));
             return;
         }
     };
     let inbox = state.inbox.clone();
-    let spawned = std::thread::Builder::new().name("snow-update-check".into()).spawn({
-        let inbox = inbox.clone();
-        move || {
-            let outcome = crate::net_settings::run_update_check(&url, crate::net_settings::APP_VERSION);
-            inbox.push(UiEvent::UpdateCheckFinished(outcome));
-        }
-    });
+    let spawned = std::thread::Builder::new()
+        .name("snow-update-check".into())
+        .spawn({
+            let inbox = inbox.clone();
+            move || {
+                let outcome =
+                    crate::net_settings::run_update_check(&url, crate::net_settings::APP_VERSION);
+                inbox.push(UiEvent::UpdateCheckFinished(outcome));
+            }
+        });
     if let Err(e) = spawned {
-        inbox.push(UiEvent::UpdateCheckFinished(crate::net_settings::UpdateCheckOutcome::FetchFailed(e.to_string())));
+        inbox.push(UiEvent::UpdateCheckFinished(
+            crate::net_settings::UpdateCheckOutcome::FetchFailed(e.to_string()),
+        ));
     }
 }
 
@@ -2559,7 +2799,9 @@ fn spawn_overlay_bench(
     // 只触发工具栏动作（OCR / 长图 / 贴图）时不需要框选轨迹：直接选中屏幕内缩一圈的区域
     let select_only = action.is_some() && tool.is_none();
     if tool.is_some() || select_only {
-        view.update(cx.app(), |v, _| v.bench_annotation_setup(tool.unwrap_or(AnnotationTool::None)));
+        view.update(cx.app(), |v, _| {
+            v.bench_annotation_setup(tool.unwrap_or(AnnotationTool::None))
+        });
     }
     let weak = view.downgrade();
     cx.app()
@@ -2632,7 +2874,9 @@ fn request_recording(cx: &mut ShellContext, state: &mut AppState) {
         return;
     };
     tracing::info!(region = ?spec.region, plan = ?spec.plan, "自动化录屏（跳过选区）");
-    state.recording.begin(cx, spec.region, &monitor, Some(&spec));
+    state
+        .recording
+        .begin(cx, spec.region, &monitor, Some(&spec));
 }
 
 /// 处理长截图请求：普通路径进入“长截图选区”覆盖窗；设置了自动化环境变量时跳过选区直接开始。
@@ -2750,7 +2994,10 @@ fn open_or_focus_history(cx: &mut ShellContext, state: &mut AppState) {
     let title = crate::ocr_backend::i18n_for(prefs.locale).tr("history-window-title");
     let spec = WindowSpec::normal(
         title,
-        LogicalSize::new(crate::history_view::WINDOW_WIDTH, crate::history_view::WINDOW_HEIGHT),
+        LogicalSize::new(
+            crate::history_view::WINDOW_WIDTH,
+            crate::history_view::WINDOW_HEIGHT,
+        ),
     );
     let inbox = state.inbox.clone();
     match cx.open_window(&spec, move |window, app| {
@@ -2781,7 +3028,10 @@ fn open_or_focus_pin_manage(cx: &mut ShellContext, state: &mut AppState) {
     let title = crate::ocr_backend::i18n_for(prefs.locale).tr("pinmgr-window-title");
     let spec = WindowSpec::normal(
         title,
-        LogicalSize::new(crate::pinned_manage_view::WINDOW_WIDTH, crate::pinned_manage_view::WINDOW_HEIGHT),
+        LogicalSize::new(
+            crate::pinned_manage_view::WINDOW_WIDTH,
+            crate::pinned_manage_view::WINDOW_HEIGHT,
+        ),
     );
     let shared = Rc::clone(state.pins.shared());
     let open_ids = state.pins.open_ids();
@@ -2827,7 +3077,11 @@ pub fn start_mouse_gesture(state: &mut AppState) {
 /// - `cx`：外壳上下文。
 /// - `state`：运行时状态。
 /// - `event`：拖动事件。
-fn on_mouse_gesture(cx: &mut ShellContext, state: &mut AppState, event: snow_platform::global_mouse::DragEvent) {
+fn on_mouse_gesture(
+    cx: &mut ShellContext,
+    state: &mut AppState,
+    event: snow_platform::global_mouse::DragEvent,
+) {
     use snow_platform::global_mouse::DragEvent;
     match event {
         DragEvent::Begin { id, action, pos } => {
@@ -2835,21 +3089,33 @@ fn on_mouse_gesture(cx: &mut ShellContext, state: &mut AppState, event: snow_pla
                 tracing::warn!(%action, "未知的鼠标手势动作");
                 return;
             };
-            if state.capture_in_flight || any_overlay_open(cx, state) || state.recording.is_busy(cx) {
+            if state.capture_in_flight || any_overlay_open(cx, state) || state.recording.is_busy(cx)
+            {
                 tracing::info!(%action, "已有截图 / 录制在进行，忽略鼠标手势");
                 if let Some(service) = &state.mouse_service {
                     service.cancel();
                 }
                 return;
             }
-            state.gesture = Some(GestureSession { id, start: pos, latest: pos, finished: false, applied: false });
+            state.gesture = Some(GestureSession {
+                id,
+                start: pos,
+                latest: pos,
+                finished: false,
+                applied: false,
+            });
             request_capture(cx, state, ORIGIN_GESTURE, mode);
         }
         DragEvent::Update { id, pos } => {
             if let Some(session) = state.gesture.as_mut().filter(|s| s.id == id) {
                 session.latest = pos;
                 if session.applied {
-                    drive_gesture(cx, state, snow_platform::global_mouse::Point { x: pos.x, y: pos.y }, crate::overlay_view::GestureStep::Move);
+                    drive_gesture(
+                        cx,
+                        state,
+                        snow_platform::global_mouse::Point { x: pos.x, y: pos.y },
+                        crate::overlay_view::GestureStep::Move,
+                    );
                 }
             }
         }
@@ -2922,12 +3188,18 @@ fn apply_pending_gesture(cx: &mut ShellContext, state: &mut AppState) {
 /// - `cx`：外壳上下文。
 /// - `state`：运行时状态（取界面偏好）。
 /// - `data`：识别结果数据。
-fn open_recognition_window(cx: &mut ShellContext, state: &mut AppState, data: crate::recognition_view::RecognitionData) {
+fn open_recognition_window(
+    cx: &mut ShellContext,
+    state: &mut AppState,
+    data: crate::recognition_view::RecognitionData,
+) {
     use crate::recognition_view::{RecognitionView, WINDOW_HEIGHT, WINDOW_WIDTH};
     let prefs = ui_prefs_from_config(&state.config);
     let title = crate::ocr_backend::i18n_for(prefs.locale).tr("recwin-window-title");
     let spec = WindowSpec::normal(title, LogicalSize::new(WINDOW_WIDTH, WINDOW_HEIGHT));
-    match cx.open_window(&spec, move |window, app| RecognitionView::create(window, app, data, prefs)) {
+    match cx.open_window(&spec, move |window, app| {
+        RecognitionView::create(window, app, data, prefs)
+    }) {
         Ok(_) => {
             apply_chrome_theme(state);
             tracing::info!("识别结果窗已打开");
@@ -2954,10 +3226,21 @@ fn refresh_pin_manage(cx: &mut ShellContext, state: &AppState) {
 /// - `cx`：外壳上下文。
 /// - `state`：运行时状态。
 /// - `error`：失败原因。
-fn report_pin_manage_error(cx: &mut ShellContext, state: &AppState, error: String) {
+fn report_pin_manage_error(cx: &mut ShellContext, state: &AppState, error: PinError) {
     if let Some((_, view)) = &state.pin_manage_window {
-        view.update(cx.app(), |v, cx| v.show_error(error, cx));
+        let message = error.message(crate::ocr_backend::i18n_for(
+            ui_prefs_from_document(state.config.borrow().document()).locale,
+        ));
+        view.update(cx.app(), |v, cx| v.show_error(message, cx));
     }
+}
+
+/// 新建分组默认名所用的界面语料。
+///
+/// # 参数
+/// - `state`：运行时状态。
+fn pin_group_i18n(state: &AppState) -> &'static snow_i18n::I18n {
+    crate::ocr_backend::i18n_for(ui_prefs_from_document(state.config.borrow().document()).locale)
 }
 
 /// 光标所在显示器作为输入框翻译浮窗的落点；取不到光标或显示器时用主屏。
@@ -2968,7 +3251,8 @@ fn translate_input_monitor(cx: &ShellContext) -> MonitorTarget {
     let Ok(monitors) = cx.monitors() else {
         return MonitorTarget::Primary;
     };
-    pick_monitor(&monitors, cursor_screen_position().ok()).map_or(MonitorTarget::Primary, |m| MonitorTarget::Id(m.id))
+    pick_monitor(&monitors, cursor_screen_position().ok())
+        .map_or(MonitorTarget::Primary, |m| MonitorTarget::Id(m.id))
 }
 
 /// 读取界面偏好（深浅色、语言、主色），与设置页同一套解析。
@@ -2978,7 +3262,12 @@ fn translate_input_monitor(cx: &ShellContext) -> MonitorTarget {
 pub(crate) fn ui_prefs_from_config(config: &SharedConfig) -> UiPrefs {
     let store = config.borrow();
     let text = |key: &str| store.value(key).as_str().unwrap_or_default().to_string();
-    UiPrefs::resolve(&text(THEME_MODE_KEY), &text(LANGUAGE_KEY), &text(THEME_COLOR_KEY), &SystemPrefs::query())
+    UiPrefs::resolve(
+        &text(THEME_MODE_KEY),
+        &text(LANGUAGE_KEY),
+        &text(THEME_COLOR_KEY),
+        &SystemPrefs::query(),
+    )
 }
 
 /// 打开输入框翻译浮窗；已打开则只激活，不重复创建。
@@ -2996,13 +3285,17 @@ fn open_or_focus_translate_input(cx: &mut ShellContext, state: &mut AppState) {
     let prefs = ui_prefs_from_config(&state.config);
     let packs = {
         let config = state.config.borrow();
-        let translate_config = TranslateConfig::from_document(config.document(), &system_ui_language());
+        let translate_config =
+            TranslateConfig::from_document(config.document(), &system_ui_language());
         crate::translate_input::installed_packs(&state.translator.scan(&translate_config).models)
     };
     let size = LogicalSize::new(TRANSLATE_INPUT_WIDTH, TRANSLATE_INPUT_HEIGHT);
     let spec = WindowSpec {
         title: String::new(),
-        placement: Placement::Centered { monitor: translate_input_monitor(cx), size },
+        placement: Placement::Centered {
+            monitor: translate_input_monitor(cx),
+            size,
+        },
         transparent: false,
         always_on_top: true,
         decorations: false,
@@ -3011,7 +3304,9 @@ fn open_or_focus_translate_input(cx: &mut ShellContext, state: &mut AppState) {
         resizable: false,
     };
     let inbox = state.inbox.clone();
-    match cx.open_window(&spec, move |window, app| TranslateInputView::create(window, app, packs, prefs, inbox)) {
+    match cx.open_window(&spec, move |window, app| {
+        TranslateInputView::create(window, app, packs, prefs, inbox)
+    }) {
         Ok((window, view)) => {
             state.translate_input = Some((window, view));
             tracing::info!("输入框翻译窗口已打开");
@@ -3028,18 +3323,23 @@ fn open_or_focus_translate_input(cx: &mut ShellContext, state: &mut AppState) {
 /// - `text`：原文。
 /// - `model_id`：下拉选中的包 ID（空串为自动）。
 fn spawn_translate_input(state: &AppState, serial: u64, text: String, model_id: String) {
-    let config = TranslateConfig::from_document(state.config.borrow().document(), &system_ui_language());
+    let config =
+        TranslateConfig::from_document(state.config.borrow().document(), &system_ui_language());
     let translator = Arc::clone(&state.translator);
     let inbox = state.inbox.clone();
-    let spawned = std::thread::Builder::new().name("snow-translate-input".into()).spawn(move || {
-        let result = translate_text(translator.as_ref(), &config, &model_id, &text);
-        inbox.push(UiEvent::TranslateInputFinished { serial, result });
-    });
+    let spawned = std::thread::Builder::new()
+        .name("snow-translate-input".into())
+        .spawn(move || {
+            let result = translate_text(translator.as_ref(), &config, &model_id, &text);
+            inbox.push(UiEvent::TranslateInputFinished { serial, result });
+        });
     if let Err(e) = spawned {
         tracing::error!(error = %e, "无法创建输入框翻译线程");
         state.inbox.push(UiEvent::TranslateInputFinished {
             serial,
-            result: Err(InputError::Translate(snow_translate::TranslateError::Io(e.to_string()))),
+            result: Err(InputError::Translate(snow_translate::TranslateError::Io(
+                e.to_string(),
+            ))),
         });
     }
 }
@@ -3057,7 +3357,11 @@ fn settings_monitor_from_env(cx: &ShellContext) -> Option<MonitorTarget> {
     let found = monitors
         .all()
         .iter()
-        .find(|m| m.name.to_ascii_uppercase().contains(&wanted.to_ascii_uppercase()))
+        .find(|m| {
+            m.name
+                .to_ascii_uppercase()
+                .contains(&wanted.to_ascii_uppercase())
+        })
         .map(|m| MonitorTarget::Id(m.id));
     if found.is_none() {
         tracing::warn!(wanted, "未找到指定的设置窗显示器，使用默认显示器");
@@ -3092,7 +3396,9 @@ fn spawn_settings_autotest(
     cx.app()
         .spawn(async move |acx| {
             for op in ops {
-                acx.background_executor().timer(AUTOTEST_STEP_INTERVAL).await;
+                acx.background_executor()
+                    .timer(AUTOTEST_STEP_INTERVAL)
+                    .await;
                 let ran = window.gpui_handle().update(acx, |_, window, app| {
                     view.update(app, |v, cx| v.run_autotest_op(&op, window, cx));
                 });
@@ -3107,7 +3413,10 @@ fn spawn_settings_autotest(
 }
 
 /// 语音转文字的两个热键配置键（触发模式变更会影响它们是否注册）。
-const DICTATION_HOTKEY_KEYS: [&str; 2] = [DICTATION_TOGGLE_HOTKEY_CONFIG_KEY, DICTATION_HOLD_HOTKEY_CONFIG_KEY];
+const DICTATION_HOTKEY_KEYS: [&str; 2] = [
+    DICTATION_TOGGLE_HOTKEY_CONFIG_KEY,
+    DICTATION_HOLD_HOTKEY_CONFIG_KEY,
+];
 
 /// 这次重新注册里，与变更的配置键相关的热键是否有失败；
 /// 触发模式键本身不是热键，它的失败看两个语音热键。
@@ -3154,7 +3463,11 @@ fn tray_group_labels(state: &AppState, locale: &str) -> Vec<(String, String)> {
         .groups()
         .into_iter()
         .map(|g| {
-            let name = if g.built_in { i18n.tr("tray-group-default") } else { g.name };
+            let name = if g.built_in {
+                i18n.tr("tray-group-default")
+            } else {
+                g.name
+            };
             (g.id, name)
         })
         .collect()
@@ -3214,7 +3527,10 @@ fn hotkey_config_key(key: &str) -> Option<&'static str> {
 /// - `key`：变更的配置键。
 /// - `previous`：变更前的值。
 fn on_config_changed(cx: &mut ShellContext, state: &mut AppState, key: &str, previous: Value) {
-    if key == LANGUAGE_KEY || key == DELAY_SECONDS_CONFIG_KEY || key == crate::tray_config::KEY_MENU_OPTIONS {
+    if key == LANGUAGE_KEY
+        || key == DELAY_SECONDS_CONFIG_KEY
+        || key == crate::tray_config::KEY_MENU_OPTIONS
+    {
         refresh_tray_menu(state);
         return;
     }
@@ -3222,7 +3538,8 @@ fn on_config_changed(cx: &mut ShellContext, state: &mut AppState, key: &str, pre
         apply_chrome_theme(state);
         return;
     }
-    if key == crate::system_settings::KEY_PRIORITY || key == crate::system_settings::KEY_AUTO_START {
+    if key == crate::system_settings::KEY_PRIORITY || key == crate::system_settings::KEY_AUTO_START
+    {
         crate::system_settings::apply(state.config.borrow().document());
         return;
     }
@@ -3245,11 +3562,20 @@ fn on_config_changed(cx: &mut ShellContext, state: &mut AppState, key: &str, pre
             tracing::warn!(error = %e, "注销旧热键失败");
         }
     }
-    let attempt = register_all_hotkeys_gated(service, state.config.borrow().document(), state.hotkeys_paused);
+    let attempt = register_all_hotkeys_gated(
+        service,
+        state.config.borrow().document(),
+        state.hotkeys_paused,
+    );
     if !hotkey_attempt_failed(&attempt, config_key) {
         let listing = service
             .registered()
-            .map(|list| list.iter().map(|(_, h)| h.to_string()).collect::<Vec<_>>().join(", "))
+            .map(|list| {
+                list.iter()
+                    .map(|(_, h)| h.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
             .unwrap_or_default();
         tracing::info!(key, registered = %listing, "全局热键已按新配置重新注册");
         state.hotkey_handles = attempt.handles;
@@ -3264,14 +3590,25 @@ fn on_config_changed(cx: &mut ShellContext, state: &mut AppState, key: &str, pre
     if let Err(e) = restore_value(&state.config, key, previous) {
         tracing::error!(key, error = %e, "回滚配置失败");
     }
-    let restored = register_all_hotkeys_gated(service, state.config.borrow().document(), state.hotkeys_paused);
-    tracing::info!(key, registered = restored.handles.len(), "已恢复回滚后的全局热键");
+    let restored = register_all_hotkeys_gated(
+        service,
+        state.config.borrow().document(),
+        state.hotkeys_paused,
+    );
+    tracing::info!(
+        key,
+        registered = restored.handles.len(),
+        "已恢复回滚后的全局热键"
+    );
     state.hotkey_handles = restored.handles;
     if let Some(view) = state.settings_view.clone() {
-        let message = format!("{}: {reason}", crate::settings_text::t(
-            view.read(cx.app()).language(),
-            crate::settings_text::Text::HotkeyRegisterFailed,
-        ));
+        let message = format!(
+            "{}: {reason}",
+            crate::settings_text::t(
+                view.read(cx.app()).language(),
+                crate::settings_text::Text::HotkeyRegisterFailed,
+            )
+        );
         view.update(cx.app(), |v, cx| v.notify_reverted(config_key, message, cx));
     }
 }
@@ -3291,7 +3628,12 @@ fn on_config_changed(cx: &mut ShellContext, state: &mut AppState, key: &str, pre
 /// assert_eq!((r.x, r.y), (-1910, 20));
 /// ```
 fn monitor_local_to_desktop(rect: PhysicalRect, bounds: PhysicalRect) -> PhysicalRect {
-    PhysicalRect::new(rect.x + bounds.x, rect.y + bounds.y, rect.width, rect.height)
+    PhysicalRect::new(
+        rect.x + bounds.x,
+        rect.y + bounds.y,
+        rect.width,
+        rect.height,
+    )
 }
 
 /// 托盘悬停提示的最大字符数（系统限制 127 个 UTF-16 单元，留出余量）。
@@ -3336,7 +3678,9 @@ fn run_quick_action(cx: &mut ShellContext, state: &mut AppState, action: QuickAc
     tracing::info!(?action, "快捷动作触发");
     match plan_for(action) {
         QuickPlan::Direct(kind) => request_direct_capture(cx, state, kind),
-        QuickPlan::Overlay(auto) => request_capture(cx, state, ORIGIN_HOTKEY, CaptureMode::Quick(auto)),
+        QuickPlan::Overlay(auto) => {
+            request_capture(cx, state, ORIGIN_HOTKEY, CaptureMode::Quick(auto))
+        }
         QuickPlan::Delayed => begin_delayed_capture(state),
         QuickPlan::OpenSettings => open_or_focus_settings(cx, state),
         QuickPlan::OpenHistory => open_or_focus_history(cx, state),
@@ -3391,7 +3735,11 @@ fn begin_delayed_capture(state: &mut AppState) {
     match spawned {
         Ok(_) => {
             tracing::info!(seconds, serial, "延迟截图开始倒计时");
-            let text = notice_text(state, "quick-notice-delay-started", Args::new().arg(1, seconds));
+            let text = notice_text(
+                state,
+                "quick-notice-delay-started",
+                Args::new().arg(1, seconds),
+            );
             show_notice(state, &text);
         }
         Err(e) => {
@@ -3412,7 +3760,9 @@ fn request_direct_capture(cx: &mut ShellContext, state: &mut AppState, kind: Dir
         .overlay
         .as_ref()
         .is_some_and(|window| cx.is_window_open(window));
-    if state.direct_in_flight || capture_gate(state.capture_in_flight, overlay_open) != CaptureGate::Proceed {
+    if state.direct_in_flight
+        || capture_gate(state.capture_in_flight, overlay_open) != CaptureGate::Proceed
+    {
         tracing::info!(?kind, "直接截图被忽略：已有截图在进行");
         let text = notice_text(state, "quick-notice-capture-busy", Args::new());
         show_notice(state, &text);
@@ -3426,9 +3776,8 @@ fn request_direct_capture(cx: &mut ShellContext, state: &mut AppState, kind: Dir
         }
     };
     let region = match kind {
-        DirectKind::FullScreen => {
-            pick_monitor(&monitors, cursor_screen_position().ok()).and_then(|m| full_monitor_region(&m))
-        }
+        DirectKind::FullScreen => pick_monitor(&monitors, cursor_screen_position().ok())
+            .and_then(|m| full_monitor_region(&m)),
         DirectKind::FocusedWindow => snow_platform::text_inject::foreground_window_rect()
             .and_then(|rect| clip_to_monitor(rect, &monitors)),
     };
@@ -3441,7 +3790,11 @@ fn request_direct_capture(cx: &mut ShellContext, state: &mut AppState, kind: Dir
         let store = state.config.borrow();
         let document = store.document();
         let (dir, _) = resolve_save_directory(document, home_directory().as_deref());
-        (direct_output_plan_from(document), dir, policy_from_document(document))
+        (
+            direct_output_plan_from(document),
+            dir,
+            policy_from_document(document),
+        )
     };
     let history = state.history.clone().map(|recorder| DirectHistory {
         recorder,
@@ -3451,7 +3804,13 @@ fn request_direct_capture(cx: &mut ShellContext, state: &mut AppState, kind: Dir
             DirectKind::FocusedWindow => HistorySource::FocusedWindow,
         },
     });
-    tracing::info!(?kind, monitor = monitor.id.0, ?region, ?plan, "开始直接截图");
+    tracing::info!(
+        ?kind,
+        monitor = monitor.id.0,
+        ?region,
+        ?plan,
+        "开始直接截图"
+    );
     state.direct_in_flight = true;
     let inbox = state.inbox.clone();
     let spawned = spawn_direct_capture(region, plan, dir, history, move |result| {
@@ -3473,29 +3832,35 @@ fn on_direct_capture_done(state: &mut AppState, result: Result<DirectResult, Str
     let text = match result {
         Err(reason) => {
             tracing::error!(%reason, "直接截图采集失败");
-            notice_text(state, "quick-notice-direct-failed", Args::new().arg(1, reason))
+            notice_text(
+                state,
+                "quick-notice-direct-failed",
+                Args::new().arg(1, reason),
+            )
         }
         Ok(r) if r.has_failure() => {
             let reason = r.failure_reason().unwrap_or_default();
             tracing::error!(%reason, "直接截图输出失败");
-            notice_text(state, "quick-notice-direct-failed", Args::new().arg(1, reason))
+            notice_text(
+                state,
+                "quick-notice-direct-failed",
+                Args::new().arg(1, reason),
+            )
         }
-        Ok(r) => {
-            match &r.saved {
-                Some(Ok(path)) => {
-                    let name = path
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_default();
-                    notice_text(state, "quick-notice-direct-saved", Args::new().arg(1, name))
-                }
-                _ => notice_text(
-                    state,
-                    "quick-notice-direct-copied",
-                    Args::new().arg(1, r.width).arg(2, r.height),
-                ),
+        Ok(r) => match &r.saved {
+            Some(Ok(path)) => {
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                notice_text(state, "quick-notice-direct-saved", Args::new().arg(1, name))
             }
-        }
+            _ => notice_text(
+                state,
+                "quick-notice-direct-copied",
+                Args::new().arg(1, r.width).arg(2, r.height),
+            ),
+        },
     };
     show_notice(state, &text);
 }
@@ -3505,7 +3870,9 @@ fn on_direct_capture_done(state: &mut AppState, result: Result<DirectResult, Str
 /// # 参数
 /// - `state`：运行时状态。
 fn toggle_fullscreen_gate(state: &mut AppState) {
-    use crate::fullscreen_gate::{DISABLE_ON_FULLSCREEN_CONFIG_KEY, config_value, configured, set_enabled};
+    use crate::fullscreen_gate::{
+        DISABLE_ON_FULLSCREEN_CONFIG_KEY, config_value, configured, set_enabled,
+    };
     let enabled = !configured(state.config.borrow().document());
     {
         let mut store = state.config.borrow_mut();
@@ -3519,7 +3886,11 @@ fn toggle_fullscreen_gate(state: &mut AppState) {
     let effective = configured(state.config.borrow().document());
     set_enabled(effective);
     refresh_tray_menu(state);
-    let id = if effective { NOTICE_FULLSCREEN_GATE_ON } else { NOTICE_FULLSCREEN_GATE_OFF };
+    let id = if effective {
+        NOTICE_FULLSCREEN_GATE_ON
+    } else {
+        NOTICE_FULLSCREEN_GATE_OFF
+    };
     let text = notice_text(state, id, Args::new());
     show_notice(state, &text);
 }
@@ -3543,7 +3914,11 @@ fn toggle_global_hotkeys(state: &mut AppState) {
     state.hotkeys_paused = paused;
     refresh_tray_menu(state);
     state.hotkey_handles = attempt.handles;
-    tracing::info!(paused, registered = state.hotkey_handles.len(), "全局热键暂停状态已切换");
+    tracing::info!(
+        paused,
+        registered = state.hotkey_handles.len(),
+        "全局热键暂停状态已切换"
+    );
     let text = if paused {
         notice_text(state, "quick-notice-hotkeys-paused", Args::new())
     } else if attempt.failures.is_empty() {
@@ -3555,7 +3930,11 @@ fn toggle_global_hotkeys(state: &mut AppState) {
             .map(|f| format!("{}: {}", f.shortcut, f.reason))
             .collect::<Vec<_>>()
             .join("; ");
-        notice_text(state, "quick-notice-hotkeys-resume-failed", Args::new().arg(1, reasons))
+        notice_text(
+            state,
+            "quick-notice-hotkeys-resume-failed",
+            Args::new().arg(1, reasons),
+        )
     };
     show_notice(state, &text);
     if paused && let Some(tray) = state.tray.as_ref() {
@@ -3572,7 +3951,10 @@ fn toggle_global_hotkeys(state: &mut AppState) {
 /// # 参数
 /// - `state`：运行时状态。
 fn open_recording_folder(state: &AppState) {
-    let dir = recording_directory(state.config.borrow().document(), home_directory().as_deref());
+    let dir = recording_directory(
+        state.config.borrow().document(),
+        home_directory().as_deref(),
+    );
     let opened = std::fs::create_dir_all(&dir)
         .map_err(|e| e.to_string())
         .and_then(|()| {
@@ -3586,7 +3968,11 @@ fn open_recording_folder(state: &AppState) {
         Ok(()) => tracing::info!(dir = %dir.display(), "已打开录屏保存目录"),
         Err(reason) => {
             tracing::warn!(dir = %dir.display(), %reason, "打开录屏保存目录失败");
-            let text = notice_text(state, "quick-notice-folder-failed", Args::new().arg(1, reason));
+            let text = notice_text(
+                state,
+                "quick-notice-folder-failed",
+                Args::new().arg(1, reason),
+            );
             show_notice(state, &text);
         }
     }
@@ -3636,7 +4022,11 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
                 view.update(cx.app(), |v, cx| v.show_result(action, error, cx));
             }
         }
-        UiEvent::HistoryPin { width, height, rgba } => {
+        UiEvent::HistoryPin {
+            width,
+            height,
+            rgba,
+        } => {
             let result = state.pins.create_from_image(cx, width, height, rgba);
             if let Err(e) = &result {
                 tracing::warn!(error = %e, "从截图历史贴图失败");
@@ -3655,12 +4045,16 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
                 .dictation
                 .probed(cx, state.tray.as_ref(), round, verdict)
         }
-        UiEvent::DictationTranslated { round, seq, outcome } => {
-            state.dictation.translated(cx, round, seq, outcome)
-        }
-        UiEvent::TranslateInputRequested { serial, text, model_id } => {
-            spawn_translate_input(state, serial, text, model_id)
-        }
+        UiEvent::DictationTranslated {
+            round,
+            seq,
+            outcome,
+        } => state.dictation.translated(cx, round, seq, outcome),
+        UiEvent::TranslateInputRequested {
+            serial,
+            text,
+            model_id,
+        } => spawn_translate_input(state, serial, text, model_id),
         UiEvent::TranslateInputFinished { serial, result } => {
             if let Some((window, view)) = &state.translate_input
                 && cx.is_window_open(window)
@@ -3695,7 +4089,12 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
             tracing::info!(restored, "启动恢复贴图");
             refresh_tray_menu(state);
         }
-        UiEvent::PinControl(crate::pinned_shared::PinControlEvent::OcrRequested { id, width, height, rgba }) => {
+        UiEvent::PinControl(crate::pinned_shared::PinControlEvent::OcrRequested {
+            id,
+            width,
+            height,
+            rgba,
+        }) => {
             spawn_pin_ocr(state, id, width, height, rgba);
         }
         UiEvent::PinOcrFinished { id, result } => state.pins.deliver_ocr(cx, &id, result),
@@ -3719,7 +4118,11 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
                 });
             }
         }
-        UiEvent::PinImage { width, height, rgba } => {
+        UiEvent::PinImage {
+            width,
+            height,
+            rgba,
+        } => {
             if let Err(e) = state.pins.create_from_image(cx, width, height, rgba) {
                 tracing::warn!(error = %e, "贴选中的图片失败");
             }
@@ -3751,7 +4154,11 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
             refresh_pin_manage(cx, state);
         }
         UiEvent::PinGroupCreateNamed { name } => {
-            if let Err(e) = state.pins.shared().create_group(Some(&name)) {
+            if let Err(e) = state
+                .pins
+                .shared()
+                .create_group(Some(&name), pin_group_i18n(state))
+            {
                 report_pin_manage_error(cx, state, e);
             }
             refresh_tray_menu(state);
@@ -3773,7 +4180,11 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
             refresh_pin_manage(cx, state);
         }
         UiEvent::PinGroupNew => {
-            match state.pins.shared().create_group(None) {
+            match state
+                .pins
+                .shared()
+                .create_group(None, pin_group_i18n(state))
+            {
                 Ok(id) => tracing::info!(group = %id, "已新建贴图分组"),
                 Err(e) => tracing::warn!(error = %e, "新建贴图分组失败"),
             }
@@ -3827,11 +4238,23 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
             }
         }
         UiEvent::TranslateFinished { serial, result } => {
-            let (auto, _) = parse_translate_auto(std::env::var(ENV_OVERLAY_BENCH_TRANSLATE_AUTO).ok().as_deref());
+            let (auto, _) = parse_translate_auto(
+                std::env::var(ENV_OVERLAY_BENCH_TRANSLATE_AUTO)
+                    .ok()
+                    .as_deref(),
+            );
             if let Some(view) = &state.overlay_view {
                 view.update(cx.app(), |v, vcx| {
                     v.finish_translate(serial, result);
-                    if auto && matches!(v.translate_state(), TranslateUiState::Failed { can_download: true, .. }) {
+                    if auto
+                        && matches!(
+                            v.translate_state(),
+                            TranslateUiState::Failed {
+                                can_download: true,
+                                ..
+                            }
+                        )
+                    {
                         v.handle_key("d", false, false);
                     }
                     vcx.notify();
@@ -3852,7 +4275,11 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
                 Ok(()) => tracing::info!("onnxruntime 运行时下载完成"),
                 Err(e) => tracing::warn!(error = %e, "onnxruntime 运行时下载失败"),
             }
-            let (_, auto_retry) = parse_translate_auto(std::env::var(ENV_OVERLAY_BENCH_TRANSLATE_AUTO).ok().as_deref());
+            let (_, auto_retry) = parse_translate_auto(
+                std::env::var(ENV_OVERLAY_BENCH_TRANSLATE_AUTO)
+                    .ok()
+                    .as_deref(),
+            );
             let retry = result.is_ok() && auto_retry;
             if let Some(view) = &state.overlay_view {
                 view.update(cx.app(), |v, vcx| {
@@ -3894,7 +4321,9 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
                 view.update(cx.app(), |v, vcx| v.finish_update_check(ui_state, vcx));
             }
         }
-        UiEvent::SttDownloadRequested { model_id, cancel } => spawn_stt_download(state, model_id, cancel),
+        UiEvent::SttDownloadRequested { model_id, cancel } => {
+            spawn_stt_download(state, model_id, cancel)
+        }
         UiEvent::SttDownloadProgress(progress) => {
             if let Some(view) = &state.settings_view {
                 view.update(cx.app(), |v, vcx| v.update_stt_download(progress, vcx));
@@ -3902,15 +4331,25 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
         }
         UiEvent::SttDownloadFinished { model_id, result } => {
             match (stt_download::classify(&result), &result) {
-                (stt_download::Outcome::Done, _) => tracing::info!(model = %model_id, "语音模型下载完成"),
-                (stt_download::Outcome::Cancelled, _) => tracing::info!(model = %model_id, "用户取消下载"),
+                (stt_download::Outcome::Done, _) => {
+                    tracing::info!(model = %model_id, "语音模型下载完成")
+                }
+                (stt_download::Outcome::Cancelled, _) => {
+                    tracing::info!(model = %model_id, "用户取消下载")
+                }
                 (stt_download::Outcome::Failed, Err(e)) => {
-                    tracing::warn!(model = %model_id, error = %e, "语音模型下载失败")
+                    tracing::warn!(model = %model_id, error = ?e, "语音模型下载失败")
                 }
                 (stt_download::Outcome::Failed, Ok(())) => {}
             }
+            let i18n = crate::ocr_backend::i18n_for(
+                ui_prefs_from_document(state.config.borrow().document()).locale,
+            );
+            let result = result.map_err(|e| e.message(i18n));
             if let Some(view) = &state.settings_view {
-                view.update(cx.app(), |v, vcx| v.finish_stt_download(model_id, result, vcx));
+                view.update(cx.app(), |v, vcx| {
+                    v.finish_stt_download(model_id, result, vcx)
+                });
             }
         }
         UiEvent::StartScrollCapture => request_scroll_capture(cx, state),
@@ -3969,7 +4408,11 @@ pub fn start_services(
     bus: &CommandBus,
     inbox: &MainThreadInbox<UiEvent>,
     document: &ConfigDocument,
-) -> (Option<TrayService>, Option<HotkeyService>, Vec<HotkeyHandle>) {
+) -> (
+    Option<TrayService>,
+    Option<HotkeyService>,
+    Vec<HotkeyHandle>,
+) {
     let prefs = ui_prefs_from_document(document);
     let locale = prefs.locale;
     apply_popup_menu_theme(prefs.dark);
@@ -3979,9 +4422,9 @@ pub fn start_services(
     } else {
         Err("托盘已在设置中关闭".to_string())
     };
-    let tray = match tray_spec
-        .and_then(|spec| TrayService::start(caps, spec, Dispatcher::from_bus(bus.clone())).map_err(|e| e.to_string()))
-    {
+    let tray = match tray_spec.and_then(|spec| {
+        TrayService::start(caps, spec, Dispatcher::from_bus(bus.clone())).map_err(|e| e.to_string())
+    }) {
         Ok(tray) => {
             let signal_inbox = inbox.clone();
             let sink = Box::new(move |signal: String| match map_tray_signal(&signal) {
@@ -4052,11 +4495,26 @@ mod tests {
             map_ipc_command(&IpcCommand::TriggerScreenshot),
             Some(UiEvent::Capture { origin: ORIGIN_IPC })
         );
-        assert_eq!(map_ipc_command(&IpcCommand::TriggerRecording), Some(UiEvent::StartRecording));
-        assert_eq!(map_ipc_command(&IpcCommand::ScrollCapture), Some(UiEvent::StartScrollCapture));
-        assert_eq!(map_ipc_command(&IpcCommand::PinClipboard), Some(UiEvent::PinFromClipboard));
-        assert_eq!(map_ipc_command(&IpcCommand::OpenSettings), Some(UiEvent::OpenSettings));
-        assert_eq!(map_ipc_command(&IpcCommand::ShowMainWindow), Some(UiEvent::OpenSettings));
+        assert_eq!(
+            map_ipc_command(&IpcCommand::TriggerRecording),
+            Some(UiEvent::StartRecording)
+        );
+        assert_eq!(
+            map_ipc_command(&IpcCommand::ScrollCapture),
+            Some(UiEvent::StartScrollCapture)
+        );
+        assert_eq!(
+            map_ipc_command(&IpcCommand::PinClipboard),
+            Some(UiEvent::PinFromClipboard)
+        );
+        assert_eq!(
+            map_ipc_command(&IpcCommand::OpenSettings),
+            Some(UiEvent::OpenSettings)
+        );
+        assert_eq!(
+            map_ipc_command(&IpcCommand::ShowMainWindow),
+            Some(UiEvent::OpenSettings)
+        );
         assert_eq!(map_ipc_command(&IpcCommand::Quit), Some(UiEvent::Quit));
         assert_eq!(map_ipc_command(&IpcCommand::Custom("x".into())), None);
     }
@@ -4068,7 +4526,10 @@ mod tests {
         assert_eq!(map_tray_signal("history"), Some(UiEvent::OpenHistory));
         assert_eq!(map_tray_signal("quit"), Some(UiEvent::Quit));
         assert_eq!(map_tray_signal("restart"), Some(UiEvent::Restart));
-        assert_eq!(map_tray_signal("pin_clipboard"), Some(UiEvent::PinFromClipboard));
+        assert_eq!(
+            map_tray_signal("pin_clipboard"),
+            Some(UiEvent::PinFromClipboard)
+        );
         assert_eq!(map_tray_signal("rm -rf"), None);
     }
 
@@ -4088,14 +4549,23 @@ mod tests {
         assert_eq!(seps, vec![5, 8, 10, 12]);
         assert!(matches!(
             &spec.menu[0],
-            TrayMenuEntry::Item { action: TrayAction::Command(AppCommand::Capture(_)), .. }
+            TrayMenuEntry::Item {
+                action: TrayAction::Command(AppCommand::Capture(_)),
+                ..
+            }
         ));
         assert!(matches!(
             spec.menu.last().unwrap(),
             TrayMenuEntry::Item { action: TrayAction::Signal(s), .. } if s == TRAY_SIGNAL_QUIT
         ));
         for entry in &spec.menu {
-            if let TrayMenuEntry::Item { icon, label, checked: None, .. } = entry {
+            if let TrayMenuEntry::Item {
+                icon,
+                label,
+                checked: None,
+                ..
+            } = entry
+            {
                 assert!(icon.is_some(), "缺少图标: {label}");
             }
         }
@@ -4120,7 +4590,9 @@ mod tests {
                     matches!(
                         e,
                         TrayMenuEntry::Item {
-                            action: TrayAction::Command(AppCommand::QuickAction(QuickAction::ToggleGlobalHotkeys)),
+                            action: TrayAction::Command(AppCommand::QuickAction(
+                                QuickAction::ToggleGlobalHotkeys
+                            )),
                             ..
                         }
                     )
@@ -4144,18 +4616,29 @@ mod tests {
         ));
         assert!(matches!(
             default_spec.on_middle_click,
-            Some(TrayAction::Command(AppCommand::QuickAction(QuickAction::ScreenshotFixed)))
+            Some(TrayAction::Command(AppCommand::QuickAction(
+                QuickAction::ScreenshotFixed
+            )))
         ));
         assert!(!has_signal(&default_spec, TRAY_SIGNAL_HISTORY));
 
-        doc.set_value("tray/menu_options", serde_json::json!(["quick.open-capture-history", "tray.exit"]))
-            .unwrap();
-        doc.set_value("tray/left_click_action", serde_json::json!("show_main_window")).unwrap();
+        doc.set_value(
+            "tray/menu_options",
+            serde_json::json!(["quick.open-capture-history", "tray.exit"]),
+        )
+        .unwrap();
+        doc.set_value(
+            "tray/left_click_action",
+            serde_json::json!("show_main_window"),
+        )
+        .unwrap();
         let spec = build_tray_spec("en-US", &doc, false).unwrap();
         assert_eq!(spec.menu.len(), 3, "历史、退出两项，中间只留一条组间分隔线");
         assert!(matches!(spec.menu[1], TrayMenuEntry::Separator));
         assert!(has_signal(&spec, TRAY_SIGNAL_HISTORY) && has_signal(&spec, TRAY_SIGNAL_QUIT));
-        assert!(matches!(spec.on_left_click, Some(TrayAction::Signal(ref s)) if s == TRAY_SIGNAL_SETTINGS));
+        assert!(
+            matches!(spec.on_left_click, Some(TrayAction::Signal(ref s)) if s == TRAY_SIGNAL_SETTINGS)
+        );
     }
 
     /// 菜单里是否有触发指定信号的条目。
@@ -4167,9 +4650,18 @@ mod tests {
     #[test]
     fn tray_delay_label_contains_seconds() {
         let mut doc = ConfigDocument::from_bytes(None);
-        assert!(tray_item(&build_tray_spec("en-US", &doc, false).unwrap(), 1).0.contains('3'));
-        doc.set_value(DELAY_SECONDS_CONFIG_KEY, serde_json::json!(7)).unwrap();
-        assert!(tray_item(&build_tray_spec("zh-CN", &doc, false).unwrap(), 1).0.contains('7'));
+        assert!(
+            tray_item(&build_tray_spec("en-US", &doc, false).unwrap(), 1)
+                .0
+                .contains('3')
+        );
+        doc.set_value(DELAY_SECONDS_CONFIG_KEY, serde_json::json!(7))
+            .unwrap();
+        assert!(
+            tray_item(&build_tray_spec("zh-CN", &doc, false).unwrap(), 1)
+                .0
+                .contains('7')
+        );
     }
 
     /// 两种语言下所有托盘文案都存在（无“缺失”占位）。
@@ -4180,7 +4672,10 @@ mod tests {
             let spec = build_tray_spec(locale, &doc, false).unwrap();
             for entry in &spec.menu {
                 if let TrayMenuEntry::Item { label, .. } = entry {
-                    assert!(!label.is_empty() && !label.contains("[!"), "{locale}: {label}");
+                    assert!(
+                        !label.is_empty() && !label.contains("[!"),
+                        "{locale}: {label}"
+                    );
                 }
             }
         }
@@ -4209,27 +4704,45 @@ mod tests {
     fn tray_group_block_follows_pin_section() {
         let doc = ConfigDocument::from_bytes(None);
         let base = build_tray_spec("en-US", &doc, false).unwrap().menu.len();
-        let groups = vec![("default".to_string(), "Default group".to_string()), ("g1".to_string(), "Work".to_string())];
+        let groups = vec![
+            ("default".to_string(), "Default group".to_string()),
+            ("g1".to_string(), "Work".to_string()),
+        ];
         let spec = build_tray_spec_with_groups("en-US", &doc, false, &groups, "g1").unwrap();
         // 两个分组 + 新建 + 删除空 + 贴图管理 + 一条分隔线
         assert_eq!(spec.menu.len(), base + 6);
         let find = |wanted: &str| {
             spec.menu.iter().find_map(|e| match e {
-                TrayMenuEntry::Item { action: TrayAction::Signal(s), checked, .. } if s == wanted => Some(*checked),
+                TrayMenuEntry::Item {
+                    action: TrayAction::Signal(s),
+                    checked,
+                    ..
+                } if s == wanted => Some(*checked),
                 _ => None,
             })
         };
         assert_eq!(find("group:g1"), Some(Some(true)));
         assert_eq!(find("group:default"), Some(Some(false)));
-        assert!(find(TRAY_SIGNAL_GROUP_NEW).is_some() && find(TRAY_SIGNAL_GROUP_DELETE_EMPTY).is_some());
+        assert!(
+            find(TRAY_SIGNAL_GROUP_NEW).is_some() && find(TRAY_SIGNAL_GROUP_DELETE_EMPTY).is_some()
+        );
     }
 
     /// 分组相关托盘信号映射成收件箱事件。
     #[test]
     fn tray_group_signals_map() {
-        assert_eq!(map_tray_signal("group:abc"), Some(UiEvent::PinGroupSwitch { id: "abc".into() }));
-        assert_eq!(map_tray_signal(TRAY_SIGNAL_GROUP_NEW), Some(UiEvent::PinGroupNew));
-        assert_eq!(map_tray_signal(TRAY_SIGNAL_GROUP_DELETE_EMPTY), Some(UiEvent::PinGroupDeleteEmpty));
+        assert_eq!(
+            map_tray_signal("group:abc"),
+            Some(UiEvent::PinGroupSwitch { id: "abc".into() })
+        );
+        assert_eq!(
+            map_tray_signal(TRAY_SIGNAL_GROUP_NEW),
+            Some(UiEvent::PinGroupNew)
+        );
+        assert_eq!(
+            map_tray_signal(TRAY_SIGNAL_GROUP_DELETE_EMPTY),
+            Some(UiEvent::PinGroupDeleteEmpty)
+        );
         assert_eq!(map_tray_signal("nope"), None);
     }
 
@@ -4240,11 +4753,25 @@ mod tests {
         let inbox = MainThreadInbox::new();
         register_bus_handlers(&bus, &inbox);
         let ctx = CommandContext::new(CommandSource::Hotkey);
-        bus.emit(&ctx, AppCommand::Capture(CaptureRequest::default())).unwrap();
-        assert_eq!(inbox.try_recv(), Some(UiEvent::Capture { origin: ORIGIN_HOTKEY }));
-        bus.emit(&CommandContext::new(CommandSource::Tray), AppCommand::Capture(CaptureRequest::default()))
+        bus.emit(&ctx, AppCommand::Capture(CaptureRequest::default()))
             .unwrap();
-        assert_eq!(inbox.try_recv(), Some(UiEvent::Capture { origin: ORIGIN_TRAY }));
+        assert_eq!(
+            inbox.try_recv(),
+            Some(UiEvent::Capture {
+                origin: ORIGIN_HOTKEY
+            })
+        );
+        bus.emit(
+            &CommandContext::new(CommandSource::Tray),
+            AppCommand::Capture(CaptureRequest::default()),
+        )
+        .unwrap();
+        assert_eq!(
+            inbox.try_recv(),
+            Some(UiEvent::Capture {
+                origin: ORIGIN_TRAY
+            })
+        );
     }
 
     /// 总线上的导出与直接截图命令变成对应的收件箱事件。
@@ -4299,7 +4826,11 @@ mod tests {
         let bus = CommandBus::new();
         let inbox = MainThreadInbox::new();
         register_bus_handlers(&bus, &inbox);
-        bus.emit(&CommandContext::new(CommandSource::Hotkey), AppCommand::OpenTranslateInput).unwrap();
+        bus.emit(
+            &CommandContext::new(CommandSource::Hotkey),
+            AppCommand::OpenTranslateInput,
+        )
+        .unwrap();
         assert_eq!(inbox.try_recv(), Some(UiEvent::OpenTranslateInput));
     }
 
@@ -4309,9 +4840,15 @@ mod tests {
         let bus = CommandBus::new();
         let inbox = MainThreadInbox::new();
         register_bus_handlers(&bus, &inbox);
-        for action in [QuickAction::ScreenshotFullScreen, QuickAction::ToggleGlobalHotkeys] {
-            bus.emit(&CommandContext::new(CommandSource::Hotkey), AppCommand::QuickAction(action))
-                .unwrap();
+        for action in [
+            QuickAction::ScreenshotFullScreen,
+            QuickAction::ToggleGlobalHotkeys,
+        ] {
+            bus.emit(
+                &CommandContext::new(CommandSource::Hotkey),
+                AppCommand::QuickAction(action),
+            )
+            .unwrap();
             assert_eq!(inbox.try_recv(), Some(UiEvent::QuickAction(action)));
         }
     }
@@ -4322,8 +4859,14 @@ mod tests {
         for (key, _) in QUICK_ACTION_KEYS {
             assert_eq!(hotkey_config_key(key), Some(*key));
         }
-        assert_eq!(hotkey_config_key(SCREENSHOT_HOTKEY_CONFIG_KEY), Some(SCREENSHOT_HOTKEY_CONFIG_KEY));
-        assert_eq!(hotkey_config_key("global_shortcuts/disable_on_focused_fullscreen_window"), None);
+        assert_eq!(
+            hotkey_config_key(SCREENSHOT_HOTKEY_CONFIG_KEY),
+            Some(SCREENSHOT_HOTKEY_CONFIG_KEY)
+        );
+        assert_eq!(
+            hotkey_config_key("global_shortcuts/disable_on_focused_fullscreen_window"),
+            None
+        );
         assert_eq!(hotkey_config_key("screenshot/delay_seconds"), None);
     }
 
@@ -4333,7 +4876,10 @@ mod tests {
         let doc = ConfigDocument::from_bytes(None);
         for (key, _) in QUICK_ACTION_KEYS {
             for text in shortcut_strings(&doc.value(key)) {
-                assert!(Hotkey::parse(&portable_to_hotkey_text(&text)).is_ok(), "{key}: {text}");
+                assert!(
+                    Hotkey::parse(&portable_to_hotkey_text(&text)).is_ok(),
+                    "{key}: {text}"
+                );
             }
         }
     }
@@ -4343,7 +4889,11 @@ mod tests {
     fn translate_input_hotkey_unbound_by_default() {
         let mut doc = ConfigDocument::from_bytes(None);
         assert!(shortcut_strings(&doc.value(TRANSLATE_INPUT_HOTKEY_CONFIG_KEY)).is_empty());
-        doc.set_value(TRANSLATE_INPUT_HOTKEY_CONFIG_KEY, serde_json::json!(["Ctrl+Alt+T"])).unwrap();
+        doc.set_value(
+            TRANSLATE_INPUT_HOTKEY_CONFIG_KEY,
+            serde_json::json!(["Ctrl+Alt+T"]),
+        )
+        .unwrap();
         let list = shortcut_strings(&doc.value(TRANSLATE_INPUT_HOTKEY_CONFIG_KEY));
         assert_eq!(list.len(), 1);
         assert!(Hotkey::parse(&portable_to_hotkey_text(&list[0])).is_ok());
@@ -4383,10 +4933,21 @@ mod tests {
             shortcut: "F9".into(),
             reason: "占用".into(),
         });
-        assert!(hotkey_attempt_failed(&attempt, DICTATION_TRIGGER_MODE_CONFIG_KEY));
-        assert!(hotkey_attempt_failed(&attempt, DICTATION_HOLD_HOTKEY_CONFIG_KEY));
-        assert!(!hotkey_attempt_failed(&attempt, DICTATION_TOGGLE_HOTKEY_CONFIG_KEY));
-        assert!(describe_hotkey_failure(&attempt, DICTATION_TRIGGER_MODE_CONFIG_KEY).contains("F9"));
+        assert!(hotkey_attempt_failed(
+            &attempt,
+            DICTATION_TRIGGER_MODE_CONFIG_KEY
+        ));
+        assert!(hotkey_attempt_failed(
+            &attempt,
+            DICTATION_HOLD_HOTKEY_CONFIG_KEY
+        ));
+        assert!(!hotkey_attempt_failed(
+            &attempt,
+            DICTATION_TOGGLE_HOTKEY_CONFIG_KEY
+        ));
+        assert!(
+            describe_hotkey_failure(&attempt, DICTATION_TRIGGER_MODE_CONFIG_KEY).contains("F9")
+        );
     }
 
     /// 贴图热键配置键与 schema 一致，默认值（F3）可解析为合法热键。
@@ -4396,7 +4957,10 @@ mod tests {
         let list = shortcut_strings(&doc.value(PIN_CLIPBOARD_HOTKEY_CONFIG_KEY));
         assert!(!list.is_empty());
         for s in list {
-            assert!(Hotkey::parse(&portable_to_hotkey_text(&s)).is_ok(), "默认热键无法解析: {s}");
+            assert!(
+                Hotkey::parse(&portable_to_hotkey_text(&s)).is_ok(),
+                "默认热键无法解析: {s}"
+            );
         }
     }
 
@@ -4423,7 +4987,8 @@ mod tests {
     /// 截图请求计数递增，序号从 1 开始。
     #[test]
     fn capture_counter_increments() {
-        let dir = std::env::temp_dir().join(format!("snow-shot-cfg-counter-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("snow-shot-cfg-counter-{}", std::process::id()));
         let mut state = AppState::new(
             open_shared_config(&dir),
             MainThreadInbox::new(),
@@ -4473,9 +5038,15 @@ mod tests {
     #[test]
     fn recording_region_uses_desktop_physical_coordinates() {
         use snow_ui::shell::geometry::PhysicalRect;
-        let r = monitor_local_to_desktop(PhysicalRect::new(10, 20, 300, 200), PhysicalRect::new(-1920, 100, 1920, 1080));
+        let r = monitor_local_to_desktop(
+            PhysicalRect::new(10, 20, 300, 200),
+            PhysicalRect::new(-1920, 100, 1920, 1080),
+        );
         assert_eq!(r, PhysicalRect::new(-1910, 120, 300, 200));
-        let p = monitor_local_to_desktop(PhysicalRect::new(0, 0, 2560, 1440), PhysicalRect::new(0, 0, 2560, 1600));
+        let p = monitor_local_to_desktop(
+            PhysicalRect::new(0, 0, 2560, 1440),
+            PhysicalRect::new(0, 0, 2560, 1600),
+        );
         assert_eq!(p, PhysicalRect::new(0, 0, 2560, 1440));
     }
 
@@ -4517,7 +5088,10 @@ mod tests {
     #[test]
     fn bench_tool_parsing() {
         assert_eq!(parse_bench_tool(Some("Arrow")), Some(AnnotationTool::Arrow));
-        assert_eq!(parse_bench_tool(Some(" MOSAIC ")), Some(AnnotationTool::Mosaic));
+        assert_eq!(
+            parse_bench_tool(Some(" MOSAIC ")),
+            Some(AnnotationTool::Mosaic)
+        );
         assert_eq!(parse_bench_tool(Some("pen")), Some(AnnotationTool::Pencil));
         assert_eq!(parse_bench_tool(Some("text")), Some(AnnotationTool::Text));
         assert_eq!(parse_bench_tool(Some("laser")), None);

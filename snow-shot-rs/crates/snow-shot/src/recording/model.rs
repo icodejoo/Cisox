@@ -4,6 +4,7 @@
 //! 支持的格式以 snow-crates 的导出能力为准：MP4 / GIF / APNG / 动画 WebP（不含 WebM，见 docs/cisox-todo-webm.md）。
 
 use serde::{Deserialize, Serialize};
+use snow_i18n::{Args, I18n};
 use snow_recorder_protocol::{AudioRequest, EffectsRequest, MediaFormat};
 use snow_ui::shell::geometry::PhysicalRect;
 use std::fmt;
@@ -40,14 +41,17 @@ impl RecordingFormat {
         self.to_media().as_str()
     }
 
-    /// 显示名称。
-    pub const fn display_name(&self) -> &'static str {
-        match self {
-            Self::Mp4 => "MP4 视频",
-            Self::Gif => "GIF 动图",
-            Self::Apng => "APNG 动图",
-            Self::Webp => "WebP 动图",
-        }
+    /// 显示名称（随界面语言）。
+    ///
+    /// # 参数
+    /// - `i18n`：界面语料。
+    pub fn label(&self, i18n: &I18n) -> String {
+        i18n.tr(match self {
+            Self::Mp4 => "recording-format-mp4",
+            Self::Gif => "recording-format-gif",
+            Self::Apng => "recording-format-apng",
+            Self::Webp => "recording-format-webp",
+        })
     }
 
     /// 转为协议格式。
@@ -150,9 +154,69 @@ pub enum RecordingState {
     },
     /// 录制发生异常终止。
     Error {
-        /// 错误原因描述。
-        reason: String,
+        /// 结构化的错误原因（界面边界再翻译）。
+        reason: RecordingFailure,
     },
+}
+
+/// 录制失败的原因（界面边界再翻译，附带的技术细节原样保留）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecordingFailure {
+    /// 找不到录制进程可执行文件。
+    RecorderMissing,
+    /// 无法启动录制进程。
+    SpawnFailed {
+        /// 可执行文件路径。
+        exe: String,
+        /// 系统给出的原因。
+        detail: String,
+    },
+    /// 录制进程意外退出。
+    ProcessExited {
+        /// 退出码（未知为 `None`）。
+        code: Option<i32>,
+    },
+    /// 与录制进程的通信失败。
+    LinkFailed(String),
+    /// 录制进程启动后长时间没有回应。
+    NoResponse,
+    /// 保存录制文件超时。
+    SaveTimeout,
+    /// 录制进程自己报告的错误（技术信息）。
+    Worker(String),
+}
+
+impl RecordingFailure {
+    /// 面向用户的失败说明。
+    ///
+    /// # 参数
+    /// - `i18n`：界面语料。
+    pub fn message(&self, i18n: &I18n) -> String {
+        match self {
+            Self::RecorderMissing => i18n.tr("recording-error-recorder-missing"),
+            Self::SpawnFailed { exe, detail } => i18n.tr_with(
+                "recording-error-spawn-failed",
+                &Args::new()
+                    .named("exe", exe.as_str())
+                    .named("detail", detail.as_str()),
+            ),
+            Self::ProcessExited { code: Some(code) } => i18n.tr_with(
+                "recording-error-process-exited",
+                &Args::new().named("code", code.to_string()),
+            ),
+            Self::ProcessExited { code: None } => i18n.tr("recording-error-process-exited-unknown"),
+            Self::LinkFailed(detail) => i18n.tr_with(
+                "recording-error-link-failed",
+                &Args::new().named("detail", detail.as_str()),
+            ),
+            Self::NoResponse => i18n.tr("recording-error-no-response"),
+            Self::SaveTimeout => i18n.tr("recording-error-save-timeout"),
+            Self::Worker(detail) => i18n.tr_with(
+                "recording-error-worker",
+                &Args::new().named("detail", detail.as_str()),
+            ),
+        }
+    }
 }
 
 impl RecordingState {
@@ -184,24 +248,24 @@ impl RecordingState {
 }
 
 impl fmt::Display for RecordingState {
-    /// 状态的人类可读描述。
+    /// 状态的技术描述（日志用，不翻译）。
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Idle => write!(f, "就绪"),
-            Self::Countdown { seconds_left } => write!(f, "倒计时: {seconds_left}"),
+            Self::Idle => write!(f, "idle"),
+            Self::Countdown { seconds_left } => write!(f, "countdown: {seconds_left}"),
             Self::Recording {
                 elapsed_secs,
                 is_paused,
                 ..
             } => {
-                let status = if *is_paused { "已暂停" } else { "录制中" };
+                let status = if *is_paused { "paused" } else { "recording" };
                 write!(f, "{} [{}]", status, Self::format_duration(*elapsed_secs))
             }
-            Self::Saving => write!(f, "正在保存"),
+            Self::Saving => write!(f, "saving"),
             Self::Finished { file_path, .. } => {
-                write!(f, "已完成: {}", file_path.display())
+                write!(f, "finished: {}", file_path.display())
             }
-            Self::Error { reason } => write!(f, "录制失败: {reason}"),
+            Self::Error { reason } => write!(f, "failed: {reason:?}"),
         }
     }
 }
@@ -210,6 +274,51 @@ impl fmt::Display for RecordingState {
 mod tests {
     use super::*;
     use snow_config::document::ConfigDocument;
+
+    /// 失败原因与格式名在两种界面语言下都完整：英文无中文、没有缺失标记，参数被代入。
+    #[test]
+    fn failures_and_formats_are_localized() {
+        let zh = crate::ocr_backend::i18n_for("zh-CN");
+        let en = crate::ocr_backend::i18n_for("en-US");
+        let failures = [
+            RecordingFailure::RecorderMissing,
+            RecordingFailure::SpawnFailed {
+                exe: "snow-recorder.exe".into(),
+                detail: "denied".into(),
+            },
+            RecordingFailure::ProcessExited { code: Some(3) },
+            RecordingFailure::ProcessExited { code: None },
+            RecordingFailure::LinkFailed("pipe closed".into()),
+            RecordingFailure::NoResponse,
+            RecordingFailure::SaveTimeout,
+        ];
+        for failure in &failures {
+            let (z, e) = (failure.message(zh), failure.message(en));
+            assert!(
+                e.is_ascii() && !e.contains("[!") && !z.contains("[!"),
+                "{failure:?}: {e}"
+            );
+            assert_ne!(z, e, "{failure:?}");
+        }
+        assert!(
+            RecordingFailure::ProcessExited { code: Some(3) }
+                .message(en)
+                .contains('3')
+        );
+        assert_eq!(
+            RecordingFailure::Worker("技术信息".into()).message(en),
+            "技术信息"
+        );
+        for format in [
+            RecordingFormat::Mp4,
+            RecordingFormat::Gif,
+            RecordingFormat::Apng,
+            RecordingFormat::Webp,
+        ] {
+            assert!(format.label(en).is_ascii() && !format.label(en).contains("[!"));
+            assert_ne!(format.label(zh), format.label(en));
+        }
+    }
 
     /// 验证录制时间格式化输出。
     #[test]
@@ -232,7 +341,12 @@ mod tests {
         assert!(recording.is_active());
         assert!(!recording.is_terminal());
         assert!(!RecordingState::Saving.is_terminal());
-        assert!(RecordingState::Error { reason: "x".into() }.is_terminal());
+        assert!(
+            RecordingState::Error {
+                reason: RecordingFailure::NoResponse
+            }
+            .is_terminal()
+        );
     }
 
     /// 格式：扩展名、协议往返；不含 WebM。

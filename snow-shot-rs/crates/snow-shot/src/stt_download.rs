@@ -7,7 +7,10 @@
 //! 下载在调用线程里阻塞执行，调用方应放到后台线程。
 
 use crate::ocr_assets::COMPLETE_MARKER;
-use crate::ocr_download::{curl_command, quiet_command, sha256_file, system_tool, write_marker};
+use crate::ocr_download::{
+    FetchError, TOOL_CURL, TOOL_TAR, curl_command, quiet_command, sha256_file, system_tool,
+    write_marker,
+};
 use crate::stt_models::{self, SharedAsset, SttModelSpec, mode_as_str};
 use snow_stt_protocol::ModelKind;
 use std::io::Read;
@@ -28,9 +31,6 @@ const STAGING_SUFFIX: &str = ".extracting";
 const DOWNLOAD_DIR: &str = ".download";
 /// 轮询下载进程与进度的间隔。
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
-/// 取消时的提示。
-const CANCELLED: &str = "已取消";
-
 /// 下载结束的归类，用于决定日志级别。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
@@ -48,11 +48,11 @@ pub enum Outcome {
 /// - `result`：[`install`] 映射后的结果。
 ///
 /// # 返回
-/// 错误文案为取消提示时归为 [`Outcome::Cancelled`]。
-pub fn classify(result: &Result<(), String>) -> Outcome {
+/// 错误是取消时归为 [`Outcome::Cancelled`]。
+pub fn classify(result: &Result<(), FetchError>) -> Outcome {
     match result {
         Ok(()) => Outcome::Done,
-        Err(message) if message == CANCELLED => Outcome::Cancelled,
+        Err(FetchError::Cancelled) => Outcome::Cancelled,
         Err(_) => Outcome::Failed,
     }
 }
@@ -176,12 +176,19 @@ fn plan_with(spec: &SttModelSpec, vad: &SharedAsset, data_root: &Path) -> Downlo
 ///
 /// # 返回
 /// 通过返回「哈希是否已固定」；不符返回说明。
-pub fn verify_asset(path: &Path, name: &str, size: u64, sha256: &str) -> Result<bool, String> {
+pub fn verify_asset(path: &Path, name: &str, size: u64, sha256: &str) -> Result<bool, FetchError> {
     let actual_size = std::fs::metadata(path)
-        .map_err(|e| format!("{name}: {e}"))?
+        .map_err(|e| FetchError::Stat {
+            name: name.to_string(),
+            detail: e.to_string(),
+        })?
         .len();
     if actual_size != size {
-        return Err(format!("{name} 大小不符: 期望 {size} 实际 {actual_size}"));
+        return Err(FetchError::SizeMismatch {
+            name: name.to_string(),
+            expected: size,
+            actual: actual_size,
+        });
     }
     if sha256.is_empty() {
         tracing::warn!(asset = name, "清单未固定该资产的 SHA-256，已跳过哈希校验");
@@ -189,7 +196,11 @@ pub fn verify_asset(path: &Path, name: &str, size: u64, sha256: &str) -> Result<
     }
     let actual = sha256_file(path)?;
     if actual != sha256.to_ascii_lowercase() {
-        return Err(format!("{name} 哈希不符: 期望 {sha256} 实际 {actual}"));
+        return Err(FetchError::HashMismatch {
+            name: name.to_string(),
+            expected: sha256.to_string(),
+            actual,
+        });
     }
     Ok(true)
 }
@@ -200,21 +211,24 @@ fn download_to_part(
     part: &Path,
     cancel: &AtomicBool,
     mut on_bytes: impl FnMut(u64),
-) -> Result<(), String> {
+) -> Result<(), FetchError> {
     let mut child = curl_command(url, part)
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| format!("无法运行 curl: {e}"))?;
+        .map_err(|e| FetchError::RunTool {
+            tool: TOOL_CURL,
+            detail: e.to_string(),
+        })?;
     loop {
         if cancel.load(Ordering::Relaxed) {
             let _ = child.kill();
             let _ = child.wait();
-            return Err(CANCELLED.to_string());
+            return Err(FetchError::Cancelled);
         }
-        match child
-            .try_wait()
-            .map_err(|e| format!("等待 curl 失败: {e}"))?
-        {
+        match child.try_wait().map_err(|e| FetchError::WaitTool {
+            tool: TOOL_CURL,
+            detail: e.to_string(),
+        })? {
             Some(status) => {
                 let mut stderr = String::new();
                 if let Some(mut pipe) = child.stderr.take() {
@@ -224,7 +238,10 @@ fn download_to_part(
                 if status.success() && part.is_file() {
                     return Ok(());
                 }
-                return Err(format!("下载失败 ({url}): {}", stderr.trim()));
+                return Err(FetchError::DownloadFailed {
+                    url: url.to_string(),
+                    detail: stderr.trim().to_string(),
+                });
             }
             None => {
                 on_bytes(std::fs::metadata(part).map_or(0, |m| m.len()));
@@ -243,12 +260,12 @@ fn fetch_asset(
     dest: &Path,
     cancel: &AtomicBool,
     on_progress: &mut impl FnMut(&Progress),
-) -> Result<bool, String> {
+) -> Result<bool, FetchError> {
     if cancel.load(Ordering::Relaxed) {
-        return Err(CANCELLED.to_string());
+        return Err(FetchError::Cancelled);
     }
-    let parent = dest.parent().ok_or("目标路径无效")?;
-    std::fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {e}"))?;
+    let parent = dest.parent().ok_or(FetchError::InvalidTarget)?;
+    std::fs::create_dir_all(parent).map_err(|e| FetchError::CreateDir(e.to_string()))?;
     let part = PathBuf::from(format!("{}{PART_SUFFIX}", dest.display()));
     let mut report = |stage, done| {
         on_progress(&Progress {
@@ -264,12 +281,17 @@ fn fetch_asset(
     let pinned = verify_asset(&part, name, size, sha256).inspect_err(|_| {
         let _ = std::fs::remove_file(&part);
     })?;
-    std::fs::rename(&part, dest).map_err(|e| format!("改名失败: {e}"))?;
+    std::fs::rename(&part, dest).map_err(|e| FetchError::Rename(e.to_string()))?;
     Ok(pinned)
 }
 
 /// 只解压压缩包里 `<id>/<file>` 成员到 `dest`（系统自带 `tar.exe`，自动识别 bz2）。
-fn extract_files(archive: &Path, dest: &Path, id: &str, files: &[String]) -> Result<(), String> {
+fn extract_files(
+    archive: &Path,
+    dest: &Path,
+    id: &str,
+    files: &[String],
+) -> Result<(), FetchError> {
     let output = quiet_command(&system_tool("tar.exe"))
         .arg("-xf")
         .arg(archive)
@@ -277,19 +299,21 @@ fn extract_files(archive: &Path, dest: &Path, id: &str, files: &[String]) -> Res
         .arg(dest)
         .args(files.iter().map(|f| format!("{id}/{f}")))
         .output()
-        .map_err(|e| format!("无法运行 tar: {e}"))?;
+        .map_err(|e| FetchError::RunTool {
+            tool: TOOL_TAR,
+            detail: e.to_string(),
+        })?;
     if output.status.success() {
         Ok(())
     } else {
-        Err(format!(
-            "解压失败: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
+        Err(FetchError::Extract(
+            String::from_utf8_lossy(&output.stderr).trim().to_string(),
         ))
     }
 }
 
 /// 写 `model.json`：记录模型的基本元数据，便于排查与后续升级。
-fn write_model_meta(spec: &SttModelSpec, dir: &Path, pinned: bool) -> Result<(), String> {
+fn write_model_meta(spec: &SttModelSpec, dir: &Path, pinned: bool) -> Result<(), FetchError> {
     let meta = serde_json::json!({
         "schema": META_SCHEMA,
         "id": spec.id,
@@ -301,8 +325,10 @@ fn write_model_meta(spec: &SttModelSpec, dir: &Path, pinned: bool) -> Result<(),
         "archive_sha256": spec.archive.sha256,
         "sha256_pinned": pinned,
     });
-    let text = serde_json::to_string_pretty(&meta).map_err(|e| format!("序列化元数据失败: {e}"))?;
-    std::fs::write(dir.join(MODEL_META_FILE), text).map_err(|e| format!("写 model.json 失败: {e}"))
+    let text = serde_json::to_string_pretty(&meta)
+        .map_err(|e| FetchError::SerializeMeta(e.to_string()))?;
+    std::fs::write(dir.join(MODEL_META_FILE), text)
+        .map_err(|e| FetchError::WriteMeta(e.to_string()))
 }
 
 /// 安装模型本体：下载压缩包 → 校验 → 解压到暂存目录 → 核对文件 → 换入正式目录 → 写元数据与标记。
@@ -311,7 +337,7 @@ fn install_model(
     data_root: &Path,
     cancel: &AtomicBool,
     on_progress: &mut impl FnMut(&Progress),
-) -> Result<bool, String> {
+) -> Result<bool, FetchError> {
     let root = stt_models::models_root(data_root);
     let archive_path = root.join(DOWNLOAD_DIR).join(&spec.archive.name);
     let a = &spec.archive;
@@ -332,16 +358,16 @@ fn install_model(
     });
     let staging = root.join(format!("{}{STAGING_SUFFIX}", spec.id));
     let _ = std::fs::remove_dir_all(&staging);
-    std::fs::create_dir_all(&staging).map_err(|e| format!("创建暂存目录失败: {e}"))?;
+    std::fs::create_dir_all(&staging).map_err(|e| FetchError::CreateStaging(e.to_string()))?;
     let result = (|| {
         extract_files(&archive_path, &staging, &spec.id, &spec.files)?;
         let extracted = staging.join(&spec.id);
         if let Some(missing) = spec.files.iter().find(|f| !extracted.join(f).is_file()) {
-            return Err(format!("压缩包里缺少必需文件: {missing}"));
+            return Err(FetchError::MissingFiles(missing.clone()));
         }
         let dir = stt_models::model_dir(spec, data_root);
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::rename(&extracted, &dir).map_err(|e| format!("换入模型目录失败: {e}"))?;
+        std::fs::rename(&extracted, &dir).map_err(|e| FetchError::SwapDir(e.to_string()))?;
         write_model_meta(spec, &dir, pinned)?;
         write_marker(&dir)
     })();
@@ -357,7 +383,7 @@ fn install_vad(
     data_root: &Path,
     cancel: &AtomicBool,
     on_progress: &mut impl FnMut(&Progress),
-) -> Result<bool, String> {
+) -> Result<bool, FetchError> {
     let dest = stt_models::models_root(data_root).join(&asset.name);
     fetch_asset(
         &asset.name,
@@ -389,7 +415,7 @@ pub fn install(
     data_root: &Path,
     cancel: &AtomicBool,
     on_progress: impl FnMut(&Progress),
-) -> Result<InstallReport, String> {
+) -> Result<InstallReport, FetchError> {
     install_with(
         spec,
         &stt_models::manifest().vad,
@@ -406,7 +432,7 @@ fn install_with(
     data_root: &Path,
     cancel: &AtomicBool,
     mut on_progress: impl FnMut(&Progress),
-) -> Result<InstallReport, String> {
+) -> Result<InstallReport, FetchError> {
     let plan = plan_with(spec, vad, data_root);
     let mut report = InstallReport::default();
     if plan.vad.is_some() && !install_vad(vad, data_root, cancel, &mut on_progress)? {
@@ -429,7 +455,7 @@ pub fn install_vad_asset(
     data_root: &Path,
     cancel: &AtomicBool,
     mut on_progress: impl FnMut(&Progress),
-) -> Result<InstallReport, String> {
+) -> Result<InstallReport, FetchError> {
     let vad = &stt_models::manifest().vad;
     let mut report = InstallReport::default();
     if !vad_installed_with(vad, data_root)
@@ -448,8 +474,11 @@ mod tests {
     #[test]
     fn classify_separates_cancel_from_failure() {
         assert_eq!(classify(&Ok(())), Outcome::Done);
-        assert_eq!(classify(&Err(CANCELLED.to_string())), Outcome::Cancelled);
-        assert_eq!(classify(&Err("网络错误".to_string())), Outcome::Failed);
+        assert_eq!(classify(&Err(FetchError::Cancelled)), Outcome::Cancelled);
+        assert_eq!(
+            classify(&Err(FetchError::Technical("network".to_string()))),
+            Outcome::Failed
+        );
     }
 
     use crate::stt_models::{ArchiveSpec, Dimension, Role};
@@ -544,16 +573,14 @@ mod tests {
         assert_eq!(verify_asset(&path, "abc", 3, sha), Ok(true));
         assert_eq!(verify_asset(&path, "abc", 3, &sha.to_uppercase()), Ok(true));
         assert_eq!(verify_asset(&path, "abc", 3, ""), Ok(false));
-        assert!(
-            verify_asset(&path, "abc", 4, sha)
-                .unwrap_err()
-                .contains("大小不符")
-        );
-        assert!(
-            verify_asset(&path, "abc", 3, &"0".repeat(64))
-                .unwrap_err()
-                .contains("哈希不符")
-        );
+        assert!(matches!(
+            verify_asset(&path, "abc", 4, sha).unwrap_err(),
+            FetchError::SizeMismatch { .. }
+        ));
+        assert!(matches!(
+            verify_asset(&path, "abc", 3, &"0".repeat(64)).unwrap_err(),
+            FetchError::HashMismatch { .. }
+        ));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -655,7 +682,7 @@ mod tests {
         spec.archive.sha256 = "0".repeat(64);
         let vad = make_vad(&src, true);
         let err = install_with(&spec, &vad, &root, &AtomicBool::new(false), |_| {}).unwrap_err();
-        assert!(err.contains("哈希不符"), "{err}");
+        assert!(matches!(err, FetchError::HashMismatch { .. }), "{err:?}");
         assert!(!is_installed(&spec, &root));
         assert!(!stt_models::model_dir(&spec, &root).exists());
         let part = stt_models::models_root(&root)
@@ -676,7 +703,7 @@ mod tests {
         spec.files.push("not-in-archive.onnx".into());
         let vad = make_vad(&src, true);
         let err = install_with(&spec, &vad, &root, &AtomicBool::new(false), |_| {}).unwrap_err();
-        assert!(!err.is_empty());
+        assert!(!matches!(err, FetchError::Cancelled));
         assert!(!is_installed(&spec, &root));
         assert!(
             !stt_models::model_dir(&spec, &root)
@@ -696,7 +723,7 @@ mod tests {
         let spec = make_spec(&src, "pack-cancel", false, true);
         let vad = make_vad(&src, true);
         let err = install_with(&spec, &vad, &root, &AtomicBool::new(true), |_| {}).unwrap_err();
-        assert_eq!(err, CANCELLED);
+        assert_eq!(err, FetchError::Cancelled);
         assert!(!is_installed(&spec, &root));
         for d in [src, root] {
             let _ = std::fs::remove_dir_all(&d);
@@ -712,7 +739,7 @@ mod tests {
         spec.archive.url = "file:///Z:/definitely/not/here.tar.bz2".into();
         let vad = make_vad(&src, true);
         let err = install_with(&spec, &vad, &root, &AtomicBool::new(false), |_| {}).unwrap_err();
-        assert!(err.contains("下载失败"), "{err}");
+        assert!(matches!(err, FetchError::DownloadFailed { .. }), "{err:?}");
         assert!(!is_installed(&spec, &root));
         for d in [src, root] {
             let _ = std::fs::remove_dir_all(&d);

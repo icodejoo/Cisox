@@ -5,7 +5,7 @@
 //! 录制进程崩溃 / 被杀 / 失联时，会话转入 `Error` 并清理，不会卡在“录制中”。
 
 use crate::recording::audio::{AudioBoard, AudioNotice};
-use crate::recording::model::{RecordingConfig, RecordingState};
+use crate::recording::model::{RecordingConfig, RecordingFailure, RecordingState};
 use snow_recorder_protocol::{Command, Event, StartRequest};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -165,7 +165,7 @@ impl ScreenRecordingSession {
     /// 当前状态不允许停止时返回错误说明。
     pub fn finish(&mut self) -> Result<(), String> {
         if !self.state.is_active() {
-            return Err("当前状态未处于活动录制中，无法停止".to_string());
+            return Err("not in an active recording; cannot stop".to_string());
         }
         self.state = RecordingState::Saving;
         self.saving_since = Some(Instant::now());
@@ -188,7 +188,7 @@ impl ScreenRecordingSession {
     ///
     /// # 参数
     /// - `reason`：错误原因。
-    pub fn abort(&mut self, reason: String) {
+    pub fn abort(&mut self, reason: RecordingFailure) {
         self.fail(reason);
     }
 
@@ -236,14 +236,20 @@ impl ScreenRecordingSession {
             LinkEvent::Event(Event::Paused) => self.set_paused(true),
             LinkEvent::Event(Event::Resumed) => self.set_paused(false),
             LinkEvent::Event(Event::Finished { path, .. }) => self.complete(path),
-            LinkEvent::Event(Event::Error { reason }) => self.fail(reason),
+            LinkEvent::Event(Event::Error { reason }) => {
+                self.fail(RecordingFailure::Worker(reason))
+            }
             // 视频编辑 / 探测事件由编辑流程消费，录制状态机不关心
-            LinkEvent::Event(Event::EditProgress { .. } | Event::EditFinished { .. } | Event::ProbeResult(_)) => {}
+            LinkEvent::Event(
+                Event::EditProgress { .. } | Event::EditFinished { .. } | Event::ProbeResult(_),
+            ) => {}
             // 音频源状态只影响降级提示，不改变录制状态机
-            LinkEvent::Event(Event::AudioState { source, status }) => self.audio.record(source, status),
+            LinkEvent::Event(Event::AudioState { source, status }) => {
+                self.audio.record(source, status)
+            }
             LinkEvent::Exited { code } => {
                 if !self.state.is_terminal() && !matches!(self.state, RecordingState::Idle) {
-                    self.fail(format!("录制进程意外退出（退出码 {code:?}）"));
+                    self.fail(RecordingFailure::ProcessExited { code });
                 }
             }
         }
@@ -278,7 +284,7 @@ impl ScreenRecordingSession {
     }
 
     /// 转入错误终态并清理通道（进程若仍在运行会被终止，中间产物随之清除）。
-    fn fail(&mut self, reason: String) {
+    fn fail(&mut self, reason: RecordingFailure) {
         self.state = RecordingState::Error { reason };
         self.release_link();
     }
@@ -296,10 +302,10 @@ impl ScreenRecordingSession {
     fn send_or_fail(&mut self, command: &Command) {
         let result = match self.link.as_mut() {
             Some(link) => link.send(command),
-            None => Err("录制进程未连接".to_string()),
+            None => Err("the recorder process is not connected".to_string()),
         };
         if let Err(e) = result {
-            self.fail(format!("与录制进程通信失败: {e}"));
+            self.fail(RecordingFailure::LinkFailed(e));
         }
     }
 
@@ -308,12 +314,12 @@ impl ScreenRecordingSession {
         if let Some(since) = self.awaiting_first_event
             && now.saturating_duration_since(since) > START_TIMEOUT
         {
-            self.fail("录制进程启动后长时间没有回应".to_string());
+            self.fail(RecordingFailure::NoResponse);
         }
         if let Some(since) = self.saving_since
             && now.saturating_duration_since(since) > SAVE_TIMEOUT
         {
-            self.fail("保存录制文件超时".to_string());
+            self.fail(RecordingFailure::SaveTimeout);
         }
     }
 }
@@ -414,18 +420,37 @@ mod tests {
     fn audio_request_sent_and_states_become_notices() {
         use snow_recorder_protocol::{AudioRequest, AudioSource, AudioStatus};
         let probe = Rc::new(RefCell::new(Probe::default()));
-        let audio = AudioRequest { microphone: true, system: true, ..AudioRequest::default() };
-        let mut s = ScreenRecordingSession::new(RecordingConfig { audio: audio.clone(), ..RecordingConfig::default() });
+        let audio = AudioRequest {
+            microphone: true,
+            system: true,
+            ..AudioRequest::default()
+        };
+        let mut s = ScreenRecordingSession::new(RecordingConfig {
+            audio: audio.clone(),
+            ..RecordingConfig::default()
+        });
         s.begin(Box::new(FakeLink(probe.clone())), 0);
         match &probe.borrow().sent[..] {
             [Command::Start(r)] => assert_eq!(r.audio, audio),
             other => panic!("期望单条 START，实际 {other:?}"),
         }
         assert!(s.audio_notices().is_empty());
-        push(&probe, LinkEvent::Event(Event::AudioState { source: AudioSource::Microphone, status: AudioStatus::Unavailable }));
+        push(
+            &probe,
+            LinkEvent::Event(Event::AudioState {
+                source: AudioSource::Microphone,
+                status: AudioStatus::Unavailable,
+            }),
+        );
         assert!(s.poll(Instant::now()), "提示变化应触发重绘");
         assert_eq!(s.audio_notices(), vec![AudioNotice::MicUnavailable]);
-        push(&probe, LinkEvent::Event(Event::AudioState { source: AudioSource::System, status: AudioStatus::Unavailable }));
+        push(
+            &probe,
+            LinkEvent::Event(Event::AudioState {
+                source: AudioSource::System,
+                status: AudioStatus::Unavailable,
+            }),
+        );
         s.poll(Instant::now());
         assert_eq!(s.audio_notices(), vec![AudioNotice::NoSound]);
         assert!(s.state().is_active());
@@ -443,21 +468,43 @@ mod tests {
     #[test]
     fn events_drive_state() {
         let (mut s, probe) = session(0);
-        push(&probe, LinkEvent::Event(Event::Recording { elapsed_ms: 2500, frames: 60 }));
+        push(
+            &probe,
+            LinkEvent::Event(Event::Recording {
+                elapsed_ms: 2500,
+                frames: 60,
+            }),
+        );
         assert!(s.poll(Instant::now()));
         assert_eq!(
             *s.state(),
-            RecordingState::Recording { elapsed_secs: 2, is_paused: false, frames_captured: 60 }
+            RecordingState::Recording {
+                elapsed_secs: 2,
+                is_paused: false,
+                frames_captured: 60
+            }
         );
         s.toggle_pause();
         push(&probe, LinkEvent::Event(Event::Paused));
         s.poll(Instant::now());
-        assert!(matches!(s.state(), RecordingState::Recording { is_paused: true, .. }));
+        assert!(matches!(
+            s.state(),
+            RecordingState::Recording {
+                is_paused: true,
+                ..
+            }
+        ));
         s.toggle_pause();
         assert_eq!(probe.borrow().sent[1..], [Command::Pause, Command::Resume]);
         push(&probe, LinkEvent::Event(Event::Resumed));
         s.poll(Instant::now());
-        assert!(matches!(s.state(), RecordingState::Recording { is_paused: false, .. }));
+        assert!(matches!(
+            s.state(),
+            RecordingState::Recording {
+                is_paused: false,
+                ..
+            }
+        ));
     }
 
     /// 停止 → Saving → Finished，并读取文件大小、关闭通道。
@@ -466,16 +513,33 @@ mod tests {
         let file = std::env::temp_dir().join(format!("snow-rec-rt-{}.bin", std::process::id()));
         std::fs::write(&file, b"12345").unwrap();
         let (mut s, probe) = session(0);
-        push(&probe, LinkEvent::Event(Event::Recording { elapsed_ms: 4200, frames: 100 }));
+        push(
+            &probe,
+            LinkEvent::Event(Event::Recording {
+                elapsed_ms: 4200,
+                frames: 100,
+            }),
+        );
         s.poll(Instant::now());
         s.finish().unwrap();
         assert_eq!(*s.state(), RecordingState::Saving);
         assert_eq!(probe.borrow().sent.last(), Some(&Command::Stop));
-        push(&probe, LinkEvent::Event(Event::Finished { path: file.clone(), frames: 100, dropped: 0 }));
+        push(
+            &probe,
+            LinkEvent::Event(Event::Finished {
+                path: file.clone(),
+                frames: 100,
+                dropped: 0,
+            }),
+        );
         s.poll(Instant::now());
         assert_eq!(
             *s.state(),
-            RecordingState::Finished { file_path: file.clone(), duration_secs: 4, file_size_bytes: 5 }
+            RecordingState::Finished {
+                file_path: file.clone(),
+                duration_secs: 4,
+                file_size_bytes: 5
+            }
         );
         assert_eq!(probe.borrow().shutdowns, 1);
         assert!(!s.needs_polling());
@@ -508,7 +572,14 @@ mod tests {
     fn exit_after_finished_is_ignored() {
         let (mut s, probe) = session(0);
         s.finish().unwrap();
-        push(&probe, LinkEvent::Event(Event::Finished { path: PathBuf::from("nope.mp4"), frames: 1, dropped: 0 }));
+        push(
+            &probe,
+            LinkEvent::Event(Event::Finished {
+                path: PathBuf::from("nope.mp4"),
+                frames: 1,
+                dropped: 0,
+            }),
+        );
         push(&probe, LinkEvent::Exited { code: Some(0) });
         s.poll(Instant::now());
         assert!(matches!(s.state(), RecordingState::Finished { .. }));
@@ -518,9 +589,19 @@ mod tests {
     #[test]
     fn reported_error_is_terminal() {
         let (mut s, probe) = session(0);
-        push(&probe, LinkEvent::Event(Event::Error { reason: "采集失败".into() }));
+        push(
+            &probe,
+            LinkEvent::Event(Event::Error {
+                reason: "采集失败".into(),
+            }),
+        );
         s.poll(Instant::now());
-        assert_eq!(*s.state(), RecordingState::Error { reason: "采集失败".into() });
+        assert_eq!(
+            *s.state(),
+            RecordingState::Error {
+                reason: RecordingFailure::Worker("采集失败".into())
+            }
+        );
     }
 
     /// 取消：发送 CANCEL、关闭通道、回到 Idle。
@@ -550,7 +631,13 @@ mod tests {
         assert!(matches!(s.state(), RecordingState::Error { .. }));
 
         let (mut s, probe) = session(0);
-        push(&probe, LinkEvent::Event(Event::Recording { elapsed_ms: 100, frames: 3 }));
+        push(
+            &probe,
+            LinkEvent::Event(Event::Recording {
+                elapsed_ms: 100,
+                frames: 3,
+            }),
+        );
         s.poll(Instant::now());
         s.finish().unwrap();
         s.poll(Instant::now() + SAVE_TIMEOUT + Duration::from_secs(1));

@@ -147,7 +147,9 @@ mod tests {
         let (shared, dir) = open("rows");
         let a = store(&shared, 100);
         let b = store(&shared, 200);
-        let work = shared.create_group(Some("工作")).unwrap();
+        let work = shared
+            .create_group(Some("工作"), crate::ocr_backend::i18n_for("zh-CN"))
+            .unwrap();
         shared.move_pin(&a, &work).unwrap();
         let open_ids: BTreeSet<String> = [b.clone()].into();
 

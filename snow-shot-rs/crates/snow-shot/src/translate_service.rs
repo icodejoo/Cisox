@@ -12,17 +12,20 @@ use serde_json::Value;
 use snow_config::custom_models::{CustomAiModel, custom_ai_models_from_json};
 use snow_config::document::ConfigDocument;
 use snow_config::extensions::{
-    BACKEND_OPENAI, DEFAULT_IDLE_SECONDS, DEFAULT_MAX_RESIDENT, DEFAULT_NUM_BEAMS, KEY_LOCAL_IDLE_SECONDS,
-    KEY_LOCAL_LOW_MEMORY, KEY_LOCAL_MAX_RESIDENT, KEY_LOCAL_MODEL_ID, KEY_LOCAL_MODELS_DIR, KEY_LOCAL_NUM_BEAMS,
-    KEY_LOCAL_ROUTE_MODE, KEY_TRANSLATION_BACKEND, MAX_MAX_RESIDENT, MAX_NUM_BEAMS,
+    BACKEND_OPENAI, DEFAULT_IDLE_SECONDS, DEFAULT_MAX_RESIDENT, DEFAULT_NUM_BEAMS,
+    KEY_LOCAL_IDLE_SECONDS, KEY_LOCAL_LOW_MEMORY, KEY_LOCAL_MAX_RESIDENT, KEY_LOCAL_MODEL_ID,
+    KEY_LOCAL_MODELS_DIR, KEY_LOCAL_NUM_BEAMS, KEY_LOCAL_ROUTE_MODE, KEY_TRANSLATION_BACKEND,
+    MAX_MAX_RESIDENT, MAX_NUM_BEAMS,
 };
 use snow_translate::openai::{OpenAiCompatibleConfig, OpenAiEngine};
 use snow_translate::protocol::MAX_BEAMS;
 use snow_translate::router::{PooledEngine, RouteMode, RoutePolicy, RoutedEngine, RoutedSlot};
-use snow_translate::worker::{MemorySnapshot, Timeouts, WORKER_EXE_NAME, WorkerConfig, WorkerEngine};
+use snow_translate::worker::{
+    MemorySnapshot, Timeouts, WORKER_EXE_NAME, WorkerConfig, WorkerEngine,
+};
 use snow_translate::{
-    Lang, ManifestIssue, ModelScanner, ScanReport, ScannedModel, TranslateError, TranslationEngine, TranslationService,
-    pick_model_routed,
+    Lang, ManifestIssue, ModelScanner, ScanReport, ScannedModel, TranslateError, TranslationEngine,
+    TranslationService, pick_model_routed,
 };
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -110,7 +113,10 @@ const SUPPORTED_TARGETS: [(Lang, &str); 11] = [
 
 /// 把语言映射到支持集合内的配置值拼写；不在集合内返回 `None`。
 fn target_code(lang: Lang) -> Option<&'static str> {
-    SUPPORTED_TARGETS.iter().find(|(l, _)| *l == lang).map(|(_, code)| *code)
+    SUPPORTED_TARGETS
+        .iter()
+        .find(|(l, _)| *l == lang)
+        .map(|(_, code)| *code)
 }
 
 /// 目标语言的生效值：已保存的具体值原样保留；缺失/空串时取系统语言，
@@ -151,7 +157,10 @@ pub fn effective_target_language(config_value: Option<&str>, system_locale: &str
 /// assert_eq!(effective_interface_language(None, "zh-CN"), "zh_CN");
 /// assert_eq!(effective_interface_language(Some("zh_TW"), "ja-JP"), "en_US");
 /// ```
-pub fn effective_interface_language(config_value: Option<&str>, system_locale: &str) -> &'static str {
+pub fn effective_interface_language(
+    config_value: Option<&str>,
+    system_locale: &str,
+) -> &'static str {
     let saved = config_value.map(str::trim).filter(|v| !v.is_empty());
     saved
         .and_then(snow_i18n::match_locale)
@@ -176,22 +185,38 @@ impl TranslateConfig {
             _ => String::new(),
         };
         let number = |key: &str, default: i32| {
-            document.value(key).as_i64().and_then(|n| i32::try_from(n).ok()).unwrap_or(default)
+            document
+                .value(key)
+                .as_i64()
+                .and_then(|n| i32::try_from(n).ok())
+                .unwrap_or(default)
         };
-        let models_dir = Some(text(KEY_LOCAL_MODELS_DIR)).filter(|d| !d.is_empty()).map(PathBuf::from);
+        let models_dir = Some(text(KEY_LOCAL_MODELS_DIR))
+            .filter(|d| !d.is_empty())
+            .map(PathBuf::from);
         let saved = text(KEY_TARGET_LANGUAGE);
         let target = Lang::from_code(effective_target_language(Some(&saved), system_language))
             .unwrap_or(Lang::En);
         let (custom_models, _) = custom_ai_models_from_json(&document.value(KEY_CUSTOM_MODELS));
         Self {
-            backend: if text(KEY_TRANSLATION_BACKEND) == BACKEND_OPENAI { Backend::OpenAi } else { Backend::Local },
+            backend: if text(KEY_TRANSLATION_BACKEND) == BACKEND_OPENAI {
+                Backend::OpenAi
+            } else {
+                Backend::Local
+            },
             models_dir,
             model_id: text(KEY_LOCAL_MODEL_ID),
-            idle: Duration::from_secs(number(KEY_LOCAL_IDLE_SECONDS, DEFAULT_IDLE_SECONDS).max(1) as u64),
+            idle: Duration::from_secs(
+                number(KEY_LOCAL_IDLE_SECONDS, DEFAULT_IDLE_SECONDS).max(1) as u64
+            ),
             beams: number(KEY_LOCAL_NUM_BEAMS, DEFAULT_NUM_BEAMS).clamp(1, MAX_NUM_BEAMS) as usize,
-            low_memory: document.value(KEY_LOCAL_LOW_MEMORY).as_bool().unwrap_or(false),
+            low_memory: document
+                .value(KEY_LOCAL_LOW_MEMORY)
+                .as_bool()
+                .unwrap_or(false),
             route_mode: RouteMode::from_code(&text(KEY_LOCAL_ROUTE_MODE)).unwrap_or_default(),
-            max_resident: number(KEY_LOCAL_MAX_RESIDENT, DEFAULT_MAX_RESIDENT).clamp(1, MAX_MAX_RESIDENT) as usize,
+            max_resident: number(KEY_LOCAL_MAX_RESIDENT, DEFAULT_MAX_RESIDENT)
+                .clamp(1, MAX_MAX_RESIDENT) as usize,
             source: Lang::from_code(&text(KEY_SOURCE_LANGUAGE)).unwrap_or(Lang::Auto),
             target,
             layout: LayoutMode::from_config(&text(KEY_LAYOUT)),
@@ -202,12 +227,20 @@ impl TranslateConfig {
 
     /// 路由策略（模式、指定包、常驻上限），变化时不需要重建引擎。
     pub fn route_policy(&self) -> RoutePolicy {
-        RoutePolicy { mode: self.route_mode, preferred_id: self.model_id.clone(), max_resident: self.max_resident }
+        RoutePolicy {
+            mode: self.route_mode,
+            preferred_id: self.model_id.clone(),
+            max_resident: self.max_resident,
+        }
     }
 
     /// 实际使用的束宽：低内存模式强制贪心。
     pub fn effective_beams(&self) -> usize {
-        if self.low_memory { 1 } else { self.beams.clamp(1, MAX_BEAMS) }
+        if self.low_memory {
+            1
+        } else {
+            self.beams.clamp(1, MAX_BEAMS)
+        }
     }
 }
 
@@ -227,7 +260,11 @@ pub trait Translator {
     /// # 参数
     /// - `config`：本次配置。
     /// - `texts`：待翻译段落。
-    fn translate(&self, config: &TranslateConfig, texts: &[String]) -> Result<Translated, TranslateError>;
+    fn translate(
+        &self,
+        config: &TranslateConfig,
+        texts: &[String],
+    ) -> Result<Translated, TranslateError>;
 }
 
 /// 已装配好的引擎。
@@ -262,17 +299,17 @@ pub struct TranslateHost {
     exe_env: Option<PathBuf>,
 }
 
-/// 本地模型不可用时给用户的说明：放哪里、哪些清单有问题。
+/// 本地模型不可用时的技术细节（英文，界面层再套上本地化的引导语）：目录与有问题的清单。
 fn no_model_message(dir: &Path, issues: &[ManifestIssue]) -> String {
-    let mut text = format!(
-        "模型目录 {} 里没有可用的翻译模型。请把模型放到该目录的子文件夹里（含 model.json、encoder/decoder onnx 与 tokenizer.json）",
-        dir.display()
-    );
+    let mut text = format!("no usable translation model in {}", dir.display());
     for issue in issues.iter().take(MAX_ISSUES_SHOWN) {
-        text.push_str(&format!("；{} 无法使用: {}", issue.dir_name, issue.reason));
+        text.push_str(&format!("; {} unusable: {}", issue.dir_name, issue.reason));
     }
     if issues.len() > MAX_ISSUES_SHOWN {
-        text.push_str(&format!("；另有 {} 个模型无法使用", issues.len() - MAX_ISSUES_SHOWN));
+        text.push_str(&format!(
+            "; {} more unusable models",
+            issues.len() - MAX_ISSUES_SHOWN
+        ));
     }
     text
 }
@@ -289,9 +326,20 @@ fn model_label(model: &ScannedModel) -> String {
 /// 混合拆分的预选标签：覆盖目标语言的包名，`default_eligible=false` 的可选包默认不参与，不列入；
 /// 只有可选包覆盖时才退回列它们（与选包逻辑一致）。没有任何包覆盖返回空。
 fn mixed_preselect_names(models: &[ScannedModel], target: Lang) -> Vec<String> {
-    let covering: Vec<&ScannedModel> = models.iter().filter(|m| m.manifest.supports(Lang::Auto, target)).collect();
-    let eligible: Vec<&ScannedModel> = covering.iter().copied().filter(|m| m.manifest.default_eligible).collect();
-    let pool = if eligible.is_empty() { covering } else { eligible };
+    let covering: Vec<&ScannedModel> = models
+        .iter()
+        .filter(|m| m.manifest.supports(Lang::Auto, target))
+        .collect();
+    let eligible: Vec<&ScannedModel> = covering
+        .iter()
+        .copied()
+        .filter(|m| m.manifest.default_eligible)
+        .collect();
+    let pool = if eligible.is_empty() {
+        covering
+    } else {
+        eligible
+    };
     pool.into_iter().map(model_label).collect()
 }
 
@@ -304,12 +352,19 @@ fn mixed_preselect_names(models: &[ScannedModel], target: Lang) -> Vec<String> {
 fn actual_label(used_ids: &[String], labels: &[(String, String)], fallback: &str) -> String {
     let mut names: Vec<&str> = Vec::new();
     for id in used_ids {
-        let name = labels.iter().find(|(k, _)| k == id).map_or(id.as_str(), |(_, v)| v.as_str());
+        let name = labels
+            .iter()
+            .find(|(k, _)| k == id)
+            .map_or(id.as_str(), |(_, v)| v.as_str());
         if !names.contains(&name) {
             names.push(name);
         }
     }
-    if names.is_empty() { fallback.to_string() } else { names.join(LABEL_JOINER) }
+    if names.is_empty() {
+        fallback.to_string()
+    } else {
+        names.join(LABEL_JOINER)
+    }
 }
 
 /// 由数据根得到默认模型目录。
@@ -321,7 +376,9 @@ fn actual_label(used_ids: &[String], labels: &[(String, String)], fallback: &str
 /// assert!(default_models_dir(Path::new("D")).ends_with("translate"));
 /// ```
 pub fn default_models_dir(data_root: &Path) -> PathBuf {
-    MODELS_SUBDIR.iter().fold(data_root.to_path_buf(), |dir, part| dir.join(part))
+    MODELS_SUBDIR
+        .iter()
+        .fold(data_root.to_path_buf(), |dir, part| dir.join(part))
 }
 
 /// 定位 `snow-translator.exe`：环境变量优先，其次主程序同目录。
@@ -337,7 +394,7 @@ pub fn locate_worker_exe(env_exe: Option<&Path>) -> Result<PathBuf, TranslateErr
             Ok(path.to_path_buf())
         } else {
             Err(TranslateError::WorkerUnavailable(format!(
-                "{ENV_TRANSLATOR_EXE} 指向的文件不存在: {}",
+                "{ENV_TRANSLATOR_EXE} points to a file that does not exist: {}",
                 path.display()
             )))
         };
@@ -348,10 +405,12 @@ pub fn locate_worker_exe(env_exe: Option<&Path>) -> Result<PathBuf, TranslateErr
     match beside {
         Some(path) if path.is_file() => Ok(path),
         Some(path) => Err(TranslateError::WorkerUnavailable(format!(
-            "未找到翻译组件 {WORKER_EXE_NAME}（应位于 {}）",
+            "{WORKER_EXE_NAME} not found (expected at {})",
             path.display()
         ))),
-        None => Err(TranslateError::WorkerUnavailable(format!("未找到翻译组件 {WORKER_EXE_NAME}"))),
+        None => Err(TranslateError::WorkerUnavailable(format!(
+            "{WORKER_EXE_NAME} not found"
+        ))),
     }
 }
 
@@ -375,7 +434,9 @@ impl TranslateHost {
         Self::with_env(
             data_root,
             std::env::var(snow_translate::worker::ENV_ORT_DYLIB).ok(),
-            std::env::var_os(ENV_TRANSLATOR_EXE).filter(|v| !v.is_empty()).map(PathBuf::from),
+            std::env::var_os(ENV_TRANSLATOR_EXE)
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from),
         )
     }
 
@@ -400,7 +461,10 @@ impl TranslateHost {
     /// # 参数
     /// - `config`：翻译配置。
     pub fn models_dir(&self, config: &TranslateConfig) -> PathBuf {
-        config.models_dir.clone().unwrap_or_else(|| default_models_dir(&self.data_root))
+        config
+            .models_dir
+            .clone()
+            .unwrap_or_else(|| default_models_dir(&self.data_root))
     }
 
     /// 扫描模型目录（设置页 / 诊断用）。
@@ -416,31 +480,53 @@ impl TranslateHost {
         let dir = self.models_dir(config);
         let report = ModelScanner::new(&dir).scan();
         if report.models.is_empty() {
-            return Err(TranslateError::NoModelFound(no_model_message(&dir, &report.issues)));
+            return Err(TranslateError::NoModelFound(no_model_message(
+                &dir,
+                &report.issues,
+            )));
         }
         let (label, src) = match config.route_mode {
             RouteMode::MixedSplit => {
                 let names = mixed_preselect_names(&report.models, config.target);
                 if names.is_empty() {
-                    return Err(TranslateError::UnsupportedLanguagePair(config.source, config.target));
+                    return Err(TranslateError::UnsupportedLanguagePair(
+                        config.source,
+                        config.target,
+                    ));
                 }
                 (names.join(LABEL_JOINER), config.source)
             }
             mode => {
-                let (model, src) =
-                    pick_model_routed(&report.models, &config.model_id, config.source, config.target, mode)?;
+                let (model, src) = pick_model_routed(
+                    &report.models,
+                    &config.model_id,
+                    config.source,
+                    config.target,
+                    mode,
+                )?;
                 // Auto 保持 Auto：由路由器逐条识别语言再选包，不能按专用包钉成其方向的源语言
-                (model_label(model), if config.source == Lang::Auto { Lang::Auto } else { src })
+                (
+                    model_label(model),
+                    if config.source == Lang::Auto {
+                        Lang::Auto
+                    } else {
+                        src
+                    },
+                )
             }
         };
         let exe = locate_worker_exe(self.exe_env.as_deref())?;
-        let dylib = resolve_ort_dylib(&self.data_root, self.ort_env.as_deref()).map_err(|e| match e {
-            OrtUnavailable::NotInstalled => TranslateError::RuntimeMissing(e.message()),
-            other => TranslateError::WorkerUnavailable(other.message()),
-        })?;
+        let dylib =
+            resolve_ort_dylib(&self.data_root, self.ort_env.as_deref()).map_err(|e| match e {
+                OrtUnavailable::NotInstalled => TranslateError::RuntimeMissing(e.detail()),
+                other => TranslateError::WorkerUnavailable(other.detail()),
+            })?;
         let beams = config.effective_beams();
-        let models_fingerprint: Vec<String> =
-            report.models.iter().map(|m| format!("{}@{}", m.manifest.id, m.dir.display())).collect();
+        let models_fingerprint: Vec<String> = report
+            .models
+            .iter()
+            .map(|m| format!("{}@{}", m.manifest.id, m.dir.display()))
+            .collect();
         let key = format!(
             "local|{}|{}|{}|{beams}|{}|{}",
             exe.display(),
@@ -465,36 +551,61 @@ impl TranslateHost {
                     timeouts: Timeouts::default(),
                 });
                 let engine: Arc<dyn PooledEngine> = Arc::new(worker);
-                RoutedSlot { manifest: model.manifest.clone(), engine }
+                RoutedSlot {
+                    manifest: model.manifest.clone(),
+                    engine,
+                }
             })
             .collect();
         let router = Arc::new(RoutedEngine::new(slots, config.route_policy()));
         let engine: Arc<dyn TranslationEngine> = router.clone();
-        let labels = report.models.iter().map(|m| (m.manifest.id.clone(), model_label(m))).collect();
-        Ok((Built { key, engine, router: Some(router), labels }, (label, src, config.target)))
+        let labels = report
+            .models
+            .iter()
+            .map(|m| (m.manifest.id.clone(), model_label(m)))
+            .collect();
+        Ok((
+            Built {
+                key,
+                engine,
+                router: Some(router),
+                labels,
+            },
+            (label, src, config.target),
+        ))
     }
 
     /// 装配 OpenAI 兼容引擎：取配置里选中的自定义模型。
     fn build_openai(&self, config: &TranslateConfig) -> Result<(Built, Prepared), TranslateError> {
         if config.custom_models.is_empty() {
-            return Err(TranslateError::NoModelFound(
-                "尚未配置自定义 AI 模型，请先在“自定义模型”里添加一个 OpenAI 兼容的端点".into(),
-            ));
+            return Err(TranslateError::NoCustomModel);
         }
         let model = config
             .custom_models
             .iter()
             .find(|m| m.id == config.custom_model_id)
-            .ok_or_else(|| {
-                TranslateError::NoModelFound("请在设置里为“文字翻译”选择一个自定义 AI 模型（screenshot_translation/model）".into())
-            })?;
-        let key = format!("openai|{}|{}|{}", model.base_url, model.model, fingerprint(&model.api_key));
-        let engine: Arc<dyn TranslationEngine> = Arc::new(OpenAiEngine::new(OpenAiCompatibleConfig {
-            base_url: model.base_url.clone(),
-            api_key: model.api_key.clone(),
-            model: model.model.clone(),
-        }));
-        Ok((Built { key, engine, router: None, labels: Vec::new() }, (model.name.clone(), config.source, config.target)))
+            .ok_or(TranslateError::CustomModelNotSelected)?;
+        let key = format!(
+            "openai|{}|{}|{}",
+            model.base_url,
+            model.model,
+            fingerprint(&model.api_key)
+        );
+        let engine: Arc<dyn TranslationEngine> =
+            Arc::new(OpenAiEngine::new(OpenAiCompatibleConfig {
+                base_url: model.base_url.clone(),
+                api_key: model.api_key.clone(),
+                model: model.model.clone(),
+            }));
+        Ok((
+            Built {
+                key,
+                engine,
+                router: None,
+                labels: Vec::new(),
+            },
+            (model.name.clone(), config.source, config.target),
+        ))
     }
 
     /// 按配置装配引擎；参数没变就复用，变了就换掉旧引擎（旧 worker 随之退出）。
@@ -506,7 +617,10 @@ impl TranslateHost {
     ///
     /// # 返回
     /// `(引擎标签, 解析出的源语言, 目标语言)`。
-    pub fn prepare(&self, config: &TranslateConfig) -> Result<(String, Lang, Lang), TranslateError> {
+    pub fn prepare(
+        &self,
+        config: &TranslateConfig,
+    ) -> Result<(String, Lang, Lang), TranslateError> {
         let (fresh, prepared) = match config.backend {
             Backend::Local => self.build_local(config)?,
             Backend::OpenAi => self.build_openai(config)?,
@@ -515,7 +629,8 @@ impl TranslateHost {
         match built.as_mut() {
             Some(current) if current.key == fresh.key => {
                 // 同参数：沿用已有引擎（丢弃刚构造的、尚未启动的新引擎），只热更新路由策略
-                if let (Some(current_router), Some(fresh_router)) = (&current.router, &fresh.router) {
+                if let (Some(current_router), Some(fresh_router)) = (&current.router, &fresh.router)
+                {
                     current_router.set_policy(fresh_router.policy());
                 }
             }
@@ -529,7 +644,12 @@ impl TranslateHost {
 
     /// 当前路由器（没有本地装配时为 `None`）。
     fn router(&self) -> Option<Arc<RoutedEngine>> {
-        self.built.lock().unwrap_or_else(PoisonError::into_inner).as_ref()?.router.clone()
+        self.built
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()?
+            .router
+            .clone()
     }
 
     /// 当前路由器与包展示名表（没有本地装配时为 `None`）。
@@ -561,7 +681,11 @@ impl TranslateHost {
 
     /// 结束全部 worker 并丢弃引擎（应用退出时调用）。
     pub fn shutdown(&self) {
-        let taken = self.built.lock().unwrap_or_else(PoisonError::into_inner).take();
+        let taken = self
+            .built
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
         if let Some(built) = taken
             && let Some(router) = &built.router
         {
@@ -573,7 +697,11 @@ impl TranslateHost {
 
 impl Translator for TranslateHost {
     /// 装配引擎后经缓存翻译。
-    fn translate(&self, config: &TranslateConfig, texts: &[String]) -> Result<Translated, TranslateError> {
+    fn translate(
+        &self,
+        config: &TranslateConfig,
+        texts: &[String],
+    ) -> Result<Translated, TranslateError> {
         let (label, src, tgt) = self.prepare(config)?;
         let routing = self.routing();
         if let Some((router, _)) = &routing {
@@ -680,9 +808,15 @@ pub fn run_flow(
     }
     on_stage(TranslateStage::Translating);
     let started = std::time::Instant::now();
-    let translated = translator.translate(config, &paragraphs).map_err(TranslateFlowError::Translate)?;
+    let translated = translator
+        .translate(config, &paragraphs)
+        .map_err(TranslateFlowError::Translate)?;
     let translate_ms = started.elapsed().as_millis() as u64;
-    let pairs: Vec<(String, String)> = paragraphs.iter().cloned().zip(translated.texts.iter().cloned()).collect();
+    let pairs: Vec<(String, String)> = paragraphs
+        .iter()
+        .cloned()
+        .zip(translated.texts.iter().cloned())
+        .collect();
     Ok(TranslateOutcome {
         source: joined,
         translated: translated.texts.join("\n"),
@@ -703,7 +837,8 @@ mod tests {
 
     /// 唯一临时目录。
     fn temp_root(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("snow-translate-host-{tag}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("snow-translate-host-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("建目录");
         dir
@@ -746,7 +881,8 @@ mod tests {
         let dll = root.join("onnxruntime.dll");
         std::fs::write(&exe, b"x").expect("写 exe");
         std::fs::write(&dll, b"x").expect("写 dll");
-        let host = TranslateHost::with_env(root, Some(dll.to_string_lossy().into_owned()), Some(exe));
+        let host =
+            TranslateHost::with_env(root, Some(dll.to_string_lossy().into_owned()), Some(exe));
         (host, root.join("models").join("translate"))
     }
 
@@ -762,7 +898,10 @@ mod tests {
         assert_eq!(cfg.target, Lang::En, "英文系统默认翻成英文");
         assert!(cfg.models_dir.is_none() && cfg.model_id.is_empty() && !cfg.low_memory);
         assert_eq!(cfg.layout, LayoutMode::SmartMerge);
-        assert_eq!((cfg.route_mode, cfg.max_resident), (RouteMode::SpecializedFirst, 1));
+        assert_eq!(
+            (cfg.route_mode, cfg.max_resident),
+            (RouteMode::SpecializedFirst, 1)
+        );
         let zh = TranslateConfig::from_document(&ConfigDocument::from_bytes(None), "zh-CN");
         assert_eq!(zh.target, Lang::ZhHans);
     }
@@ -771,33 +910,65 @@ mod tests {
     #[test]
     fn config_reads_extension_keys() {
         let mut doc = ConfigDocument::from_bytes(None);
-        doc.set_value(KEY_LOCAL_MODELS_DIR, serde_json::json!("D:/my models")).expect("目录");
-        doc.set_value(KEY_LOCAL_MODEL_ID, serde_json::json!("opus")).expect("模型");
-        doc.set_value(KEY_LOCAL_IDLE_SECONDS, serde_json::json!(30)).expect("空闲");
-        doc.set_value(KEY_LOCAL_NUM_BEAMS, serde_json::json!(2)).expect("束宽");
-        doc.set_value(KEY_TARGET_LANGUAGE, serde_json::json!("ja")).expect("目标");
-        doc.set_value(KEY_SOURCE_LANGUAGE, serde_json::json!("en")).expect("源");
-        doc.set_value(KEY_LAYOUT, serde_json::json!("original")).expect("版式");
-        doc.set_value(KEY_LOCAL_ROUTE_MODE, serde_json::json!(ROUTE_MIXED_SPLIT)).expect("路由");
-        doc.set_value(KEY_LOCAL_MAX_RESIDENT, serde_json::json!(2)).expect("常驻数");
+        doc.set_value(KEY_LOCAL_MODELS_DIR, serde_json::json!("D:/my models"))
+            .expect("目录");
+        doc.set_value(KEY_LOCAL_MODEL_ID, serde_json::json!("opus"))
+            .expect("模型");
+        doc.set_value(KEY_LOCAL_IDLE_SECONDS, serde_json::json!(30))
+            .expect("空闲");
+        doc.set_value(KEY_LOCAL_NUM_BEAMS, serde_json::json!(2))
+            .expect("束宽");
+        doc.set_value(KEY_TARGET_LANGUAGE, serde_json::json!("ja"))
+            .expect("目标");
+        doc.set_value(KEY_SOURCE_LANGUAGE, serde_json::json!("en"))
+            .expect("源");
+        doc.set_value(KEY_LAYOUT, serde_json::json!("original"))
+            .expect("版式");
+        doc.set_value(KEY_LOCAL_ROUTE_MODE, serde_json::json!(ROUTE_MIXED_SPLIT))
+            .expect("路由");
+        doc.set_value(KEY_LOCAL_MAX_RESIDENT, serde_json::json!(2))
+            .expect("常驻数");
         let cfg = TranslateConfig::from_document(&doc, "en-US");
-        assert_eq!((cfg.route_mode, cfg.max_resident), (RouteMode::MixedSplit, 2));
+        assert_eq!(
+            (cfg.route_mode, cfg.max_resident),
+            (RouteMode::MixedSplit, 2)
+        );
         assert_eq!(cfg.route_policy().preferred_id, "opus");
         assert_eq!(cfg.models_dir, Some(PathBuf::from("D:/my models")));
-        assert_eq!((cfg.model_id.as_str(), cfg.beams, cfg.idle), ("opus", 2, Duration::from_secs(30)));
-        assert_eq!((cfg.source, cfg.target, cfg.layout), (Lang::En, Lang::Ja, LayoutMode::Original));
-        doc.set_value(KEY_LOCAL_LOW_MEMORY, serde_json::json!(true)).expect("低内存");
-        assert_eq!(TranslateConfig::from_document(&doc, "en-US").effective_beams(), 1);
-        doc.set_value(KEY_TRANSLATION_BACKEND, serde_json::json!("openai")).expect("后端");
-        assert_eq!(TranslateConfig::from_document(&doc, "en-US").backend, Backend::OpenAi);
+        assert_eq!(
+            (cfg.model_id.as_str(), cfg.beams, cfg.idle),
+            ("opus", 2, Duration::from_secs(30))
+        );
+        assert_eq!(
+            (cfg.source, cfg.target, cfg.layout),
+            (Lang::En, Lang::Ja, LayoutMode::Original)
+        );
+        doc.set_value(KEY_LOCAL_LOW_MEMORY, serde_json::json!(true))
+            .expect("低内存");
+        assert_eq!(
+            TranslateConfig::from_document(&doc, "en-US").effective_beams(),
+            1
+        );
+        doc.set_value(KEY_TRANSLATION_BACKEND, serde_json::json!("openai"))
+            .expect("后端");
+        assert_eq!(
+            TranslateConfig::from_document(&doc, "en-US").backend,
+            Backend::OpenAi
+        );
     }
 
     /// 配置里的路由模式取值与路由器认的代号一一对应（两个 crate 各写一份字面量，这里守住一致）。
     #[test]
     fn route_mode_codes_match_config_values() {
         assert_eq!(RouteMode::from_code(ROUTE_SINGLE), Some(RouteMode::Single));
-        assert_eq!(RouteMode::from_code(ROUTE_SPECIALIZED_FIRST), Some(RouteMode::SpecializedFirst));
-        assert_eq!(RouteMode::from_code(ROUTE_MIXED_SPLIT), Some(RouteMode::MixedSplit));
+        assert_eq!(
+            RouteMode::from_code(ROUTE_SPECIALIZED_FIRST),
+            Some(RouteMode::SpecializedFirst)
+        );
+        assert_eq!(
+            RouteMode::from_code(ROUTE_MIXED_SPLIT),
+            Some(RouteMode::MixedSplit)
+        );
     }
 
     /// 专用包优先：同时有通用包与显式声明语言对的专用包时，未指定包选专用包；指定通用包仍尊重；
@@ -819,7 +990,10 @@ mod tests {
         assert_eq!(host.prepare(&cfg).expect("single").0, "Model a-nllb");
         cfg.source = Lang::Ja;
         cfg.route_mode = RouteMode::SpecializedFirst;
-        assert_eq!(host.prepare(&cfg).expect("日译中只有通用包").0, "Model a-nllb");
+        assert_eq!(
+            host.prepare(&cfg).expect("日译中只有通用包").0,
+            "Model a-nllb"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -834,19 +1008,38 @@ mod tests {
         cfg.target = Lang::ZhHans;
         cfg.route_mode = RouteMode::MixedSplit;
         let (label, src, tgt) = host.prepare(&cfg).expect("混合拆分");
-        assert_eq!((label.as_str(), src, tgt), ("Model a-nllb + Model z-opus", Lang::Auto, Lang::ZhHans));
+        assert_eq!(
+            (label.as_str(), src, tgt),
+            ("Model a-nllb + Model z-opus", Lang::Auto, Lang::ZhHans)
+        );
         cfg.target = Lang::Ko;
-        assert!(matches!(host.prepare(&cfg), Err(TranslateError::UnsupportedLanguagePair(Lang::Auto, Lang::Ko))));
+        assert!(matches!(
+            host.prepare(&cfg),
+            Err(TranslateError::UnsupportedLanguagePair(
+                Lang::Auto,
+                Lang::Ko
+            ))
+        ));
         let _ = std::fs::remove_dir_all(&root);
     }
 
     /// 实际标签：按实际用包去重保序；没有记录时用预选标签；未知 ID 退回 ID 本身。
     #[test]
     fn actual_label_dedups_and_falls_back() {
-        let labels = vec![("a".to_string(), "Model A".to_string()), ("b".to_string(), "Model B".to_string())];
+        let labels = vec![
+            ("a".to_string(), "Model A".to_string()),
+            ("b".to_string(), "Model B".to_string()),
+        ];
         let ids = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        assert_eq!(actual_label(&ids(&["b", "a", "b"]), &labels, "pre"), "Model B + Model A");
-        assert_eq!(actual_label(&ids(&["b"]), &labels, "Model A"), "Model B", "预选 A 实际 B，显示 B");
+        assert_eq!(
+            actual_label(&ids(&["b", "a", "b"]), &labels, "pre"),
+            "Model B + Model A"
+        );
+        assert_eq!(
+            actual_label(&ids(&["b"]), &labels, "Model A"),
+            "Model B",
+            "预选 A 实际 B，显示 B"
+        );
         assert_eq!(actual_label(&[], &labels, "pre"), "pre");
         assert_eq!(actual_label(&ids(&["x"]), &labels, "pre"), "x");
     }
@@ -860,14 +1053,39 @@ mod tests {
         write_model(&models, "b-opt", r#"[["en","zh-CN"]]"#);
         let manifest_path = models.join("b-opt").join("model.json");
         let text = std::fs::read_to_string(&manifest_path).expect("读清单");
-        std::fs::write(&manifest_path, text.replacen("{\"schema_version\":1,", "{\"schema_version\":1,\"default_eligible\":false,", 1))
-            .expect("写清单");
+        std::fs::write(
+            &manifest_path,
+            text.replacen(
+                "{\"schema_version\":1,",
+                "{\"schema_version\":1,\"default_eligible\":false,",
+                1,
+            ),
+        )
+        .expect("写清单");
         let report = host.scan(&config());
         assert_eq!(report.models.len(), 2, "{:?}", report.issues);
-        assert!(!report.models.iter().find(|m| m.manifest.id == "b-opt").unwrap().manifest.default_eligible);
-        assert_eq!(mixed_preselect_names(&report.models, Lang::ZhHans), ["Model a-nllb"]);
-        let only_opt: Vec<ScannedModel> = report.models.into_iter().filter(|m| m.manifest.id == "b-opt").collect();
-        assert_eq!(mixed_preselect_names(&only_opt, Lang::ZhHans), ["Model b-opt"]);
+        assert!(
+            !report
+                .models
+                .iter()
+                .find(|m| m.manifest.id == "b-opt")
+                .unwrap()
+                .manifest
+                .default_eligible
+        );
+        assert_eq!(
+            mixed_preselect_names(&report.models, Lang::ZhHans),
+            ["Model a-nllb"]
+        );
+        let only_opt: Vec<ScannedModel> = report
+            .models
+            .into_iter()
+            .filter(|m| m.manifest.id == "b-opt")
+            .collect();
+        assert_eq!(
+            mixed_preselect_names(&only_opt, Lang::ZhHans),
+            ["Model b-opt"]
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -879,7 +1097,11 @@ mod tests {
         write_general_model(&models, "a-nllb");
         write_model(&models, "z-opus", r#"[["en","zh-CN"]]"#);
         let engine_ptr = |host: &TranslateHost| {
-            host.built.lock().unwrap().as_ref().map(|b| Arc::as_ptr(&b.engine) as *const () as usize)
+            host.built
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|b| Arc::as_ptr(&b.engine) as *const () as usize)
         };
         let mut cfg = config();
         cfg.target = Lang::ZhHans;
@@ -892,7 +1114,11 @@ mod tests {
         assert_eq!(first, engine_ptr(&host), "策略变化应热更新而不是重建");
         let policy = host.router().expect("路由器").policy();
         assert_eq!(
-            (policy.mode, policy.preferred_id.as_str(), policy.max_resident),
+            (
+                policy.mode,
+                policy.preferred_id.as_str(),
+                policy.max_resident
+            ),
             (RouteMode::MixedSplit, "a-nllb", 2)
         );
         cfg.beams = 3;
@@ -912,33 +1138,76 @@ mod tests {
         assert_eq!(effective_target_language(None, "ko-KR"), "en");
         assert_eq!(effective_target_language(None, ""), "en");
         assert_eq!(effective_target_language(None, "xx"), "en");
-        assert_eq!(effective_target_language(Some("fr"), "ja-JP"), "fr", "已保存值不变");
-        assert_eq!(effective_target_language(Some("zh-Hant"), "zh-CN"), "zh-Hans", "旧繁体值视同没保存");
-        assert_eq!(effective_target_language(Some("zh-Hans"), "ja-JP"), "zh-Hans");
+        assert_eq!(
+            effective_target_language(Some("fr"), "ja-JP"),
+            "fr",
+            "已保存值不变"
+        );
+        assert_eq!(
+            effective_target_language(Some("zh-Hant"), "zh-CN"),
+            "zh-Hans",
+            "旧繁体值视同没保存"
+        );
+        assert_eq!(
+            effective_target_language(Some("zh-Hans"), "ja-JP"),
+            "zh-Hans"
+        );
         assert_eq!(effective_target_language(Some("bogus"), "de-DE"), "de");
     }
 
     /// 界面语言生效值：旧 system/auto/空串/繁体视同没保存，en_US 与 zh_CN 不变，映射不到退 en_US。
     #[test]
     fn effective_interface_rules() {
-        for old in [None, Some(""), Some("system"), Some("AUTO"), Some("zh_TW"), Some("zh-Hant")] {
-            assert_eq!(effective_interface_language(old, "zh-CN"), "zh_CN", "{old:?}");
-            assert_eq!(effective_interface_language(old, "en-US"), "en_US", "{old:?}");
-            assert_eq!(effective_interface_language(old, "zh-Hant-TW"), "en_US", "{old:?} 繁体系统回退英语");
+        for old in [
+            None,
+            Some(""),
+            Some("system"),
+            Some("AUTO"),
+            Some("zh_TW"),
+            Some("zh-Hant"),
+        ] {
+            assert_eq!(
+                effective_interface_language(old, "zh-CN"),
+                "zh_CN",
+                "{old:?}"
+            );
+            assert_eq!(
+                effective_interface_language(old, "en-US"),
+                "en_US",
+                "{old:?}"
+            );
+            assert_eq!(
+                effective_interface_language(old, "zh-Hant-TW"),
+                "en_US",
+                "{old:?} 繁体系统回退英语"
+            );
             assert_eq!(effective_interface_language(old, "ja-JP"), "en_US");
             assert_eq!(effective_interface_language(old, ""), "en_US");
         }
-        assert_eq!(effective_interface_language(Some("zh_CN"), "en-US"), "zh_CN");
-        assert_eq!(effective_interface_language(Some("en_US"), "zh-CN"), "en_US");
+        assert_eq!(
+            effective_interface_language(Some("zh_CN"), "en-US"),
+            "zh_CN"
+        );
+        assert_eq!(
+            effective_interface_language(Some("en_US"), "zh-CN"),
+            "en_US"
+        );
     }
 
     /// 调用点：配置里没有保存目标语言（默认空串）时 TranslateConfig 取系统语言；已保存值不被覆盖。
     #[test]
     fn config_unset_target_uses_system_language() {
         let mut doc = ConfigDocument::from_bytes(None);
-        assert_eq!(TranslateConfig::from_document(&doc, "ja-JP").target, Lang::Ja);
-        doc.set_value(KEY_TARGET_LANGUAGE, serde_json::json!("fr")).expect("目标");
-        assert_eq!(TranslateConfig::from_document(&doc, "de-DE").target, Lang::Fr);
+        assert_eq!(
+            TranslateConfig::from_document(&doc, "ja-JP").target,
+            Lang::Ja
+        );
+        doc.set_value(KEY_TARGET_LANGUAGE, serde_json::json!("fr"))
+            .expect("目标");
+        assert_eq!(
+            TranslateConfig::from_document(&doc, "de-DE").target,
+            Lang::Fr
+        );
     }
 
     /// 模型根目录：配置为空用数据根下的默认位置。
@@ -946,7 +1215,10 @@ mod tests {
     fn models_dir_resolution() {
         let host = TranslateHost::with_env(Path::new("D:/data"), None, None);
         let mut cfg = config();
-        assert_eq!(host.models_dir(&cfg), Path::new("D:/data").join("models").join("translate"));
+        assert_eq!(
+            host.models_dir(&cfg),
+            Path::new("D:/data").join("models").join("translate")
+        );
         cfg.models_dir = Some(PathBuf::from("E:/m"));
         assert_eq!(host.models_dir(&cfg), PathBuf::from("E:/m"));
     }
@@ -959,12 +1231,19 @@ mod tests {
         let mut cfg = config();
         cfg.target = Lang::ZhHans;
         let err = host.prepare(&cfg).unwrap_err();
-        let TranslateError::NoModelFound(message) = err else { panic!("应为 NoModelFound: {err:?}") };
+        let TranslateError::NoModelFound(message) = err else {
+            panic!("应为 NoModelFound: {err:?}")
+        };
         assert!(message.contains(&models.display().to_string()), "{message}");
         std::fs::create_dir_all(models.join("broken")).expect("建目录");
         std::fs::write(models.join("broken").join("model.json"), "{oops").expect("写坏清单");
-        let TranslateError::NoModelFound(message) = host.prepare(&cfg).unwrap_err() else { panic!("类型") };
-        assert!(message.contains("broken") && message.contains("解析失败"), "{message}");
+        let TranslateError::NoModelFound(message) = host.prepare(&cfg).unwrap_err() else {
+            panic!("类型")
+        };
+        assert!(
+            message.contains("broken") && message.contains("解析失败"),
+            "{message}"
+        );
         assert_eq!(host.worker_launches(), 0);
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -977,7 +1256,10 @@ mod tests {
         write_model(&models, "en-zh", r#"[["en","zh-CN"]]"#);
         let mut cfg = config();
         cfg.target = Lang::Ja;
-        assert!(matches!(host.prepare(&cfg), Err(TranslateError::UnsupportedLanguagePair(_, Lang::Ja))));
+        assert!(matches!(
+            host.prepare(&cfg),
+            Err(TranslateError::UnsupportedLanguagePair(_, Lang::Ja))
+        ));
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -994,13 +1276,20 @@ mod tests {
         let no_runtime = TranslateHost::with_env(&root, None, Some(exe.clone()));
         let err = no_runtime.prepare(&cfg).unwrap_err();
         assert!(err.can_download_runtime(), "{err:?}");
-        let bad_env = TranslateHost::with_env(&root, Some("Z:/nope/onnxruntime.dll".into()), Some(exe));
+        let bad_env =
+            TranslateHost::with_env(&root, Some("Z:/nope/onnxruntime.dll".into()), Some(exe));
         let err = bad_env.prepare(&cfg).unwrap_err();
         assert!(matches!(err, TranslateError::WorkerUnavailable(_)) && !err.can_download_runtime());
         let dll = root.join("onnxruntime.dll");
         std::fs::write(&dll, b"x").expect("写 dll");
-        let no_exe = TranslateHost::with_env(&root, Some(dll.to_string_lossy().into_owned()), Some(root.join("missing.exe")));
-        assert!(matches!(no_exe.prepare(&cfg), Err(TranslateError::WorkerUnavailable(m)) if m.contains("不存在")));
+        let no_exe = TranslateHost::with_env(
+            &root,
+            Some(dll.to_string_lossy().into_owned()),
+            Some(root.join("missing.exe")),
+        );
+        assert!(
+            matches!(no_exe.prepare(&cfg), Err(TranslateError::WorkerUnavailable(m)) if m.contains("does not exist"))
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1013,14 +1302,32 @@ mod tests {
         let mut cfg = config();
         cfg.target = Lang::ZhHans;
         let (label, src, tgt) = host.prepare(&cfg).expect("装配");
-        assert_eq!((label.as_str(), src, tgt), ("Model en-zh", Lang::Auto, Lang::ZhHans));
-        let first = host.built.lock().unwrap().as_ref().map(|b| Arc::as_ptr(&b.engine) as *const () as usize);
+        assert_eq!(
+            (label.as_str(), src, tgt),
+            ("Model en-zh", Lang::Auto, Lang::ZhHans)
+        );
+        let first = host
+            .built
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|b| Arc::as_ptr(&b.engine) as *const () as usize);
         host.prepare(&cfg).expect("再次装配");
-        let second = host.built.lock().unwrap().as_ref().map(|b| Arc::as_ptr(&b.engine) as *const () as usize);
+        let second = host
+            .built
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|b| Arc::as_ptr(&b.engine) as *const () as usize);
         assert_eq!(first, second, "同参数应复用");
         cfg.beams = 3;
         host.prepare(&cfg).expect("换束宽");
-        let third = host.built.lock().unwrap().as_ref().map(|b| Arc::as_ptr(&b.engine) as *const () as usize);
+        let third = host
+            .built
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|b| Arc::as_ptr(&b.engine) as *const () as usize);
         assert_ne!(first, third, "束宽变化应重建");
         assert_eq!(host.worker_launches(), 0);
         assert!(!host.worker_running());
@@ -1035,7 +1342,10 @@ mod tests {
         let host = TranslateHost::with_env(&root, None, None);
         let mut cfg = config();
         cfg.backend = Backend::OpenAi;
-        assert!(matches!(host.prepare(&cfg), Err(TranslateError::NoModelFound(m)) if m.contains("自定义 AI 模型")));
+        assert!(matches!(
+            host.prepare(&cfg),
+            Err(TranslateError::NoCustomModel)
+        ));
         cfg.custom_models = vec![CustomAiModel {
             id: "11111111-1111-1111-1111-111111111111".into(),
             name: "本地 Ollama".into(),
@@ -1045,7 +1355,10 @@ mod tests {
             supports_vision: false,
             supports_reasoning: false,
         }];
-        assert!(matches!(host.prepare(&cfg), Err(TranslateError::NoModelFound(m)) if m.contains("选择")));
+        assert!(matches!(
+            host.prepare(&cfg),
+            Err(TranslateError::CustomModelNotSelected)
+        ));
         cfg.custom_model_id = "11111111-1111-1111-1111-111111111111".into();
         let (label, src, _) = host.prepare(&cfg).expect("装配");
         assert_eq!((label.as_str(), src), ("本地 Ollama", Lang::Auto));
@@ -1061,12 +1374,19 @@ mod tests {
     }
 
     impl Translator for FakeTranslator {
-        fn translate(&self, _config: &TranslateConfig, texts: &[String]) -> Result<Translated, TranslateError> {
+        fn translate(
+            &self,
+            _config: &TranslateConfig,
+            texts: &[String],
+        ) -> Result<Translated, TranslateError> {
             self.seen.lock().unwrap().push(texts.to_vec());
             if let Some(e) = &self.fail {
                 return Err(e.clone());
             }
-            Ok(Translated { texts: texts.iter().map(|t| format!("译:{t}")).collect(), label: "fake".into() })
+            Ok(Translated {
+                texts: texts.iter().map(|t| format!("译:{t}")).collect(),
+                label: "fake".into(),
+            })
         }
     }
 
@@ -1074,28 +1394,54 @@ mod tests {
     fn ocr(lines: &[(&str, i32)]) -> OcrResult {
         let boxes: Vec<OcrTextBox> = lines
             .iter()
-            .map(|(t, y)| OcrTextBox { rect: PhysicalRect::new(0, *y, 200, 20), text: (*t).to_string(), confidence: Some(0.9) })
+            .map(|(t, y)| OcrTextBox {
+                rect: PhysicalRect::new(0, *y, 200, 20),
+                text: (*t).to_string(),
+                confidence: Some(0.9),
+            })
             .collect();
-        OcrResult { full_text: lines.iter().map(|l| l.0).collect::<Vec<_>>().join("\n"), boxes, elapsed_ms: 7 }
+        OcrResult {
+            full_text: lines.iter().map(|l| l.0).collect::<Vec<_>>().join("\n"),
+            boxes,
+            elapsed_ms: 7,
+        }
     }
 
     /// 流程：OCR → 合并段落 → 翻译，阶段回调按序触发，结果含逐段对照。
     #[test]
     fn flow_merges_translates_and_reports_stages() {
-        let translator = FakeTranslator { seen: Mutex::new(Vec::new()), fail: None };
+        let translator = FakeTranslator {
+            seen: Mutex::new(Vec::new()),
+            fail: None,
+        };
         let mut cfg = config();
         cfg.target = Lang::ZhHans;
         let mut stages = Vec::new();
         let outcome = run_flow(
-            || Ok(ocr(&[("Hello there", 0), ("my friend", 22), ("Second para.", 100)])),
+            || {
+                Ok(ocr(&[
+                    ("Hello there", 0),
+                    ("my friend", 22),
+                    ("Second para.", 100),
+                ]))
+            },
             &translator,
             &cfg,
             |s| stages.push(s),
         )
         .expect("流程");
-        assert_eq!(stages, [TranslateStage::Recognizing, TranslateStage::Translating]);
-        assert_eq!(translator.seen.lock().unwrap()[0], ["Hello there my friend", "Second para."]);
-        assert_eq!(outcome.translated, "译:Hello there my friend\n译:Second para.");
+        assert_eq!(
+            stages,
+            [TranslateStage::Recognizing, TranslateStage::Translating]
+        );
+        assert_eq!(
+            translator.seen.lock().unwrap()[0],
+            ["Hello there my friend", "Second para."]
+        );
+        assert_eq!(
+            outcome.translated,
+            "译:Hello there my friend\n译:Second para."
+        );
         assert_eq!(outcome.pairs.len(), 2);
         assert_eq!((outcome.ocr_ms, outcome.label.as_str()), (7, "fake"));
     }
@@ -1103,7 +1449,10 @@ mod tests {
     /// 流程失败分支：OCR 缺资产、没识别到文字、原文已是中文（不调用翻译）、翻译失败。
     #[test]
     fn flow_failure_branches() {
-        let translator = FakeTranslator { seen: Mutex::new(Vec::new()), fail: None };
+        let translator = FakeTranslator {
+            seen: Mutex::new(Vec::new()),
+            fail: None,
+        };
         let mut cfg = config();
         cfg.target = Lang::ZhHans;
         let err = run_flow(
@@ -1113,16 +1462,43 @@ mod tests {
             |_| {},
         )
         .unwrap_err();
-        assert_eq!(err, TranslateFlowError::Ocr(OcrError::Unavailable(OcrUnavailable::NoRuntime)));
-        assert_eq!(run_flow(|| Ok(ocr(&[("   ", 0)])), &translator, &cfg, |_| {}).unwrap_err(), TranslateFlowError::NoText);
         assert_eq!(
-            run_flow(|| Ok(ocr(&[("今天天气很好，我们出去玩吧", 0)])), &translator, &cfg, |_| {}).unwrap_err(),
+            err,
+            TranslateFlowError::Ocr(OcrError::Unavailable(OcrUnavailable::NoRuntime))
+        );
+        assert_eq!(
+            run_flow(|| Ok(ocr(&[("   ", 0)])), &translator, &cfg, |_| {}).unwrap_err(),
+            TranslateFlowError::NoText
+        );
+        assert_eq!(
+            run_flow(
+                || Ok(ocr(&[("今天天气很好，我们出去玩吧", 0)])),
+                &translator,
+                &cfg,
+                |_| {}
+            )
+            .unwrap_err(),
             TranslateFlowError::AlreadyTarget(Lang::ZhHans)
         );
-        assert!(translator.seen.lock().unwrap().is_empty(), "以上三种都不应调用翻译");
+        assert!(
+            translator.seen.lock().unwrap().is_empty(),
+            "以上三种都不应调用翻译"
+        );
         cfg.target = Lang::En;
-        assert!(run_flow(|| Ok(ocr(&[("今天天气很好", 0)])), &translator, &cfg, |_| {}).is_ok(), "翻成英文时中文原文正常");
-        let failing = FakeTranslator { seen: Mutex::new(Vec::new()), fail: Some(TranslateError::Timeout) };
+        assert!(
+            run_flow(
+                || Ok(ocr(&[("今天天气很好", 0)])),
+                &translator,
+                &cfg,
+                |_| {}
+            )
+            .is_ok(),
+            "翻成英文时中文原文正常"
+        );
+        let failing = FakeTranslator {
+            seen: Mutex::new(Vec::new()),
+            fail: Some(TranslateError::Timeout),
+        };
         assert_eq!(
             run_flow(|| Ok(ocr(&[("Hello", 0)])), &failing, &cfg, |_| {}).unwrap_err(),
             TranslateFlowError::Translate(TranslateError::Timeout)
@@ -1142,7 +1518,9 @@ mod tests {
             std::env::var(snow_translate::worker::ENV_ORT_DYLIB).ok(),
             std::env::var_os("SNOW_TRANSLATOR_TEST_MODEL_DIR"),
         ) else {
-            eprintln!("跳过探针：未设置 SNOW_TRANSLATOR_EXE / SNOW_ORT_DYLIB / SNOW_TRANSLATOR_TEST_MODEL_DIR");
+            eprintln!(
+                "跳过探针：未设置 SNOW_TRANSLATOR_EXE / SNOW_ORT_DYLIB / SNOW_TRANSLATOR_TEST_MODEL_DIR"
+            );
             return;
         };
         let model_dir = PathBuf::from(model_dir);
@@ -1157,7 +1535,8 @@ mod tests {
             "I would like to order a cup of coffee and a piece of cake.",
             "The meeting has been rescheduled to next Tuesday at 3 pm.",
         ];
-        for (mode, low_memory, beams) in [("beam4", false, 4usize), ("greedy-low-memory", true, 1)] {
+        for (mode, low_memory, beams) in [("beam4", false, 4usize), ("greedy-low-memory", true, 1)]
+        {
             let mut cfg = config();
             cfg.target = Lang::ZhHans;
             cfg.models_dir = model_dir.parent().map(Path::to_path_buf);
@@ -1167,10 +1546,15 @@ mod tests {
             cfg.low_memory = low_memory;
             let main_before = current_process_memory().map(|m| m.working_set).unwrap_or(0);
             let started = Instant::now();
-            let first = host.translate(&cfg, &[sentences[0].to_string()]).expect("首句翻译");
+            let first = host
+                .translate(&cfg, &[sentences[0].to_string()])
+                .expect("首句翻译");
             let cold_ms = started.elapsed().as_millis();
             let pid = host.worker_memory().map(|m| m.pid).unwrap_or(0);
-            eprintln!("PROBE [{mode}] cold(启动+加载+首句)={cold_ms}ms 首句={:?} worker_pid={pid}", first.texts);
+            eprintln!(
+                "PROBE [{mode}] cold(启动+加载+首句)={cold_ms}ms 首句={:?} worker_pid={pid}",
+                first.texts
+            );
             let mut times = Vec::new();
             let mut peak = 0u64;
             for text in &sentences[1..] {
@@ -1180,7 +1564,11 @@ mod tests {
                 if let Some(m) = process_memory(pid) {
                     peak = peak.max(m.peak_working_set);
                 }
-                eprintln!("PROBE [{mode}] {}ms  {text} -> {}", times.last().copied().unwrap_or(0), out.texts[0]);
+                eprintln!(
+                    "PROBE [{mode}] {}ms  {text} -> {}",
+                    times.last().copied().unwrap_or(0),
+                    out.texts[0]
+                );
             }
             let snap = host.worker_memory();
             let worker_now = process_memory(pid).map(|m| m.working_set).unwrap_or(0);
@@ -1206,7 +1594,10 @@ mod tests {
                 host.worker_running(),
                 mib(main_after)
             );
-            assert!(!host.worker_running() && !alive, "空闲后 worker 进程必须已退出");
+            assert!(
+                !host.worker_running() && !alive,
+                "空闲后 worker 进程必须已退出"
+            );
             let t = Instant::now();
             // 换一句没翻译过的，避免命中结果缓存而没有真正重新拉起
             let fresh = format!("Thank you very much for your help, mode {mode}.");

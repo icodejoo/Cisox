@@ -656,6 +656,42 @@ pub fn initial_clipboard_rect(
     (rect, zoom)
 }
 
+/// 按「自动调整窗口大小」设置算贴图初始外框：开启时等同 [`initial_clipboard_rect`]（超大图缩到工作区内），
+/// 关闭时按原始尺寸居中（允许超出工作区）。
+///
+/// # 参数
+/// - `width` / `height`：图像尺寸。
+/// - `work_area`：目标显示器的工作区。
+/// - `auto_resize`：`pin_to_screen/auto_resize_window` 的值。
+///
+/// # 返回
+/// `(外框, 缩放倍率)`。
+///
+/// ```
+/// use snow_shot::pinned_model::initial_pin_rect;
+/// use snow_ui::shell::geometry::PhysicalRect;
+/// let (rect, zoom) = initial_pin_rect(2000, 1000, PhysicalRect::new(0, 0, 1000, 800), false);
+/// assert_eq!((rect.width, zoom), (2000, 1.0));
+/// ```
+pub fn initial_pin_rect(
+    width: u32,
+    height: u32,
+    work_area: PhysicalRect,
+    auto_resize: bool,
+) -> (PhysicalRect, f32) {
+    if auto_resize {
+        return initial_clipboard_rect(width, height, work_area);
+    }
+    let (w, h) = (width.max(1) as i32, height.max(1) as i32);
+    let rect = PhysicalRect::new(
+        work_area.x + (work_area.width - w) / 2,
+        work_area.y + (work_area.height - h) / 2,
+        w,
+        h,
+    );
+    (rect, 1.0)
+}
+
 /// 把带透明度的 RGBA 图像铺在白底上（结果不透明）。
 ///
 /// 贴图管线（GPU 图像、标注合成）都假定底图不透明，剪贴板图像进入前先铺白底。
@@ -1046,6 +1082,20 @@ mod tests {
         // 极端尺寸不会得到 0 宽高
         let (thin, _) = initial_clipboard_rect(1, 20000, area);
         assert!(thin.width >= 1 && thin.height >= 1);
+    }
+
+    /// 关闭自动调整窗口大小：大图也按原尺寸居中；开启时仍缩进工作区。
+    #[test]
+    fn pin_rect_follows_auto_resize() {
+        let area = PhysicalRect::new(0, 0, 1000, 800);
+        let (full, z) = initial_pin_rect(2000, 1000, area, false);
+        assert_eq!((full, z), (PhysicalRect::new(-500, -100, 2000, 1000), 1.0));
+        let (fit, z) = initial_pin_rect(2000, 1000, area, true);
+        assert!(z < 1.0 && fit.width < 2000);
+        assert_eq!(
+            initial_pin_rect(100, 50, area, true),
+            initial_pin_rect(100, 50, area, false)
+        );
     }
 
     /// 铺白底：全透明变白，半透明按比例混合，不透明不变。

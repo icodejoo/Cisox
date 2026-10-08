@@ -275,7 +275,7 @@ impl ExportSettings {
 }
 
 /// 压缩级别配置值解析（未知按“中”，与旧版一致）。
-fn compression_from_key(key: &str) -> CompressionLevel {
+pub(crate) fn compression_from_key(key: &str) -> CompressionLevel {
     match key.trim().to_ascii_lowercase().as_str() {
         LEVEL_LOW => CompressionLevel::Low,
         LEVEL_HIGH => CompressionLevel::High,
@@ -450,6 +450,42 @@ pub fn encode_png(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, Strin
         .write_image(rgba, width, height, ExtendedColorType::Rgba8)
         .map_err(|e| format!("PNG 编码失败: {e}"))?;
     Ok(out)
+}
+
+/// 把 RGBA 像素按指定压缩级别编码为 PNG 字节（贴图历史按 `pinned_history/compression_level` 落盘用）。
+///
+/// # 参数
+/// - `width` / `height`：图像尺寸。
+/// - `rgba`：RGBA 像素（长度须为 `宽 * 高 * 4`）。
+/// - `level`：压缩级别（低 = 最快，高 = 最小）。
+///
+/// # 返回
+/// PNG 字节；参数不合法或编码失败返回错误说明。
+///
+/// ```ignore
+/// let png = encode_png_with_level(1, 1, &[255, 0, 0, 255], CompressionLevel::High).unwrap();
+/// assert_eq!(&png[1..4], b"PNG");
+/// ```
+pub fn encode_png_with_level(
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+    level: CompressionLevel,
+) -> Result<Vec<u8>, String> {
+    let settings = crate::export_format::EncodeSettings {
+        quality: u8::MAX,
+        compression: level,
+        pdf_page: PdfPageSize::ImageSize,
+        pdf_title: String::new(),
+        created: snow_platform::local_time::now(),
+    };
+    crate::export_format::encode(
+        crate::export_format::ExportFormat::Png,
+        width,
+        height,
+        rgba,
+        &settings,
+    )
 }
 
 /// 原子写文件：先写同目录临时文件再改名覆盖，失败时清理临时文件。

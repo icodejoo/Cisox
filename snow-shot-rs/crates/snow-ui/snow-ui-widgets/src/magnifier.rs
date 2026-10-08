@@ -12,6 +12,8 @@ pub enum ColorFormat {
     /// 十六进制格式（`#RRGGBB`）。
     #[default]
     Hex,
+    /// 不带井号的十六进制格式（`RRGGBB`）。
+    HexNoHash,
     /// RGB 格式（`rgb(r, g, b)`）。
     Rgb,
     /// HSL 格式（`hsl(h, s%, l%)`）。
@@ -19,6 +21,27 @@ pub enum ColorFormat {
 }
 
 impl ColorFormat {
+    /// 由配置值（`screenshot_ui/color_picker_format`）解析；未知值返回 `None`。
+    ///
+    /// # 参数
+    /// - `text`：配置里的格式名（`hex` / `hex_without_hash` / `rgb` / `hsl`）。
+    ///
+    /// # 示例
+    /// ```rust
+    /// use snow_ui_widgets::ColorFormat;
+    /// assert_eq!(ColorFormat::parse("hex_without_hash"), Some(ColorFormat::HexNoHash));
+    /// assert_eq!(ColorFormat::parse("bogus"), None);
+    /// ```
+    pub fn parse(text: &str) -> Option<Self> {
+        Some(match text {
+            "hex" => Self::Hex,
+            "hex_without_hash" => Self::HexNoHash,
+            "rgb" => Self::Rgb,
+            "hsl" => Self::Hsl,
+            _ => return None,
+        })
+    }
+
     /// 循环切换至下一个格式。
     ///
     /// # 返回
@@ -33,7 +56,7 @@ impl ColorFormat {
     /// ```
     pub const fn cycle(&self) -> Self {
         match self {
-            Self::Hex => Self::Rgb,
+            Self::Hex | Self::HexNoHash => Self::Rgb,
             Self::Rgb => Self::Hsl,
             Self::Hsl => Self::Hex,
         }
@@ -58,6 +81,7 @@ impl ColorFormat {
     pub fn format_color(&self, r: u8, g: u8, b: u8) -> String {
         match self {
             Self::Hex => format!("#{:02X}{:02X}{:02X}", r, g, b),
+            Self::HexNoHash => format!("{:02X}{:02X}{:02X}", r, g, b),
             Self::Rgb => format!("RGB({}, {}, {})", r, g, b),
             Self::Hsl => {
                 let rf = r as f64 / 255.0;
@@ -311,10 +335,7 @@ impl RenderOnce for Magnifier {
                 let pixel_color = rgb((pr as u32) << 16 | (pg as u32) << 8 | (pb as u32));
                 let is_center = row == dim / 2 && col == dim / 2;
 
-                let mut cell = div()
-                    .w(px(cell_px))
-                    .h(px(cell_px))
-                    .bg(pixel_color);
+                let mut cell = div().w(px(cell_px)).h(px(cell_px)).bg(pixel_color);
 
                 if is_center {
                     // 中心十字准星加亮边框
@@ -418,6 +439,19 @@ mod tests {
 
         let fmt_back = fmt_hsl.cycle();
         assert_eq!(fmt_back, ColorFormat::Hex);
+    }
+
+    /// 无井号十六进制格式与配置值解析。
+    #[test]
+    fn hex_without_hash_and_parse() {
+        assert_eq!(ColorFormat::HexNoHash.format_color(22, 119, 255), "1677FF");
+        assert_eq!(
+            ColorFormat::parse("hex_without_hash"),
+            Some(ColorFormat::HexNoHash)
+        );
+        assert_eq!(ColorFormat::parse("rgb"), Some(ColorFormat::Rgb));
+        assert_eq!(ColorFormat::parse("nope"), None);
+        assert_eq!(ColorFormat::HexNoHash.cycle(), ColorFormat::Rgb);
     }
 
     /// 验证放大镜采样网格。

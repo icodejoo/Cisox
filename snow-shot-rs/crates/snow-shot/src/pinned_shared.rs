@@ -2,19 +2,23 @@
 //!
 //! 所有调用都发生在 GPUI 主线程，因此用 `Rc<RefCell<..>>` 共享，不需要锁。
 
+use crate::pinned_keymap::PinKeymap;
 use crate::pinned_model::{
     PinClickAction, PinEntryInfo, PinGeometry, PinPolicy, build_record, parse_double_click_action,
     parse_hex_color, parse_middle_click_action, record_created_ms, record_geometry,
     record_payload_bytes, select_evictions,
 };
-use crate::pinned_keymap::PinKeymap;
+use crate::screenshot_output::compression_from_key;
 use crate::settings_state::SharedConfig;
 use image::ImageFormat;
+use snow_app_core::command::CompressionLevel;
 use snow_history::pin_id::new_unique_pin_id;
 use snow_history::pinned::{
-    DEFAULT_GROUP_ID, MAX_GROUP_NAME_UNITS, MAX_GROUPS, PinGroup, PinImage, PinOptions, PinPayload, PinnedStore,
+    DEFAULT_GROUP_ID, MAX_GROUP_NAME_UNITS, MAX_GROUPS, PinGroup, PinImage, PinOptions, PinPayload,
+    PinnedStore,
 };
 use snow_history::timeutil::now_utc_ms;
+use snow_i18n::{Args, I18n};
 use snow_ui::shell::geometry::PhysicalRect;
 use std::cell::RefCell;
 use std::collections::BTreeSet;
@@ -29,6 +33,68 @@ const DEFAULT_BORDER: u32 = 0xDBDBDBFF;
 const DEFAULT_BORDER_ACTIVE: u32 = 0x69B1FFFF;
 /// 默认滚轮缩放锚点模式。
 const DEFAULT_WHEEL_MODE: &str = "mouse_position";
+/// 贴图仓储 / 分组操作的结构化错误；界面边界再翻译（见 [`PinError::message`]）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PinError {
+    /// 分组名为空。
+    GroupNameEmpty,
+    /// 分组名过长。
+    GroupNameTooLong,
+    /// 已有同名分组。
+    GroupNameTaken,
+    /// 分组数量已达上限。
+    TooManyGroups,
+    /// 默认分组不能删除。
+    CannotDeleteDefaultGroup,
+    /// 分组不存在。
+    GroupMissing,
+    /// 贴图记录不存在。
+    PinMissing,
+    /// 贴图内容（payload）不存在。
+    PayloadMissing,
+    /// 贴图缺少源图。
+    SourceMissing,
+    /// 源图解码失败（附解码器给出的原因）。
+    DecodeFailed(String),
+    /// 仓储读写失败（附系统给出的原因）。
+    Store(String),
+}
+
+impl std::fmt::Display for PinError {
+    /// 技术说明（日志 / 排错用，不翻译）。
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+
+impl PinError {
+    /// 面向用户的提示文案。
+    ///
+    /// # 参数
+    /// - `i18n`：界面语料。
+    pub fn message(&self, i18n: &I18n) -> String {
+        let detail = |id: &str, text: &str| i18n.tr_with(id, &Args::new().named("detail", text));
+        match self {
+            Self::GroupNameEmpty => i18n.tr("pin-error-group-name-empty"),
+            Self::GroupNameTooLong => i18n.tr_with(
+                "pin-error-group-name-too-long",
+                &Args::new().named("max", MAX_GROUP_NAME_UNITS.to_string()),
+            ),
+            Self::GroupNameTaken => i18n.tr("pin-error-group-name-taken"),
+            Self::TooManyGroups => i18n.tr("pin-error-too-many-groups"),
+            Self::CannotDeleteDefaultGroup => i18n.tr("pin-error-delete-default-group"),
+            Self::GroupMissing => i18n.tr("pin-error-group-missing"),
+            Self::PinMissing => i18n.tr("pin-error-pin-missing"),
+            Self::PayloadMissing => i18n.tr("pin-error-payload-missing"),
+            Self::SourceMissing => i18n.tr("pin-error-source-missing"),
+            Self::DecodeFailed(e) => detail("pin-error-decode-failed", e),
+            Self::Store(e) => detail("pin-error-store", e),
+        }
+    }
+}
+
+/// 贴图历史 PNG 压缩级别配置键。
+const COMPRESSION_KEY: &str = "pinned_history/compression_level";
 /// 双击动作配置键。
 const KEY_DOUBLE_CLICK: &str = "pin_to_screen/double_click_action";
 /// 中键动作配置键。
@@ -206,6 +272,18 @@ impl PinShared {
         PinPolicy::from_document(self.config.borrow().document())
     }
 
+    /// 贴图历史落盘用的 PNG 压缩级别（读自 `pinned_history/compression_level`，未知按“中”）。
+    pub fn compression(&self) -> CompressionLevel {
+        let store = self.config.borrow();
+        compression_from_key(
+            store
+                .document()
+                .value(COMPRESSION_KEY)
+                .as_str()
+                .unwrap_or_default(),
+        )
+    }
+
     /// 读取交互配置快照。
     pub fn interaction(&self) -> PinInteraction {
         let store = self.config.borrow();
@@ -268,7 +346,10 @@ impl PinShared {
         let store = self.store.borrow();
         store
             .record(id)
-            .and_then(|r| r.get("group_id").and_then(|g| g.as_str().map(str::to_string)))
+            .and_then(|r| {
+                r.get("group_id")
+                    .and_then(|g| g.as_str().map(str::to_string))
+            })
             .unwrap_or_else(|| store.active_group_id())
     }
 
@@ -311,7 +392,10 @@ impl PinShared {
             .filter(|id| {
                 store
                     .record(id)
-                    .and_then(|r| r.get("group_id").and_then(|g| g.as_str().map(|g| g == group)))
+                    .and_then(|r| {
+                        r.get("group_id")
+                            .and_then(|g| g.as_str().map(|g| g == group))
+                    })
                     .unwrap_or(false)
             })
             .collect()
@@ -322,7 +406,12 @@ impl PinShared {
     /// # 参数
     /// - `key`：配置键。
     pub fn config_bool(&self, key: &str) -> bool {
-        self.config.borrow().document().value(key).as_bool().unwrap_or(false)
+        self.config
+            .borrow()
+            .document()
+            .value(key)
+            .as_bool()
+            .unwrap_or(false)
     }
 
     /// 贴图所属分组 ID；仓储里没有这条记录时返回 `None`。
@@ -330,51 +419,61 @@ impl PinShared {
     /// # 参数
     /// - `id`：贴图 ID。
     pub fn pin_group(&self, id: &str) -> Option<String> {
-        self.store
-            .borrow()
-            .record(id)
-            .and_then(|r| r.get("group_id").and_then(|g| g.as_str().map(str::to_string)))
+        self.store.borrow().record(id).and_then(|r| {
+            r.get("group_id")
+                .and_then(|g| g.as_str().map(str::to_string))
+        })
     }
 
     /// 新建分组。
     ///
     /// # 参数
-    /// - `name`：分组名；`None` 时自动取「分组 N」，N 取第一个未被占用的序号。
+    /// - `name`：分组名；`None` 时自动取「分组 N」（随界面语言），N 取第一个未被占用的序号。
+    /// - `i18n`：界面语料（只用于生成默认名）。
     ///
     /// # 返回
-    /// 新分组 ID；名称为空、超过 16 个 UTF-16 单元、重名或分组数已满返回错误说明。
+    /// 新分组 ID；名称为空、超过 16 个 UTF-16 单元、重名或分组数已满返回错误。
     ///
     /// ```ignore
-    /// let id = shared.create_group(Some("工作")).unwrap();
+    /// let id = shared.create_group(Some("工作"), i18n).unwrap();
     /// ```
-    pub fn create_group(&self, name: Option<&str>) -> Result<String, String> {
+    pub fn create_group(&self, name: Option<&str>, i18n: &I18n) -> Result<String, PinError> {
         let mut store = self.store.borrow_mut();
         let groups = store.groups();
         let name = match name.map(str::trim) {
             Some(n) => n.to_string(),
             None => (1..)
-                .map(|n| format!("分组 {n}"))
+                .map(|n| {
+                    i18n.tr_with(
+                        "pin-group-default-name",
+                        &Args::new().named("n", n.to_string()),
+                    )
+                })
                 .find(|candidate| !groups.iter().any(|g| &g.name == candidate))
                 .unwrap_or_default(),
         };
         if name.is_empty() {
-            return Err("分组名不能为空".into());
+            return Err(PinError::GroupNameEmpty);
         }
         if name.encode_utf16().count() > MAX_GROUP_NAME_UNITS {
-            return Err(format!("分组名不能超过 {MAX_GROUP_NAME_UNITS} 个字符"));
+            return Err(PinError::GroupNameTooLong);
         }
         if groups.iter().any(|g| g.name == name) {
-            return Err("已有同名分组".into());
+            return Err(PinError::GroupNameTaken);
         }
         if groups.len() >= MAX_GROUPS {
-            return Err("分组数量已达上限".into());
+            return Err(PinError::TooManyGroups);
         }
         let id = snow_history::pin_id::new_uuid_v4();
         let mut next: Vec<PinGroup> = groups.into_iter().filter(|g| !g.built_in).collect();
-        next.push(PinGroup { id: id.clone(), name, built_in: false });
+        next.push(PinGroup {
+            id: id.clone(),
+            name,
+            built_in: false,
+        });
         let active = store.active_group_id();
         store.set_groups(&next, &active);
-        store.flush().map_err(|e| e.to_string())?;
+        store.flush().map_err(|e| PinError::Store(e.to_string()))?;
         Ok(id)
     }
 
@@ -385,23 +484,31 @@ impl PinShared {
     ///
     /// # 返回
     /// 被一并删除的贴图 ID（调用方应关闭对应窗口）；分组不存在或是默认分组返回错误。
-    pub fn delete_group(&self, group: &str) -> Result<Vec<String>, String> {
+    pub fn delete_group(&self, group: &str) -> Result<Vec<String>, PinError> {
         if group == DEFAULT_GROUP_ID {
-            return Err("默认分组不能删除".into());
+            return Err(PinError::CannotDeleteDefaultGroup);
         }
         if !self.groups().iter().any(|g| g.id == group) {
-            return Err("分组不存在".into());
+            return Err(PinError::GroupMissing);
         }
         let victims = self.ids_in_group(group);
         let mut store = self.store.borrow_mut();
         for id in &victims {
             store.remove(id);
         }
-        let next: Vec<PinGroup> = store.groups().into_iter().filter(|g| !g.built_in && g.id != group).collect();
+        let next: Vec<PinGroup> = store
+            .groups()
+            .into_iter()
+            .filter(|g| !g.built_in && g.id != group)
+            .collect();
         let active = store.active_group_id();
-        let active = if active == group { DEFAULT_GROUP_ID.to_string() } else { active };
+        let active = if active == group {
+            DEFAULT_GROUP_ID.to_string()
+        } else {
+            active
+        };
         store.set_groups(&next, &active);
-        store.flush().map_err(|e| e.to_string())?;
+        store.flush().map_err(|e| PinError::Store(e.to_string()))?;
         Ok(victims)
     }
 
@@ -409,7 +516,7 @@ impl PinShared {
     ///
     /// # 返回
     /// 被删除的分组数。
-    pub fn delete_empty_groups(&self) -> Result<usize, String> {
+    pub fn delete_empty_groups(&self) -> Result<usize, PinError> {
         let empty: Vec<String> = self
             .groups()
             .into_iter()
@@ -426,15 +533,15 @@ impl PinShared {
     ///
     /// # 参数
     /// - `group`：分组 ID，必须存在。
-    pub fn set_active_group(&self, group: &str) -> Result<(), String> {
+    pub fn set_active_group(&self, group: &str) -> Result<(), PinError> {
         let mut store = self.store.borrow_mut();
         let groups = store.groups();
         if !groups.iter().any(|g| g.id == group) {
-            return Err("分组不存在".into());
+            return Err(PinError::GroupMissing);
         }
         let custom: Vec<PinGroup> = groups.into_iter().filter(|g| !g.built_in).collect();
         store.set_groups(&custom, group);
-        store.flush().map_err(|e| e.to_string())
+        store.flush().map_err(|e| PinError::Store(e.to_string()))
     }
 
     /// 把一张贴图移到另一个分组（只改清单，不动图片）。
@@ -442,15 +549,17 @@ impl PinShared {
     /// # 参数
     /// - `id`：贴图 ID。
     /// - `group`：目标分组 ID。
-    pub fn move_pin(&self, id: &str, group: &str) -> Result<(), String> {
+    pub fn move_pin(&self, id: &str, group: &str) -> Result<(), PinError> {
         let mut store = self.store.borrow_mut();
         if !store.groups().iter().any(|g| g.id == group) {
-            return Err("分组不存在".into());
+            return Err(PinError::GroupMissing);
         }
-        let mut record = store.record(id).ok_or_else(|| "贴图不存在".to_string())?;
+        let mut record = store.record(id).ok_or(PinError::PinMissing)?;
         record.insert("group_id".into(), serde_json::Value::String(group.into()));
-        store.upsert(record, None).map_err(|e| e.to_string())?;
-        store.flush().map_err(|e| e.to_string())
+        store
+            .upsert(record, None)
+            .map_err(|e| PinError::Store(e.to_string()))?;
+        store.flush().map_err(|e| PinError::Store(e.to_string()))
     }
 
     /// 登记一个来自仓储的既有 ID（恢复时调用，使其不会再被分配）。
@@ -510,27 +619,30 @@ impl PinShared {
         geometry: &PinGeometry,
         created_ms: i64,
         session: Vec<u8>,
-    ) -> Result<u64, String> {
+    ) -> Result<u64, PinError> {
         if !self.policy().enabled {
             return Ok(0);
         }
         let mut store = self.store.borrow_mut();
         let mut payload = store
             .load_payload(id)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| "贴图内容不存在".to_string())?;
+            .map_err(|e| PinError::Store(e.to_string()))?
+            .ok_or(PinError::PayloadMissing)?;
         let total =
             payload.image.as_ref().map_or(0, |i| i.bytes.len() as u64) + session.len() as u64;
         payload.canvas_session = session;
         let group = store
             .record(id)
-            .and_then(|r| r.get("group_id").and_then(|g| g.as_str().map(str::to_string)))
+            .and_then(|r| {
+                r.get("group_id")
+                    .and_then(|g| g.as_str().map(str::to_string))
+            })
             .unwrap_or_else(|| store.active_group_id());
         let record = build_record(id, &group, geometry, created_ms, total);
         store
             .upsert(record, Some(payload))
-            .map_err(|e| e.to_string())?;
-        store.flush().map_err(|e| e.to_string())?;
+            .map_err(|e| PinError::Store(e.to_string()))?;
+        store.flush().map_err(|e| PinError::Store(e.to_string()))?;
         Ok(total)
     }
 
@@ -544,15 +656,24 @@ impl PinShared {
     pub fn remove_remembering(&self, id: &str) -> bool {
         let snapshot = {
             let store = self.store.borrow();
-            let geometry = store.record(id).and_then(|r| crate::pinned_model::record_geometry(&r));
+            let geometry = store
+                .record(id)
+                .and_then(|r| crate::pinned_model::record_geometry(&r));
             store.load_payload(id).ok().flatten().and_then(|payload| {
-                payload.image.map(|image| ClosedPin { png: image.bytes, session: payload.canvas_session, geometry })
+                payload.image.map(|image| ClosedPin {
+                    png: image.bytes,
+                    session: payload.canvas_session,
+                    geometry,
+                })
             })
         };
         if let Some(pin) = snapshot {
             let mut closed = self.closed.borrow_mut();
             closed.push(pin);
-            while closed.len() > MAX_CLOSED_PINS || (closed.len() > 1 && closed.iter().map(ClosedPin::bytes).sum::<usize>() > MAX_CLOSED_BYTES) {
+            while closed.len() > MAX_CLOSED_PINS
+                || (closed.len() > 1
+                    && closed.iter().map(ClosedPin::bytes).sum::<usize>() > MAX_CLOSED_BYTES)
+            {
                 closed.remove(0);
             }
         }
@@ -643,18 +764,16 @@ impl PinShared {
     ///
     /// # 返回
     /// 解码后的贴图；记录不存在、源图缺失或解码失败返回错误说明。
-    pub fn load(&self, id: &str) -> Result<RestoredPin, String> {
+    pub fn load(&self, id: &str) -> Result<RestoredPin, PinError> {
         let store = self.store.borrow();
-        let record = store
-            .record(id)
-            .ok_or_else(|| "贴图记录不存在".to_string())?;
+        let record = store.record(id).ok_or(PinError::PinMissing)?;
         let payload = store
             .load_payload(id)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| "贴图内容不存在".to_string())?;
-        let image = payload.image.ok_or_else(|| "贴图缺少源图".to_string())?;
+            .map_err(|e| PinError::Store(e.to_string()))?
+            .ok_or(PinError::PayloadMissing)?;
+        let image = payload.image.ok_or(PinError::SourceMissing)?;
         let decoded = image::load_from_memory_with_format(&image.bytes, ImageFormat::Png)
-            .map_err(|e| format!("源图解码失败: {e}"))?
+            .map_err(|e| PinError::DecodeFailed(e.to_string()))?
             .to_rgba8();
         let (width, height) = decoded.dimensions();
         Ok(RestoredPin {
@@ -683,7 +802,10 @@ impl PinShared {
     /// - `id`：贴图 ID。
     /// - `group`：目标分组 ID。
     pub fn request_move_to_group(&self, id: &str, group: &str) {
-        self.emit_control(PinControlEvent::MoveToGroup { id: id.to_string(), group: group.to_string() });
+        self.emit_control(PinControlEvent::MoveToGroup {
+            id: id.to_string(),
+            group: group.to_string(),
+        });
     }
 
     /// 发出一个控制事件；没有设置出口时忽略。
@@ -729,12 +851,57 @@ mod tests {
     fn groups_create_move_delete_and_keep_membership() {
         let dir = temp_dir("groups");
         let (shared, _) = open_in(&dir);
-        let work = shared.create_group(Some("工作")).unwrap();
-        assert!(shared.create_group(Some("工作")).is_err());
-        assert!(shared.create_group(Some("")).is_err());
-        assert!(shared.create_group(Some("一二三四五六七八九十一二三四五六七")).is_err());
-        let auto = shared.create_group(None).unwrap();
-        assert_eq!(shared.groups().iter().find(|g| g.id == auto).unwrap().name, "分组 1");
+        let zh = crate::ocr_backend::i18n_for("zh-CN");
+        let en = crate::ocr_backend::i18n_for("en-US");
+        let work = shared.create_group(Some("工作"), zh).unwrap();
+        assert_eq!(
+            shared.create_group(Some("工作"), zh),
+            Err(PinError::GroupNameTaken)
+        );
+        assert_eq!(
+            shared.create_group(Some(""), zh),
+            Err(PinError::GroupNameEmpty)
+        );
+        assert_eq!(
+            shared.create_group(Some("一二三四五六七八九十一二三四五六七"), zh),
+            Err(PinError::GroupNameTooLong)
+        );
+        let auto = shared.create_group(None, zh).unwrap();
+        assert_eq!(
+            shared.groups().iter().find(|g| g.id == auto).unwrap().name,
+            "分组 1"
+        );
+        // 默认名随界面语言；错误文案两种语言都完整
+        let english = shared.create_group(None, en).unwrap();
+        assert_eq!(
+            shared
+                .groups()
+                .iter()
+                .find(|g| g.id == english)
+                .unwrap()
+                .name,
+            "Group 1"
+        );
+        for error in [
+            PinError::GroupNameEmpty,
+            PinError::GroupNameTooLong,
+            PinError::GroupNameTaken,
+            PinError::TooManyGroups,
+            PinError::CannotDeleteDefaultGroup,
+            PinError::GroupMissing,
+            PinError::PinMissing,
+            PinError::PayloadMissing,
+            PinError::SourceMissing,
+            PinError::DecodeFailed("d".into()),
+            PinError::Store("d".into()),
+        ] {
+            assert!(
+                error.message(en).is_ascii() && !error.message(en).contains("[!"),
+                "{error:?}"
+            );
+            assert_ne!(error.message(en), error.message(zh), "{error:?}");
+        }
+        shared.delete_group(&english).unwrap();
 
         let a = store_pin(&shared, 8, 8, PhysicalRect::new(0, 0, 8, 8));
         let b = store_pin(&shared, 8, 8, PhysicalRect::new(10, 0, 8, 8));
@@ -765,18 +932,31 @@ mod tests {
         let second = store_pin(&shared, 8, 8, PhysicalRect::new(3, 4, 8, 8));
         assert!(shared.remove_remembering(&first));
         assert!(shared.remove_remembering(&second));
-        assert!(!shared.remove_remembering(&second), "记录已不在，不应重复记忆");
+        assert!(
+            !shared.remove_remembering(&second),
+            "记录已不在，不应重复记忆"
+        );
         assert_eq!(shared.closed_count(), 2);
         let latest = shared.pop_closed().unwrap();
-        assert_eq!(latest.geometry.unwrap().rect(), PhysicalRect::new(3, 4, 8, 8));
+        assert_eq!(
+            latest.geometry.unwrap().rect(),
+            PhysicalRect::new(3, 4, 8, 8)
+        );
         assert!(!latest.png.is_empty());
         let older = shared.pop_closed().unwrap();
-        assert_eq!(older.geometry.unwrap().rect(), PhysicalRect::new(1, 2, 8, 8));
+        assert_eq!(
+            older.geometry.unwrap().rect(),
+            PhysicalRect::new(1, 2, 8, 8)
+        );
         assert!(shared.pop_closed().is_none());
 
         let kept = store_pin(&shared, 8, 8, PhysicalRect::new(0, 0, 8, 8));
         assert!(shared.remove(&kept));
-        assert_eq!(shared.closed_count(), 0, "普通移除（淘汰 / 删除）不进最近关闭");
+        assert_eq!(
+            shared.closed_count(),
+            0,
+            "普通移除（淘汰 / 删除）不进最近关闭"
+        );
         for _ in 0..(MAX_CLOSED_PINS + 3) {
             let id = store_pin(&shared, 8, 8, PhysicalRect::new(0, 0, 8, 8));
             shared.remove_remembering(&id);
@@ -959,6 +1139,42 @@ mod tests {
         let pins = dir.join("pinned_windows_v2").join("pins");
         assert!(!pins.join(&ids[0]).exists());
         assert!(pins.join(&ids[3]).is_dir());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 贴图历史压缩级别跟随配置：高档编码结果不比低档大，且都是合法 PNG。
+    #[test]
+    fn history_compression_follows_config() {
+        let dir = temp_dir("compression");
+        let (shared, _) = open_in(&dir);
+        assert_eq!(shared.compression(), CompressionLevel::Medium);
+        let set = |value: &str| {
+            shared
+                .config
+                .borrow_mut()
+                .set_value("pinned_history/compression_level", serde_json::json!(value))
+                .unwrap();
+        };
+        set("low");
+        assert_eq!(shared.compression(), CompressionLevel::Low);
+        let low = crate::screenshot_output::encode_png_with_level(
+            64,
+            64,
+            &gradient(64, 64),
+            shared.compression(),
+        )
+        .unwrap();
+        set("high");
+        assert_eq!(shared.compression(), CompressionLevel::High);
+        let high = crate::screenshot_output::encode_png_with_level(
+            64,
+            64,
+            &gradient(64, 64),
+            shared.compression(),
+        )
+        .unwrap();
+        assert!(high.len() <= low.len());
+        assert_eq!(&high[1..4], b"PNG");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

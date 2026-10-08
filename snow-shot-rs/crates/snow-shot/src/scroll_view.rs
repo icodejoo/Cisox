@@ -4,13 +4,14 @@
 //! 采集与拼接在独立线程里跑（见 [`crate::scroll_capture`]），这里只读共享进度并把按钮转成控制开关。
 
 use crate::app_runtime::UiEvent;
-use crate::scroll_capture::{
-    AUTO_SCROLL_DELTA, AutoScroller, CaptureOptions, CaptureTiming, CopyStatus, ScreenSource, ScrollControl,
-    ScrollPhase, ScrollProgress, ScrollSink, SharedProgress, run_capture,
-};
 use crate::screenshot_output::{ExportOverrides, ExportSettings, home_directory, save_automatic};
+use crate::scroll_capture::{
+    AUTO_SCROLL_DELTA, AutoScroller, CaptureOptions, CaptureTiming, CopyStatus, ScreenSource,
+    ScrollControl, ScrollPhase, ScrollProgress, ScrollSink, SharedProgress, run_capture,
+};
 use crate::settings_state::SharedConfig;
 use snow_capability::CapabilityRegistry;
+use snow_i18n::{Args, I18n};
 use snow_platform::clipboard::copy_image_to_clipboard;
 use snow_platform::scroll_input::post_wheel;
 use snow_ui::shell::geometry::{PhysicalPoint, PhysicalRect, Region};
@@ -124,7 +125,11 @@ impl ScrollLayout {
 ///
 /// # 返回
 /// 布局；边框与控制条都不与选区相交（不会进入被截取的画面）。
-pub fn compute_scroll_layout(region: PhysicalRect, window: PhysicalRect, scale: f32) -> ScrollLayout {
+pub fn compute_scroll_layout(
+    region: PhysicalRect,
+    window: PhysicalRect,
+    scale: f32,
+) -> ScrollLayout {
     let t = (BORDER_LOGICAL * scale).ceil() as i32;
     let strips = [
         PhysicalRect::new(region.x - t, region.y - t, region.width + 2 * t, t),
@@ -150,35 +155,62 @@ pub fn compute_scroll_layout(region: PhysicalRect, window: PhysicalRect, scale: 
 /// # 参数
 /// - `progress`：进度快照。
 /// - `auto_scroll`：自动滚动是否开启。
-pub fn status_lines(progress: &ScrollProgress, auto_scroll: bool) -> (String, String) {
+/// - `i18n`：界面语料。
+pub fn status_lines(progress: &ScrollProgress, auto_scroll: bool, i18n: &I18n) -> (String, String) {
     match &progress.phase {
         ScrollPhase::Capturing => {
-            let mode = if auto_scroll { "自动滚动" } else { "请滚动内容" };
-            let first = if progress.frames == 0 {
-                format!("长截图 · {mode}")
+            let mode = i18n.tr(if auto_scroll {
+                "scroll-status-mode-auto"
             } else {
-                format!("长截图 · {} 帧 · {}×{} · {mode}", progress.frames, progress.width, progress.height)
+                "scroll-status-mode-manual"
+            });
+            let first = if progress.frames == 0 {
+                i18n.tr_with("scroll-status-title", &Args::new().named("mode", mode))
+            } else {
+                i18n.tr_with(
+                    "scroll-status-title-frames",
+                    &Args::new()
+                        .named("frames", progress.frames.to_string())
+                        .named("width", progress.width.to_string())
+                        .named("height", progress.height.to_string())
+                        .named("mode", mode),
+                )
             };
-            let second = progress
-                .hint
-                .clone()
-                .unwrap_or_else(|| "每次滚动不超过半屏；滚完点“完成”".to_string());
+            let second = progress.hint.as_ref().map_or_else(
+                || i18n.tr("scroll-status-hint-default"),
+                |hint| hint.message(i18n),
+            );
             (first, second)
         }
-        ScrollPhase::Saving => ("正在保存…".to_string(), String::new()),
+        ScrollPhase::Saving => (i18n.tr("scroll-status-saving"), String::new()),
         ScrollPhase::Done(done) => {
             let copied = match &done.copied {
-                CopyStatus::Copied => "已复制到剪贴板".to_string(),
-                CopyStatus::Skipped(why) => format!("未复制（{why}）"),
-                CopyStatus::Failed(e) => format!("复制失败（{e}）"),
+                CopyStatus::Copied => i18n.tr("scroll-status-copied"),
+                CopyStatus::Skipped(why) => i18n.tr_with(
+                    "scroll-status-not-copied",
+                    &Args::new().named("why", why.message(i18n)),
+                ),
+                CopyStatus::Failed(e) => i18n.tr_with(
+                    "scroll-status-copy-failed",
+                    &Args::new().named("detail", e.as_str()),
+                ),
             };
             (
-                format!("完成 · {}×{} · {copied}", done.width, done.height),
-                format!("已保存 {} 个文件", done.files.len()),
+                i18n.tr_with(
+                    "scroll-status-done",
+                    &Args::new()
+                        .named("width", done.width.to_string())
+                        .named("height", done.height.to_string())
+                        .named("copied", copied),
+                ),
+                i18n.tr_with(
+                    "scroll-status-saved-files",
+                    &Args::new().named("count", done.files.len().to_string()),
+                ),
             )
         }
-        ScrollPhase::Failed(reason) => ("长截图失败".to_string(), reason.clone()),
-        ScrollPhase::Cancelled => ("已取消".to_string(), String::new()),
+        ScrollPhase::Failed(reason) => (i18n.tr("scroll-status-failed"), reason.message(i18n)),
+        ScrollPhase::Cancelled => (i18n.tr("scroll-status-cancelled"), String::new()),
     }
 }
 
@@ -194,6 +226,8 @@ pub struct ScrollAreaView {
     progress: SharedProgress,
     /// 控制开关。
     control: Arc<ScrollControl>,
+    /// 界面语料。
+    i18n: &'static I18n,
     /// 用户点了“关闭”。
     dismissed: bool,
     /// 进入终态（完成 / 失败）的时刻。
@@ -208,19 +242,26 @@ impl ScrollAreaView {
     /// - `monitor_bounds`：显示器边界（虚拟桌面坐标，用其宽高作为窗口大小）。
     /// - `scale`：显示器缩放比。
     /// - `progress` / `control`：与采集线程共享的进度与开关。
+    /// - `i18n`：界面语料。
     pub fn new(
         region: PhysicalRect,
         monitor_bounds: PhysicalRect,
         scale: f32,
         progress: SharedProgress,
         control: Arc<ScrollControl>,
+        i18n: &'static I18n,
     ) -> Self {
         Self {
             region,
             window: PhysicalRect::new(0, 0, monitor_bounds.width, monitor_bounds.height),
-            scale: if scale.is_finite() && scale > 0.0 { scale } else { 1.0 },
+            scale: if scale.is_finite() && scale > 0.0 {
+                scale
+            } else {
+                1.0
+            },
             progress,
             control,
+            i18n,
             dismissed: false,
             ended_at: None,
         }
@@ -233,7 +274,10 @@ impl ScrollAreaView {
 
     /// 读取进度快照。
     fn snapshot(&self) -> ScrollProgress {
-        self.progress.lock().unwrap_or_else(PoisonError::into_inner).clone()
+        self.progress
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     /// 推进状态：记录进入终态的时刻。
@@ -289,7 +333,7 @@ impl ScrollAreaView {
     fn button(
         &self,
         id: &'static str,
-        label: &'static str,
+        label: String,
         bg: u32,
         text: u32,
         cx: &mut Context<Self>,
@@ -328,7 +372,7 @@ impl Render for ScrollAreaView {
             root = root.child(div().absolute().left(l).top(t).w(w).h(h).bg(rgba(accent)));
         }
         let auto = self.control.auto_scroll();
-        let (first, second) = status_lines(&progress, auto);
+        let (first, second) = status_lines(&progress, auto, self.i18n);
         let (l, t, w, h) = self.logical(layout.bar);
         let mut buttons = div().flex().items_center().gap_2();
         match progress.phase {
@@ -338,25 +382,44 @@ impl Render for ScrollAreaView {
                 buttons = buttons
                     .child(self.button(
                         "scroll-auto",
-                        if auto { "自动滚动：开" } else { "自动滚动：关" },
+                        self.i18n.tr(if auto {
+                            "scroll-btn-auto-on"
+                        } else {
+                            "scroll-btn-auto-off"
+                        }),
                         if auto { 0x1677FFFF } else { 0x303030FF },
                         0xFFFFFFFF,
                         cx,
                         move |_| toggle.set_auto_scroll(!toggle.auto_scroll()),
                     ))
-                    .child(self.button("scroll-finish", "完成", COLOR_CAPTURING, 0xFFFFFFFF, cx, move |_| {
-                        control.request_finish()
-                    }));
+                    .child(self.button(
+                        "scroll-finish",
+                        self.i18n.tr("scroll-btn-finish"),
+                        COLOR_CAPTURING,
+                        0xFFFFFFFF,
+                        cx,
+                        move |_| control.request_finish(),
+                    ));
                 let cancel = Arc::clone(&self.control);
-                buttons = buttons.child(self.button("scroll-cancel", "取消", 0x434343FF, 0xFF4D4FFF, cx, move |_| {
-                    cancel.request_cancel()
-                }));
+                buttons = buttons.child(self.button(
+                    "scroll-cancel",
+                    self.i18n.tr("scroll-btn-cancel"),
+                    0x434343FF,
+                    0xFF4D4FFF,
+                    cx,
+                    move |_| cancel.request_cancel(),
+                ));
             }
             ScrollPhase::Saving => {}
             _ => {
-                buttons = buttons.child(self.button("scroll-close", "关闭", 0x434343FF, 0xFFFFFFFF, cx, |this| {
-                    this.dismissed = true
-                }));
+                buttons = buttons.child(self.button(
+                    "scroll-close",
+                    self.i18n.tr("scroll-btn-close"),
+                    0x434343FF,
+                    0xFFFFFFFF,
+                    cx,
+                    |this| this.dismissed = true,
+                ));
             }
         }
         root.child(
@@ -386,7 +449,12 @@ impl Render for ScrollAreaView {
                                 .text_color(rgba(0xFFFFFFFF))
                                 .child(first),
                         )
-                        .child(div().text_size(px(11.0)).text_color(rgba(0xBFBFBFFF)).child(second)),
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(rgba(0xBFBFBFFF))
+                                .child(second),
+                        ),
                 )
                 .child(buttons),
         )
@@ -453,7 +521,11 @@ impl ScrollHost {
     /// - `caps`：能力表。
     /// - `inbox`：主线程收件箱。
     /// - `config`：共享配置存储。
-    pub fn new(caps: CapabilityRegistry, inbox: MainThreadInbox<UiEvent>, config: SharedConfig) -> Self {
+    pub fn new(
+        caps: CapabilityRegistry,
+        inbox: MainThreadInbox<UiEvent>,
+        config: SharedConfig,
+    ) -> Self {
         Self {
             caps,
             inbox,
@@ -464,7 +536,9 @@ impl ScrollHost {
 
     /// 是否有长截图窗仍在运行。
     pub fn is_busy(&self, cx: &ShellContext) -> bool {
-        self.active.as_ref().is_some_and(|a| cx.is_window_open(&a.window))
+        self.active
+            .as_ref()
+            .is_some_and(|a| cx.is_window_open(&a.window))
     }
 
     /// 开始一次长截图：启动采集线程并打开控制窗。
@@ -474,7 +548,13 @@ impl ScrollHost {
     /// - `region`：截取区域（虚拟桌面物理坐标）。
     /// - `monitor`：区域所在显示器。
     /// - `autotest`：自动化参数（验收用）。
-    pub fn begin(&mut self, cx: &mut ShellContext, region: PhysicalRect, monitor: &MonitorInfo, autotest: Option<&ScrollAutotest>) {
+    pub fn begin(
+        &mut self,
+        cx: &mut ShellContext,
+        region: PhysicalRect,
+        monitor: &MonitorInfo,
+        autotest: Option<&ScrollAutotest>,
+    ) {
         if self.is_busy(cx) {
             tracing::info!("已有长截图在进行，忽略新的请求");
             return;
@@ -495,11 +575,30 @@ impl ScrollHost {
         let progress: SharedProgress = Arc::new(Mutex::new(ScrollProgress::new()));
         let control = Arc::new(ScrollControl::default());
         control.set_auto_scroll(autotest.is_some_and(|a| a.auto_scroll));
-        self.spawn_worker(region, Arc::clone(&progress), Arc::clone(&control), settings, locale, autotest.and_then(|a| a.stop_after_secs));
+        self.spawn_worker(
+            region,
+            Arc::clone(&progress),
+            Arc::clone(&control),
+            settings,
+            locale.clone(),
+            autotest.and_then(|a| a.stop_after_secs),
+        );
 
         let bounds = monitor.bounds;
-        let window_region = PhysicalRect::new(region.x - bounds.x, region.y - bounds.y, region.width, region.height);
-        let view = ScrollAreaView::new(window_region, bounds, monitor.scale.value(), progress, control);
+        let window_region = PhysicalRect::new(
+            region.x - bounds.x,
+            region.y - bounds.y,
+            region.width,
+            region.height,
+        );
+        let view = ScrollAreaView::new(
+            window_region,
+            bounds,
+            monitor.scale.value(),
+            progress,
+            control,
+            crate::ocr_backend::i18n_for(&locale),
+        );
         let mut spec = WindowSpec::overlay(MonitorTarget::Id(monitor.id));
         spec.focus = false;
         match cx.open_window(&spec, move |_window, app| app.new(|_| view)) {
@@ -530,34 +629,42 @@ impl ScrollHost {
     ) {
         let inbox = self.inbox.clone();
         let center = (region.x + region.width / 2, region.y + region.height / 2);
-        let spawned = std::thread::Builder::new().name("snow-scroll-capture".into()).spawn(move || {
-            if let Some(secs) = stop_after {
-                let stopper = Arc::clone(&control);
-                std::thread::spawn(move || {
-                    std::thread::sleep(Duration::from_secs(secs));
-                    stopper.request_finish();
-                });
-            }
-            let scroller: AutoScroller = Box::new(move || post_wheel(center, AUTO_SCROLL_DELTA));
-            let mut sink = SystemScrollSink { settings, locale };
-            let wake_inbox = inbox.clone();
-            run_capture(
-                ScreenSource::new((region.x, region.y, region.width.max(0) as u32, region.height.max(0) as u32)),
-                &control,
-                &progress,
-                &move || {
-                    wake_inbox.push(UiEvent::ScrollTick);
-                },
-                Some(scroller),
-                &mut sink,
-                CaptureOptions {
-                    copy_to_clipboard: true,
-                    timing: CaptureTiming::default(),
-                },
-            );
-            tracing::info!("长截图采集线程结束");
-            inbox.push(UiEvent::ScrollTick);
-        });
+        let spawned = std::thread::Builder::new()
+            .name("snow-scroll-capture".into())
+            .spawn(move || {
+                if let Some(secs) = stop_after {
+                    let stopper = Arc::clone(&control);
+                    std::thread::spawn(move || {
+                        std::thread::sleep(Duration::from_secs(secs));
+                        stopper.request_finish();
+                    });
+                }
+                let scroller: AutoScroller =
+                    Box::new(move || post_wheel(center, AUTO_SCROLL_DELTA));
+                let mut sink = SystemScrollSink { settings, locale };
+                let wake_inbox = inbox.clone();
+                run_capture(
+                    ScreenSource::new((
+                        region.x,
+                        region.y,
+                        region.width.max(0) as u32,
+                        region.height.max(0) as u32,
+                    )),
+                    &control,
+                    &progress,
+                    &move || {
+                        wake_inbox.push(UiEvent::ScrollTick);
+                    },
+                    Some(scroller),
+                    &mut sink,
+                    CaptureOptions {
+                        copy_to_clipboard: true,
+                        timing: CaptureTiming::default(),
+                    },
+                );
+                tracing::info!("长截图采集线程结束");
+                inbox.push(UiEvent::ScrollTick);
+            });
         if let Err(e) = spawned {
             tracing::error!(error = %e, "无法创建长截图采集线程");
         }
@@ -647,7 +754,8 @@ impl ScrollHost {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scroll_capture::ScrollDone;
+    use crate::scroll_capture::{CopySkip, ScrollDone, ScrollFailure, ScrollHint};
+    use crate::stitch_service::RejectReason;
 
     /// 自动化参数解析：最小形态、含 auto、含秒数；非法输入被拒绝。
     #[test]
@@ -660,7 +768,14 @@ mod tests {
         assert_eq!(t.stop_after_secs, Some(15));
         let t = parse_scroll_autotest("0,0,100,100,8").unwrap();
         assert_eq!(t.stop_after_secs, Some(8));
-        for bad in ["", "1,2,3", "a,b,c,d", "0,0,0,10", "0,0,10,10,0", "0,0,10,10,xx"] {
+        for bad in [
+            "",
+            "1,2,3",
+            "a,b,c,d",
+            "0,0,0,10",
+            "0,0,10,10,0",
+            "0,0,10,10,xx",
+        ] {
             assert_eq!(parse_scroll_autotest(bad), None, "应拒绝 {bad:?}");
         }
     }
@@ -685,28 +800,41 @@ mod tests {
     /// 文案：采集中 / 保存中 / 完成 / 失败各不相同，提示优先于默认引导。
     #[test]
     fn status_text_per_phase() {
+        let zh = crate::ocr_backend::i18n_for("zh-CN");
+        let en = crate::ocr_backend::i18n_for("en-US");
         let mut p = ScrollProgress::new();
-        let (first, second) = status_lines(&p, false);
+        let (first, second) = status_lines(&p, false, zh);
         assert!(first.contains("请滚动内容") && second.contains("完成"));
         p.frames = 3;
         p.width = 100;
         p.height = 400;
-        p.hint = Some("滚动太快".into());
-        let (first, second) = status_lines(&p, true);
+        p.hint = Some(ScrollHint::Rejected(RejectReason::TooFast { offset: 500 }));
+        let (first, second) = status_lines(&p, true, zh);
         assert!(first.contains("3 帧") && first.contains("100×400") && first.contains("自动滚动"));
-        assert_eq!(second, "滚动太快");
+        assert!(second.contains("滚动太快"), "{second}");
+        let (first_en, second_en) = status_lines(&p, true, en);
+        assert!(
+            first_en.is_ascii() && second_en.is_ascii(),
+            "{first_en} / {second_en}"
+        );
         p.phase = ScrollPhase::Saving;
-        assert_eq!(status_lines(&p, false).0, "正在保存…");
+        assert_eq!(status_lines(&p, false, zh).0, "正在保存…");
+        assert_eq!(status_lines(&p, false, en).0, "Saving...");
         p.phase = ScrollPhase::Done(ScrollDone {
             width: 100,
             height: 400,
             files: vec![PathBuf::from("a.png"), PathBuf::from("b.png")],
-            copied: CopyStatus::Skipped("太大".into()),
+            copied: CopyStatus::Skipped(CopySkip::TooLarge { megabytes: 300 }),
         });
-        let (first, second) = status_lines(&p, false);
-        assert!(first.contains("未复制（太大）") && second.contains("2 个文件"));
-        p.phase = ScrollPhase::Failed("拒绝访问".into());
-        assert_eq!(status_lines(&p, false).1, "拒绝访问");
+        let (first, second) = status_lines(&p, false, zh);
+        assert!(
+            first.contains("未复制（图像过大（300 MB）") && second.contains("2 个文件"),
+            "{first}"
+        );
+        p.phase = ScrollPhase::Failed(ScrollFailure::Output("拒绝访问".into()));
+        assert_eq!(status_lines(&p, false, zh).1, "拒绝访问");
+        p.phase = ScrollPhase::Failed(ScrollFailure::NothingCaptured);
+        assert_eq!(status_lines(&p, false, en).1, "Nothing was captured.");
     }
 
     /// 视图状态机：取消立即结束；完成后停留一段时间才结束；点关闭立即结束。
@@ -720,6 +848,7 @@ mod tests {
             1.0,
             Arc::clone(&progress),
             control,
+            crate::ocr_backend::i18n_for("en-US"),
         );
         let t0 = Instant::now();
         view.advance(t0);

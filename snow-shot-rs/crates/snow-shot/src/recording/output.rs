@@ -66,7 +66,13 @@ pub fn expand_filename(template: &str, now: LocalDateTime) -> String {
     out.push_str(rest);
     let cleaned: String = out
         .chars()
-        .map(|c| if INVALID_FILENAME_CHARS.contains(&c) || c.is_control() { '_' } else { c })
+        .map(|c| {
+            if INVALID_FILENAME_CHARS.contains(&c) || c.is_control() {
+                '_'
+            } else {
+                c
+            }
+        })
         .collect();
     let trimmed = cleaned.trim().trim_end_matches('.');
     if trimmed.is_empty() {
@@ -125,7 +131,7 @@ pub fn unique_path(dir: &Path, stem: &str, extension: &str) -> Result<PathBuf, S
             return Ok(path);
         }
     }
-    Err("无法生成不冲突的文件名".to_string())
+    Err("could not find a file name that does not collide".to_string())
 }
 
 /// 读取布尔配置，非布尔时回退。
@@ -165,9 +171,14 @@ pub fn build_recording_config(
     home: Option<&Path>,
     now: LocalDateTime,
 ) -> Result<RecordingConfig, String> {
-    let format = RecordingFormat::from_config(document.value(KEY_FORMAT).as_str().unwrap_or_default());
+    let format =
+        RecordingFormat::from_config(document.value(KEY_FORMAT).as_str().unwrap_or_default());
     // 视频与动图各有一套帧率配置
-    let fps_key = if format == RecordingFormat::Mp4 { KEY_FPS } else { KEY_ANIMATED_FPS };
+    let fps_key = if format == RecordingFormat::Mp4 {
+        KEY_FPS
+    } else {
+        KEY_ANIMATED_FPS
+    };
     let dir = resolve_video_directory(document, home);
     let template = document.value(KEY_FILENAME_FORMAT);
     let stem = expand_filename(template.as_str().unwrap_or_default(), now);
@@ -178,7 +189,11 @@ pub fn build_recording_config(
         show_cursor: bool_of(document, KEY_SHOW_CURSOR, true),
         format,
         output_path,
-        countdown_secs: document.value(KEY_START_DELAY).as_u64().and_then(|n| u32::try_from(n).ok()).unwrap_or(0),
+        countdown_secs: document
+            .value(KEY_START_DELAY)
+            .as_u64()
+            .and_then(|n| u32::try_from(n).ok())
+            .unwrap_or(0),
         audio: audio_request(document, format),
         effects: crate::recording::effects::effects_request(document),
     })
@@ -190,7 +205,14 @@ mod tests {
 
     /// 固定测试时间。
     fn t() -> LocalDateTime {
-        LocalDateTime { year: 2026, month: 9, day: 30, hour: 8, minute: 5, second: 3 }
+        LocalDateTime {
+            year: 2026,
+            month: 9,
+            day: 30,
+            hour: 8,
+            minute: 5,
+            second: 3,
+        }
     }
 
     /// 时间记号展开、非法字符替换、空结果兜底。
@@ -210,13 +232,15 @@ mod tests {
     #[test]
     fn video_directory_fallbacks() {
         let mut doc = ConfigDocument::from_bytes(None);
-        doc.set_value(KEY_SAVE_DIR, Value::String(String::new())).unwrap();
+        doc.set_value(KEY_SAVE_DIR, Value::String(String::new()))
+            .unwrap();
         assert_eq!(
             resolve_video_directory(&doc, Some(Path::new("C:/Users/a"))),
             Path::new("C:/Users/a").join("Videos")
         );
         assert_eq!(resolve_video_directory(&doc, None), std::env::temp_dir());
-        doc.set_value(KEY_SAVE_DIR, Value::String("D:/rec".into())).unwrap();
+        doc.set_value(KEY_SAVE_DIR, Value::String("D:/rec".into()))
+            .unwrap();
         assert_eq!(resolve_video_directory(&doc, None), PathBuf::from("D:/rec"));
     }
 
@@ -238,16 +262,27 @@ mod tests {
     fn config_from_document() {
         let dir = std::env::temp_dir().join(format!("snow-rec-cfg-{}", std::process::id()));
         let mut doc = ConfigDocument::from_bytes(None);
-        doc.set_value(KEY_SAVE_DIR, Value::String(dir.to_string_lossy().into_owned())).unwrap();
-        doc.set_value(KEY_FORMAT, Value::String("gif".into())).unwrap();
-        doc.set_value(KEY_START_DELAY, serde_json::json!(3)).unwrap();
-        doc.set_value(KEY_SHOW_CURSOR, serde_json::json!(false)).unwrap();
-        let cfg = build_recording_config(&doc, PhysicalRect::new(1, 2, 300, 200), None, t()).unwrap();
+        doc.set_value(
+            KEY_SAVE_DIR,
+            Value::String(dir.to_string_lossy().into_owned()),
+        )
+        .unwrap();
+        doc.set_value(KEY_FORMAT, Value::String("gif".into()))
+            .unwrap();
+        doc.set_value(KEY_START_DELAY, serde_json::json!(3))
+            .unwrap();
+        doc.set_value(KEY_SHOW_CURSOR, serde_json::json!(false))
+            .unwrap();
+        let cfg =
+            build_recording_config(&doc, PhysicalRect::new(1, 2, 300, 200), None, t()).unwrap();
         assert_eq!(cfg.format, RecordingFormat::Gif);
         assert_eq!(cfg.countdown_secs, 3);
         assert!(!cfg.show_cursor);
         assert_eq!(cfg.region, PhysicalRect::new(1, 2, 300, 200));
-        assert_eq!(cfg.output_path.extension().and_then(|e| e.to_str()), Some("gif"));
+        assert_eq!(
+            cfg.output_path.extension().and_then(|e| e.to_str()),
+            Some("gif")
+        );
         assert!(cfg.fps > 0);
         // 动图格式强制不录音频
         assert!(!cfg.audio.enabled());
@@ -258,12 +293,24 @@ mod tests {
     fn config_audio_follows_latest_switches() {
         let dir = std::env::temp_dir().join(format!("snow-rec-aud-{}", std::process::id()));
         let mut doc = ConfigDocument::from_bytes(None);
-        doc.set_value(KEY_SAVE_DIR, Value::String(dir.to_string_lossy().into_owned())).unwrap();
+        doc.set_value(
+            KEY_SAVE_DIR,
+            Value::String(dir.to_string_lossy().into_owned()),
+        )
+        .unwrap();
         let region = PhysicalRect::new(0, 0, 100, 100);
         let first = build_recording_config(&doc, region, None, t()).unwrap();
         assert!(!first.audio.microphone && first.audio.system);
-        doc.set_value("screen_recording/enable_microphone", serde_json::json!(true)).unwrap();
-        doc.set_value("screen_recording/enable_system_audio", serde_json::json!(false)).unwrap();
+        doc.set_value(
+            "screen_recording/enable_microphone",
+            serde_json::json!(true),
+        )
+        .unwrap();
+        doc.set_value(
+            "screen_recording/enable_system_audio",
+            serde_json::json!(false),
+        )
+        .unwrap();
         let second = build_recording_config(&doc, region, None, t()).unwrap();
         assert!(second.audio.microphone && !second.audio.system);
     }
