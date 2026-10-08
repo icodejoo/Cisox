@@ -36,9 +36,9 @@ main-page-system = System
 
 main-page-about = About
 
-main-desc-hotkeys = Shortcuts that work anywhere in the system. Edit them in the settings window.
+main-desc-hotkeys = Shortcuts that work anywhere in the system.
 
-main-desc-mouse = Mouse gestures that trigger actions. Edit them in the settings window.
+main-desc-mouse = Mouse gestures that trigger actions.
 
 main-desc-history = Browse, copy and pin past screenshots.
 
@@ -62,10 +62,12 @@ main-desc-system = Startup, priority and network.
 
 main-desc-about = About this application.
 
-main-open-settings = Open settings
+main-open-settings = Open in separate window
 
 main-open-history = Open screenshot history
 
 main-open-pins = Open pin management
 
 main-open-translate = Open translate page
+
+main-goto-settings = Related settings

@@ -11,6 +11,12 @@ use crate::annotation_style::{
     ArrowheadChoice, FONT_PRESETS, PALETTE, Rgba, ToolStyle, ToolStyleStore, WIDTH_PRESETS,
     config_key, nearest_index, panel_placement, style_fields,
 };
+use crate::decoration_style::{
+    SPOTLIGHT_OPACITY_PRESETS, SPOTLIGHT_STYLE_KEY, SpotlightEdit, WATERMARK_ANGLE_PRESETS,
+    WATERMARK_FONT_PRESETS, WATERMARK_GAP_PRESETS, WATERMARK_OPACITY_PRESETS, WATERMARK_STYLE_KEY,
+    WatermarkEdit, apply_spotlight_edit, apply_watermark_edit, nearest_preset, spotlight_to_json,
+    watermark_to_json,
+};
 use crate::desktop_frames::DesktopFrames;
 use crate::frozen_frame::FrozenFrame;
 use crate::history_nav::{FinishStep, HistoryNav, HistoryProvider, LoadOutcome, NavStep};
@@ -50,6 +56,7 @@ use snow_ui::shell::selection::{
     marquee_selection_rect, selection_size_label,
 };
 use snow_ui::ui::component::checkbox::Checkbox;
+use snow_ui::ui::component::input::{Input, InputEvent, InputState};
 use snow_ui::ui::component::searchable_list::{SearchableListItem, SearchableVec};
 use snow_ui::ui::component::select::{Select, SelectEvent, SelectState};
 use snow_ui::ui::component::{IndexPath, Sizable, Size as ComponentSize, Theme, ThemeMode};
@@ -72,9 +79,15 @@ const MAGNIFIER_LOGICAL_SIZE: (i32, i32) = (109, 178);
 /// 放大镜距光标的逻辑偏移。
 const MAGNIFIER_OFFSET: i32 = 16;
 /// 工具栏的逻辑尺寸（宽, 高），仅用于定位与命中避让。
-const TOOLBAR_LOGICAL_SIZE: (i32, i32) = (980, 36);
+const TOOLBAR_LOGICAL_SIZE: (i32, i32) = (1080, 36);
 /// 样式面板的逻辑尺寸（宽, 高），仅用于定位与命中避让。
 const STYLE_PANEL_SIZE: (i32, i32) = (560, 84);
+/// 水印设置面板的逻辑尺寸（宽, 高），仅用于定位与命中避让。
+const WATERMARK_PANEL_SIZE: (i32, i32) = (560, 116);
+/// 聚光灯设置面板的逻辑尺寸（宽, 高），仅用于定位与命中避让。
+const SPOTLIGHT_PANEL_SIZE: (i32, i32) = (560, 48);
+/// 水印文字输入框的宽度。
+const WATERMARK_INPUT_WIDTH: f32 = 220.0;
 /// 样式面板与工具栏的间距。
 const STYLE_PANEL_GAP: i32 = 6;
 /// 样式面板背景色。
@@ -467,6 +480,37 @@ enum StyleSelectKind {
     FontSize,
     /// 箭头头型。
     Arrowhead,
+}
+
+/// 聚光灯 / 水印设置面板里会触发变更的下拉种类。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DecorationSelectKind {
+    /// 水印字号。
+    WatermarkFont,
+    /// 水印不透明度（百分比）。
+    WatermarkOpacity,
+    /// 水印旋转角度。
+    WatermarkAngle,
+    /// 水印平铺间距。
+    WatermarkGap,
+    /// 聚光灯不透明度（百分比）。
+    SpotlightOpacity,
+}
+
+/// 聚光灯 / 水印设置面板的控件实体（首次选中这两个工具时创建）。
+struct DecorationUi {
+    /// 水印文字输入框。
+    text: Entity<InputState>,
+    /// 水印字号下拉。
+    wm_font: Entity<StyleSelect>,
+    /// 水印不透明度下拉。
+    wm_opacity: Entity<StyleSelect>,
+    /// 水印角度下拉。
+    wm_angle: Entity<StyleSelect>,
+    /// 水印间距下拉。
+    wm_gap: Entity<StyleSelect>,
+    /// 聚光灯不透明度下拉。
+    sp_opacity: Entity<StyleSelect>,
 }
 
 /// 样式面板用到的三个下拉实体（首次显示面板时创建）。
@@ -1234,6 +1278,14 @@ pub struct ScreenshotOverlayView {
     i18n: &'static I18n,
     /// 样式面板的下拉实体。
     style_ui: Option<StyleUi>,
+    /// 聚光灯 / 水印设置面板的控件实体。
+    decoration_ui: Option<DecorationUi>,
+    /// 设置面板已按该工具同步过控件状态（工具变化或撤销后重置）。
+    decoration_prepared: Option<AnnotationTool>,
+    /// 水印文字输入框正持有键盘焦点（此时覆盖窗快捷键让路）。
+    decoration_text_focused: bool,
+    /// 已把配置里保存的聚光灯 / 水印样式套到当前标注层（避免重复写入撤销历史）。
+    decoration_loaded: bool,
     /// 标注预览分块（只保留非空块）。
     tile_sprites: HashMap<TileKey, TileSprite>,
     /// 已被替换、等待在下一次渲染时从 GPU 图集释放的图像。
@@ -1376,6 +1428,10 @@ impl ScreenshotOverlayView {
             style_config: None,
             i18n: crate::ocr_backend::i18n_for(snow_i18n::FALLBACK_LOCALE),
             style_ui: None,
+            decoration_ui: None,
+            decoration_prepared: None,
+            decoration_text_focused: false,
+            decoration_loaded: false,
             tile_sprites: HashMap::new(),
             pending_drops: Vec::new(),
             annotating: false,
@@ -1732,7 +1788,7 @@ impl ScreenshotOverlayView {
                     return OverlayOutcome::Stay;
                 }
                 // 选中标注工具后，选区内部（非手柄 / 边缘）的按下属于标注
-                if mode == SelectionDragMode::All && self.tool != AnnotationTool::None {
+                if mode == SelectionDragMode::All && self.tool.draws() {
                     if self.tool == AnnotationTool::Text {
                         return OverlayOutcome::BeginText(point);
                     }
@@ -2170,7 +2226,7 @@ impl ScreenshotOverlayView {
         }
     }
 
-    /// 绘制工具快捷键：能映射到已有标注工具的切换，橡皮擦 / 水印尚未实现给出提示。
+    /// 绘制工具快捷键：映射到标注工具并切换（水印键打开水印设置面板）。
     ///
     /// # 参数
     /// - `key`：绘制键位。
@@ -2185,9 +2241,7 @@ impl ScreenshotOverlayView {
             DrawingKey::SerialNumber => AnnotationTool::Counter,
             DrawingKey::Filter => AnnotationTool::Mosaic,
             DrawingKey::Eraser => AnnotationTool::Eraser,
-            DrawingKey::Watermark => {
-                return self.not_implemented_outcome("drawing_shortcuts/watermark");
-            }
+            DrawingKey::Watermark => AnnotationTool::Watermark,
         };
         // 再按同一个键不取消工具（与点工具栏不同），只在工具变化时切换
         if tool == self.tool {
@@ -2214,12 +2268,6 @@ impl ScreenshotOverlayView {
             "overlay-key-not-implemented",
             &snow_i18n::Args::new().named("action", name),
         ));
-    }
-
-    /// 提示未实现并返回“留在覆盖窗”。
-    fn not_implemented_outcome(&mut self, config_key: &str) -> OverlayOutcome {
-        self.show_not_implemented(config_key);
-        OverlayOutcome::Stay
     }
 
     /// 换上覆盖窗键位表。
@@ -2295,6 +2343,7 @@ impl ScreenshotOverlayView {
                 self.tool = next;
                 self.status_message = None;
                 self.apply_stored_style(next);
+                self.apply_stored_decoration(next);
             }
             Err(e) => {
                 tracing::error!(error = %e, tool = ?next, "切换标注工具失败");
@@ -2848,13 +2897,13 @@ impl ScreenshotOverlayView {
     /// - `toolbar`：工具栏左上角（逻辑像素）。
     /// - `screen`：屏幕逻辑尺寸。
     fn style_panel_origin(&self, toolbar: (i32, i32), screen: (i32, i32)) -> Option<(i32, i32)> {
-        if style_fields(self.tool).is_empty() || self.record_mode || self.scroll_mode {
+        if self.active_panel_size().is_none() || self.record_mode || self.scroll_mode {
             return None;
         }
         Some(panel_placement(
             toolbar,
             TOOLBAR_LOGICAL_SIZE.1,
-            STYLE_PANEL_SIZE,
+            self.active_panel_size().unwrap_or(STYLE_PANEL_SIZE),
             screen,
             STYLE_PANEL_GAP,
         ))
@@ -2961,11 +3010,13 @@ impl ScreenshotOverlayView {
 
     /// 撤销上一个标注。
     pub fn undo_annotation(&mut self) {
+        self.decoration_prepared = None;
         self.run_layer(|layer, base| layer.undo(base));
     }
 
     /// 重做上一个被撤销的标注。
     pub fn redo_annotation(&mut self) {
+        self.decoration_prepared = None;
         self.run_layer(|layer, base| layer.redo(base));
     }
 
@@ -2981,6 +3032,8 @@ impl ScreenshotOverlayView {
         self.annotating = false;
         self.pending_annotation_point = None;
         self.tool = AnnotationTool::None;
+        self.decoration_prepared = None;
+        self.decoration_loaded = false;
         self.text_edit = None;
         for (_, sprite) in self.tile_sprites.drain() {
             self.pending_drops.push(sprite.image);
@@ -3478,6 +3531,8 @@ impl ScreenshotOverlayView {
         self.annotating = false;
         self.pending_annotation_point = None;
         self.tool = AnnotationTool::None;
+        self.decoration_prepared = None;
+        self.decoration_loaded = false;
         self.text_edit = None;
         self.pick.clear();
         self.click_window = None;
@@ -4889,7 +4944,7 @@ impl ScreenshotOverlayView {
 
     /// 当前应显示的鼠标指针样式：选中标注工具时选区内是十字（文字工具为 I 形）。
     fn cursor_style(&self, dragging: bool) -> CursorStyle {
-        if self.tool != AnnotationTool::None && self.hover_mode == SelectionDragMode::All {
+        if self.tool.draws() && self.hover_mode == SelectionDragMode::All {
             return if self.tool == AnnotationTool::Text {
                 CursorStyle::IBeam
             } else {
@@ -4923,8 +4978,11 @@ impl ScreenshotOverlayView {
             PhysicalRect::new(self.cursor_pos.x, self.cursor_pos.y, 1, 1),
             self.scale,
         );
-        PhysicalRect::new(pos.x, pos.y, STYLE_PANEL_SIZE.0, STYLE_PANEL_SIZE.1)
-            .contains(PhysicalPoint::new(cursor.x, cursor.y))
+        {
+            let size = self.active_panel_size().unwrap_or(STYLE_PANEL_SIZE);
+            PhysicalRect::new(pos.x, pos.y, size.0, size.1)
+        }
+        .contains(PhysicalPoint::new(cursor.x, cursor.y))
     }
 
     /// 选区与鼠标是否在工具栏范围内（用于避免放大镜遮挡工具栏）。
@@ -4938,6 +4996,389 @@ impl ScreenshotOverlayView {
         );
         PhysicalRect::new(pos.x, pos.y, TOOLBAR_LOGICAL_SIZE.0, TOOLBAR_LOGICAL_SIZE.1)
             .contains(PhysicalPoint::new(cursor.x, cursor.y))
+    }
+}
+
+/// 聚光灯 / 水印设置面板：控件创建、同步、编辑与持久化。
+impl ScreenshotOverlayView {
+    /// 当前工具设置面板的逻辑尺寸；没有面板的工具返回 `None`。
+    fn active_panel_size(&self) -> Option<(i32, i32)> {
+        match self.tool {
+            AnnotationTool::Watermark => Some(WATERMARK_PANEL_SIZE),
+            AnnotationTool::Spotlight => Some(SPOTLIGHT_PANEL_SIZE),
+            tool if !style_fields(tool).is_empty() => Some(STYLE_PANEL_SIZE),
+            _ => None,
+        }
+    }
+
+    /// 把配置里保存的聚光灯 / 水印样式套到标注层（每个标注层只套一次，缺字段沿用当前值）。
+    ///
+    /// # 参数
+    /// - `tool`：刚选中的工具；非装饰工具直接返回。
+    fn apply_stored_decoration(&mut self, tool: AnnotationTool) {
+        if !tool.is_decoration() || self.decoration_loaded {
+            return;
+        }
+        let Some(config) = self.style_config.clone() else {
+            return;
+        };
+        let (watermark_value, spotlight_value) = {
+            let store = config.borrow();
+            (
+                store.value(WATERMARK_STYLE_KEY),
+                store.value(SPOTLIGHT_STYLE_KEY),
+            )
+        };
+        self.decoration_loaded = true;
+        self.run_layer(|layer, base| {
+            layer.apply_decoration_style(&watermark_value, &spotlight_value, base)
+        });
+    }
+
+    /// 选中聚光灯 / 水印工具后按需创建控件并与标注层当前配置同步。
+    fn prepare_decoration_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.tool.is_decoration() {
+            self.decoration_prepared = None;
+            return;
+        }
+        if self.decoration_prepared == Some(self.tool) {
+            return;
+        }
+        self.ensure_decoration_ui(window, cx);
+        self.sync_decoration_ui(window, cx);
+        self.decoration_prepared = Some(self.tool);
+    }
+
+    /// 构造一组档位下拉的选项。
+    ///
+    /// # 参数
+    /// - `values`：档位取值。
+    /// - `label_id`：标签的消息 id（参数为档位值）。
+    fn decoration_items(&self, values: &[i32], label_id: &str) -> Vec<StyleItem> {
+        values
+            .iter()
+            .map(|v| StyleItem {
+                value: v.to_string(),
+                label: self.i18n.tr_with(label_id, &Args::new().arg(1, v)).into(),
+            })
+            .collect()
+    }
+
+    /// 首次需要时创建水印文字框与五个档位下拉，并订阅它们的事件。
+    fn ensure_decoration_ui(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.decoration_ui.is_some() {
+            return;
+        }
+        Theme::change(ThemeMode::Dark, None, cx);
+        let placeholder: SharedString = self.i18n.tr("annot-deco-text-placeholder").into();
+        let text = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
+        cx.subscribe_in(
+            &text,
+            window,
+            |this, _state, event: &InputEvent, window, cx| match event {
+                InputEvent::Focus => this.decoration_text_focused = true,
+                InputEvent::Blur => {
+                    this.decoration_text_focused = false;
+                    this.commit_watermark_text(window, cx);
+                }
+                InputEvent::PressEnter { .. } => {
+                    this.commit_watermark_text(window, cx);
+                    this.refocus_root(window, cx);
+                }
+                InputEvent::Change => {}
+            },
+        )
+        .detach();
+        let signed = |values: &[u32]| values.iter().map(|v| *v as i32).collect::<Vec<_>>();
+        let sets: [(DecorationSelectKind, Vec<StyleItem>); 5] = [
+            (
+                DecorationSelectKind::WatermarkFont,
+                self.decoration_items(&signed(&WATERMARK_FONT_PRESETS), "annot-size-px"),
+            ),
+            (
+                DecorationSelectKind::WatermarkOpacity,
+                self.decoration_items(&signed(&WATERMARK_OPACITY_PRESETS), "annot-deco-percent"),
+            ),
+            (
+                DecorationSelectKind::WatermarkAngle,
+                self.decoration_items(&WATERMARK_ANGLE_PRESETS, "annot-deco-degree"),
+            ),
+            (
+                DecorationSelectKind::WatermarkGap,
+                self.decoration_items(&signed(&WATERMARK_GAP_PRESETS), "annot-size-px"),
+            ),
+            (
+                DecorationSelectKind::SpotlightOpacity,
+                self.decoration_items(&signed(&SPOTLIGHT_OPACITY_PRESETS), "annot-deco-percent"),
+            ),
+        ];
+        let mut made: Vec<Entity<StyleSelect>> = Vec::new();
+        for (kind, items) in sets {
+            let state = cx.new(|cx| SelectState::new(SearchableVec::new(items), None, window, cx));
+            cx.subscribe_in(
+                &state,
+                window,
+                move |this, _state, event: &SelectEvent<SearchableVec<StyleItem>>, window, cx| {
+                    if let SelectEvent::Confirm(Some(value)) = event {
+                        this.on_decoration_select(kind, value, window, cx);
+                    }
+                },
+            )
+            .detach();
+            made.push(state);
+        }
+        let mut made = made.into_iter();
+        if let (Some(wm_font), Some(wm_opacity), Some(wm_angle), Some(wm_gap), Some(sp_opacity)) = (
+            made.next(),
+            made.next(),
+            made.next(),
+            made.next(),
+            made.next(),
+        ) {
+            self.decoration_ui = Some(DecorationUi {
+                text,
+                wm_font,
+                wm_opacity,
+                wm_angle,
+                wm_gap,
+                sp_opacity,
+            });
+        }
+    }
+
+    /// 让文字框与下拉的显示与标注层当前的水印 / 聚光灯配置一致。
+    fn sync_decoration_ui(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(ui), Some(layer)) = (&self.decoration_ui, &self.annotations) else {
+            return;
+        };
+        let wm = layer.watermark_config();
+        let sp = layer.spotlight_config();
+        let pick = |index: usize| Some(IndexPath::default().row(index));
+        let nearest_u32 =
+            |presets: &[u32], value: f64| nearest_index(presets, value.round().max(0.0) as u32);
+        let font = nearest_u32(&WATERMARK_FONT_PRESETS, wm.font_size);
+        let wm_opacity = nearest_u32(&WATERMARK_OPACITY_PRESETS, wm.opacity * 100.0);
+        let angle = nearest_preset(&WATERMARK_ANGLE_PRESETS, wm.angle);
+        let gap = nearest_u32(&WATERMARK_GAP_PRESETS, wm.gap);
+        let sp_opacity = nearest_u32(&SPOTLIGHT_OPACITY_PRESETS, sp.opacity * 100.0);
+        ui.wm_font
+            .update(cx, |s, cx| s.set_selected_index(pick(font), window, cx));
+        ui.wm_opacity.update(cx, |s, cx| {
+            s.set_selected_index(pick(wm_opacity), window, cx)
+        });
+        ui.wm_angle
+            .update(cx, |s, cx| s.set_selected_index(pick(angle), window, cx));
+        ui.wm_gap
+            .update(cx, |s, cx| s.set_selected_index(pick(gap), window, cx));
+        ui.sp_opacity.update(cx, |s, cx| {
+            s.set_selected_index(pick(sp_opacity), window, cx)
+        });
+        if !self.decoration_text_focused {
+            let text = wm.text;
+            ui.text
+                .update(cx, |s, cx| s.set_value(text.as_str(), window, cx));
+        }
+    }
+
+    /// 下拉选中：换算成对应字段的编辑并写入标注层与配置。
+    fn on_decoration_select(
+        &mut self,
+        kind: DecorationSelectKind,
+        value: &str,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Ok(number) = value.parse::<f64>() else {
+            return;
+        };
+        match kind {
+            DecorationSelectKind::SpotlightOpacity => {
+                self.edit_spotlight(SpotlightEdit::Opacity(number / 100.0));
+            }
+            DecorationSelectKind::WatermarkFont => {
+                self.edit_watermark(WatermarkEdit::FontSize(number));
+            }
+            DecorationSelectKind::WatermarkOpacity => {
+                self.edit_watermark(WatermarkEdit::Opacity(number / 100.0));
+            }
+            DecorationSelectKind::WatermarkAngle => {
+                self.edit_watermark(WatermarkEdit::Angle(number));
+            }
+            DecorationSelectKind::WatermarkGap => {
+                self.edit_watermark(WatermarkEdit::Gap(number));
+            }
+        }
+        cx.notify();
+    }
+
+    /// 提交水印文字框里的文本（回车或失焦时）。
+    fn commit_watermark_text(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some(ui) = &self.decoration_ui else {
+            return;
+        };
+        let text = ui.text.read(cx).value().to_string();
+        self.edit_watermark(WatermarkEdit::Text(text));
+        cx.notify();
+    }
+
+    /// 色块被点击：按当前工具改水印或聚光灯的 RGB（透明度通道不动）。
+    fn on_decoration_color(&mut self, rgb: [u8; 3], cx: &mut Context<Self>) {
+        match self.tool {
+            AnnotationTool::Watermark => self.edit_watermark(WatermarkEdit::ColorRgb(rgb)),
+            AnnotationTool::Spotlight => self.edit_spotlight(SpotlightEdit::ColorRgb(rgb)),
+            _ => {}
+        }
+        cx.notify();
+    }
+
+    /// 对水印配置做一次编辑：有变化才下发给标注层，并写回 `drawing/watermark_style`。
+    ///
+    /// # 参数
+    /// - `edit`：控件产生的编辑。
+    fn edit_watermark(&mut self, edit: WatermarkEdit) {
+        let Some(layer) = &self.annotations else {
+            return;
+        };
+        let before = layer.watermark_config();
+        let after = apply_watermark_edit(&before, edit);
+        if after == before {
+            return;
+        }
+        let saved = watermark_to_json(&after);
+        self.run_layer(|layer, base| layer.set_watermark(after, base));
+        self.persist_decoration(WATERMARK_STYLE_KEY, saved);
+    }
+
+    /// 对聚光灯样式做一次编辑，写回 `drawing/spotlight_style`。
+    ///
+    /// # 参数
+    /// - `edit`：控件产生的编辑。
+    fn edit_spotlight(&mut self, edit: SpotlightEdit) {
+        let Some(layer) = &self.annotations else {
+            return;
+        };
+        let before = layer.spotlight_config();
+        let after = apply_spotlight_edit(&before, edit);
+        if after == before {
+            return;
+        }
+        let saved = spotlight_to_json(&after);
+        self.run_layer(|layer, base| layer.set_spotlight_style(after, base));
+        self.persist_decoration(SPOTLIGHT_STYLE_KEY, saved);
+    }
+
+    /// 把装饰样式写回配置并落盘；失败只记日志。
+    fn persist_decoration(&self, key: &'static str, value: serde_json::Value) {
+        let Some(config) = &self.style_config else {
+            return;
+        };
+        let mut store = config.borrow_mut();
+        if let Err(e) = store.set_value(key, value) {
+            tracing::warn!(key, error = %e, "写入装饰样式配置失败");
+        } else if let Err(e) = store.flush() {
+            tracing::warn!(key, error = %e, "装饰样式落盘失败");
+        }
+    }
+
+    /// 聚光灯 / 水印设置面板：颜色色块、水印文字与档位下拉，点击不穿透到选区。
+    ///
+    /// # 参数
+    /// - `origin`：面板左上角（逻辑像素）。
+    fn render_decoration_panel(&self, origin: (i32, i32), cx: &mut Context<Self>) -> Div {
+        let watermark = self.tool == AnnotationTool::Watermark;
+        let size = self.active_panel_size().unwrap_or(WATERMARK_PANEL_SIZE);
+        let i18n = self.i18n;
+        let label = move |id: &str| {
+            div()
+                .text_xs()
+                .text_color(rgba(STYLE_LABEL_COLOR))
+                .child(i18n.tr(id))
+        };
+        let select = |state: &Entity<StyleSelect>| {
+            div()
+                .w(px(STYLE_SELECT_WIDTH))
+                .h(px(STYLE_SELECT_HEIGHT))
+                .child(
+                    Select::new(state)
+                        .with_size(ComponentSize::Small)
+                        .menu_max_h(px(STYLE_SELECT_MENU_MAX_HEIGHT)),
+                )
+        };
+        let current_rgb = self.annotations.as_ref().map_or([0, 0, 0], |layer| {
+            let c = if watermark {
+                layer.watermark_config().color
+            } else {
+                layer.spotlight_config().color
+            };
+            [c.r, c.g, c.b]
+        });
+        let mut swatches = div().flex().flex_row().items_center().gap_1();
+        for (index, color) in PALETTE.iter().copied().enumerate() {
+            let channels = [color[0], color[1], color[2]];
+            swatches = swatches.child(
+                div()
+                    .id(SharedString::from(format!("deco-color-{index}")))
+                    .size(px(SWATCH_SIZE))
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .border_1()
+                    .border_color(if channels == current_rgb {
+                        rgb(0xFFFFFF)
+                    } else {
+                        rgba(0xFFFFFF40)
+                    })
+                    .bg(rgba(u32::from_be_bytes(color)))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                        this.on_decoration_color(channels, cx);
+                    })),
+            );
+        }
+        let mut panel = div()
+            .absolute()
+            .top(px(origin.1 as f32))
+            .left(px(origin.0 as f32))
+            .w(px(size.0 as f32))
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .items_center()
+            .gap_2()
+            .px_3()
+            .py_2()
+            .rounded_md()
+            .bg(rgba(STYLE_PANEL_BG))
+            .shadow_lg()
+            .border_1()
+            .border_color(rgba(STYLE_PANEL_BORDER))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+            .child(label("annot-style-color"))
+            .child(swatches);
+        let Some(ui) = &self.decoration_ui else {
+            return panel;
+        };
+        if watermark {
+            panel = panel
+                .child(label("annot-deco-text"))
+                .child(
+                    div()
+                        .w(px(WATERMARK_INPUT_WIDTH))
+                        .child(Input::new(&ui.text).with_size(ComponentSize::Small)),
+                )
+                .child(label("annot-deco-font-size"))
+                .child(select(&ui.wm_font))
+                .child(label("annot-deco-opacity"))
+                .child(select(&ui.wm_opacity))
+                .child(label("annot-deco-angle"))
+                .child(select(&ui.wm_angle))
+                .child(label("annot-deco-gap"))
+                .child(select(&ui.wm_gap));
+        } else {
+            panel = panel
+                .child(label("annot-deco-opacity"))
+                .child(select(&ui.sp_opacity));
+        }
+        panel
     }
 }
 
@@ -4969,6 +5410,7 @@ impl ScreenshotOverlayView {
         cx: &mut Context<Self>,
     ) -> Div {
         let index = index.min(self.frame.count().saturating_sub(1));
+        self.prepare_decoration_panel(window, cx);
         self.flush_pending_annotation();
         let render_started = self.probe.render_start();
         self.flush_pending_drops(window);
@@ -5282,7 +5724,11 @@ impl ScreenshotOverlayView {
                 {
                     let origin = (origin.0 + mx, origin.1 + my);
                     panel_pos = Some(PhysicalPoint::new(origin.0, origin.1));
-                    root = root.child(self.render_style_panel(origin, cx));
+                    root = root.child(if self.tool.is_decoration() {
+                        self.render_decoration_panel(origin, cx)
+                    } else {
+                        self.render_style_panel(origin, cx)
+                    });
                 }
             }
         } else {
@@ -5420,6 +5866,14 @@ impl ScreenshotOverlayView {
             }))
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
                 let mods = ev.keystroke.modifiers;
+                // 水印文字框持有焦点：快捷键让路，Esc 把焦点还给覆盖窗
+                if this.decoration_text_focused {
+                    if ev.keystroke.key == "escape" {
+                        this.refocus_root(window, cx);
+                    }
+                    cx.stop_propagation();
+                    return;
+                }
                 // 文字输入进行中：按键先交给输入框（字符本身走系统输入法通道）
                 if this.route_key_to_text_edit(
                     &ev.keystroke.key,
@@ -8259,5 +8713,82 @@ mod tests {
         assert!(view.style_panel_origin((10, 10), (300, 200)).is_some());
         view.set_record_mode(true);
         assert_eq!(view.style_panel_origin((10, 10), (300, 200)), None);
+    }
+
+    /// 聚光灯工具：选区内拖动产生洞与预览分块，选区不动，并显示聚光灯面板。
+    #[test]
+    fn spotlight_tool_drag_creates_cutout() {
+        let (mut view, _) = view_with(300, 200, 1.0, false);
+        drag(&mut view, (20, 20), (219, 149));
+        let sel = view.current_selection().unwrap();
+        view.select_tool(AnnotationTool::Spotlight);
+        assert_eq!(view.current_tool(), AnnotationTool::Spotlight);
+        annotate(&mut view, (60, 50), (160, 110));
+        assert_eq!(view.current_selection(), Some(sel));
+        assert!(view.tile_sprite_count() > 0);
+        assert!(view.history_state().0);
+        assert_eq!(view.active_panel_size(), Some(SPOTLIGHT_PANEL_SIZE));
+        assert!(view.style_panel_origin((10, 10), (300, 200)).is_some());
+    }
+
+    /// 水印工具不拖拽绘制（与无工具一样移动选区），但显示水印面板；快捷键能选中它。
+    #[test]
+    fn watermark_tool_opens_panel_without_drawing() {
+        let (mut view, _) = view_with(300, 200, 1.0, false);
+        drag(&mut view, (20, 20), (119, 99));
+        view.select_tool(AnnotationTool::Watermark);
+        assert_eq!(view.active_panel_size(), Some(WATERMARK_PANEL_SIZE));
+        assert!(view.style_panel_origin((10, 10), (300, 200)).is_some());
+        let before = view.current_selection().unwrap();
+        annotate(&mut view, (60, 50), (100, 80));
+        let after = view.current_selection().unwrap();
+        assert_eq!((after.x, after.y), (before.x + 40, before.y + 30));
+        assert_eq!(view.tile_sprite_count(), 0);
+        view.select_tool(AnnotationTool::Watermark);
+        assert_eq!(view.current_tool(), AnnotationTool::None);
+        view.apply_drawing_key(DrawingKey::Watermark);
+        assert_eq!(view.current_tool(), AnnotationTool::Watermark);
+    }
+
+    /// 水印 / 聚光灯编辑：即时作用于标注层、写回配置，新覆盖窗选中工具时读回（文本不持久化）。
+    #[test]
+    fn decoration_edits_persist_and_reload() {
+        let dir = std::env::temp_dir().join(format!(
+            "cisox-deco-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+
+        let (mut first, _) = view_with(300, 200, 1.0, false);
+        first.set_style_config(Rc::new(RefCell::new(ConfigStore::open(&path))), "en-US");
+        drag(&mut first, (20, 20), (219, 149));
+        first.select_tool(AnnotationTool::Watermark);
+        first.edit_watermark(WatermarkEdit::Text("Hello".into()));
+        first.edit_watermark(WatermarkEdit::Angle(-15.0));
+        first.edit_watermark(WatermarkEdit::Opacity(0.5));
+        first.edit_watermark(WatermarkEdit::ColorRgb([0xFF, 0x30, 0x30]));
+        first.edit_spotlight(SpotlightEdit::Opacity(0.3));
+        assert!(first.tile_sprite_count() > 0, "水印应画出预览分块");
+        let live = first.annotations.as_ref().unwrap().watermark_config();
+        assert_eq!(
+            (live.text.as_str(), live.angle, live.opacity),
+            ("Hello", -15.0, 0.5)
+        );
+
+        let (mut second, _) = view_with(300, 200, 1.0, false);
+        second.set_style_config(Rc::new(RefCell::new(ConfigStore::open(&path))), "en-US");
+        drag(&mut second, (20, 20), (219, 149));
+        second.select_tool(AnnotationTool::Spotlight);
+        let layer = second.annotations.as_ref().unwrap();
+        let wm = layer.watermark_config();
+        assert_eq!((wm.angle, wm.opacity), (-15.0, 0.5));
+        assert_eq!((wm.color.r, wm.color.g, wm.color.b), (0xFF, 0x30, 0x30));
+        assert!(wm.text.is_empty(), "水印文本属于会话，不持久化");
+        assert_eq!(layer.spotlight_config().opacity, 0.3);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -4,8 +4,8 @@
 //! 撤销/重做堆栈操作以及导出动作（钉图、OCR、翻译、复制、保存、取消）。
 
 use snow_ui_shell::geometry::{PhysicalPoint, PhysicalRect};
-use std::rc::Rc;
 use snow_ui_shell::ui::*;
+use std::rc::Rc;
 
 /// 标注工具种类枚举。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -37,6 +37,10 @@ pub enum AnnotationTool {
     Eraser,
     /// 选择对象：点选、移动、缩放已画的标注。
     Select,
+    /// 聚光灯：拖出矩形洞，洞外压暗。
+    Spotlight,
+    /// 水印：只打开水印设置面板，不在画布上拖拽。
+    Watermark,
 }
 
 impl AnnotationTool {
@@ -66,7 +70,37 @@ impl AnnotationTool {
             Self::Counter => "序号",
             Self::Eraser => "橡皮",
             Self::Select => "选对象",
+            Self::Spotlight => "聚光灯",
+            Self::Watermark => "水印",
         }
+    }
+
+    /// 在选区内按下鼠标是否开始绘制；无工具与水印（只开面板）不绘制。
+    ///
+    /// # 返回
+    /// 需要把指针事件交给标注层时为 `true`。
+    ///
+    /// # 示例
+    /// ```rust
+    /// use snow_ui_widgets::AnnotationTool;
+    /// assert!(AnnotationTool::Spotlight.draws());
+    /// assert!(!AnnotationTool::Watermark.draws());
+    /// assert!(!AnnotationTool::None.draws());
+    /// ```
+    pub const fn draws(&self) -> bool {
+        !matches!(self, Self::None | Self::Watermark)
+    }
+
+    /// 是否装饰层工具（聚光灯 / 水印），选中时显示各自的设置面板。
+    ///
+    /// # 示例
+    /// ```rust
+    /// use snow_ui_widgets::AnnotationTool;
+    /// assert!(AnnotationTool::Watermark.is_decoration());
+    /// assert!(!AnnotationTool::Arrow.is_decoration());
+    /// ```
+    pub const fn is_decoration(&self) -> bool {
+        matches!(self, Self::Spotlight | Self::Watermark)
     }
 }
 
@@ -152,7 +186,6 @@ pub fn calculate_toolbar_placement(
     PhysicalPoint::new(x, y)
 }
 
-
 /// 工具栏动作回调：参数为被点击的动作与窗口 / 应用上下文。
 type ActionHandler = Rc<dyn Fn(ToolbarAction, &mut Window, &mut App)>;
 
@@ -172,7 +205,7 @@ const TOOLBAR_ACTIONS: [(&str, ToolbarAction); 8] = [
 ];
 
 /// 可选标注工具的显示顺序。
-const TOOLBAR_TOOLS: [AnnotationTool; 12] = [
+const TOOLBAR_TOOLS: [AnnotationTool; 14] = [
     AnnotationTool::Rectangle,
     AnnotationTool::Ellipse,
     AnnotationTool::Arrow,
@@ -185,6 +218,8 @@ const TOOLBAR_TOOLS: [AnnotationTool; 12] = [
     AnnotationTool::Blur,
     AnnotationTool::Eraser,
     AnnotationTool::Select,
+    AnnotationTool::Spotlight,
+    AnnotationTool::Watermark,
 ];
 
 /// 主色（选中 / 主按钮）。
@@ -464,6 +499,21 @@ mod tests {
         assert!(TOOLBAR_TOOLS.contains(&AnnotationTool::Counter));
     }
 
+    /// 聚光灯与水印在工具栏里；只有水印不触发拖拽绘制。
+    #[test]
+    fn decoration_tools_in_toolbar() {
+        assert!(TOOLBAR_TOOLS.contains(&AnnotationTool::Spotlight));
+        assert!(TOOLBAR_TOOLS.contains(&AnnotationTool::Watermark));
+        assert!(AnnotationTool::Spotlight.draws());
+        assert!(!AnnotationTool::Watermark.draws());
+        assert!(!AnnotationTool::None.draws());
+        assert!(AnnotationTool::Rectangle.draws());
+        assert!(
+            AnnotationTool::Spotlight.is_decoration() && AnnotationTool::Watermark.is_decoration()
+        );
+        assert!(!AnnotationTool::Select.is_decoration());
+    }
+
     /// 验证工具栏定位算法。
     #[test]
     fn toolbar_placement() {
@@ -486,7 +536,11 @@ mod tests {
     #[test]
     fn disabled_actions_are_selective() {
         let tb = ScreenshotToolbar::new("t");
-        assert!(TOOLBAR_ACTIONS.iter().all(|(_, a)| !tb.is_action_disabled(*a)));
+        assert!(
+            TOOLBAR_ACTIONS
+                .iter()
+                .all(|(_, a)| !tb.is_action_disabled(*a))
+        );
         let tb = tb.disabled_actions(&[ToolbarAction::Pin, ToolbarAction::Ocr]);
         assert!(tb.is_action_disabled(ToolbarAction::Pin));
         assert!(tb.is_action_disabled(ToolbarAction::Ocr));

@@ -36,9 +36,9 @@ main-page-system = 系统
 
 main-page-about = 关于
 
-main-desc-hotkeys = 在系统任何位置都能用的快捷键，在设置窗口里修改。
+main-desc-hotkeys = 在系统任何位置都能用的快捷键。
 
-main-desc-mouse = 用鼠标手势触发动作，在设置窗口里修改。
+main-desc-mouse = 用鼠标手势触发动作。
 
 main-desc-history = 浏览、复制、贴出以前的截图。
 
@@ -62,10 +62,12 @@ main-desc-system = 开机启动、优先级与网络。
 
 main-desc-about = 关于本应用。
 
-main-open-settings = 打开设置
+main-open-settings = 在独立窗口打开
 
 main-open-history = 打开截图历史
 
 main-open-pins = 打开贴图管理
 
 main-open-translate = 打开翻译页
+
+main-goto-settings = 相关设置

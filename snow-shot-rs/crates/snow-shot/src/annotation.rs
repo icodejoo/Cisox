@@ -9,6 +9,9 @@
 //! 层序（自下而上）：滤镜（取自冻结底图）-> 矢量图形 -> 文字 -> 聚光灯 -> 水印。滤镜只采样冻结底图，
 //! 不会对其下方的其它标注再做模糊；聚光灯与水印是装饰层，预览分块与导出共用同一渲染函数。
 
+use crate::annotation_style::{
+    COUNTER_DIGIT_COLOR, ToolStyle, engine_color, physical_px, shape_patch,
+};
 use snow_canvas_filters::{
     ExecutionOptions, FILTER_BLUR, FILTER_MOSAIC, OwnedImage, Parameters, apply,
     sampling_radius_pixels,
@@ -18,19 +21,18 @@ use snow_canvas_raster::{
     CanvasRasterizer, RasterConfig, RasterOutput, RasterTile, TileKey, TinySkiaRasterizer,
 };
 use snow_draw_engine::{
-    ActiveTool, ArrowStyle, ArrowType, Camera, Arrowhead, ColorRgba8, DisplayFilterType,
+    ActiveTool, ArrowStyle, ArrowType, Arrowhead, Camera, ColorRgba8, DisplayFilterType,
     DisplayTextHorizontalAlign, DisplayTextVerticalAlign, EditorStyleDefaults, Engine,
     FILTER_STYLE_PROPERTY_ALL, FilterDisplayItem, FilterStyle, InputEvent, Modifiers, Point,
     PointerButton, PointerButtons, PointerDevice, PointerEvent, PointerEventType,
     RectangleShapeStyle, RuntimeConfig, SceneDisplayItem, StrokeStyle, StyleDefaults,
     TextDisplayItem, TextLayoutSize, ViewportConfig, ViewportId,
 };
-use snow_draw_engine::{DisplayFillStyle, DisplaySerialNumberType, SerialNumberDisplayItem, SerialNumberType};
+use snow_draw_engine::{
+    DisplayFillStyle, DisplaySerialNumberType, SerialNumberDisplayItem, SerialNumberType,
+};
 use snow_draw_engine::{HighlightShape, ShapeStyle, TextStyle};
 use snow_draw_engine_editor::{TEXT_STYLE_MIXED_COLOR, TEXT_STYLE_MIXED_FONT_SIZE};
-use crate::annotation_style::{
-    COUNTER_DIGIT_COLOR, ToolStyle, engine_color, physical_px, shape_patch,
-};
 use snow_platform::text_raster::{self, DEFAULT_FONT_FAMILY, TextBitmap};
 use snow_ui::widgets::AnnotationTool;
 use std::collections::HashMap;
@@ -135,7 +137,11 @@ impl AnnotationStyle {
     /// assert_eq!(AnnotationStyle::for_dpr(2.0).stroke_width, 6.0);
     /// ```
     pub fn for_dpr(dpr: f32) -> Self {
-        let dpr = if dpr.is_finite() && dpr > 0.0 { f64::from(dpr) } else { 1.0 };
+        let dpr = if dpr.is_finite() && dpr > 0.0 {
+            f64::from(dpr)
+        } else {
+            1.0
+        };
         Self {
             color: DEFAULT_COLOR,
             stroke_width: (DEFAULT_STROKE_LOGICAL * dpr).round().max(1.0),
@@ -167,13 +173,20 @@ pub fn engine_tool(tool: AnnotationTool) -> Option<ActiveTool> {
         AnnotationTool::Counter => Some(ActiveTool::SerialNumber),
         AnnotationTool::Eraser => Some(ActiveTool::Eraser),
         AnnotationTool::Select => Some(ActiveTool::Select),
-        AnnotationTool::None => None,
+        AnnotationTool::Spotlight => Some(ActiveTool::Spotlight),
+        // 水印只开设置面板，不进引擎绘制工具
+        AnnotationTool::Watermark | AnnotationTool::None => None,
     }
 }
 
 /// 求两个整数矩形的交集；不相交返回 `None`。
 fn intersect(a: IntRect, b: IntRect) -> Option<IntRect> {
-    let r = [a[0].max(b[0]), a[1].max(b[1]), a[2].min(b[2]), a[3].min(b[3])];
+    let r = [
+        a[0].max(b[0]),
+        a[1].max(b[1]),
+        a[2].min(b[2]),
+        a[3].min(b[3]),
+    ];
     (r[0] < r[2] && r[1] < r[3]).then_some(r)
 }
 
@@ -239,7 +252,9 @@ pub fn hash_pixels(bytes: &[u8]) -> u64 {
     for word in &mut words {
         let mut buf = [0u8; 8];
         buf.copy_from_slice(word);
-        hash = (hash ^ u64::from_le_bytes(buf)).wrapping_mul(PRIME).rotate_left(29);
+        hash = (hash ^ u64::from_le_bytes(buf))
+            .wrapping_mul(PRIME)
+            .rotate_left(29);
     }
     for &b in words.remainder() {
         hash = (hash ^ u64::from(b)).wrapping_mul(PRIME);
@@ -289,8 +304,14 @@ fn filter_parameters(item: &FilterDisplayItem, dpr: f64) -> Option<Parameters> {
         ..Parameters::default()
     };
     match spec.filter_type {
-        DisplayFilterType::Mosaic => Some(Parameters { filter_type: FILTER_MOSAIC, ..base }),
-        DisplayFilterType::GaussianBlur => Some(Parameters { filter_type: FILTER_BLUR, ..base }),
+        DisplayFilterType::Mosaic => Some(Parameters {
+            filter_type: FILTER_MOSAIC,
+            ..base
+        }),
+        DisplayFilterType::GaussianBlur => Some(Parameters {
+            filter_type: FILTER_BLUR,
+            ..base
+        }),
         _ => None,
     }
 }
@@ -308,12 +329,23 @@ fn render_filter(item: &FilterDisplayItem, base: BaseView, dpr: f64) -> Option<F
     let mut params = filter_parameters(item, dpr)?;
     let screen = [0, 0, base.width as i32, base.height as i32];
     let region = intersect(
-        aabb(item.center_x, item.center_y, item.width, item.height, item.rotation),
+        aabb(
+            item.center_x,
+            item.center_y,
+            item.width,
+            item.height,
+            item.rotation,
+        ),
         screen,
     )?;
     let margin = sampling_radius_pixels(&params).clamp(0, MAX_FILTER_MARGIN);
     let sub = intersect(
-        [region[0] - margin, region[1] - margin, region[2] + margin, region[3] + margin],
+        [
+            region[0] - margin,
+            region[1] - margin,
+            region[2] + margin,
+            region[3] + margin,
+        ],
         screen,
     )?;
     let (sw, sh) = rect_size(sub);
@@ -364,7 +396,9 @@ fn draw_filter(layer: &mut [u8], rect: IntRect, render: &FilterRender, base: Bas
                 let bo = (y * base.width as usize + x) * BPP;
                 let b = &base.bgra[bo..bo + BPP];
                 let t = render.opacity;
-                let mix = |src: u8, dst: u8| (f64::from(dst) + (f64::from(src) - f64::from(dst)) * t).round() as u8;
+                let mix = |src: u8, dst: u8| {
+                    (f64::from(dst) + (f64::from(src) - f64::from(dst)) * t).round() as u8
+                };
                 out = [mix(f[2], b[2]), mix(f[1], b[1]), mix(f[0], b[0])];
             }
             layer[lo..lo + BPP].copy_from_slice(&[out[0], out[1], out[2], 255]);
@@ -389,7 +423,11 @@ fn draw_text(
         .font_family
         .clone()
         .unwrap_or_else(|| DEFAULT_FONT_FAMILY.to_string());
-    let key: TextKey = (item.text.clone(), (item.font_size as f32).to_bits(), family.clone());
+    let key: TextKey = (
+        item.text.clone(),
+        (item.font_size as f32).to_bits(),
+        family.clone(),
+    );
     if cache.len() >= TEXT_CACHE_LIMIT && !cache.contains_key(&key) {
         cache.clear();
     }
@@ -434,7 +472,9 @@ fn draw_text(
         let y = hit[1] as usize + row;
         for col in 0..hw {
             let x = hit[0] as usize + col;
-            let cov = u32::from(bitmap.coverage[(y - oy as usize) * bitmap.width as usize + (x - ox as usize)]);
+            let cov = u32::from(
+                bitmap.coverage[(y - oy as usize) * bitmap.width as usize + (x - ox as usize)],
+            );
             if cov == 0 {
                 continue;
             }
@@ -467,7 +507,11 @@ fn serial_digit_item(item: &SerialNumberDisplayItem) -> TextDisplayItem {
         content_width: item.diameter,
         content_height: item.diameter,
         text: item.number.to_string(),
-        color: if solid { engine_color(COUNTER_DIGIT_COLOR) } else { item.color },
+        color: if solid {
+            engine_color(COUNTER_DIGIT_COLOR)
+        } else {
+            item.color
+        },
         font_size: item.font_size,
         font_family: item.font_family.clone(),
         fill: ColorRgba8::default(),
@@ -487,8 +531,16 @@ fn deferred_hits(item: &SceneDisplayItem, rect: IntRect) -> bool {
         SceneDisplayItem::Filter(f) if !f.is_pen_filter => {
             aabb(f.center_x, f.center_y, f.width, f.height, f.rotation)
         }
-        SceneDisplayItem::Text(t) => aabb(t.center_x, t.center_y, t.content_width.max(t.width), t.content_height.max(t.height), t.rotation),
-        SceneDisplayItem::SerialNumber(n) if n.serial_number_type != DisplaySerialNumberType::Circle => {
+        SceneDisplayItem::Text(t) => aabb(
+            t.center_x,
+            t.center_y,
+            t.content_width.max(t.width),
+            t.content_height.max(t.height),
+            t.rotation,
+        ),
+        SceneDisplayItem::SerialNumber(n)
+            if n.serial_number_type != DisplaySerialNumberType::Circle =>
+        {
             aabb(n.center_x, n.center_y, n.diameter, n.diameter, n.rotation)
         }
         _ => return false,
@@ -581,7 +633,8 @@ impl AnnotationLayer {
     /// ```
     pub fn new(width: u32, height: u32, dpr: f32) -> Result<Self, String> {
         let style = AnnotationStyle::for_dpr(dpr);
-        let engine = Engine::try_new(runtime_config(style)).map_err(|e| format!("初始化标注引擎失败: {e:?}"))?;
+        let engine = Engine::try_new(runtime_config(style))
+            .map_err(|e| format!("初始化标注引擎失败: {e:?}"))?;
         Self::from_engine(engine, width, height, dpr, style)
     }
 
@@ -606,8 +659,9 @@ impl AnnotationLayer {
     /// ```
     pub fn from_session(width: u32, height: u32, dpr: f32, session: &[u8]) -> Result<Self, String> {
         let style = AnnotationStyle::for_dpr(dpr);
-        let engine = Engine::from_serialized_document_session_with_config(session, runtime_config(style))
-            .map_err(|e| format!("恢复标注会话失败: {e:?}"))?;
+        let engine =
+            Engine::from_serialized_document_session_with_config(session, runtime_config(style))
+                .map_err(|e| format!("恢复标注会话失败: {e:?}"))?;
         Self::from_engine(engine, width, height, dpr, style)
     }
 
@@ -630,8 +684,9 @@ impl AnnotationLayer {
     /// ```
     pub fn from_history(width: u32, height: u32, dpr: f32, history: &[u8]) -> Result<Self, String> {
         let style = AnnotationStyle::for_dpr(dpr);
-        let engine = Engine::from_serialized_document_history_with_config(history, runtime_config(style))
-            .map_err(|e| format!("恢复标注历史失败: {e:?}"))?;
+        let engine =
+            Engine::from_serialized_document_history_with_config(history, runtime_config(style))
+                .map_err(|e| format!("恢复标注历史失败: {e:?}"))?;
         Self::from_engine(engine, width, height, dpr, style)
     }
 
@@ -688,7 +743,11 @@ impl AnnotationLayer {
             }),
             width,
             height,
-            dpr: if dpr.is_finite() && dpr > 0.0 { f64::from(dpr) } else { 1.0 },
+            dpr: if dpr.is_finite() && dpr > 0.0 {
+                f64::from(dpr)
+            } else {
+                1.0
+            },
             tool: AnnotationTool::None,
             style,
             emitted: HashMap::new(),
@@ -748,21 +807,37 @@ impl AnnotationLayer {
         spotlight_style: &serde_json::Value,
         base: BaseView,
     ) -> Result<LayerUpdate, String> {
-        let watermark =
-            crate::decoration_style::watermark_from_json(watermark_style, self.engine.watermark_config());
-        let spotlight =
-            crate::decoration_style::spotlight_from_json(spotlight_style, &self.engine.spotlight_config());
+        let watermark = crate::decoration_style::watermark_from_json(
+            watermark_style,
+            self.engine.watermark_config(),
+        );
+        let spotlight = crate::decoration_style::spotlight_from_json(
+            spotlight_style,
+            &self.engine.spotlight_config(),
+        );
         let mut update = self.set_watermark(watermark, base)?;
         let second = self.set_spotlight_style(spotlight, base)?;
         // 两次更新可能触及同一块：后者覆盖前者
+        update.tiles.retain(|t| {
+            !second.tiles.iter().any(|n| n.key == t.key) && !second.released.contains(&t.key)
+        });
         update
-            .tiles
-            .retain(|t| !second.tiles.iter().any(|n| n.key == t.key) && !second.released.contains(&t.key));
-        update.released.retain(|k| !second.tiles.iter().any(|n| n.key == *k));
+            .released
+            .retain(|k| !second.tiles.iter().any(|n| n.key == *k));
         update.tiles.extend(second.tiles);
         update.released.extend(second.released);
         update.touched_pixels += second.touched_pixels;
         Ok(update)
+    }
+
+    /// 引擎里当前的水印配置（含文本）。
+    pub fn watermark_config(&self) -> snow_draw_engine::WatermarkConfig {
+        self.engine.watermark_config().clone()
+    }
+
+    /// 引擎里当前的聚光灯样式。
+    pub fn spotlight_config(&self) -> snow_draw_engine::SpotlightConfig {
+        self.engine.spotlight_config()
     }
 
     /// 当前工具。
@@ -813,7 +888,10 @@ impl AnnotationLayer {
             .map_err(err)?;
         match tool {
             AnnotationTool::Rectangle | AnnotationTool::Ellipse => {
-                let mut style = self.engine.viewport_rectangle_shape_style(self.viewport).map_err(err)?;
+                let mut style = self
+                    .engine
+                    .viewport_rectangle_shape_style(self.viewport)
+                    .map_err(err)?;
                 style.shape = if tool == AnnotationTool::Ellipse {
                     HighlightShape::Ellipse
                 } else {
@@ -825,7 +903,10 @@ impl AnnotationLayer {
             }
             AnnotationTool::Mosaic | AnnotationTool::Blur => {
                 let (filter_type, strength) = if tool == AnnotationTool::Blur {
-                    (snow_draw_engine::CanvasFilterType::GaussianBlur, BLUR_STRENGTH)
+                    (
+                        snow_draw_engine::CanvasFilterType::GaussianBlur,
+                        BLUR_STRENGTH,
+                    )
                 } else {
                     (snow_draw_engine::CanvasFilterType::Mosaic, MOSAIC_STRENGTH)
                 };
@@ -866,7 +947,10 @@ impl AnnotationLayer {
         base: BaseView,
     ) -> Result<LayerUpdate, String> {
         let err = |e| format!("应用标注样式失败: {e:?}");
-        let state = self.engine.viewport_style_toolbar_state(self.viewport).map_err(err)?;
+        let state = self
+            .engine
+            .viewport_style_toolbar_state(self.viewport)
+            .map_err(err)?;
         if let Some(patch) = shape_patch(tool, style, self.dpr, state.shape_style) {
             self.engine
                 .set_viewport_shape_style_patch(self.viewport, patch)
@@ -976,10 +1060,8 @@ impl AnnotationLayer {
 
     /// 当前工具是否通过指针拖动创建元素（文字工具走单击 + 输入框）。
     pub fn accepts_pointer(&self) -> bool {
-        !matches!(
-            self.tool,
-            AnnotationTool::None | AnnotationTool::Text
-        ) && engine_tool(self.tool).is_some()
+        !matches!(self.tool, AnnotationTool::None | AnnotationTool::Text)
+            && engine_tool(self.tool).is_some()
     }
 
     /// 撤销上一步。
@@ -1205,7 +1287,11 @@ impl AnnotationLayer {
 /// - `family`：字体族（空串取默认）。
 /// - `px`：像素字号。
 fn decoration_text(text: &str, family: &str, px: f32) -> Option<CoverageBitmap> {
-    let family = if family.is_empty() { DEFAULT_FONT_FAMILY } else { family };
+    let family = if family.is_empty() {
+        DEFAULT_FONT_FAMILY
+    } else {
+        family
+    };
     match text_raster::rasterize_text(text, family, px, false) {
         Ok(b) => Some(CoverageBitmap {
             width: b.width,
@@ -1310,7 +1396,12 @@ mod tests {
         let mut data = Vec::with_capacity((w * h * 4) as usize);
         for y in 0..h {
             for x in 0..w {
-                data.extend_from_slice(&[(x % 251) as u8, (y % 241) as u8, ((x + y) % 239) as u8, 255]);
+                data.extend_from_slice(&[
+                    (x % 251) as u8,
+                    (y % 241) as u8,
+                    ((x + y) % 239) as u8,
+                    255,
+                ]);
             }
         }
         data
@@ -1318,7 +1409,9 @@ mod tests {
 
     /// BGRA 底图转不透明 RGBA。
     fn gradient_rgba(bgra: &[u8]) -> Vec<u8> {
-        bgra.chunks_exact(4).flat_map(|p| [p[2], p[1], p[0], 255]).collect()
+        bgra.chunks_exact(4)
+            .flat_map(|p| [p[2], p[1], p[0], 255])
+            .collect()
     }
 
     /// 取 RGBA 缓冲中某像素。
@@ -1339,7 +1432,11 @@ mod tests {
             let t = f64::from(i) / 8.0;
             out.push(
                 layer
-                    .pointer_move(from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t, base)
+                    .pointer_move(
+                        from.0 + (to.0 - from.0) * t,
+                        from.1 + (to.1 - from.1) * t,
+                        base,
+                    )
                     .unwrap(),
             );
         }
@@ -1350,10 +1447,22 @@ mod tests {
     /// 工具栏工具到引擎工具的映射。
     #[test]
     fn tool_mapping() {
-        assert_eq!(engine_tool(AnnotationTool::Rectangle), Some(ActiveTool::Shape));
-        assert_eq!(engine_tool(AnnotationTool::Ellipse), Some(ActiveTool::Shape));
-        assert_eq!(engine_tool(AnnotationTool::Pencil), Some(ActiveTool::FreeDraw));
-        assert_eq!(engine_tool(AnnotationTool::Mosaic), Some(ActiveTool::RectangleFilter));
+        assert_eq!(
+            engine_tool(AnnotationTool::Rectangle),
+            Some(ActiveTool::Shape)
+        );
+        assert_eq!(
+            engine_tool(AnnotationTool::Ellipse),
+            Some(ActiveTool::Shape)
+        );
+        assert_eq!(
+            engine_tool(AnnotationTool::Pencil),
+            Some(ActiveTool::FreeDraw)
+        );
+        assert_eq!(
+            engine_tool(AnnotationTool::Mosaic),
+            Some(ActiveTool::RectangleFilter)
+        );
         assert_eq!(engine_tool(AnnotationTool::None), None);
     }
 
@@ -1377,7 +1486,11 @@ mod tests {
         let mut layer = AnnotationLayer::new(64, 64, 1.0).unwrap();
         layer.set_tool(AnnotationTool::Rectangle).unwrap();
         let small = gradient(8, 8);
-        let bad = BaseView { width: 8, height: 8, bgra: &small };
+        let bad = BaseView {
+            width: 8,
+            height: 8,
+            bgra: &small,
+        };
         assert!(layer.pointer_down(1.0, 1.0, bad).is_err());
     }
 
@@ -1386,7 +1499,11 @@ mod tests {
     fn rectangle_draws_outline() {
         let (w, h) = (400, 300);
         let data = gradient(w, h);
-        let base = BaseView { width: w, height: h, bgra: &data };
+        let base = BaseView {
+            width: w,
+            height: h,
+            bgra: &data,
+        };
         let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
         layer.set_tool(AnnotationTool::Rectangle).unwrap();
         drag(&mut layer, base, (50.0, 40.0), (250.0, 200.0));
@@ -1395,7 +1512,10 @@ mod tests {
         assert_eq!((ew, eh), (w, h));
         // 左边线中部应是红色描边（BGRA 底图导出后为 RGBA）
         let edge = px(&rgba, w, 50, 120);
-        assert!(edge[0] > 200 && edge[1] < 90 && edge[2] < 90, "左边线像素 {edge:?}");
+        assert!(
+            edge[0] > 200 && edge[1] < 90 && edge[2] < 90,
+            "左边线像素 {edge:?}"
+        );
         // 内部不填充：应等于底图像素
         let inner = px(&rgba, w, 150, 120);
         let b = &data[((120 * w + 150) * 4) as usize..];
@@ -1407,7 +1527,11 @@ mod tests {
     fn ellipse_draws_curve_not_corners() {
         let (w, h) = (400, 300);
         let data = gradient(w, h);
-        let base = BaseView { width: w, height: h, bgra: &data };
+        let base = BaseView {
+            width: w,
+            height: h,
+            bgra: &data,
+        };
         let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
         layer.set_tool(AnnotationTool::Ellipse).unwrap();
         drag(&mut layer, base, (100.0, 60.0), (300.0, 240.0));
@@ -1422,10 +1546,18 @@ mod tests {
     /// 箭头、直线、画笔都能产生像素。
     #[test]
     fn arrow_line_pencil_produce_pixels() {
-        for tool in [AnnotationTool::Arrow, AnnotationTool::Line, AnnotationTool::Pencil] {
+        for tool in [
+            AnnotationTool::Arrow,
+            AnnotationTool::Line,
+            AnnotationTool::Pencil,
+        ] {
             let (w, h) = (300, 200);
             let data = gradient(w, h);
-            let base = BaseView { width: w, height: h, bgra: &data };
+            let base = BaseView {
+                width: w,
+                height: h,
+                bgra: &data,
+            };
             let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
             layer.set_tool(tool).unwrap();
             drag(&mut layer, base, (30.0, 30.0), (250.0, 150.0));
@@ -1445,13 +1577,20 @@ mod tests {
     fn drag_updates_are_partial_tiles() {
         let (w, h) = (1920, 1080);
         let data = gradient(w, h);
-        let base = BaseView { width: w, height: h, bgra: &data };
+        let base = BaseView {
+            width: w,
+            height: h,
+            bgra: &data,
+        };
         let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
         layer.set_tool(AnnotationTool::Arrow).unwrap();
         let updates = drag(&mut layer, base, (100.0, 100.0), (400.0, 260.0));
         let total_tiles = (w.div_ceil(TILE_SIZE) * h.div_ceil(TILE_SIZE)) as usize;
         let max_tiles = updates.iter().map(|u| u.tiles.len()).max().unwrap();
-        assert!(max_tiles > 0 && max_tiles < total_tiles / 4, "单次更新块数 {max_tiles}/{total_tiles}");
+        assert!(
+            max_tiles > 0 && max_tiles < total_tiles / 4,
+            "单次更新块数 {max_tiles}/{total_tiles}"
+        );
         let touched: u64 = updates.iter().map(|u| u.touched_pixels).max().unwrap();
         assert!(touched < u64::from(w * h) / 4);
     }
@@ -1461,20 +1600,33 @@ mod tests {
     fn undo_redo_roundtrip() {
         let (w, h) = (200, 150);
         let data = gradient(w, h);
-        let base = BaseView { width: w, height: h, bgra: &data };
+        let base = BaseView {
+            width: w,
+            height: h,
+            bgra: &data,
+        };
         let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
         layer.set_tool(AnnotationTool::Rectangle).unwrap();
         drag(&mut layer, base, (20.0, 20.0), (120.0, 100.0));
         assert!(layer.can_undo() && !layer.can_redo());
-        let with = layer.export_rgba([0, 0, w as i32, h as i32], base).unwrap().2;
+        let with = layer
+            .export_rgba([0, 0, w as i32, h as i32], base)
+            .unwrap()
+            .2;
         let update = layer.undo(base).unwrap();
         assert!(!update.is_empty());
         assert_eq!(layer.item_count(), 0);
         assert!(layer.can_redo());
-        let without = layer.export_rgba([0, 0, w as i32, h as i32], base).unwrap().2;
+        let without = layer
+            .export_rgba([0, 0, w as i32, h as i32], base)
+            .unwrap()
+            .2;
         assert_ne!(with, without);
         layer.redo(base).unwrap();
-        let again = layer.export_rgba([0, 0, w as i32, h as i32], base).unwrap().2;
+        let again = layer
+            .export_rgba([0, 0, w as i32, h as i32], base)
+            .unwrap()
+            .2;
         assert_eq!(with, again);
     }
 
@@ -1483,19 +1635,29 @@ mod tests {
     fn history_json_round_trip_keeps_items_and_undo() {
         let (w, h) = (200, 150);
         let data = gradient(w, h);
-        let base = BaseView { width: w, height: h, bgra: &data };
+        let base = BaseView {
+            width: w,
+            height: h,
+            bgra: &data,
+        };
         let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
         layer.set_tool(AnnotationTool::Rectangle).unwrap();
         drag(&mut layer, base, (20.0, 20.0), (120.0, 100.0));
         let bytes = layer.serialize_history().unwrap();
         // 仓储要求画布历史是 JSON 对象 / 数组
         assert!(matches!(bytes.first(), Some(b'{' | b'[')));
-        let before = layer.export_rgba([0, 0, w as i32, h as i32], base).unwrap().2;
+        let before = layer
+            .export_rgba([0, 0, w as i32, h as i32], base)
+            .unwrap()
+            .2;
 
         let mut restored = AnnotationLayer::from_history(w, h, 1.0, &bytes).unwrap();
         restored.refresh(base).unwrap();
         assert_eq!(restored.item_count(), layer.item_count());
-        let after = restored.export_rgba([0, 0, w as i32, h as i32], base).unwrap().2;
+        let after = restored
+            .export_rgba([0, 0, w as i32, h as i32], base)
+            .unwrap()
+            .2;
         assert_eq!(before, after);
         assert!(restored.can_undo());
         restored.undo(base).unwrap();
@@ -1508,7 +1670,11 @@ mod tests {
     fn mosaic_pixelates_region_only() {
         let (w, h) = (300, 200);
         let data = gradient(w, h);
-        let base = BaseView { width: w, height: h, bgra: &data };
+        let base = BaseView {
+            width: w,
+            height: h,
+            bgra: &data,
+        };
         let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
         layer.set_tool(AnnotationTool::Mosaic).unwrap();
         drag(&mut layer, base, (50.0, 40.0), (200.0, 150.0));
@@ -1533,7 +1699,10 @@ mod tests {
                 }
             }
         }
-        assert!(same_neighbors > 80 * 110 * 3 / 4, "马赛克块内应相同: {same_neighbors}");
+        assert!(
+            same_neighbors > 80 * 110 * 3 / 4,
+            "马赛克块内应相同: {same_neighbors}"
+        );
         assert!(differs > 1000, "马赛克应改变像素: {differs}");
     }
 
@@ -1549,7 +1718,11 @@ mod tests {
                 data.extend_from_slice(&[v, v, v, 255]);
             }
         }
-        let base = BaseView { width: w, height: h, bgra: &data };
+        let base = BaseView {
+            width: w,
+            height: h,
+            bgra: &data,
+        };
         let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
         layer.set_tool(AnnotationTool::Blur).unwrap();
         drag(&mut layer, base, (40.0, 30.0), (240.0, 170.0));
@@ -1563,7 +1736,10 @@ mod tests {
                 diff_orig += u32::from(data[o].abs_diff(data[o + 4]));
             }
         }
-        assert!(diff_in * 3 < diff_orig, "模糊后相邻差 {diff_in} 应远小于原图 {diff_orig}");
+        assert!(
+            diff_in * 3 < diff_orig,
+            "模糊后相邻差 {diff_in} 应远小于原图 {diff_orig}"
+        );
     }
 
     /// 文字：提交后导出含有文字颜色像素；空白文本不创建元素；撤销可移除。
@@ -1571,10 +1747,19 @@ mod tests {
     fn text_commit_and_export() {
         let (w, h) = (400, 200);
         let data = vec![255u8; (w * h * 4) as usize];
-        let base = BaseView { width: w, height: h, bgra: &data };
+        let base = BaseView {
+            width: w,
+            height: h,
+            bgra: &data,
+        };
         let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
         layer.set_tool(AnnotationTool::Text).unwrap();
-        assert!(layer.commit_text(10.0, 10.0, "   ", base).unwrap().is_empty());
+        assert!(
+            layer
+                .commit_text(10.0, 10.0, "   ", base)
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(layer.item_count(), 0);
         let update = layer.commit_text(20.0, 30.0, "你好 Snow", base).unwrap();
         assert!(!update.tiles.is_empty());
@@ -1593,7 +1778,10 @@ mod tests {
                 min_y = min_y.min(i as u32 / w);
             }
         }
-        assert!((18..=40).contains(&min_x) && (28..=50).contains(&min_y), "文字位置偏离: ({min_x},{min_y})");
+        assert!(
+            (18..=40).contains(&min_x) && (28..=50).contains(&min_y),
+            "文字位置偏离: ({min_x},{min_y})"
+        );
         layer.undo(base).unwrap();
         assert_eq!(layer.item_count(), 0);
         let (_, _, blank) = layer.export_rgba([0, 0, w as i32, h as i32], base).unwrap();
@@ -1605,7 +1793,11 @@ mod tests {
     fn export_crop_matches_full_composite() {
         let (w, h) = (500, 400);
         let data = gradient(w, h);
-        let base = BaseView { width: w, height: h, bgra: &data };
+        let base = BaseView {
+            width: w,
+            height: h,
+            bgra: &data,
+        };
         let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
         layer.set_tool(AnnotationTool::Rectangle).unwrap();
         drag(&mut layer, base, (60.0, 50.0), (300.0, 260.0));
@@ -1613,7 +1805,10 @@ mod tests {
         drag(&mut layer, base, (200.0, 150.0), (420.0, 330.0));
         layer.set_tool(AnnotationTool::Text).unwrap();
         layer.commit_text(80.0, 70.0, "Crop", base).unwrap();
-        let full = layer.export_rgba([0, 0, w as i32, h as i32], base).unwrap().2;
+        let full = layer
+            .export_rgba([0, 0, w as i32, h as i32], base)
+            .unwrap()
+            .2;
         // 选区跨越多个 256 分块边界
         let sel = [180, 120, 470, 380];
         let (cw, ch, crop) = layer.export_rgba(sel, base).unwrap();
@@ -1634,7 +1829,11 @@ mod tests {
     fn preview_tiles_equal_export() {
         let (w, h) = (700, 500);
         let data = gradient(w, h);
-        let base = BaseView { width: w, height: h, bgra: &data };
+        let base = BaseView {
+            width: w,
+            height: h,
+            bgra: &data,
+        };
         let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
         let mut canvas: HashMap<TileKey, TileImage> = HashMap::new();
         let apply = |u: LayerUpdate, canvas: &mut HashMap<TileKey, TileImage>| {
@@ -1654,7 +1853,10 @@ mod tests {
             apply(u, &mut canvas);
         }
         layer.set_tool(AnnotationTool::Text).unwrap();
-        apply(layer.commit_text(300.0, 100.0, "Preview", base).unwrap(), &mut canvas);
+        apply(
+            layer.commit_text(300.0, 100.0, "Preview", base).unwrap(),
+            &mut canvas,
+        );
         layer.set_tool(AnnotationTool::Pencil).unwrap();
         for u in drag(&mut layer, base, (400.0, 300.0), (650.0, 100.0)) {
             apply(u, &mut canvas);
@@ -1676,7 +1878,10 @@ mod tests {
                 }
             }
         }
-        let exported = layer.export_rgba([0, 0, w as i32, h as i32], base).unwrap().2;
+        let exported = layer
+            .export_rgba([0, 0, w as i32, h as i32], base)
+            .unwrap()
+            .2;
         assert_eq!(rebuilt, exported, "预览块合成结果应与导出逐像素一致");
     }
 
@@ -1685,7 +1890,11 @@ mod tests {
     fn decoration_preview_equals_export() {
         let (w, h) = (600, 420);
         let data = gradient(w, h);
-        let base = BaseView { width: w, height: h, bgra: &data };
+        let base = BaseView {
+            width: w,
+            height: h,
+            bgra: &data,
+        };
         let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
         let mut canvas: HashMap<TileKey, TileImage> = HashMap::new();
         let apply = |u: LayerUpdate, canvas: &mut HashMap<TileKey, TileImage>| {
@@ -1729,7 +1938,10 @@ mod tests {
                 }
             }
         }
-        let exported = layer.export_rgba([0, 0, w as i32, h as i32], base).unwrap().2;
+        let exported = layer
+            .export_rgba([0, 0, w as i32, h as i32], base)
+            .unwrap()
+            .2;
         assert_eq!(rebuilt, exported, "装饰层预览分块与导出应逐像素一致");
         // 导出裁切（跨分块边界）与整幅一致
         let (cw, ch, crop) = layer.export_rgba([200, 150, 470, 380], base).unwrap();
@@ -1748,7 +1960,10 @@ mod tests {
         );
         // 矩形左边线（x=100）在洞内：保持标注红色，没有被压暗
         let edge = px(&exported, w, 100, 160);
-        assert!(edge[0] > 200 && edge[1] < 90, "洞内标注应保持红色: {edge:?}");
+        assert!(
+            edge[0] > 200 && edge[1] < 90,
+            "洞内标注应保持红色: {edge:?}"
+        );
         // 撤销（水印是文档级配置，进历史）后，导出不再含水印笔画
         layer.undo(base).unwrap();
         assert!(!layer.raster.decoration().watermark_visible());
@@ -1759,14 +1974,22 @@ mod tests {
     fn unchanged_tiles_are_not_reemitted() {
         let (w, h) = (800, 600);
         let data = gradient(w, h);
-        let base = BaseView { width: w, height: h, bgra: &data };
+        let base = BaseView {
+            width: w,
+            height: h,
+            bgra: &data,
+        };
         let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
         layer.set_tool(AnnotationTool::Arrow).unwrap();
         layer.pointer_down(100.0, 100.0, base).unwrap();
         let first = layer.pointer_move(500.0, 400.0, base).unwrap();
         assert!(!first.tiles.is_empty());
         let again = layer.pointer_move(500.0, 400.0, base).unwrap();
-        assert!(again.is_empty(), "原地不动不应再上传分块: {} 块", again.tiles.len());
+        assert!(
+            again.is_empty(),
+            "原地不动不应再上传分块: {} 块",
+            again.tiles.len()
+        );
     }
 
     /// 像素哈希：相同内容相同、单字节变化不同、长度不同不同。
@@ -1785,7 +2008,11 @@ mod tests {
     fn pointer_ignored_without_drawing_tool() {
         let (w, h) = (100, 100);
         let data = gradient(w, h);
-        let base = BaseView { width: w, height: h, bgra: &data };
+        let base = BaseView {
+            width: w,
+            height: h,
+            bgra: &data,
+        };
         let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
         assert!(layer.pointer_down(10.0, 10.0, base).unwrap().is_empty());
         assert!(!layer.is_drawing());
@@ -1802,15 +2029,66 @@ mod tests {
     /// 荧光笔与序号球映射到引擎的对应工具。
     #[test]
     fn highlighter_and_counter_map_to_engine_tools() {
-        assert_eq!(engine_tool(AnnotationTool::Highlighter), Some(ActiveTool::PenHighlight));
-        assert_eq!(engine_tool(AnnotationTool::Counter), Some(ActiveTool::SerialNumber));
+        assert_eq!(
+            engine_tool(AnnotationTool::Highlighter),
+            Some(ActiveTool::PenHighlight)
+        );
+        assert_eq!(
+            engine_tool(AnnotationTool::Counter),
+            Some(ActiveTool::SerialNumber)
+        );
     }
 
     /// 橡皮与选对象映射到引擎的 Eraser / Select。
     #[test]
     fn eraser_and_select_map_to_engine_tools() {
-        assert_eq!(engine_tool(AnnotationTool::Eraser), Some(ActiveTool::Eraser));
-        assert_eq!(engine_tool(AnnotationTool::Select), Some(ActiveTool::Select));
+        assert_eq!(
+            engine_tool(AnnotationTool::Eraser),
+            Some(ActiveTool::Eraser)
+        );
+        assert_eq!(
+            engine_tool(AnnotationTool::Select),
+            Some(ActiveTool::Select)
+        );
+    }
+
+    /// 聚光灯映射到引擎 Spotlight；水印只开面板，不进引擎工具也不接收指针。
+    #[test]
+    fn spotlight_maps_and_watermark_is_panel_only() {
+        assert_eq!(
+            engine_tool(AnnotationTool::Spotlight),
+            Some(ActiveTool::Spotlight)
+        );
+        assert_eq!(engine_tool(AnnotationTool::Watermark), None);
+        let mut layer = AnnotationLayer::new(100, 100, 1.0).unwrap();
+        layer.set_tool(AnnotationTool::Spotlight).unwrap();
+        assert!(layer.accepts_pointer());
+        layer.set_tool(AnnotationTool::Watermark).unwrap();
+        assert_eq!(layer.tool(), AnnotationTool::Watermark);
+        assert!(!layer.accepts_pointer());
+    }
+
+    /// 配置访问器返回装饰层当前值，`set_watermark` 后可读回。
+    #[test]
+    fn decoration_config_accessors_round_trip() {
+        let (w, h) = (80, 60);
+        let data = white(w, h);
+        let base = BaseView {
+            width: w,
+            height: h,
+            bgra: &data,
+        };
+        let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
+        let mut wm = layer.watermark_config();
+        wm.text = "Hi".into();
+        wm.opacity = 0.5;
+        layer.set_watermark(wm, base).unwrap();
+        assert_eq!(layer.watermark_config().text, "Hi");
+        assert_eq!(layer.watermark_config().opacity, 0.5);
+        let mut sp = layer.spotlight_config();
+        sp.opacity = 0.25;
+        layer.set_spotlight_style(sp, base).unwrap();
+        assert_eq!(layer.spotlight_config().opacity, 0.25);
     }
 
     /// 橡皮拖过一条已画的线：这条线被擦除（元素数归零），撤销后恢复。
@@ -1818,7 +2096,11 @@ mod tests {
     fn eraser_removes_a_drawn_line_and_undo_restores_it() {
         let (w, h) = (300, 200);
         let data = white(w, h);
-        let base = BaseView { width: w, height: h, bgra: &data };
+        let base = BaseView {
+            width: w,
+            height: h,
+            bgra: &data,
+        };
         let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
         layer.set_tool(AnnotationTool::Line).unwrap();
         drag(&mut layer, base, (40.0, 100.0), (240.0, 100.0));
@@ -1835,7 +2117,11 @@ mod tests {
     fn select_tool_moves_a_drawn_line() {
         let (w, h) = (300, 200);
         let data = white(w, h);
-        let base = BaseView { width: w, height: h, bgra: &data };
+        let base = BaseView {
+            width: w,
+            height: h,
+            bgra: &data,
+        };
         let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
         layer.set_tool(AnnotationTool::Line).unwrap();
         drag(&mut layer, base, (40.0, 60.0), (240.0, 60.0));
@@ -1843,8 +2129,13 @@ mod tests {
         drag(&mut layer, base, (140.0, 60.0), (140.0, 140.0));
         assert_eq!(layer.item_count(), 1);
         let (_, _, rgba) = layer.export_rgba([0, 0, w as i32, h as i32], base).unwrap();
-        let moved = (0..h).filter(|&y| px(&rgba, w, 140, y)[..3].iter().any(|&c| c < 200)).collect::<Vec<_>>();
-        assert!(!moved.is_empty() && moved.iter().all(|&y| (125..=155).contains(&y)), "线应被移到 y≈140: {moved:?}");
+        let moved = (0..h)
+            .filter(|&y| px(&rgba, w, 140, y)[..3].iter().any(|&c| c < 200))
+            .collect::<Vec<_>>();
+        assert!(
+            !moved.is_empty() && moved.iter().all(|&y| (125..=155).contains(&y)),
+            "线应被移到 y≈140: {moved:?}"
+        );
     }
 
     /// 改色与线宽后，后续绘制按新样式出图（颜色为蓝，线宽约 12）。
@@ -1852,19 +2143,28 @@ mod tests {
     fn style_color_and_width_apply_to_next_drawing() {
         let (w, h) = (300, 200);
         let data = white(w, h);
-        let base = BaseView { width: w, height: h, bgra: &data };
+        let base = BaseView {
+            width: w,
+            height: h,
+            bgra: &data,
+        };
         let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
         layer.set_tool(AnnotationTool::Line).unwrap();
         let mut style = default_style(AnnotationTool::Line);
         style.color = [0x16, 0x77, 0xFF, 0xFF];
         style.width = 12;
-        layer.apply_style(AnnotationTool::Line, &style, base).unwrap();
+        layer
+            .apply_style(AnnotationTool::Line, &style, base)
+            .unwrap();
         drag(&mut layer, base, (40.0, 100.0), (240.0, 100.0));
         let (_, _, rgba) = layer.export_rgba([0, 0, w as i32, h as i32], base).unwrap();
         let mid = px(&rgba, w, 140, 100);
         assert!(mid[2] > 200 && mid[0] < 60, "应为蓝色: {mid:?}");
         let thickness = (0..h).filter(|&y| px(&rgba, w, 140, y)[0] < 128).count();
-        assert!((10..=14).contains(&thickness), "线宽应约 12px，实际 {thickness}");
+        assert!(
+            (10..=14).contains(&thickness),
+            "线宽应约 12px，实际 {thickness}"
+        );
     }
 
     /// 设备像素比 2 时，逻辑线宽乘 2 下发引擎。
@@ -1872,16 +2172,25 @@ mod tests {
     fn style_width_scales_with_dpr() {
         let (w, h) = (300, 200);
         let data = white(w, h);
-        let base = BaseView { width: w, height: h, bgra: &data };
+        let base = BaseView {
+            width: w,
+            height: h,
+            bgra: &data,
+        };
         let mut layer = AnnotationLayer::new(w, h, 2.0).unwrap();
         layer.set_tool(AnnotationTool::Line).unwrap();
         let mut style = default_style(AnnotationTool::Line);
         style.width = 4;
-        layer.apply_style(AnnotationTool::Line, &style, base).unwrap();
+        layer
+            .apply_style(AnnotationTool::Line, &style, base)
+            .unwrap();
         drag(&mut layer, base, (40.0, 100.0), (240.0, 100.0));
         let (_, _, rgba) = layer.export_rgba([0, 0, w as i32, h as i32], base).unwrap();
         let thickness = (0..h).filter(|&y| px(&rgba, w, 140, y)[1] < 128).count();
-        assert!((7..=9).contains(&thickness), "4 逻辑像素 @2x 应约 8 物理像素，实际 {thickness}");
+        assert!(
+            (7..=9).contains(&thickness),
+            "4 逻辑像素 @2x 应约 8 物理像素，实际 {thickness}"
+        );
     }
 
     /// 形状填充开关：开启后内部被半透明描边色覆盖。
@@ -1889,16 +2198,25 @@ mod tests {
     fn rectangle_fill_toggle() {
         let (w, h) = (300, 200);
         let data = white(w, h);
-        let base = BaseView { width: w, height: h, bgra: &data };
+        let base = BaseView {
+            width: w,
+            height: h,
+            bgra: &data,
+        };
         let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
         layer.set_tool(AnnotationTool::Rectangle).unwrap();
         let mut style = default_style(AnnotationTool::Rectangle);
         style.fill = true;
-        layer.apply_style(AnnotationTool::Rectangle, &style, base).unwrap();
+        layer
+            .apply_style(AnnotationTool::Rectangle, &style, base)
+            .unwrap();
         drag(&mut layer, base, (40.0, 40.0), (240.0, 160.0));
         let (_, _, rgba) = layer.export_rgba([0, 0, w as i32, h as i32], base).unwrap();
         let inner = px(&rgba, w, 140, 100);
-        assert!(inner[0] > 200 && inner[1] < 245 && inner[1] > 100, "内部应是淡红填充: {inner:?}");
+        assert!(
+            inner[0] > 200 && inner[1] < 245 && inner[1] > 100,
+            "内部应是淡红填充: {inner:?}"
+        );
     }
 
     /// 箭头头型：选“无”时末端没有头部，比标准箭头少很多像素。
@@ -1906,21 +2224,30 @@ mod tests {
     fn arrowhead_none_draws_fewer_pixels() {
         let (w, h) = (300, 200);
         let data = white(w, h);
-        let base = BaseView { width: w, height: h, bgra: &data };
+        let base = BaseView {
+            width: w,
+            height: h,
+            bgra: &data,
+        };
         let count = |head: ArrowheadChoice| {
             let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
             layer.set_tool(AnnotationTool::Arrow).unwrap();
             let mut style = default_style(AnnotationTool::Arrow);
             style.arrowhead = head;
             style.width = 4;
-            layer.apply_style(AnnotationTool::Arrow, &style, base).unwrap();
+            layer
+                .apply_style(AnnotationTool::Arrow, &style, base)
+                .unwrap();
             drag(&mut layer, base, (40.0, 100.0), (240.0, 100.0));
             let (_, _, rgba) = layer.export_rgba([0, 0, w as i32, h as i32], base).unwrap();
             rgba.chunks_exact(4).filter(|p| p[1] < 128).count()
         };
         let none = count(ArrowheadChoice::None);
         let arrow = count(ArrowheadChoice::Arrow);
-        assert!(none > 0 && arrow > none + 20, "无头 {none} 像素，标准箭头 {arrow} 像素");
+        assert!(
+            none > 0 && arrow > none + 20,
+            "无头 {none} 像素，标准箭头 {arrow} 像素"
+        );
     }
 
     /// 荧光笔：画出半透明粗线，底图仍能透出来。
@@ -1928,11 +2255,19 @@ mod tests {
     fn highlighter_draws_translucent_stroke() {
         let (w, h) = (300, 200);
         let data = gradient(w, h);
-        let base = BaseView { width: w, height: h, bgra: &data };
+        let base = BaseView {
+            width: w,
+            height: h,
+            bgra: &data,
+        };
         let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
         layer.set_tool(AnnotationTool::Highlighter).unwrap();
         layer
-            .apply_style(AnnotationTool::Highlighter, &default_style(AnnotationTool::Highlighter), base)
+            .apply_style(
+                AnnotationTool::Highlighter,
+                &default_style(AnnotationTool::Highlighter),
+                base,
+            )
             .unwrap();
         drag(&mut layer, base, (40.0, 100.0), (240.0, 100.0));
         assert_eq!(layer.item_count(), 1);
@@ -1955,12 +2290,18 @@ mod tests {
     fn counter_places_numbered_balls() {
         let (w, h) = (300, 200);
         let data = white(w, h);
-        let base = BaseView { width: w, height: h, bgra: &data };
+        let base = BaseView {
+            width: w,
+            height: h,
+            bgra: &data,
+        };
         let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
         layer.set_tool(AnnotationTool::Counter).unwrap();
         let mut style = default_style(AnnotationTool::Counter);
         style.color = [0x16, 0x77, 0xFF, 0xFF];
-        layer.apply_style(AnnotationTool::Counter, &style, base).unwrap();
+        layer
+            .apply_style(AnnotationTool::Counter, &style, base)
+            .unwrap();
         for x in [80.0, 200.0] {
             layer.pointer_down(x, 100.0, base).unwrap();
             layer.pointer_up(x, 100.0, base).unwrap();
@@ -1984,7 +2325,10 @@ mod tests {
                 .flat_map(|x| (85..116).map(move |y| px(rgba_ref, w, x, y)))
                 .collect::<Vec<_>>()
         };
-        let white_dots = patch(65).iter().filter(|p| p[..3] == [255, 255, 255]).count();
+        let white_dots = patch(65)
+            .iter()
+            .filter(|p| p[..3] == [255, 255, 255])
+            .count();
         assert!(white_dots > 5, "球内应有白色数字，实际白点 {white_dots}");
         assert_ne!(patch(65), patch(185), "两个球的数字应不同");
     }
@@ -1994,23 +2338,38 @@ mod tests {
     fn text_style_affects_committed_text() {
         let (w, h) = (400, 200);
         let data = white(w, h);
-        let base = BaseView { width: w, height: h, bgra: &data };
+        let base = BaseView {
+            width: w,
+            height: h,
+            bgra: &data,
+        };
         let measure = |font: u32| {
             let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
             layer.set_tool(AnnotationTool::Text).unwrap();
             let mut style = default_style(AnnotationTool::Text);
             style.font_size = font;
             style.color = [0x16, 0x77, 0xFF, 0xFF];
-            layer.apply_style(AnnotationTool::Text, &style, base).unwrap();
+            layer
+                .apply_style(AnnotationTool::Text, &style, base)
+                .unwrap();
             layer.commit_text(20.0, 30.0, "Snow", base).unwrap();
             let (_, _, rgba) = layer.export_rgba([0, 0, w as i32, h as i32], base).unwrap();
-            let blue = rgba.chunks_exact(4).filter(|p| p[2] > 200 && p[0] < 80).count();
+            let blue = rgba
+                .chunks_exact(4)
+                .filter(|p| p[2] > 200 && p[0] < 80)
+                .count();
             (layer.measure_text("Snow").unwrap().0, blue)
         };
         let (small_w, small_blue) = measure(16);
         let (big_w, big_blue) = measure(48);
-        assert!(big_w > small_w * 2, "字号变大文字应更宽: {small_w} -> {big_w}");
-        assert!(small_blue > 20 && big_blue > small_blue, "文字应是蓝色: {small_blue} / {big_blue}");
+        assert!(
+            big_w > small_w * 2,
+            "字号变大文字应更宽: {small_w} -> {big_w}"
+        );
+        assert!(
+            small_blue > 20 && big_blue > small_blue,
+            "文字应是蓝色: {small_blue} / {big_blue}"
+        );
     }
 
     /// 没有样式的工具（马赛克 / 无）不产生更新也不报错。
@@ -2018,10 +2377,18 @@ mod tests {
     fn style_for_filter_tools_is_noop() {
         let (w, h) = (100, 100);
         let data = white(w, h);
-        let base = BaseView { width: w, height: h, bgra: &data };
+        let base = BaseView {
+            width: w,
+            height: h,
+            bgra: &data,
+        };
         let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
         let update = layer
-            .apply_style(AnnotationTool::Mosaic, &default_style(AnnotationTool::Line), base)
+            .apply_style(
+                AnnotationTool::Mosaic,
+                &default_style(AnnotationTool::Line),
+                base,
+            )
             .unwrap();
         assert!(update.is_empty());
     }

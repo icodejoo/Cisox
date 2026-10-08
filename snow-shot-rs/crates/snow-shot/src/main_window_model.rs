@@ -1,4 +1,4 @@
-//! 主窗口的导航与状态模型：页面清单、侧栏折叠、设置分组展开、当前页。
+//! 主窗口的导航与状态模型：页面清单、侧栏折叠、设置分组展开、当前页、页内设置分组。
 //!
 //! 纯逻辑，不依赖 GPUI，可离屏测试。窗口关闭即整体释放，不做后台常驻。
 
@@ -58,6 +58,8 @@ pub enum OpenTarget {
 pub enum PageContent {
     /// 入口页：说明文字加一个打开现成窗口的按钮。
     Open(OpenTarget),
+    /// 内嵌设置页：直接显示本页所属的设置分组（复用设置页视图）。
+    Settings,
     /// 关于页。
     About,
     /// 尚未提供的页面；可附带一个可用的替代入口。
@@ -130,7 +132,85 @@ impl MainPage {
             Self::PinManage => PageContent::Open(OpenTarget::PinManage),
             Self::Translation => PageContent::Open(OpenTarget::TranslatePage),
             Self::About => PageContent::About,
-            _ => PageContent::Open(OpenTarget::Settings),
+            _ => PageContent::Settings,
+        }
+    }
+
+    /// 本页内嵌的设置分组 id（按显示顺序）；非设置页为空。
+    ///
+    /// 28 个设置分组恰好分摊到各设置页，每个分组只属于一页。
+    pub fn settings_groups(self) -> &'static [&'static str] {
+        match self {
+            Self::GlobalHotkeys => &["global_shortcuts"],
+            Self::GlobalMouse => &["global_mouse"],
+            Self::Interface => &["interface", "tray"],
+            Self::Function => &[
+                "screenshot",
+                "screenshot_ui",
+                "screenshot_selection",
+                "screenshot_toolbar",
+                "screenshot_translation",
+                "screenshot_conversion",
+                "drawing",
+                "pin_to_screen",
+                "pinned_history",
+                "capture_history",
+                "text_recognition",
+                "dictation",
+                "screen_recording",
+            ],
+            Self::AppShortcuts => &[
+                "screenshot_shortcuts",
+                "drawing_shortcuts",
+                "pin_to_screen_shortcuts",
+                "screen_recording_shortcuts",
+            ],
+            Self::Storage => &["storage"],
+            Self::ApiConfig => &["api_configuration", "mcp"],
+            Self::ExtendedFeatures => &["extended_features"],
+            Self::System => &["system", "updates", "network"],
+            Self::History | Self::PinManage | Self::Translation | Self::About => &[],
+        }
+    }
+
+    /// 设置分组 id 所在的页面；不属于任何页返回 `None`。
+    ///
+    /// # 参数
+    /// - `group_id`：设置分组 id（如 `screenshot_ui`）。
+    pub fn for_settings_group(group_id: &str) -> Option<MainPage> {
+        TOP_PAGES
+            .iter()
+            .chain(SETTINGS_PAGES.iter())
+            .copied()
+            .find(|page| page.settings_groups().contains(&group_id))
+    }
+
+    /// 入口页（历史 / 贴图 / 翻译）相关的设置分组 id：页面上的按钮点一下跳到该分组。
+    pub fn related_settings_group(self) -> Option<&'static str> {
+        match self {
+            Self::History => Some("capture_history"),
+            Self::PinManage => Some("pin_to_screen"),
+            Self::Translation => Some("screenshot_translation"),
+            _ => None,
+        }
+    }
+
+    /// 侧栏图标名（snow-ui-icons 的描边图标）；折叠态只显示它。
+    pub fn icon_name(self) -> &'static str {
+        match self {
+            Self::GlobalHotkeys => "key",
+            Self::GlobalMouse => "aim",
+            Self::History => "history",
+            Self::PinManage => "pushpin",
+            Self::Translation => "translation",
+            Self::Interface => "skin",
+            Self::Function => "appstore",
+            Self::AppShortcuts => "thunderbolt",
+            Self::Storage => "database",
+            Self::ApiConfig => "api",
+            Self::ExtendedFeatures => "experiment",
+            Self::System => "desktop",
+            Self::About => "info-circle",
         }
     }
 
@@ -139,6 +219,13 @@ impl MainPage {
         SETTINGS_PAGES.contains(&self)
     }
 }
+
+/// 侧栏「设置」分组标题的图标名。
+pub const SETTINGS_GROUP_ICON: &str = "setting";
+/// 折叠按钮图标名（展开态时点击收起）。
+pub const COLLAPSE_ICON: &str = "menu-fold";
+/// 展开按钮图标名（折叠态时点击展开）。
+pub const EXPAND_ICON: &str = "menu-unfold";
 
 impl OpenTarget {
     /// 入口按钮文案的本地化 id。
@@ -180,6 +267,8 @@ pub struct MainWindowModel {
     settings_expanded: bool,
     /// 翻译页是否启用。
     translation_enabled: bool,
+    /// 当前设置页里选中的分组下标（相对 [`MainPage::settings_groups`]）。
+    group_index: usize,
 }
 
 impl MainWindowModel {
@@ -194,6 +283,7 @@ impl MainWindowModel {
             collapsed,
             settings_expanded: false,
             translation_enabled,
+            group_index: 0,
         }
     }
 
@@ -220,11 +310,58 @@ impl MainWindowModel {
         if !self.page_visible(page) {
             return false;
         }
+        if self.current != page {
+            self.group_index = 0;
+        }
         self.current = page;
         if page.in_settings_group() {
             self.settings_expanded = true;
         }
         true
+    }
+
+    /// 当前设置页选中的分组 id；当前页不是设置页返回 `None`。
+    pub fn settings_group(&self) -> Option<&'static str> {
+        self.current
+            .settings_groups()
+            .get(self.group_index)
+            .copied()
+    }
+
+    /// 在当前设置页内切换分组；分组不属于当前页时忽略并返回 `false`。
+    ///
+    /// # 参数
+    /// - `group_id`：设置分组 id。
+    pub fn select_group(&mut self, group_id: &str) -> bool {
+        match self
+            .current
+            .settings_groups()
+            .iter()
+            .position(|g| *g == group_id)
+        {
+            Some(index) => {
+                self.group_index = index;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// 跳到某个设置分组：切到它所在的页并选中该分组（入口按钮用）。
+    ///
+    /// # 参数
+    /// - `group_id`：设置分组 id。
+    ///
+    /// # 返回
+    /// 分组不属于任何页（或所在页不可见）时返回 `false`。
+    pub fn jump_to_group(&mut self, group_id: &str) -> bool {
+        let Some(page) = MainPage::for_settings_group(group_id) else {
+            return false;
+        };
+        if !self.select(page) {
+            return false;
+        }
+        self.select_group(group_id)
     }
 
     /// 切换侧栏折叠，返回切换后的值（调用方据此落盘）。
@@ -366,5 +503,105 @@ mod tests {
             MainPage::History.content(),
             PageContent::Open(OpenTarget::History)
         );
+        assert_eq!(MainPage::Storage.content(), PageContent::Settings);
+        assert_eq!(MainPage::GlobalHotkeys.content(), PageContent::Settings);
+    }
+
+    /// 28 个设置分组恰好分摊到各设置页：不重不漏，且非设置页没有分组。
+    #[test]
+    fn every_settings_group_belongs_to_exactly_one_page() {
+        let mut seen = std::collections::HashSet::new();
+        let pages = TOP_PAGES
+            .iter()
+            .chain(SETTINGS_PAGES.iter())
+            .copied()
+            .chain([MainPage::About]);
+        for page in pages {
+            assert_eq!(
+                page.content() == PageContent::Settings,
+                !page.settings_groups().is_empty(),
+                "{page:?}"
+            );
+            for id in page.settings_groups() {
+                assert!(seen.insert(*id), "分组重复：{id}");
+                assert_eq!(MainPage::for_settings_group(id), Some(page));
+            }
+        }
+        for id in crate::settings_text::GROUP_IDS {
+            assert!(seen.contains(id), "分组未分配到页面：{id}");
+        }
+        assert_eq!(seen.len(), crate::settings_text::GROUP_IDS.len());
+    }
+
+    /// 设置页默认选中第一个分组；换页重置，页内可切换，跨页分组被拒绝。
+    #[test]
+    fn settings_group_selection_follows_page() {
+        let mut m = MainWindowModel::new(false, true);
+        assert_eq!(m.settings_group(), Some("global_shortcuts"));
+        assert!(m.select(MainPage::Function));
+        assert_eq!(m.settings_group(), Some("screenshot"));
+        assert!(m.select_group("drawing"));
+        assert_eq!(m.settings_group(), Some("drawing"));
+        assert!(!m.select_group("storage"), "别页的分组不能在本页选");
+        assert_eq!(m.settings_group(), Some("drawing"));
+        // 重选同一页不重置分组，换页则重置
+        assert!(m.select(MainPage::Function));
+        assert_eq!(m.settings_group(), Some("drawing"));
+        assert!(m.select(MainPage::Storage));
+        assert!(m.select(MainPage::Function));
+        assert_eq!(m.settings_group(), Some("screenshot"));
+        assert!(m.select(MainPage::About));
+        assert_eq!(m.settings_group(), None);
+    }
+
+    /// 入口按钮按分组 id 跳页并选中分组，同时展开设置分组。
+    #[test]
+    fn jump_to_group_selects_page_and_group() {
+        let mut m = MainWindowModel::new(false, true);
+        assert!(m.jump_to_group("screen_recording"));
+        assert_eq!(m.current(), MainPage::Function);
+        assert_eq!(m.settings_group(), Some("screen_recording"));
+        assert!(
+            m.nav_items()
+                .contains(&NavItem::SettingsGroup { expanded: true })
+        );
+        assert!(!m.jump_to_group("no_such_group"));
+        assert_eq!(m.current(), MainPage::Function);
+    }
+
+    /// 入口页的相关设置分组都存在，点击入口能跳过去。
+    #[test]
+    fn related_groups_are_jumpable() {
+        for page in [
+            MainPage::History,
+            MainPage::PinManage,
+            MainPage::Translation,
+        ] {
+            let group = page.related_settings_group().unwrap();
+            assert!(MainPage::for_settings_group(group).is_some(), "{group}");
+        }
+        assert_eq!(MainPage::Storage.related_settings_group(), None);
+        let mut m = MainWindowModel::new(false, true);
+        assert!(m.jump_to_group(MainPage::History.related_settings_group().unwrap()));
+        assert_eq!(m.settings_group(), Some("capture_history"));
+    }
+
+    /// 每个页面都有可渲染的侧栏图标。
+    #[test]
+    fn every_page_icon_exists() {
+        let pages = TOP_PAGES
+            .iter()
+            .chain(SETTINGS_PAGES.iter())
+            .copied()
+            .chain([MainPage::About]);
+        for page in pages {
+            let icon =
+                snow_ui::icons::IconRef::new(snow_ui::icons::IconTheme::Outlined, page.icon_name());
+            assert!(icon.exists(), "缺少图标 {}", page.icon_name());
+        }
+        for name in [SETTINGS_GROUP_ICON, COLLAPSE_ICON, EXPAND_ICON] {
+            let icon = snow_ui::icons::IconRef::new(snow_ui::icons::IconTheme::Outlined, name);
+            assert!(icon.exists(), "缺少图标 {name}");
+        }
     }
 }
