@@ -107,3 +107,4 @@ snow-crates/crates/snow-audio-recorder/tests/output/
 
 # Local model/test caches
 /.cache/
+/.codegraph/
