@@ -49,8 +49,8 @@ pub enum OpenTarget {
     History,
     /// 贴图管理窗口。
     PinManage,
-    /// 输入框翻译浮窗。
-    TranslateInput,
+    /// 翻译页独立窗口。
+    TranslatePage,
 }
 
 /// 页面内容类型。
@@ -128,7 +128,7 @@ impl MainPage {
         match self {
             Self::History => PageContent::Open(OpenTarget::History),
             Self::PinManage => PageContent::Open(OpenTarget::PinManage),
-            Self::Translation => PageContent::Placeholder(Some(OpenTarget::TranslateInput)),
+            Self::Translation => PageContent::Open(OpenTarget::TranslatePage),
             Self::About => PageContent::About,
             _ => PageContent::Open(OpenTarget::Settings),
         }
@@ -147,7 +147,7 @@ impl OpenTarget {
             Self::Settings => "main-open-settings",
             Self::History => "main-open-history",
             Self::PinManage => "main-open-pins",
-            Self::TranslateInput => "main-open-translate",
+            Self::TranslatePage => "main-open-translate",
         }
     }
 }
@@ -359,7 +359,7 @@ mod tests {
         }
         assert_eq!(
             MainPage::Translation.content(),
-            PageContent::Placeholder(Some(OpenTarget::TranslateInput))
+            PageContent::Open(OpenTarget::TranslatePage)
         );
         assert_eq!(MainPage::About.content(), PageContent::About);
         assert_eq!(

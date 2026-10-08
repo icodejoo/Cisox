@@ -111,7 +111,7 @@ impl MainWindowView {
             OpenTarget::Settings => UiEvent::OpenSettings,
             OpenTarget::History => UiEvent::OpenHistory,
             OpenTarget::PinManage => UiEvent::OpenPinManage,
-            OpenTarget::TranslateInput => UiEvent::OpenTranslateInput,
+            OpenTarget::TranslatePage => UiEvent::OpenTranslatePage,
         }
     }
 

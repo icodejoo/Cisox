@@ -68,4 +68,4 @@ main-open-history = Open screenshot history
 
 main-open-pins = Open pin management
 
-main-open-translate = Open translate input
+main-open-translate = Open translate page

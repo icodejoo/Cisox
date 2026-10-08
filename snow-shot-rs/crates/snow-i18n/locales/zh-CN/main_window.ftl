@@ -68,4 +68,4 @@ main-open-history = 打开截图历史
 
 main-open-pins = 打开贴图管理
 
-main-open-translate = 打开翻译输入框
+main-open-translate = 打开翻译页
