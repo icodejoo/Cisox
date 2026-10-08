@@ -147,3 +147,52 @@ fn perf_4k_single_arrow_drag() {
         assert!(avg < 5.0, "release 下每帧平均应远小于 5ms，实测 {avg:.3}");
     }
 }
+
+/// 真实引擎的聚光灯工具：拖出一个洞后，光栅化器消费装饰补丁，洞内透明、洞外压暗；
+/// 回传游标后的增量补丁与无游标整屏补丁渲染出的装饰层逐字节一致。
+#[test]
+fn engine_spotlight_drag_feeds_decoration() {
+    use snow_canvas_raster::decoration::CoverageBitmap;
+
+    let mut engine = Engine::default();
+    let id = engine.create_viewport(ViewportConfig::default()).unwrap();
+    engine.set_viewport_surface_size(id, 600, 400).unwrap();
+    engine
+        .set_viewport_active_tool(id, ActiveTool::Spotlight)
+        .unwrap();
+    pointer(&mut engine, id, PointerEventType::Down, 100.0, 100.0);
+    pointer(&mut engine, id, PointerEventType::Move, 300.0, 200.0);
+    pointer(&mut engine, id, PointerEventType::Up, 300.0, 200.0);
+
+    let mut text = |_: &str, _: &str, _: f32| -> Option<CoverageBitmap> { None };
+    let mut r = TinySkiaRasterizer::new(RasterConfig::default());
+    let patch = engine.acquire_patch(id, r.cursor()).unwrap();
+    r.apply_patch(&patch).unwrap();
+    assert_eq!(r.decoration().cutouts().len(), 1);
+    assert!(r.decoration().spotlight_visible());
+    let incremental = r.render_decoration([0, 0, 600, 400], &mut text).unwrap();
+    let px = |x: usize, y: usize| {
+        let o = (y * 600 + x) * 4;
+        incremental[o + 3]
+    };
+    assert_eq!(px(200, 150), 0, "洞中心不压暗");
+    assert!(px(500, 350) > 100, "洞外压暗");
+
+    // 再画一个洞，增量补丁（带游标）与整屏补丁（无游标）渲染结果一致
+    pointer(&mut engine, id, PointerEventType::Down, 400.0, 250.0);
+    pointer(&mut engine, id, PointerEventType::Move, 520.0, 330.0);
+    pointer(&mut engine, id, PointerEventType::Up, 520.0, 330.0);
+    let patch = engine.acquire_patch(id, r.cursor()).unwrap();
+    r.apply_patch(&patch).unwrap();
+    assert_eq!(r.decoration().cutouts().len(), 2);
+    let incremental = r.render_decoration([0, 0, 600, 400], &mut text).unwrap();
+    let mut fresh = TinySkiaRasterizer::new(RasterConfig::default());
+    let full = engine.acquire_patch(id, None).unwrap();
+    fresh.apply_patch(&full).unwrap();
+    assert_eq!(
+        fresh
+            .render_decoration([0, 0, 600, 400], &mut text)
+            .unwrap(),
+        incremental
+    );
+}

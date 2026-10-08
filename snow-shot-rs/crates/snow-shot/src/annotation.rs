@@ -6,13 +6,14 @@
 //!
 //! 坐标约定：世界坐标 = 覆盖窗底图物理像素坐标（相机恒等、缩放 1）。
 //!
-//! 层序（自下而上）：滤镜（取自冻结底图）-> 矢量图形 -> 文字。滤镜只采样冻结底图，
-//! 不会对其下方的其它标注再做模糊。
+//! 层序（自下而上）：滤镜（取自冻结底图）-> 矢量图形 -> 文字 -> 聚光灯 -> 水印。滤镜只采样冻结底图，
+//! 不会对其下方的其它标注再做模糊；聚光灯与水印是装饰层，预览分块与导出共用同一渲染函数。
 
 use snow_canvas_filters::{
     ExecutionOptions, FILTER_BLUR, FILTER_MOSAIC, OwnedImage, Parameters, apply,
     sampling_radius_pixels,
 };
+use snow_canvas_raster::decoration::CoverageBitmap;
 use snow_canvas_raster::{
     CanvasRasterizer, RasterConfig, RasterOutput, RasterTile, TileKey, TinySkiaRasterizer,
 };
@@ -696,6 +697,74 @@ impl AnnotationLayer {
         })
     }
 
+    /// 设置水印配置（含文本）并刷新受影响的预览块；水印是文档级配置，进撤销历史。
+    ///
+    /// # 参数
+    /// - `config`：水印配置；文本为空白或不透明度过低则不显示水印。
+    /// - `base`：冻结底图。
+    ///
+    /// # 返回
+    /// 需要更新的预览块；配置未变化时更新为空。
+    pub fn set_watermark(
+        &mut self,
+        config: snow_draw_engine::WatermarkConfig,
+        base: BaseView,
+    ) -> Result<LayerUpdate, String> {
+        self.engine
+            .set_viewport_watermark_config(self.viewport, config)
+            .map_err(|e| format!("设置水印失败: {e:?}"))?;
+        self.sync(base)
+    }
+
+    /// 设置聚光灯样式（颜色与不透明度）并刷新受影响的预览块。
+    ///
+    /// # 参数
+    /// - `config`：聚光灯样式。
+    /// - `base`：冻结底图。
+    pub fn set_spotlight_style(
+        &mut self,
+        config: snow_draw_engine::SpotlightConfig,
+        base: BaseView,
+    ) -> Result<LayerUpdate, String> {
+        self.engine
+            .set_viewport_spotlight_config(self.viewport, config)
+            .map_err(|e| format!("设置聚光灯失败: {e:?}"))?;
+        self.sync(base)
+    }
+
+    /// 按配置键 `drawing/watermark_style` 与 `drawing/spotlight_style` 的值更新装饰层样式
+    /// （缺字段沿用当前值，水印文本不动），数值夹取规则见 [`crate::decoration_style`]。
+    ///
+    /// # 参数
+    /// - `watermark_style`：水印样式配置值。
+    /// - `spotlight_style`：聚光灯样式配置值。
+    /// - `base`：冻结底图。
+    ///
+    /// # 返回
+    /// 需要更新的预览块。
+    pub fn apply_decoration_style(
+        &mut self,
+        watermark_style: &serde_json::Value,
+        spotlight_style: &serde_json::Value,
+        base: BaseView,
+    ) -> Result<LayerUpdate, String> {
+        let watermark =
+            crate::decoration_style::watermark_from_json(watermark_style, self.engine.watermark_config());
+        let spotlight =
+            crate::decoration_style::spotlight_from_json(spotlight_style, &self.engine.spotlight_config());
+        let mut update = self.set_watermark(watermark, base)?;
+        let second = self.set_spotlight_style(spotlight, base)?;
+        // 两次更新可能触及同一块：后者覆盖前者
+        update
+            .tiles
+            .retain(|t| !second.tiles.iter().any(|n| n.key == t.key) && !second.released.contains(&t.key));
+        update.released.retain(|k| !second.tiles.iter().any(|n| n.key == *k));
+        update.tiles.extend(second.tiles);
+        update.released.extend(second.released);
+        update.touched_pixels += second.touched_pixels;
+        Ok(update)
+    }
+
     /// 当前工具。
     pub fn tool(&self) -> AnnotationTool {
         self.tool
@@ -1033,6 +1102,7 @@ impl AnnotationLayer {
                 &mut filters,
                 &mut self.text_cache,
             );
+            let layer = compose_decoration(&mut self.raster, rect, layer);
             match layer {
                 Some(mut rgba) => {
                     swap_rb(&mut rgba);
@@ -1097,7 +1167,7 @@ impl AnnotationLayer {
                 out.extend_from_slice(&[p[2], p[1], p[0], 255]);
             }
         }
-        if self.item_count() == 0 {
+        if self.item_count() == 0 && !self.raster.decoration().is_active() {
             return Some((w as u32, h as u32, out));
         }
         let vector = self.raster.canvas_rgba().and_then(|(cw, _, data)| {
@@ -1109,7 +1179,7 @@ impl AnnotationLayer {
             (!all_transparent(&crop)).then_some(crop)
         });
         let mut filters = HashMap::new();
-        if let Some(layer) = finish_layer(
+        let layer = finish_layer(
             rect,
             vector,
             self.raster.scene_items(),
@@ -1117,11 +1187,61 @@ impl AnnotationLayer {
             self.dpr,
             &mut filters,
             &mut self.text_cache,
-        ) {
+        );
+        // 聚光灯与水印叠在标注之上，与预览分块用同一个渲染函数、同样的“先合图层再叠底图”顺序
+        let layer = compose_decoration(&mut self.raster, rect, layer);
+        if let Some(layer) = layer {
             // 图层预乘 RGBA 叠在不透明底图上：out = layer + out * (1 - a)
             source_over(&mut out, &layer);
         }
         Some((w as u32, h as u32, out))
+    }
+}
+
+/// 水印文字光栅化回调：系统 GDI 覆盖率位图，字体族为空时用默认字体。
+///
+/// # 参数
+/// - `text`：水印文本。
+/// - `family`：字体族（空串取默认）。
+/// - `px`：像素字号。
+fn decoration_text(text: &str, family: &str, px: f32) -> Option<CoverageBitmap> {
+    let family = if family.is_empty() { DEFAULT_FONT_FAMILY } else { family };
+    match text_raster::rasterize_text(text, family, px, false) {
+        Ok(b) => Some(CoverageBitmap {
+            width: b.width,
+            height: b.height,
+            coverage: b.coverage,
+        }),
+        Err(e) => {
+            tracing::warn!(error = %e, "水印文字光栅化失败，水印不会绘制");
+            None
+        }
+    }
+}
+
+/// 把装饰层（聚光灯 + 水印）叠到 `layer` 之上；装饰层无内容时原样返回。
+///
+/// # 参数
+/// - `raster`：光栅化器（持有装饰层状态）。
+/// - `rect`：区域（画布物理坐标）。
+/// - `layer`：该区域的标注层（预乘 RGBA，全透明为 `None`）。
+fn compose_decoration(
+    raster: &mut TinySkiaRasterizer,
+    rect: IntRect,
+    layer: Option<Vec<u8>>,
+) -> Option<Vec<u8>> {
+    let Some(deco) = raster.render_decoration(rect, &mut decoration_text) else {
+        return layer;
+    };
+    if raster.decoration().watermark_degraded() {
+        tracing::warn!("水印重复单元超限或构建失败，本次不绘制水印");
+    }
+    match layer {
+        Some(mut base) => {
+            source_over(&mut base, &deco);
+            Some(base)
+        }
+        None => Some(deco),
     }
 }
 
@@ -1194,6 +1314,11 @@ mod tests {
             }
         }
         data
+    }
+
+    /// BGRA 底图转不透明 RGBA。
+    fn gradient_rgba(bgra: &[u8]) -> Vec<u8> {
+        bgra.chunks_exact(4).flat_map(|p| [p[2], p[1], p[0], 255]).collect()
     }
 
     /// 取 RGBA 缓冲中某像素。
@@ -1553,6 +1678,80 @@ mod tests {
         }
         let exported = layer.export_rgba([0, 0, w as i32, h as i32], base).unwrap().2;
         assert_eq!(rebuilt, exported, "预览块合成结果应与导出逐像素一致");
+    }
+
+    /// 聚光灯 + 水印：预览分块合成与导出逐像素一致；洞内标注保留、洞外压暗；撤销水印后恢复。
+    #[test]
+    fn decoration_preview_equals_export() {
+        let (w, h) = (600, 420);
+        let data = gradient(w, h);
+        let base = BaseView { width: w, height: h, bgra: &data };
+        let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
+        let mut canvas: HashMap<TileKey, TileImage> = HashMap::new();
+        let apply = |u: LayerUpdate, canvas: &mut HashMap<TileKey, TileImage>| {
+            for t in u.tiles {
+                canvas.insert(t.key, t);
+            }
+            for k in u.released {
+                canvas.remove(&k);
+            }
+        };
+        // 先画一个矩形标注，再在它上面拖出聚光灯洞（洞内应看到原标注）
+        layer.set_tool(AnnotationTool::Rectangle).unwrap();
+        for u in drag(&mut layer, base, (100.0, 100.0), (260.0, 220.0)) {
+            apply(u, &mut canvas);
+        }
+        layer
+            .engine
+            .set_viewport_active_tool(layer.viewport, ActiveTool::Spotlight)
+            .unwrap();
+        for u in drag(&mut layer, base, (80.0, 80.0), (300.0, 260.0)) {
+            apply(u, &mut canvas);
+        }
+        assert!(layer.raster.decoration().spotlight_visible());
+        let mut watermark = layer.engine.watermark_config().clone();
+        watermark.text = "Wm".into();
+        watermark.opacity = 0.5;
+        apply(layer.set_watermark(watermark, base).unwrap(), &mut canvas);
+        assert!(layer.raster.decoration().watermark_visible());
+
+        let mut rebuilt = Vec::with_capacity(data.len());
+        for p in data.chunks_exact(4) {
+            rebuilt.extend_from_slice(&[p[2], p[1], p[0], 255]);
+        }
+        for t in canvas.values() {
+            for row in 0..t.h {
+                for col in 0..t.w {
+                    let s = ((row * t.w + col) * 4) as usize;
+                    let d = (((t.y + row) * w + t.x + col) * 4) as usize;
+                    let src = [t.bgra[s + 2], t.bgra[s + 1], t.bgra[s], t.bgra[s + 3]];
+                    source_over(&mut rebuilt[d..d + 4], &src);
+                }
+            }
+        }
+        let exported = layer.export_rgba([0, 0, w as i32, h as i32], base).unwrap().2;
+        assert_eq!(rebuilt, exported, "装饰层预览分块与导出应逐像素一致");
+        // 导出裁切（跨分块边界）与整幅一致
+        let (cw, ch, crop) = layer.export_rgba([200, 150, 470, 380], base).unwrap();
+        for y in 0..ch {
+            for x in 0..cw {
+                assert_eq!(px(&crop, cw, x, y), px(&exported, w, x + 200, y + 150));
+            }
+        }
+        // 洞内的矩形标注线不被擦，洞外同样位置的底图被压暗
+        let plain = gradient_rgba(&data);
+        let outside = px(&exported, w, 560, 400);
+        let plain_outside = px(&plain, w, 560, 400);
+        assert!(
+            outside[0] < plain_outside[0] || outside[1] < plain_outside[1],
+            "洞外应压暗: {outside:?} vs {plain_outside:?}"
+        );
+        // 矩形左边线（x=100）在洞内：保持标注红色，没有被压暗
+        let edge = px(&exported, w, 100, 160);
+        assert!(edge[0] > 200 && edge[1] < 90, "洞内标注应保持红色: {edge:?}");
+        // 撤销（水印是文档级配置，进历史）后，导出不再含水印笔画
+        layer.undo(base).unwrap();
+        assert!(!layer.raster.decoration().watermark_visible());
     }
 
     /// 内容没变的分块不重复输出：原地不动的移动事件产生空更新。

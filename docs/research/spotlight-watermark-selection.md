@@ -1,6 +1,6 @@
 # 聚光灯 / 水印：选型调研
 
-> 状态：调研结论，未实施。日期 2026-10-08。依据 [`principles.md`](../principles.md) 的优先级链（高性能 > 低内存 > 高 fps > 少编译依赖 > 多用系统能力）。
+> 状态：已按本方案实施（2026-10-08，`snow-canvas-raster::decoration`），UI 入口与黄金对照未做，见审计表 D08。日期 2026-10-08。依据 [`principles.md`](../principles.md) 的优先级链（高性能 > 低内存 > 高 fps > 少编译依赖 > 多用系统能力）。
 > 关联：[`qt-parity-audit.md`](qt-parity-audit.md) D08、[`cisox-progress-handoff.md`](../cisox-progress-handoff.md)（"聚光灯 / 水印要先让 `snow-canvas-raster` 会画图层级配置"）。
 
 ## 1. 结论（先看这里）

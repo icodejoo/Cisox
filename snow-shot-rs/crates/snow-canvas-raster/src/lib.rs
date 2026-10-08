@@ -20,6 +20,7 @@
 //! - 脏区蒙版常驻全 0、每帧只处理脏区行。
 //! - 被替换/清空的旧块由上层显式释放，否则泄漏图集。
 
+pub mod decoration;
 mod draw;
 mod rasterizer;
 pub mod region;

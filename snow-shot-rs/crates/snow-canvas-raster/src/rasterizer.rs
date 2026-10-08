@@ -8,6 +8,7 @@ use snow_draw_engine_display::{
 };
 use tiny_skia::{Mask, Pixmap};
 
+use crate::decoration::{DecorationLayer, RegionRect, TextRasterizer};
 use crate::draw::{Ctx, HatchCache, View, draw_item, item_canvas_bounds};
 use crate::types::{
     DeferredItem, DeferredKind, MAX_SURFACE_PIXELS, RasterConfig, RasterError, RasterOutput,
@@ -56,7 +57,8 @@ struct Canvas {
 /// # 说明
 /// - 支持元素：矩形/椭圆/菱形、箭头（含虚线、线帽、头部图元、锥形）、画笔、序号形状、序号连线。
 /// - 文字与滤镜不绘制，登记在 `RasterOutput::deferred`（降级为空白）。
-/// - 覆盖层（选择框/手柄）与装饰层（水印/聚光灯）不在本光栅化器范围。
+/// - 装饰层（聚光灯/水印）的状态与脏区由本光栅化器跟踪，像素由 [`TinySkiaRasterizer::render_decoration`]
+///   按区域输出（预览与导出共用），不写进常驻矢量画布；覆盖层（选择框/手柄）不在范围。
 ///
 /// # 示例
 /// ```
@@ -76,6 +78,7 @@ pub struct TinySkiaRasterizer {
     canvas: Option<Canvas>,
     emitted: HashSet<TileKey>,
     hatch: HatchCache,
+    decoration: DecorationLayer,
 }
 
 impl TinySkiaRasterizer {
@@ -93,7 +96,32 @@ impl TinySkiaRasterizer {
             canvas: None,
             emitted: HashSet::new(),
             hatch: HatchCache::default(),
+            decoration: DecorationLayer::default(),
         }
+    }
+
+    /// 装饰层（聚光灯/水印）状态只读视图。
+    pub fn decoration(&self) -> &DecorationLayer {
+        &self.decoration
+    }
+
+    /// 渲染一个区域的装饰图层（预乘 RGBA），预览分块与导出裁切共用。
+    ///
+    /// # 参数
+    /// - `rect`：区域（画布物理像素）。
+    /// - `text`：水印文字光栅化回调。
+    ///
+    /// # 返回
+    /// 区域大小的预乘 RGBA；尚无帧或装饰层无可见内容时为 `None`。
+    /// 调用方用 source-over 把它叠在标注层之上。
+    pub fn render_decoration(
+        &mut self,
+        rect: RegionRect,
+        text: &mut TextRasterizer<'_>,
+    ) -> Option<Vec<u8>> {
+        let frame = self.frame?;
+        let dpr = f64::from(self.config.device_pixel_ratio);
+        self.decoration.render_region(&frame, dpr, rect, text)
     }
 
     /// 当前整幅画布的预乘 RGBA 像素（宽、高、数据），未初始化或零尺寸时为 `None`。
@@ -120,6 +148,7 @@ impl TinySkiaRasterizer {
         self.scene_revision = None;
         self.frame = None;
         self.cursor = None;
+        self.decoration.reset();
     }
 
     /// 校验并把 patch 的场景操作应用到本地镜像。
@@ -154,6 +183,10 @@ impl TinySkiaRasterizer {
     /// `apply_patch` 的实现体，错误由外层统一作废状态。
     fn apply_inner(&mut self, patch: &ViewportPatch) -> Result<RasterOutput, RasterError> {
         self.apply_scene_ops(patch)?;
+        // 重复收到同一修订号的 reset 不携带新信息，不必整屏重画装饰层
+        let decoration_reset =
+            patch.decoration.reset && self.decoration.revision() != Some(patch.decoration.revision);
+        self.decoration.apply_patch(&patch.decoration)?;
 
         let dpr = f64::from(self.config.device_pixel_ratio);
         let frame = patch.frame_view;
@@ -209,21 +242,32 @@ impl TinySkiaRasterizer {
         };
 
         let full = patch.scene.reset || frame_changed || size_changed;
-        let rects: Vec<IntRect> = if full {
-            vec![[0, 0, width, height]]
-        } else {
-            patch
-                .scene
-                .dirty_regions
+        let dirty_rects = |regions: &[snow_draw_engine_display::DirtyRegion]| -> Vec<IntRect> {
+            regions
                 .iter()
                 .filter_map(|r| to_int_rect(r.min_x, r.min_y, r.max_x, r.max_y, dpr, width, height))
                 .collect()
         };
+        let rects: Vec<IntRect> = if full {
+            vec![[0, 0, width, height]]
+        } else {
+            dirty_rects(&patch.scene.dirty_regions)
+        };
+        // 装饰层只触及自己的脏区（reset/视图或尺寸变化时整屏），不重画矢量内容
+        let deco_rects: Vec<IntRect> = if decoration_reset || frame_changed || size_changed {
+            vec![[0, 0, width, height]]
+        } else {
+            dirty_rects(&patch.decoration.dirty_regions)
+        };
         output.full_redraw = full;
-        if rects.is_empty() {
+        if rects.is_empty() && deco_rects.is_empty() {
             return Ok(output);
         }
 
+        if rects.is_empty() {
+            self.collect_tiles(&deco_rects, &mut output);
+            return Ok(output);
+        }
         clear_rows(canvas.pixmap.data_mut(), width, &rects);
         set_mask_rows(&mut canvas.mask, width, &rects, 255);
 
@@ -259,7 +303,9 @@ impl TinySkiaRasterizer {
         }
         set_mask_rows(&mut canvas.mask, width, &rects, 0);
 
-        self.collect_tiles(&rects, &mut output);
+        let mut touched = rects;
+        touched.extend(deco_rects);
+        self.collect_tiles(&touched, &mut output);
         Ok(output)
     }
 

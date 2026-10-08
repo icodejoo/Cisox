@@ -25,6 +25,7 @@ pub mod annotation;
 pub mod annotation_style;
 pub mod app_runtime;
 pub mod capture_flow;
+pub mod decoration_style;
 pub mod dictation;
 pub mod direct_capture;
 pub mod export_format;
