@@ -734,20 +734,26 @@ impl AnnotationLayer {
                 },
             )
             .map_err(|e| format!("设置相机失败: {e:?}"))?;
+        let layer_dpr = if dpr.is_finite() && dpr > 0.0 {
+            f64::from(dpr)
+        } else {
+            1.0
+        };
         Ok(Self {
             engine,
             viewport,
-            raster: TinySkiaRasterizer::new(RasterConfig {
-                tile_size: TILE_SIZE,
-                device_pixel_ratio: 1.0,
-            }),
+            raster: {
+                let mut raster = TinySkiaRasterizer::new(RasterConfig {
+                    tile_size: TILE_SIZE,
+                    device_pixel_ratio: 1.0,
+                });
+                // 画布是物理像素，水印字号与间距按逻辑像素存，所以按 DPR 放大
+                raster.set_watermark_logical_scale(layer_dpr);
+                raster
+            },
             width,
             height,
-            dpr: if dpr.is_finite() && dpr > 0.0 {
-                f64::from(dpr)
-            } else {
-                1.0
-            },
+            dpr: layer_dpr,
             tool: AnnotationTool::None,
             style,
             emitted: HashMap::new(),
@@ -1883,6 +1889,44 @@ mod tests {
             .unwrap()
             .2;
         assert_eq!(rebuilt, exported, "预览块合成结果应与导出逐像素一致");
+    }
+
+    /// 水印字号与间距按 DPR 换算成物理像素：125% / 150% 下平铺步长按倍数放大，字号随之变大。
+    #[test]
+    fn watermark_scales_with_dpr() {
+        let (w, h) = (600, 420);
+        let data = gradient(w, h);
+        let base = BaseView {
+            width: w,
+            height: h,
+            bgra: &data,
+        };
+        let mut ink_widths = Vec::new();
+        for dpr in [1.0f32, 1.25, 1.5] {
+            let mut layer = AnnotationLayer::new(w, h, dpr).unwrap();
+            let mut watermark = layer.engine.watermark_config().clone();
+            watermark.text = "Wm".into();
+            watermark.opacity = 0.5;
+            watermark.font_size = 20.0;
+            watermark.gap = 56.0;
+            layer.set_watermark(watermark, base).unwrap();
+            assert_eq!(layer.raster.decoration().logical_scale(), f64::from(dpr));
+            let rendered = layer
+                .raster
+                .render_decoration([0, 0, w as i32, h as i32], &mut decoration_text);
+            assert!(rendered.is_some(), "dpr {dpr}");
+            let g = layer.raster.decoration().watermark_geometry().unwrap();
+            let want_gap = 56.0 * f64::from(dpr);
+            assert!(
+                (g.step_x - (f64::from(g.ink_width) + want_gap)).abs() < 1e-6,
+                "dpr {dpr}: 步长应为墨迹宽 + 间距 {want_gap}"
+            );
+            ink_widths.push(g.ink_width);
+        }
+        assert!(
+            ink_widths[0] < ink_widths[1] && ink_widths[1] < ink_widths[2],
+            "字号随 DPR 放大: {ink_widths:?}"
+        );
     }
 
     /// 聚光灯 + 水印：预览分块合成与导出逐像素一致；洞内标注保留、洞外压暗；撤销水印后恢复。

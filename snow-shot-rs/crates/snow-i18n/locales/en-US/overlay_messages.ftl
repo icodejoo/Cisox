@@ -114,6 +114,8 @@ overlay-toolbar-ocr = OCR
 
 overlay-toolbar-translate = Translate
 
+overlay-toolbar-table = Table
+
 overlay-toolbar-record = Record
 
 overlay-toolbar-scroll = Long shot

@@ -456,6 +456,44 @@ fn watermark_geometry_and_cell() {
     assert_eq!(g2.step_x, f64::from(INK_W) + 40.0);
 }
 
+/// 逻辑像素换算：字号与间距按 DPR 放大成物理像素（125% / 150%），非法系数按 1。
+#[test]
+fn watermark_logical_scale_converts_font_and_gap() {
+    // 默认字号 16、间距 56（逻辑像素）
+    let view = DecorationView {
+        watermark: {
+            let mut w = watermark("W", 0.0, 56.0, 1.0);
+            w.font_size = 16.0;
+            w
+        },
+        ..DecorationView::default()
+    };
+    for (scale, want_px, want_gap) in [(1.0, 16.0, 56.0), (1.25, 20.0, 70.0), (1.5, 24.0, 84.0)] {
+        let mut layer = layer_with(view, vec![]);
+        layer.set_logical_scale(scale);
+        let mut seen: Vec<f32> = Vec::new();
+        let mut text = |t: &str, f: &str, px: f32| {
+            seen.push(px);
+            fake_text(t, f, px)
+        };
+        let out = layer.render_region(&frame(300, 300), 1.0, [0, 0, 300, 300], &mut text);
+        assert!(out.is_some());
+        assert_eq!(seen, vec![want_px as f32], "scale {scale}");
+        let g = layer.watermark_geometry().unwrap();
+        assert_eq!(g.step_x, f64::from(INK_W) + want_gap, "scale {scale}");
+        assert_eq!(g.step_y, f64::from(INK_H) + want_gap, "scale {scale}");
+        assert_eq!(
+            snow_canvas_raster::decoration::watermark_physical(16.0, 56.0, scale),
+            (want_px, want_gap)
+        );
+    }
+    let mut layer = layer_with(view, vec![]);
+    layer.set_logical_scale(f64::NAN);
+    assert_eq!(layer.logical_scale(), 1.0);
+    layer.set_logical_scale(-2.0);
+    assert_eq!(layer.logical_scale(), 1.0);
+}
+
 /// 不旋转时水印位置：锚点（渲染区中心）处是第一个单元的墨迹左上角，奇数行错开半个步长。
 #[test]
 fn watermark_anchor_and_stagger_unrotated() {
