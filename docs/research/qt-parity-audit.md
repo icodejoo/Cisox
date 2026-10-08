@@ -41,7 +41,7 @@
 | A02 | 日志 + 本地崩溃转储 | `diagnostics/crashcollector.cpp`、`diagnostics.cpp` | `snow-app-core::logging`、`snow-platform::crash`，`bootstrap()` 接线；有测试。不上报，符合 T3 | ✅ | 读码 |
 | A03 | 数据目录解析、便携模式、拒绝 upstream 目录 | `storage/applicationstorage.cpp`、`storagedirectoryutils_p.h` | `snow-config::paths`（含末尾点/空格归一与 canonicalize 解析，已修复 handoff 里记的绕过问题） | ✅ | 读码 |
 | A04 | 配置 schema（238 键）、normalizer、读写 | `storage/configurationschema.cpp`、`configurationstore.cpp`、`settingsadapters.cpp` | `snow-config`（schema_table / normalize / store / document）；真实样本往返；本次跑 96 项通过 | ✅ | 读码 + 跑测 |
-| A05 | 配置项被运行时实际读取 | （消费方散在各处） | 238 键里有 **40 个**在运行时代码被读（热键 3、贴图 10、录屏 7、截图 11、翻译 4、OCR 4、自定义模型 1）；另有 Rust 新增键（翻译路由、语音、OCR 后端）被读。其余 **198 个**能在设置页改、能落盘，但不改变任何行为。清单见 §2。2026-10-03 导出块新接线 9 个 `screenshot/*` 键 | 🟡 | 读码（检索）+ 推断 |
+| A05 | 配置项被运行时实际读取 | （消费方散在各处） | 238 键里有 **40 个**在运行时代码被读（热键 3、贴图 10、录屏 7、截图 11、翻译 4、OCR 4、自定义模型 1）；另有 Rust 新增键（翻译路由、语音、OCR 后端）被读。其余 **198 个**能在设置页改、能落盘，但不改变任何行为。清单见 §2。2026-10-03 导出块新接线 9 个 `screenshot/*` 键 | 🟡 | 读码（检索）+ 推断 | **2026-10-08 复盘**：按「配置键字面量在运行时代码里是否出现」重新盘点，238 键里只剩 **78 个**没有被引用（快捷键组由键位表按前缀读取，不在其中）。本轮新消费：`screenshot/double_click_action`、`middle_mouse_button_action`、`screenshot_ui/selection_border_color`、`selection_mask_color`、`selection_display_unit`、`system/application_priority`、`system/auto_start_at_boot`（开发构建不改注册表）、`tray/*` 6 键、`screen_recording` 特效 10 键、`screen_recording_shortcuts/*`、`pin_to_screen_shortcuts/*` 等。仍未消费的分类：截图 14（`capture_cursor`、`shutter_sound_notification`、`selection_resize_mode`、`auto_execute_after_text_recognition` 等）、`screenshot_ui` 8（`toolbar_size`、`color_picker_*`、引导线颜色等；`color_picker_format` 缺 `hex_without_hash` 变体）、`drawing` 9（样式模板 / 水印 / 聚光灯，依赖未做的工具）、`screenshot_toolbar` 8（工具栏布局）、`global_mouse` 7（C04 鼠标手势）、`screen_recording` 6（`clarity`、`encoder`、`encoding_preset` 等需扩协议）、`extended_features` 3 / `interface` 3（翻译页，G07）、`mcp` / `updates` / `network/proxy`（A12 / A09 / A10 骨架）、其余零散。
 | A06 | 配置归档导出 / 导入 | `storage/configurationarchive.cpp` | 无 | ⬜ | 读码 |
 | A07 | upstream 数据导入器（T9） | `storage/*` | 无。方案刻意延后 | ⬜ | 读码 |
 | A08 | 开机自启 / 管理员启动 / 进程优先级 / 应用重启 | `platform/windows/autostartregistration.cpp`、`administratorlaunch.cpp`、`app/applicationrestart.cpp`、`presentation/settings/applicationpriority.cpp` | 无。`system/*` 三个键与托盘「重启」均未消费 | ⬜ | 读码 |
@@ -51,7 +51,7 @@
 | A12 | MCP server（101 个 tool） | `app/mcp/*`（约 7.2k 行）、`mcp-capabilities.json`、`snow-crates` 的 `snow-shot-mcp` | `snow-mcp` 只有 `PHASE` 常量。`mcp/enabled` 未消费。`MCP_TOOL_MAP` 只是 28 个名字到命令种类的静态表，没有 server、没有 transport、没有描述符/token 文件 | 🟥 | 读码 |
 | A13 | 平台能力注册 | `app/featureavailability.cpp` | `snow-capability`，主程序装载；托盘 / 热键服务按能力启动 | ✅ | 读码 |
 | A14 | i18n 机制（Fluent、提取门禁、locale 自动发现） | `i18n/*.ts`、`services/languagemanager.cpp` | `snow-i18n`；en-US + zh-CN 完整；37 项测试；门禁命令见 AGENTS.md | ✅ | 读码 |
-| A15 | UI 文案真正走 i18n | 同上 | 设置页、翻译输入浮窗、语音、Hy-MT2 面板走 `.ftl`。**覆盖窗提示、托盘菜单、贴图右键菜单、长截图视图、录制流程、`app_runtime` 里仍是写死的中文字面量**（`overlay_view` 约 86 行、`pinned_view` 55、`app_runtime` 68、`scroll_view` 28、`recording_flow` 15、`ocr_flow` 13、`translate_flow` 17，粗计，含日志行）。违反 AGENTS.md 的 i18n 规则；也导致英文界面下这些位置仍是中文 | 🟡 | 读码（检索） |
+| A15 | UI 文案真正走 i18n | 同上 | 设置页、翻译输入浮窗、语音、Hy-MT2 面板走 `.ftl`。**覆盖窗提示、托盘菜单、贴图右键菜单、长截图视图、录制流程、`app_runtime` 里仍是写死的中文字面量**（`overlay_view` 约 86 行、`pinned_view` 55、`app_runtime` 68、`scroll_view` 28、`recording_flow` 15、`ocr_flow` 13、`translate_flow` 17，粗计，含日志行）。违反 AGENTS.md 的 i18n 规则；也导致英文界面下这些位置仍是中文 | 🟡 | 读码（检索） | **2026-10-08 进展**：覆盖窗（`overlay_view`，底部提示与全部状态消息，新增 `overlay_messages.ftl`）与贴图窗口（`pinned_view`，右键菜单与状态提示，新增 `pinned_window.ftl`，`PinInteraction` 带界面语言）已全部走 `.ftl`，有测试（贴图右键菜单英文界面全是 ASCII 且无缺失 id）；剩余写死中文按文件计（粗计，含内部错误串）：`ocr_client` 23、`ocr_download` 17、`stitch_service` 17、`translate_flow` 17、`stt_download` 16、`scroll_view` 16、`pinned_shared` 15、`ocr_flow` 13、`recording/*` 约 27、`app_runtime` 6、其余零散。
 | A16 | 主题 / Ant 色板 / 令牌 | `ant_design_qt` 的 `palette_generate`、`presentation/styles/*` | `snow-ui-theme`（色板对拍 423 行；alpha 的 /257 问题已修）。但覆盖窗、贴图等视图直接写死色值（如 `ACCENT_COLOR = 0x1677FF`），没有消费令牌；设置页按 `UiPrefs` 取主题 | 🟡 | 读码 |
 | A17 | 图标体系（829 个 Ant 图标） | `ant_design_qt/icons` | `snow-ui-icons`（build.rs 嵌入、resvg 光栅化）；无 C++ 像素黄金样本 | ✅ | 读码 |
 | A18 | 主窗口、侧栏、标题栏、关于页 | `presentation/mainwindow.cpp`、`components/sidebarwidget.cpp`、`titlebarwidget.cpp`、`aboutpagewidget.cpp` | 没有主窗口。「唤醒主窗口」被映射成打开设置窗 | ⬜ | 读码 |
@@ -72,11 +72,11 @@
 | ID | 功能 | C++ 位置 | Rust 现状 | 状态 | 依据 |
 |---|---|---|---|---|---|
 | C01 | 全局热键基础设施 | `platform/windows/globalshortcutbackend.cpp`、`services/globalshortcutmanager.cpp` | `snow-ui-shell::hotkey`（`RegisterHotKey`，支持松开事件）；启动注册、改键重注册；有测试 | ✅ | 读码 |
-| C02 | `global_shortcuts/*` 动作接线（21 个键） | `services/globalshortcutmanager.cpp` | 已接线 3 个原有键：`screenshot`、`screen_record`、`pin_clipboard_content`；另有 Rust 新增的 `translate_input`、`dictation_toggle/hold`。**18 个未接线**：`screenshot_copy/delay/fixed/focused_window/full_screen/ocr/translation`、`screen_record_copy`、`open_settings/capture_history/pin_to_screen_management/screen_recording_folder`、`pin_selected_files`、`restore_last_closed_windows`、`translate_selected_text`、`toggle_global_hotkeys`、`toggle/disable_on_focused_fullscreen_window`。代码里明说「动作尚未接线，配置已保存但不会注册热键」 | 🟡 | 读码 |
-| C03 | 托盘图标与菜单 | `services/systemtraycontroller.cpp` | 菜单：截图 / 录屏 / 剪贴板贴图 / 设置 / 退出，双击开设置。**图标是 32×32 纯蓝色占位**；菜单文字写死中文；无 `menu_options`、左 / 中键动作、分组菜单、重启、禁用快捷键、气泡通知、自定义图标。`tray/*` 6 键全未消费 | 🟡 | 读码 |
-| C04 | 全局鼠标手势（`global_mouse` 7 键） | `services/globalmousegesture.cpp`、`globalmousemanager.cpp`、`platform/globalmousebackend.cpp` | 无 | ⬜ | 读码 |
-| C05 | 前台全屏窗口时禁用热键 | `platform/focusedfullscreenwindow.cpp` | 无 | ⬜ | 读码 |
-| C06 | 覆盖窗内快捷键（`screenshot_shortcuts` 27 键 + `drawing_shortcuts` 10 键） | `overlay/screenshotoverlayshortcutcontroller.cpp`、`services/windowshortcutmanager.cpp` | `overlay_view::handle_key` 写死 Esc / Enter / Ctrl+C / Ctrl+S / Ctrl+Z / Ctrl+Y / C / D；不读配置；无方向键微调、工具快捷键、历史切换、锁比例 | 🟡 | 读码 |
+| C02 | `global_shortcuts/*` 动作接线（21 个键） | `services/globalshortcutmanager.cpp` | 🟡（2026-10-08 订正）`global_shortcuts/*` 21 键里除 `translate_selected_text`（选中文字翻译，依赖选中文本读取 G 类能力）外均已接线：直接截图 / 延迟 / 贴图 / OCR / 翻译 / 复制、整屏与前台窗口、设置、历史、贴图管理、录屏目录、录屏并复制、贴选中文件、恢复最近关闭、暂停全部热键、前台全屏停用热键；另有 Rust 新增的 `translate_input`、`dictation_toggle/hold`。真机验证有限（见各动作所在行） | 🟡 | 读码 + 离屏测试 |
+| C03 | 托盘图标与菜单 | `services/systemtraycontroller.cpp` | 🟡（2026-10-08）`tray_config.rs`：`tray/enabled`（关闭则不建托盘）、`tray/menu_options`（按列表显示菜单项，改动即时重建菜单；**默认只显示 Qt 默认的 12 项，之前多出的历史 / 重启 / 全屏停用等项需在设置里勾选**）、`tray/left_click_action` / `middle_click_action`（默认左键截图、中键贴图；左键不再弹菜单，右键弹菜单；`TraySpec` 新增中键动作）、`tray/icon` + `tray/custom_icon`（内置旧版应用图标 PNG，light / dark 为白 / 黑剪影，自定义路径读失败回退内置）。图标与点击动作的配置改动需重启生效（托盘服务只支持热更新菜单与提示）。未做：气泡通知、`snow-*` 图标变体与 `default` 的区别（旧版有多套图）、菜单文字外的主题联动 | 🟡 | 离屏测试 |
+| C04 | 全局鼠标手势（`global_mouse` 7 键） | `services/globalmousegesture.cpp`、`globalmousemanager.cpp`、`platform/globalmousebackend.cpp` | 🟡（2026-10-08）`snow-platform::global_mouse`（手势状态机 `Gesture` 纯逻辑 + Windows 低级钩子线程）+ `snow-shot/mouse_gesture.rs`（读 `global_mouse/*` 7 键、动作 → 截图模式）：按住修饰键（默认 Win）再按住左 / 中 / 右 / 侧键拖动，开启一次截图并把拖动接成覆盖窗里的框选，松开时执行复制 / 贴图 / OCR / 翻译 / 另存 / 快速保存 / 录屏。性能策略同旧版：键盘钩子常驻只跟踪修饰键，**鼠标钩子只在修饰键恰好匹配绑定或手势进行中才安装**；有 Win 修饰时发一个无意义按键，避免松开 Win 弹开始菜单；没有任何绑定时一个钩子都不装；默认忽略注入输入。已验证：状态机 6 项离屏测试、键盘钩子修饰键跟踪与「匹配时才装鼠标钩子」（真机调试输出）。**未能验证**：这台机器上注入的鼠标事件到不了任何低级鼠标钩子（独立 Python ctypes 探针同样只收到键盘事件），所以真实 Win+拖动全流程没跑通，需要真人鼠标手动试；`snow-platform` 里有 `--ignored` 的真钩子测试可在能注入的环境跑。未做：拖动期间的框选可视化以覆盖窗打开后为准（覆盖窗打开前约 100~300ms 的移动在打开后补发）、macOS | 🟡 | 离屏测试 + 键盘钩子真机 |
+| C05 | 前台全屏窗口时禁用热键 | `platform/focusedfullscreenwindow.cpp` | ✅（2026-10-07）`fullscreen_gate.rs`：开关写 `global_shortcuts/disable_on_focused_fullscreen_window`，托盘勾选，前台全屏窗口时丢弃热键命令（托盘 / IPC 与两个开关热键不受影响）；真机（全屏游戏 / 视频）未验证 | 🟡 | 离屏测试 |
+| C06 | 覆盖窗内快捷键（`screenshot_shortcuts` 27 键 + `drawing_shortcuts` 10 键） | `overlay/screenshotoverlayshortcutcontroller.cpp`、`services/windowshortcutmanager.cpp` | 🟡（2026-10-08 订正）`overlay_keymap.rs` 按配置解析 `screenshot_shortcuts` 27 键 + `drawing_shortcuts` 10 键；已接线：取消 / 复制 / 另存 / 快速保存 / 贴图 / 录屏 / OCR / 翻译 / 长截图 / 撤销重做 / 复制颜色 / 移动工具 / 光标微移 / 工具键 / 智能选区目标切换 / 历史翻页 / 选回上次选区 / 重新截图（Alt+R）/ 坐标模式（Ctrl+P，写 `screenshot_ui/color_picker_coordinate_mode`）。按住类键（2026-10-08）：按住 Space（`move_entire_selection`）时框选拖动变成整体平移，松开键结束；按住 Shift（`keep_selection_width_and_height_consistent`，修饰键取自鼠标 / 键盘事件，配置若改成别的键则不再按 Shift 锁定）时新框选保持正方形、调整已有选区保持原宽高比。仍是「未实现」提示的：`table_recognition`、`qr_code_recognition`（G03 / G04）；橡皮擦 / 水印工具键未做 | 🟡 | 离屏测试 |
 
 ### D. 截图主链路
 
@@ -89,8 +89,8 @@
 | D05 | 智能元素 / 窗口选区 | `selector/*`；`snow-crates/snow-ui-selector`、`snow-visual-region-detector` | `snow-shot/window_pick.rs`（UIA 窗口 / 控件层级、滚轮与快捷键切换、后台细化、过渡动画，2026-10-07）；未接 `visual-region-detector`，多屏 / DPI 无真机验证 | 🟡 | 读码 + 单测 |
 | D06 | 放大镜 / 取色 | `services/screenshotcolorpicker*.cpp`、`screenshotcanvascolorsampler*.cpp` | `snow-ui-widgets::magnifier` + 覆盖窗 `C` 复制光标处颜色；取色格式 / 坐标模式 / 辅助线键未消费；无独立取色窗 | 🟡 | 读码 |
 | D07 | 延迟截图、固定区域、聚焦窗口、全屏直接截图 | `capture/directcapture*.cpp` | 总线 `DirectCapture` 已有 handler：当前显示器 / 焦点窗口 → 复制（可附带自动保存）或保存（指定路径 / 自动路径，格式 / 质量 / 压缩 / PDF 参数取请求，缺省读配置）；`render` 输出、缩放、光标采集未做；无对应全局热键、无延迟 / 固定区域；`screenshot/delay_seconds` 只在设置页 | 🟡 | 读码 + 跑测 |
-| D08 | 标注工具集 | `tools/*`；`snow_draw_engine_qt/crates`（15 个引擎工具） | 工具栏 8 个：矩形、椭圆、箭头、直线、画笔、文字、马赛克、模糊（经 `snow-draw-engine`）。`Highlighter`、`Counter` 在枚举里但引擎映射为 `None`，选了没有效果、也不在工具栏。缺：荧光笔（矩形 / 画笔）、聚光灯、序号、水印、橡皮、自动滤镜、选择 / 移动 | 🟡 | 读码 |
-| D09 | 工具样式面板（颜色、线宽、模板、最近使用） | `tools/screenshottoolpalette*.cpp`；`drawing/*` 16 键 | 无；样式写死（默认色、3 逻辑像素线宽）；`drawing/*`、`screenshot_toolbar/*` 未消费 | ⬜ | 读码 |
+| D08 | 标注工具集 | `tools/*`；`snow_draw_engine_qt/crates`（15 个引擎工具） | 🟡（2026-10-08 订正）工具栏 12 个：矩形、椭圆、箭头、直线、画笔、荧光笔（`PenHighlight`）、序号（`SerialNumber`）、文字、马赛克、模糊，另新增**橡皮**（`Eraser`，拖过的标注被擦除，可撤销）与**选对象**（`Select`，点选 / 移动已画标注），均有引擎层行为测试；覆盖窗绘制键 `drawing_shortcuts/select`、`eraser` 已接。仍缺：聚光灯（`Spotlight`）、水印（`Watermark`）——引擎把它们作为图层级配置 / 补丁（`spotlight_ops`、`DisplayWatermarkConfig`），`snow-canvas-raster` 还不会画；自动滤镜（依赖未移植的智能擦除 D12）；矩形 / 画笔高亮与滤镜的细分变体 | 🟡 | 读码 + 引擎行为测试 |
+| D09 | 工具样式面板（颜色、线宽、模板、最近使用） | `tools/screenshottoolpalette*.cpp`；`drawing/*` 16 键 | 🟡 最小闭环已做（见交接文档 §5.1「标注样式面板最小闭环」）：选中工具弹样式条（颜色预设 + 最近 8 色、线宽 / 字号 / 箭头头型、矩形椭圆填充开关），按工具记忆并持久化到 `drawing/*_style`；`screenshot_toolbar/*` 布局、样式模板、独立填充色仍未消费 | 🟡 | 读码 + 离屏测试 |
 | D10 | 标注光栅化（patch → tiles） | `snow_draw_engine_qt/src`（QPainter） | `snow-canvas-raster`（tiny-skia，27 项测试：合成场景 + 引擎端到端 + 4K 耗时）；**无对 QPainter 输出的像素黄金比对** | 🟡 | 读码 |
 | D11 | 滤镜内核（马赛克、模糊、反相、浮雕等） | `snow_canvas_filter_avx2.cpp`、`snow_canvas_pen_mask_avx2.cpp` | `snow-canvas-filters`；C++ 内核黄金样本逐字节对拍；本次跑通过 | ✅ | 读码 + 跑测 |
 | D12 | 智能擦除 | `snow_canvas_smart_erase_algorithm.cpp`（约 880 行，依赖 OpenCV） | `smart_erase()` 恒返回 `false`，文件头自述未移植 | 🟥 | 读码 |
@@ -112,12 +112,12 @@
 | E03 | 贴图窗口交互（拖动、八向缩放、滚轮缩放 / 透明度、置顶、右键菜单、复制、另存） | `pinned/screenshotpinnedwindow.cpp`、`screenshotpinnedinteraction.cpp` | `pinned_view`（1875 行）+ `pinned_model`（1045 行）+ `snow-ui-shell::pinned_geometry`；双击 / 中键 / 滚轮模式读配置；有测试 | ✅ | 读码；手感见 §5 |
 | E04 | 贴图二次标注 | `pinned/screenshotpinnededitcontroller.cpp` | 复用 `AnnotationLayer`，右键菜单进入；工具集同 D08 | 🟡 | 读码 |
 | E05 | 贴图持久化与启动恢复 | `storage/pinnedwindowrepository.cpp` | `snow-history::pinned` + `PinShared`；启动时 `RestorePins`；退出时 `persist_all`；容量 / 保留策略读 `pinned_history/*` | ✅ | 读码 |
-| E06 | 贴图快捷键（`pin_to_screen_shortcuts` 15 键） | `services/windowshortcutmanager.cpp` | 无；贴图窗里只有写死的 Esc / Ctrl+C / Ctrl+S / Ctrl+Z / Ctrl+Y | ⬜ | 读码 |
-| E07 | 点击穿透、缩略图模式、隐藏到顶部、方向键移动 | `pinned/screenshotpinnedclickthroughgeometry.cpp`、`hidetotopcontroller.cpp` | 无 | ⬜ | 读码 |
-| E08 | 贴图分组与托盘分组菜单 | `services/pinnedwindowgroupmanager.cpp` | 仓储里有 `active_group_id`，写入记录；无切换、新建、删除界面 | ⬜ | 读码 |
-| E09 | 贴图管理页 | `components/pinnedwindowmanagementpagewidget.cpp` | 无 | ⬜ | 读码 |
-| E10 | 贴图上识别文本、自动 OCR、复制原图 | `pin_to_screen/automatic_text_recognition` 等 | 无 | ⬜ | 读码 |
-| E11 | 从文件贴图、恢复最近关闭 | `services/screenshotfilepinbatch.cpp`、`platform/windows/selectedfiles.cpp`、`historypinplacement.cpp` | 无 | ⬜ | 读码 |
+| E06 | 贴图快捷键（`pin_to_screen_shortcuts` 15 键） | `services/windowshortcutmanager.cpp` | 🟡 `pinned_keymap.rs` 已按 15 个配置键解析（2026-10-07）；已接线：复制、复制原图、另存、标注模式、关闭 / 销毁、方向键微移系统指针；点击穿透、缩略图、隐藏到顶部、识别结果、缩放到尺寸仍是占位（见 E07 / E10）；Ctrl+Z / Ctrl+Y 仍写死 | 🟡 | 离屏测试 |
+| E07 | 点击穿透、缩略图模式、隐藏到顶部、方向键移动 | `pinned/screenshotpinnedclickthroughgeometry.cpp`、`hidetotopcontroller.cpp` | 🟡 缩略图模式（83 逻辑像素方块，鼠标锚点，无动画，右键菜单 + 键位）、点击穿透（`WS_EX_LAYERED/TRANSPARENT`，独立退出按钮小窗 `pinned_controls.rs`）已做（2026-10-07）；隐藏到顶部为简化版（30×6 把手小窗，悬停滑出、移开自动收回、点击复位；无滑入动画、多把手不避让、不持久化）；未做：穿透时的透明度 / 移动按钮、缩略图与穿透状态持久化、150ms 动画；方向键移动（指针微移）见 E06 | 🟡 | 离屏 + 原生样式测试 |
+| E08 | 贴图分组与托盘分组菜单 | `services/pinnedwindowgroupmanager.cpp` | 🟡 `PinShared` 新增分组 API（新建 / 重名与长度校验 / 删除 / 删空分组 / 切换激活 / 移动贴图），已有记录的几何更新不再被挪进激活分组；托盘新增分组块（切换、新建、删除空分组，激活分组打勾）；贴图右键菜单有「移到分组」；切换分组 = 落盘并关闭当前分组窗口再恢复目标分组。未做：新建分组时输入名称（现在自动取「分组 N」）、改名、删除指定分组入口（见 E09 管理页）、托盘显示各分组窗口数 | 🟡 | 离屏测试 |
+| E09 | 贴图管理页 | `components/pinnedwindowmanagementpagewidget.cpp` | 🟡 贴图管理窗口（`pinned_manage.rs` 模型 + `pinned_manage_view.rs` 视图，2026-10-07）：分组筛选条、列表（缩略图 / 分组 / 状态 / 尺寸 / 时间）、显示（必要时切换分组）、删除（确认气泡）、全部删除、按名称新建分组、删除空分组、删除当前筛选的分组；入口为托盘「贴图管理」与快捷动作 `open_pin_to_screen_management`。未做：来源 / 日期筛选、多选批量删除、分页（现为虚拟滚动，缩略图只解前 60 行）、改名；**窗口只有离屏模型测试，未真机渲染验证** | 🟡 | 离屏测试 |
+| E10 | 贴图上识别文本、自动 OCR、复制原图 | `pin_to_screen/automatic_text_recognition` 等 | 🟡（2026-10-07）识别文字：`Ctrl+D` / 右键菜单切换文字框，点击文字框复制该段，菜单可复制全部文字；新建贴图按 `pin_to_screen/automatic_text_recognition` 自动识别（恢复的旧贴图不触发）；复制原图见 E06。识别沿用设置里的 OCR 后端，后台线程执行。未做：`text_selection_on_recognition_results`（框内选字，现为整段复制）、识别失败 / 组件缺失的下载引导、识别结果窗（G02）；真机未验证 | 🟡 | 离屏测试 |
+| E11 | 从文件贴图、恢复最近关闭 | `services/screenshotfilepinbatch.cpp`、`platform/windows/selectedfiles.cpp`、`historypinplacement.cpp` | 🟡（2026-10-07）贴选中的文件：`snow-platform/selected_files.rs` 用 `IShellWindows` 读前台资源管理器 / 桌面的选中项（**真机验证过**：资源管理器选中 `notepad.exe` 读到正确路径），png / jpg / jpeg / bmp / gif / webp 逐张后台解码后贴出，一次最多 12 个，热键与托盘入口已接。恢复最近关闭：用户主动关闭的贴图把源图 + 标注会话 + 几何记在内存栈（最多 10 张、64MB），快捷动作 / 托盘「恢复最近关闭」后进先出恢复；淘汰和管理页删除不进栈，重启后栈清空。未做：多文件贴图的错位摆放、非图片文件（文本 / 文档）贴图、`HistoryPinPlacement`、关闭记录跨重启保留 | 🟡 | 离屏测试 + 真机（读选中项） |
 
 ### F. 录屏
 
@@ -129,9 +129,10 @@
 | F04 | WebM | 同上 | 刻意移除，见 `cisox-todo-webm.md` | ⬜ | 读码 |
 | F05 | 硬件编码（Auto：MF → 厂商硬编 → 软编） | （C++ 侧走 snow-crates） | worker 内实现，默认 `Auto` | ✅ | 读码 |
 | F06 | 跨屏选区录制 | `recording/screenrecordinggeometry.cpp` | worker 的跨屏拼接已实现（`win/span.rs`）；**覆盖窗只能在单显示器内选区**，所以界面上选不出跨屏区域 | 🟡 | 读码 |
-| F07 | 音频（系统声 / 麦克风） | `snow-crates/snow-audio-recorder` | 无；`plan.rs` 里 `enable_system_audio` 固定 `false`；协议无音频字段 | ⬜ | 读码 |
-| F08 | 鼠标点击 / 轨迹高亮、按键回显 | `recording/recordingeffect*.cpp`；`snow-crates/snow-recording-effects` | 无。**方案 P6 描述的 `ClickRipple` / `KeystrokeDisplay` 在代码里不存在**（全仓检索无结果）；录制进程不依赖 `snow-recording-effects` | ⬜ | 读码 |
-| F09 | 录屏快捷键、复制到剪贴板、打开录屏目录 | `recording/screenrecordingshortcutcontroller.cpp` | 无；`screen_recording_shortcuts/*` 4 键、`screen_record_copy`、`open_screen_recording_folder` 未接线 | ⬜ | 读码 |
+| F07 | 音频（系统声 / 麦克风） | `snow-crates/snow-audio-recorder` | 🟡 阶段 1 已做（2026-10-04，见交接文档 §5.1「录屏音频阶段 1」）：MP4 单轨混音（系统声 WASAPI loopback + 麦克风），协议 `mic=`/`sys=`/`mvol=`/`svol=`/`mdev=`/`sdev=` 与 `AUDIO_STATE` 事件，控制条显示降级提示；非 MP4 强制关闭。未做：设备选择与音量滑块界面、双轨、录制工具栏上的开关、麦克风真实内容验证 | 🟡 | 真屏自检（三条路径音视频时长差 ≤0.05s） |
+| F08 | 鼠标点击 / 轨迹高亮、按键回显 | `recording/recordingeffect*.cpp`；`snow-crates/snow-recording-effects` | 🟡（2026-10-08）协议新增 `EffectsRequest`（`trail=`/`trms=`/`click=`/`hl=`/`clicks=`/`keys=`/`ksize=`/`kbg=`/`kfg=` 前缀令牌，全关时 START 行字节不变），主程序 `recording/effects.rs` 读 `screen_recording/*` 的 10 个特效键；任一特效打开时 worker 不走自建硬件流水线、改走上游软件路径（它叠加点击波纹 / 轨迹 / 高亮 / 按键回显）。**真机验证**：带全部特效录 4 秒 MP4，抽帧可见红色轨迹、光标高亮圈（正片叠底）、右下角堆叠的键帽。未做：硬件流水线上的特效（开特效即放弃硬件编码，CPU 占用更高）、键帽字体与标签自定义、点击波纹未逐帧核对 | 🟡 | 离屏测试 + 真机录制抽帧 |
+| F09 | 录屏快捷键、复制到剪贴板、打开录屏目录 | `recording/screenrecordingshortcutcontroller.cpp` | 🟡（2026-10-08）`open_screen_recording_folder` 早已接线；新增：控制条键位表 `recording/keymap.rs`（`screen_recording_shortcuts/*` 4 键：导出 / 暂停继续 / 复制 / 结束，只在控制条有焦点时生效，不注册全局热键以免录屏期间劫持其它程序的 Ctrl+C / Esc；录制中的 Esc 不响应，避免误丢录像）；`screen_record_copy`（录屏并复制）= 开始录屏、完成后把录制文件以文件列表写入剪贴板（`snow_platform::clipboard::copy_files_to_clipboard`，**真机验证过** PowerShell 读回 `C:\Windows
+otepad.exe`）。未验证：控制条窗口能否真正拿到键盘焦点（覆盖窗不抢焦点，点击控制条是否激活待真机确认）；未做：录制工具栏上的复制按钮 | 🟡 | 离屏测试 + 剪贴板真机 |
 | F10 | 录屏设置项（清晰度、编码器、预设、循环、特效颜色等） | `screen_recording/*` 25 键 | 7 个被读取（帧率、格式、光标、延迟、目录、文件名、动图帧率）；其余 18 个未消费 | 🟡 | 读码 |
 
 ### G. OCR / 识别 / 翻译
@@ -139,13 +140,13 @@
 | ID | 功能 | C++ 位置 | Rust 现状 | 状态 | 依据 |
 |---|---|---|---|---|---|
 | G01 | OCR 引擎（local-model，独立进程） | `ocr/screenshotocrrecognitionservice.cpp`、`screenshotocrassets.cpp`；`snow-crates/snow-ocr-process` | `ocr_client`（协议 v4 客户端）、`ocr_service`、`ocr_assets`、`ocr_download`、`ort_runtime`；常驻、模型档位、DirectML、缩放策略读配置；协议 / 路径 / 失败路径有测试 | ✅ | 读码；端到端见 §5 |
-| G02 | OCR 结果呈现与编辑 | `ocr/screenshotocrvisuals.cpp`、`screenshotrecognitionwindow.cpp`、`screenshotocrtexteditingsession.cpp` | 覆盖窗内面板：最多 8 行、每行 56 字，框线叠加，Enter 复制全文；无识别窗口、无选字编辑、无版面重建；`text_recognition/*` 7 键中 `fill_style`、`save_recognition_result_as_image`、`model_hot_start` 未消费 | 🟡 | 读码 |
+| G02 | OCR 结果呈现与编辑 | `ocr/screenshotocrvisuals.cpp`、`screenshotrecognitionwindow.cpp`、`screenshotocrtexteditingsession.cpp` | 🟡（2026-10-08）覆盖窗内面板（最多 8 行、每行 56 字，框线叠加，Enter 复制全文）之外，新增识别结果窗 `recognition_view.rs`：OCR 完成后按 `E` 打开，左图叠文字块框（点框复制该段）、右侧可编辑全文、复制全文；窗口自带数据，覆盖窗关闭后仍在。未做：按版面重建 / 填充还原（`fill_style`）、保存带识别结果的图片（`save_recognition_result_as_image`）、`model_hot_start`；窗口只有离屏逻辑测试，**未真机渲染验证** | 🟡 | 离屏测试 |
 | G03 | 二维码识别 | `ocr/screenshotqrcontroller.cpp`、`screenshotqrrecognitionservice.cpp` | 无；`auto_recognize_qr_code` 未消费 | ⬜ | 读码 |
 | G04 | 表格识别、LaTeX、Markdown / HTML 转换 | `ocr/screenshottable*.cpp`、`screenshotimageconversion*.cpp` | 无；连 ADR-5 要求的「未配置时引导卡片」也没有；工具栏 ID 只存在于配置常量 | ⬜ | 读码 |
 | G05 | 截图翻译（OCR → 翻译 → 展示） | `ocr/*`、`app/translationservice.cpp` | 覆盖窗 `Translate` 动作：OCR → 本地路由翻译 → 原文 / 译文对照面板 → Enter 复制译文；缺运行时 / 模型有分级提示与下载入口。**不是把译文画回原图**（`original_image_translation` 未消费） | 🟡 | 读码 |
 | G06 | 本地翻译引擎与路由 | 无（Qt 版走云端） | `snow-translate` + `tools/snow-translator`（NLLB / Hy-MT2、路由、分段、全角标点后处理）；113 项测试 | ✅ | 读码；真实模型见 §5 |
 | G07 | 翻译页、独立翻译窗 | `components/translationpagewidget.cpp`、`standalonetranslationwindow.cpp` | 无翻译页；Rust 新增的输入翻译浮窗覆盖「输入文字 → 译文」这一条 | ⬜ | 读码 |
-| G08 | 选中文字翻译 | `services/selectedtexttranslation*.cpp`；`snow-crates/snow-selected-text` | 无（`translate_selected_text` 热键未接线，也没用 `snow-selected-text`） | ⬜ | 读码 |
+| G08 | 选中文字翻译 | `services/selectedtexttranslation*.cpp`；`snow-crates/snow-selected-text` | 🟡（2026-10-08）热键 / 托盘 `translate_selected_text`：后台线程用 `snow-selected-text`（路径依赖，Apache-2.0，Windows）读前台选中文字（无障碍优先、必要时复制回退并还原剪贴板，2 秒超时，排除自身进程），再打开输入翻译浮窗预填并自动翻译；没读到给本地化提示。**真机验证**：记事本全选后读到整句中英文。未做：浮窗定位到选区附近、`selected_text_translation` 相关设置键 | 🟡 | 真机读取 + 离屏测试 |
 | G09 | 自定义 / OpenAI 兼容模型通道 | `network/snowshotapiclient.cpp` | `snow-translate::openai` 能格式化请求，但配置入口是只读键（B03），表格 / 公式提取没有消费者 | 🟡 | 读码 |
 
 ### H. 其它
@@ -198,7 +199,7 @@
 - 单屏覆盖窗：跨屏选区登记为后续项（D02、F06）。
 - 录制走独立进程、不链接 FFmpeg 到主程序；MCP 计划进程内化。
 
-**非刻意的缺口**（方案没说不做，只是没做完或没接上）：D05 智能选区、D08 剩余 7 个标注工具、D09 样式面板、D18 历史界面、D01 多屏 / DXGI 采集、E06~E11 贴图后半、F07 / F08 录屏音频与特效、C02 的 18 个热键、C03 托盘细节、G02~G04 识别结果窗 / QR / 表格、A05 的 198 个未消费键、A12 MCP。
+**非刻意的缺口**（方案没说不做，只是没做完或没接上；~~D05 智能选区~~、~~D18 历史界面~~、~~D01 多屏~~ 已于 2026-10-07 做完，D01 仍缺 DXGI 采集）：D08 剩余 7 个标注工具、D09 样式面板、D01 DXGI 采集、E06~E11 贴图后半、F07 / F08 录屏音频与特效、C02 的 18 个热键、C03 托盘细节、G02~G04 识别结果窗 / QR / 表格、A05 的 198 个未消费键、A12 MCP。
 
 ### 3.3 Rust 侧新增、Qt 没有的功能
 

@@ -1,8 +1,56 @@
-# Cisox 进度交接（2026-10-03 暂停点）
+# Cisox 进度交接（2026-10-03 暂停点；2026-10-07 更新见 §0）
 
 > 本文记录 2026-10-03 暂停时的真实状态与续做入口。方案主文档：`docs/cisox-gpui-migration-plan.md`。
 > **功能对齐程度以 [`research/qt-parity-audit.md`](research/qt-parity-audit.md)（2026-10-03，读代码得出）为准**；方案 P2~P7 与旧验收报告里的「已完成」没按现状重核，别直接引用。
 > 最新待办清单在 §5.1；§5 及之前的清单是 09-29 旧稿，仍有效的条目已在 §5 开头标出。
+
+## 0.0 2026-10-08 收口（最新，先读这里）
+
+**状态**：2026-10-07/08 两天在 `main` 上做的全部改动**都还没提交**（`git status` 看）。提交前按 AGENTS.md 先跑 fmt / clippy / 相关测试；注意 `snow-ui-shell/src/tray.rs` 的文档示例修复、`scripts/build-snow-recorder.ps1` 强制 `link.exe`、`Cargo.lock` 多了 `snow-selected-text` 一项，几处改动不在功能主线上。
+
+**本轮完成（均见 [research/qt-parity-audit.md](research/qt-parity-audit.md) 对应行，状态多为 🟡：主体做了、真机验证有限）**
+- 贴图 E06~E11：键位表、缩略图、点击穿透、隐藏到顶部、分组 + 托盘分组块、管理页、识别文字、贴选中文件（资源管理器选中项**真机验证过**）、恢复最近关闭。
+- 录屏 F07 订正、F08 特效（轨迹 / 点击 / 高亮 / 按键回显，**带特效录制抽帧验证过**，开特效会放弃硬件编码）、F09 控制条快捷键与「录屏并复制」（文件列表入剪贴板**真机验证过**；控制条能否拿到键盘焦点**未验证**）。
+- 热键与覆盖窗：C02 / C05 / C06（含按住 Space 平移选区、按住 Shift 锁比例、快速保存、重新截图、坐标模式）、C03 托盘（图标 / 左中键 / `tray/enabled` / `menu_options`，默认菜单变短）、C04 全局鼠标手势（状态机离屏测过、键盘钩子真机看过，**鼠标钩子全流程这台机器测不了**，见审计 C04）。
+- 识别：G02 结果窗（未真机渲染）、G08 选中文字翻译（**真机验证过**）。
+- 标注：D08 橡皮 + 选对象；D09 订正。
+- 设置：A05 新消费一批键（双击 / 中键动作、选区颜色与单位、`system/*`），盘点后只剩 78 个键没被引用，分类见审计 A05。
+- i18n A15：覆盖窗与贴图窗全部走 `.ftl`。
+
+**需要你拍板的（我没有擅自做）**
+1. **G03 二维码**：需要新增第三方解码库（建议纯 Rust 的 `rqrr`），按规则要你同意。
+2. **G04 表格 / LaTeX / Markdown 转换**：依赖识别模型与 ADR-5 的「未配置时引导卡片」，要先定模型来源。
+3. **A09 自动更新**：需要更新服务端地址 / 清单格式（规则：不硬编码端点）。
+4. **A10 网络 / 代理**：`network/proxy` 的落地方式（下载走 curl 进程，是否改为进程内 HTTP 客户端要引入依赖）。
+5. **A12 MCP（101 个 tool）**：旧版是约 7000 行的独立子系统（本地管道服务 + 令牌鉴权 + 应用 / 截图 / 文档 / 媒体四个域），建议单独立项，不在零散迭代里做。
+6. **托盘默认菜单**：现在按 Qt 默认只显示 12 项，之前重做托盘时的「历史 / 重启 / 录屏目录 / 前台全屏停用」等默认不显示（设置里可勾选）；若你想保留旧的完整默认，改 `tray/menu_options` 的 schema 默认值。
+
+**技术上还能继续、但量大的**：聚光灯 / 水印（要先让 `snow-canvas-raster` 会画图层级配置）、自动滤镜 / 智能擦除 D12（OpenCV 依赖）、翻译页 G07、主窗口 A18、配置归档 A06、A15 剩余（`ocr_client`、`ocr_download`、`stitch_service`、`translate_flow`、`stt_download`、`scroll_view`、`pinned_shared`、`recording/*` 等的错误串与下载文案，需连带重构错误类型）、剩余 78 个设置键、各项真机验证。
+
+**构建环境补充**：worker 构建需要 `libclang.dll`（已用 PyPI `libclang` 轮子里的 DLL 放在 `.tools/llvm/bin/`，被 gitignore）；`sccache` 在 vcvars 环境下会启动失败，需 `RUSTC_WRAPPER=""`；E: 盘慢，建议把 `CARGO_TARGET_DIR` 指到 C: 盘。
+
+## 0. 2026-10-07 更新（最新，先读这里）
+
+**分支与提交**：现在在 `main` 上工作（不再是 `rust-gpui`）。本轮新增提交：`29ef4398`（智能选区 / 历史翻页 / 选区形状）、`1837df69`（托盘重做 + 构建配置，用户的工作）、`95e8aff8`（多屏覆盖窗），外加构建提速文档的 `docs` 提交。**后两个本地提交尚未 push**：连续 3 次推送被 GitHub 返回 `Internal Server Error`（远端临时故障，没用强推），稍后重试。
+
+**本轮已完成（均有离屏测试，`snow-shot` 全量 762 个通过，`clippy -D warnings` 干净）**
+- 智能选区完整对齐 Qt：控件级、滚轮切层、目标切换快捷键、UIA 后台细化、过渡动画、右键 / 松开立刻重新命中、选回上一次选区；多屏每块屏都能命中（共享一条 UIA 线程）。
+- 截图历史：覆盖窗导出写入完整现场（整帧 + 选区 + 标注历史），快捷键前后翻，右键回当前截图（`history_nav.rs`）。
+- 选区形状：折线 / 曲线 / 自由绘制 + 加减区域（栅格蒙版，`snow-canvas-raster/src/region.rs`）；区域外导出透明（剪贴板 `CF_DIBV5` + `PNG`、贴图预乘 alpha）。
+- 多屏覆盖窗：所有显示器并行采集、每屏一个窗口、一个共享视图工作在虚拟桌面画布坐标上，选区可跨屏；方案与结果见 [design/multi-display-overlay.md](design/multi-display-overlay.md)。
+- 托盘菜单重做（用户的工作，见 `1837df69`）。
+
+**待真机验证（我这边做不了的）**：鼠标按住跨缝拖动框选（本机 `SendInput` 合成按键送不到覆盖窗，`examples/multi_overlay_probe.rs --manual` 可手动验证）、混合 DPI（副屏临时改 125% / 150%）、负原点副屏（副屏拖到主屏左边）。
+
+**已知取舍**：选区跨屏时录屏 / 长截图禁用（跨屏采集窗未做）；历史里多屏会话写成一张画布图；跨屏提示文案目前写死中文。
+
+**构建环境（重要）**：本机 `E:` 盘写大文件比 `C:` 盘慢约 40 倍，增量构建 14~89 秒且不稳定。已设用户级环境变量 `CARGO_TARGET_DIR=C:\cargo-target\cisox`（增量构建稳定约 8 秒），可执行文件在 `C:\cargo-target\cisox\debug\`；下文和脚本里的 `build\cargo\...` 路径在设置后要换成这个。实测数据与采纳结论见 [guides/build-speed.md](guides/build-speed.md)。
+
+**贴图后半 E06~E11 已做（2026-10-07，见审计表各行；均为离屏测试，真机只验证了读取资源管理器选中项）**：键位表、缩略图、点击穿透、隐藏到顶部、分组、管理页、识别文字、贴选中文件、恢复最近关闭。
+
+**录屏特效 F08 已做（2026-10-08）**：见审计表 F08 一行。构建 worker 的两个坑：① 本机没有 `libclang.dll`，已用 PyPI `libclang` 轮子里的 DLL 放到 `.tools/llvm/bin/`（被 gitignore，需要时重新取）；② 根目录 `.cargo/config.toml` 的 `rust-lld` 链不了 `/GL` 的静态 FFmpeg，`scripts/build-snow-recorder.ps1` 已强制 `link.exe`。E: 盘慢，建议把脚本里的 `CARGO_TARGET_DIR` 临时指到 C: 盘；sccache 在 vcvars 环境下会启动失败，需 `RUSTC_WRAPPER=""`。
+
+**接下来可做（按 [research/qt-parity-audit.md](research/qt-parity-audit.md) 的“非刻意缺口”）**：录屏音频与特效（F07 / F08）、覆盖窗快捷键里剩余的热键（C02 / C06）、托盘细节（C03）、识别结果窗 / QR / 表格（G02~G04）、设置页 198 个未消费键（A05）、MCP（A12）、截图历史管理页之外的贴图管理页（B04）。
 
 ## 1. 一句话状态
 
@@ -228,7 +276,7 @@ Windows 主线已经能跑通「热键 / 托盘 / IPC → 截图覆盖窗（单�
 
 **覆盖窗键位表（2026-10-03，WIP 提交 `0061a4bc`，随合并保留）**
 - [x] 新增 `overlay_keymap.rs`：按旧版 `screenshot_shortcuts/*`（27 键）与 `drawing_shortcuts/*`（10 键）解析覆盖窗键位，并接入 `overlay_view.rs`；`snow-platform` 补 `window_rect` 前台窗口矩形等。
-- [ ] 本机断电前并行做过一套 `GlobalAction` 热键动作表（含“前台全屏窗口停用热键”闸门），与远端 `QuickAction` 重复，合并时已丢弃（仍在 `0061a4bc` 的 `global_actions.rs` 里）。**待办：把“前台全屏停用热键”（`toggle_disable_on_focused_fullscreen_window`，目前是占位）移植到 `QuickAction` 上**；覆盖窗键位表尚无真机验证。
+- [ ] 本机断电前并行做过一套 `GlobalAction` 热键动作表（含“前台全屏窗口停用热键”闸门），与远端 `QuickAction` 重复，合并时已丢弃（仍在 `0061a4bc` 的 `global_actions.rs` 里）。**“前台全屏停用热键”已移植到 `QuickAction`（2026-10-07，`fullscreen_gate.rs`）**：开关持久化在 `global_shortcuts/disable_on_focused_fullscreen_window`，打开后前台全屏窗口时热键命令被丢弃（托盘 / IPC 不受影响，两个开关热键除外），托盘勾选跟随配置；探测用 `snow_platform::window_rect::focused_fullscreen_window_exists`，纯函数与派发器已离屏测试，真机（全屏游戏 / 视频）未验证。覆盖窗键位表尚无真机验证。
 
 **2026-10-04 界面与截图补齐（未提交，在工作区）**
 - [x] 听写浮窗：右上角 ✕ 关闭按钮（原底部关闭按钮移除）；去掉撑高空白，窗口高度 270→234，复制按钮上下留白减半。
