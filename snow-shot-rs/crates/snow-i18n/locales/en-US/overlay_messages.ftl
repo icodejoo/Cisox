@@ -11,6 +11,8 @@ overlay-hint-record = Drag to select the recording area · Double-click/Enter to
 overlay-hint-scroll = Drag to select the area to scroll-capture · Double-click/Enter to start · Esc/right-click to cancel
 
 overlay-msg-annotation-unavailable = Annotation is unavailable.
+overlay-msg-auto-filter-detecting = Identifying regions...
+overlay-msg-auto-filter-failed = Region identification failed. Try Auto filter again.
 
 overlay-msg-select-area-first = Select an area first.
 
@@ -103,6 +105,7 @@ overlay-toolbar-tool-eraser = Eraser
 overlay-toolbar-tool-spotlight = Spotlight
 
 overlay-toolbar-tool-watermark = Watermark
+overlay-toolbar-tool-auto-filter = Auto filter
 
 overlay-toolbar-undo = Undo
 

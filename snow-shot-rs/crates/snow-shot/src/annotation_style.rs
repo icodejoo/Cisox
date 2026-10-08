@@ -144,6 +144,8 @@ pub struct StyleFields {
     pub fill: bool,
     /// 箭头头型。
     pub arrowhead: bool,
+    /// 自动滤镜的滤镜类型。
+    pub filter_kind: bool,
 }
 
 impl StyleFields {
@@ -238,6 +240,10 @@ pub fn style_fields(tool: AnnotationTool) -> StyleFields {
         AnnotationTool::Text | AnnotationTool::Counter => StyleFields {
             color: true,
             font_size: true,
+            ..base
+        },
+        AnnotationTool::AutoFilter => StyleFields {
+            filter_kind: true,
             ..base
         },
         _ => base,

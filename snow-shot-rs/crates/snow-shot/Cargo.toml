@@ -19,6 +19,8 @@ snow-i18n = { path = "../snow-i18n" }
 # 标注引擎内核（仓库内 path 依赖，仅依赖 serde，不引入新外部 crate）
 snow-draw-engine = { path = "../../../snow_draw_engine_qt/crates/snow-draw-engine" }
 snow-draw-engine-editor = { path = "../../../snow_draw_engine_qt/crates/snow-draw-engine-editor" }
+# 自动滤镜区域记录类型（仓库内 path 依赖，引擎已带入，Cargo.lock 无新第三方包）
+snow-draw-engine-document = { path = "../../../snow_draw_engine_qt/crates/snow-draw-engine-document" }
 snow-history = { path = "../snow-history" }
 snow-mcp = { path = "../snow-mcp" }
 snow-ocr-protocol = { path = "../snow-ocr-protocol" }
@@ -40,4 +42,6 @@ rqrr = { version = "0.11.0", default-features = false }
 # 窗口级智能选区（Apache-2.0；仅 Windows，传递 rstar / crossbeam-channel）
 [target.'cfg(windows)'.dependencies]
 snow-ui-selector = { path = "../../../snow-crates/crates/snow-ui-selector" }
+# 区域检测（仓库内 path 依赖，默认纯 Rust 后端，不启用 opencv）
+visual-region-detector = { path = "../../../snow-crates/crates/visual-region-detector" }
 snow-selected-text = { path = "../../../snow-crates/crates/snow-selected-text" }

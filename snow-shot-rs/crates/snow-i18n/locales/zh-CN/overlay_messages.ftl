@@ -11,6 +11,8 @@ overlay-hint-record = 拖拽框选录制区域 · 双击/Enter 开始录制 · E
 overlay-hint-scroll = 拖拽框选要滚动截取的区域 · 双击/Enter 开始长截图 · Esc/右键 取消
 
 overlay-msg-annotation-unavailable = 标注功能不可用
+overlay-msg-auto-filter-detecting = 正在识别区域...
+overlay-msg-auto-filter-failed = 区域识别失败，请重新选择自动滤镜。
 
 overlay-msg-select-area-first = 请先框选一个区域
 
@@ -103,6 +105,7 @@ overlay-toolbar-tool-eraser = 橡皮
 overlay-toolbar-tool-spotlight = 聚光灯
 
 overlay-toolbar-tool-watermark = 水印
+overlay-toolbar-tool-auto-filter = 自动滤镜
 
 overlay-toolbar-undo = 撤销
 
