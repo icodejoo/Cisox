@@ -49,7 +49,7 @@ impl Render for SmokeView {
 /// snow_ui_shell::run_smoke_app();
 /// ```
 pub fn run_smoke_app() {
-    gpui_kit::application().run(|cx| {
+    ui::application_with_assets().run(|cx| {
         gpui_kit::init(cx);
         if let Err(err) = gpui_kit::open_window(WindowOptions::default(), cx, |_window, cx| {
             cx.new(|_| SmokeView)

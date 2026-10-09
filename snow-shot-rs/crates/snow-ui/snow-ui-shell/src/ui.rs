@@ -26,7 +26,7 @@ pub use gpui_kit::{
     Hsla, ImageSource, InteractiveElement, IntoElement, KeyDownEvent, KeyUpEvent, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, ObjectFit, ParentElement, Pixels, Point, QuitMode, Render,
     RenderImage, RenderOnce, Rgba, SharedString, Size, StatefulInteractiveElement, Styled,
-    StyledImage, TextAlign, TextRun, UTF16Selection, UnderlineStyle, ViewElement, WeakEntity,
+    StyledImage, Task, TextAlign, TextRun, UTF16Selection, UnderlineStyle, ViewElement, WeakEntity,
     Window, actions,
     DispatchPhase, ScrollDelta, ScrollStrategy, ScrollWheelEvent, ShapedLine, UniformListScrollHandle, canvas, component, div, hsla, img, point,
     px, rgb, rgba, size, uniform_list,
@@ -428,6 +428,14 @@ fn native_id_of(window: &Window) -> Option<NativeWindowId> {
     }
 }
 
+/// 内置图标资源源：gpui-component 控件按路径（icons/*.svg）加载 SVG，须在 Application 上注册。
+///
+/// 使用 gpui-kit 已带的默认包（104 个 Lucide 图标，约 48KB），不新增依赖。
+/// 与 `snow-ui-icons`（自绘图标）无关。
+pub(crate) fn application_with_assets() -> gpui_kit::Application {
+    gpui_kit::application().with_assets(gpui_kit::assets::Assets)
+}
+
 /// 启动 GPUI 应用主循环（阻塞直到应用退出）。
 ///
 /// 会先把进程设为 Per-Monitor-V2 DPI 感知（已设置则忽略），再初始化 GPUI 与组件库。
@@ -444,7 +452,7 @@ fn native_id_of(window: &Window) -> Option<NativeWindowId> {
 /// ```
 pub fn run(setup: impl FnOnce(&mut ShellContext) + 'static) {
     native::ensure_dpi_awareness();
-    gpui_kit::application().run(move |app| {
+    application_with_assets().run(move |app| {
         gpui_kit::init(app);
         setup(&mut ShellContext { app });
     });
@@ -463,7 +471,7 @@ pub fn run(setup: impl FnOnce(&mut ShellContext) + 'static) {
 /// ```
 pub fn run_resident(setup: impl FnOnce(&mut ShellContext) + 'static) {
     native::ensure_dpi_awareness();
-    gpui_kit::application().run(move |app| {
+    application_with_assets().run(move |app| {
         gpui_kit::init(app);
         app.set_quit_mode(QuitMode::Explicit);
         setup(&mut ShellContext { app });
@@ -473,6 +481,57 @@ pub fn run_resident(setup: impl FnOnce(&mut ShellContext) + 'static) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// gpui-component 内部用到的图标路径（Checkbox 对勾、下拉箭头、清除按钮等）。
+    const COMPONENT_ICON_PATHS: &[&str] = &[
+        "icons/check.svg",
+        "icons/close.svg",
+        "icons/chevron-right.svg",
+        "icons/chevron-left.svg",
+        "icons/chevron-down.svg",
+        "icons/chevron-up.svg",
+        "icons/chevrons-up-down.svg",
+        "icons/search.svg",
+        "icons/plus.svg",
+        "icons/minus.svg",
+        "icons/loader.svg",
+        "icons/calendar.svg",
+        "icons/circle-x.svg",
+        "icons/circle-check.svg",
+        "icons/info.svg",
+        "icons/triangle-alert.svg",
+        "icons/eye.svg",
+        "icons/eye-off.svg",
+        "icons/ellipsis.svg",
+        "icons/copy.svg",
+        "icons/inbox.svg",
+    ];
+
+    /// 资源源能加载组件用到的每个图标，且内容是合法 SVG。
+    #[test]
+    fn assets_cover_component_icons() {
+        use gpui_kit::AssetSource;
+        let src = gpui_kit::assets::Assets;
+        for path in COMPONENT_ICON_PATHS {
+            let data = src
+                .load(path)
+                .unwrap_or_else(|e| panic!("{path} 加载失败: {e}"))
+                .unwrap_or_else(|| panic!("{path} 为空"));
+            assert!(data.starts_with(b"<svg"), "{path} 不是 svg");
+        }
+    }
+
+    /// 未知或空路径不会返回内容；list 能列出 icons 前缀下的条目。
+    #[test]
+    fn assets_unknown_path_and_list() {
+        use gpui_kit::AssetSource;
+        let src = gpui_kit::assets::Assets;
+        assert!(src.load("").unwrap().is_none());
+        assert!(src.load("icons/__no_such_icon__.svg").map_or(true, |d| d.is_none()));
+        let listed = src.list("icons/").unwrap();
+        assert!(listed.iter().any(|p| p.as_ref() == "icons/check.svg"));
+    }
+
     use crate::geometry::{PhysicalRect, ScaleFactor};
     use crate::monitor::{MonitorId, MonitorInfo, MonitorTarget};
 
