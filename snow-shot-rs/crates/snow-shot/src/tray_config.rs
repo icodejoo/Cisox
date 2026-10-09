@@ -24,7 +24,7 @@ pub const ICON_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp", "bmp"];
 
 /// 托盘图标边长（像素）。
 pub const ICON_SIZE: u32 = 32;
-/// 内置图标（128 像素 PNG，取自旧版应用图标）。
+/// 内置图标（128 像素 PNG，由新 logo `assets/logo.svg` 经 snow-ui-icons 的 gen_app_icons 示例生成）。
 const BUILTIN_ICON_PNG: &[u8] = include_bytes!("../assets/tray-icon.png");
 
 /// 点击托盘图标时可选的动作。

@@ -45,3 +45,7 @@ snow-ui-selector = { path = "../../../snow-crates/crates/snow-ui-selector" }
 # 区域检测（仓库内 path 依赖，默认纯 Rust 后端，不启用 opencv）
 visual-region-detector = { path = "../../../snow-crates/crates/visual-region-detector" }
 snow-selected-text = { path = "../../../snow-crates/crates/snow-selected-text" }
+
+# 构建期嵌入 exe 图标与版本资源（仅 Windows 目标用到，不进运行时）
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
