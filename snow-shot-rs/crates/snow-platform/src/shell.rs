@@ -2,7 +2,14 @@
 
 use std::path::Path;
 
-/// 生成 `explorer.exe` 的 `/select` 参数：路径必须整体加引号，且不能拆成两个参数。
+/// 把路径规整成 explorer 认的形式：正斜杠一律换成反斜杠。
+///
+/// explorer 对混用分隔符（如 `C:/a\b.png`）会放弃定位并退回“此电脑”。
+fn explorer_path_text(path: &Path) -> String {
+    path.display().to_string().replace('/', "\\")
+}
+
+/// 生成 `explorer.exe` 的 `/select` 参数：路径规整为反斜杠并整体加引号，且不能拆成两个参数。
 ///
 /// # 参数
 /// - `path`：要选中的文件。
@@ -10,13 +17,13 @@ use std::path::Path;
 /// # 示例
 /// ```
 /// let arg = snow_platform::shell::explorer_select_arg(std::path::Path::new("C:/a b/c.mp4"));
-/// assert_eq!(arg, "/select,\"C:/a b/c.mp4\"");
+/// assert_eq!(arg, r#"/select,"C:\a b\c.mp4""#);
 /// ```
 pub fn explorer_select_arg(path: &Path) -> String {
-    format!("/select,\"{}\"", path.display())
+    format!("/select,\"{}\"", explorer_path_text(path))
 }
 
-/// 生成 `explorer.exe` 打开目录的参数：路径整体加引号。
+/// 生成 `explorer.exe` 打开目录的参数：路径规整为反斜杠并整体加引号。
 ///
 /// # 参数
 /// - `dir`：要打开的目录。
@@ -24,10 +31,10 @@ pub fn explorer_select_arg(path: &Path) -> String {
 /// # 示例
 /// ```
 /// let arg = snow_platform::shell::explorer_open_arg(std::path::Path::new("C:/a b"));
-/// assert_eq!(arg, "\"C:/a b\"");
+/// assert_eq!(arg, r#""C:\a b""#);
 /// ```
 pub fn explorer_open_arg(dir: &Path) -> String {
-    format!("\"{}\"", dir.display())
+    format!("\"{}\"", explorer_path_text(dir))
 }
 
 /// 在资源管理器中打开文件所在目录并选中该文件。
@@ -192,12 +199,21 @@ y",
         assert!(open_url("file:///C:/Windows/notepad.exe").is_err());
     }
 
+    /// 长截图保存路径（正斜杠目录 + 反斜杠文件名混用）被规整为纯反斜杠。
+    #[test]
+    fn select_arg_normalizes_mixed_separators() {
+        assert_eq!(
+            explorer_select_arg(Path::new(r"C:/Users/me/Pictures\long 1.png")),
+            r#"/select,"C:\Users\me\Pictures\long 1.png""#
+        );
+    }
+
     /// 打开目录的参数整体加引号。
     #[test]
     fn open_arg_quotes_dir() {
         assert_eq!(
             explorer_open_arg(Path::new("D:/My Videos")),
-            "\"D:/My Videos\""
+            "\"D:\\My Videos\""
         );
     }
 
@@ -206,7 +222,7 @@ y",
     fn select_arg_quotes_path() {
         assert_eq!(
             explorer_select_arg(Path::new("D:/My Videos/x.gif")),
-            "/select,\"D:/My Videos/x.gif\""
+            "/select,\"D:\\My Videos\\x.gif\""
         );
     }
 }
