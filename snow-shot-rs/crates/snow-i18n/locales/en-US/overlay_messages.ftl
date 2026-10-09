@@ -132,3 +132,21 @@ overlay-toolbar-copy = Copy
 overlay-toolbar-cancel = Cancel
 
 overlay-magnifier-hint = Press C to copy the color value
+
+overlay-toolbar-group-shape = Shapes
+
+overlay-toolbar-group-pen = Pens
+
+overlay-toolbar-group-mark = Marks
+
+overlay-toolbar-group-filter = Filters
+
+overlay-toolbar-group-edit = Edit
+
+overlay-toolbar-group-recognize = Recognize
+
+overlay-toolbar-group-output = Output
+
+overlay-toolbar-group-tip = { $arg1 }: { $arg2 }
+
+overlay-region-bar-tip = Selection: { $arg1 }

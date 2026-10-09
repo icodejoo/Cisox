@@ -5,15 +5,25 @@
 
 mod checkerboard;
 mod magnifier;
+mod menu_button;
 mod popconfirm;
 mod segmented;
+mod text_measure;
 mod toolbar;
+mod toolbar_groups;
 
 pub use checkerboard::{
     Checkerboard, DEFAULT_CELL_SIZE, DEFAULT_DARK_COLOR, DEFAULT_LIGHT_COLOR,
 };
 pub use magnifier::{
     ColorFormat, Magnifier, MagnifierGrid, calculate_magnifier_placement,
+};
+pub use menu_button::{
+    IconMenuButton, MenuEntry, calculate_region_bar_placement, menu_button_menu_height,
+    menu_button_size,
+};
+pub use text_measure::{
+    LABEL_FONT_PX, max_label_width, max_width, menu_button_outer_width, menu_outer_width,
 };
 pub use popconfirm::{
     Popconfirm, PopconfirmHandler, PopconfirmPlacement,
@@ -24,7 +34,12 @@ pub use segmented::{
     SegmentedItem,
 };
 pub use toolbar::{
-    AnnotationTool, ScreenshotToolbar, ToolbarAction, ToolbarLabel, calculate_toolbar_placement,
+    AnnotationTool, ScreenshotToolbar, ToolbarAction, ToolbarGroups, ToolbarLabel,
+    calculate_toolbar_placement,
+};
+pub use toolbar_groups::{
+    HOVER_CLOSE_DELAY_MS, HOVER_OPEN_DELAY_MS, ToolbarGroup, ToolbarItem, all_icon_paths,
+    all_items, max_menu_height, toolbar_logical_size,
 };
 
 /// 本 crate 的阶段标记，用于骨架连通性测试。

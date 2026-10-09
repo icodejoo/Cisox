@@ -132,3 +132,21 @@ overlay-toolbar-copy = 复制
 overlay-toolbar-cancel = 取消
 
 overlay-magnifier-hint = 按 C 复制颜色值
+
+overlay-toolbar-group-shape = 形状
+
+overlay-toolbar-group-pen = 画笔
+
+overlay-toolbar-group-mark = 标记
+
+overlay-toolbar-group-filter = 滤镜
+
+overlay-toolbar-group-edit = 编辑
+
+overlay-toolbar-group-recognize = 识别
+
+overlay-toolbar-group-output = 输出
+
+overlay-toolbar-group-tip = { $arg1 }：{ $arg2 }
+
+overlay-region-bar-tip = 选区：{ $arg1 }

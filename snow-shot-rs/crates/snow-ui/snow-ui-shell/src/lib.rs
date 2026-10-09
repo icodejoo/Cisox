@@ -12,6 +12,7 @@
 //!
 //! 所属阶段：P1。
 
+mod assets;
 pub mod dispatch;
 pub mod error;
 pub mod geometry;

@@ -7123,6 +7123,7 @@ dependencies = [
  "raw-window-handle",
  "snow-app-core",
  "snow-capability",
+ "snow-ui-icons",
  "tracing",
  "tray-icon",
  "windows 0.62.2",

@@ -32,8 +32,37 @@ pub use gpui_kit::{
     px, rgb, rgba, size, uniform_list,
 };
 pub use gpui_kit::prelude::FluentBuilder;
+/// 锚定弹层宿主（触发元素 + 延迟绘制的弹出内容，自带窗口边缘避让与遮挡）。
+pub use gpui_kit::base::Popup;
+/// 应用资源源与图标资源检查（antd / 自绘图标路径约定见 `assets` 模块）。
+pub use crate::assets::{ANTD_ICON_PREFIX, AppAssets, OWN_ICON_PREFIX, icon_asset_exists};
 /// 组件库的“取消”动作（Esc）：向焦点所在的下拉浮层派发即可关闭它。
 pub use gpui_kit::base::actions::Cancel;
+
+/// 用窗口当前文本样式（字体、字重）量出单行文字的宽度。
+///
+/// # 参数
+/// - `window`：当前窗口（提供文本系统与默认文本样式）。
+/// - `text`：不含换行的文字。
+/// - `font_px`：字号（逻辑像素）。
+///
+/// # 返回
+/// 文字宽度（逻辑像素）。
+pub fn measure_text_width(window: &Window, text: &str, font_px: f32) -> f32 {
+    let run = window.text_style().to_run(text.len());
+    let shaped = window.text_system().shape_line(
+        SharedString::from(text.to_string()),
+        px(font_px),
+        &[run],
+        None,
+    );
+    f32::from(shaped.width)
+}
+
+/// 窗口当前文本样式的字体族名（宽度缓存按它失效）。
+pub fn window_font_family(window: &Window) -> String {
+    window.text_style().font_family.to_string()
+}
 
 /// 读取虚拟列表当前的纵向滚动偏移（逻辑像素，向下滚动为负）。
 ///
@@ -430,10 +459,9 @@ fn native_id_of(window: &Window) -> Option<NativeWindowId> {
 
 /// 内置图标资源源：gpui-component 控件按路径（icons/*.svg）加载 SVG，须在 Application 上注册。
 ///
-/// 使用 gpui-kit 已带的默认包（104 个 Lucide 图标，约 48KB），不新增依赖。
-/// 与 `snow-ui-icons`（自绘图标）无关。
+/// 在 gpui-kit 默认包（104 个 Lucide 图标，约 48KB）之上叠加 antd 单色层与自绘图标，见 `assets` 模块。
 pub(crate) fn application_with_assets() -> gpui_kit::Application {
-    gpui_kit::application().with_assets(gpui_kit::assets::Assets)
+    gpui_kit::application().with_assets(crate::assets::AppAssets)
 }
 
 /// 启动 GPUI 应用主循环（阻塞直到应用退出）。

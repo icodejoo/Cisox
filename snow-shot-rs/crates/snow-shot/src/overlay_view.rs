@@ -71,7 +71,12 @@ use snow_ui::ui::component::{IndexPath, Sizable, Size as ComponentSize, Theme, T
 use snow_ui::ui::*;
 use snow_ui::widgets::{
     AnnotationTool, ColorFormat, Magnifier, MagnifierGrid, ScreenshotToolbar, ToolbarAction,
-    ToolbarLabel, calculate_magnifier_placement, calculate_toolbar_placement,
+    ToolbarGroup, ToolbarGroups, ToolbarLabel, calculate_magnifier_placement,
+    calculate_toolbar_placement, max_menu_height, toolbar_logical_size,
+};
+use snow_ui::widgets::{
+    IconMenuButton, LABEL_FONT_PX, MenuEntry, calculate_region_bar_placement, max_label_width,
+    menu_button_menu_height, menu_button_outer_width, menu_button_size,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -86,8 +91,8 @@ const MAGNIFIER_DIMENSION: usize = 15;
 const MAGNIFIER_LOGICAL_SIZE: (i32, i32) = (109, 178);
 /// 放大镜距光标的逻辑偏移。
 const MAGNIFIER_OFFSET: i32 = 16;
-/// 工具栏的逻辑尺寸（宽, 高），仅用于定位与命中避让。
-const TOOLBAR_LOGICAL_SIZE: (i32, i32) = (1120, 36);
+/// 分组下拉菜单与工具栏的间距（逻辑像素），用来判断菜单是否会超出屏幕底边。
+const TOOLBAR_MENU_GAP: i32 = 4;
 /// 自动滤镜命中区域的边框颜色（RGB，同旧版 `#ff4d4f`）。
 const AUTO_FILTER_BORDER_COLOR: u32 = 0xFF4D4F;
 /// 自动滤镜命中区域的填充颜色（RGBA，同旧版 alpha 51）。
@@ -185,11 +190,117 @@ const OCR_BOX_COLOR: u32 = 0xFAAD14;
 /// 双击判定所需的点击次数。
 const DOUBLE_CLICK_COUNT: usize = 2;
 
-/// 选区形状栏的估算高度（逻辑像素），用于把它摆在工具栏上方。
-const REGION_BAR_HEIGHT: f32 = 30.0;
+/// 选区菜单按钮与上方 / 下方屏幕边缘、主工具栏的间距（逻辑像素）。
+const REGION_BAR_GAP: f32 = 4.0;
 
-/// 选区形状栏估算半宽（逻辑像素），用于顶部居中。
-const REGION_BAR_HALF_WIDTH: f32 = 220.0;
+/// 选区菜单按钮叠在选区内右下角时的边距：缩放手柄半径 + 命中容差 + 4，避免盖住右下角手柄。
+const REGION_BAR_MARGIN: f32 = (DEFAULT_HANDLE_SIZE / 2 + DEFAULT_EDGE_TOLERANCE + 4) as f32;
+
+/// 选区菜单按钮的消息 id：悬停提示模板（参数：当前形状名）。
+const REGION_BAR_TIP_ID: &str = "overlay-region-bar-tip";
+
+/// 选区菜单里一项对应的动作。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RegionChoice {
+    /// 区域运算（增加 / 减去），选区确定后才有。
+    Op(RegionOp),
+    /// 切换选区形状。
+    Shape(RegionType),
+}
+
+/// 菜单里的四种选区形状（顺序固定）。
+const REGION_SHAPES: [RegionType; 4] = [
+    RegionType::Rectangle,
+    RegionType::Polyline,
+    RegionType::Curve,
+    RegionType::Freehand,
+];
+
+/// 选区菜单的全部项：选区确定后「增加 / 减去」在最前，随后是四种形状。
+///
+/// # 参数
+/// - `selected`：选区是否已确定。
+fn region_choices(selected: bool) -> Vec<RegionChoice> {
+    let ops = [RegionOp::Add, RegionOp::Subtract].map(RegionChoice::Op);
+    let shapes = REGION_SHAPES.map(RegionChoice::Shape);
+    if selected {
+        ops.into_iter().chain(shapes).collect()
+    } else {
+        shapes.to_vec()
+    }
+}
+
+/// 选区菜单项的（文案 id、图标路径）。
+fn region_choice_meta(choice: RegionChoice) -> (&'static str, &'static str) {
+    match choice {
+        RegionChoice::Op(RegionOp::Add) => (
+            "screenshot-tool-palette-add-screenshot-region-4f7ae0d9",
+            "icons/plus.svg",
+        ),
+        RegionChoice::Op(RegionOp::Subtract) => (
+            "screenshot-tool-palette-subtract-screenshot-region-c0df476a",
+            "icons/minus.svg",
+        ),
+        RegionChoice::Shape(RegionType::Rectangle) => (
+            "screenshot-tool-palette-rectangle-region-86f2b03d",
+            "icons/antd/border.svg",
+        ),
+        RegionChoice::Shape(RegionType::Polyline) => (
+            "screenshot-tool-palette-polyline-region-4f71de1a",
+            "icons/snow/region-polyline.svg",
+        ),
+        RegionChoice::Shape(RegionType::Curve) => (
+            "screenshot-tool-palette-curve-region-7a0abb9b",
+            "icons/snow/region-curve.svg",
+        ),
+        RegionChoice::Shape(RegionType::Freehand) => (
+            "screenshot-tool-palette-freehand-region-c5a700ff",
+            "icons/snow/region-freehand.svg",
+        ),
+    }
+}
+
+/// 选区菜单全部可能的文案（含「增加 / 减去」），用来量最长一项。
+///
+/// # 参数
+/// - `i18n`：界面文案。
+fn region_all_labels(i18n: &snow_i18n::I18n) -> Vec<String> {
+    region_choices(true)
+        .into_iter()
+        .map(|choice| i18n.tr(region_choice_meta(choice).0))
+        .collect()
+}
+
+/// 构造选区菜单项：当前形状带对勾，确定选区后「增加 / 减去」与形状之间用分隔线隔开。
+///
+/// # 参数
+/// - `i18n`：界面文案。
+/// - `selected`：选区是否已确定。
+/// - `current`：当前选区形状。
+fn region_menu_entries(
+    i18n: &snow_i18n::I18n,
+    selected: bool,
+    current: RegionType,
+) -> Vec<MenuEntry> {
+    let mut first_shape_seen = false;
+    region_choices(selected)
+        .into_iter()
+        .enumerate()
+        .map(|(index, choice)| {
+            let (id, icon) = region_choice_meta(choice);
+            let is_shape = matches!(choice, RegionChoice::Shape(_));
+            let separator_before = selected && is_shape && !first_shape_seen;
+            first_shape_seen |= is_shape;
+            MenuEntry {
+                id: index.to_string(),
+                icon,
+                label: i18n.tr(id),
+                checked: choice == RegionChoice::Shape(current),
+                separator_before,
+            }
+        })
+        .collect()
+}
 
 /// 选区形状的配置键。
 const REGION_TYPE_KEY: &str = "screenshot_selection/region_type";
@@ -348,12 +459,34 @@ const COORDINATE_MODE_RELATIVE: &str = "relative";
 /// # 参数
 /// - `i18n`：界面语料。
 fn toolbar_labels(i18n: &'static snow_i18n::I18n) -> impl Fn(ToolbarLabel) -> String + 'static {
-    move |key| i18n.tr(toolbar_label_id(key))
+    move |key| match key {
+        ToolbarLabel::GroupTip(group, item) => i18n.tr_with(
+            TOOLBAR_GROUP_TIP_ID,
+            &Args::new()
+                .arg(1, i18n.tr(toolbar_label_id(ToolbarLabel::Group(group))))
+                .arg(2, i18n.tr(toolbar_label_id(item.label()))),
+        ),
+        _ => i18n.tr(toolbar_label_id(key)),
+    }
 }
+
+/// 分组箭头提示的模板消息 id（参数：组名、当前项名）。
+const TOOLBAR_GROUP_TIP_ID: &str = "overlay-toolbar-group-tip";
 
 /// 工具栏按钮位置对应的消息 id。
 fn toolbar_label_id(key: ToolbarLabel) -> &'static str {
     match key {
+        ToolbarLabel::Group(group) => match group {
+            ToolbarGroup::Shape => "overlay-toolbar-group-shape",
+            ToolbarGroup::Pen => "overlay-toolbar-group-pen",
+            ToolbarGroup::Mark => "overlay-toolbar-group-mark",
+            ToolbarGroup::Filter => "overlay-toolbar-group-filter",
+            ToolbarGroup::Edit => "overlay-toolbar-group-edit",
+            ToolbarGroup::Recognize => "overlay-toolbar-group-recognize",
+            ToolbarGroup::Output => "overlay-toolbar-group-output",
+        },
+        // 组合提示：模板消息，文案由 `toolbar_labels` 带参数拼出
+        ToolbarLabel::GroupTip(..) => TOOLBAR_GROUP_TIP_ID,
         ToolbarLabel::Tool(tool) => match tool {
             AnnotationTool::None | AnnotationTool::Select => "overlay-toolbar-tool-select",
             AnnotationTool::Rectangle => "overlay-toolbar-tool-rectangle",
@@ -1494,6 +1627,12 @@ pub struct ScreenshotOverlayView {
     logical_size_label: bool,
     /// 放大镜是否被配置为始终隐藏。
     magnifier_hidden: bool,
+    /// 选区菜单按钮的下拉是否展开。
+    region_menu_open: bool,
+    /// 选区菜单按钮本帧的位置与尺寸（逻辑像素），用于放大镜避让；未显示为 `None`。
+    region_bar_rect: Option<PhysicalRect>,
+    /// 工具栏分组复合按钮的共享状态（当前项记忆与下拉弹出），首次渲染工具栏时创建。
+    toolbar_groups: Option<Entity<ToolbarGroups>>,
     /// 调整选区时是否让被抓的边直接跟随鼠标位置（而非跟随位移）。
     resize_follow_position: bool,
     /// 按住「移动整个选区」键：框选拖动变成平移。
@@ -1680,6 +1819,9 @@ impl ScreenshotOverlayView {
             mask_color: MASK_COLOR,
             logical_size_label: false,
             magnifier_hidden: false,
+            region_menu_open: false,
+            region_bar_rect: None,
+            toolbar_groups: None,
             resize_follow_position: false,
             move_held: false,
             keep_ratio: false,
@@ -2346,6 +2488,11 @@ impl ScreenshotOverlayView {
         alt: bool,
     ) -> OverlayOutcome {
         match (key, control) {
+            // 选区菜单展开时，Esc 只收起菜单
+            ("escape", _) if self.region_menu_open => {
+                self.region_menu_open = false;
+                OverlayOutcome::Stay
+            }
             ("enter", _) if self.region_draft.is_some() => {
                 self.finish_region_draft();
                 OverlayOutcome::Stay
@@ -3087,20 +3234,25 @@ impl ScreenshotOverlayView {
         row
     }
 
-    /// 选区形状栏：四种形状单选；选区确定后再多出「添加 / 减去区域」两个按钮。
+    /// 选区菜单按钮：一个「图标 + 文字 + 向上小箭头」的按钮，点击弹出菜单；
+    /// 选区确定后菜单顶部多出「增加 / 减去」两项。
     ///
     /// # 参数
-    /// - `toolbar_pos`：主工具栏位置（逻辑像素）；有则把形状栏贴在它上方。
-    /// - `monitor`：本窗口所在显示器在画布里的逻辑矩形 `(x, y, 宽, 高)`；选区阶段形状栏顶部居中于它。
+    /// - `toolbar_pos`：主工具栏位置（逻辑像素）；有则据此避开它，并与 `selection` 一起决定位置（见 `calculate_region_bar_placement`）。
+    /// - `selection`：选区在本屏上的逻辑矩形；选区确定后按钮叠在它内部右下角。
+    /// - `monitor`：本窗口所在显示器在画布里的逻辑矩形 `(x, y, 宽, 高)`；选区阶段按钮顶部居中于它。
     ///
     /// # 返回
-    /// 形状栏元素；录屏 / 长截图 / 标注 / 文字输入 / 翻译或识别界面期间不显示。
+    /// 按钮元素；录屏 / 长截图 / 标注 / 文字输入 / 翻译或识别界面期间不显示（同时收起菜单）。
     fn render_region_bar(
-        &self,
+        &mut self,
         toolbar_pos: Option<PhysicalPoint>,
+        selection: Option<PhysicalRect>,
         monitor: (f32, f32, f32, f32),
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<Div> {
+        self.region_bar_rect = None;
         if self.record_mode
             || self.scroll_mode
             || self.annotating
@@ -3113,96 +3265,81 @@ impl ScreenshotOverlayView {
                 .as_ref()
                 .is_some_and(|h| h.nav.in_history())
         {
+            self.region_menu_open = false;
             return None;
         }
         let selected = matches!(self.state, SelectionState::Selected { .. });
         let i18n = self.i18n;
-        let button = |label: String, active: bool| {
-            div()
-                .px_2()
-                .py_0p5()
-                .rounded_xs()
-                .text_xs()
-                .cursor(CursorStyle::PointingHand)
-                .text_color(rgba(0xFFFFFFFF))
-                .bg(if active {
-                    rgb(ACCENT_COLOR)
-                } else {
-                    rgb(0x2B2B2B)
-                })
-                .child(label)
-        };
-        let mut row = div()
-            .absolute()
-            .flex()
-            .flex_row()
-            .gap_1()
-            .p_1()
-            .rounded_sm()
-            .bg(rgba(0x000000CC))
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation());
-        if selected {
-            for (op, id) in [
-                (
-                    RegionOp::Add,
-                    "screenshot-tool-palette-add-screenshot-region-4f7ae0d9",
-                ),
-                (
-                    RegionOp::Subtract,
-                    "screenshot-tool-palette-subtract-screenshot-region-c0df476a",
-                ),
-            ] {
-                row = row.child(button(i18n.tr(id).to_string(), false).on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, _: &MouseDownEvent, _window, cx| {
-                        this.begin_region_op(op);
-                        cx.stop_propagation();
-                        cx.notify();
-                    }),
-                ));
-            }
-        }
-        for (region_type, id) in [
-            (
-                RegionType::Rectangle,
-                "screenshot-tool-palette-rectangle-region-86f2b03d",
-            ),
-            (
-                RegionType::Polyline,
-                "screenshot-tool-palette-polyline-region-4f71de1a",
-            ),
-            (
-                RegionType::Curve,
-                "screenshot-tool-palette-curve-region-7a0abb9b",
-            ),
-            (
-                RegionType::Freehand,
-                "screenshot-tool-palette-freehand-region-c5a700ff",
-            ),
-        ] {
-            row = row.child(
-                button(i18n.tr(id).to_string(), self.region_type == region_type).on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, _: &MouseDownEvent, _window, cx| {
-                        this.switch_region_type(region_type);
-                        cx.stop_propagation();
-                        cx.notify();
-                    }),
-                ),
-            );
-        }
+        // 宽度按全部可能的选项（含「增加 / 减去」）里最长的一项固定，切换形状时不跳动
+        let labels = region_all_labels(i18n);
+        let outer = menu_button_outer_width(max_label_width(window, &labels, LABEL_FONT_PX));
+        let (bar_w, bar_h) = menu_button_size(outer);
         let (top, left) = match toolbar_pos {
-            Some(pos) if selected => (
-                (pos.y as f32 - REGION_BAR_HEIGHT - 4.0).max(4.0),
-                pos.x as f32,
-            ),
+            // 选区确定后：叠在选区内右下角，小选区 / 嵌入式工具栏的回退见 `calculate_region_bar_placement`
+            Some(pos) if selected && selection.is_some() => {
+                let (toolbar_w, toolbar_h) = self.toolbar_size();
+                let screen = PhysicalRect::new(
+                    monitor.0 as i32,
+                    monitor.1 as i32,
+                    monitor.2 as i32,
+                    monitor.3 as i32,
+                );
+                let at = calculate_region_bar_placement(
+                    selection.unwrap_or(screen),
+                    PhysicalRect::new(pos.x, pos.y, toolbar_w, toolbar_h),
+                    (bar_w.ceil() as i32, bar_h.ceil() as i32),
+                    screen,
+                    REGION_BAR_MARGIN as i32,
+                    REGION_BAR_GAP as i32,
+                );
+                (at.y as f32, at.x as f32)
+            }
             _ => (
                 monitor.1 + 8.0,
-                monitor.0 + (monitor.2 / 2.0 - REGION_BAR_HALF_WIDTH).max(4.0),
+                monitor.0 + (monitor.2 / 2.0 - bar_w / 2.0).max(4.0),
             ),
         };
-        Some(row.top(px(top)).left(px(left)))
+        self.region_bar_rect = Some(PhysicalRect::new(
+            left as i32,
+            top as i32,
+            bar_w.ceil() as i32,
+            bar_h.ceil() as i32,
+        ));
+        let entries = region_menu_entries(i18n, selected, self.region_type);
+        let separators = usize::from(selected);
+        // 默认向上展开；上方（到显示器顶边）放不下才改向下
+        let menu_h = menu_button_menu_height(entries.len(), separators);
+        let up = top - menu_h - REGION_BAR_GAP >= monitor.1;
+        let (shape_id, shape_icon) = region_choice_meta(RegionChoice::Shape(self.region_type));
+        let shape_label = i18n.tr(shape_id);
+        let tip = i18n.tr_with(REGION_BAR_TIP_ID, &Args::new().arg(1, shape_label.clone()));
+        let (toggle_view, select_view) = (cx.entity(), cx.entity());
+        let choices = region_choices(selected);
+        let button = IconMenuButton::new("region-menu", shape_icon, shape_label, entries)
+            .tooltip(tip)
+            .width(outer)
+            .open(self.region_menu_open)
+            .up(up)
+            .on_toggle(move |_, app| {
+                toggle_view.update(app, |this, cx| {
+                    this.region_menu_open = !this.region_menu_open;
+                    cx.notify();
+                });
+            })
+            .on_select(move |index, _, app| {
+                let Some(choice) = choices.get(index).copied() else {
+                    return;
+                };
+                select_view.update(app, |this, cx| {
+                    this.region_menu_open = false;
+                    match choice {
+                        RegionChoice::Op(op) => this.begin_region_op(op),
+                        RegionChoice::Shape(shape) => this.switch_region_type(shape),
+                    };
+                    cx.notify();
+                });
+            });
+        Some(div().absolute().top(px(top)).left(px(left)).child(button))
     }
 
     /// 样式面板：按当前工具展示颜色 / 线宽 / 字号 / 填充 / 箭头头型，点击不穿透到选区。
@@ -3308,7 +3445,7 @@ impl ScreenshotOverlayView {
         }
         Some(panel_placement(
             toolbar,
-            TOOLBAR_LOGICAL_SIZE.1,
+            self.toolbar_size().1,
             self.active_panel_size().unwrap_or(STYLE_PANEL_SIZE),
             screen,
             STYLE_PANEL_GAP,
@@ -5606,6 +5743,18 @@ impl ScreenshotOverlayView {
         }
     }
 
+    /// 鼠标是否在选区菜单按钮范围内（用于避免放大镜遮挡按钮）。
+    fn cursor_over_region_bar(&self) -> bool {
+        let Some(rect) = self.region_bar_rect else {
+            return false;
+        };
+        let cursor = logical_rect(
+            PhysicalRect::new(self.cursor_pos.x, self.cursor_pos.y, 1, 1),
+            self.scale,
+        );
+        rect.contains(PhysicalPoint::new(cursor.x, cursor.y))
+    }
+
     /// 鼠标是否在样式面板范围内（用于避免放大镜遮挡面板）。
     fn cursor_over_style_panel(&self, panel_pos: Option<PhysicalPoint>) -> bool {
         let Some(pos) = panel_pos else {
@@ -5622,8 +5771,17 @@ impl ScreenshotOverlayView {
         .contains(PhysicalPoint::new(cursor.x, cursor.y))
     }
 
+    /// 主工具栏的逻辑尺寸（宽, 高）；录屏 / 长图模式隐藏标注工具组，所以更窄。
+    fn toolbar_size(&self) -> (i32, i32) {
+        toolbar_logical_size(!self.record_mode && !self.scroll_mode)
+    }
+
     /// 选区与鼠标是否在工具栏范围内（用于避免放大镜遮挡工具栏）。
-    fn cursor_over_toolbar(&self, toolbar_pos: Option<PhysicalPoint>) -> bool {
+    ///
+    /// # 参数
+    /// - `toolbar_pos`：工具栏左上角（逻辑像素）。
+    /// - `menu_open`：分组下拉是否弹出；弹出时上下各多算一个菜单高度。
+    fn cursor_over_toolbar(&self, toolbar_pos: Option<PhysicalPoint>, menu_open: bool) -> bool {
         let Some(pos) = toolbar_pos else {
             return false;
         };
@@ -5631,7 +5789,13 @@ impl ScreenshotOverlayView {
             PhysicalRect::new(self.cursor_pos.x, self.cursor_pos.y, 1, 1),
             self.scale,
         );
-        PhysicalRect::new(pos.x, pos.y, TOOLBAR_LOGICAL_SIZE.0, TOOLBAR_LOGICAL_SIZE.1)
+        let (width, height) = self.toolbar_size();
+        let extra = if menu_open {
+            max_menu_height().ceil() as i32 + TOOLBAR_MENU_GAP
+        } else {
+            0
+        };
+        PhysicalRect::new(pos.x, pos.y - extra, width, height + extra * 2)
             .contains(PhysicalPoint::new(cursor.x, cursor.y))
     }
 }
@@ -6546,7 +6710,16 @@ impl ScreenshotOverlayView {
         }
 
         let mut toolbar_pos: Option<PhysicalPoint> = None;
+        let mut selection_logical: Option<PhysicalRect> = None;
+        let mut menu_open = false;
         let mut panel_pos: Option<PhysicalPoint> = None;
+        // 选区没了（Esc / 右键退出）时收起残留的分组菜单，免得下次工具栏出现时它还开着
+        if !matches!(self.state, SelectionState::Selected { .. })
+            && let Some(groups) = &self.toolbar_groups
+            && groups.read(cx).open_group().is_some()
+        {
+            groups.update(cx, |state, gcx| state.dismiss(gcx));
+        }
         if let Some(s) = sel {
             let (sx, sy) = (s.x as f32 / scale, s.y as f32 / scale);
             let (sw, sh) = (s.width as f32 / scale, s.height as f32 / scale);
@@ -6647,13 +6820,29 @@ impl ScreenshotOverlayView {
                 let screen_logical =
                     PhysicalRect::new(ox as i32, oy as i32, mon_w as i32, mon_h as i32);
                 let on_this_monitor = mon.intersect(&s).unwrap_or(s);
+                let (toolbar_w, toolbar_h) = self.toolbar_size();
                 let pos = calculate_toolbar_placement(
                     logical_rect(on_this_monitor, scale),
-                    PhysicalPoint::new(TOOLBAR_LOGICAL_SIZE.0, TOOLBAR_LOGICAL_SIZE.1),
+                    PhysicalPoint::new(toolbar_w, toolbar_h),
                     screen_logical,
                     TOOLBAR_MARGIN,
                 );
+                // 工具栏下方放不下最高的分组菜单时，菜单改向上展开
+                let popup_up =
+                    pos.y + toolbar_h + TOOLBAR_MENU_GAP + max_menu_height().ceil() as i32
+                        > screen_logical.bottom();
+                let groups = match &self.toolbar_groups {
+                    Some(groups) => groups.clone(),
+                    None => {
+                        let groups = cx.new(|_| ToolbarGroups::new());
+                        cx.observe(&groups, |_, _, cx| cx.notify()).detach();
+                        self.toolbar_groups = Some(groups.clone());
+                        groups
+                    }
+                };
+                menu_open = groups.read(cx).open_group().is_some();
                 toolbar_pos = Some(pos);
+                selection_logical = Some(logical_rect(on_this_monitor, scale));
                 let entity = cx.entity();
                 let tool_entity = entity.clone();
                 let (can_undo, can_redo) = self.history_state();
@@ -6662,6 +6851,8 @@ impl ScreenshotOverlayView {
                     .undo_redo_state(can_undo, can_redo)
                     .labels(toolbar_labels(self.i18n))
                     .show_tools(!self.record_mode && !self.scroll_mode)
+                    .popup_up(popup_up)
+                    .groups(groups)
                     .disabled_actions(if self.record_mode {
                         &RECORD_MODE_DISABLED_ACTIONS[..]
                     } else if self.scroll_mode {
@@ -6676,7 +6867,7 @@ impl ScreenshotOverlayView {
                         entity.update(app, |this, cx| this.on_toolbar_action(action, window, cx));
                     });
                 // 按右边缘锚定：真实宽度与估算不符时也不会溢出屏幕右侧
-                let right_gap = (screen_w - (pos.x + TOOLBAR_LOGICAL_SIZE.0) as f32).max(0.0);
+                let right_gap = (screen_w - (pos.x + toolbar_w) as f32).max(0.0);
                 root = root.child(
                     div()
                         .absolute()
@@ -6711,9 +6902,15 @@ impl ScreenshotOverlayView {
             );
         }
 
-        // 选区形状栏：选区阶段浮在屏幕顶部；选区确定后贴在工具栏上方（含加 / 减区域）
+        // 选区形状栏：选区阶段浮在屏幕顶部；选区确定后叠在选区内右下角（含加 / 减区域）
         if (anchor_here || (sel.is_none() && cursor_here))
-            && let Some(bar) = self.render_region_bar(toolbar_pos, (ox, oy, mon_w, mon_h), cx)
+            && let Some(bar) = self.render_region_bar(
+                toolbar_pos,
+                selection_logical,
+                (ox, oy, mon_w, mon_h),
+                window,
+                cx,
+            )
         {
             root = root.child(bar);
         }
@@ -6750,8 +6947,9 @@ impl ScreenshotOverlayView {
         // 放大镜：跟随光标，光标压在工具栏上时隐藏
         if cursor_here
             && !self.magnifier_hidden
-            && !self.cursor_over_toolbar(toolbar_pos)
+            && !self.cursor_over_toolbar(toolbar_pos, menu_open)
             && !self.cursor_over_style_panel(panel_pos)
+            && !self.cursor_over_region_bar()
         {
             let screen_logical =
                 PhysicalRect::new(ox as i32, oy as i32, mon_w as i32, mon_h as i32);
@@ -6798,6 +6996,8 @@ impl ScreenshotOverlayView {
                 MouseButton::Left,
                 cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
                     this.scale = this.scale_override.unwrap_or(window.scale_factor());
+                    // 点击菜单以外的位置：收起选区菜单
+                    this.region_menu_open = false;
                     // 点击输入框以外的位置：先提交正在输入的文字
                     this.commit_text_edit(window, cx);
                     let p = this.canvas_point(index, ev.position);
@@ -10334,5 +10534,110 @@ mod tests {
         assert_eq!(zh.tr("overlay-magnifier-hint"), "按 C 复制颜色值");
         let provider = toolbar_labels(en);
         assert_eq!(provider(ToolbarLabel::Action(ToolbarAction::Copy)), "Copy");
+    }
+
+    /// 分组箭头提示由「组名 + 当前项」模板拼出，中英文都带本地化标点。
+    #[test]
+    fn toolbar_group_tip_is_composed() {
+        use snow_ui::widgets::ToolbarItem;
+        let tip = ToolbarLabel::GroupTip(
+            ToolbarGroup::Shape,
+            ToolbarItem::Tool(AnnotationTool::Arrow),
+        );
+        assert_eq!(
+            toolbar_labels(crate::ocr_backend::i18n_for("en-US"))(tip),
+            "Shapes: Arrow"
+        );
+        assert_eq!(
+            toolbar_labels(crate::ocr_backend::i18n_for("zh-CN"))(tip),
+            "形状：箭头"
+        );
+    }
+
+    /// 选区菜单：未确定选区只有四个形状，确定后「增加 / 减去」在最前并用分隔线隔开；当前形状带对勾。
+    #[test]
+    fn region_menu_entries_follow_selection() {
+        let i18n = crate::ocr_backend::i18n_for("en-US");
+        let before = region_menu_entries(i18n, false, RegionType::Curve);
+        assert_eq!(before.len(), 4);
+        assert!(before.iter().all(|e| !e.separator_before));
+        assert_eq!(before.iter().filter(|e| e.checked).count(), 1);
+        assert!(before[2].checked && before[2].label == "Curve region");
+
+        let after = region_menu_entries(i18n, true, RegionType::Rectangle);
+        assert_eq!(after.len(), 6);
+        assert_eq!(after[0].label, "Add screenshot region");
+        assert_eq!(after[1].label, "Subtract screenshot region");
+        assert_eq!(
+            after.iter().filter(|e| e.separator_before).count(),
+            1,
+            "只在第一个形状前有分隔线"
+        );
+        assert!(after[2].separator_before && after[2].checked);
+        assert!(!after[0].checked && !after[1].checked);
+        let choices = region_choices(true);
+        assert_eq!(choices[0], RegionChoice::Op(RegionOp::Add));
+        assert_eq!(choices[2], RegionChoice::Shape(RegionType::Rectangle));
+        assert_eq!(region_choices(false).len(), 4);
+    }
+
+    /// 选区菜单每一项的图标都能解析到资源，提示模板中英文齐全。
+    #[test]
+    fn region_menu_icons_and_tip_resolve() {
+        for choice in region_choices(true) {
+            let (id, icon) = region_choice_meta(choice);
+            assert!(snow_ui::ui::icon_asset_exists(icon), "{icon}");
+            assert!(!crate::ocr_backend::i18n_for("zh-CN").tr(id).is_empty());
+        }
+        let en = crate::ocr_backend::i18n_for("en-US");
+        let zh = crate::ocr_backend::i18n_for("zh-CN");
+        assert_eq!(
+            en.tr_with(REGION_BAR_TIP_ID, &Args::new().arg(1, "X")),
+            "Selection: X"
+        );
+        assert_eq!(
+            zh.tr_with(REGION_BAR_TIP_ID, &Args::new().arg(1, "X")),
+            "选区：X"
+        );
+    }
+
+    /// 量宽用的文案集合恒含全部六项，与当前形状 / 是否已选区无关，所以按钮宽度不会随切换跳动。
+    #[test]
+    fn region_labels_cover_all_options() {
+        let en = region_all_labels(crate::ocr_backend::i18n_for("en-US"));
+        assert_eq!(en.len(), 6);
+        assert!(en.iter().any(|l| l == "Subtract screenshot region"));
+        let zh = region_all_labels(crate::ocr_backend::i18n_for("zh-CN"));
+        assert_ne!(en, zh);
+    }
+
+    /// Esc 先收起选区菜单（不退出覆盖窗），再按才退出。
+    #[test]
+    fn escape_closes_region_menu_first() {
+        let (mut view, _) = view_with(300, 200, 1.0, false);
+        view.region_menu_open = true;
+        assert_eq!(
+            view.handle_key("escape", false, false),
+            OverlayOutcome::Stay
+        );
+        assert!(!view.region_menu_open);
+        assert_eq!(
+            view.handle_key("escape", false, false),
+            OverlayOutcome::Close
+        );
+    }
+
+    /// 主工具栏尺寸随模式变化：录屏 / 长图隐藏标注工具组后更窄，且都远小于旧版 1120 估算。
+    #[test]
+    fn toolbar_size_follows_mode() {
+        let (mut view, _) = view_with(300, 200, 1.0, false);
+        let (full_w, h) = view.toolbar_size();
+        view.record_mode = true;
+        let (record_w, record_h) = view.toolbar_size();
+        assert_eq!(h, record_h);
+        assert!(record_w < full_w && full_w < 1120);
+        view.record_mode = false;
+        view.scroll_mode = true;
+        assert_eq!(view.toolbar_size().0, record_w);
     }
 }
