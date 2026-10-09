@@ -5,7 +5,10 @@
 //! 问题只给出清晰说明，绝不显示假译文。
 
 use crate::ocr_client::OcrError;
-use crate::translate_service::{TranslateFlowError, TranslateOutcome, TranslateStage};
+use crate::ocr_service::OcrTextBox;
+use crate::translate_service::{
+    TranslateFlowError, TranslateOutcome, TranslateStage, TranslatedParagraph,
+};
 use snow_i18n::{Args, I18n};
 use snow_translate::{Lang, TranslateError};
 
@@ -15,6 +18,77 @@ pub const PANEL_MAX_PARAGRAPHS: usize = 8;
 pub const PANEL_MAX_CHARS: usize = 160;
 /// 失败说明最多显示的字符数。
 const FAILURE_MAX_CHARS: usize = 320;
+
+/// 段落与行框联动高亮的填充色（半透明黄）。
+pub const LINK_FILL: u32 = 0xFADB1473;
+/// 段落与行框联动高亮的描边色（黄）。
+pub const LINK_BORDER: u32 = 0xFAAD14FF;
+
+/// 译文段落与 OCR 行框的悬停联动状态：鼠标在某段译文或某个行框上。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LinkHover {
+    /// 悬停的译文段落下标。
+    paragraph: Option<usize>,
+    /// 悬停的行框下标。
+    box_ix: Option<usize>,
+}
+
+impl LinkHover {
+    /// 更新译文段落的悬停：进入时记录，离开时只清除自己（避免晚到的“离开”清掉新的“进入”）。
+    ///
+    /// # 参数
+    /// - `index`：段落下标。
+    /// - `hovered`：鼠标是进入（`true`）还是离开（`false`）。
+    pub fn set_paragraph(&mut self, index: usize, hovered: bool) {
+        if hovered {
+            self.paragraph = Some(index);
+        } else if self.paragraph == Some(index) {
+            self.paragraph = None;
+        }
+    }
+
+    /// 更新行框的悬停，规则同 [`Self::set_paragraph`]。
+    ///
+    /// # 参数
+    /// - `index`：行框下标。
+    /// - `hovered`：鼠标是进入还是离开。
+    pub fn set_box(&mut self, index: usize, hovered: bool) {
+        if hovered {
+            self.box_ix = Some(index);
+        } else if self.box_ix == Some(index) {
+            self.box_ix = None;
+        }
+    }
+
+    /// 清空悬停（界面切换或关闭时用）。
+    pub fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    /// 当前该高亮的译文段落：悬停段落本身，或悬停行框所属的段落。
+    ///
+    /// # 参数
+    /// - `pairs`：逐段对照。
+    pub fn active_paragraph(&self, pairs: &[TranslatedParagraph]) -> Option<usize> {
+        self.paragraph.or_else(|| {
+            let ix = self.box_ix?;
+            pairs.iter().position(|p| p.box_indices.contains(&ix))
+        })
+    }
+
+    /// 某个行框是否该高亮：它属于悬停的段落，或它自己被悬停。
+    ///
+    /// # 参数
+    /// - `pairs`：逐段对照。
+    /// - `box_ix`：行框下标。
+    pub fn box_active(&self, pairs: &[TranslatedParagraph], box_ix: usize) -> bool {
+        self.box_ix == Some(box_ix)
+            || self
+                .paragraph
+                .and_then(|p| pairs.get(p))
+                .is_some_and(|p| p.box_indices.contains(&box_ix))
+    }
+}
 
 /// 翻译在覆盖窗里的状态。
 #[derive(Debug, Clone, PartialEq)]
@@ -29,8 +103,10 @@ pub enum TranslateUiState {
         source: String,
         /// 译文（按段落，行间 `\n`）。
         translated: String,
-        /// 原文与译文逐段对照。
-        pairs: Vec<(String, String)>,
+        /// 原文与译文逐段对照（含行框下标）。
+        pairs: Vec<TranslatedParagraph>,
+        /// OCR 行框（选区内图像坐标）。
+        boxes: Vec<OcrTextBox>,
         /// 后端与模型展示名。
         label: String,
         /// 译文是否已复制到剪贴板。
@@ -168,6 +244,7 @@ impl TranslateUiState {
             source: outcome.source.clone(),
             translated: outcome.translated.clone(),
             pairs: outcome.pairs.clone(),
+            boxes: outcome.boxes.clone(),
             label: outcome.label.clone(),
             copied,
         }
@@ -254,11 +331,16 @@ pub fn panel_lines(state: &TranslateUiState, i18n: &I18n) -> Vec<String> {
         }
         TranslateUiState::Done {
             translated,
+            pairs,
             label,
             copied,
             ..
         } => {
-            let all: Vec<&str> = translated.lines().collect();
+            let all: Vec<&str> = if pairs.is_empty() {
+                translated.lines().collect()
+            } else {
+                pairs.iter().map(|p| p.translated.as_str()).collect()
+            };
             let mut lines = vec![i18n.tr_with(
                 "translate-flow-title",
                 &Args::new().named("label", label.as_str()),
@@ -318,12 +400,56 @@ mod tests {
             translated: translated.join("\n"),
             pairs: translated
                 .iter()
-                .map(|t| ("s".to_string(), (*t).to_string()))
+                .map(|t| TranslatedParagraph {
+                    source: "s".to_string(),
+                    translated: (*t).to_string(),
+                    box_indices: vec![],
+                })
                 .collect(),
+            boxes: vec![],
             label: "OPUS-MT".into(),
             ocr_ms: 1,
             translate_ms: 2,
         }
+    }
+
+    /// 造两段对照：段 0 含行框 0、1，段 1 含行框 2。
+    fn two_pairs() -> Vec<TranslatedParagraph> {
+        vec![
+            TranslatedParagraph {
+                source: "a".into(),
+                translated: "A".into(),
+                box_indices: vec![0, 1],
+            },
+            TranslatedParagraph {
+                source: "b".into(),
+                translated: "B".into(),
+                box_indices: vec![2],
+            },
+        ]
+    }
+
+    /// 悬停译文段落：高亮该段全部行框；悬停行框：高亮所属段落（与它自己）。
+    #[test]
+    fn link_hover_maps_both_ways() {
+        let pairs = two_pairs();
+        let mut hover = LinkHover::default();
+        assert_eq!(hover.active_paragraph(&pairs), None);
+        hover.set_paragraph(0, true);
+        assert!(hover.box_active(&pairs, 0) && hover.box_active(&pairs, 1));
+        assert!(!hover.box_active(&pairs, 2));
+        hover.set_paragraph(0, false);
+        assert!(!hover.box_active(&pairs, 0));
+
+        hover.set_box(2, true);
+        assert_eq!(hover.active_paragraph(&pairs), Some(1));
+        assert!(hover.box_active(&pairs, 2) && !hover.box_active(&pairs, 0));
+        // 晚到的“离开”不会清掉新的悬停
+        hover.set_box(1, true);
+        hover.set_box(2, false);
+        assert_eq!(hover.active_paragraph(&pairs), Some(0));
+        hover.clear();
+        assert_eq!(hover, LinkHover::default());
     }
 
     /// 可见性、忙碌、阶段文案。

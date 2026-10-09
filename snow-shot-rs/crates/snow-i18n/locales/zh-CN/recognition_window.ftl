@@ -13,3 +13,5 @@ recwin-close = 关闭
 recwin-notice-copied = 已复制。
 
 recwin-notice-copy-failed = 复制失败：{ $arg1 }
+
+recwin-translation-title = 译文

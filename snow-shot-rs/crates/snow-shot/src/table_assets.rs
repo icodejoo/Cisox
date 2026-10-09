@@ -1,10 +1,11 @@
 //! 表格识别资产：SLANet_plus 模型（官方 ONNX 发布包）、onnxruntime 动态库与 `snow-table` 工作进程的定位、
 //! 清单解析、就绪判定与按需下载。
 //!
-//! 目录布局对齐 OCR：`<数据根>/assets/table/models/<模型 ID>/`，目录内有完成标记才算就绪。
+//! 模型放在统一目录 `<数据根>/models/table/`（文件夹 `<模型 ID>/` 或直接放 `.onnx` 文件都认），
+//! 不要求完成标记，文件齐全即可。
 //! 模型不随包；下载复用 OCR 下载器（curl 断点续传 + SHA-256 校验 + 原子改名），onnxruntime 复用翻译的那份运行时。
 
-use crate::ocr_assets::{AssetFile, COMPLETE_MARKER, dir_complete};
+use crate::ocr_assets::{AssetFile, COMPLETE_MARKER, model_ready};
 use crate::ocr_download::{DownloadItem, DownloadStep, FetchError, fetch_verified, write_marker};
 use crate::ort_runtime;
 use serde::Deserialize;
@@ -23,8 +24,6 @@ pub const TABLE_WORKER_EXE_NAME: &str = "snow-table.exe";
 const ASSETS_DIR: &str = "assets";
 /// 表格子目录名。
 const TABLE_DIR: &str = "table";
-/// 模型子目录名。
-const MODELS_DIR: &str = "models";
 /// 表格清单的组件名（错误文案里的技术名词）。
 const TABLE_MANIFEST_NAME: &str = "table";
 /// 内置清单。
@@ -84,9 +83,44 @@ pub fn table_root(data_root: &Path, env_override: Option<&str>) -> PathBuf {
     }
 }
 
-/// 模型目录：`<根>/models/<模型 ID>`。
-pub fn model_dir(root: &Path, manifest: &TableManifest) -> PathBuf {
-    root.join(MODELS_DIR).join(&manifest.id)
+/// 模型文件夹：`<模型根>/<模型 ID>`。
+///
+/// # 参数
+/// - `models_root`：某个模型读取目录（如统一目录 `<数据根>/models/table`）。
+/// - `manifest`：清单。
+pub fn model_dir(models_root: &Path, manifest: &TableManifest) -> PathBuf {
+    models_root.join(&manifest.id)
+}
+
+/// 表格模型的读取目录：只有统一目录；设置了环境变量时只认 `<覆盖目录>/models`。
+///
+/// # 参数
+/// - `data_root`：应用数据根目录。
+/// - `env_root`：`SNOW_TABLE_ASSET_DIR` 的值。
+pub fn model_search_dirs(data_root: &Path, env_root: Option<&str>) -> Vec<PathBuf> {
+    crate::model_catalog::read_dirs(
+        crate::model_catalog::Feature::Table,
+        data_root,
+        "",
+        None,
+        env_root,
+    )
+}
+
+/// 在读取目录里找可用的模型文件：先认 `<目录>/<模型 ID>/` 文件夹，再认直接放在目录里的文件。
+///
+/// # 参数
+/// - `dirs`：读取目录（统一目录在前）。
+/// - `manifest`：清单。
+///
+/// # 返回
+/// 模型 `.onnx` 文件路径；都不齐全返回 `None`。
+pub fn find_model_file(dirs: &[PathBuf], manifest: &TableManifest) -> Option<PathBuf> {
+    let file = manifest.model_file()?;
+    dirs.iter()
+        .flat_map(|dir| [model_dir(dir, manifest), dir.clone()])
+        .find(|candidate| model_ready(candidate, &manifest.files))
+        .map(|candidate| candidate.join(&file.name))
 }
 
 /// 已就绪的表格识别资产路径。
@@ -158,6 +192,7 @@ fn format_megabytes(bytes: u64) -> String {
 /// # 参数
 /// - `data_root`：应用数据根目录。
 /// - `env_root`：`SNOW_TABLE_ASSET_DIR` 的值。
+/// - `selected`：配置里选中的表格模型（文件夹或 `.onnx` 文件名；空串表示自动，优先内置清单的 SLANet_plus）。
 /// - `exe_override`：`SNOW_TABLE_EXE` 的值（存在时优先）。
 /// - `ort_env`：`SNOW_ORT_DYLIB` 的值。
 /// - `beside_exe`：主程序所在目录（找同目录的工作进程用）。
@@ -171,28 +206,30 @@ fn format_megabytes(bytes: u64) -> String {
 pub fn resolve_assets(
     data_root: &Path,
     env_root: Option<&str>,
+    selected: &str,
     exe_override: Option<&Path>,
     ort_env: Option<&str>,
     beside_exe: Option<&Path>,
 ) -> Result<TableAssets, TableUnavailable> {
     let manifest = manifest().map_err(TableUnavailable::Manifest)?;
     let exe = locate_worker(exe_override, beside_exe)?;
-    let dir = model_dir(&table_root(data_root, env_root), manifest);
     let file = manifest
         .model_file()
         .ok_or_else(|| TableUnavailable::Manifest("no .onnx file in the manifest".into()))?;
-    if !dir_complete(&dir, &manifest.files) {
-        return Err(TableUnavailable::NoModel {
+    let options =
+        crate::model_pick::table_options(&model_search_dirs(data_root, env_root), &file.name);
+    let model = crate::model_pick::pick(&options, selected, &[&manifest.id, &file.name])
+        .map(|o| o.path.clone())
+        .ok_or(TableUnavailable::NoModel {
             size: manifest.total_size(),
-        });
-    }
+        })?;
     let ort_dll = ort_runtime::resolve_ort_dylib(data_root, ort_env).map_err(|e| match e {
         ort_runtime::OrtUnavailable::NotInstalled => TableUnavailable::NoRuntime,
         other => TableUnavailable::NoWorker(other.detail()),
     })?;
     Ok(TableAssets {
         exe,
-        model: dir.join(&file.name),
+        model,
         ort_dll,
     })
 }
@@ -245,8 +282,10 @@ pub fn download_missing(
         what: TABLE_MANIFEST_NAME,
         detail,
     })?;
-    let dir = model_dir(&table_root(data_root, env_root), manifest);
-    if !dir_complete(&dir, &manifest.files) {
+    let dirs = model_search_dirs(data_root, env_root);
+    if find_model_file(&dirs, manifest).is_none() {
+        // 落盘到主目录（统一目录）
+        let dir = model_dir(&dirs[0], manifest);
         progress(DownloadStep::TableModel);
         for file in &manifest.files {
             fetch_verified(
@@ -314,17 +353,18 @@ mod tests {
         let root = temp_root("resolve");
         let beside = root.join("bin");
         std::fs::create_dir_all(&beside).expect("建目录");
-        let none = resolve_assets(&root, None, None, None, Some(&beside));
+        let none = resolve_assets(&root, None, "", None, None, Some(&beside));
         assert!(matches!(none, Err(TableUnavailable::NoWorker(_))));
         std::fs::write(beside.join(TABLE_WORKER_EXE_NAME), b"x").expect("写 exe");
         let m = manifest().expect("清单");
         assert_eq!(
-            resolve_assets(&root, None, None, None, Some(&beside)),
+            resolve_assets(&root, None, "", None, None, Some(&beside)),
             Err(TableUnavailable::NoModel {
                 size: m.total_size()
             })
         );
-        let dir = model_dir(&table_root(&root, None), m);
+        // 统一目录里带标记的完整下载
+        let dir = model_dir(&model_search_dirs(&root, None)[0], m);
         std::fs::create_dir_all(&dir).expect("建目录");
         for f in &m.files {
             std::fs::File::create(dir.join(&f.name))
@@ -333,15 +373,56 @@ mod tests {
         }
         std::fs::write(dir.join(MARKER_NAME), b"{}").expect("标记");
         assert_eq!(
-            resolve_assets(&root, None, None, None, Some(&beside)),
+            resolve_assets(&root, None, "", None, None, Some(&beside)),
             Err(TableUnavailable::NoRuntime)
         );
         let dll = root.join("onnxruntime.dll");
         std::fs::write(&dll, b"x").expect("写 dll");
-        let assets = resolve_assets(&root, None, None, dll.to_str(), Some(&beside)).expect("齐全");
+        let assets =
+            resolve_assets(&root, None, "", None, dll.to_str(), Some(&beside)).expect("齐全");
         assert_eq!(assets.ort_dll, dll);
         assert!(assets.model.ends_with("slanet-plus.onnx"));
         assert!(assets.exe.ends_with(TABLE_WORKER_EXE_NAME));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 手动放入统一目录的文件夹或单个 onnx 文件（无标记）都认，文件夹形式优先，空文件不算；
+    /// 旧位置不再读取；环境变量覆盖只认覆盖目录。
+    #[test]
+    fn unified_dir_manual_files_and_override() {
+        let root = temp_root("manual");
+        let m = manifest().expect("清单");
+        let dirs = model_search_dirs(&root, None);
+        assert_eq!(dirs, vec![root.join("models").join("table")]);
+        assert!(find_model_file(&dirs, m).is_none());
+        let old = root.join("assets").join("table").join("models");
+        std::fs::create_dir_all(&old).expect("建");
+        std::fs::write(old.join("slanet-plus.onnx"), b"x").expect("写");
+        assert!(find_model_file(&dirs, m).is_none(), "旧位置不再读取");
+        std::fs::create_dir_all(&dirs[0]).expect("建");
+        std::fs::write(dirs[0].join("slanet-plus.onnx"), b"x").expect("写");
+        assert_eq!(
+            find_model_file(&dirs, m),
+            Some(dirs[0].join("slanet-plus.onnx"))
+        );
+        let folder = model_dir(&dirs[0], m);
+        std::fs::create_dir_all(&folder).expect("建");
+        std::fs::write(folder.join("slanet-plus.onnx"), b"x").expect("写");
+        assert_eq!(
+            find_model_file(&dirs, m),
+            Some(folder.join("slanet-plus.onnx"))
+        );
+        std::fs::write(folder.join("slanet-plus.onnx"), b"").expect("清空");
+        assert_eq!(
+            find_model_file(&dirs, m),
+            Some(dirs[0].join("slanet-plus.onnx")),
+            "文件夹里是空文件时退到直接放的文件"
+        );
+        let env = root.join("custom");
+        assert_eq!(
+            model_search_dirs(&root, env.to_str()),
+            vec![env.join("models")]
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

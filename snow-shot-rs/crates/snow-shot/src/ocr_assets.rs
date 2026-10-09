@@ -1,7 +1,8 @@
 //! OCR 资产定位：运行时（`snow-ocr-process`）与模型的目录布局、清单解析与就绪判定。
 //!
-//! 目录布局与上游一致（不随包，按需下载到用户目录）：
-//! `<数据根>/assets/ocr/runtimes/<版本>/<平台>/`、`models/<模型 ID>/`、`state/<版本>/`。
+//! 运行时与状态目录与上游一致（不随包，按需下载到用户目录）：
+//! `<数据根>/assets/ocr/runtimes/<版本>/<平台>/`、`state/<版本>/`。
+//! 模型放在统一目录 `<数据根>/models/ocr/<模型 ID>/`；手动放入的文件不要求完成标记，文件齐全即可。
 //! 清单是上游的原样副本（`resources/ocr-asset-manifest.json`），下载后的哈希校验以它为准。
 
 use serde::Deserialize;
@@ -191,9 +192,36 @@ pub fn runtime_dir(root: &Path, runtime: &RuntimeSpec) -> PathBuf {
         .join(&runtime.platform)
 }
 
-/// 模型目录。
+/// 资产根下的 `models` 目录（环境变量覆盖资产根时的模型目录；测试里伪造资产也用它）。
+pub fn models_dir(root: &Path) -> PathBuf {
+    root.join(MODELS_DIR)
+}
+
+/// 某模型在资产根 `models` 下的目录（测试里伪造资产用）。
+#[cfg(test)]
 pub fn model_dir(root: &Path, model: &ModelSpec) -> PathBuf {
-    root.join(MODELS_DIR).join(&model.id)
+    models_dir(root).join(&model.id)
+}
+
+/// OCR 模型的读取目录列表：只有统一目录；设置了资产根环境变量时只认 `<覆盖目录>/models`。
+///
+/// # 参数
+/// - `data_root`：应用数据根目录。
+/// - `env_root`：`SNOW_OCR_ASSET_DIR` 的值。
+///
+/// # 示例
+/// ```ignore
+/// let dirs = model_search_dirs(Path::new("D"), None);
+/// assert!(dirs[0].ends_with("ocr"));
+/// ```
+pub fn model_search_dirs(data_root: &Path, env_root: Option<&str>) -> Vec<PathBuf> {
+    crate::model_catalog::read_dirs(
+        crate::model_catalog::Feature::Ocr,
+        data_root,
+        "",
+        env_root,
+        None,
+    )
 }
 
 /// 能力缓存目录。
@@ -211,6 +239,36 @@ pub fn dir_complete(dir: &Path, files: &[AssetFile]) -> bool {
         && files.iter().all(|f| {
             std::fs::metadata(dir.join(&f.name)).is_ok_and(|m| m.is_file() && m.len() == f.size)
         })
+}
+
+/// 模型目录里的文件是否齐全可用。
+///
+/// 有完成标记（应用内下载留下的）时按清单严格校验大小；没有标记（手动放入）时只要每个文件都存在且非空。
+///
+/// # 参数
+/// - `dir`：目标目录。
+/// - `files`：清单里应有的文件。
+pub fn model_ready(dir: &Path, files: &[AssetFile]) -> bool {
+    if dir.join(COMPLETE_MARKER).is_file() {
+        return dir_complete(dir, files);
+    }
+    files
+        .iter()
+        .all(|f| std::fs::metadata(dir.join(&f.name)).is_ok_and(|m| m.is_file() && m.len() > 0))
+}
+
+/// 在若干模型目录里找齐全的模型目录（按顺序，先找到的优先）。
+///
+/// # 参数
+/// - `dirs`：模型目录列表（统一目录在前）。
+/// - `model`：模型。
+///
+/// # 返回
+/// `<某目录>/<模型 ID>`；都没有齐全的返回 `None`。
+pub fn find_model_dir(dirs: &[PathBuf], model: &ModelSpec) -> Option<PathBuf> {
+    dirs.iter()
+        .map(|dir| dir.join(&model.id))
+        .find(|candidate| model_ready(candidate, &model.files))
 }
 
 /// 按模型类型查找模型；类型为空时用默认模型。
@@ -243,7 +301,8 @@ pub fn runtime_exe_name(runtime: &RuntimeSpec) -> Option<&str> {
 /// 定位 OCR 资产。
 ///
 /// # 参数
-/// - `root`：资产根目录（见 [`ocr_root`]）。
+/// - `root`：资产根目录（见 [`ocr_root`]，运行时与状态目录在它下面）。
+/// - `model_dirs`：模型读取目录（见 [`model_search_dirs`]）。
 /// - `exe_override`：`SNOW_OCR_PROCESS_EXE` 指定的可执行文件（存在时优先，且不要求运行时目录）。
 /// - `model_kind`：配置里的模型类型。
 ///
@@ -251,10 +310,11 @@ pub fn runtime_exe_name(runtime: &RuntimeSpec) -> Option<&str> {
 /// 全部就绪时返回路径集合；否则返回具体缺什么。
 ///
 /// ```ignore
-/// let assets = resolve_assets(&root, None, "small")?;
+/// let assets = resolve_assets(&root, &model_dirs, None, "small")?;
 /// ```
 pub fn resolve_assets(
     root: &Path,
+    model_dirs: &[PathBuf],
     exe_override: Option<&Path>,
     model_kind: &str,
 ) -> Result<OcrAssets, OcrUnavailable> {
@@ -272,12 +332,9 @@ pub fn resolve_assets(
             dir.join(name)
         }
     };
-    let dir = model_dir(root, model);
-    if !dir_complete(&dir, &model.files) {
-        return Err(OcrUnavailable::NoModel {
-            id: model.id.clone(),
-        });
-    }
+    let dir = find_model_dir(model_dirs, model).ok_or_else(|| OcrUnavailable::NoModel {
+        id: model.id.clone(),
+    })?;
     Ok(OcrAssets {
         exe,
         detector: dir.join(&model.detector),
@@ -309,6 +366,62 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("建根目录");
         dir
+    }
+
+    /// 只含资产根下 `models` 的读取目录（环境变量覆盖布局的测试用）。
+    fn dirs(root: &Path) -> Vec<PathBuf> {
+        vec![models_dir(root)]
+    }
+
+    /// 手动放入（无完成标记）的文件夹，只要三个文件都在就能被认出；缺一个或空文件不行。
+    #[test]
+    fn manual_files_without_marker_are_accepted() {
+        let root = temp_root("manual");
+        let m = manifest().expect("清单");
+        let model = find_model(m, "small").expect("模型");
+        let dir = model_dir(&root, model);
+        std::fs::create_dir_all(&dir).expect("建");
+        for f in &model.files {
+            assert!(!model_ready(&dir, &model.files));
+            std::fs::write(dir.join(&f.name), b"x").expect("写");
+        }
+        assert!(model_ready(&dir, &model.files), "无标记但文件齐全");
+        std::fs::write(dir.join(&model.detector), b"").expect("清空");
+        assert!(!model_ready(&dir, &model.files), "空文件不算");
+        // 有标记时仍按清单严格校验大小（应用内下载路径）
+        std::fs::write(dir.join(&model.detector), b"x").expect("写");
+        std::fs::write(dir.join(COMPLETE_MARKER), b"{}").expect("标记");
+        assert!(!model_ready(&dir, &model.files));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 只认统一目录 `models/ocr`（旧位置 `assets/ocr/models` 不再读取）；环境变量覆盖只认覆盖目录下的 models。
+    #[test]
+    fn unified_dir_only() {
+        let data = temp_root("unified");
+        let m = manifest().expect("清单");
+        let model = find_model(m, "small").expect("模型");
+        let dirs = model_search_dirs(&data, None);
+        assert_eq!(dirs, vec![data.join("models").join("ocr")]);
+        let put = |dir: &Path| {
+            std::fs::create_dir_all(dir).expect("建");
+            for f in &model.files {
+                std::fs::write(dir.join(&f.name), b"x").expect("写");
+            }
+        };
+        put(&data
+            .join("assets")
+            .join("ocr")
+            .join("models")
+            .join(&model.id));
+        assert!(find_model_dir(&dirs, model).is_none(), "旧位置不再读取");
+        let unified = dirs[0].join(&model.id);
+        put(&unified);
+        assert_eq!(find_model_dir(&dirs, model), Some(unified));
+        let env = data.join("custom");
+        let env_dirs = model_search_dirs(&data, env.to_str());
+        assert_eq!(env_dirs, vec![env.join("models")]);
+        let _ = std::fs::remove_dir_all(&data);
     }
 
     /// 内置清单可解析，含默认模型与全部 7 套模型，运行时有 exe。
@@ -369,19 +482,19 @@ mod tests {
         let root = temp_root("resolve");
         let m = manifest().expect("清单");
         assert_eq!(
-            resolve_assets(&root, None, "small"),
+            resolve_assets(&root, &dirs(&root), None, "small"),
             Err(OcrUnavailable::NoRuntime)
         );
         fake_complete_dir(&runtime_dir(&root, &m.runtime), &m.runtime.files);
         let model = find_model(m, "small").expect("模型");
         assert_eq!(
-            resolve_assets(&root, None, "small"),
+            resolve_assets(&root, &dirs(&root), None, "small"),
             Err(OcrUnavailable::NoModel {
                 id: model.id.clone()
             })
         );
         fake_complete_dir(&model_dir(&root, model), &model.files);
-        let assets = resolve_assets(&root, None, "small").expect("齐全");
+        let assets = resolve_assets(&root, &dirs(&root), None, "small").expect("齐全");
         assert!(assets.exe.starts_with(runtime_dir(&root, &m.runtime)));
         assert!(assets.detector.ends_with(&model.detector));
         assert_eq!(assets.model_id, model.id);
@@ -415,14 +528,14 @@ mod tests {
         let exe = root.join("custom-ocr.exe");
         std::fs::write(&exe, b"x").expect("写 exe");
         assert_eq!(
-            resolve_assets(&root, Some(&exe), "small")
+            resolve_assets(&root, &dirs(&root), Some(&exe), "small")
                 .expect("齐全")
                 .exe,
             exe
         );
         let missing = root.join("missing.exe");
         assert_eq!(
-            resolve_assets(&root, Some(&missing), "small"),
+            resolve_assets(&root, &dirs(&root), Some(&missing), "small"),
             Err(OcrUnavailable::NoRuntime)
         );
         let _ = std::fs::remove_dir_all(&root);

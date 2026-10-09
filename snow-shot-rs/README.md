@@ -95,7 +95,7 @@ Model files are never stored in the repository and are not shipped with a clone.
 
 ### 2. OCR 模型与运行时（上游原样，不由本仓库托管）/ OCR models and runtime (unmodified upstream, not hosted here)
 
-来源：Snow Shot 上游在 ModelScope 的 `mgchao/SnowShotOCR`（PP-OCR 系列 ONNX；PaddleOCR 为 Apache-2.0）。落盘位置 `<数据根>/assets/ocr/models/<模型 ID>/`，运行时在 `<数据根>/assets/ocr/runtimes/<版本>/<平台>/`。 / Source: Snow Shot upstream, ModelScope `mgchao/SnowShotOCR` (PP-OCR ONNX; PaddleOCR is Apache-2.0). Files go to `<data root>/assets/ocr/models/<model id>/` and `<data root>/assets/ocr/runtimes/<version>/<platform>/`.
+来源：Snow Shot 上游在 ModelScope 的 `mgchao/SnowShotOCR`（PP-OCR 系列 ONNX；PaddleOCR 为 Apache-2.0）。落盘位置 `<数据根>/models/ocr/<模型 ID>/`，运行时在 `<数据根>/assets/ocr/runtimes/<版本>/<平台>/`。 / Source: Snow Shot upstream, ModelScope `mgchao/SnowShotOCR` (PP-OCR ONNX; PaddleOCR is Apache-2.0). Files go to `<data root>/models/ocr/<model id>/` and `<data root>/assets/ocr/runtimes/<version>/<platform>/`.
 
 默认档 / default tier: `small`
 

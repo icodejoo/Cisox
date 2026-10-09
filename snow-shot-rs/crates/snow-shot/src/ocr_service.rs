@@ -5,7 +5,8 @@
 //! 识别是阻塞调用，必须在后台线程里执行。
 
 use crate::ocr_assets::{
-    ENV_OCR_ASSET_DIR, ENV_OCR_PROCESS_EXE, OcrAssets, ocr_root, resolve_assets,
+    ENV_OCR_ASSET_DIR, ENV_OCR_PROCESS_EXE, OcrAssets, model_search_dirs, models_dir, ocr_root,
+    resolve_assets,
 };
 use crate::ocr_client::{OcrError, OcrWorker, SessionConfig, Timeouts};
 use image::{RgbaImage, imageops};
@@ -225,8 +226,10 @@ fn session_for(config: &OcrRequestConfig, assets: &OcrAssets) -> SessionConfig {
 
 /// OCR 识别服务。
 pub struct OcrService {
-    /// 资产根目录。
+    /// 资产根目录（运行时与状态目录）。
     asset_root: PathBuf,
+    /// 模型读取目录（统一目录；设了环境变量覆盖时是覆盖目录下的 models）。
+    model_dirs: Vec<PathBuf>,
     /// 指定的 `snow-ocr-process` 可执行文件（开发 / 自测用）。
     exe_override: Option<PathBuf>,
     /// worker 拉起方式。
@@ -253,12 +256,14 @@ impl OcrService {
         let exe = std::env::var_os(ENV_OCR_PROCESS_EXE)
             .filter(|v| !v.is_empty())
             .map(PathBuf::from);
-        Self::with_parts(
+        let mut service = Self::with_parts(
             ocr_root(data_root, env_root.as_deref()),
             exe,
             Arc::new(ProcessLauncher),
             DEFAULT_IDLE_TIMEOUT,
-        )
+        );
+        service.model_dirs = model_search_dirs(data_root, env_root.as_deref());
+        service
     }
 
     /// 用显式部件创建服务（测试可注入假拉起方式与短空闲时间）。
@@ -275,6 +280,7 @@ impl OcrService {
         idle_timeout: Duration,
     ) -> Self {
         Self {
+            model_dirs: vec![models_dir(&asset_root)],
             asset_root,
             exe_override,
             launcher,
@@ -302,8 +308,13 @@ impl OcrService {
     /// # 参数
     /// - `model_kind`：模型类型键。
     pub fn resolve(&self, model_kind: &str) -> Result<OcrAssets, OcrError> {
-        resolve_assets(&self.asset_root, self.exe_override.as_deref(), model_kind)
-            .map_err(OcrError::Unavailable)
+        resolve_assets(
+            &self.asset_root,
+            &self.model_dirs,
+            self.exe_override.as_deref(),
+            model_kind,
+        )
+        .map_err(OcrError::Unavailable)
     }
 
     /// worker 进程当前是否在运行。

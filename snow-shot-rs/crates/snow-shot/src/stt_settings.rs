@@ -6,7 +6,6 @@ use crate::dictation::config::DictationConfig;
 use crate::dictation::status::issue_message;
 use crate::dictation::translate::{ModelSupport, assess, resolve_pair};
 use crate::ocr_backend::i18n_for;
-use crate::stt_download::{Progress, Stage};
 use crate::stt_models::{self, Dimension, Role, SttModelSpec, mode_from_config};
 use crate::translate_service::{TranslateConfig, default_models_dir};
 use serde_json::Value;
@@ -20,8 +19,6 @@ use snow_i18n::Args;
 use snow_stt_protocol::{ModelKind, RecognitionMode};
 use snow_translate::{Lang, ModelScanner};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 /// 默认模型在下拉里对应的配置值（空串表示跟随默认）。
 pub const DEFAULT_OPTION_VALUE: &str = "";
@@ -38,36 +35,11 @@ const MIB: u64 = 1024 * 1024;
 /// 模型名称 message id 的前缀（后接模型 ID）。
 const MODEL_NAME_PREFIX: &str = "stt-model-";
 
-/// 可跨线程共享、可比较的取消标记（便于放进 `UiEvent`）。
-#[derive(Debug, Clone, Default)]
-pub struct CancelFlag(pub Arc<AtomicBool>);
-
-impl CancelFlag {
-    /// 置位取消。
-    pub fn cancel(&self) {
-        self.0.store(true, Ordering::Relaxed);
-    }
-
-    /// 是否已被取消。
-    pub fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::Relaxed)
-    }
-}
-
-impl PartialEq for CancelFlag {
-    /// 指向同一个标记才算相等。
-    fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.0, &other.0)
-    }
-}
-
-/// 设置页向上层请求下载的入口与数据根目录。
+/// 设置页判断语音模型安装状态用的数据根目录。
 #[derive(Clone)]
 pub struct SttHooks {
-    /// 应用数据根目录（用于判断安装状态与落盘）。
+    /// 应用数据根目录（用于判断安装状态）。
     pub data_root: PathBuf,
-    /// 请求下载：参数为模型 ID 与取消标记，由上层起后台线程。
-    pub request: Arc<dyn Fn(String, CancelFlag)>,
 }
 
 /// 三项选择被置灰的原因。
@@ -353,230 +325,6 @@ pub fn selector_note(inputs: &SttInputs, key: &str, locale: &str) -> Option<(Str
     })
 }
 
-/// 模型行的一句话状态（已安装 / 未安装与体积）。
-///
-/// # 参数
-/// - `spec`：当前选中的模型。
-/// - `installed`：是否已安装。
-/// - `locale`：界面语言代码。
-pub fn model_row_status(spec: &SttModelSpec, installed: bool, locale: &str) -> String {
-    let i18n = i18n_for(locale);
-    if installed {
-        i18n.tr_with(
-            "stt-ui-row-installed",
-            &Args::new().named("size", format_size(spec.size_bytes)),
-        )
-    } else {
-        i18n.tr_with(
-            "stt-ui-row-missing",
-            &Args::new().named("archive", format_size(spec.archive.size)),
-        )
-    }
-}
-
-/// 下载任务的界面状态。
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub enum DownloadState {
-    /// 空闲。
-    #[default]
-    Idle,
-    /// 进行中。
-    Running {
-        /// 正在安装的模型 ID。
-        model_id: String,
-        /// 最近一次进度。
-        progress: Option<Progress>,
-    },
-    /// 失败（含用户取消）。
-    Failed {
-        /// 模型 ID。
-        model_id: String,
-        /// 错误说明；用户取消时为 `None`。
-        message: Option<String>,
-    },
-    /// 成功。
-    Done {
-        /// 模型 ID。
-        model_id: String,
-    },
-}
-
-/// 下载面板上主按钮的形态。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PanelAction {
-    /// 可下载（未安装，或离线模式缺共享 VAD）。
-    Download,
-    /// 正在下载本模型，可取消。
-    Cancel,
-    /// 已就绪。
-    Installed,
-    /// 正在下载别的模型，暂不可操作。
-    Busy,
-}
-
-/// 下载面板：选中模型的详情、主按钮与下载结果提示。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PanelModel {
-    /// 标题。
-    pub title: String,
-    /// 说明行。
-    pub lines: Vec<String>,
-    /// 主按钮形态。
-    pub action: PanelAction,
-    /// 主按钮文案。
-    pub action_label: String,
-    /// 按钮旁提示：（文案, 是否为错误）。
-    pub notice: Option<(String, bool)>,
-    /// 当前选中的模型 ID（点下载时使用）。
-    pub model_id: String,
-}
-
-/// 进度里展示的资产名：模型压缩包显示模型可读名称，其它（VAD 文件）显示文件名。
-///
-/// # 参数
-/// - `asset`：进度里的资产文件名。
-/// - `locale`：界面语言代码。
-pub fn asset_display_name(asset: &str, locale: &str) -> String {
-    stt_models::manifest()
-        .models
-        .iter()
-        .find(|spec| spec.archive.name == asset)
-        .map_or_else(|| asset.to_string(), |spec| model_name(spec, locale))
-}
-
-/// 进度文案：阶段、资产名（模型显示可读名称）与百分比。
-///
-/// # 参数
-/// - `progress`：进度快照。
-/// - `locale`：界面语言代码。
-pub fn progress_text(progress: &Progress, locale: &str) -> String {
-    let i18n = i18n_for(locale);
-    let stage = i18n.tr(match progress.stage {
-        Stage::Downloading => "stt-ui-stage-downloading",
-        Stage::Verifying => "stt-ui-stage-verifying",
-        Stage::Extracting => "stt-ui-stage-extracting",
-    });
-    let args = Args::new()
-        .named("stage", stage)
-        .named("asset", asset_display_name(&progress.asset, locale));
-    if progress.total == 0 {
-        return i18n.tr_with("stt-ui-progress-no-total", &args);
-    }
-    let percent = (progress.done.min(progress.total) * 100 / progress.total).to_string();
-    i18n.tr_with("stt-ui-progress", &args.named("percent", percent))
-}
-
-/// 构建下载面板；后端为系统语音、手动目录或清单无模型时不显示（`None`）。
-///
-/// # 参数
-/// - `inputs`：当前配置。
-/// - `installed`：模型是否已安装。
-/// - `vad_installed`：共享 VAD 是否已安装。
-/// - `download`：下载任务状态。
-/// - `locale`：界面语言代码。
-pub fn build_panel(
-    inputs: &SttInputs,
-    installed: impl Fn(&SttModelSpec) -> bool,
-    vad_installed: bool,
-    download: &DownloadState,
-    locale: &str,
-) -> Option<PanelModel> {
-    if inputs.lock_reason().is_some() {
-        return None;
-    }
-    let spec = inputs.selected()?;
-    let i18n = i18n_for(locale);
-    let ready = installed(spec);
-    let needs_vad = spec.kind.is_offline() && !vad_installed;
-    let mut lines = vec![
-        i18n.tr_with(
-            if ready {
-                "stt-ui-line-installed"
-            } else {
-                "stt-ui-line-missing"
-            },
-            &Args::new()
-                .named("size", format_size(spec.size_bytes))
-                .named("archive", format_size(spec.archive.size))
-                .named("mem", spec.peak_mem_mb.to_string()),
-        ),
-    ];
-    if let Some(key) = spec.notes_key.as_deref().filter(|k| i18n.has(k)) {
-        lines.push(i18n.tr(key));
-    }
-    if spec.kind.is_offline() {
-        lines.push(if needs_vad {
-            i18n.tr_with(
-                "stt-ui-line-vad-missing",
-                &Args::new().named("size", format_size(stt_models::manifest().vad.size)),
-            )
-        } else {
-            i18n.tr("stt-ui-line-vad-ok")
-        });
-    }
-    let license = if spec.license == "unverified" {
-        i18n.tr("stt-ui-license-unverified")
-    } else {
-        spec.license.clone()
-    };
-    lines.push(i18n.tr_with(
-        "stt-ui-line-license",
-        &Args::new().named("license", license),
-    ));
-    if spec.archive.sha256.is_empty() {
-        lines.push(i18n.tr("stt-ui-line-unpinned"));
-    }
-    let running = match download {
-        DownloadState::Running { model_id, .. } => Some(model_id.as_str()),
-        _ => None,
-    };
-    let action = match running {
-        Some(id) if id == spec.id => PanelAction::Cancel,
-        Some(_) => PanelAction::Busy,
-        None if ready && !needs_vad => PanelAction::Installed,
-        None => PanelAction::Download,
-    };
-    let action_label = i18n.tr(match action {
-        PanelAction::Download => "stt-ui-action-download",
-        PanelAction::Cancel => "stt-ui-action-cancel",
-        PanelAction::Installed => "stt-ui-action-installed",
-        PanelAction::Busy => "stt-ui-action-busy",
-    });
-    let notice = match download {
-        DownloadState::Running {
-            model_id,
-            progress: Some(p),
-        } if *model_id == spec.id => Some((progress_text(p, locale), false)),
-        DownloadState::Failed { model_id, message } if *model_id == spec.id => {
-            Some(match message {
-                Some(detail) => (
-                    i18n.tr_with(
-                        "stt-ui-download-failed",
-                        &Args::new().named("detail", detail.as_str()),
-                    ),
-                    true,
-                ),
-                None => (i18n.tr("stt-ui-download-cancelled"), false),
-            })
-        }
-        DownloadState::Done { model_id } if *model_id == spec.id => {
-            Some((i18n.tr("stt-ui-download-done"), false))
-        }
-        _ => None,
-    };
-    Some(PanelModel {
-        title: i18n.tr_with(
-            "stt-ui-panel-title",
-            &Args::new().named("name", model_name(spec, locale)),
-        ),
-        lines,
-        action,
-        action_label,
-        notice,
-        model_id: spec.id.clone(),
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -736,26 +484,6 @@ mod tests {
         assert_eq!(format_size(76_326_475), "73 MB");
     }
 
-    /// 进度里的模型压缩包显示可读名称，VAD 文件仍显示文件名。
-    #[test]
-    fn asset_display_name_prefers_model_name() {
-        let spec = &stt_models::manifest().models[0];
-        for locale in ["en-US", "zh-CN"] {
-            assert_eq!(
-                asset_display_name(&spec.archive.name, locale),
-                model_name(spec, locale)
-            );
-        }
-        assert_eq!(asset_display_name("silero_vad.onnx", "en-US"), "silero_vad.onnx");
-        let p = Progress {
-            stage: Stage::Downloading,
-            asset: spec.archive.name.clone(),
-            done: 1,
-            total: 4,
-        };
-        assert!(!progress_text(&p, "en-US").contains(".tar.bz2"));
-    }
-
     /// 清单里每个模型两种语言都有名称，选项标签含名称且不超过下拉宽度可容纳的字符数。
     #[test]
     fn every_model_has_name_and_label() {
@@ -783,116 +511,6 @@ mod tests {
                 }
             }
         }
-    }
-
-    /// 进度文案：有总量带百分比，无总量不带。
-    #[test]
-    fn progress_text_percent() {
-        let p = Progress {
-            stage: Stage::Downloading,
-            asset: "a.tar.bz2".into(),
-            done: 50,
-            total: 200,
-        };
-        assert!(progress_text(&p, "en-US").contains("25%"));
-        let none = Progress { total: 0, ..p };
-        assert!(!progress_text(&none, "en-US").contains('%'));
-    }
-
-    /// 面板：置灰时无面板；未安装可下载；下载中本模型可取消；他模型忙；失败 / 取消 / 完成提示。
-    #[test]
-    fn panel_actions_and_notices() {
-        let cfg = base();
-        let spec = cfg.selected().unwrap();
-        assert!(
-            build_panel(
-                &SttInputs {
-                    manual_dir: true,
-                    ..cfg.clone()
-                },
-                |_| false,
-                true,
-                &DownloadState::Idle,
-                "en-US"
-            )
-            .is_none()
-        );
-        let panel = |ready: bool, vad: bool, dl: &DownloadState| {
-            build_panel(&cfg, |_| ready, vad, dl, "en-US").unwrap()
-        };
-        assert_eq!(
-            panel(false, true, &DownloadState::Idle).action,
-            PanelAction::Download
-        );
-        assert_eq!(
-            panel(true, true, &DownloadState::Idle).action,
-            PanelAction::Installed
-        );
-        let running = DownloadState::Running {
-            model_id: spec.id.clone(),
-            progress: None,
-        };
-        assert_eq!(panel(false, true, &running).action, PanelAction::Cancel);
-        let other = DownloadState::Running {
-            model_id: "other".into(),
-            progress: None,
-        };
-        assert_eq!(panel(false, true, &other).action, PanelAction::Busy);
-        let failed = DownloadState::Failed {
-            model_id: spec.id.clone(),
-            message: Some("boom".into()),
-        };
-        let notice = panel(false, true, &failed).notice.unwrap();
-        assert!(notice.1 && notice.0.contains("boom"));
-        let cancelled = DownloadState::Failed {
-            model_id: spec.id.clone(),
-            message: None,
-        };
-        assert!(!panel(false, true, &cancelled).notice.unwrap().1);
-        assert!(
-            panel(
-                true,
-                true,
-                &DownloadState::Done {
-                    model_id: spec.id.clone()
-                }
-            )
-            .notice
-            .is_some()
-        );
-        assert!(
-            panel(
-                true,
-                true,
-                &DownloadState::Done {
-                    model_id: "x".into()
-                }
-            )
-            .notice
-            .is_none()
-        );
-    }
-
-    /// 离线模型缺 VAD 时即使模型已装也要下载；面板含 VAD 行与校验值待固定提示。
-    #[test]
-    fn offline_panel_needs_vad() {
-        let cfg = SttInputs {
-            mode: RecognitionMode::Offline,
-            ..base()
-        };
-        let missing = build_panel(&cfg, |_| true, false, &DownloadState::Idle, "zh-CN").unwrap();
-        assert_eq!(missing.action, PanelAction::Download);
-        let ok = build_panel(&cfg, |_| true, true, &DownloadState::Idle, "zh-CN").unwrap();
-        assert_eq!(ok.action, PanelAction::Installed);
-        assert_ne!(missing.lines, ok.lines);
-        let spec = cfg.selected().unwrap();
-        let unpinned = build_panel(&cfg, |_| true, true, &DownloadState::Idle, "zh-CN")
-            .unwrap()
-            .lines
-            .len();
-        let expect =
-            3 + usize::from(spec.notes_key.is_some()) + usize::from(spec.archive.sha256.is_empty());
-        assert_eq!(unpinned, expect);
     }
 
     /// 造一份听写配置。
@@ -1013,17 +631,5 @@ mod tests {
                 );
             }
         }
-    }
-
-    /// 取消标记按指针比较相等。
-    #[test]
-    fn cancel_flag_semantics() {
-        let a = CancelFlag::default();
-        let b = a.clone();
-        assert_eq!(a, b);
-        assert_ne!(a, CancelFlag::default());
-        assert!(!b.is_cancelled());
-        a.cancel();
-        assert!(b.is_cancelled());
     }
 }

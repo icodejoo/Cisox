@@ -96,7 +96,7 @@ DirectML 可用，三档都成功运行，**CER 与 CPU 逐张完全一致**。r
 - 没有测系统 OCR 本身（见 [ocr-samples.md](ocr-samples.md)）。
 
 ## 复现命令
-模型已按清单下载到 `%LOCALAPPDATA%\Cisox\assets\ocr\models\<模型 ID>\`，每个目录写入 `.complete.json`（内容 `{"schema":1}`）；`ocr_assets.rs::dir_complete` 判据为标记文件存在且每个文件大小与清单一致。下载用 aria2（`-x16 -s16 -k8M`），modelscope.cn 单源，本机实测每文件 0.9 到 21 MiB/s（大文件 6 到 21 MiB/s，6 档新模型合计不到 2 分钟下完），sha256 全部与清单一致。
+模型已按清单下载到 `%LOCALAPPDATA%\Cisox\assets\ocr\models\<模型 ID>\`（当时的位置；现在落在 `models\ocr\<模型 ID>\`，旧位置不再读取），每个目录写入 `.complete.json`（内容 `{"schema":1}`）；`ocr_assets.rs::dir_complete` 判据为标记文件存在且每个文件大小与清单一致。下载用 aria2（`-x16 -s16 -k8M`），modelscope.cn 单源，本机实测每文件 0.9 到 21 MiB/s（大文件 6 到 21 MiB/s，6 档新模型合计不到 2 分钟下完），sha256 全部与清单一致。
 
 ```
 # CPU，7 张样片

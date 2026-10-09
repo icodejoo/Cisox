@@ -429,6 +429,43 @@ mod tests {
         }
     }
 
+    /// 设置页会展示的每个配置键，在每种内置语言下都必须有非空说明（隐藏键与只读内部键除外），防止界面又退回显示原始键。
+    #[test]
+    fn every_displayed_key_has_description_in_all_locales() {
+        for lang in all_langs() {
+            let missing: Vec<&str> = snow_config::schema::entries()
+                .iter()
+                .filter(|e| !crate::settings_state::is_hidden_key(e.key))
+                .filter(|e| {
+                    !matches!(
+                        crate::settings_model::control_for(e),
+                        crate::settings_model::Control::ReadOnly(_)
+                    )
+                })
+                .map(|e| e.key)
+                .filter(|key| item_desc(lang, key).is_none_or(|text| text.trim().is_empty()))
+                .collect();
+            assert!(
+                missing.is_empty(),
+                "{} 缺少说明：{missing:?}",
+                lang.locale()
+            );
+        }
+    }
+
+    /// 说明里不能出现配置键名（含“组/名”形式）。
+    #[test]
+    fn descriptions_do_not_contain_config_keys() {
+        for lang in all_langs() {
+            for e in snow_config::schema::entries() {
+                if let Some(text) = item_desc(lang, e.key) {
+                    assert!(!text.contains(e.key), "{} 的说明含键名", e.key);
+                    assert!(!text.contains('\n'), "{} 的说明应为一行", e.key);
+                }
+            }
+        }
+    }
+
     /// 名称与说明按语言取值；无说明的键返回 None。
     #[test]
     fn item_labels_are_localized() {
@@ -441,7 +478,8 @@ mod tests {
             item_label(en, "screenshot_translation/source_language"),
             "Source language"
         );
-        assert!(item_desc(zh, "screenshot/image_quality").is_none());
+        assert!(item_desc(zh, "screenshot/image_quality").is_some());
+        assert!(item_desc(zh, "no_such_group/no_such_key").is_none());
         for lang in [en, zh] {
             assert!(item_desc(lang, "screenshot/delay_seconds").is_some());
         }

@@ -6,6 +6,8 @@ use crate::ocr_service::OcrTextBox;
 use crate::settings_state::UiPrefs;
 use crate::settings_view::{Palette, palette};
 use crate::table_structure::TableTexts;
+use crate::translate_flow::{LINK_BORDER, LINK_FILL, LinkHover};
+use crate::translate_service::TranslatedParagraph;
 use image::{Frame, RgbaImage};
 use snow_i18n::Args;
 use snow_platform::clipboard::copy_text_to_clipboard;
@@ -20,9 +22,9 @@ use std::sync::Arc;
 /// 窗口逻辑宽度。
 pub const WINDOW_WIDTH: f32 = 980.0;
 /// 窗口逻辑高度。
-pub const WINDOW_HEIGHT: f32 = 600.0;
-/// 图片区最大边长（逻辑像素）。
-const IMAGE_MAX_EDGE: f32 = 520.0;
+pub const WINDOW_HEIGHT: f32 = 640.0;
+/// 图片区最大边长（逻辑像素）：留出内边距、提示行与标题栏的余量，保证底部按钮完整可见。
+const IMAGE_MAX_EDGE: f32 = 500.0;
 /// 内边距。
 const PADDING: f32 = 12.0;
 /// 控件间距。
@@ -53,6 +55,8 @@ pub struct RecognitionData {
     pub latex: Option<String>,
     /// Markdown / HTML 模型转换通道的配置状态（只用于未配置引导）。
     pub conversion: ConversionGuide,
+    /// 译文逐段对照（含每段对应的行框下标）；没有译文为 `None`。
+    pub translation: Option<Vec<TranslatedParagraph>>,
 }
 
 /// 把 RGBA 像素换成 GPUI 渲染图（GPUI 内部按 BGRA 存放）；尺寸与像素数不符返回 `None`。
@@ -91,6 +95,8 @@ pub struct RecognitionView {
     prefs: UiPrefs,
     /// 底部提示 `(文案, 是否错误)`。
     notice: Option<(String, bool)>,
+    /// 译文段落与行框的悬停联动状态。
+    hover: LinkHover,
     /// 待释放的图像资源。
     pending_drops: Vec<Arc<RenderImage>>,
 }
@@ -119,7 +125,7 @@ impl RecognitionView {
         );
         let initial = data.text.clone();
         let text = app.new(|cx| {
-            let mut state = TextareaState::new(window, cx).auto_grow(12, 24);
+            let mut state = TextareaState::new(window, cx);
             state.set_value(initial, window, cx);
             state
         });
@@ -130,6 +136,7 @@ impl RecognitionView {
             text,
             prefs,
             notice: None,
+            hover: LinkHover::default(),
             pending_drops: Vec::new(),
         })
     }
@@ -154,6 +161,7 @@ impl RecognitionView {
             .update(cx, |state, cx| state.set_value(text, window, cx));
         self.data = data;
         self.notice = None;
+        self.hover.clear();
         cx.notify();
     }
 
@@ -170,6 +178,11 @@ impl RecognitionView {
         let ready = matches!(self.data.conversion, ConversionGuide::Ready(_));
         self.notice = Some((self.data.conversion.message(i18n), !ready));
         cx.notify();
+    }
+
+    /// 译文段落对照（没有译文时为空切片）。
+    fn paragraphs(&self) -> &[TranslatedParagraph] {
+        self.data.translation.as_deref().unwrap_or(&[])
     }
 
     /// 复制一段文字并给出提示。
@@ -207,8 +220,10 @@ impl Render for RecognitionView {
                     .object_fit(ObjectFit::Fill),
             );
         }
+        let linked = self.data.translation.is_some();
         for (ix, b) in self.data.boxes.iter().enumerate() {
             let text = b.text.clone();
+            let active = linked && self.hover.box_active(self.paragraphs(), ix);
             image_box = image_box.child(
                 div()
                     .id(("recwin-box", ix))
@@ -218,9 +233,15 @@ impl Render for RecognitionView {
                     .w(px(b.rect.width as f32 * k))
                     .h(px(b.rect.height as f32 * k))
                     .border_1()
-                    .border_color(rgba(BOX_BORDER))
-                    .bg(rgba(BOX_FILL))
+                    .border_color(rgba(if active { LINK_BORDER } else { BOX_BORDER }))
+                    .bg(rgba(if active { LINK_FILL } else { BOX_FILL }))
                     .cursor_pointer()
+                    .on_hover(cx.listener(move |this, hovered: &bool, _w, cx| {
+                        if this.data.translation.is_some() {
+                            this.hover.set_box(ix, *hovered);
+                            cx.notify();
+                        }
+                    }))
                     .on_click(
                         cx.listener(move |this, _e: &ClickEvent, _w, cx| this.copy(&text, cx)),
                     ),
@@ -251,7 +272,7 @@ impl Render for RecognitionView {
             .with_size(ComponentSize::Small)
             .label(i18n.tr("recwin-close"))
             .on_click(cx.listener(|_this, _e: &ClickEvent, window, _cx| window.remove_window()));
-        let mut format_row = div().flex().items_center().gap(px(GAP));
+        let mut format_row = div().flex().flex_wrap().items_center().gap(px(GAP));
         if let Some(table) = self.data.table.clone() {
             let (markdown, html) = (table.markdown, table.html);
             format_row = format_row
@@ -305,8 +326,59 @@ impl Render for RecognitionView {
                     ),
             );
         }
+        let mut translation_area = None;
+        if let Some(paragraphs) = &self.data.translation {
+            let active = self.hover.active_paragraph(paragraphs);
+            let mut list = div()
+                .id("recwin-translation-list")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .flex()
+                .flex_col()
+                .gap(px(GAP / 2.0))
+                .p(px(GAP))
+                .border_1()
+                .border_color(p.control)
+                .rounded_md();
+            for (ix, para) in paragraphs.iter().enumerate() {
+                let on = active == Some(ix);
+                list = list.child(
+                    div()
+                        .id(("recwin-para", ix))
+                        .px(px(GAP / 2.0))
+                        .py(px(2.0))
+                        .rounded_sm()
+                        .border_1()
+                        .border_color(rgba(if on { LINK_BORDER } else { 0x00000000 }))
+                        .bg(rgba(if on { LINK_FILL } else { 0x00000000 }))
+                        .text_size(px(TEXT_SIZE))
+                        .on_hover(cx.listener(move |this, hovered: &bool, _w, cx| {
+                            this.hover.set_paragraph(ix, *hovered);
+                            cx.notify();
+                        }))
+                        .child(para.translated.clone()),
+                );
+            }
+            translation_area = Some(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(GAP / 2.0))
+                    .child(
+                        div()
+                            .text_size(px(TEXT_SIZE))
+                            .child(i18n.tr("recwin-translation-title")),
+                    )
+                    .child(list),
+            );
+        }
         let right = div()
             .flex_1()
+            .min_w_0()
+            .min_h_0()
             .flex()
             .flex_col()
             .gap(px(GAP))
@@ -320,7 +392,13 @@ impl Render for RecognitionView {
                 },
                 &Args::new().arg(1, self.data.boxes.len()),
             )))
-            .child(div().flex_1().child(Textarea::new(&self.text)))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .child(Textarea::new(&self.text).h_full()),
+            )
+            .children(translation_area)
             .child(format_row)
             .child(
                 div()
@@ -346,6 +424,7 @@ impl Render for RecognitionView {
             .flex()
             .gap(px(PADDING))
             .p(px(PADDING))
+            .overflow_hidden()
             .bg(p.bg)
             .text_color(p.text)
             .child(left)
@@ -369,7 +448,9 @@ mod tests {
             table: None,
             latex: None,
             conversion: ConversionGuide::NotConfigured,
+            translation: None,
         };
+        assert!(data.translation.is_none());
         assert!(data.table.is_none());
         assert!(data.latex.is_none());
         assert_eq!(data.conversion, ConversionGuide::NotConfigured);

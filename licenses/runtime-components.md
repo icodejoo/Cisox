@@ -24,3 +24,9 @@ Cargo 依赖由 `scripts/collect-third-party-licenses.ps1` 按 `cargo tree` 自�
 | x-asr 三款（480ms / 160ms 流式、离线） | Apache-2.0（上游 X-ASR-zh-en） | https://huggingface.co/GilgameshWind/X-ASR-zh-en ；sherpa 导出仓库自身未声明 |
 | SenseVoice small | FunASR Model Open Source License | https://github.com/modelscope/FunASR/blob/main/MODEL_LICENSE ；https://github.com/FunAudioLLM/SenseVoice |
 | paraformer-zh-small、paraformer-trilingual | 未核实（unverified） | 导出仓库与 ModelScope 上游页均未声明许可；推测为 FunASR 许可，未确认 |
+
+## 内置图标（随程序编译进二进制）
+
+| 图标 | 许可证 | 来源 |
+| --- | --- | --- |
+| `hearing`（语音转文字聆听指示，`snow-ui-shell/assets/icons/snow/hearing.svg`，14x14 线性耳朵） | **待确认**（用户提供，疑似 Streamline 图标集，使用前需核对其许可证与署名要求） | 用户提供的 SVG；`currentColor` 改为纯黑以便按遮罩着色 |

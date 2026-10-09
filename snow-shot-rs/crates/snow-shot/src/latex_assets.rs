@@ -78,8 +78,6 @@ pub struct LatexAssets {
 /// 公式识别资产不可用的原因。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LatexUnavailable {
-    /// 没有设置公式模型目录。
-    NoDir,
     /// 目录里缺文件或文件不完整（附目录与文件名）。
     Missing {
         /// 设置的目录。
@@ -105,9 +103,7 @@ impl LatexUnavailable {
                 .named("dir", dir)
                 .named("url", i18n.tr(SOURCE_URL_MESSAGE))
         };
-        let all = file_list(&MODEL_FILES.map(|f| f.name));
         match self {
-            Self::NoDir => i18n.tr_with("latex-guide-no-dir", &args(all, "")),
             Self::Missing { dir, files } => {
                 i18n.tr_with("latex-guide-missing", &args(file_list(files), dir))
             }
@@ -172,10 +168,49 @@ pub fn model_dir_from_document(document: &ConfigDocument) -> String {
     }
 }
 
+/// 公式模型的读取目录：配置里用户自设的目录优先，其后是统一目录 `<数据根>/models/latex`；没设置时只有统一目录。
+///
+/// # 参数
+/// - `data_root`：应用数据根目录。
+/// - `cfg_dir`：配置里的公式模型目录（空白表示没设置）。
+pub fn model_dirs(data_root: &Path, cfg_dir: &str) -> Vec<PathBuf> {
+    crate::model_catalog::read_dirs(
+        crate::model_catalog::Feature::Latex,
+        data_root,
+        cfg_dir,
+        None,
+        None,
+    )
+}
+
+/// 在读取目录里按选中的模型找四个文件齐全的文件夹：选中项优先，为空或已不存在时用第一个可用的。
+///
+/// # 参数
+/// - `dirs`：读取目录（主目录在前，见 [`model_dirs`]）。
+/// - `selected`：配置里选中的模型（文件夹名；空串表示自动）。
+///
+/// # 返回
+/// 齐全时返回文件路径；没有任何可用模型时返回主目录与它缺的文件名。
+pub fn find_models(
+    dirs: &[PathBuf],
+    selected: &str,
+) -> Result<ModelPaths, (PathBuf, Vec<&'static str>)> {
+    let options = crate::model_pick::latex_options(dirs);
+    if let Some(found) = crate::model_pick::pick(&options, selected, &[])
+        && let Ok(paths) = check_model_dir(&found.path)
+    {
+        return Ok(paths);
+    }
+    let primary = dirs.first().cloned().unwrap_or_default();
+    let files = check_model_dir(&primary).err().unwrap_or_default();
+    Err((primary, files))
+}
+
 /// 定位公式识别资产：先看模型目录，再看 onnxruntime，最后看工作进程。
 ///
 /// # 参数
-/// - `model_dir`：配置里的公式模型目录（空串表示没设置）。
+/// - `model_dir`：配置里的公式模型目录（空白表示没设置，回退统一目录 `<数据根>/models/latex`）。
+/// - `selected`：配置里选中的公式模型（空串表示自动）。
 /// - `data_root`：应用数据根目录（找 onnxruntime 用）。
 /// - `ort_env`：`SNOW_ORT_DYLIB` 的值。
 /// - `exe_override`：`SNOW_LATEX_EXE` 的值（存在时优先）。
@@ -185,19 +220,18 @@ pub fn model_dir_from_document(document: &ConfigDocument) -> String {
 /// 全部就绪返回路径集合；否则返回具体缺什么。
 pub fn resolve_assets(
     model_dir: &str,
+    selected: &str,
     data_root: &Path,
     ort_env: Option<&str>,
     exe_override: Option<&Path>,
     beside_exe: Option<&Path>,
 ) -> Result<LatexAssets, LatexUnavailable> {
-    let model_dir = model_dir.trim();
-    if model_dir.is_empty() {
-        return Err(LatexUnavailable::NoDir);
-    }
     let models =
-        check_model_dir(Path::new(model_dir)).map_err(|files| LatexUnavailable::Missing {
-            dir: model_dir.to_string(),
-            files,
+        find_models(&model_dirs(data_root, model_dir), selected).map_err(|(dir, files)| {
+            LatexUnavailable::Missing {
+                dir: dir.display().to_string(),
+                files,
+            }
         })?;
     let ort_dll = ort_runtime::resolve_ort_dylib(data_root, ort_env).map_err(|e| match e {
         ort_runtime::OrtUnavailable::NotInstalled => LatexUnavailable::NoRuntime,
@@ -238,60 +272,6 @@ fn locate_worker(
     }
 }
 
-/// 设置页“公式模型”面板上的动作。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LatexAction {
-    /// 打开公式模型目录（没设置或不存在时无事发生）。
-    OpenFolder,
-    /// 用浏览器打开官方来源。
-    OpenSource,
-}
-
-/// 设置页面板文案与状态。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LatexPanel {
-    /// 标题。
-    pub title: String,
-    /// 状态行 `(文案, 是否警示)`。
-    pub status: (String, bool),
-    /// “打开目录”按钮文案。
-    pub open_folder_label: String,
-    /// “官方来源”按钮文案。
-    pub open_source_label: String,
-    /// 官方来源地址（点“官方来源”时打开）。
-    pub source_url: String,
-}
-
-/// 生成设置页面板。
-///
-/// # 参数
-/// - `i18n`：界面语料。
-/// - `model_dir`：配置里的公式模型目录（空串表示没设置）。
-pub fn latex_panel(i18n: &I18n, model_dir: &str) -> LatexPanel {
-    let model_dir = model_dir.trim();
-    let status = if model_dir.is_empty() {
-        (i18n.tr("latex-panel-status-unset"), false)
-    } else {
-        match check_model_dir(Path::new(model_dir)) {
-            Ok(_) => (i18n.tr("latex-panel-status-ready"), false),
-            Err(files) => (
-                i18n.tr_with(
-                    "latex-panel-status-missing",
-                    &Args::new().named("files", file_list(&files)),
-                ),
-                true,
-            ),
-        }
-    };
-    LatexPanel {
-        title: i18n.tr("latex-panel-title"),
-        status,
-        open_folder_label: i18n.tr("latex-panel-open-folder"),
-        open_source_label: i18n.tr("latex-panel-open-source"),
-        source_url: i18n.tr(SOURCE_URL_MESSAGE),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -329,7 +309,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// 解析顺序：没设目录 -> 缺文件 -> 缺运行时 -> 缺工作进程 -> 就绪。
+    /// 解析顺序：没设目录（统一目录里也没有）-> 缺文件 -> 缺运行时 -> 缺工作进程 -> 就绪。
     #[test]
     fn resolve_progression() {
         let root = temp_root("resolve");
@@ -338,29 +318,31 @@ mod tests {
         let dir = models.to_str().expect("路径");
         let beside = root.join("bin");
         std::fs::create_dir_all(&beside).expect("建目录");
-        assert_eq!(
-            resolve_assets("  ", &root, None, None, Some(&beside)),
-            Err(LatexUnavailable::NoDir)
-        );
         assert!(matches!(
-            resolve_assets(dir, &root, None, None, Some(&beside)),
+            resolve_assets("  ", "", &root, None, None, Some(&beside)),
+            Err(LatexUnavailable::Missing { dir, files })
+                if files.len() == 4 && Path::new(&dir) == root.join("models").join("latex")
+        ));
+        assert!(matches!(
+            resolve_assets(dir, "", &root, None, None, Some(&beside)),
             Err(LatexUnavailable::Missing { files, .. }) if files.len() == 4
         ));
         for f in MODEL_FILES {
             put(&models, f, f.min_size);
         }
         assert_eq!(
-            resolve_assets(dir, &root, None, None, Some(&beside)),
+            resolve_assets(dir, "", &root, None, None, Some(&beside)),
             Err(LatexUnavailable::NoRuntime)
         );
         let dll = root.join("onnxruntime.dll");
         std::fs::write(&dll, b"x").expect("写 dll");
         assert!(matches!(
-            resolve_assets(dir, &root, dll.to_str(), None, Some(&beside)),
+            resolve_assets(dir, "", &root, dll.to_str(), None, Some(&beside)),
             Err(LatexUnavailable::NoWorker(_))
         ));
         std::fs::write(beside.join(LATEX_WORKER_EXE_NAME), b"x").expect("写 exe");
-        let assets = resolve_assets(dir, &root, dll.to_str(), None, Some(&beside)).expect("齐全");
+        let assets =
+            resolve_assets(dir, "", &root, dll.to_str(), None, Some(&beside)).expect("齐全");
         assert_eq!(assets.ort_dll, dll);
         assert!(assets.exe.ends_with(LATEX_WORKER_EXE_NAME));
         assert!(assets.models.encoder.ends_with("encoder.onnx"));
@@ -371,7 +353,6 @@ mod tests {
     #[test]
     fn download_flag_and_worker_override() {
         assert!(LatexUnavailable::NoRuntime.can_download());
-        assert!(!LatexUnavailable::NoDir.can_download());
         assert!(
             !LatexUnavailable::Missing {
                 dir: "x".into(),
@@ -390,13 +371,10 @@ mod tests {
     fn guide_cards_are_localized() {
         let zh = crate::ocr_backend::i18n_for("zh-CN");
         let en = crate::ocr_backend::i18n_for("en-US");
-        let cases = [
-            LatexUnavailable::NoDir,
-            LatexUnavailable::Missing {
-                dir: "D:/m".into(),
-                files: vec!["encoder.onnx", "tokenizer.json"],
-            },
-        ];
+        let cases = [LatexUnavailable::Missing {
+            dir: "D:/m".into(),
+            files: vec!["encoder.onnx", "tokenizer.json"],
+        }];
         for case in &cases {
             for i18n in [zh, en] {
                 let text = case.message(i18n);
@@ -408,11 +386,7 @@ mod tests {
             let text = case.message(zh);
             assert!(text.contains("设置"), "{text}");
         }
-        let no_dir = LatexUnavailable::NoDir.message(zh);
-        for f in MODEL_FILES {
-            assert!(no_dir.contains(f.name), "{no_dir}");
-        }
-        let missing = cases[1].message(en);
+        let missing = cases[0].message(en);
         assert!(
             missing.contains("D:/m") && missing.contains("tokenizer.json"),
             "{missing}"
@@ -433,23 +407,64 @@ mod tests {
         );
     }
 
-    /// 设置页面板：没设置 / 缺文件 / 就绪三种状态。
+    /// 未设目录时读统一目录 `models/latex`（手动放入四个文件即可）；自设目录优先，自设目录缺文件时回退统一目录。
     #[test]
-    fn panel_states() {
-        let en = crate::ocr_backend::i18n_for("en-US");
-        let unset = latex_panel(en, "");
-        assert!(!unset.status.1);
-        assert!(unset.source_url.starts_with("https://"));
-        let dir = temp_root("panel");
-        let missing = latex_panel(en, dir.to_str().expect("路径"));
-        assert!(missing.status.1 && missing.status.0.contains("decoder.onnx"));
+    fn default_dir_manual_files_and_priority() {
+        let data = temp_root("default-dir");
+        let unified = data.join("models").join("latex");
+        std::fs::create_dir_all(&unified).expect("建");
+        assert!(find_models(&model_dirs(&data, ""), "").is_err());
         for f in MODEL_FILES {
-            put(&dir, f, f.min_size);
+            put(&unified, f, f.min_size);
         }
-        let ready = latex_panel(en, dir.to_str().expect("路径"));
-        assert!(!ready.status.1);
-        assert_ne!(ready.status.0, unset.status.0);
-        let _ = std::fs::remove_dir_all(&dir);
+        let paths = find_models(&model_dirs(&data, "  "), "").expect("统一目录齐全");
+        assert!(paths.encoder.starts_with(&unified));
+        // 自设目录齐全时优先
+        let custom = temp_root("custom-dir");
+        for f in MODEL_FILES {
+            put(&custom, f, f.min_size);
+        }
+        let paths =
+            find_models(&model_dirs(&data, custom.to_str().expect("路径")), "").expect("自设");
+        assert!(paths.encoder.starts_with(&custom));
+        // 自设目录缺文件，统一目录齐全：回退
+        let empty = temp_root("empty-dir");
+        let paths =
+            find_models(&model_dirs(&data, empty.to_str().expect("路径")), "").expect("回退");
+        assert!(paths.encoder.starts_with(&unified));
+        // 都不齐全：报主目录（自设目录）缺的文件
+        std::fs::remove_dir_all(&unified).expect("删");
+        let (dir, files) =
+            find_models(&model_dirs(&data, empty.to_str().expect("路径")), "").expect_err("都缺");
+        assert_eq!(dir, empty);
+        assert_eq!(files.len(), 4);
+        for d in [data, custom, empty] {
+            let _ = std::fs::remove_dir_all(&d);
+        }
+    }
+
+    /// 选中的公式模型：文件夹名匹配就用它；为空或已不存在时用第一个可用的。
+    #[test]
+    fn selected_model_with_fallback() {
+        let data = temp_root("selected");
+        let unified = data.join("models").join("latex");
+        for name in ["alpha", "beta"] {
+            std::fs::create_dir_all(unified.join(name)).expect("建");
+            for f in MODEL_FILES {
+                put(&unified.join(name), f, f.min_size);
+            }
+        }
+        let dirs = model_dirs(&data, "");
+        let beta = find_models(&dirs, "beta").expect("beta");
+        assert!(beta.encoder.starts_with(unified.join("beta")));
+        let auto = find_models(&dirs, "").expect("自动");
+        assert!(
+            auto.encoder.starts_with(unified.join("alpha")),
+            "自动用第一个"
+        );
+        let gone = find_models(&dirs, "gone").expect("回退");
+        assert!(gone.encoder.starts_with(unified.join("alpha")));
+        let _ = std::fs::remove_dir_all(&data);
     }
 
     /// 从配置文档读目录：默认空，设置后去空白。

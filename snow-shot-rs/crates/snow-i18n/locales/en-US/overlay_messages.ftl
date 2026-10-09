@@ -150,3 +150,9 @@ overlay-toolbar-group-output = Output
 overlay-toolbar-group-tip = { $arg1 }: { $arg2 }
 
 overlay-region-bar-tip = Selection: { $arg1 }
+
+overlay-panel-confirm = OK
+
+overlay-panel-undo = Undo
+
+overlay-panel-close = Close

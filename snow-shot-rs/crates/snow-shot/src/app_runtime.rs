@@ -53,9 +53,7 @@ use crate::settings_pages::{
 use crate::settings_state::{ConfigChange, SharedConfig, SystemPrefs, UiPrefs, restore_value};
 use crate::settings_text::{Lang, window_title};
 use crate::settings_view::{AUTOTEST_STEP_INTERVAL, SettingsView, parse_autotest_ops};
-use crate::stt_download::{self, Progress as SttProgress};
-use crate::stt_models;
-use crate::stt_settings::{CancelFlag, SttHooks};
+use crate::stt_settings::SttHooks;
 use crate::sys_prefs::system_ui_language;
 use crate::translate_flow::TranslateUiState;
 use crate::translate_history::history_path;
@@ -501,8 +499,6 @@ pub enum UiEvent {
     },
     /// 覆盖窗请求下载公式识别所需的 onnxruntime 运行时（进度与结果复用 OCR 下载事件）。
     LatexDownloadRequested,
-    /// 设置页“公式模型”面板上的按钮动作。
-    LatexActionRequested(crate::latex_assets::LatexAction),
     /// 文字识别完成（成功或失败）。
     OcrFinished {
         /// 对应的请求序号。
@@ -547,22 +543,6 @@ pub enum UiEvent {
     OcrDownloadProgress(String),
     /// OCR 组件下载结束。
     OcrDownloadFinished(Result<(), String>),
-    /// 设置页请求下载语音模型（携带取消标记）。
-    SttDownloadRequested {
-        /// 模型 ID。
-        model_id: String,
-        /// 取消标记。
-        cancel: CancelFlag,
-    },
-    /// 语音模型下载进度。
-    SttDownloadProgress(SttProgress),
-    /// 语音模型下载结束。
-    SttDownloadFinished {
-        /// 模型 ID。
-        model_id: String,
-        /// 结果（结构化错误，界面边界再翻译）。
-        result: Result<(), ocr_download::FetchError>,
-    },
     /// 设置页请求为某个路径键选择文件（配置键）。
     PathPickRequested(&'static str),
     /// 文件对话框选中了路径：配置键与要写回的值。
@@ -2832,11 +2812,15 @@ fn spawn_table(state: &AppState, serial: u64, width: u32, height: u32, rgba: Vec
     let selection = select_from_document(state.config.borrow().document(), Arc::clone(&state.ocr));
     let engine = selection.engine;
     let data_root = state.data_root.clone();
+    let table_model = crate::model_pick::selected_from_document(
+        state.config.borrow().document(),
+        snow_config::extensions::KEY_TABLE_MODEL,
+    );
     let inbox = state.inbox.clone();
     let spawned = std::thread::Builder::new()
         .name("snow-table-request".into())
         .spawn(move || {
-            let result = run_table(&data_root, &*engine, width, height, &rgba);
+            let result = run_table(&data_root, &table_model, &*engine, width, height, &rgba);
             inbox.push(UiEvent::OcrFinished { serial, result });
         });
     if let Err(e) = spawned {
@@ -2852,10 +2836,12 @@ fn spawn_table(state: &AppState, serial: u64, width: u32, height: u32, rgba: Vec
 ///
 /// # 参数
 /// - `data_root`：数据根目录。
+/// - `table_model`：配置里选中的表格模型（空串为自动）。
 /// - `engine`：当前选中的 OCR 后端。
 /// - `width` / `height` / `rgba`：选区图像。
 fn run_table(
     data_root: &std::path::Path,
+    table_model: &str,
     engine: &dyn crate::ocr_backend::OcrEngine,
     width: u32,
     height: u32,
@@ -2869,6 +2855,7 @@ fn run_table(
         std::env::var(crate::table_assets::ENV_TABLE_ASSET_DIR)
             .ok()
             .as_deref(),
+        table_model,
         std::env::var_os(crate::table_assets::ENV_TABLE_EXE)
             .map(PathBuf::from)
             .as_deref(),
@@ -2897,12 +2884,16 @@ fn run_table(
 /// - `width` / `height` / `rgba`：选区图像。
 fn spawn_latex(state: &AppState, serial: u64, width: u32, height: u32, rgba: Vec<u8>) {
     let model_dir = crate::latex_assets::model_dir_from_document(state.config.borrow().document());
+    let latex_model = crate::model_pick::selected_from_document(
+        state.config.borrow().document(),
+        snow_config::extensions::KEY_LATEX_MODEL,
+    );
     let data_root = state.data_root.clone();
     let inbox = state.inbox.clone();
     let spawned = std::thread::Builder::new()
         .name("snow-latex-request".into())
         .spawn(move || {
-            let result = run_latex_job(&model_dir, &data_root, width, height, &rgba);
+            let result = run_latex_job(&model_dir, &latex_model, &data_root, width, height, &rgba);
             inbox.push(UiEvent::OcrFinished { serial, result });
         });
     if let Err(e) = spawned {
@@ -2918,10 +2909,12 @@ fn spawn_latex(state: &AppState, serial: u64, width: u32, height: u32, rgba: Vec
 ///
 /// # 参数
 /// - `model_dir`：配置里的公式模型目录。
+/// - `latex_model`：配置里选中的公式模型（空串为自动）。
 /// - `data_root`：数据根目录。
 /// - `width` / `height` / `rgba`：选区图像。
 fn run_latex_job(
     model_dir: &str,
+    latex_model: &str,
     data_root: &std::path::Path,
     width: u32,
     height: u32,
@@ -2932,6 +2925,7 @@ fn run_latex_job(
         .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf));
     let assets = crate::latex_assets::resolve_assets(
         model_dir,
+        latex_model,
         data_root,
         std::env::var(snow_translate::worker::ENV_ORT_DYLIB)
             .ok()
@@ -2973,33 +2967,6 @@ fn spawn_latex_download(state: &AppState) {
     }
 }
 
-/// 处理设置页“公式模型”面板的按钮：打开模型目录，或用浏览器打开官方来源。
-///
-/// # 参数
-/// - `state`：运行时状态。
-/// - `action`：按钮动作。
-fn run_latex_action(state: &AppState, action: crate::latex_assets::LatexAction) {
-    use crate::latex_assets::LatexAction;
-    let document = state.config.borrow();
-    let result = match action {
-        LatexAction::OpenFolder => {
-            let dir = crate::latex_assets::model_dir_from_document(document.document());
-            if dir.is_empty() {
-                return;
-            }
-            snow_platform::shell::open_directory(std::path::Path::new(&dir))
-        }
-        LatexAction::OpenSource => {
-            let i18n =
-                crate::ocr_backend::i18n_for(ui_prefs_from_document(document.document()).locale);
-            snow_platform::shell::open_url(&i18n.tr("latex-source-url"))
-        }
-    };
-    if let Err(e) = result {
-        tracing::warn!(error = %e, ?action, "公式面板动作失败");
-    }
-}
-
 /// 在后台线程下载表格识别组件（模型与缺失的 onnxruntime），进度与结果复用 OCR 下载事件。
 ///
 /// # 参数
@@ -3014,7 +2981,7 @@ fn spawn_table_download(state: &AppState) {
         .name("snow-table-download".into())
         .spawn(move || {
             let env_root = std::env::var(crate::table_assets::ENV_TABLE_ASSET_DIR).ok();
-            tracing::info!(root = %crate::table_assets::table_root(&data_root, env_root.as_deref()).display(), "开始下载表格识别组件");
+            tracing::info!(models_dir = %crate::table_assets::model_search_dirs(&data_root, env_root.as_deref())[0].display(), "开始下载表格识别组件");
             let cancel = AtomicBool::new(false);
             let progress_inbox = inbox.clone();
             let result = crate::table_assets::download_missing(
@@ -3067,41 +3034,6 @@ fn spawn_ocr_download(state: &AppState) {
     if let Err(e) = spawned {
         let message = ocr_download::FetchError::TaskStart(e.to_string()).message(i18n);
         state.inbox.push(UiEvent::OcrDownloadFinished(Err(message)));
-    }
-}
-
-/// 在后台线程安装语音模型（含离线模式缺的共享 VAD），进度与结果经收件箱回到主线程。
-///
-/// # 参数
-/// - `state`：运行时状态。
-/// - `model_id`：模型 ID。
-/// - `cancel`：取消标记。
-fn spawn_stt_download(state: &AppState, model_id: String, cancel: CancelFlag) {
-    let data_root = state.data_root.clone();
-    let inbox = state.inbox.clone();
-    let id = model_id.clone();
-    let spawned = std::thread::Builder::new().name("snow-stt-download".into()).spawn(move || {
-        let result = match stt_models::find(&id) {
-            None => Err(ocr_download::FetchError::Technical(format!("unknown speech model: {id}"))),
-            Some(spec) => {
-                let progress_inbox = inbox.clone();
-                stt_download::install(spec, &data_root, &cancel.0, |p| {
-                    progress_inbox.push(UiEvent::SttDownloadProgress(p.clone()));
-                })
-                .map(|report| {
-                    if !report.unpinned.is_empty() {
-                        tracing::warn!(assets = ?report.unpinned, "语音模型资产未固定校验值，仅校验了大小");
-                    }
-                })
-            }
-        };
-        inbox.push(UiEvent::SttDownloadFinished { model_id: id, result });
-    });
-    if let Err(e) = spawned {
-        state.inbox.push(UiEvent::SttDownloadFinished {
-            model_id,
-            result: Err(ocr_download::FetchError::TaskStart(e.to_string())),
-        });
     }
 }
 
@@ -3517,17 +3449,10 @@ fn build_settings_view(
         });
     });
     let view = SettingsView::create(window, app, config, system, notify);
-    let stt_inbox = inbox.clone();
     let mcp_data_root = data_root.clone();
-    let stt_hooks = SttHooks {
-        data_root,
-        request: std::sync::Arc::new(move |model_id, cancel| {
-            stt_inbox.push(UiEvent::SttDownloadRequested { model_id, cancel });
-        }),
-    };
+    let stt_hooks = SttHooks { data_root };
     let transfer_inbox = inbox.clone();
     let pick_inbox = inbox.clone();
-    let latex_action_inbox = inbox.clone();
     let update_inbox = inbox.clone();
     let page_inbox = inbox;
     let mcp_descriptor = snow_mcp::descriptor::descriptor_path(&mcp_data_root);
@@ -3537,14 +3462,12 @@ fn build_settings_view(
             snow_platform::clipboard::copy_text_to_clipboard(&text)
         }));
         v.set_stt_hooks(stt_hooks);
+        v.set_catalog_data_root(mcp_data_root.clone());
         v.set_transfer_hook(Rc::new(move |action| {
             transfer_inbox.push(UiEvent::ConfigTransferRequested(action));
         }));
         v.set_path_pick_hook(Rc::new(move |key| {
             pick_inbox.push(UiEvent::PathPickRequested(key));
-        }));
-        v.set_latex_hook(Rc::new(move |action| {
-            latex_action_inbox.push(UiEvent::LatexActionRequested(action));
         }));
         v.set_update_hook(Rc::new(move |action| {
             update_inbox.push(UiEvent::UpdateActionRequested(action));
@@ -5238,7 +5161,6 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
             rgba,
         } => spawn_latex(state, serial, width, height, rgba),
         UiEvent::LatexDownloadRequested => spawn_latex_download(state),
-        UiEvent::LatexActionRequested(action) => run_latex_action(state, action),
         UiEvent::OcrFinished { serial, result } => {
             let outcome = state.overlay_view.as_ref().map(|view| {
                 view.update(cx.app(), |v, vcx| {
@@ -5370,39 +5292,6 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
                 show_notice(state, &text);
                 let ui_state = crate::net_settings::update_outcome_state(&outcome, locale);
                 publish_update_state(state, cx, ui_state);
-            }
-        }
-        UiEvent::SttDownloadRequested { model_id, cancel } => {
-            spawn_stt_download(state, model_id, cancel)
-        }
-        UiEvent::SttDownloadProgress(progress) => {
-            if let Some(view) = settings_view(state, cx.app()) {
-                let progress = progress.clone();
-                view.update(cx.app(), |v, vcx| v.update_stt_download(progress, vcx));
-            }
-        }
-        UiEvent::SttDownloadFinished { model_id, result } => {
-            match (stt_download::classify(&result), &result) {
-                (stt_download::Outcome::Done, _) => {
-                    tracing::info!(model = %model_id, "语音模型下载完成")
-                }
-                (stt_download::Outcome::Cancelled, _) => {
-                    tracing::info!(model = %model_id, "用户取消下载")
-                }
-                (stt_download::Outcome::Failed, Err(e)) => {
-                    tracing::warn!(model = %model_id, error = ?e, "语音模型下载失败")
-                }
-                (stt_download::Outcome::Failed, Ok(())) => {}
-            }
-            let i18n = crate::ocr_backend::i18n_for(
-                ui_prefs_from_document(state.config.borrow().document()).locale,
-            );
-            let result = result.map_err(|e| e.message(i18n));
-            if let Some(view) = settings_view(state, cx.app()) {
-                let (model_id, result) = (model_id.clone(), result.clone());
-                view.update(cx.app(), |v, vcx| {
-                    v.finish_stt_download(model_id, result, vcx)
-                });
             }
         }
         UiEvent::StartScrollCapture => request_scroll_capture(cx, state),

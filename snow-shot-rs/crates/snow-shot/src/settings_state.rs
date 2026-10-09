@@ -4,16 +4,19 @@
 //! 校验失败或落盘失败时内存与磁盘保持原值。视图层只调用这里的方法并绘制结果。
 
 use crate::settings_model::{
-    Control, EditOutcome, LANGUAGE_KEY, ReadOnlyReason,
-    THEME_COLOR_KEY, THEME_MODE_KEY, TextBuffer, apply_edit_key, control_for, describe_input_error,
-    edit_text, find_shortcut_conflict, group_id_of, groups, humanize, is_modifier_key,
-    parse_hex_color, parse_input, portable_to_hotkey_text, shortcut_from_keystroke,
-    shortcut_texts, with_shortcut, without_shortcut, GLOBAL_SHORTCUT_GROUP,
+    Control, EditOutcome, GLOBAL_SHORTCUT_GROUP, LANGUAGE_KEY, ReadOnlyReason, THEME_COLOR_KEY,
+    THEME_MODE_KEY, TextBuffer, apply_edit_key, control_for, describe_input_error, edit_text,
+    find_shortcut_conflict, group_id_of, groups, humanize, is_modifier_key, parse_hex_color,
+    parse_input, portable_to_hotkey_text, shortcut_from_keystroke, shortcut_texts, with_shortcut,
+    without_shortcut,
 };
 use crate::settings_text::{Lang, Text, group_title, item_label, t};
 use crate::stt_settings::{SttInputs, affects_layout, resets_model_id};
 use serde_json::{Value, json};
-use snow_config::extensions::{KEY_DICTATION_MODEL_ID, KEY_DICTATION_SENSEVOICE_ITN};
+use snow_config::extensions::{
+    KEY_DICTATION_MODEL_DIR, KEY_DICTATION_MODEL_ID, KEY_DICTATION_SENSEVOICE_ITN,
+    KEY_LATEX_MODEL_DIR, KEY_LOCAL_MODEL_ID, KEY_LOCAL_MODELS_DIR,
+};
 use snow_config::schema::{self, entries};
 use snow_config::store::ConfigStore;
 use snow_config::value::json_eq;
@@ -285,6 +288,25 @@ pub fn restore_value(store: &SharedConfig, key: &str, previous: Value) -> Result
     store.flush().map_err(|e| e.to_string())
 }
 
+/// 不在设置页展示的配置键（键、schema 与读取逻辑都保留，已有配置值照常生效）：
+/// “自定义 AI 模型”列表（由“模型接口”页的专用编辑界面承载，不再以只读行出现），以及翻译 / 公式 / 语音的“模型目录”（目录固定为统一目录，旧配置里手动指定的目录仍被读取端尊重）。
+pub const HIDDEN_KEYS: [&str; 4] = [
+    crate::conversion_guide::KEY_CUSTOM_MODELS,
+    KEY_LOCAL_MODELS_DIR,
+    KEY_LATEX_MODEL_DIR,
+    KEY_DICTATION_MODEL_DIR,
+];
+
+/// 配置键是否不在设置页展示。
+///
+/// # 示例
+/// ```ignore
+/// assert!(is_hidden_key("api_configuration/custom_models"));
+/// ```
+pub fn is_hidden_key(key: &str) -> bool {
+    HIDDEN_KEYS.contains(&key)
+}
+
 impl SettingsState {
     /// 创建状态并一次性构建全部行模型。
     ///
@@ -420,11 +442,10 @@ impl SettingsState {
     pub fn choice_value(&self, key: &str, value: &Value) -> String {
         let saved = value.as_str().map(str::trim).filter(|v| !v.is_empty());
         match key {
-            LANGUAGE_KEY => crate::translate_service::effective_interface_language(
-                saved,
-                &self.system.language,
-            )
-            .to_string(),
+            LANGUAGE_KEY => {
+                crate::translate_service::effective_interface_language(saved, &self.system.language)
+                    .to_string()
+            }
             crate::settings_model::TARGET_LANGUAGE_KEY => {
                 crate::translate_service::effective_target_language(saved, &self.system.language)
                     .to_string()
@@ -501,12 +522,34 @@ impl SettingsState {
     /// 分组里当前可见的条目下标（扣除被隐藏的 itn 开关）。
     fn group_visible_entries(&self, group: usize) -> Vec<usize> {
         let itn_hidden = self.itn_hidden();
-        groups()[group]
+        let mut list: Vec<usize> = groups()[group]
             .entries
             .iter()
             .copied()
             .filter(|i| !(itn_hidden && self.all_rows[*i].key == KEY_DICTATION_SENSEVOICE_ITN))
-            .collect()
+            .filter(|i| !is_hidden_key(self.all_rows[*i].key))
+            .collect();
+        self.move_online_model_after_local(&mut list);
+        list
+    }
+
+    /// 把“在线模型”挪到“本地模型”后面（schema 顺序里它排在前面）。
+    ///
+    /// # 参数
+    /// - `list`：分组可见条目下标，原地调整。
+    fn move_online_model_after_local(&self, list: &mut Vec<usize>) {
+        let pos_of = |key: &str| list.iter().position(|i| self.all_rows[*i].key == key);
+        let (Some(from), Some(local)) = (
+            pos_of(crate::translate_service::KEY_CUSTOM_MODEL),
+            pos_of(KEY_LOCAL_MODEL_ID),
+        ) else {
+            return;
+        };
+        if from < local {
+            let moved = list.remove(from);
+            // 移除后 local 前移一位，插到它之后即原 local 下标处
+            list.insert(local, moved);
+        }
     }
 
     /// 分组当前可见的条目数；侧栏徽标与分组标题共用此口径。
@@ -562,6 +605,7 @@ impl SettingsState {
             self.visible = base
                 .into_iter()
                 .filter(|i| !(itn_hidden && self.all_rows[*i].key == KEY_DICTATION_SENSEVOICE_ITN))
+                .filter(|i| !is_hidden_key(self.all_rows[*i].key))
                 .filter(|i| self.all_rows[*i].haystack.contains(&query))
                 .collect();
             self.scope = Scope::Search;
@@ -634,7 +678,7 @@ impl SettingsState {
             self.prefs = resolve_prefs(&self.store.borrow(), &self.system);
         }
         let lang = self.prefs.lang;
-        let mut text = format!("{}: {key}", t(lang, Text::Saved));
+        let mut text = format!("{}: {}", t(lang, Text::Saved), item_label(lang, key));
         if key == THEME_MODE_KEY || key == THEME_COLOR_KEY {
             text = format!("{text} ({})", t(lang, Text::ThemeLiveNote));
         } else if key == LANGUAGE_KEY {
@@ -655,13 +699,19 @@ impl SettingsState {
     /// # 参数
     /// - `key`：配置键
     pub fn reset(&mut self, key: &'static str) {
-        if self.row_by_key(key).is_some_and(|r| matches!(r.control, Control::ReadOnly(_))) {
+        if self
+            .row_by_key(key)
+            .is_some_and(|r| matches!(r.control, Control::ReadOnly(_)))
+        {
             return;
         }
         let default = schema::default_value(key);
         if let Ok(true) = self.apply(key, default) {
             let lang = self.prefs.lang;
-            self.set_status(StatusKind::Info, format!("{}: {key}", t(lang, Text::Restored)));
+            self.set_status(
+                StatusKind::Info,
+                format!("{}: {}", t(lang, Text::Restored), item_label(lang, key)),
+            );
         }
     }
 
@@ -682,7 +732,10 @@ impl SettingsState {
             }
         }
         let lang = self.prefs.lang;
-        self.set_status(StatusKind::Info, format!("{} ({done})", t(lang, Text::Restored)));
+        self.set_status(
+            StatusKind::Info,
+            format!("{} ({done})", t(lang, Text::Restored)),
+        );
     }
 
     /// 开始编辑搜索框。
@@ -727,7 +780,11 @@ impl SettingsState {
 
     /// 取消编辑与录入。
     pub fn cancel_input(&mut self) {
-        if let Some(EditState { target: EditTarget::Row(key), .. }) = self.edit {
+        if let Some(EditState {
+            target: EditTarget::Row(key),
+            ..
+        }) = self.edit
+        {
             self.set_row_error(key, None);
         }
         if let Some(capture) = self.capture {
@@ -871,15 +928,17 @@ impl SettingsState {
         if is_modifier_key(key) {
             return;
         }
-        let Some(text) =
-            shortcut_from_keystroke(key, mods.ctrl, mods.alt, mods.shift, mods.win)
+        let Some(text) = shortcut_from_keystroke(key, mods.ctrl, mods.alt, mods.shift, mods.win)
         else {
             let message = unsupported_key_text(self.prefs.lang);
             self.set_row_error(capture.key, Some(message.clone()));
             self.set_status(StatusKind::Error, message);
             return;
         };
-        if self.commit_shortcut(capture.key, capture.index, &text).is_ok() {
+        if self
+            .commit_shortcut(capture.key, capture.index, &text)
+            .is_ok()
+        {
             self.capture = None;
         }
     }
@@ -930,7 +989,8 @@ impl SettingsState {
         if index.is_none() && max.is_some_and(|m| count >= m) {
             return fail(self, list_full_text(lang));
         }
-        self.apply(key, with_shortcut(&current, index, text)).map(|_| ())
+        self.apply(key, with_shortcut(&current, index, text))
+            .map(|_| ())
     }
 
     /// 删除一条快捷键。
@@ -981,7 +1041,12 @@ impl SettingsState {
 /// 由配置与系统偏好解析界面偏好。
 fn resolve_prefs(store: &ConfigStore, system: &SystemPrefs) -> UiPrefs {
     let text = |key: &str| store.value(key).as_str().unwrap_or_default().to_string();
-    UiPrefs::resolve(&text(THEME_MODE_KEY), &text(LANGUAGE_KEY), &text(THEME_COLOR_KEY), system)
+    UiPrefs::resolve(
+        &text(THEME_MODE_KEY),
+        &text(LANGUAGE_KEY),
+        &text(THEME_COLOR_KEY),
+        system,
+    )
 }
 
 /// 构建一行的展示模型。
@@ -1097,7 +1162,10 @@ mod tests {
         let a = unique_fixture_dir();
         let b = unique_fixture_dir();
         assert_ne!(a, b);
-        assert!(a.to_string_lossy().contains(&std::process::id().to_string()));
+        assert!(
+            a.to_string_lossy()
+                .contains(&std::process::id().to_string())
+        );
     }
 
     /// 侧栏徽标与分组标题的条目数以可见条目为准：itn 开关隐藏时不计入，显示后加一。
@@ -1107,11 +1175,55 @@ mod tests {
         let group = groups().iter().position(|g| g.id == "dictation").unwrap();
         state.dispatch(SettingsAction::SwitchGroup(group));
         assert_eq!(state.group_item_count(group), state.visible_len());
-        assert_eq!(state.group_item_count(group) + 1, groups()[group].entries.len());
+        assert_eq!(
+            state.group_item_count(group) + 2,
+            groups()[group].entries.len(),
+            "itn 开关与隐藏的模型目录键"
+        );
         state.apply("dictation/mode", json!("offline")).unwrap();
-        state.apply(KEY_DICTATION_MODEL_ID, json!("sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17")).unwrap();
-        assert_eq!(state.group_item_count(group), groups()[group].entries.len());
+        state
+            .apply(
+                KEY_DICTATION_MODEL_ID,
+                json!("sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17"),
+            )
+            .unwrap();
+        assert_eq!(
+            state.group_item_count(group) + 1,
+            groups()[group].entries.len(),
+            "只剩隐藏的模型目录键"
+        );
         assert_eq!(state.group_item_count(group), state.visible_len());
+    }
+
+    /// 隐藏的配置键不出现在分组列表与搜索结果里，但配置值照常可读写。
+    #[test]
+    fn hidden_keys_are_not_listed_but_stay_in_config() {
+        let (mut state, _, _) = fixture();
+        let group = groups()
+            .iter()
+            .position(|g| g.id == "screenshot_translation")
+            .unwrap();
+        state.dispatch(SettingsAction::SwitchGroup(group));
+        let listed: Vec<&str> = (0..state.visible_len())
+            .filter_map(|i| state.visible_row(i).map(|r| r.key))
+            .collect();
+        for key in HIDDEN_KEYS {
+            assert!(!listed.contains(&key), "{key} 不应展示");
+            assert!(state.row_by_key(key).is_some(), "{key} 的配置行仍在");
+        }
+        assert!(listed.contains(&"screenshot_translation/local_model_id"));
+        // 在线模型排在本地模型后面
+        let at = |key: &str| listed.iter().position(|k| *k == key).expect("已列出");
+        assert_eq!(
+            at("screenshot_translation/model"),
+            at("screenshot_translation/local_model_id") + 1
+        );
+        assert_eq!(state.group_item_count(group), state.visible_len());
+        state.set_search("local_models_dir");
+        assert!(
+            (0..state.visible_len())
+                .all(|i| !state.visible_row(i).is_some_and(|r| is_hidden_key(r.key)))
+        );
     }
 
     /// 在临时目录里建一个状态，返回状态、共享存储与配置文件路径。
@@ -1144,7 +1256,10 @@ mod tests {
             let group_hidden = group
                 .entries
                 .iter()
-                .filter(|i| entries()[**i].key == KEY_DICTATION_SENSEVOICE_ITN)
+                .filter(|i| {
+                    let key = entries()[**i].key;
+                    key == KEY_DICTATION_SENSEVOICE_ITN || is_hidden_key(key)
+                })
                 .count();
             assert_eq!(state.visible_len(), group.entries.len() - group_hidden);
             seen += state.visible_len();
@@ -1164,7 +1279,10 @@ mod tests {
         assert_eq!(state.scope(), Scope::Search);
         state.set_search("quality");
         assert!(state.visible_len() <= first);
-        assert!((0..state.visible_len()).any(|i| state.visible_row(i).unwrap().key == "screenshot/image_quality"));
+        assert!(
+            (0..state.visible_len())
+                .any(|i| state.visible_row(i).unwrap().key == "screenshot/image_quality")
+        );
         // 非前缀的新查询会重新全量过滤
         state.set_search("shutter_nothing_zzz");
         assert_eq!(state.visible_len(), 0);
@@ -1181,16 +1299,30 @@ mod tests {
     fn apply_persists_and_round_trips() {
         let (mut state, store, path) = fixture();
         assert_eq!(state.apply("screenshot/image_quality", json!(80)), Ok(true));
-        assert_eq!(disk_value(&path, "screenshot/image_quality"), Some(json!(80)));
-        assert_eq!(std::fs::read(&path).unwrap(), store.borrow().document().to_bytes());
+        assert_eq!(
+            disk_value(&path, "screenshot/image_quality"),
+            Some(json!(80))
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            store.borrow().document().to_bytes()
+        );
         assert!(!store.borrow().is_dirty());
         // 值未变：不再产生变更
-        assert_eq!(state.apply("screenshot/image_quality", json!(80)), Ok(false));
+        assert_eq!(
+            state.apply("screenshot/image_quality", json!(80)),
+            Ok(false)
+        );
         let changes = state.take_pending();
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].previous, json!(100));
         assert!(state.take_pending().is_empty());
-        assert!(!state.row_by_key("screenshot/image_quality").unwrap().is_default);
+        assert!(
+            !state
+                .row_by_key("screenshot/image_quality")
+                .unwrap()
+                .is_default
+        );
     }
 
     /// 校验失败：不落盘、内存不变、行内报错。
@@ -1201,7 +1333,13 @@ mod tests {
         assert!(result.is_err());
         assert!(!path.exists(), "校验失败不应产生配置文件");
         assert_eq!(store.borrow().value("screenshot/image_quality"), json!(100));
-        assert!(state.row_by_key("screenshot/image_quality").unwrap().error.is_some());
+        assert!(
+            state
+                .row_by_key("screenshot/image_quality")
+                .unwrap()
+                .error
+                .is_some()
+        );
         assert_eq!(state.status().unwrap().kind, StatusKind::Error);
         assert!(state.apply("no/such_key", json!(1)).is_err());
         assert!(state.take_pending().is_empty());
@@ -1224,7 +1362,10 @@ mod tests {
         let result = state.apply("screenshot/image_quality", json!(70));
         assert!(result.is_err());
         assert_eq!(store.borrow().value("screenshot/image_quality"), json!(100));
-        assert_eq!(state.row_by_key("screenshot/image_quality").unwrap().value, json!(100));
+        assert_eq!(
+            state.row_by_key("screenshot/image_quality").unwrap().value,
+            json!(100)
+        );
         assert!(state.take_pending().is_empty());
     }
 
@@ -1237,36 +1378,65 @@ mod tests {
         state.apply("screenshot/image_quality", json!(60)).unwrap();
         state.apply("screenshot/delay_seconds", json!(5)).unwrap();
         state.dispatch(SettingsAction::Reset("screenshot/image_quality"));
-        assert_eq!(disk_value(&path, "screenshot/image_quality"), Some(json!(100)));
-        assert!(state.row_by_key("screenshot/image_quality").unwrap().is_default);
+        assert_eq!(
+            disk_value(&path, "screenshot/image_quality"),
+            Some(json!(100))
+        );
+        assert!(
+            state
+                .row_by_key("screenshot/image_quality")
+                .unwrap()
+                .is_default
+        );
         state.dispatch(SettingsAction::ResetScope);
-        assert_eq!(disk_value(&path, "screenshot/delay_seconds"), Some(json!(schema::default_value("screenshot/delay_seconds"))));
+        assert_eq!(
+            disk_value(&path, "screenshot/delay_seconds"),
+            Some(json!(schema::default_value("screenshot/delay_seconds")))
+        );
         // 只读项不可重置
         state.reset("storage/schema_version");
-        assert_eq!(state.row_by_key("storage/schema_version").unwrap().value, json!(3));
+        assert_eq!(
+            state.row_by_key("storage/schema_version").unwrap().value,
+            json!(3)
+        );
     }
 
     /// 语音分组可见行里是否含 itn 开关。
     fn itn_visible_in(state: &SettingsState) -> bool {
-        (0..state.visible_len())
-            .any(|i| state.visible_row(i).is_some_and(|r| r.key == KEY_DICTATION_SENSEVOICE_ITN))
+        (0..state.visible_len()).any(|i| {
+            state
+                .visible_row(i)
+                .is_some_and(|r| r.key == KEY_DICTATION_SENSEVOICE_ITN)
+        })
     }
 
     /// 切换识别模式或语言维度会清空模型 ID；写入模型 ID 本身不会连锁清空。
     #[test]
     fn switching_mode_or_dimension_resets_model_id() {
         let (mut state, _, path) = fixture();
-        state.apply(KEY_DICTATION_MODEL_ID, json!("some-alt")).unwrap();
-        assert_eq!(disk_value(&path, KEY_DICTATION_MODEL_ID), Some(json!("some-alt")));
+        state
+            .apply(KEY_DICTATION_MODEL_ID, json!("some-alt"))
+            .unwrap();
+        assert_eq!(
+            disk_value(&path, KEY_DICTATION_MODEL_ID),
+            Some(json!("some-alt"))
+        );
         state.apply("dictation/mode", json!("offline")).unwrap();
         assert_eq!(disk_value(&path, KEY_DICTATION_MODEL_ID), Some(json!("")));
-        state.apply(KEY_DICTATION_MODEL_ID, json!("some-alt")).unwrap();
-        state.apply("dictation/language_dimension", json!("zh")).unwrap();
+        state
+            .apply(KEY_DICTATION_MODEL_ID, json!("some-alt"))
+            .unwrap();
+        state
+            .apply("dictation/language_dimension", json!("zh"))
+            .unwrap();
         assert_eq!(disk_value(&path, KEY_DICTATION_MODEL_ID), Some(json!("")));
         // 模式值未变时不应清空
         state.apply(KEY_DICTATION_MODEL_ID, json!("keep")).unwrap();
         state.apply("dictation/mode", json!("offline")).unwrap();
-        assert_eq!(disk_value(&path, KEY_DICTATION_MODEL_ID), Some(json!("keep")));
+        assert_eq!(
+            disk_value(&path, KEY_DICTATION_MODEL_ID),
+            Some(json!("keep"))
+        );
         // 重置单项同样触发联动
         state.reset("dictation/mode");
         assert_eq!(disk_value(&path, KEY_DICTATION_MODEL_ID), Some(json!("")));
@@ -1281,7 +1451,12 @@ mod tests {
         assert!(!itn_visible_in(&state));
         let before = state.visible_len();
         state.apply("dictation/mode", json!("offline")).unwrap();
-        state.apply(KEY_DICTATION_MODEL_ID, json!("sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17")).unwrap();
+        state
+            .apply(
+                KEY_DICTATION_MODEL_ID,
+                json!("sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17"),
+            )
+            .unwrap();
         assert!(itn_visible_in(&state));
         assert_eq!(state.visible_len(), before + 1);
         // 手动目录会让三项失效，itn 随之隐藏
@@ -1292,7 +1467,9 @@ mod tests {
         // 搜索范围：显示出来的行能被搜到，隐藏后不再出现
         state.set_search("punctuation");
         assert!(itn_visible_in(&state));
-        state.apply("dictation/language_dimension", json!("zh")).unwrap();
+        state
+            .apply("dictation/language_dimension", json!("zh"))
+            .unwrap();
         assert!(!itn_visible_in(&state));
     }
 
@@ -1366,7 +1543,11 @@ mod tests {
         let key = "global_shortcuts/screen_record";
         state.dispatch(SettingsAction::BeginCapture { key, index: None });
         assert!(state.capture().is_some());
-        let mods = KeyMods { ctrl: true, alt: true, ..KeyMods::default() };
+        let mods = KeyMods {
+            ctrl: true,
+            alt: true,
+            ..KeyMods::default()
+        };
         // 纯修饰键被忽略，仍在录入
         state.on_key("control", None, mods, None);
         assert!(state.capture().is_some());
@@ -1424,25 +1605,45 @@ mod tests {
         assert!(crate::settings_model::language_options().contains(&"zh_CN"));
         // 旧的 system 值被拒绝
         assert!(state.apply("interface/language", json!("system")).is_err());
-        state.apply("interface/theme_primary_color", json!("#FF0000FF")).unwrap();
+        state
+            .apply("interface/theme_primary_color", json!("#FF0000FF"))
+            .unwrap();
         assert_eq!(state.prefs().accent, [255, 0, 0, 255]);
-        assert!(state.status().unwrap().text.contains("Saved") || state.status().unwrap().text.contains("已保存"));
+        assert!(
+            state.status().unwrap().text.contains("Saved")
+                || state.status().unwrap().text.contains("已保存")
+        );
     }
 
     /// 解析函数不依赖系统：模式与语言解析。
     #[test]
     fn ui_prefs_resolution() {
-        let dark_system = SystemPrefs { dark: true, language: "zh-CN".into() };
+        let dark_system = SystemPrefs {
+            dark: true,
+            language: "zh-CN".into(),
+        };
         let p = UiPrefs::resolve("system", "", "#112233FF", &dark_system);
         assert!(p.dark && p.lang == Lang::new("zh-CN") && p.accent == [0x11, 0x22, 0x33, 0xFF]);
         let p = UiPrefs::resolve("light", "en_US", "bad", &dark_system);
         assert!(!p.dark && p.lang == Lang::new("en-US") && p.accent == DEFAULT_ACCENT);
         assert_eq!(p.locale, "en-US");
         // 繁体系统语言不支持，回退英文；旧 system / zh_TW 值按没有保存处理
-        let tw_system = SystemPrefs { dark: false, language: "zh-TW".into() };
-        assert_eq!(UiPrefs::resolve("system", "", "bad", &tw_system).locale, "en-US");
-        assert_eq!(UiPrefs::resolve("system", "zh_TW", "bad", &dark_system).locale, "zh-CN");
-        assert_eq!(UiPrefs::resolve("system", "system", "bad", &dark_system).locale, "zh-CN");
+        let tw_system = SystemPrefs {
+            dark: false,
+            language: "zh-TW".into(),
+        };
+        assert_eq!(
+            UiPrefs::resolve("system", "", "bad", &tw_system).locale,
+            "en-US"
+        );
+        assert_eq!(
+            UiPrefs::resolve("system", "zh_TW", "bad", &dark_system).locale,
+            "zh-CN"
+        );
+        assert_eq!(
+            UiPrefs::resolve("system", "system", "bad", &dark_system).locale,
+            "zh-CN"
+        );
     }
 
     /// 下拉当前值：没有已保存值时用系统语言算出生效值，已保存值不变，不写回配置。
@@ -1450,11 +1651,17 @@ mod tests {
     fn choice_value_uses_effective_language() {
         let (mut state, _, path) = fixture();
         let target = crate::settings_model::TARGET_LANGUAGE_KEY;
-        state.system = SystemPrefs { dark: false, language: "ja-JP".into() };
+        state.system = SystemPrefs {
+            dark: false,
+            language: "ja-JP".into(),
+        };
         assert_eq!(state.choice_value(target, &json!("")), "ja");
         assert_eq!(state.choice_value(target, &json!("fr")), "fr");
         assert_eq!(state.choice_value(LANGUAGE_KEY, &json!("")), "en_US");
-        state.system = SystemPrefs { dark: false, language: "zh-CN".into() };
+        state.system = SystemPrefs {
+            dark: false,
+            language: "zh-CN".into(),
+        };
         assert_eq!(state.choice_value(LANGUAGE_KEY, &json!("")), "zh_CN");
         assert_eq!(state.choice_value(LANGUAGE_KEY, &json!("en_US")), "en_US");
         assert_eq!(state.choice_value("tray/icon", &json!("dark")), "dark");
@@ -1467,10 +1674,16 @@ mod tests {
         let (mut state, store, path) = fixture();
         state.apply("screenshot/image_quality", json!(50)).unwrap();
         restore_value(&store, "screenshot/image_quality", json!(100)).unwrap();
-        assert_eq!(disk_value(&path, "screenshot/image_quality"), Some(json!(100)));
+        assert_eq!(
+            disk_value(&path, "screenshot/image_quality"),
+            Some(json!(100))
+        );
         assert!(restore_value(&store, "screenshot/image_quality", json!(999)).is_err());
         state.notify_reverted("screenshot/image_quality", "x".into());
-        assert_eq!(state.row_by_key("screenshot/image_quality").unwrap().value, json!(100));
+        assert_eq!(
+            state.row_by_key("screenshot/image_quality").unwrap().value,
+            json!(100)
+        );
         assert_eq!(state.status().unwrap().kind, StatusKind::Error);
     }
 
@@ -1482,7 +1695,11 @@ mod tests {
         assert!(state.edit().is_none());
         state.dispatch(SettingsAction::BeginEdit("api_configuration/custom_models"));
         assert!(state.edit().is_none());
-        for reason in [ReadOnlyReason::Internal, ReadOnlyReason::Secret, ReadOnlyReason::TooLarge] {
+        for reason in [
+            ReadOnlyReason::Internal,
+            ReadOnlyReason::Secret,
+            ReadOnlyReason::TooLarge,
+        ] {
             for info in snow_i18n::locales() {
                 assert!(!read_only_note(Lang::new(info.code), reason).is_empty());
             }

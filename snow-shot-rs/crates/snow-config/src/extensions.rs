@@ -8,7 +8,7 @@ use crate::schema::{IntRange, SchemaEntry, ValueKind, entry};
 use serde_json::json;
 
 /// 扩展项数量（`schema::entries()` 在原 238 项之后追加的条目数）。
-pub const EXTENSION_ENTRY_COUNT: usize = 32;
+pub const EXTENSION_ENTRY_COUNT: usize = 34;
 
 /// 翻译后端：`local` 本地 NMT worker，`openai` OpenAI 兼容通道。
 pub const KEY_TRANSLATION_BACKEND: &str = "screenshot_translation/backend";
@@ -38,6 +38,12 @@ pub const KEY_TRANSLATE_INPUT_HOTKEY: &str = "global_shortcuts/translate_input";
 
 /// 公式识别（RapidLaTeXOCR）模型目录；空串表示没设置。模型由用户自行下载放入，程序不内置、不托管、不下载。
 pub const KEY_LATEX_MODEL_DIR: &str = "screenshot_conversion/latex_model_dir";
+/// 公式识别默认使用的模型（模型目录下的文件夹名）；空串表示自动（用第一个可用的）。
+pub const KEY_LATEX_MODEL: &str = "screenshot_conversion/latex_model";
+/// 表格识别默认使用的模型（模型目录下的文件夹或 .onnx 文件名）；空串表示自动（优先 slanet-plus，否则第一个可用的）。
+pub const KEY_TABLE_MODEL: &str = "screenshot_conversion/table_model";
+/// 文字识别默认使用的模型档位（清单里的模型类型键，如 `small`）。
+pub const KEY_OCR_MODEL_TYPE: &str = "text_recognition/model_type";
 /// 覆盖窗里「公式识别」的快捷键（旧版没有这个动作，Cisox 新增）。
 pub const KEY_LATEX_SHORTCUT: &str = "screenshot_shortcuts/latex_recognition";
 
@@ -265,54 +271,250 @@ pub(crate) fn extension_entries() -> Vec<SchemaEntry> {
             &[],
             None,
         ),
-        entry(KEY_LOCAL_LOW_MEMORY, json!(false), ValueKind::Boolean, None, &[], None),
-        entry(KEY_LOCAL_ROUTE_MODE, json!(ROUTE_SPECIALIZED_FIRST), ValueKind::String, None, ROUTE_MODE_VALUES, None),
+        entry(
+            KEY_LOCAL_LOW_MEMORY,
+            json!(false),
+            ValueKind::Boolean,
+            None,
+            &[],
+            None,
+        ),
+        entry(
+            KEY_LOCAL_ROUTE_MODE,
+            json!(ROUTE_SPECIALIZED_FIRST),
+            ValueKind::String,
+            None,
+            ROUTE_MODE_VALUES,
+            None,
+        ),
         entry(
             KEY_LOCAL_MAX_RESIDENT,
             json!(DEFAULT_MAX_RESIDENT),
             ValueKind::Integer,
-            Some(IntRange { min: DEFAULT_MAX_RESIDENT, max: MAX_MAX_RESIDENT, step: 1 }),
+            Some(IntRange {
+                min: DEFAULT_MAX_RESIDENT,
+                max: MAX_MAX_RESIDENT,
+                step: 1,
+            }),
             &[],
             None,
         ),
-        entry(KEY_PAGE_AUTO_TRANSLATE, json!(false), ValueKind::Boolean, None, &[], None),
-        entry(KEY_LATEX_MODEL_DIR, json!(""), ValueKind::String, None, &[], None),
-        entry(KEY_LATEX_SHORTCUT, json!([{"portable": "Ctrl+L"}]), ValueKind::ShortcutList, None, &[], Some(2)),
-        entry(KEY_UPDATE_MANIFEST_URL, json!(""), ValueKind::String, None, &[], None),
-        entry(KEY_OCR_BACKEND, json!(default_ocr_backend()), ValueKind::String, None, OCR_BACKEND_VALUES, None),
-        entry(KEY_TRANSLATE_INPUT_HOTKEY, json!([]), ValueKind::StringList, None, &[], Some(2)),
-        entry(KEY_DICTATION_TOGGLE_HOTKEY, json!([]), ValueKind::StringList, None, &[], Some(2)),
-        entry(KEY_DICTATION_HOLD_HOTKEY, json!([]), ValueKind::StringList, None, &[], Some(2)),
-        entry(KEY_DICTATION_BACKEND, json!(DICTATION_BACKEND_LOCAL_MODEL), ValueKind::String, None, DICTATION_BACKEND_VALUES, None),
-        entry(KEY_DICTATION_TRIGGER_MODE, json!(DICTATION_MODE_BOTH), ValueKind::String, None, DICTATION_MODE_VALUES, None),
-        entry(KEY_DICTATION_RECOGNITION_MODE, json!(DICTATION_RECOGNITION_STREAMING), ValueKind::String, None, DICTATION_RECOGNITION_VALUES, None),
-        entry(KEY_DICTATION_LANGUAGE_DIMENSION, json!(DICTATION_DIMENSION_BILINGUAL), ValueKind::String, None, DICTATION_DIMENSION_VALUES, None),
-        entry(KEY_DICTATION_MODEL_ID, json!(""), ValueKind::String, None, &[], None),
-        entry(KEY_DICTATION_SENSEVOICE_ITN, json!(true), ValueKind::Boolean, None, &[], None),
-        entry(KEY_DICTATION_TRANSLATE_ENABLED, json!(false), ValueKind::Boolean, None, &[], None),
-        entry(KEY_DICTATION_TRANSLATE_TARGET, json!(DICTATION_TARGET_AUTO), ValueKind::String, None, DICTATION_TARGET_VALUES, None),
-        entry(KEY_DICTATION_MODEL_DIR, json!(""), ValueKind::String, None, &[], None),
-        entry(KEY_DICTATION_LANGUAGE, json!(DEFAULT_DICTATION_LANGUAGE), ValueKind::String, None, &[], None),
+        entry(
+            KEY_PAGE_AUTO_TRANSLATE,
+            json!(false),
+            ValueKind::Boolean,
+            None,
+            &[],
+            None,
+        ),
+        entry(
+            KEY_LATEX_MODEL_DIR,
+            json!(""),
+            ValueKind::String,
+            None,
+            &[],
+            None,
+        ),
+        entry(
+            KEY_LATEX_MODEL,
+            json!(""),
+            ValueKind::String,
+            None,
+            &[],
+            None,
+        ),
+        entry(
+            KEY_TABLE_MODEL,
+            json!(""),
+            ValueKind::String,
+            None,
+            &[],
+            None,
+        ),
+        entry(
+            KEY_LATEX_SHORTCUT,
+            json!([{"portable": "Ctrl+L"}]),
+            ValueKind::ShortcutList,
+            None,
+            &[],
+            Some(2),
+        ),
+        entry(
+            KEY_UPDATE_MANIFEST_URL,
+            json!(""),
+            ValueKind::String,
+            None,
+            &[],
+            None,
+        ),
+        entry(
+            KEY_OCR_BACKEND,
+            json!(default_ocr_backend()),
+            ValueKind::String,
+            None,
+            OCR_BACKEND_VALUES,
+            None,
+        ),
+        entry(
+            KEY_TRANSLATE_INPUT_HOTKEY,
+            json!([]),
+            ValueKind::StringList,
+            None,
+            &[],
+            Some(2),
+        ),
+        entry(
+            KEY_DICTATION_TOGGLE_HOTKEY,
+            json!([]),
+            ValueKind::StringList,
+            None,
+            &[],
+            Some(2),
+        ),
+        entry(
+            KEY_DICTATION_HOLD_HOTKEY,
+            json!([]),
+            ValueKind::StringList,
+            None,
+            &[],
+            Some(2),
+        ),
+        entry(
+            KEY_DICTATION_BACKEND,
+            json!(DICTATION_BACKEND_LOCAL_MODEL),
+            ValueKind::String,
+            None,
+            DICTATION_BACKEND_VALUES,
+            None,
+        ),
+        entry(
+            KEY_DICTATION_TRIGGER_MODE,
+            json!(DICTATION_MODE_BOTH),
+            ValueKind::String,
+            None,
+            DICTATION_MODE_VALUES,
+            None,
+        ),
+        entry(
+            KEY_DICTATION_RECOGNITION_MODE,
+            json!(DICTATION_RECOGNITION_STREAMING),
+            ValueKind::String,
+            None,
+            DICTATION_RECOGNITION_VALUES,
+            None,
+        ),
+        entry(
+            KEY_DICTATION_LANGUAGE_DIMENSION,
+            json!(DICTATION_DIMENSION_BILINGUAL),
+            ValueKind::String,
+            None,
+            DICTATION_DIMENSION_VALUES,
+            None,
+        ),
+        entry(
+            KEY_DICTATION_MODEL_ID,
+            json!(""),
+            ValueKind::String,
+            None,
+            &[],
+            None,
+        ),
+        entry(
+            KEY_DICTATION_SENSEVOICE_ITN,
+            json!(true),
+            ValueKind::Boolean,
+            None,
+            &[],
+            None,
+        ),
+        entry(
+            KEY_DICTATION_TRANSLATE_ENABLED,
+            json!(false),
+            ValueKind::Boolean,
+            None,
+            &[],
+            None,
+        ),
+        entry(
+            KEY_DICTATION_TRANSLATE_TARGET,
+            json!(DICTATION_TARGET_AUTO),
+            ValueKind::String,
+            None,
+            DICTATION_TARGET_VALUES,
+            None,
+        ),
+        entry(
+            KEY_DICTATION_MODEL_DIR,
+            json!(""),
+            ValueKind::String,
+            None,
+            &[],
+            None,
+        ),
+        entry(
+            KEY_DICTATION_LANGUAGE,
+            json!(DEFAULT_DICTATION_LANGUAGE),
+            ValueKind::String,
+            None,
+            &[],
+            None,
+        ),
         entry(
             KEY_DICTATION_THREADS,
             json!(DEFAULT_DICTATION_THREADS),
             ValueKind::Integer,
-            Some(IntRange { min: 1, max: MAX_DICTATION_THREADS, step: 1 }),
+            Some(IntRange {
+                min: 1,
+                max: MAX_DICTATION_THREADS,
+                step: 1,
+            }),
             &[],
             None,
         ),
-        entry(KEY_DICTATION_OUTPUT_MODE, json!(DICTATION_OUTPUT_AUTO), ValueKind::String, None, DICTATION_OUTPUT_VALUES, None),
-        entry(KEY_DICTATION_TYPE_WITH_OVERLAY, json!(false), ValueKind::Boolean, None, &[], None),
+        entry(
+            KEY_DICTATION_OUTPUT_MODE,
+            json!(DICTATION_OUTPUT_AUTO),
+            ValueKind::String,
+            None,
+            DICTATION_OUTPUT_VALUES,
+            None,
+        ),
+        entry(
+            KEY_DICTATION_TYPE_WITH_OVERLAY,
+            json!(false),
+            ValueKind::Boolean,
+            None,
+            &[],
+            None,
+        ),
         entry(
             KEY_DICTATION_MAX_SECONDS,
             json!(DEFAULT_DICTATION_MAX_SECONDS),
             ValueKind::Integer,
-            Some(IntRange { min: 0, max: MAX_DICTATION_MAX_SECONDS, step: DICTATION_MAX_SECONDS_STEP }),
+            Some(IntRange {
+                min: 0,
+                max: MAX_DICTATION_MAX_SECONDS,
+                step: DICTATION_MAX_SECONDS_STEP,
+            }),
             &[],
             None,
         ),
-        entry(KEY_MCP_ALLOW_CAPTURE, json!(true), ValueKind::Boolean, None, &[], None),
-        entry(KEY_MCP_ALLOW_CONTROL, json!(false), ValueKind::Boolean, None, &[], None),
+        entry(
+            KEY_MCP_ALLOW_CAPTURE,
+            json!(true),
+            ValueKind::Boolean,
+            None,
+            &[],
+            None,
+        ),
+        entry(
+            KEY_MCP_ALLOW_CONTROL,
+            json!(false),
+            ValueKind::Boolean,
+            None,
+            &[],
+            None,
+        ),
     ]
 }
 
@@ -337,6 +539,8 @@ mod tests {
                     || item.key == KEY_OCR_BACKEND
                     || item.key == KEY_UPDATE_MANIFEST_URL
                     || item.key == KEY_LATEX_MODEL_DIR
+                    || item.key == KEY_LATEX_MODEL
+                    || item.key == KEY_TABLE_MODEL
                     || item.key == KEY_LATEX_SHORTCUT
                     || item.key == KEY_TRANSLATE_INPUT_HOTKEY
                     || item.key == KEY_DICTATION_TOGGLE_HOTKEY
@@ -348,7 +552,34 @@ mod tests {
             );
             assert!(crate::schema::is_extension_key(item.key));
         }
-        assert!(!crate::schema::is_extension_key("screenshot_translation/model"));
+        assert!(!crate::schema::is_extension_key(
+            "screenshot_translation/model"
+        ));
+    }
+
+    /// 新增的两个模型选择键：默认空串（自动），写入后可读回，旧配置里没有这两个键时读到默认值。
+    #[test]
+    fn model_choice_keys_default_to_auto_and_roundtrip() {
+        let mut doc = ConfigDocument::from_bytes(None);
+        for key in [KEY_LATEX_MODEL, KEY_TABLE_MODEL] {
+            assert!(crate::schema::is_extension_key(key));
+            assert_eq!(doc.value(key), json!(""));
+            doc.set_value(key, json!("my-model")).expect("写入");
+            assert_eq!(doc.value(key), json!("my-model"));
+        }
+        // 旧配置（只写过旧键）读回来：旧键保留，新键用默认值
+        let mut legacy = ConfigDocument::from_bytes(None);
+        legacy
+            .set_value(KEY_LATEX_MODEL_DIR, json!("D:/m"))
+            .expect("旧键");
+        let old = ConfigDocument::from_bytes(Some(&legacy.to_bytes()));
+        assert_eq!(
+            old.value(KEY_TABLE_MODEL),
+            json!(""),
+            "旧配置没有新键时用默认值"
+        );
+        assert_eq!(old.value(KEY_LATEX_MODEL), json!(""));
+        assert_eq!(old.value(KEY_LATEX_MODEL_DIR), json!("D:/m"));
     }
 
     /// 默认值本身合法且是规范化不动点。
@@ -394,18 +625,32 @@ mod tests {
     #[test]
     fn route_mode_whitelist_and_default() {
         let mut doc = ConfigDocument::from_bytes(None);
-        assert_eq!(doc.value(KEY_LOCAL_ROUTE_MODE), json!(ROUTE_SPECIALIZED_FIRST));
-        assert_eq!(doc.value(KEY_LOCAL_MAX_RESIDENT), json!(DEFAULT_MAX_RESIDENT));
+        assert_eq!(
+            doc.value(KEY_LOCAL_ROUTE_MODE),
+            json!(ROUTE_SPECIALIZED_FIRST)
+        );
+        assert_eq!(
+            doc.value(KEY_LOCAL_MAX_RESIDENT),
+            json!(DEFAULT_MAX_RESIDENT)
+        );
         for mode in [ROUTE_SINGLE, ROUTE_SPECIALIZED_FIRST, ROUTE_MIXED_SPLIT] {
-            assert!(normalize(KEY_LOCAL_ROUTE_MODE, &json!(mode)).valid, "{mode}");
+            assert!(
+                normalize(KEY_LOCAL_ROUTE_MODE, &json!(mode)).valid,
+                "{mode}"
+            );
         }
         assert!(!normalize(KEY_LOCAL_ROUTE_MODE, &json!("auto")).valid);
         assert!(!normalize(KEY_LOCAL_ROUTE_MODE, &json!(2)).valid);
         assert!(doc.set_value(KEY_LOCAL_ROUTE_MODE, json!("auto")).is_err());
-        doc.set_value(KEY_LOCAL_ROUTE_MODE, json!(ROUTE_MIXED_SPLIT)).expect("合法模式");
-        doc.set_value(KEY_LOCAL_MAX_RESIDENT, json!(2)).expect("合法常驻数");
+        doc.set_value(KEY_LOCAL_ROUTE_MODE, json!(ROUTE_MIXED_SPLIT))
+            .expect("合法模式");
+        doc.set_value(KEY_LOCAL_MAX_RESIDENT, json!(2))
+            .expect("合法常驻数");
         let reloaded = ConfigDocument::from_bytes(Some(&doc.to_bytes()));
-        assert_eq!(reloaded.value(KEY_LOCAL_ROUTE_MODE), json!(ROUTE_MIXED_SPLIT));
+        assert_eq!(
+            reloaded.value(KEY_LOCAL_ROUTE_MODE),
+            json!(ROUTE_MIXED_SPLIT)
+        );
         assert_eq!(reloaded.value(KEY_LOCAL_MAX_RESIDENT), json!(2));
     }
 
@@ -418,21 +663,31 @@ mod tests {
         assert_eq!(DEFAULT_NUM_BEAMS, 2);
         assert_eq!(doc.value(KEY_TRANSLATION_BACKEND), json!(BACKEND_LOCAL));
         assert!(doc.set_value(KEY_LOCAL_NUM_BEAMS, json!(99)).is_err());
-        doc.set_value(KEY_LOCAL_NUM_BEAMS, json!(2)).expect("合法束宽");
-        doc.set_value(KEY_LOCAL_MODEL_ID, json!("opus-mt-en-zh-int8")).expect("模型 ID");
+        doc.set_value(KEY_LOCAL_NUM_BEAMS, json!(2))
+            .expect("合法束宽");
+        doc.set_value(KEY_LOCAL_MODEL_ID, json!("opus-mt-en-zh-int8"))
+            .expect("模型 ID");
         let reloaded = ConfigDocument::from_bytes(Some(&doc.to_bytes()));
         assert_eq!(reloaded.value(KEY_LOCAL_NUM_BEAMS), json!(2));
-        assert_eq!(reloaded.value(KEY_LOCAL_MODEL_ID), json!("opus-mt-en-zh-int8"));
+        assert_eq!(
+            reloaded.value(KEY_LOCAL_MODEL_ID),
+            json!("opus-mt-en-zh-int8")
+        );
     }
 
     /// 扩展项都有 schema 条目，控件所需的范围信息齐全。
     #[test]
     fn schema_lookup_works() {
         assert_eq!(
-            entry_for(KEY_LOCAL_IDLE_SECONDS).and_then(|e| e.range).map(|r| r.max),
+            entry_for(KEY_LOCAL_IDLE_SECONDS)
+                .and_then(|e| e.range)
+                .map(|r| r.max),
             Some(MAX_IDLE_SECONDS)
         );
-        assert_eq!(entry_for(KEY_TRANSLATION_BACKEND).map(|e| e.allowed.len()), Some(2));
+        assert_eq!(
+            entry_for(KEY_TRANSLATION_BACKEND).map(|e| e.allowed.len()),
+            Some(2)
+        );
         assert_eq!(entry_for(KEY_OCR_BACKEND).map(|e| e.allowed.len()), Some(2));
     }
 
@@ -446,16 +701,23 @@ mod tests {
         let mut doc = ConfigDocument::from_bytes(None);
         assert_eq!(doc.value(KEY_OCR_BACKEND), json!(default_ocr_backend()));
         assert!(doc.set_value(KEY_OCR_BACKEND, json!("cloud")).is_err());
-        doc.set_value(KEY_OCR_BACKEND, json!(OCR_BACKEND_LOCAL_MODEL)).expect("合法后端");
+        doc.set_value(KEY_OCR_BACKEND, json!(OCR_BACKEND_LOCAL_MODEL))
+            .expect("合法后端");
         let reloaded = ConfigDocument::from_bytes(Some(&doc.to_bytes()));
-        assert_eq!(reloaded.value(KEY_OCR_BACKEND), json!(OCR_BACKEND_LOCAL_MODEL));
+        assert_eq!(
+            reloaded.value(KEY_OCR_BACKEND),
+            json!(OCR_BACKEND_LOCAL_MODEL)
+        );
     }
 
     /// 配置损坏（RecoveredDefaults）回落到默认值，同样是 local-model。
     #[test]
     fn ocr_backend_corrupt_config_uses_default() {
         let doc = ConfigDocument::from_bytes(Some(b"{not json"));
-        assert_eq!(doc.compatibility(), crate::document::Compatibility::RecoveredDefaults);
+        assert_eq!(
+            doc.compatibility(),
+            crate::document::Compatibility::RecoveredDefaults
+        );
         assert_eq!(doc.value(KEY_OCR_BACKEND), json!(OCR_BACKEND_LOCAL_MODEL));
     }
 
@@ -466,11 +728,18 @@ mod tests {
         assert_eq!(fresh.value(KEY_OCR_BACKEND), json!(OCR_BACKEND_LOCAL_MODEL));
 
         // 取一份全新文档，抹掉后端键，模拟升级前写出的旧配置文件
-        let mut legacy: serde_json::Value = serde_json::from_slice(&fresh.to_bytes()).expect("json");
-        legacy["text_recognition"].as_object_mut().expect("分组").remove("backend");
+        let mut legacy: serde_json::Value =
+            serde_json::from_slice(&fresh.to_bytes()).expect("json");
+        legacy["text_recognition"]
+            .as_object_mut()
+            .expect("分组")
+            .remove("backend");
         let bytes = serde_json::to_vec(&legacy).expect("序列化");
         let migrated = ConfigDocument::from_bytes(Some(&bytes));
-        assert_eq!(migrated.value(KEY_OCR_BACKEND), json!(OCR_BACKEND_LOCAL_MODEL));
+        assert_eq!(
+            migrated.value(KEY_OCR_BACKEND),
+            json!(OCR_BACKEND_LOCAL_MODEL)
+        );
         assert!(migrated.is_dirty(), "迁移结果应落盘");
         let text = String::from_utf8(migrated.to_bytes()).expect("utf8");
         assert!(text.contains("\"backend\": \"local-model\""), "{text}");
@@ -478,7 +747,8 @@ mod tests {
         // 已经写了值的配置不被迁移覆盖
         let mut explicit = legacy.clone();
         explicit["text_recognition"]["backend"] = json!(OCR_BACKEND_SYSTEM);
-        let kept = ConfigDocument::from_bytes(Some(&serde_json::to_vec(&explicit).expect("序列化")));
+        let kept =
+            ConfigDocument::from_bytes(Some(&serde_json::to_vec(&explicit).expect("序列化")));
         assert_eq!(kept.value(KEY_OCR_BACKEND), json!(OCR_BACKEND_SYSTEM));
     }
 
@@ -488,7 +758,8 @@ mod tests {
         let mut doc = ConfigDocument::from_bytes(None);
         assert_eq!(doc.value(KEY_TRANSLATE_INPUT_HOTKEY), json!([]));
         assert!(crate::schema::is_extension_key(KEY_TRANSLATE_INPUT_HOTKEY));
-        doc.set_value(KEY_TRANSLATE_INPUT_HOTKEY, json!(["Ctrl+Alt+T"])).expect("合法热键");
+        doc.set_value(KEY_TRANSLATE_INPUT_HOTKEY, json!(["Ctrl+Alt+T"]))
+            .expect("合法热键");
         let reloaded = ConfigDocument::from_bytes(Some(&doc.to_bytes()));
         let shown = reloaded.value(KEY_TRANSLATE_INPUT_HOTKEY).to_string();
         assert!(shown.contains("Ctrl+Alt+T"), "{shown}");
@@ -499,8 +770,12 @@ mod tests {
 
         // 旧配置（没有该键）读到默认的空绑定
         let fresh = ConfigDocument::from_bytes(None);
-        let mut legacy: serde_json::Value = serde_json::from_slice(&fresh.to_bytes()).expect("json");
-        legacy["global_shortcuts"].as_object_mut().expect("分组").remove("translate_input");
+        let mut legacy: serde_json::Value =
+            serde_json::from_slice(&fresh.to_bytes()).expect("json");
+        legacy["global_shortcuts"]
+            .as_object_mut()
+            .expect("分组")
+            .remove("translate_input");
         let old = ConfigDocument::from_bytes(Some(&serde_json::to_vec(&legacy).expect("序列化")));
         assert_eq!(old.value(KEY_TRANSLATE_INPUT_HOTKEY), json!([]));
     }
@@ -511,13 +786,28 @@ mod tests {
         let doc = ConfigDocument::from_bytes(None);
         assert_eq!(doc.value(KEY_DICTATION_TOGGLE_HOTKEY), json!([]));
         assert_eq!(doc.value(KEY_DICTATION_HOLD_HOTKEY), json!([]));
-        assert_eq!(doc.value(KEY_DICTATION_BACKEND), json!(DICTATION_BACKEND_LOCAL_MODEL));
-        assert_eq!(doc.value(KEY_DICTATION_TRIGGER_MODE), json!(DICTATION_MODE_BOTH));
-        assert_eq!(doc.value(KEY_DICTATION_OUTPUT_MODE), json!(DICTATION_OUTPUT_AUTO));
+        assert_eq!(
+            doc.value(KEY_DICTATION_BACKEND),
+            json!(DICTATION_BACKEND_LOCAL_MODEL)
+        );
+        assert_eq!(
+            doc.value(KEY_DICTATION_TRIGGER_MODE),
+            json!(DICTATION_MODE_BOTH)
+        );
+        assert_eq!(
+            doc.value(KEY_DICTATION_OUTPUT_MODE),
+            json!(DICTATION_OUTPUT_AUTO)
+        );
         assert_eq!(doc.value(KEY_DICTATION_TYPE_WITH_OVERLAY), json!(false));
         assert_eq!(doc.value(KEY_DICTATION_MODEL_DIR), json!(""));
-        assert_eq!(doc.value(KEY_DICTATION_THREADS), json!(DEFAULT_DICTATION_THREADS));
-        assert_eq!(doc.value(KEY_DICTATION_MAX_SECONDS), json!(DEFAULT_DICTATION_MAX_SECONDS));
+        assert_eq!(
+            doc.value(KEY_DICTATION_THREADS),
+            json!(DEFAULT_DICTATION_THREADS)
+        );
+        assert_eq!(
+            doc.value(KEY_DICTATION_MAX_SECONDS),
+            json!(DEFAULT_DICTATION_MAX_SECONDS)
+        );
         for (key, good, bad) in [
             (KEY_DICTATION_BACKEND, DICTATION_BACKEND_SYSTEM, "cloud"),
             (KEY_DICTATION_TRIGGER_MODE, DICTATION_MODE_HOLD, "double"),
@@ -532,7 +822,13 @@ mod tests {
         assert!(!normalize(KEY_DICTATION_THREADS, &json!(0)).valid);
         assert!(!normalize(KEY_DICTATION_THREADS, &json!(MAX_DICTATION_THREADS + 1)).valid);
         assert!(normalize(KEY_DICTATION_MAX_SECONDS, &json!(0)).valid);
-        assert!(!normalize(KEY_DICTATION_MAX_SECONDS, &json!(MAX_DICTATION_MAX_SECONDS + 1)).valid);
+        assert!(
+            !normalize(
+                KEY_DICTATION_MAX_SECONDS,
+                &json!(MAX_DICTATION_MAX_SECONDS + 1)
+            )
+            .valid
+        );
         assert!(!normalize(KEY_DICTATION_TYPE_WITH_OVERLAY, &json!("yes")).valid);
     }
 
@@ -549,25 +845,58 @@ mod tests {
     #[test]
     fn dictation_round_trip_and_legacy_fill() {
         let mut doc = ConfigDocument::from_bytes(None);
-        doc.set_value(KEY_DICTATION_TOGGLE_HOTKEY, json!(["Ctrl+Alt+D"])).expect("合法热键");
-        doc.set_value(KEY_DICTATION_HOLD_HOTKEY, json!(["F9"])).expect("合法热键");
-        doc.set_value(KEY_DICTATION_OUTPUT_MODE, json!(DICTATION_OUTPUT_TYPE)).expect("合法输出方式");
-        doc.set_value(KEY_DICTATION_MODEL_DIR, json!("D:/models/stt")).expect("目录");
+        doc.set_value(KEY_DICTATION_TOGGLE_HOTKEY, json!(["Ctrl+Alt+D"]))
+            .expect("合法热键");
+        doc.set_value(KEY_DICTATION_HOLD_HOTKEY, json!(["F9"]))
+            .expect("合法热键");
+        doc.set_value(KEY_DICTATION_OUTPUT_MODE, json!(DICTATION_OUTPUT_TYPE))
+            .expect("合法输出方式");
+        doc.set_value(KEY_DICTATION_MODEL_DIR, json!("D:/models/stt"))
+            .expect("目录");
         let reloaded = ConfigDocument::from_bytes(Some(&doc.to_bytes()));
-        assert!(reloaded.value(KEY_DICTATION_TOGGLE_HOTKEY).to_string().contains("Ctrl+Alt+D"));
-        assert!(reloaded.value(KEY_DICTATION_HOLD_HOTKEY).to_string().contains("F9"));
-        assert_eq!(reloaded.value(KEY_DICTATION_OUTPUT_MODE), json!(DICTATION_OUTPUT_TYPE));
-        assert_eq!(reloaded.value(KEY_DICTATION_MODEL_DIR), json!("D:/models/stt"));
+        assert!(
+            reloaded
+                .value(KEY_DICTATION_TOGGLE_HOTKEY)
+                .to_string()
+                .contains("Ctrl+Alt+D")
+        );
+        assert!(
+            reloaded
+                .value(KEY_DICTATION_HOLD_HOTKEY)
+                .to_string()
+                .contains("F9")
+        );
+        assert_eq!(
+            reloaded.value(KEY_DICTATION_OUTPUT_MODE),
+            json!(DICTATION_OUTPUT_TYPE)
+        );
+        assert_eq!(
+            reloaded.value(KEY_DICTATION_MODEL_DIR),
+            json!("D:/models/stt")
+        );
 
         let fresh = ConfigDocument::from_bytes(None);
-        let mut legacy: serde_json::Value = serde_json::from_slice(&fresh.to_bytes()).expect("json");
+        let mut legacy: serde_json::Value =
+            serde_json::from_slice(&fresh.to_bytes()).expect("json");
         legacy.as_object_mut().expect("根").remove("dictation");
-        legacy["global_shortcuts"].as_object_mut().expect("分组").remove("dictation_toggle");
-        legacy["global_shortcuts"].as_object_mut().expect("分组").remove("dictation_hold");
+        legacy["global_shortcuts"]
+            .as_object_mut()
+            .expect("分组")
+            .remove("dictation_toggle");
+        legacy["global_shortcuts"]
+            .as_object_mut()
+            .expect("分组")
+            .remove("dictation_hold");
         let old = ConfigDocument::from_bytes(Some(&serde_json::to_vec(&legacy).expect("序列化")));
         assert_eq!(old.value(KEY_DICTATION_TOGGLE_HOTKEY), json!([]));
         assert_eq!(old.value(KEY_DICTATION_HOLD_HOTKEY), json!([]));
-        assert_eq!(old.value(KEY_DICTATION_BACKEND), json!(DICTATION_BACKEND_LOCAL_MODEL));
-        assert_eq!(old.value(KEY_DICTATION_THREADS), json!(DEFAULT_DICTATION_THREADS));
+        assert_eq!(
+            old.value(KEY_DICTATION_BACKEND),
+            json!(DICTATION_BACKEND_LOCAL_MODEL)
+        );
+        assert_eq!(
+            old.value(KEY_DICTATION_THREADS),
+            json!(DEFAULT_DICTATION_THREADS)
+        );
     }
 }

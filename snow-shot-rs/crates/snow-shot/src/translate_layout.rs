@@ -49,7 +49,10 @@ impl LayoutMode {
 
 /// 判断字符是否为句末标点。
 fn is_sentence_punctuation(c: char) -> bool {
-    matches!(c, '.' | '!' | '?' | '。' | '！' | '？' | '…' | ':' | '：' | ';' | '；')
+    matches!(
+        c,
+        '.' | '!' | '?' | '。' | '！' | '？' | '…' | ':' | '：' | ';' | '；'
+    )
 }
 
 /// 判断字符是否为收尾引号或括号。
@@ -94,7 +97,10 @@ fn should_break_paragraph(prev: &OcrTextBox, cur: &OcrTextBox, prev_text: &str) 
     }
 
     // (d) 行高差异过大
-    let (ph, ch) = (clamped_height(prev.rect.height), clamped_height(cur.rect.height));
+    let (ph, ch) = (
+        clamped_height(prev.rect.height),
+        clamped_height(cur.rect.height),
+    );
     if ph.max(ch) / ph.min(ch) > LINE_HEIGHT_DIFF_THRESHOLD {
         return true;
     }
@@ -134,34 +140,42 @@ fn merge_texts(prev: &str, cur: &str) -> String {
 /// * `mode` - 版式处理模式
 ///
 /// # 返回
-/// 段落列表，顺序与输入一致；空白块会被丢弃。
+/// 段落列表（段落文本 + 组成它的输入块下标），顺序与输入一致；空白块会被丢弃（下标不含它们）。
 ///
 /// # 示例
 /// ```ignore
 /// let paragraphs = paragraphs_from_boxes(&boxes, LayoutMode::SmartMerge);
 /// ```
-pub fn paragraphs_from_boxes(boxes: &[OcrTextBox], mode: LayoutMode) -> Vec<String> {
+pub fn paragraphs_from_boxes(boxes: &[OcrTextBox], mode: LayoutMode) -> Vec<(String, Vec<usize>)> {
     let mut paragraphs = Vec::new();
     let mut current = String::new();
+    let mut current_indices = Vec::new();
     let mut prev_box: Option<&OcrTextBox> = None;
 
-    for bx in boxes {
+    for (ix, bx) in boxes.iter().enumerate() {
         let text = bx.text.trim();
         if text.is_empty() {
             continue;
         }
 
         match prev_box {
-            None => current.push_str(text),
+            None => {
+                current.push_str(text);
+                current_indices.push(ix);
+            }
             Some(prev) => {
                 let split = match mode {
                     LayoutMode::Original => true,
                     LayoutMode::SmartMerge => should_break_paragraph(prev, bx, &current),
                 };
                 if split {
-                    paragraphs.push(std::mem::replace(&mut current, text.to_string()));
+                    paragraphs.push((
+                        std::mem::replace(&mut current, text.to_string()),
+                        std::mem::replace(&mut current_indices, vec![ix]),
+                    ));
                 } else {
                     current = merge_texts(&current, text);
+                    current_indices.push(ix);
                 }
             }
         }
@@ -169,7 +183,7 @@ pub fn paragraphs_from_boxes(boxes: &[OcrTextBox], mode: LayoutMode) -> Vec<Stri
     }
 
     if !current.is_empty() {
-        paragraphs.push(current);
+        paragraphs.push((current, current_indices));
     }
     paragraphs
 }
@@ -188,11 +202,38 @@ mod tests {
         }
     }
 
+    /// 只取段落文本。
+    fn texts(boxes: &[OcrTextBox], mode: LayoutMode) -> Vec<String> {
+        paragraphs_from_boxes(boxes, mode)
+            .into_iter()
+            .map(|(text, _)| text)
+            .collect()
+    }
+
+    /// 段落带回组成它的块下标（空白块不计入，下标仍是原数组下标）。
+    #[test]
+    fn paragraphs_carry_box_indices() {
+        let boxes = vec![
+            b(0, 0, 100, 20, "Line 1"),
+            b(0, 20, 100, 20, "  "),
+            b(0, 25, 100, 20, "Line 2"),
+            b(0, 200, 100, 20, "Far away"),
+        ];
+        let merged = paragraphs_from_boxes(&boxes, LayoutMode::SmartMerge);
+        assert_eq!(merged[0].1, vec![0, 2]);
+        let original = paragraphs_from_boxes(&boxes, LayoutMode::Original);
+        let indices: Vec<_> = original.into_iter().map(|(_, i)| i).collect();
+        assert_eq!(indices, vec![vec![0], vec![2], vec![3]]);
+    }
+
     /// from_config 三种取值。
     #[test]
     fn from_config_cases() {
         assert_eq!(LayoutMode::from_config("original"), LayoutMode::Original);
-        assert_eq!(LayoutMode::from_config("smart_merge"), LayoutMode::SmartMerge);
+        assert_eq!(
+            LayoutMode::from_config("smart_merge"),
+            LayoutMode::SmartMerge
+        );
         assert_eq!(LayoutMode::from_config(""), LayoutMode::SmartMerge);
         assert_eq!(LayoutMode::from_config("whatever"), LayoutMode::SmartMerge);
     }
@@ -212,47 +253,59 @@ mod tests {
             b(0, 20, 100, 20, "  \t "),
             b(0, 25, 100, 20, "Line 2"),
         ];
-        assert_eq!(paragraphs_from_boxes(&boxes, LayoutMode::SmartMerge), vec!["Line 1 Line 2"]);
-        assert_eq!(paragraphs_from_boxes(&boxes, LayoutMode::Original), vec!["Line 1", "Line 2"]);
+        assert_eq!(texts(&boxes, LayoutMode::SmartMerge), vec!["Line 1 Line 2"]);
+        assert_eq!(
+            texts(&boxes, LayoutMode::Original),
+            vec!["Line 1", "Line 2"]
+        );
     }
 
     /// Original 保持逐行。
     #[test]
     fn original_keeps_lines() {
         let boxes = vec![b(0, 0, 100, 20, "Hello"), b(0, 22, 100, 20, "world")];
-        assert_eq!(paragraphs_from_boxes(&boxes, LayoutMode::Original), vec!["Hello", "world"]);
+        assert_eq!(texts(&boxes, LayoutMode::Original), vec!["Hello", "world"]);
     }
 
     /// 同段落两行英文合并并加空格。
     #[test]
     fn merges_english_lines_with_space() {
         let boxes = vec![b(0, 0, 100, 20, "Hello"), b(0, 22, 100, 20, "world")];
-        assert_eq!(paragraphs_from_boxes(&boxes, LayoutMode::SmartMerge), vec!["Hello world"]);
+        assert_eq!(texts(&boxes, LayoutMode::SmartMerge), vec!["Hello world"]);
     }
 
     /// 中文行合并不加空格。
     #[test]
     fn merges_chinese_without_space() {
         let boxes = vec![b(0, 0, 100, 20, "今天天气"), b(0, 22, 100, 20, "非常不错")];
-        assert_eq!(paragraphs_from_boxes(&boxes, LayoutMode::SmartMerge), vec!["今天天气非常不错"]);
+        assert_eq!(
+            texts(&boxes, LayoutMode::SmartMerge),
+            vec!["今天天气非常不错"]
+        );
     }
 
     /// 连字符断词拼接。
     #[test]
     fn joins_hyphenated_word() {
         let boxes = vec![b(0, 0, 100, 20, "out-"), b(0, 22, 100, 20, "standing")];
-        assert_eq!(paragraphs_from_boxes(&boxes, LayoutMode::SmartMerge), vec!["outstanding"]);
+        assert_eq!(texts(&boxes, LayoutMode::SmartMerge), vec!["outstanding"]);
     }
 
     /// 句末标点（含收尾引号）断段。
     #[test]
     fn sentence_end_breaks() {
         let boxes = vec![b(0, 0, 100, 20, "First."), b(0, 22, 100, 20, "Second")];
-        assert_eq!(paragraphs_from_boxes(&boxes, LayoutMode::SmartMerge), vec!["First.", "Second"]);
-
-        let quoted = vec![b(0, 0, 100, 20, "He said: “Stop!”"), b(0, 22, 100, 20, "Then left")];
         assert_eq!(
-            paragraphs_from_boxes(&quoted, LayoutMode::SmartMerge),
+            texts(&boxes, LayoutMode::SmartMerge),
+            vec!["First.", "Second"]
+        );
+
+        let quoted = vec![
+            b(0, 0, 100, 20, "He said: “Stop!”"),
+            b(0, 22, 100, 20, "Then left"),
+        ];
+        assert_eq!(
+            texts(&quoted, LayoutMode::SmartMerge),
             vec!["He said: “Stop!”", "Then left"]
         );
     }
@@ -262,7 +315,7 @@ mod tests {
     fn large_vertical_gap_breaks() {
         let boxes = vec![b(0, 0, 100, 20, "Para one"), b(0, 40, 100, 20, "Para two")];
         assert_eq!(
-            paragraphs_from_boxes(&boxes, LayoutMode::SmartMerge),
+            texts(&boxes, LayoutMode::SmartMerge),
             vec!["Para one", "Para two"]
         );
     }
@@ -271,14 +324,17 @@ mod tests {
     #[test]
     fn same_row_breaks() {
         let boxes = vec![b(0, 0, 100, 20, "Left"), b(110, 5, 100, 20, "Right")];
-        assert_eq!(paragraphs_from_boxes(&boxes, LayoutMode::SmartMerge), vec!["Left", "Right"]);
+        assert_eq!(texts(&boxes, LayoutMode::SmartMerge), vec!["Left", "Right"]);
     }
 
     /// 行高差异断段。
     #[test]
     fn line_height_difference_breaks() {
         let boxes = vec![b(0, 0, 100, 10, "Small"), b(0, 12, 100, 30, "Large")];
-        assert_eq!(paragraphs_from_boxes(&boxes, LayoutMode::SmartMerge), vec!["Small", "Large"]);
+        assert_eq!(
+            texts(&boxes, LayoutMode::SmartMerge),
+            vec!["Small", "Large"]
+        );
     }
 
     /// 左边界错位断段。
@@ -286,7 +342,7 @@ mod tests {
     fn left_misalignment_breaks() {
         let boxes = vec![b(0, 0, 100, 20, "Normal"), b(80, 22, 100, 20, "Indented")];
         assert_eq!(
-            paragraphs_from_boxes(&boxes, LayoutMode::SmartMerge),
+            texts(&boxes, LayoutMode::SmartMerge),
             vec!["Normal", "Indented"]
         );
     }

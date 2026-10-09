@@ -29,6 +29,12 @@ const PART_SUFFIX: &str = ".part";
 const STAGING_SUFFIX: &str = ".extracting";
 /// 下载缓存子目录（位于模型根目录下）。
 const DOWNLOAD_DIR: &str = ".download";
+/// 用户指定解压程序时，bz2 先解成明文 tar 所用的暂存子目录名。
+const UNPACK_DIR: &str = ".unbz2";
+/// 暂存子目录里明文 tar 的固定文件名。
+const UNPACKED_TAR: &str = "archive.tar";
+/// 错误里标识「用户指定的解压程序」的工具名。
+const TOOL_UNPACK: &str = "extractor";
 /// 轮询下载进程与进度的间隔。
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 /// 下载结束的归类，用于决定日志级别。
@@ -275,6 +281,18 @@ fn fetch_asset(
             total: size,
         })
     };
+    // 压缩包已在（上次解压失败留下的）且校验通过：直接复用，不重下
+    if dest.is_file() {
+        match verify_asset(dest, name, size, sha256) {
+            Ok(pinned) => {
+                report(Stage::Verifying, size);
+                return Ok(pinned);
+            }
+            Err(_) => {
+                let _ = std::fs::remove_file(dest);
+            }
+        }
+    }
     report(Stage::Downloading, 0);
     download_to_part(url, &part, cancel, |done| report(Stage::Downloading, done))?;
     report(Stage::Verifying, size);
@@ -285,24 +303,38 @@ fn fetch_asset(
     Ok(pinned)
 }
 
-/// 只解压压缩包里 `<id>/<file>` 成员到 `dest`（系统自带 `tar.exe`，自动识别 bz2）。
-fn extract_files(
-    archive: &Path,
-    dest: &Path,
-    id: &str,
-    files: &[String],
-) -> Result<(), FetchError> {
-    let output = quiet_command(&system_tool("tar.exe"))
-        .arg("-xf")
-        .arg(archive)
-        .arg("-C")
-        .arg(dest)
-        .args(files.iter().map(|f| format!("{id}/{f}")))
-        .output()
-        .map_err(|e| FetchError::RunTool {
-            tool: TOOL_TAR,
-            detail: e.to_string(),
-        })?;
+/// 用户指定解压程序的类别（按文件名判断）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExtractorKind {
+    /// 7-Zip（`7z.exe` / `7za.exe` / `7zz.exe`）：先解出 `.tar` 再交给系统 tar。
+    SevenZip,
+    /// `bzip2.exe`：先解出 `.tar` 再交给系统 tar。
+    Bzip2,
+    /// 自带 bz2 的 tar（bsdtar / GNU tar），直接解。
+    Tar,
+}
+
+/// 按文件名判断解压程序类别；不认识的当作 tar。
+fn extractor_kind(exe: &Path) -> ExtractorKind {
+    let stem = exe
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    if stem.contains("7z") {
+        ExtractorKind::SevenZip
+    } else if stem.contains("bzip2") {
+        ExtractorKind::Bzip2
+    } else {
+        ExtractorKind::Tar
+    }
+}
+
+/// 运行解压类外部命令，失败时把 stderr 作为解压错误。
+fn run_extract(mut command: std::process::Command, tool: &'static str) -> Result<(), FetchError> {
+    let output = command.output().map_err(|e| FetchError::RunTool {
+        tool,
+        detail: e.to_string(),
+    })?;
     if output.status.success() {
         Ok(())
     } else {
@@ -310,6 +342,104 @@ fn extract_files(
             String::from_utf8_lossy(&output.stderr).trim().to_string(),
         ))
     }
+}
+
+/// 用 `tar_exe` 从（已是明文 tar 或自带 bz2 支持的）压缩包里只解出 `<id>/<file>` 成员。
+fn tar_extract(
+    tar_exe: &Path,
+    archive: &Path,
+    dest: &Path,
+    id: &str,
+    files: &[String],
+    force_local: bool,
+) -> Result<(), FetchError> {
+    let mut command = quiet_command(tar_exe);
+    if force_local {
+        // GNU tar 会把 `C:\...` 当成远程主机，需要显式声明本地路径
+        command.arg("--force-local");
+    }
+    command
+        .arg("-xf")
+        .arg(archive)
+        .arg("-C")
+        .arg(dest)
+        .args(files.iter().map(|f| format!("{id}/{f}")));
+    run_extract(command, TOOL_TAR)
+}
+
+/// 只解压压缩包里 `<id>/<file>` 成员到 `dest`。
+///
+/// `extractor` 为空时用系统自带 `tar.exe`；部分 Windows 版本的 `tar.exe` 不能直接解 bz2，
+/// 这类失败由调用方让用户另选解压程序后，带着 `extractor` 重试。
+fn extract_files(
+    archive: &Path,
+    dest: &Path,
+    id: &str,
+    files: &[String],
+    extractor: Option<&Path>,
+) -> Result<(), FetchError> {
+    let system_tar = system_tool("tar.exe");
+    let Some(exe) = extractor else {
+        return tar_extract(&system_tar, archive, dest, id, files, false);
+    };
+    match extractor_kind(exe) {
+        ExtractorKind::Tar => tar_extract(exe, archive, dest, id, files, false)
+            .or_else(|_| tar_extract(exe, archive, dest, id, files, true)),
+        kind @ (ExtractorKind::SevenZip | ExtractorKind::Bzip2) => {
+            // 先把 bz2 解成明文 tar（放在暂存目录里的子目录），再用系统 tar 取成员
+            let scratch = dest.join(UNPACK_DIR);
+            std::fs::create_dir_all(&scratch).map_err(|e| FetchError::CreateDir(e.to_string()))?;
+            let tar_path = scratch.join(UNPACKED_TAR);
+            let unpacked = if kind == ExtractorKind::SevenZip {
+                let mut command = quiet_command(exe);
+                command
+                    .arg("x")
+                    .arg("-y")
+                    .arg(format!("-o{}", scratch.display()))
+                    .arg(archive);
+                run_extract(command, TOOL_UNPACK).and_then(|()| {
+                    // 7z 输出名是去掉 .bz2 的文件名，统一改成固定名
+                    let stem = archive.file_stem().ok_or(FetchError::InvalidTarget)?;
+                    std::fs::rename(scratch.join(stem), &tar_path)
+                        .map_err(|e| FetchError::Rename(e.to_string()))
+                })
+            } else {
+                let out = std::fs::File::create(&tar_path)
+                    .map_err(|e| FetchError::CreateDir(e.to_string()))?;
+                let mut command = quiet_command(exe);
+                command.arg("-dc").arg(archive).stdout(Stdio::from(out));
+                run_extract(command, TOOL_UNPACK)
+            };
+            let result =
+                unpacked.and_then(|()| tar_extract(&system_tar, &tar_path, dest, id, files, false));
+            let _ = std::fs::remove_file(&tar_path);
+            let _ = std::fs::remove_dir(&scratch);
+            result
+        }
+    }
+}
+
+/// 判断失败是否出在「解压程序不可用 / 不能解 bz2」，这时应让用户另选解压程序。
+///
+/// # 参数
+/// - `error`：安装返回的错误。
+///
+/// # 返回
+/// 解压阶段的失败返回 `true`；下载、校验等其它失败返回 `false`。
+pub fn needs_extractor(error: &FetchError) -> bool {
+    matches!(error, FetchError::Extract(_))
+        || matches!(error, FetchError::RunTool { tool, .. } if *tool == TOOL_TAR || *tool == TOOL_UNPACK)
+}
+
+/// 已下载压缩包在磁盘上的位置（解压失败时留在这里，供用户手动处理）。
+///
+/// # 参数
+/// - `spec`：模型清单项。
+/// - `data_root`：应用数据根目录。
+pub fn archive_path(spec: &SttModelSpec, data_root: &Path) -> PathBuf {
+    stt_models::models_root(data_root)
+        .join(DOWNLOAD_DIR)
+        .join(&spec.archive.name)
 }
 
 /// 写 `model.json`：记录模型的基本元数据，便于排查与后续升级。
@@ -336,6 +466,7 @@ fn install_model(
     spec: &SttModelSpec,
     data_root: &Path,
     cancel: &AtomicBool,
+    extractor: Option<&Path>,
     on_progress: &mut impl FnMut(&Progress),
 ) -> Result<bool, FetchError> {
     let root = stt_models::models_root(data_root);
@@ -360,7 +491,7 @@ fn install_model(
     let _ = std::fs::remove_dir_all(&staging);
     std::fs::create_dir_all(&staging).map_err(|e| FetchError::CreateStaging(e.to_string()))?;
     let result = (|| {
-        extract_files(&archive_path, &staging, &spec.id, &spec.files)?;
+        extract_files(&archive_path, &staging, &spec.id, &spec.files, extractor)?;
         let extracted = staging.join(&spec.id);
         if let Some(missing) = spec.files.iter().find(|f| !extracted.join(f).is_file()) {
             return Err(FetchError::MissingFiles(missing.clone()));
@@ -416,11 +547,30 @@ pub fn install(
     cancel: &AtomicBool,
     on_progress: impl FnMut(&Progress),
 ) -> Result<InstallReport, FetchError> {
+    install_using(spec, data_root, cancel, None, on_progress)
+}
+
+/// 同 [`install`]，但可指定解压程序（7-Zip / bzip2 / 自带 bz2 的 tar）；压缩包已下载且校验通过时不会重下。
+///
+/// # 参数
+/// - `extractor`：解压程序路径；`None` 用系统自带 `tar.exe`。
+/// - 其余同 [`install`]。
+///
+/// # 返回
+/// 同 [`install`]；解压阶段失败可用 [`needs_extractor`] 判断是否该让用户换解压程序。
+pub fn install_using(
+    spec: &SttModelSpec,
+    data_root: &Path,
+    cancel: &AtomicBool,
+    extractor: Option<&Path>,
+    on_progress: impl FnMut(&Progress),
+) -> Result<InstallReport, FetchError> {
     install_with(
         spec,
         &stt_models::manifest().vad,
         data_root,
         cancel,
+        extractor,
         on_progress,
     )
 }
@@ -431,6 +581,7 @@ fn install_with(
     vad: &SharedAsset,
     data_root: &Path,
     cancel: &AtomicBool,
+    extractor: Option<&Path>,
     mut on_progress: impl FnMut(&Progress),
 ) -> Result<InstallReport, FetchError> {
     let plan = plan_with(spec, vad, data_root);
@@ -438,7 +589,8 @@ fn install_with(
     if plan.vad.is_some() && !install_vad(vad, data_root, cancel, &mut on_progress)? {
         report.unpinned.push(vad.name.clone());
     }
-    if plan.model.is_some() && !install_model(spec, data_root, cancel, &mut on_progress)? {
+    if plan.model.is_some() && !install_model(spec, data_root, cancel, extractor, &mut on_progress)?
+    {
         report.unpinned.push(spec.archive.name.clone());
     }
     Ok(report)
@@ -597,7 +749,7 @@ mod tests {
             "流式不需要 VAD"
         );
         let mut stages = Vec::new();
-        let report = install_with(&spec, &vad, &root, &AtomicBool::new(false), |p| {
+        let report = install_with(&spec, &vad, &root, &AtomicBool::new(false), None, |p| {
             stages.push(p.stage)
         })
         .expect("安装");
@@ -637,7 +789,7 @@ mod tests {
         let vad = make_vad(&src, true);
         let plan = plan_with(&spec, &vad, &root);
         assert!(plan.vad.is_some() && plan.model.is_some());
-        install_with(&spec, &vad, &root, &AtomicBool::new(false), |_| {}).expect("安装");
+        install_with(&spec, &vad, &root, &AtomicBool::new(false), None, |_| {}).expect("安装");
         let vad_file = stt_models::models_root(&root).join("silero_vad.onnx");
         assert!(vad_file.is_file());
         assert_eq!(
@@ -659,7 +811,7 @@ mod tests {
         let spec = make_spec(&src, "pack-unpinned", true, false);
         let vad = make_vad(&src, false);
         let report =
-            install_with(&spec, &vad, &root, &AtomicBool::new(false), |_| {}).expect("安装");
+            install_with(&spec, &vad, &root, &AtomicBool::new(false), None, |_| {}).expect("安装");
         assert_eq!(
             report.unpinned,
             vec![
@@ -681,7 +833,8 @@ mod tests {
         let mut spec = make_spec(&src, "pack-bad", false, true);
         spec.archive.sha256 = "0".repeat(64);
         let vad = make_vad(&src, true);
-        let err = install_with(&spec, &vad, &root, &AtomicBool::new(false), |_| {}).unwrap_err();
+        let err =
+            install_with(&spec, &vad, &root, &AtomicBool::new(false), None, |_| {}).unwrap_err();
         assert!(matches!(err, FetchError::HashMismatch { .. }), "{err:?}");
         assert!(!is_installed(&spec, &root));
         assert!(!stt_models::model_dir(&spec, &root).exists());
@@ -702,7 +855,8 @@ mod tests {
         let mut spec = make_spec(&src, "pack-miss", false, true);
         spec.files.push("not-in-archive.onnx".into());
         let vad = make_vad(&src, true);
-        let err = install_with(&spec, &vad, &root, &AtomicBool::new(false), |_| {}).unwrap_err();
+        let err =
+            install_with(&spec, &vad, &root, &AtomicBool::new(false), None, |_| {}).unwrap_err();
         assert!(!matches!(err, FetchError::Cancelled));
         assert!(!is_installed(&spec, &root));
         assert!(
@@ -722,7 +876,8 @@ mod tests {
         let root = temp_root("cancel-dst");
         let spec = make_spec(&src, "pack-cancel", false, true);
         let vad = make_vad(&src, true);
-        let err = install_with(&spec, &vad, &root, &AtomicBool::new(true), |_| {}).unwrap_err();
+        let err =
+            install_with(&spec, &vad, &root, &AtomicBool::new(true), None, |_| {}).unwrap_err();
         assert_eq!(err, FetchError::Cancelled);
         assert!(!is_installed(&spec, &root));
         for d in [src, root] {
@@ -738,7 +893,8 @@ mod tests {
         let mut spec = make_spec(&src, "pack-dead", false, true);
         spec.archive.url = "file:///Z:/definitely/not/here.tar.bz2".into();
         let vad = make_vad(&src, true);
-        let err = install_with(&spec, &vad, &root, &AtomicBool::new(false), |_| {}).unwrap_err();
+        let err =
+            install_with(&spec, &vad, &root, &AtomicBool::new(false), None, |_| {}).unwrap_err();
         assert!(matches!(err, FetchError::DownloadFailed { .. }), "{err:?}");
         assert!(!is_installed(&spec, &root));
         for d in [src, root] {
@@ -753,7 +909,7 @@ mod tests {
         let root = temp_root("inst-dst");
         let spec = make_spec(&src, "pack-inst", false, true);
         let vad = make_vad(&src, true);
-        install_with(&spec, &vad, &root, &AtomicBool::new(false), |_| {}).expect("安装");
+        install_with(&spec, &vad, &root, &AtomicBool::new(false), None, |_| {}).expect("安装");
         let dir = stt_models::model_dir(&spec, &root);
         std::fs::remove_file(dir.join("tokens.txt")).expect("删");
         assert!(!is_installed(&spec, &root));
@@ -761,6 +917,128 @@ mod tests {
         assert!(is_installed(&spec, &root));
         std::fs::remove_file(dir.join(COMPLETE_MARKER)).expect("删");
         assert!(!is_installed(&spec, &root));
+        for d in [src, root] {
+            let _ = std::fs::remove_dir_all(&d);
+        }
+    }
+
+    /// 解压程序按文件名分类：7z / bzip2 / 其余当 tar。
+    #[test]
+    fn extractor_kind_by_file_name() {
+        assert_eq!(
+            extractor_kind(Path::new("C:/x/7z.exe")),
+            ExtractorKind::SevenZip
+        );
+        assert_eq!(
+            extractor_kind(Path::new("C:/x/7zG.exe")),
+            ExtractorKind::SevenZip
+        );
+        assert_eq!(
+            extractor_kind(Path::new("C:/x/bzip2.exe")),
+            ExtractorKind::Bzip2
+        );
+        assert_eq!(
+            extractor_kind(Path::new("C:/x/tar.exe")),
+            ExtractorKind::Tar
+        );
+        assert_eq!(
+            extractor_kind(Path::new("C:/x/whatever.exe")),
+            ExtractorKind::Tar
+        );
+    }
+
+    /// 只有解压阶段的失败才需要让用户另选解压程序。
+    #[test]
+    fn only_extract_failures_need_an_extractor() {
+        assert!(needs_extractor(&FetchError::Extract("x".into())));
+        assert!(needs_extractor(&FetchError::RunTool {
+            tool: TOOL_TAR,
+            detail: "x".into()
+        }));
+        assert!(needs_extractor(&FetchError::RunTool {
+            tool: TOOL_UNPACK,
+            detail: "x".into()
+        }));
+        assert!(!needs_extractor(&FetchError::Cancelled));
+        assert!(!needs_extractor(&FetchError::DownloadFailed {
+            url: "u".into(),
+            detail: "d".into()
+        }));
+        assert!(!needs_extractor(&FetchError::MissingFiles("a".into())));
+    }
+
+    /// 压缩包已在 `.download` 且校验通过：不再下载（地址不可达也能装），可指定解压程序。
+    #[test]
+    fn existing_archive_is_reused_and_custom_extractor_works() {
+        let src = temp_root("reuse-src");
+        let root = temp_root("reuse-dst");
+        let mut spec = make_spec(&src, "pack-reuse", false, true);
+        let archive = archive_path(&spec, &root);
+        std::fs::create_dir_all(archive.parent().expect("父目录")).expect("建目录");
+        std::fs::copy(src.join(&spec.archive.name), &archive).expect("复制");
+        spec.archive.url = "file:///nonexistent/never-downloaded.tar.bz2".into();
+        let vad = make_vad(&src, true);
+        let tar = system_tool("tar.exe");
+        install_with(
+            &spec,
+            &vad,
+            &root,
+            &AtomicBool::new(false),
+            Some(&tar),
+            |_| {},
+        )
+        .expect("复用已下载的压缩包并用指定解压程序安装");
+        assert!(is_installed(&spec, &root));
+        assert!(!archive.exists(), "成功后清理压缩包");
+        for d in [src, root] {
+            let _ = std::fs::remove_dir_all(&d);
+        }
+    }
+
+    /// 已下载但损坏的压缩包会被丢弃并重新下载，不会被当成有效缓存。
+    #[test]
+    fn corrupt_cached_archive_is_redownloaded() {
+        let src = temp_root("stale-src");
+        let root = temp_root("stale-dst");
+        let spec = make_spec(&src, "pack-stale", false, true);
+        let archive = archive_path(&spec, &root);
+        std::fs::create_dir_all(archive.parent().expect("父目录")).expect("建目录");
+        std::fs::write(&archive, b"garbage").expect("写");
+        let vad = make_vad(&src, true);
+        install_with(&spec, &vad, &root, &AtomicBool::new(false), None, |_| {})
+            .expect("坏缓存应被替换");
+        assert!(is_installed(&spec, &root));
+        for d in [src, root] {
+            let _ = std::fs::remove_dir_all(&d);
+        }
+    }
+
+    /// 用 bzip2 解压程序（先解成明文 tar 再取成员）安装；找不到 bzip2 的机器上跳过。
+    #[test]
+    fn bzip2_extractor_installs_when_available() {
+        let Some(bzip2) = std::env::var_os("PATH").and_then(|paths| {
+            std::env::split_paths(&paths)
+                .map(|d| d.join("bzip2.exe"))
+                .find(|p| p.is_file())
+        }) else {
+            return;
+        };
+        let src = temp_root("bz-src");
+        let root = temp_root("bz-dst");
+        let spec = make_spec(&src, "pack-bz", false, true);
+        let vad = make_vad(&src, true);
+        install_with(
+            &spec,
+            &vad,
+            &root,
+            &AtomicBool::new(false),
+            Some(&bzip2),
+            |_| {},
+        )
+        .expect("bzip2 解压安装");
+        assert!(is_installed(&spec, &root));
+        let staging = stt_models::models_root(&root).join("pack-bz.extracting");
+        assert!(!staging.exists(), "暂存目录应清理");
         for d in [src, root] {
             let _ = std::fs::remove_dir_all(&d);
         }

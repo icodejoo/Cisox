@@ -5,7 +5,7 @@
 //! 不会产出任何假译文。翻译是阻塞调用，必须在后台线程里执行。
 
 use crate::ocr_client::OcrError;
-use crate::ocr_service::OcrResult;
+use crate::ocr_service::{OcrResult, OcrTextBox};
 use crate::ort_runtime::{OrtUnavailable, resolve_ort_dylib};
 use crate::translate_layout::{LayoutMode, paragraphs_from_boxes};
 use serde_json::Value;
@@ -726,15 +726,28 @@ pub enum TranslateStage {
     Translating,
 }
 
-/// 翻译流程的产出。
+/// 一个段落的原文、译文与它对应的 OCR 行框下标。
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TranslatedParagraph {
+    /// 原文段。
+    pub source: String,
+    /// 译文段。
+    pub translated: String,
+    /// 组成该段的 OCR 行框下标（对应 `OcrResult::boxes`）。
+    pub box_indices: Vec<usize>,
+}
+
+/// 翻译流程的产出。
+#[derive(Debug, Clone, PartialEq)]
 pub struct TranslateOutcome {
     /// 参与翻译的原文（按段落，行间 `\n`）。
     pub source: String,
     /// 译文（按段落，行间 `\n`）。
     pub translated: String,
-    /// 原文与译文的逐段对照。
-    pub pairs: Vec<(String, String)>,
+    /// 原文与译文的逐段对照（含行框下标）。
+    pub pairs: Vec<TranslatedParagraph>,
+    /// OCR 行框（选区内图像坐标，供浮层与结果窗高亮）。
+    pub boxes: Vec<OcrTextBox>,
     /// 后端与模型展示名。
     pub label: String,
     /// OCR 耗时（毫秒）。
@@ -798,10 +811,14 @@ pub fn run_flow(
 ) -> Result<TranslateOutcome, TranslateFlowError> {
     on_stage(TranslateStage::Recognizing);
     let ocr = recognize().map_err(TranslateFlowError::Ocr)?;
-    let paragraphs = paragraphs_from_boxes(&ocr.boxes, config.layout);
-    if paragraphs.is_empty() {
+    let paragraphs_with_indices = paragraphs_from_boxes(&ocr.boxes, config.layout);
+    if paragraphs_with_indices.is_empty() {
         return Err(TranslateFlowError::NoText);
     }
+    let paragraphs: Vec<String> = paragraphs_with_indices
+        .iter()
+        .map(|(s, _)| s.clone())
+        .collect();
     let joined = paragraphs.join("\n");
     if matches!(config.target, Lang::ZhHans | Lang::ZhHant) && is_mostly_cjk(&joined) {
         return Err(TranslateFlowError::AlreadyTarget(config.target));
@@ -812,15 +829,21 @@ pub fn run_flow(
         .translate(config, &paragraphs)
         .map_err(TranslateFlowError::Translate)?;
     let translate_ms = started.elapsed().as_millis() as u64;
-    let pairs: Vec<(String, String)> = paragraphs
-        .iter()
-        .cloned()
-        .zip(translated.texts.iter().cloned())
+    let translated_text = translated.texts.join("\n");
+    let pairs: Vec<TranslatedParagraph> = paragraphs_with_indices
+        .into_iter()
+        .zip(translated.texts)
+        .map(|((source, box_indices), translated)| TranslatedParagraph {
+            source,
+            translated,
+            box_indices,
+        })
         .collect();
     Ok(TranslateOutcome {
         source: joined,
-        translated: translated.texts.join("\n"),
+        translated: translated_text,
         pairs,
+        boxes: ocr.boxes,
         label: translated.label,
         ocr_ms: ocr.elapsed_ms,
         translate_ms,
@@ -1445,6 +1468,9 @@ mod tests {
             "译:Hello there my friend\n译:Second para."
         );
         assert_eq!(outcome.pairs.len(), 2);
+        assert_eq!(outcome.pairs[0].box_indices, vec![0, 1]);
+        assert_eq!(outcome.pairs[1].box_indices, vec![2]);
+        assert_eq!(outcome.boxes.len(), 3);
         assert_eq!((outcome.ocr_ms, outcome.label.as_str()), (7, "fake"));
     }
 

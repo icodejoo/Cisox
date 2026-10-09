@@ -20,6 +20,7 @@ use snow_capability::CapabilityRegistry;
 
 // ---- 精选 GPUI 子集（视图层使用）----
 pub use gpui_kit::{
+    Animation, AnimationExt,
     Anchor, AnyElement, App, AppContext, Bounds, ClickEvent, Context, CursorStyle, Div, Element,
     ElementId, ElementInputHandler, Entity, EntityInputHandler, FocusHandle, Focusable, FontWeight,
     PathBuilder,
@@ -190,6 +191,22 @@ impl ShellWindow {
     /// ```
     pub fn set_input_transparent(&self, transparent: bool) -> Result<(), ShellError> {
         native::set_input_transparent(self.native_hwnd()?, transparent)
+    }
+
+    /// 设置整窗不透明度，用于让不支持逐像素透明的窗口也呈现半透明。
+    ///
+    /// # 参数
+    /// - `alpha`：`0` 全透明 ~ `255` 不透明。
+    ///
+    /// # 返回
+    /// 取不到原生句柄或平台调用失败返回错误。若同时要鼠标穿透，须在 [`Self::set_input_transparent`] 之后调用。
+    ///
+    /// ```ignore
+    /// window.set_input_transparent(true)?;
+    /// window.set_window_alpha(140)?;
+    /// ```
+    pub fn set_window_alpha(&self, alpha: u8) -> Result<(), ShellError> {
+        native::set_window_alpha(self.native_hwnd()?, alpha)
     }
 
     /// 原生窗口句柄整数值；取不到返回 `Platform` 错误。

@@ -245,6 +245,26 @@ pub(crate) fn set_capture_excluded(hwnd: isize, excluded: bool) -> Result<(), Sh
         .map_err(|e| platform_err("SetWindowDisplayAffinity", e))
 }
 
+/// 设置整窗不透明度（`0` 全透明 ~ `255` 不透明），用分层窗口的整体 alpha 实现。
+///
+/// 会把窗口设为分层窗口（`WS_EX_LAYERED`）；与 [`set_input_transparent`] 同时使用时，应在它之后调用，
+/// 否则不透明度会被它重置为 255。
+pub(crate) fn set_window_alpha(hwnd: isize, alpha: u8) -> Result<(), ShellError> {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GWL_EXSTYLE, GetWindowLongPtrW, LWA_ALPHA, SetLayeredWindowAttributes, SetWindowLongPtrW,
+        WS_EX_LAYERED,
+    };
+    let hwnd = to_hwnd(hwnd);
+    // SAFETY: 纯值参数；句柄无效时系统返回错误而不是崩溃。
+    unsafe {
+        let current = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, current | WS_EX_LAYERED.0 as isize);
+    }
+    // SAFETY: 同上。
+    unsafe { SetLayeredWindowAttributes(hwnd, Default::default(), alpha, LWA_ALPHA) }
+        .map_err(|e| platform_err("SetLayeredWindowAttributes", e))
+}
+
 /// 设置窗口是否对输入透明（鼠标点击穿过窗口落到下层窗口，且窗口不抢焦点）。
 ///
 /// 实现为 `WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE`；开启分层样式后补一次

@@ -76,6 +76,11 @@ pub(crate) fn set_window_visible(_hwnd: isize, _visible: bool) -> Result<(), She
     Err(unsupported(Capability::OverlayClickThrough))
 }
 
+/// 设置整窗不透明度：桩返回不支持。
+pub(crate) fn set_window_alpha(_hwnd: isize, _alpha: u8) -> Result<(), ShellError> {
+    Err(unsupported(Capability::OverlayClickThrough))
+}
+
 /// 设置窗口输入透明：桩返回不支持。
 pub(crate) fn set_input_transparent(_hwnd: isize, _transparent: bool) -> Result<(), ShellError> {
     Err(unsupported(Capability::OverlayClickThrough))

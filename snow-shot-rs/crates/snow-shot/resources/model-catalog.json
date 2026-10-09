@@ -1,0 +1,497 @@
+{
+  "schema": 1,
+  "entries": [
+    {
+      "feature": "translate",
+      "id": "nllb600m-main14-ccm-int4",
+      "name": "NLLB-200 600M (14 languages)",
+      "file_name": "nllb600m-main14-ccm-int4",
+      "aliases": [
+        "nllb600m-main14-ccm-int4-pack",
+        "nllb600m-main14-ccm-int4-ext"
+      ],
+      "size_bytes": 507510784,
+      "size_approx": true,
+      "license": "CC BY-NC 4.0",
+      "url": "https://github.com/icodejoo/Cisox/releases/download/models/nllb600m-main14-ccm-int4.zip",
+      "default": true,
+      "note_key": "model-catalog-note-nllb600m-main14-ccm-int4"
+    },
+    {
+      "feature": "translate",
+      "id": "nllb600m-un6-ccm-int4",
+      "name": "NLLB-200 600M (UN six)",
+      "file_name": "nllb600m-un6-ccm-int4",
+      "aliases": [
+        "nllb600m-un6-ccm-int4-pack",
+        "nllb600m-un6-ccm-int4-ext"
+      ],
+      "size_bytes": 401604608,
+      "size_approx": true,
+      "license": "CC BY-NC 4.0",
+      "url": "https://github.com/icodejoo/Cisox/releases/download/models/nllb600m-un6-ccm-int4.zip",
+      "default": false,
+      "note_key": "model-catalog-note-nllb600m-un6-ccm-int4"
+    },
+    {
+      "feature": "translate",
+      "id": "opusmt-en-zh-int4",
+      "name": "OPUS-MT en to zh",
+      "file_name": "opusmt-en-zh-int4",
+      "aliases": [
+        "opusmt-en-zh-int4-pack"
+      ],
+      "size_bytes": 118803660,
+      "size_approx": true,
+      "license": "Apache-2.0",
+      "url": "https://github.com/icodejoo/Cisox/releases/download/models/opusmt-en-zh-int4.zip",
+      "default": false,
+      "note_key": "model-catalog-note-opusmt-en-zh-int4"
+    },
+    {
+      "feature": "translate",
+      "id": "opusmt-zh-en-int4",
+      "name": "OPUS-MT zh to en",
+      "file_name": "opusmt-zh-en-int4",
+      "aliases": [
+        "opusmt-zh-en-int4-pack"
+      ],
+      "size_bytes": 128450560,
+      "size_approx": true,
+      "license": "CC BY 4.0",
+      "url": "https://github.com/icodejoo/Cisox/releases/download/models/opusmt-zh-en-int4.zip",
+      "default": false,
+      "note_key": "model-catalog-note-opusmt-zh-en-int4"
+    },
+    {
+      "feature": "translate",
+      "id": "hymt2-1.8b-int4",
+      "name": "Hy-MT2 1.8B",
+      "file_name": "hymt2-1.8b-int4",
+      "aliases": [
+        "hymt2-1.8b-int4-pack",
+        "hymt2-1.8b-int4-ext"
+      ],
+      "size_bytes": 1378877440,
+      "size_approx": true,
+      "license": "Apache-2.0",
+      "url": "https://github.com/icodejoo/Cisox/releases/download/models/hymt2-1.8b-int4.zip",
+      "default": false,
+      "note_key": "model-catalog-note-hymt2-1-8b-int4"
+    },
+    {
+      "feature": "ocr",
+      "id": "ppocrv6-tiny-cd609a1",
+      "name": "PP-OCRv6 tiny",
+      "file_name": "ppocrv6-tiny-cd609a1",
+      "size_bytes": 6346587,
+      "license": "Apache-2.0",
+      "url": "https://www.modelscope.cn/models/mgchao/SnowShotOCR/files",
+      "default": false,
+      "extra": [
+        {
+          "name": "PP-OCRv6_det_tiny.onnx",
+          "url": "https://www.modelscope.cn/models/mgchao/SnowShotOCR/resolve/master/PP-OCRv6/tiny/PP-OCRv6_det_tiny.onnx",
+          "size_bytes": 1829618
+        },
+        {
+          "name": "PP-OCRv6_rec_tiny.onnx",
+          "url": "https://www.modelscope.cn/models/mgchao/SnowShotOCR/resolve/master/PP-OCRv6/tiny/PP-OCRv6_rec_tiny.onnx",
+          "size_bytes": 4489813
+        },
+        {
+          "name": "ppocrv6_tiny_dict.txt",
+          "url": "https://www.modelscope.cn/models/mgchao/SnowShotOCR/resolve/master/PP-OCRv6/tiny/ppocrv6_tiny_dict.txt",
+          "size_bytes": 27156
+        }
+      ],
+      "note_key": "model-catalog-note-ppocrv6-tiny-cd609a1"
+    },
+    {
+      "feature": "ocr",
+      "id": "ppocrv6-small-463ea9f",
+      "name": "PP-OCRv6 small",
+      "file_name": "ppocrv6-small-463ea9f",
+      "size_bytes": 31238924,
+      "license": "Apache-2.0",
+      "url": "https://www.modelscope.cn/models/mgchao/SnowShotOCR/files",
+      "default": true,
+      "extra": [
+        {
+          "name": "PP-OCRv6_det_small.onnx",
+          "url": "https://www.modelscope.cn/models/mgchao/SnowShotOCR/resolve/master/PP-OCRv6/small/PP-OCRv6_det_small.onnx",
+          "size_bytes": 9929594
+        },
+        {
+          "name": "PP-OCRv6_rec_small.onnx",
+          "url": "https://www.modelscope.cn/models/mgchao/SnowShotOCR/resolve/master/PP-OCRv6/small/PP-OCRv6_rec_small.onnx",
+          "size_bytes": 21234383
+        },
+        {
+          "name": "ppocrv6_dict.txt",
+          "url": "https://www.modelscope.cn/models/mgchao/SnowShotOCR/resolve/master/PP-OCRv6/small/ppocrv6_dict.txt",
+          "size_bytes": 74947
+        }
+      ],
+      "note_key": "model-catalog-note-ppocrv6-small-463ea9f"
+    },
+    {
+      "feature": "ocr",
+      "id": "ppocrv6-medium-f5063c6",
+      "name": "PP-OCRv6 medium",
+      "file_name": "ppocrv6-medium-f5063c6",
+      "size_bytes": 138824385,
+      "license": "Apache-2.0",
+      "url": "https://www.modelscope.cn/models/mgchao/SnowShotOCR/files",
+      "default": false,
+      "extra": [
+        {
+          "name": "PP-OCRv6_det_medium.onnx",
+          "url": "https://www.modelscope.cn/models/mgchao/SnowShotOCR/resolve/master/PP-OCRv6/medium/PP-OCRv6_det_medium.onnx",
+          "size_bytes": 62119454
+        },
+        {
+          "name": "PP-OCRv6_rec_medium.onnx",
+          "url": "https://www.modelscope.cn/models/mgchao/SnowShotOCR/resolve/master/PP-OCRv6/medium/PP-OCRv6_rec_medium.onnx",
+          "size_bytes": 76629984
+        },
+        {
+          "name": "ppocrv6_dict.txt",
+          "url": "https://www.modelscope.cn/models/mgchao/SnowShotOCR/resolve/master/PP-OCRv6/medium/ppocrv6_dict.txt",
+          "size_bytes": 74947
+        }
+      ],
+      "note_key": "model-catalog-note-ppocrv6-medium-f5063c6"
+    },
+    {
+      "feature": "ocr",
+      "id": "ppocrv5-small-7b2a75a",
+      "name": "PP-OCRv5 small",
+      "file_name": "ppocrv5-small-7b2a75a",
+      "size_bytes": 21524894,
+      "license": "Apache-2.0",
+      "url": "https://www.modelscope.cn/models/mgchao/SnowShotOCR/files",
+      "default": false,
+      "extra": [
+        {
+          "name": "ch_PP-OCRv5_det_mobile.onnx",
+          "url": "https://www.modelscope.cn/models/mgchao/SnowShotOCR/resolve/master/PP-OCRv5/mobile/ch_PP-OCRv5_det_mobile.onnx",
+          "size_bytes": 4819576
+        },
+        {
+          "name": "ch_PP-OCRv5_rec_mobile.onnx",
+          "url": "https://www.modelscope.cn/models/mgchao/SnowShotOCR/resolve/master/PP-OCRv5/mobile/ch_PP-OCRv5_rec_mobile.onnx",
+          "size_bytes": 16631306
+        },
+        {
+          "name": "ppocrv5_dict.txt",
+          "url": "https://www.modelscope.cn/models/mgchao/SnowShotOCR/resolve/master/PP-OCRv5/mobile/ppocrv5_dict.txt",
+          "size_bytes": 74012
+        }
+      ],
+      "note_key": "model-catalog-note-ppocrv5-small-7b2a75a"
+    },
+    {
+      "feature": "ocr",
+      "id": "ppocrv5-medium-7b2a75a",
+      "name": "PP-OCRv5 medium",
+      "file_name": "ppocrv5-medium-7b2a75a",
+      "size_bytes": 172769802,
+      "license": "Apache-2.0",
+      "url": "https://www.modelscope.cn/models/mgchao/SnowShotOCR/files",
+      "default": false,
+      "extra": [
+        {
+          "name": "ch_PP-OCRv5_det_server.onnx",
+          "url": "https://www.modelscope.cn/models/mgchao/SnowShotOCR/resolve/master/PP-OCRv5/server/ch_PP-OCRv5_det_server.onnx",
+          "size_bytes": 88118768
+        },
+        {
+          "name": "ch_PP-OCRv5_rec_server.onnx",
+          "url": "https://www.modelscope.cn/models/mgchao/SnowShotOCR/resolve/master/PP-OCRv5/server/ch_PP-OCRv5_rec_server.onnx",
+          "size_bytes": 84577022
+        },
+        {
+          "name": "ppocrv5_dict.txt",
+          "url": "https://www.modelscope.cn/models/mgchao/SnowShotOCR/resolve/master/PP-OCRv5/server/ppocrv5_dict.txt",
+          "size_bytes": 74012
+        }
+      ],
+      "note_key": "model-catalog-note-ppocrv5-medium-7b2a75a"
+    },
+    {
+      "feature": "ocr",
+      "id": "ppocrv4-small-7b2a75a",
+      "name": "PP-OCRv4 small",
+      "file_name": "ppocrv4-small-7b2a75a",
+      "size_bytes": 15629724,
+      "license": "Apache-2.0",
+      "url": "https://www.modelscope.cn/models/mgchao/SnowShotOCR/files",
+      "default": false,
+      "extra": [
+        {
+          "name": "ch_PP-OCRv4_det_mobile.onnx",
+          "url": "https://www.modelscope.cn/models/mgchao/SnowShotOCR/resolve/master/PP-OCRv4/mobile/ch_PP-OCRv4_det_mobile.onnx",
+          "size_bytes": 4745517
+        },
+        {
+          "name": "ch_PP-OCRv4_rec_mobile.onnx",
+          "url": "https://www.modelscope.cn/models/mgchao/SnowShotOCR/resolve/master/PP-OCRv4/mobile/ch_PP-OCRv4_rec_mobile.onnx",
+          "size_bytes": 10857958
+        },
+        {
+          "name": "ppocr_keys_v1.txt",
+          "url": "https://www.modelscope.cn/models/mgchao/SnowShotOCR/resolve/master/PP-OCRv4/mobile/ppocr_keys_v1.txt",
+          "size_bytes": 26249
+        }
+      ],
+      "note_key": "model-catalog-note-ppocrv4-small-7b2a75a"
+    },
+    {
+      "feature": "ocr",
+      "id": "ppocrv4-medium-7b2a75a",
+      "name": "PP-OCRv4 medium",
+      "file_name": "ppocrv4-medium-7b2a75a",
+      "size_bytes": 203909085,
+      "license": "Apache-2.0",
+      "url": "https://www.modelscope.cn/models/mgchao/SnowShotOCR/files",
+      "default": false,
+      "extra": [
+        {
+          "name": "ch_PP-OCRv4_det_server.onnx",
+          "url": "https://www.modelscope.cn/models/mgchao/SnowShotOCR/resolve/master/PP-OCRv4/server/ch_PP-OCRv4_det_server.onnx",
+          "size_bytes": 113352104
+        },
+        {
+          "name": "ch_PP-OCRv4_rec_server.onnx",
+          "url": "https://www.modelscope.cn/models/mgchao/SnowShotOCR/resolve/master/PP-OCRv4/server/ch_PP-OCRv4_rec_server.onnx",
+          "size_bytes": 90530732
+        },
+        {
+          "name": "ppocr_keys_v1.txt",
+          "url": "https://www.modelscope.cn/models/mgchao/SnowShotOCR/resolve/master/PP-OCRv4/server/ppocr_keys_v1.txt",
+          "size_bytes": 26249
+        }
+      ],
+      "note_key": "model-catalog-note-ppocrv4-medium-7b2a75a"
+    },
+    {
+      "feature": "ocr",
+      "id": "ocr-runtime-1.0.8",
+      "name": "OCR runtime 1.0.8",
+      "anchor": "ocr_runtime",
+      "file_name": "runtimes/1.0.8/windows-x64",
+      "size_bytes": 17345319,
+      "license": "Apache-2.0",
+      "url": "https://www.modelscope.cn/models/mgchao/SnowShotOCR/resolve/master/runtime/1.0.8/windows-x64/snow-ocr-runtime-1.0.8-windows-x64.zip",
+      "default": false,
+      "note_key": "model-catalog-note-ocr-runtime-1-0-8"
+    },
+    {
+      "feature": "stt",
+      "id": "sherpa-onnx-streaming-zipformer-multi-zh-hans-2023-12-12",
+      "name": "sherpa-onnx-streaming-zipformer-multi-zh-hans-2023-12-12",
+      "file_name": "sherpa-onnx-streaming-zipformer-multi-zh-hans-2023-12-12",
+      "size_bytes": 310380628,
+      "license": "apache-2.0",
+      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-multi-zh-hans-2023-12-12.tar.bz2",
+      "default": true,
+      "note_key": "model-catalog-note-stt-zh-streaming-default"
+    },
+    {
+      "feature": "stt",
+      "id": "sherpa-onnx-streaming-zipformer-zh-int8-2025-06-30",
+      "name": "sherpa-onnx-streaming-zipformer-zh-int8-2025-06-30",
+      "file_name": "sherpa-onnx-streaming-zipformer-zh-int8-2025-06-30",
+      "size_bytes": 132634597,
+      "license": "apache-2.0",
+      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-zh-int8-2025-06-30.tar.bz2",
+      "default": false,
+      "note_key": "model-catalog-note-stt-zh-streaming-alternate"
+    },
+    {
+      "feature": "stt",
+      "id": "sherpa-onnx-streaming-zipformer-en-2023-06-26",
+      "name": "sherpa-onnx-streaming-zipformer-en-2023-06-26",
+      "file_name": "sherpa-onnx-streaming-zipformer-en-2023-06-26",
+      "size_bytes": 310414022,
+      "license": "apache-2.0",
+      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-en-2023-06-26.tar.bz2",
+      "default": true,
+      "note_key": "model-catalog-note-stt-en-streaming-default"
+    },
+    {
+      "feature": "stt",
+      "id": "sherpa-onnx-streaming-zipformer-en-2023-06-21",
+      "name": "sherpa-onnx-streaming-zipformer-en-2023-06-21",
+      "file_name": "sherpa-onnx-streaming-zipformer-en-2023-06-21",
+      "size_bytes": 506956414,
+      "license": "apache-2.0",
+      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-en-2023-06-21.tar.bz2",
+      "default": false,
+      "note_key": "model-catalog-note-stt-en-streaming-alternate"
+    },
+    {
+      "feature": "stt",
+      "id": "sherpa-onnx-x-asr-480ms-streaming-zipformer-transducer-zh-en-punct-int8-2026-06-05",
+      "name": "sherpa-onnx-x-asr-480ms-streaming-zipformer-transducer-zh-en-punct-int8-2026-06-05",
+      "file_name": "sherpa-onnx-x-asr-480ms-streaming-zipformer-transducer-zh-en-punct-int8-2026-06-05",
+      "size_bytes": 133895136,
+      "license": "apache-2.0",
+      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-x-asr-480ms-streaming-zipformer-transducer-zh-en-punct-int8-2026-06-05.tar.bz2",
+      "default": true,
+      "note_key": "model-catalog-note-stt-bilingual-streaming-default"
+    },
+    {
+      "feature": "stt",
+      "id": "sherpa-onnx-x-asr-160ms-streaming-zipformer-transducer-zh-en-punct-int8-2026-06-05",
+      "name": "sherpa-onnx-x-asr-160ms-streaming-zipformer-transducer-zh-en-punct-int8-2026-06-05",
+      "file_name": "sherpa-onnx-x-asr-160ms-streaming-zipformer-transducer-zh-en-punct-int8-2026-06-05",
+      "size_bytes": 133898007,
+      "license": "apache-2.0",
+      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-x-asr-160ms-streaming-zipformer-transducer-zh-en-punct-int8-2026-06-05.tar.bz2",
+      "default": false,
+      "note_key": "model-catalog-note-stt-bilingual-streaming-alternate"
+    },
+    {
+      "feature": "stt",
+      "id": "sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20",
+      "name": "sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20",
+      "file_name": "sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20",
+      "size_bytes": 511274346,
+      "license": "apache-2.0",
+      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20.tar.bz2",
+      "default": false,
+      "note_key": "model-catalog-note-stt-bilingual-streaming-legacy"
+    },
+    {
+      "feature": "stt",
+      "id": "sherpa-onnx-paraformer-zh-small-2024-03-09",
+      "name": "sherpa-onnx-paraformer-zh-small-2024-03-09",
+      "file_name": "sherpa-onnx-paraformer-zh-small-2024-03-09",
+      "size_bytes": 77920048,
+      "license": "unverified",
+      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-paraformer-zh-small-2024-03-09.tar.bz2",
+      "default": true,
+      "note_key": "model-catalog-note-stt-zh-offline-default"
+    },
+    {
+      "feature": "stt",
+      "id": "sherpa-onnx-paraformer-trilingual-zh-cantonese-en",
+      "name": "sherpa-onnx-paraformer-trilingual-zh-cantonese-en",
+      "file_name": "sherpa-onnx-paraformer-trilingual-zh-cantonese-en",
+      "size_bytes": 1059453702,
+      "license": "unverified",
+      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-paraformer-trilingual-zh-cantonese-en.tar.bz2",
+      "default": false,
+      "note_key": "model-catalog-note-stt-zh-offline-alternate"
+    },
+    {
+      "feature": "stt",
+      "id": "sherpa-onnx-zipformer-small-en-2023-06-26",
+      "name": "sherpa-onnx-zipformer-small-en-2023-06-26",
+      "file_name": "sherpa-onnx-zipformer-small-en-2023-06-26",
+      "size_bytes": 112232184,
+      "license": "apache-2.0",
+      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-zipformer-small-en-2023-06-26.tar.bz2",
+      "default": true,
+      "note_key": "model-catalog-note-stt-en-offline-default"
+    },
+    {
+      "feature": "stt",
+      "id": "sherpa-onnx-zipformer-en-2023-06-26",
+      "name": "sherpa-onnx-zipformer-en-2023-06-26",
+      "file_name": "sherpa-onnx-zipformer-en-2023-06-26",
+      "size_bytes": 307666046,
+      "license": "apache-2.0",
+      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-zipformer-en-2023-06-26.tar.bz2",
+      "default": false,
+      "note_key": "model-catalog-note-stt-en-offline-alternate"
+    },
+    {
+      "feature": "stt",
+      "id": "sherpa-onnx-x-asr-zipformer-transducer-zh-en-punct-int8-2026-06-03",
+      "name": "sherpa-onnx-x-asr-zipformer-transducer-zh-en-punct-int8-2026-06-03",
+      "file_name": "sherpa-onnx-x-asr-zipformer-transducer-zh-en-punct-int8-2026-06-03",
+      "size_bytes": 136396739,
+      "license": "apache-2.0",
+      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-x-asr-zipformer-transducer-zh-en-punct-int8-2026-06-03.tar.bz2",
+      "default": true,
+      "note_key": "model-catalog-note-stt-bilingual-offline-default"
+    },
+    {
+      "feature": "stt",
+      "id": "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17",
+      "name": "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17",
+      "file_name": "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17",
+      "size_bytes": 163002883,
+      "license": "funasr-model-license",
+      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2",
+      "default": false,
+      "note_key": "model-catalog-note-stt-bilingual-offline-alternate"
+    },
+    {
+      "feature": "stt",
+      "id": "silero-vad",
+      "name": "Silero VAD",
+      "file_name": "silero_vad.onnx",
+      "size_bytes": 643854,
+      "license": "MIT",
+      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx",
+      "default": false,
+      "note_key": "model-catalog-note-silero-vad"
+    },
+    {
+      "feature": "table",
+      "id": "slanet-plus",
+      "name": "SLANet plus",
+      "file_name": "slanet-plus",
+      "aliases": [
+        "slanet-plus.onnx"
+      ],
+      "size_bytes": 7758305,
+      "license": "Apache-2.0",
+      "url": "https://www.modelscope.cn/models/RapidAI/RapidTable/resolve/master/slanet-plus.onnx",
+      "default": true,
+      "note_key": "model-catalog-note-slanet-plus"
+    },
+    {
+      "feature": "latex",
+      "id": "rapid-latex-ocr",
+      "name": "RapidLaTeXOCR",
+      "file_name": "image_resizer.onnx",
+      "also_files": [
+        "encoder.onnx",
+        "decoder.onnx",
+        "tokenizer.json"
+      ],
+      "size_bytes": 178952787,
+      "license": "MIT",
+      "url": "https://github.com/RapidAI/RapidLaTeXOCR/releases/tag/v0.0.0",
+      "default": true,
+      "extra": [
+        {
+          "name": "image_resizer.onnx",
+          "url": "",
+          "size_bytes": 38967751
+        },
+        {
+          "name": "encoder.onnx",
+          "url": "",
+          "size_bytes": 89008136
+        },
+        {
+          "name": "decoder.onnx",
+          "url": "",
+          "size_bytes": 50952726
+        },
+        {
+          "name": "tokenizer.json",
+          "url": "",
+          "size_bytes": 24174
+        }
+      ],
+      "note_key": "model-catalog-note-rapid-latex-ocr"
+    }
+  ]
+}

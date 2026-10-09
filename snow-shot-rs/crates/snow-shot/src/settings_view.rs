@@ -4,11 +4,13 @@
 //! 每帧只构建屏幕内可见的几行，与配置项总数无关。
 
 use crate::config_transfer::{TRANSFER_GROUP_ID, TransferAction, TransferUiState, transfer_panel};
+use crate::custom_models_edit::{self, KEY_CUSTOM_MODELS, ModelForm};
 use crate::dictation::status::backend_notice as dictation_backend_notice;
 use crate::dictation::translate::ModelSupport;
 use crate::language_names::{is_language_key, language_option_label};
-use crate::latex_assets::{LATEX_GROUP_ID, LatexAction, latex_panel};
 use crate::mcp_settings::{MCP_GROUP_ID, McpUiState, copy_result_state, mcp_panel};
+use crate::model_catalog::{self, CatalogRow, Feature, ModelDirs, ScanKind};
+use crate::model_pick;
 use crate::net_settings::{UPDATES_GROUP_ID, UpdateAction, UpdateUiState, update_panel};
 use crate::ocr_backend::{OcrBackend, OcrNotice};
 use crate::settings_model::{
@@ -17,26 +19,24 @@ use crate::settings_model::{
 };
 use crate::settings_pages::{ExtraState, TRANSLATION_PAGE_ENABLED_KEY};
 use crate::settings_state::{
-    ConfigChange, KeyMods, RowModel, Scope, SettingsAction, SettingsState,
-    SharedConfig, StatusKind, SystemPrefs, read_only_note,
+    ConfigChange, KeyMods, RowModel, Scope, SettingsAction, SettingsState, SharedConfig,
+    StatusKind, SystemPrefs, read_only_note,
 };
 use crate::settings_text::{Lang, Text, group_title, item_desc, item_label, option_text, t};
-use crate::stt_download::{self, Progress};
+use crate::stt_download;
 use crate::stt_models::{self, mode_as_str};
 use crate::stt_settings::{
-    CancelFlag, DICTATION_GROUP_ID, DownloadState, PanelAction, PanelModel, SttHooks, SttInputs,
-    build_panel, is_selector_key, is_translate_note_key, model_row_status,
-    option_label as stt_option_label, option_value, rescans_translate_support,
-    scan_translate_support, selector_note, translate_note,
+    SttHooks, SttInputs, is_selector_key, is_translate_note_key, option_label as stt_option_label,
+    option_value, rescans_translate_support, scan_translate_support, selector_note, translate_note,
 };
 use crate::translate_settings::{
-    HYMT2_LINE_COUNT, Hymt2Button, Hymt2Click, Hymt2Row, Hymt2View, hymt2_click, hymt2_rows,
-    hymt2_view, route_hint, route_mode_label, split_list_index,
+    Hymt2Row, hymt2_rows, route_hint, route_mode_label, split_list_index,
 };
 use serde_json::{Value, json};
+use snow_config::custom_models::CustomAiModel;
 use snow_config::extensions::{
-    KEY_DICTATION_BACKEND, KEY_DICTATION_MODEL_ID, KEY_LOCAL_MODEL_ID, KEY_LOCAL_ROUTE_MODE,
-    KEY_OCR_BACKEND,
+    KEY_DICTATION_BACKEND, KEY_DICTATION_MODEL_ID, KEY_LATEX_MODEL, KEY_LOCAL_MODEL_ID,
+    KEY_LOCAL_ROUTE_MODE, KEY_OCR_BACKEND, KEY_OCR_MODEL_TYPE, KEY_TABLE_MODEL,
 };
 use snow_i18n::Args;
 use snow_ui::ui::component::button::Button;
@@ -66,8 +66,10 @@ const LABEL_WIDTH: f32 = 300.0;
 const SUB_MAX_HEIGHT: f32 = 36.0;
 /// 下拉选择器触发器宽度。
 const DROPDOWN_WIDTH: f32 = 200.0;
-/// 语音模型下拉触发器宽度（需完整容纳最长的「名称（推荐）」标签，约 66 个英文字符）。
-const MODEL_DROPDOWN_WIDTH: f32 = 540.0;
+/// 语音模型下拉触发器宽度（长标签会被截断显示；与“获取”“重置”一起要在默认窗口宽度下同时可见）。
+const MODEL_DROPDOWN_WIDTH: f32 = 300.0;
+/// 扫描类“默认模型”下拉（翻译 / OCR / 表格 / 公式）触发器宽度：下拉 + “获取” + “重置”要在默认窗口宽度下同时可见。
+const PICK_DROPDOWN_WIDTH: f32 = 210.0;
 /// 下拉选择器触发器高度。
 const DROPDOWN_HEIGHT: f32 = 28.0;
 /// 下拉浮层最大高度（超出后浮层内滚动）。
@@ -90,6 +92,133 @@ const READ_ONLY_PREVIEW_CHARS: usize = 28;
 const SHORTCUT_CHIPS_MAX: usize = 4;
 /// 自动化测试操作的间隔。
 pub const AUTOTEST_STEP_INTERVAL: Duration = Duration::from_millis(350);
+
+/// 自定义 AI 模型编辑表单的界面状态。
+struct CustomModelFormState {
+    /// 表单里不由输入框承载的部分（ID、视觉 / 推理开关）。
+    form: ModelForm,
+    /// 名称输入框。
+    name: Entity<InputState>,
+    /// API URL 输入框。
+    base_url: Entity<InputState>,
+    /// API 密钥输入框（遮罩显示）。
+    api_key: Entity<InputState>,
+    /// API 模型输入框。
+    model: Entity<InputState>,
+    /// 校验失败 / 保存失败的提示。
+    error: Option<String>,
+}
+
+/// 推荐模型弹窗的缓存（避免每帧访问磁盘）。
+struct CatalogCache {
+    /// 对应的功能。
+    feature: Feature,
+    /// 缓存时的界面语言。
+    locale: String,
+    /// 该功能的目录集合（主目录在前，其余是回退读取目录）。
+    dirs: ModelDirs,
+    /// 弹窗行。
+    rows: Vec<CatalogRow>,
+    /// 模型目录里已有的文件（夹）名。
+    installed: Vec<String>,
+    /// 扫描时刻；超过 [`CATALOG_RESCAN`] 后下次渲染重扫。
+    scanned: Instant,
+}
+
+/// 把字符串转成 `'static`（下拉选项的值要求 `'static`；同一个值只泄漏一份，数量受模型目录里的文件夹数限制）。
+fn intern_value(value: &str) -> &'static str {
+    use std::sync::{Mutex, OnceLock};
+    static POOL: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
+    let mut pool = POOL
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(found) = pool.get(value) {
+        return found;
+    }
+    let leaked: &'static str = Box::leak(value.to_owned().into_boxed_str());
+    pool.insert(leaked);
+    leaked
+}
+
+/// 扫描类“默认模型”下拉对应的功能（语音有自己的下拉，不在此列）。
+fn pick_feature(key: &str) -> Option<Feature> {
+    match key {
+        KEY_LOCAL_MODEL_ID => Some(Feature::Translate),
+        KEY_OCR_MODEL_TYPE => Some(Feature::Ocr),
+        KEY_TABLE_MODEL => Some(Feature::Table),
+        KEY_LATEX_MODEL => Some(Feature::Latex),
+        _ => None,
+    }
+}
+
+/// 扫描类“默认模型”下拉的数据来源。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PickSource {
+    /// 模型目录里已下载的模型（翻译 / OCR / 表格 / 公式）。
+    Catalog(Feature),
+    /// 已配置的自定义 AI 模型；`vision_only` 为真时只含支持视觉的模型。
+    Custom {
+        /// 是否只列支持视觉的模型。
+        vision_only: bool,
+    },
+}
+
+/// 配置键对应的下拉数据来源；不走扫描类下拉的键返回 `None`。
+fn pick_source(key: &str) -> Option<PickSource> {
+    match key {
+        crate::translate_service::KEY_CUSTOM_MODEL => {
+            Some(PickSource::Custom { vision_only: false })
+        }
+        crate::conversion_guide::KEY_VISION_MODEL => Some(PickSource::Custom { vision_only: true }),
+        _ => pick_feature(key).map(PickSource::Catalog),
+    }
+}
+
+/// 自定义 AI 模型编辑页所在的设置分组 id（“模型接口”）。
+const CUSTOM_MODELS_GROUP_ID: &str = "api_configuration";
+
+/// 把扫描结果转成下拉选项：选项就是且仅是已下载的模型（可带开头的“自动”空值项）。
+/// 没有任何已下载模型时为空（界面显示占位文案）；配置里的当前值不在其中也不追加。
+///
+/// # 参数
+/// - `scanned`：扫描得到的已下载模型。
+/// - `auto_label`：“自动”的本地化标签；`None` 表示该功能没有“自动”项。
+fn pick_items(
+    scanned: &[model_catalog::ModelOption],
+    auto_label: Option<&str>,
+) -> Vec<DropdownItem> {
+    if scanned.is_empty() {
+        return Vec::new();
+    }
+    let mut items: Vec<DropdownItem> = auto_label
+        .map(|label| DropdownItem {
+            value: "",
+            label: label.to_string().into(),
+        })
+        .into_iter()
+        .collect();
+    items.extend(scanned.iter().map(|option| DropdownItem {
+        value: intern_value(&option.value),
+        label: option.label.clone().into(),
+    }));
+    items
+}
+
+/// 各功能里“一个模型”怎么数：翻译包与 OCR 的 det/rec/dict 组是文件夹，其余文件夹与文件都算。
+fn catalog_scan_kind(feature: Feature) -> ScanKind {
+    match feature {
+        Feature::Translate | Feature::Ocr => ScanKind::FoldersOnly,
+        Feature::Stt | Feature::Table | Feature::Latex => ScanKind::Any,
+    }
+}
+
+/// 推荐模型弹窗的重新扫描间隔（用户下载放好文件后回到窗口能及时看到）。
+const CATALOG_RESCAN: Duration = Duration::from_secs(1);
+/// 推荐模型弹窗宽度（逻辑像素）。
+const CATALOG_DIALOG_WIDTH: f32 = 680.0;
+/// 推荐模型弹窗高度（逻辑像素）。
+const CATALOG_DIALOG_HEIGHT: f32 = 540.0;
 
 /// 一套配色。
 #[derive(Clone, Copy)]
@@ -392,8 +521,6 @@ pub struct SettingsView {
     list_scroll: UniformListScrollHandle,
     /// 渲染耗时探针。
     probe: RenderProbe,
-    /// Hy-MT2 下载入口点击后的提示（暂无发布地址，只给手动放置指引）。
-    hymt2_notice: Option<String>,
     /// 各配置键的下拉选择器（按需创建后常驻）。
     dropdowns: HashMap<&'static str, Dropdown>,
     /// 多选下拉（如托盘菜单项）按配置键常驻的状态。
@@ -426,12 +553,24 @@ pub struct SettingsView {
     mcp_state: McpUiState,
     /// 复制客户端配置入口；由上层写剪贴板并返回结果。
     mcp_hook: Option<Rc<dyn Fn() -> Result<(), String>>>,
-    /// “公式模型”面板按钮（打开目录 / 官方来源）的入口（未接入时为 `None`，按钮不可用）。
-    latex_hook: Option<Rc<dyn Fn(LatexAction)>>,
-    /// 语音模型下载任务的界面状态。
-    stt_download: DownloadState,
-    /// 进行中下载的取消标记。
-    stt_cancel: Option<CancelFlag>,
+    /// 应用数据根目录（推荐模型清单判定“已下载”、打开模型目录用）；未接入时没有“获取模型”入口。
+    catalog_data_root: Option<std::path::PathBuf>,
+    /// 当前打开的推荐模型弹窗对应的功能；未打开为 `None`。
+    catalog_open: Option<Feature>,
+    /// 推荐模型弹窗的缓存：行、目录里已有的名称、模型目录与扫描时刻（避免每帧访问磁盘）。
+    catalog_cache: Option<CatalogCache>,
+    /// 推荐模型弹窗里的操作失败提示。
+    catalog_notice: Option<String>,
+    /// 自定义 AI 模型编辑页的状态：正在编辑 / 新建的表单；未打开为 `None`。
+    cm_form: Option<CustomModelFormState>,
+    /// 等待确认删除的模型 ID。
+    cm_confirm_delete: Option<String>,
+    /// 编辑页顶部的操作提示（如保存失败）。
+    cm_notice: Option<String>,
+    /// 各“默认模型”下拉的扫描缓存（配置键 → 扫描时刻与已下载模型），避免每帧读盘。
+    pick_cache: HashMap<&'static str, (Instant, Vec<model_catalog::ModelOption>)>,
+    /// 各“默认模型”下拉当前选项的签名，变化时重建选项。
+    pick_signature: HashMap<&'static str, String>,
     /// 已安装的语音模型 ID 缓存（避免每帧访问磁盘）。
     stt_installed: HashSet<String>,
     /// 共享 VAD 是否已安装（缓存）。
@@ -518,12 +657,6 @@ const MCP_PANEL_LINES: usize = 1;
 /// 导出 / 导入说明区的文本行数（只有一行说明）。
 const TRANSFER_PANEL_LINES: usize = 1;
 
-/// “公式模型”说明区的文本行数（标题加状态为一个定高行）。
-const LATEX_PANEL_LINES: usize = 1;
-
-/// 翻译设置所在分组的 id。
-const TRANSLATION_GROUP_ID: &str = "screenshot_translation";
-
 impl SettingsView {
     /// 创建设置页并把键盘焦点交给它。
     ///
@@ -569,7 +702,6 @@ impl SettingsView {
                 focus: cx.focus_handle(),
                 list_scroll: UniformListScrollHandle::new(),
                 probe: RenderProbe::default(),
-                hymt2_notice: None,
                 dropdowns: HashMap::new(),
                 multi_dropdowns: HashMap::new(),
                 text_inputs: HashMap::new(),
@@ -586,9 +718,15 @@ impl SettingsView {
                 path_pick_hook: None,
                 mcp_state: McpUiState::Idle,
                 mcp_hook: None,
-                latex_hook: None,
-                stt_download: DownloadState::Idle,
-                stt_cancel: None,
+                catalog_data_root: None,
+                catalog_open: None,
+                catalog_cache: None,
+                catalog_notice: None,
+                cm_form: None,
+                cm_confirm_delete: None,
+                cm_notice: None,
+                pick_cache: HashMap::new(),
+                pick_signature: HashMap::new(),
                 stt_installed: HashSet::new(),
                 stt_vad_installed: false,
                 translate_support: None,
@@ -836,14 +974,6 @@ impl SettingsView {
         cx.notify();
     }
 
-    /// 接入“公式模型”面板的按钮入口。
-    ///
-    /// # 参数
-    /// - `hook`：点击按钮时调用，由上层打开目录或浏览器
-    pub fn set_latex_hook(&mut self, hook: Rc<dyn Fn(LatexAction)>) {
-        self.latex_hook = Some(hook);
-    }
-
     /// 当前配置里的公式模型目录（去掉首尾空白；没设置为空串）。
     fn latex_model_dir(&self) -> String {
         match self
@@ -908,76 +1038,6 @@ impl SettingsView {
         };
     }
 
-    /// 当前语音模型面板；被联动置灰或清单无模型时为 `None`。
-    fn stt_panel(&self) -> Option<PanelModel> {
-        build_panel(
-            &self.stt_inputs(),
-            |spec| self.stt_installed.contains(&spec.id),
-            self.stt_vad_installed,
-            &self.stt_download,
-            self.state.prefs().locale,
-        )
-    }
-
-    /// 开始下载模型（含离线模式缺的共享 VAD，由安装流程一并补齐）。
-    fn start_stt_download(&mut self, model_id: String) {
-        let Some(hooks) = &self.stt_hooks else { return };
-        let cancel = CancelFlag::default();
-        self.stt_cancel = Some(cancel.clone());
-        self.stt_download = DownloadState::Running {
-            model_id: model_id.clone(),
-            progress: None,
-        };
-        (hooks.request)(model_id, cancel);
-    }
-
-    /// 取消进行中的下载。
-    fn cancel_stt_download(&mut self) {
-        if let Some(cancel) = &self.stt_cancel {
-            cancel.cancel();
-        }
-    }
-
-    /// 下载线程上报进度（经主线程收件箱转入）。
-    ///
-    /// # 参数
-    /// - `progress`：进度快照
-    /// - `cx`：视图上下文
-    pub fn update_stt_download(&mut self, progress: Progress, cx: &mut Context<Self>) {
-        if let DownloadState::Running { progress: slot, .. } = &mut self.stt_download {
-            *slot = Some(progress);
-            cx.notify();
-        }
-    }
-
-    /// 下载结束（成功、失败或用户取消）。
-    ///
-    /// # 参数
-    /// - `model_id`：模型 ID
-    /// - `result`：结果，失败带错误说明
-    /// - `cx`：视图上下文
-    pub fn finish_stt_download(
-        &mut self,
-        model_id: String,
-        result: Result<(), String>,
-        cx: &mut Context<Self>,
-    ) {
-        let cancelled = self.stt_cancel.take().is_some_and(|c| c.is_cancelled());
-        self.stt_download = match result {
-            Ok(()) => DownloadState::Done { model_id },
-            Err(_) if cancelled => DownloadState::Failed {
-                model_id,
-                message: None,
-            },
-            Err(message) => DownloadState::Failed {
-                model_id,
-                message: Some(message),
-            },
-        };
-        self.refresh_stt_cache();
-        cx.notify();
-    }
-
     /// 确保模型下拉存在，选项与标签随维度、模式、安装状态与界面语言同步。
     fn ensure_model_dropdown(
         &mut self,
@@ -986,10 +1046,12 @@ impl SettingsView {
         cx: &mut Context<Self>,
     ) {
         let locale = self.state.prefs().locale;
-        let specs = inputs.options();
-        if specs.is_empty() {
-            return;
-        }
+        // 只列已下载的模型（沿用 stt_download::is_installed 的判定缓存）；一个都没有时选项为空，界面显示占位文案
+        let specs: Vec<_> = inputs
+            .options()
+            .into_iter()
+            .filter(|spec| self.stt_installed.contains(&spec.id))
+            .collect();
         let items: Vec<DropdownItem> = specs
             .iter()
             .map(|spec| DropdownItem {
@@ -1007,7 +1069,10 @@ impl SettingsView {
                 .collect::<Vec<_>>()
                 .join(";"),
         );
-        let want = inputs.selected_value();
+        // 选中的模型没下载时不在选项里：当作未选，显示占位文案
+        let want = inputs
+            .selected_value()
+            .filter(|value| items.iter().any(|item| item.value == *value));
         let index = items
             .iter()
             .position(|item| Some(item.value) == want)
@@ -1055,6 +1120,182 @@ impl SettingsView {
                 None => select.set_selected_index(index, window, cx),
             });
         }
+    }
+
+    /// 翻译模型目录：配置里手动指定的目录优先，否则是统一目录。数据根未接入返回 `None`。
+    fn translate_models_dir(&self) -> Option<std::path::PathBuf> {
+        let root = self.catalog_data_root.as_ref()?;
+        let custom = self
+            .state
+            .row_by_key(snow_config::extensions::KEY_LOCAL_MODELS_DIR)
+            .and_then(|row| row.value.as_str().map(|s| s.trim().to_string()))
+            .filter(|s| !s.is_empty());
+        Some(match custom {
+            Some(dir) => std::path::PathBuf::from(dir),
+            None => model_catalog::unified_dir(root, Feature::Translate),
+        })
+    }
+
+    /// 某“默认模型”下拉要扫描的已下载模型：翻译只数文件夹（值取 model.json 的 ID），OCR 只列文件齐全的已知档位，
+    /// 表格列含 onnx 的文件夹 / 单个 onnx 文件，公式列四个文件齐全的文件夹。
+    fn scan_pick_options(&self, source: PickSource) -> Vec<model_catalog::ModelOption> {
+        let feature = match source {
+            PickSource::Catalog(feature) => feature,
+            PickSource::Custom { vision_only } => {
+                return custom_models_edit::pick_options(&self.custom_models(), vision_only);
+            }
+        };
+        let to_option = |o: model_pick::PickOption| model_catalog::ModelOption {
+            value: o.value,
+            label: o.label,
+        };
+        match feature {
+            Feature::Translate => self
+                .translate_models_dir()
+                .map(|dir| model_catalog::translate_options(&dir))
+                .unwrap_or_default(),
+            Feature::Ocr => self
+                .catalog_dirs(feature)
+                .map(|d| model_pick::ocr_options(&d.read))
+                .unwrap_or_default()
+                .into_iter()
+                .map(to_option)
+                .collect(),
+            Feature::Table => {
+                let preferred = crate::table_assets::manifest()
+                    .ok()
+                    .and_then(|m| m.model_file().map(|f| f.name.clone()))
+                    .unwrap_or_default();
+                self.catalog_dirs(feature)
+                    .map(|d| model_pick::table_options(&d.read, &preferred))
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(to_option)
+                    .collect()
+            }
+            Feature::Latex => self
+                .catalog_dirs(feature)
+                .map(|d| model_pick::latex_options(&d.read))
+                .unwrap_or_default()
+                .into_iter()
+                .map(to_option)
+                .collect(),
+            Feature::Stt => Vec::new(),
+        }
+    }
+
+    /// 确保 `key` 对应的“默认模型”下拉存在：选项是该功能目录里扫描到的已下载模型（显示名为文件（夹）名），
+    /// 没有已下载模型时选项为空、显示占位文案（旁边的“获取”按钮仍可用）。
+    ///
+    /// 数据根未接入时不建下拉（该行保持原控件）。扫描结果缓存 [`CATALOG_RESCAN`]，避免每帧读盘。
+    fn ensure_pick_dropdown(
+        &mut self,
+        key: &'static str,
+        source: PickSource,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // 目录类下拉依赖数据根；自定义模型下拉只读配置
+        if matches!(source, PickSource::Catalog(_)) && self.catalog_data_root.is_none() {
+            return;
+        }
+        if self
+            .pick_cache
+            .get(key)
+            .is_none_or(|(at, _)| at.elapsed() >= CATALOG_RESCAN)
+        {
+            let scanned = self.scan_pick_options(source);
+            self.pick_cache.insert(key, (Instant::now(), scanned));
+        }
+        let locale = self.state.prefs().locale;
+        let i18n = crate::ocr_backend::i18n_for(locale);
+        let current = self
+            .state
+            .row_by_key(key)
+            .and_then(|row| row.value.as_str().map(str::to_owned))
+            .unwrap_or_default();
+        let scanned = self
+            .pick_cache
+            .get(key)
+            .map(|(_, list)| list.clone())
+            .unwrap_or_default();
+        let auto = i18n.tr("model-select-auto");
+        let auto_label =
+            matches!(source, PickSource::Catalog(f) if f != Feature::Ocr).then_some(auto.as_str());
+        let items = pick_items(&scanned, auto_label);
+        let signature = format!(
+            "{locale}|{}|{current}",
+            items
+                .iter()
+                .map(|item| format!("{}={}", item.value, item.label))
+                .collect::<Vec<_>>()
+                .join(";")
+        );
+        // 当前值在选项里才选中；不在（旧配置 / 模型被删 / 没有任何已下载模型）则不选，显示占位文案
+        let want = items
+            .iter()
+            .find(|item| item.value == current)
+            .map(|item| item.value);
+        let index = items
+            .iter()
+            .position(|item| Some(item.value) == want)
+            .map(|row| IndexPath::default().row(row));
+        let Some(existing) = self.dropdowns.get(key) else {
+            let state = cx.new(|cx| SelectState::new(SearchableVec::new(items), index, window, cx));
+            cx.subscribe_in(
+                &state,
+                window,
+                move |this,
+                      _state,
+                      event: &SelectEvent<SearchableVec<DropdownItem>>,
+                      window,
+                      cx| {
+                    if let SelectEvent::Confirm(Some(value)) = event {
+                        this.act(
+                            SettingsAction::Change {
+                                key,
+                                value: json!(value),
+                            },
+                            window,
+                            cx,
+                        );
+                    }
+                },
+            )
+            .detach();
+            self.dropdowns.insert(key, Dropdown { state, locale });
+            self.pick_signature.insert(key, signature);
+            return;
+        };
+        let state = existing.state.clone();
+        let changed = self.pick_signature.get(key) != Some(&signature);
+        let stale = state.read(cx).selected_value().copied() != want;
+        if changed {
+            state.update(cx, |select, cx| {
+                select.set_items(SearchableVec::new(items), window, cx)
+            });
+            self.pick_signature.insert(key, signature);
+        }
+        if changed || stale {
+            state.update(cx, |select, cx| match want {
+                Some(value) => select.set_selected_value(&value, window, cx),
+                None => select.set_selected_index(index, window, cx),
+            });
+        }
+    }
+
+    /// 下拉后面的“获取”按钮：打开该功能的推荐模型弹窗。
+    fn catalog_get_button(&self, feature: Feature, cx: &mut Context<Self>) -> Button {
+        Button::new(("catalog-get", feature as usize))
+            .small()
+            .outline()
+            .label(crate::ocr_backend::i18n_for(self.state.prefs().locale).tr("model-select-get"))
+            .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
+                this.catalog_open = Some(feature);
+                this.catalog_cache = None;
+                this.catalog_notice = None;
+                cx.notify();
+            }))
     }
 
     /// 按分组 id 切到某个设置分组（不抢焦点，宿主跳转用）；id 不存在时忽略。
@@ -1327,7 +1568,34 @@ impl SettingsView {
         let key = row.key;
         let row_div = div().flex().items_center().gap_2();
         if key == KEY_DICTATION_MODEL_ID {
-            return self.model_control(row_div, p, lang.locale());
+            return self.model_control(row_div, p, lang.locale(), cx);
+        }
+        if let Some(source) = pick_source(key)
+            && let Some(dropdown) = self.dropdowns.get(key)
+        {
+            // 没有可选项时的占位：目录类是“还没有已下载的模型”，自定义模型是“尚未配置自定义模型”
+            let placeholder = crate::ocr_backend::i18n_for(lang.locale()).tr(match source {
+                PickSource::Catalog(_) => "model-select-empty",
+                PickSource::Custom { .. } => cm_text::EMPTY,
+            });
+            return row_div
+                .child(
+                    div()
+                        .w(px(PICK_DROPDOWN_WIDTH))
+                        .h(px(DROPDOWN_HEIGHT))
+                        .child(
+                            Select::new(&dropdown.state)
+                                .with_size(ComponentSize::Small)
+                                .menu_max_h(px(DROPDOWN_MENU_MAX_HEIGHT))
+                                .placeholder(placeholder),
+                        ),
+                )
+                .child(match source {
+                    PickSource::Catalog(feature) => self.catalog_get_button(feature, cx),
+                    PickSource::Custom { vision_only } => {
+                        self.custom_models_get_button(vision_only, cx)
+                    }
+                });
         }
         match row.control {
             Control::Switch => {
@@ -1578,28 +1846,40 @@ impl SettingsView {
         )
     }
 
-    /// 语音模型行的控件：下拉（候选来自清单）；被联动置灰时禁用，无候选时给占位文案。
-    fn model_control(&self, row_div: Div, p: &Palette, locale: &'static str) -> Div {
+    /// 语音模型行的控件：下拉（只列已下载的模型，一个都没有时显示占位文案）加“获取”按钮；被联动置灰时下拉禁用。
+    fn model_control(
+        &self,
+        row_div: Div,
+        p: &Palette,
+        locale: &'static str,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let inputs = self.stt_inputs();
         let locked = inputs.lock_reason().is_some();
+        let i18n = crate::ocr_backend::i18n_for(locale);
         match self.dropdowns.get(KEY_DICTATION_MODEL_ID) {
-            Some(dropdown) if !inputs.options().is_empty() => row_div.child(
-                div()
-                    .w(px(MODEL_DROPDOWN_WIDTH))
-                    .h(px(DROPDOWN_HEIGHT))
-                    .child(
-                        Select::new(&dropdown.state)
-                            .with_size(ComponentSize::Small)
-                            .menu_max_h(px(DROPDOWN_MENU_MAX_HEIGHT))
-                            .disabled(locked),
-                    ),
-            ),
-            _ => row_div.child(
-                div()
-                    .text_size(px(12.0))
-                    .text_color(p.dim)
-                    .child(crate::ocr_backend::i18n_for(locale).tr("stt-ui-no-models")),
-            ),
+            Some(dropdown) if !inputs.options().is_empty() => row_div
+                .child(
+                    div()
+                        .w(px(MODEL_DROPDOWN_WIDTH))
+                        .h(px(DROPDOWN_HEIGHT))
+                        .child(
+                            Select::new(&dropdown.state)
+                                .with_size(ComponentSize::Small)
+                                .menu_max_h(px(DROPDOWN_MENU_MAX_HEIGHT))
+                                .placeholder(i18n.tr("model-select-empty"))
+                                .disabled(locked),
+                        ),
+                )
+                .child(self.catalog_get_button(Feature::Stt, cx)),
+            _ => row_div
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(p.dim)
+                        .child(i18n.tr("stt-ui-no-models")),
+                )
+                .child(self.catalog_get_button(Feature::Stt, cx)),
         }
     }
 
@@ -1698,7 +1978,7 @@ impl SettingsView {
             .state
             .visible_row(position)
             .and_then(|row| match row.control {
-                Control::Choice(options) => Some((
+                Control::Choice(options) if pick_source(row.key).is_none() => Some((
                     row.key,
                     options,
                     self.state.choice_value(row.key, &row.value),
@@ -1740,6 +2020,13 @@ impl SettingsView {
         {
             let inputs = self.stt_inputs();
             self.ensure_model_dropdown(&inputs, window, cx);
+        }
+        let pick = self
+            .state
+            .visible_row(position)
+            .and_then(|row| pick_source(row.key).map(|source| (row.key, source)));
+        if let Some((key, source)) = pick {
+            self.ensure_pick_dropdown(key, source, window, cx);
         }
         let Some(row) = self.state.visible_row(position) else {
             return div().into_any_element();
@@ -1794,7 +2081,7 @@ impl SettingsView {
             (None, None, None, None, Some(note)) => div().text_color(p.dim).child(note),
             (None, None, None, None, None) => div()
                 .text_color(p.dim)
-                .child(item_desc(lang, key).unwrap_or_else(|| key.to_string())),
+                .child(item_desc(lang, key).unwrap_or_default()),
         };
         let label = div()
             .w(px(LABEL_WIDTH))
@@ -1939,11 +2226,13 @@ impl SettingsView {
                             .font_weight(FontWeight::BOLD)
                             .child(self.state.scope_title()),
                     )
-                    .child(div().text_size(px(12.0)).text_color(p.dim).child(format!(
-                        "{} {}",
-                        self.state.visible_len(),
-                        t(lang, Text::ItemsCount)
-                    ))),
+                    .children((!self.is_custom_models_page()).then(|| {
+                        div().text_size(px(12.0)).text_color(p.dim).child(format!(
+                            "{} {}",
+                            self.state.visible_len(),
+                            t(lang, Text::ItemsCount)
+                        ))
+                    })),
             )
             .child(
                 div()
@@ -1957,15 +2246,15 @@ impl SettingsView {
 
     /// 当前分组顶部说明区占的列表行数（翻译分组的 Hy-MT2 说明、语音分组的模型面板）；其它范围为 0。
     fn header_len(&self) -> usize {
+        self.panel_header_len()
+    }
+
+    /// 当前分组原有说明面板占的列表行数（不含“获取模型”入口行）。
+    fn panel_header_len(&self) -> usize {
         match self.current_group_id() {
-            Some(TRANSLATION_GROUP_ID) => self.hymt2_header_len(),
-            Some(DICTATION_GROUP_ID) => self
-                .stt_panel()
-                .map_or(0, |panel| hymt2_rows(panel.lines.len()).len()),
             Some(UPDATES_GROUP_ID) => hymt2_rows(UPDATE_PANEL_LINES).len(),
             Some(TRANSFER_GROUP_ID) => hymt2_rows(TRANSFER_PANEL_LINES).len(),
             Some(MCP_GROUP_ID) => hymt2_rows(MCP_PANEL_LINES).len(),
-            Some(LATEX_GROUP_ID) => hymt2_rows(LATEX_PANEL_LINES).len(),
             _ => 0,
         }
     }
@@ -1980,125 +2269,7 @@ impl SettingsView {
             .map(|group| group.id)
     }
 
-    /// 翻译分组下说明区占的列表行数；其它范围为 0。
-    fn hymt2_header_len(&self) -> usize {
-        let Scope::Group(index) = self.state.scope() else {
-            return 0;
-        };
-        match crate::settings_model::groups().get(index) {
-            Some(group) if group.id == TRANSLATION_GROUP_ID => hymt2_rows(HYMT2_LINE_COUNT).len(),
-            _ => 0,
-        }
-    }
-
-    /// 渲染 Hy-MT2 说明区的第 `row_index` 个定高行（与普通行同高，随列表滚动）。
-    fn render_hymt2_row(
-        &self,
-        row_index: usize,
-        p: &Palette,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let locale = self.state.prefs().locale;
-        let current = self
-            .state
-            .row_by_key(KEY_LOCAL_MODEL_ID)
-            .and_then(|row| row.value.as_str().map(str::to_owned))
-            .unwrap_or_default();
-        let Hymt2View { panel, in_use } = hymt2_view(locale, &current);
-        let rows = hymt2_rows(panel.lines.len());
-        let frame = div()
-            .h(px(ROW_HEIGHT))
-            .w_full()
-            .px_4()
-            .py_1()
-            .flex()
-            .flex_col()
-            .overflow_hidden()
-            .text_size(px(12.0))
-            .line_height(px(16.0));
-        let Some(row) = rows.get(row_index) else {
-            return frame.into_any_element();
-        };
-        match row {
-            Hymt2Row::Text { title, lines } => {
-                let mut block = frame;
-                if *title {
-                    block = block.child(
-                        div()
-                            .font_weight(FontWeight::BOLD)
-                            .child(panel.title.clone()),
-                    );
-                }
-                for line in &panel.lines[lines.clone()] {
-                    block = block.child(
-                        div()
-                            .text_color(p.dim)
-                            .whitespace_nowrap()
-                            .child(line.clone()),
-                    );
-                }
-                block.into_any_element()
-            }
-            Hymt2Row::Actions => {
-                // 用 gpui-component 的 Button；已选中时禁用并显示“使用中”。
-                let use_button = match hymt2_click(Hymt2Button::Use, locale) {
-                    _ if in_use => Button::new("hymt2-use")
-                        .small()
-                        .label(panel.in_use_label)
-                        .disabled(true),
-                    Hymt2Click::SetConfig { key, value } => Button::new("hymt2-use")
-                        .small()
-                        .label(panel.use_label)
-                        .on_click(cx.listener(move |this, _event: &ClickEvent, window, cx| {
-                            this.act(
-                                SettingsAction::Change {
-                                    key,
-                                    value: json!(value),
-                                },
-                                window,
-                                cx,
-                            );
-                        })),
-                    Hymt2Click::ShowNotice(_) => {
-                        Button::new("hymt2-use").small().label(panel.use_label)
-                    }
-                };
-                let download = Button::new("hymt2-download")
-                    .small()
-                    .outline()
-                    .label(panel.download_label)
-                    .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
-                        if let Hymt2Click::ShowNotice(text) =
-                            hymt2_click(Hymt2Button::Download, locale)
-                        {
-                            this.hymt2_notice = Some(text);
-                        }
-                        cx.stop_propagation();
-                        cx.notify();
-                    }));
-                let mut block = frame
-                    .py_0()
-                    .pt(px(2.0))
-                    .gap(px(2.0))
-                    .border_b_1()
-                    .border_color(p.border)
-                    .child(div().flex().gap_2().child(use_button).child(download));
-                // 提示放在按钮下方并用中性色，出现时不挤动按钮。
-                if let Some(notice) = &self.hymt2_notice {
-                    block = block.child(
-                        div()
-                            .text_size(px(11.0))
-                            .line_height(px(14.0))
-                            .text_color(p.text)
-                            .child(notice.clone()),
-                    );
-                }
-                block.into_any_element()
-            }
-        }
-    }
-
-    /// 语音三项选择行的说明：置灰原因、无效组合提示，模型行未置灰时显示安装状态。
+    /// 语音三项选择行的说明：置灰原因、无效组合提示（不再显示“未安装，下载约…”这类下载提示，下载统一走“获取”入口）。
     ///
     /// # 返回
     /// `(文案, 是否为警示)`；与语音转文字无关的键返回 `None`。
@@ -2119,23 +2290,7 @@ impl SettingsView {
         if let Some(note) = selector_note(&inputs, key, locale) {
             return Some(note);
         }
-        if key != KEY_DICTATION_MODEL_ID {
-            return None;
-        }
-        if let DownloadState::Running { model_id, progress } = &self.stt_download
-            && inputs.selected().is_some_and(|spec| &spec.id == model_id)
-        {
-            let text = progress
-                .as_ref()
-                .map(|p| crate::stt_settings::progress_text(p, locale))
-                .unwrap_or_default();
-            return Some((text, false));
-        }
-        let spec = inputs.selected()?;
-        Some((
-            model_row_status(spec, self.stt_installed.contains(&spec.id), locale),
-            false,
-        ))
+        None
     }
 
     /// 渲染说明区的第 `row_index` 个定高行：翻译分组走 Hy-MT2 说明，语音分组走模型面板。
@@ -2146,12 +2301,10 @@ impl SettingsView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         match self.current_group_id() {
-            Some(DICTATION_GROUP_ID) => self.render_stt_row(row_index, p, cx),
             Some(UPDATES_GROUP_ID) => self.render_update_row(row_index, p, cx),
             Some(TRANSFER_GROUP_ID) => self.render_transfer_row(row_index, p, cx),
             Some(MCP_GROUP_ID) => self.render_mcp_row(row_index, p, cx),
-            Some(LATEX_GROUP_ID) => self.render_latex_row(row_index, p, cx),
-            _ => self.render_hymt2_row(row_index, p, cx),
+            _ => div().into_any_element(),
         }
     }
 
@@ -2334,78 +2487,6 @@ impl SettingsView {
         }
     }
 
-    /// 渲染“公式模型”说明区的第 `row_index` 个定高行（标题与状态行、按钮行）。
-    fn render_latex_row(
-        &self,
-        row_index: usize,
-        p: &Palette,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let i18n = crate::ocr_backend::i18n_for(self.state.prefs().locale);
-        let panel = latex_panel(i18n, &self.latex_model_dir());
-        let frame = div()
-            .h(px(ROW_HEIGHT))
-            .w_full()
-            .px_4()
-            .py_1()
-            .flex()
-            .flex_col()
-            .overflow_hidden()
-            .text_size(px(12.0))
-            .line_height(px(16.0));
-        let rows = hymt2_rows(LATEX_PANEL_LINES);
-        let Some(row) = rows.get(row_index) else {
-            return frame.into_any_element();
-        };
-        match row {
-            Hymt2Row::Text { .. } => frame
-                .child(div().font_weight(FontWeight::BOLD).child(panel.title))
-                .child(
-                    div()
-                        .text_color(if panel.status.1 { p.danger } else { p.dim })
-                        .whitespace_nowrap()
-                        .child(panel.status.0),
-                )
-                .into_any_element(),
-            Hymt2Row::Actions => {
-                let mut buttons = Vec::new();
-                for (id, label, action) in [
-                    (
-                        "latex-open-folder",
-                        panel.open_folder_label,
-                        LatexAction::OpenFolder,
-                    ),
-                    (
-                        "latex-open-source",
-                        panel.open_source_label,
-                        LatexAction::OpenSource,
-                    ),
-                ] {
-                    let mut button = Button::new(id).small().label(label);
-                    button = match &self.latex_hook {
-                        Some(hook) => {
-                            let hook = Rc::clone(hook);
-                            button.on_click(cx.listener(
-                                move |_this, _event: &ClickEvent, _window, _cx| {
-                                    hook(action);
-                                },
-                            ))
-                        }
-                        None => button.disabled(true),
-                    };
-                    buttons.push(button);
-                }
-                frame
-                    .py_0()
-                    .pt(px(2.0))
-                    .border_b_1()
-                    .border_color(p.border)
-                    .child(div().flex().items_center().gap_3().children(buttons))
-                    .into_any_element()
-            }
-        }
-    }
-
     /// 渲染“导出 / 导入设置”说明区的第 `row_index` 个定高行（说明行与按钮行）。
     fn render_transfer_row(
         &self,
@@ -2497,93 +2578,6 @@ impl SettingsView {
         }
     }
 
-    /// 渲染语音模型面板的第 `row_index` 个定高行（详情文本行与下载按钮行）。
-    fn render_stt_row(&self, row_index: usize, p: &Palette, cx: &mut Context<Self>) -> AnyElement {
-        let frame = div()
-            .h(px(ROW_HEIGHT))
-            .w_full()
-            .px_4()
-            .py_1()
-            .flex()
-            .flex_col()
-            .overflow_hidden()
-            .text_size(px(12.0))
-            .line_height(px(16.0));
-        let Some(panel) = self.stt_panel() else {
-            return frame.into_any_element();
-        };
-        let rows = hymt2_rows(panel.lines.len());
-        let Some(row) = rows.get(row_index) else {
-            return frame.into_any_element();
-        };
-        match row {
-            Hymt2Row::Text { title, lines } => {
-                let mut block = frame;
-                if *title {
-                    block = block.child(
-                        div()
-                            .font_weight(FontWeight::BOLD)
-                            .child(panel.title.clone()),
-                    );
-                }
-                for line in &panel.lines[lines.clone()] {
-                    block = block.child(
-                        div()
-                            .text_color(p.dim)
-                            .whitespace_nowrap()
-                            .child(line.clone()),
-                    );
-                }
-                block.into_any_element()
-            }
-            Hymt2Row::Actions => {
-                let action = panel.action;
-                let model_id = panel.model_id.clone();
-                let mut button = Button::new("stt-action")
-                    .small()
-                    .label(panel.action_label.clone());
-                button = match action {
-                    PanelAction::Download => button.on_click(cx.listener(
-                        move |this, _event: &ClickEvent, _window, cx| {
-                            this.start_stt_download(model_id.clone());
-                            cx.notify();
-                        },
-                    )),
-                    PanelAction::Cancel => button.outline().on_click(cx.listener(
-                        |this, _event: &ClickEvent, _window, cx| {
-                            this.cancel_stt_download();
-                            cx.notify();
-                        },
-                    )),
-                    PanelAction::Installed | PanelAction::Busy => button.disabled(true),
-                };
-                let button =
-                    button.disabled(action == PanelAction::Download && self.stt_hooks.is_none());
-                let notice = panel.notice.map(|(text, danger)| {
-                    div()
-                        .text_size(px(11.0))
-                        .text_color(if danger { p.danger } else { p.dim })
-                        .whitespace_nowrap()
-                        .child(text)
-                });
-                frame
-                    .py_0()
-                    .pt(px(2.0))
-                    .border_b_1()
-                    .border_color(p.border)
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_3()
-                            .child(button)
-                            .children(notice),
-                    )
-                    .into_any_element()
-            }
-        }
-    }
-
     /// 渲染状态栏。
     fn render_status(&self, p: &Palette) -> impl IntoElement {
         let (text, color) = match self.state.status() {
@@ -2604,6 +2598,746 @@ impl SettingsView {
             .overflow_hidden()
             .whitespace_nowrap()
             .child(text)
+    }
+}
+
+impl SettingsView {
+    /// 接入应用数据根目录，打开“获取模型”入口（推荐模型清单依赖它定位各功能的模型目录）。
+    ///
+    /// # 参数
+    /// - `root`：应用数据根目录
+    pub fn set_catalog_data_root(&mut self, root: std::path::PathBuf) {
+        self.catalog_data_root = Some(root);
+    }
+
+    /// 某功能当前实际读取模型的目录集合；数据根未接入返回 `None`。
+    fn catalog_dirs(&self, feature: Feature) -> Option<ModelDirs> {
+        let root = self.catalog_data_root.as_ref()?;
+        let ocr_env = std::env::var(crate::ocr_assets::ENV_OCR_ASSET_DIR).ok();
+        let table_env = std::env::var(crate::table_assets::ENV_TABLE_ASSET_DIR).ok();
+        Some(ModelDirs::resolve(
+            feature,
+            root,
+            &self.latex_model_dir(),
+            ocr_env.as_deref(),
+            table_env.as_deref(),
+        ))
+    }
+
+    /// 关闭推荐模型弹窗并清掉缓存与提示。
+    fn close_catalog(&mut self) {
+        self.catalog_open = None;
+        self.catalog_cache = None;
+        self.catalog_notice = None;
+    }
+
+    /// 保证弹窗缓存对应当前功能与语言，且没过期；过期或不匹配时重扫磁盘。
+    fn ensure_catalog_cache(&mut self, feature: Feature) {
+        let locale = self.state.prefs().locale.to_string();
+        let fresh = self.catalog_cache.as_ref().is_some_and(|c| {
+            c.feature == feature && c.locale == locale && c.scanned.elapsed() < CATALOG_RESCAN
+        });
+        if fresh {
+            return;
+        }
+        let Some(dirs) = self.catalog_dirs(feature) else {
+            self.catalog_cache = None;
+            return;
+        };
+        let i18n = crate::ocr_backend::i18n_for(&locale);
+        self.catalog_cache = Some(CatalogCache {
+            feature,
+            rows: model_catalog::build_rows(feature, &dirs, i18n),
+            installed: model_catalog::scan_models(&dirs.read, catalog_scan_kind(feature)),
+            dirs,
+            locale,
+            scanned: Instant::now(),
+        });
+    }
+
+    /// 记录操作失败提示（带原因）。
+    fn catalog_fail(&mut self, reason: String) {
+        let i18n = crate::ocr_backend::i18n_for(self.state.prefs().locale);
+        self.catalog_notice = Some(i18n.tr_with(
+            "model-catalog-open-failed",
+            &Args::new().named("reason", reason),
+        ));
+    }
+
+    /// 用系统默认浏览器打开下载地址。
+    fn catalog_open_url(&mut self, url: &str) {
+        self.catalog_notice = None;
+        if let Err(e) = snow_platform::shell::open_url(url) {
+            self.catalog_fail(e);
+        }
+    }
+
+    /// 用资源管理器打开当前弹窗功能的模型目录（不存在会先创建）。
+    fn catalog_open_dir(&mut self) {
+        self.catalog_notice = None;
+        let Some(dir) = self
+            .catalog_cache
+            .as_ref()
+            .map(|c| c.dirs.primary().to_path_buf())
+        else {
+            return;
+        };
+        if let Err(e) = snow_platform::shell::open_directory(&dir) {
+            self.catalog_fail(e);
+        }
+        // 目录可能刚被创建，下次渲染重扫
+        self.catalog_cache = None;
+    }
+
+    /// 渲染推荐模型弹窗（全窗口遮罩 + 居中面板）；未打开返回 `None`。
+    fn render_catalog_overlay(
+        &mut self,
+        p: &Palette,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let feature = self.catalog_open?;
+        self.ensure_catalog_cache(feature);
+        let cache = self.catalog_cache.as_ref()?;
+        let i18n = crate::ocr_backend::i18n_for(self.state.prefs().locale);
+        let mut list = div()
+            .id("catalog-list")
+            .flex_1()
+            .min_h_0()
+            .px_4()
+            .overflow_y_scroll();
+        for (index, row) in cache.rows.iter().enumerate() {
+            let url = row.url.clone();
+            let button = Button::new(("catalog-row", index)).small();
+            let button = if row.downloaded {
+                button
+                    .outline()
+                    .label(i18n.tr("model-catalog-open-folder"))
+                    .on_click(cx.listener(|this, _event: &ClickEvent, _window, cx| {
+                        this.catalog_open_dir();
+                        cx.notify();
+                    }))
+            } else {
+                button
+                    .label(i18n.tr("model-catalog-download"))
+                    .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
+                        this.catalog_open_url(&url);
+                        cx.notify();
+                    }))
+            };
+            let badge = row.default.then(|| {
+                div()
+                    .text_size(px(11.0))
+                    .text_color(p.accent)
+                    .child(i18n.tr("model-catalog-default-badge"))
+            });
+            let meta = i18n.tr_with(
+                "model-catalog-row-meta",
+                &Args::new()
+                    .named("size", row.size.clone())
+                    .named("license", row.license.clone()),
+            );
+            list = list.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .py_2()
+                    .border_b_1()
+                    .border_color(p.border)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.0))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        div().font_weight(FontWeight::BOLD).child(row.name.clone()),
+                                    )
+                                    .children(badge),
+                            )
+                            .child(div().text_size(px(11.0)).text_color(p.dim).child(meta))
+                            .child(
+                                div()
+                                    .text_size(px(12.0))
+                                    .text_color(p.dim)
+                                    .child(row.note.clone()),
+                            ),
+                    )
+                    .child(div().flex_none().child(button)),
+            );
+        }
+        let installed = if cache.installed.is_empty() {
+            i18n.tr("model-catalog-installed-none")
+        } else {
+            i18n.tr_with(
+                "model-catalog-installed",
+                &Args::new().named("names", cache.installed.join(", ")),
+            )
+        };
+        let notice = self
+            .catalog_notice
+            .clone()
+            .map(|text| div().text_color(p.danger).child(text));
+        let footer = div()
+            .flex_none()
+            .px_4()
+            .py_3()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .border_t_1()
+            .border_color(p.border)
+            .text_size(px(12.0))
+            .child(div().child(i18n.tr("model-catalog-footer")))
+            .child(
+                div()
+                    .text_color(p.accent)
+                    .child(cache.dirs.primary().display().to_string()),
+            )
+            .child(div().text_color(p.dim).child(installed))
+            .children(notice)
+            .child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .pt_1()
+                    .child(
+                        Button::new("catalog-open-dir")
+                            .small()
+                            .outline()
+                            .label(i18n.tr("model-catalog-open-folder"))
+                            .on_click(cx.listener(|this, _event: &ClickEvent, _window, cx| {
+                                this.catalog_open_dir();
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("catalog-close")
+                            .small()
+                            .label(i18n.tr("model-catalog-close"))
+                            .on_click(cx.listener(|this, _event: &ClickEvent, _window, cx| {
+                                this.close_catalog();
+                                cx.notify();
+                            })),
+                    ),
+            );
+        let panel = div()
+            .w(px(CATALOG_DIALOG_WIDTH))
+            .h(px(CATALOG_DIALOG_HEIGHT))
+            .max_w_full()
+            .max_h_full()
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .rounded(px(8.0))
+            .border_1()
+            .border_color(p.border)
+            .bg(p.bg)
+            .text_color(p.text)
+            .text_size(px(13.0))
+            .on_mouse_down(MouseButton::Left, |_event: &MouseDownEvent, _window, cx| {
+                cx.stop_propagation()
+            })
+            .child(
+                div()
+                    .flex_none()
+                    .px_4()
+                    .py_3()
+                    .border_b_1()
+                    .border_color(p.border)
+                    .text_size(px(16.0))
+                    .font_weight(FontWeight::BOLD)
+                    .child(i18n.tr(feature.title_key())),
+            )
+            .child(list)
+            .child(footer);
+        Some(
+            div()
+                .id("catalog-backdrop")
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .occlude()
+                .flex()
+                .items_center()
+                .justify_center()
+                .p_4()
+                .bg(rgba(0x000000A6))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _event: &MouseDownEvent, _window, cx| {
+                        this.close_catalog();
+                        cx.stop_propagation();
+                        cx.notify();
+                    }),
+                )
+                .child(panel)
+                .into_any_element(),
+        )
+    }
+}
+
+/// 自定义 AI 模型编辑页用到的文案 id（复用旧版设置控件的条目）。
+mod cm_text {
+    /// “添加模型”。
+    pub const ADD: &str = "custom-ai-models-settings-widget-add-model-e22b0845";
+    /// “编辑”。
+    pub const EDIT: &str = "custom-ai-models-settings-widget-edit-f8c8ae85";
+    /// “复制”。
+    pub const COPY: &str = "custom-ai-models-settings-widget-copy-b7f569b8";
+    /// “删除”。
+    pub const DELETE: &str = "custom-ai-models-settings-widget-delete-e7c26f26";
+    /// “保存”。
+    pub const SAVE: &str = "custom-ai-models-settings-widget-save-70bbec44";
+    /// “取消”。
+    pub const CANCEL: &str = "custom-ai-models-settings-widget-cancel-1169b04f";
+    /// 字段：模型名称。
+    pub const NAME: &str = "custom-ai-models-settings-widget-model-name-ca7916f9";
+    /// 字段：API URL。
+    pub const URL: &str = "custom-ai-models-settings-widget-api-url-0576c7a2";
+    /// 字段：API 密钥。
+    pub const KEY: &str = "custom-ai-models-settings-widget-api-key-6928cd58";
+    /// 字段：API 模型。
+    pub const MODEL: &str = "custom-ai-models-settings-widget-api-model-62aa6326";
+    /// 复选框：允许此模型把图像转换为 Markdown / HTML。
+    pub const VISION: &str =
+        "custom-ai-models-settings-widget-allow-this-model-to-convert-imag-5c549e75";
+    /// URL 字段说明。
+    pub const URL_HINT: &str =
+        "custom-ai-models-settings-widget-open-ai-compatible-chat-completi-3a424e4e";
+    /// 密钥字段说明。
+    pub const KEY_HINT: &str =
+        "custom-ai-models-settings-widget-optional-for-servers-that-do-not-ce292dc0";
+    /// 模型 ID 字段说明（拉取列表失败时的手填提示）。
+    pub const MODEL_HINT: &str =
+        "custom-ai-models-settings-widget-enter-a-custom-model-id-or-open-d0c41af6";
+    /// 列表为空。
+    pub const EMPTY: &str = "custom-ai-models-settings-widget-no-custom-models-configured-8e60417b";
+    /// 删除确认（参数 1 为模型名）。
+    pub const DELETE_CONFIRM: &str =
+        "custom-ai-models-settings-widget-delete-model-1-if-selected-anoth-352b34d5";
+    /// 保存失败。
+    pub const SAVE_FAILED: &str =
+        "custom-ai-models-settings-widget-unable-to-save-models-check-that-547b38bc";
+    /// 复制名：“名称（副本）”。
+    pub const COPY_NAME: &str = "custom-ai-models-settings-widget-1-copy-742bda4d";
+    /// 复制名：“名称（副本 n）”。
+    pub const COPY_NAME_N: &str = "custom-ai-models-settings-widget-1-copy-2-9943d0f4";
+}
+
+/// 表单字段标签的宽度。
+const CM_LABEL_WIDTH: f32 = 140.0;
+/// 表单输入框宽度。
+const CM_INPUT_WIDTH: f32 = 420.0;
+
+impl SettingsView {
+    /// 当前是否停在“模型接口”分组（自定义 AI 模型编辑页）。
+    fn is_custom_models_page(&self) -> bool {
+        self.current_group_id() == Some(CUSTOM_MODELS_GROUP_ID)
+    }
+
+    /// 当前配置里的自定义 AI 模型列表。
+    fn custom_models(&self) -> Vec<CustomAiModel> {
+        self.state
+            .row_by_key(KEY_CUSTOM_MODELS)
+            .map(|row| custom_models_edit::read_models(&row.value))
+            .unwrap_or_default()
+    }
+
+    /// 编辑页文案。
+    fn cm_tr(&self, id: &str) -> String {
+        crate::ocr_backend::i18n_for(self.state.prefs().locale).tr(id)
+    }
+
+    /// 翻译 / 视觉模型下拉后面的“获取”按钮：跳到自定义 AI 模型编辑页并打开“添加模型”表单。
+    fn custom_models_get_button(&self, vision_only: bool, cx: &mut Context<Self>) -> Button {
+        Button::new(("custom-models-get", usize::from(vision_only)))
+            .small()
+            .outline()
+            .label(self.cm_tr("model-select-get"))
+            .on_click(cx.listener(|this, _event: &ClickEvent, window, cx| {
+                this.open_custom_models_page(window, cx);
+            }))
+    }
+
+    /// 切到“模型接口”分组并打开空白的添加表单。
+    fn open_custom_models_page(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(index) = crate::settings_model::groups()
+            .iter()
+            .position(|g| g.id == CUSTOM_MODELS_GROUP_ID)
+        {
+            self.act(SettingsAction::SwitchGroup(index), window, cx);
+        }
+        self.cm_open_form(None, window, cx);
+    }
+
+    /// 打开编辑表单（`None` 为新建）；密钥输入框遮罩显示。
+    fn cm_open_form(
+        &mut self,
+        model: Option<&CustomAiModel>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let form = model.map(ModelForm::from_model).unwrap_or_default();
+        let name = cx.new(|cx| InputState::new(window, cx).default_value(form.name.clone()));
+        let base_url =
+            cx.new(|cx| InputState::new(window, cx).default_value(form.base_url.clone()));
+        let api_key = cx.new(|cx| {
+            InputState::new(window, cx)
+                .masked(true)
+                .default_value(form.api_key.clone())
+        });
+        let model_input =
+            cx.new(|cx| InputState::new(window, cx).default_value(form.model.clone()));
+        self.cm_form = Some(CustomModelFormState {
+            form,
+            name,
+            base_url,
+            api_key,
+            model: model_input,
+            error: None,
+        });
+        self.cm_confirm_delete = None;
+        self.cm_notice = None;
+        cx.notify();
+    }
+
+    /// 写回模型列表；成功后清掉下拉缓存并通知上层。失败只给固定文案，不带任何配置内容。
+    fn cm_write(&mut self, models: &[CustomAiModel]) -> Result<(), String> {
+        match self
+            .state
+            .apply(KEY_CUSTOM_MODELS, custom_models_edit::to_value(models))
+        {
+            Ok(_) => {
+                self.pick_cache.clear();
+                self.flush_changes();
+                Ok(())
+            }
+            Err(_) => Err(self.cm_tr(cm_text::SAVE_FAILED)),
+        }
+    }
+
+    /// 保存表单：校验通过才写回。
+    fn cm_save(&mut self, cx: &mut Context<Self>) {
+        let Some(state) = &self.cm_form else { return };
+        let mut form = state.form.clone();
+        form.name = state.name.read(cx).value().to_string();
+        form.base_url = state.base_url.read(cx).value().to_string();
+        form.api_key = state.api_key.read(cx).value().to_string();
+        form.model = state.model.read(cx).value().to_string();
+        let mut models = self.custom_models();
+        let outcome = match custom_models_edit::build_model(&models, &form) {
+            Err(error) => Err(self.cm_tr(error.message_id())),
+            Ok(model) => {
+                custom_models_edit::upsert(&mut models, model);
+                self.cm_write(&models)
+            }
+        };
+        match outcome {
+            Ok(()) => self.cm_form = None,
+            Err(message) => {
+                if let Some(state) = &mut self.cm_form {
+                    state.error = Some(message);
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// 切换“允许视觉”勾选（暂存在表单里，保存时一起写）。
+    fn cm_set_vision(&mut self, on: bool, cx: &mut Context<Self>) {
+        if let Some(state) = &mut self.cm_form {
+            state.form.supports_vision = on;
+            cx.notify();
+        }
+    }
+
+    /// 删除模型（已确认）。
+    fn cm_delete(&mut self, id: &str, cx: &mut Context<Self>) {
+        let mut models = self.custom_models();
+        custom_models_edit::remove(&mut models, id);
+        self.cm_notice = self.cm_write(&models).err();
+        self.cm_confirm_delete = None;
+        cx.notify();
+    }
+
+    /// 复制模型：名称加“（副本）”并自动避开重名。
+    fn cm_copy(&mut self, id: &str, cx: &mut Context<Self>) {
+        let locale = self.state.prefs().locale;
+        let i18n = crate::ocr_backend::i18n_for(locale);
+        let mut models = self.custom_models();
+        let base = models
+            .iter()
+            .find(|m| m.id == id)
+            .map(|m| m.name.clone())
+            .unwrap_or_default();
+        let copy_name = |n: usize| {
+            if n == 1 {
+                i18n.tr_with(cm_text::COPY_NAME, &Args::new().arg(1, &base))
+            } else {
+                i18n.tr_with(cm_text::COPY_NAME_N, &Args::new().arg(1, &base).arg(2, n))
+            }
+        };
+        if let Some(copy) = custom_models_edit::duplicate(&models, id, copy_name) {
+            models.push(copy);
+            self.cm_notice = self.cm_write(&models).err();
+        }
+        cx.notify();
+    }
+
+    /// 渲染自定义 AI 模型编辑页：表单（编辑 / 新建时）或模型列表加“添加模型”。
+    fn render_custom_models(&self, p: &Palette, cx: &mut Context<Self>) -> AnyElement {
+        let page = div()
+            .id("custom-models-page")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .px_4()
+            .py_3()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .text_size(px(13.0));
+        if let Some(state) = &self.cm_form {
+            return page
+                .child(self.render_cm_form(state, p, cx))
+                .into_any_element();
+        }
+        let models = self.custom_models();
+        let mut page = page.child(
+            div().flex().items_center().gap_3().child(
+                Button::new("cm-add")
+                    .small()
+                    .label(self.cm_tr(cm_text::ADD))
+                    .on_click(cx.listener(|this, _event: &ClickEvent, window, cx| {
+                        this.cm_open_form(None, window, cx);
+                    })),
+            ),
+        );
+        if let Some(notice) = &self.cm_notice {
+            page = page.child(div().text_color(p.danger).child(notice.clone()));
+        }
+        if models.is_empty() {
+            return page
+                .child(div().text_color(p.dim).child(self.cm_tr(cm_text::EMPTY)))
+                .into_any_element();
+        }
+        for (index, model) in models.iter().enumerate() {
+            page = page.child(self.render_cm_row(index, model, p, cx));
+        }
+        page.into_any_element()
+    }
+
+    /// 渲染列表里的一行：名称、模型 / 地址，以及编辑 / 复制 / 删除（删除需确认）。
+    fn render_cm_row(
+        &self,
+        index: usize,
+        model: &CustomAiModel,
+        p: &Palette,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let id = model.id.clone();
+        let confirming = self.cm_confirm_delete.as_deref() == Some(model.id.as_str());
+        let buttons = if confirming {
+            let i18n = crate::ocr_backend::i18n_for(self.state.prefs().locale);
+            let (id_yes, id_no) = (id.clone(), id.clone());
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    div().text_color(p.danger).child(
+                        i18n.tr_with(cm_text::DELETE_CONFIRM, &Args::new().arg(1, &model.name)),
+                    ),
+                )
+                .child(
+                    Button::new(("cm-del-yes", index))
+                        .small()
+                        .label(i18n.tr(cm_text::DELETE))
+                        .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| {
+                            this.cm_delete(&id_yes, cx);
+                        })),
+                )
+                .child(
+                    Button::new(("cm-del-no", index))
+                        .small()
+                        .outline()
+                        .label(i18n.tr(cm_text::CANCEL))
+                        .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| {
+                            let _ = &id_no;
+                            this.cm_confirm_delete = None;
+                            cx.notify();
+                        })),
+                )
+        } else {
+            let (id_edit, id_copy, id_del) = (id.clone(), id.clone(), id);
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    Button::new(("cm-edit", index))
+                        .small()
+                        .outline()
+                        .label(self.cm_tr(cm_text::EDIT))
+                        .on_click(cx.listener(move |this, _e: &ClickEvent, window, cx| {
+                            let found = this.custom_models().into_iter().find(|m| m.id == id_edit);
+                            this.cm_open_form(found.as_ref(), window, cx);
+                        })),
+                )
+                .child(
+                    Button::new(("cm-copy", index))
+                        .small()
+                        .outline()
+                        .label(self.cm_tr(cm_text::COPY))
+                        .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| {
+                            this.cm_copy(&id_copy, cx);
+                        })),
+                )
+                .child(
+                    Button::new(("cm-del", index))
+                        .small()
+                        .outline()
+                        .label(self.cm_tr(cm_text::DELETE))
+                        .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| {
+                            this.cm_confirm_delete = Some(id_del.clone());
+                            cx.notify();
+                        })),
+                )
+        };
+        div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_3()
+            .py_2()
+            .border_b_1()
+            .border_color(p.border)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .font_weight(FontWeight::BOLD)
+                            .child(model.name.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(p.dim)
+                            .child(format!("{} @ {}", model.model, model.base_url)),
+                    ),
+            )
+            .child(buttons)
+    }
+
+    /// 渲染编辑 / 新建表单：名称、API URL、API 密钥（遮罩）、API 模型、视觉勾选、保存 / 取消。
+    fn render_cm_form(
+        &self,
+        state: &CustomModelFormState,
+        p: &Palette,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let field = |label: &str, input: &Entity<InputState>, hint: Option<String>, mask: bool| {
+            let mut input_el = Input::new(input).with_size(ComponentSize::Small);
+            if mask {
+                input_el = input_el.mask_toggle();
+            }
+            let mut column = div()
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .child(div().w(px(CM_INPUT_WIDTH)).child(input_el));
+            if let Some(hint) = hint {
+                column = column.child(
+                    div()
+                        .w(px(CM_INPUT_WIDTH))
+                        .text_size(px(11.0))
+                        .text_color(p.dim)
+                        .child(hint),
+                );
+            }
+            div()
+                .flex()
+                .gap_3()
+                .child(
+                    div()
+                        .w(px(CM_LABEL_WIDTH))
+                        .flex_none()
+                        .pt(px(4.0))
+                        .child(label.to_string()),
+                )
+                .child(column)
+        };
+        let vision = Checkbox::new("cm-vision")
+            .label(SharedString::from(self.cm_tr(cm_text::VISION)))
+            .checked(state.form.supports_vision)
+            .on_click(cx.listener(|this, checked: &bool, _window, cx| {
+                this.cm_set_vision(*checked, cx);
+            }));
+        let error = state
+            .error
+            .clone()
+            .map(|text| div().text_color(p.danger).child(text));
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(field(&self.cm_tr(cm_text::NAME), &state.name, None, false))
+            .child(field(
+                &self.cm_tr(cm_text::URL),
+                &state.base_url,
+                Some(self.cm_tr(cm_text::URL_HINT)),
+                false,
+            ))
+            .child(field(
+                &self.cm_tr(cm_text::KEY),
+                &state.api_key,
+                Some(self.cm_tr(cm_text::KEY_HINT)),
+                true,
+            ))
+            .child(field(
+                &self.cm_tr(cm_text::MODEL),
+                &state.model,
+                Some(self.cm_tr(cm_text::MODEL_HINT)),
+                false,
+            ))
+            .child(div().pl(px(CM_LABEL_WIDTH + 12.0)).child(vision))
+            .children(error)
+            .child(
+                div()
+                    .pl(px(CM_LABEL_WIDTH + 12.0))
+                    .flex()
+                    .gap_2()
+                    .child(
+                        Button::new("cm-save")
+                            .small()
+                            .label(self.cm_tr(cm_text::SAVE))
+                            .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
+                                this.cm_save(cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("cm-cancel")
+                            .small()
+                            .outline()
+                            .label(self.cm_tr(cm_text::CANCEL))
+                            .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
+                                this.cm_form = None;
+                                cx.notify();
+                            })),
+                    ),
+            )
     }
 }
 
@@ -2648,7 +3382,10 @@ impl Render for SettingsView {
         let total = header + visible;
 
         let extra_page = self.extra.nav.current();
-        let body = if total == 0 {
+        let custom_page = self.is_custom_models_page();
+        let body = if custom_page {
+            self.render_custom_models(&p, cx)
+        } else if total == 0 {
             div()
                 .flex_1()
                 .flex()
@@ -2705,6 +3442,15 @@ impl Render for SettingsView {
                 }),
             )
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if this.catalog_open.is_some() {
+                    // 推荐模型弹窗打开时只响应 Esc，其余按键不落到下面的列表
+                    if event.keystroke.key == "escape" {
+                        this.close_catalog();
+                        cx.notify();
+                    }
+                    cx.stop_propagation();
+                    return;
+                }
                 if this.extra.nav.current().is_some() {
                     return;
                 }
@@ -2766,7 +3512,8 @@ impl Render for SettingsView {
                     .child(self.render_header(&p, lang, cx))
                     .child(body)
                     .child(self.render_status(&p)),
-            });
+            })
+            .children(self.render_catalog_overlay(&p, cx));
 
         let elapsed = started.elapsed();
         self.probe.frames += 1;
@@ -2786,6 +3533,97 @@ impl Drop for SettingsView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 默认模型下拉选项：就是扫描到的已下载模型（可带开头“自动”）；没有已下载模型时为空（显示占位）。
+    #[test]
+    fn pick_items_are_exactly_the_scanned_models() {
+        let scanned = vec![
+            model_catalog::ModelOption {
+                value: "id-a".into(),
+                label: "folder-a".into(),
+            },
+            model_catalog::ModelOption {
+                value: "folder-b".into(),
+                label: "folder-b".into(),
+            },
+        ];
+        let items = pick_items(&scanned, Some("Auto"));
+        let shown: Vec<(&str, String)> = items
+            .iter()
+            .map(|i| (i.value, i.label.to_string()))
+            .collect();
+        assert_eq!(
+            shown,
+            vec![
+                ("", "Auto".to_string()),
+                ("id-a", "folder-a".to_string()),
+                ("folder-b", "folder-b".to_string())
+            ]
+        );
+        assert_eq!(pick_items(&scanned, None).len(), 2, "OCR 没有自动项");
+        assert!(
+            pick_items(&[], Some("Auto")).is_empty(),
+            "没有已下载模型时为空"
+        );
+        assert!(std::ptr::eq(intern_value("same"), intern_value("same")));
+    }
+
+    /// 配置里存了不存在的值（旧配置 / 模型被删）：选项里不含它，也不会选中任何项（显示占位）；
+    /// 存的值在扫描结果里时才选中；空值选中“自动”。
+    #[test]
+    fn stale_config_value_is_not_listed_or_selected() {
+        let scanned = vec![model_catalog::ModelOption {
+            value: "small".into(),
+            label: "ppocrv6-small".into(),
+        }];
+        let items = pick_items(&scanned, Some("Auto"));
+        assert!(items.iter().all(|i| i.value != "gone-model"));
+        let selected = |current: &str| items.iter().find(|i| i.value == current).map(|i| i.value);
+        assert_eq!(selected("gone-model"), None, "不在列表里就不选中，显示占位");
+        assert_eq!(selected("small"), Some("small"));
+        assert_eq!(selected(""), Some(""));
+        let ocr = pick_items(&scanned, None);
+        assert!(ocr.iter().all(|i| i.value != "medium"));
+        assert!(ocr.iter().find(|i| i.value == "medium").is_none());
+    }
+
+    /// 哪些配置键走扫描类下拉：翻译、OCR 档位、表格、公式；语音与其它键不走。
+    #[test]
+    fn pick_feature_keys() {
+        assert_eq!(pick_feature(KEY_LOCAL_MODEL_ID), Some(Feature::Translate));
+        assert_eq!(pick_feature(KEY_OCR_MODEL_TYPE), Some(Feature::Ocr));
+        assert_eq!(pick_feature(KEY_TABLE_MODEL), Some(Feature::Table));
+        assert_eq!(pick_feature(KEY_LATEX_MODEL), Some(Feature::Latex));
+        assert_eq!(pick_feature(KEY_DICTATION_MODEL_ID), None);
+        assert_eq!(pick_feature("screenshot/image_format"), None);
+    }
+
+    /// 自定义 AI 模型下拉：翻译模型列出全部，视觉模型只列支持视觉的；其余键沿用目录类来源。
+    #[test]
+    fn pick_source_for_custom_model_keys() {
+        assert_eq!(
+            pick_source("screenshot_translation/model"),
+            Some(PickSource::Custom { vision_only: false })
+        );
+        assert_eq!(
+            pick_source("screenshot_conversion/vision_model"),
+            Some(PickSource::Custom { vision_only: true })
+        );
+        assert_eq!(
+            pick_source(KEY_TABLE_MODEL),
+            Some(PickSource::Catalog(Feature::Table))
+        );
+        assert_eq!(pick_source(KEY_DICTATION_MODEL_ID), None);
+    }
+
+    /// 各功能“一个模型”的数法：翻译与 OCR 只数文件夹，其余文件也算。
+    #[test]
+    fn scan_kind_per_feature() {
+        assert_eq!(catalog_scan_kind(Feature::Translate), ScanKind::FoldersOnly);
+        assert_eq!(catalog_scan_kind(Feature::Ocr), ScanKind::FoldersOnly);
+        assert_eq!(catalog_scan_kind(Feature::Stt), ScanKind::Any);
+        assert_eq!(catalog_scan_kind(Feature::Latex), ScanKind::Any);
+    }
 
     /// 行勾选状态由选中集合推出。
     #[test]
@@ -2882,10 +3720,16 @@ mod tests {
         assert_eq!(back, ["arrow", "pen-filter", "text"]);
         assert_eq!(menu_options_from_selection(&next, options, &back), next);
         // 全部取消只留未知值
-        assert_eq!(menu_options_from_selection(&next, options, &[]), json!(["legacy"]));
+        assert_eq!(
+            menu_options_from_selection(&next, options, &[]),
+            json!(["legacy"])
+        );
         // 摘要：禁用语义键与托盘键用不同文案
         assert_eq!(multi_summary_id(KEY), "settings-multi-disabled-summary");
-        assert_eq!(multi_summary_id("tray/menu_options"), "settings-multi-summary");
+        assert_eq!(
+            multi_summary_id("tray/menu_options"),
+            "settings-multi-summary"
+        );
     }
 
     /// 文本框同步：配置变了且框内不同才覆盖；用户输入中（配置没变）或已一致都不动。

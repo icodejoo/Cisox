@@ -37,7 +37,10 @@ use crate::screenshot_output::{
     self, ExportOverrides, ExportSettings, ManualSaveJob, SaveMode, SaveOutcome, home_directory,
 };
 use crate::settings_state::SharedConfig;
-use crate::translate_flow::{TranslateUiState, panel_lines as translate_panel_lines, stage_text};
+use crate::translate_flow::{
+    LINK_BORDER, LINK_FILL, LinkHover, PANEL_MAX_PARAGRAPHS, TranslateUiState,
+    panel_lines as translate_panel_lines, stage_text,
+};
 use crate::translate_service::{TranslateFlowError, TranslateOutcome, TranslateStage};
 use crate::window_pick::{
     DRAG_THRESHOLD_LOGICAL, HighlightTransition, PickPath, PickTarget, SELECTION_TARGET_KEY,
@@ -67,7 +70,9 @@ use snow_ui::ui::component::color_picker::{ColorPicker, ColorPickerEvent, ColorP
 use snow_ui::ui::component::input::{Input, InputEvent, InputState};
 use snow_ui::ui::component::searchable_list::{SearchableListItem, SearchableVec};
 use snow_ui::ui::component::select::{Select, SelectEvent, SelectState};
-use snow_ui::ui::component::{IndexPath, Sizable, Size as ComponentSize, Theme, ThemeMode};
+use snow_ui::ui::component::{
+    Disableable, IndexPath, Sizable, Size as ComponentSize, Theme, ThemeMode,
+};
 use snow_ui::ui::*;
 use snow_ui::widgets::{
     AnnotationTool, ColorFormat, Magnifier, MagnifierGrid, ScreenshotToolbar, ToolbarAction,
@@ -183,8 +188,26 @@ const SCROLL_MODE_DISABLED_ACTIONS: [ToolbarAction; 8] = [
 const SCROLL_HINT_TEXT: &str = "overlay-hint-scroll";
 /// OCR 结果面板的逻辑宽度上限。
 const OCR_PANEL_MAX_WIDTH: f32 = 520.0;
-/// OCR 结果面板背景色。
-const OCR_PANEL_BG: u32 = 0x000000D9;
+/// OCR / 翻译结果面板背景色（白底）。
+const OCR_PANEL_BG: u32 = 0xFFFFFFF5;
+/// OCR / 翻译结果面板文字色（黑字）。
+const OCR_PANEL_TEXT: u32 = 0x000000FF;
+/// OCR / 翻译结果面板描边色。
+const OCR_PANEL_BORDER: u32 = 0x00000040;
+/// 结果面板与选区、屏幕边缘的间距（逻辑像素）。
+const RESULT_PANEL_MARGIN: f32 = 6.0;
+/// 结果面板文字行高估值（逻辑像素，用于估算面板高度以免超出屏幕）。
+const RESULT_PANEL_LINE_HEIGHT: f32 = 16.0;
+/// 结果面板单个字符宽度估值（逻辑像素）。
+const RESULT_PANEL_CHAR_WIDTH: f32 = 7.0;
+/// 结果面板按钮行高度估值（含内边距与间距）。
+const RESULT_PANEL_BUTTON_ROW_HEIGHT: f32 = 40.0;
+/// 结果面板左右内边距之和（逻辑像素）。
+const RESULT_PANEL_PADDING_X: f32 = 16.0;
+/// 结果面板上下内边距之和（逻辑像素）。
+const RESULT_PANEL_PADDING_Y: f32 = 8.0;
+/// 结果面板按钮间距。
+const RESULT_PANEL_BUTTON_GAP: f32 = 6.0;
 /// OCR 文本框描边色。
 const OCR_BOX_COLOR: u32 = 0xFAAD14;
 /// 双击判定所需的点击次数。
@@ -1725,6 +1748,8 @@ pub struct ScreenshotOverlayView {
     translate: TranslateUiState,
     /// 最近一次翻译请求序号（过期结果据此丢弃）。
     translate_serial: u64,
+    /// 译文段落与 OCR 行框的悬停联动状态。
+    link_hover: LinkHover,
     /// 窗口悬停来源（智能选区开启时才有）。
     window_hover: Option<Box<dyn WindowHover>>,
     /// 悬停处的命中层级路径与当前选中层（仅 Idle 时更新并高亮）。
@@ -1867,6 +1892,7 @@ impl ScreenshotOverlayView {
             latex_text: None,
             translate: TranslateUiState::Idle,
             translate_serial: 0,
+            link_hover: LinkHover::default(),
             window_hover: None,
             pick: PickPath::new(PickTarget::WindowSubElement),
             highlight_transition: HighlightTransition::new(true),
@@ -4798,6 +4824,7 @@ impl ScreenshotOverlayView {
         self.latex_text = None;
         self.qr_auto_panel = false;
         self.status_message = state.status_text(self.i18n);
+        self.link_hover.clear();
         self.ocr = state;
     }
 
@@ -4805,6 +4832,7 @@ impl ScreenshotOverlayView {
     fn dismiss_ocr(&mut self) {
         self.ocr_serial += 1;
         self.ocr = OcrUiState::Idle;
+        self.link_hover.clear();
         self.qr_link = None;
         self.qr_auto_panel = false;
         self.status_message = None;
@@ -4977,6 +5005,7 @@ impl ScreenshotOverlayView {
     /// 切换翻译状态，同时刷新底部状态条。
     fn set_translate_state(&mut self, state: TranslateUiState) {
         self.status_message = state.status_text(self.i18n);
+        self.link_hover.clear();
         self.translate = state;
     }
 
@@ -4984,6 +5013,7 @@ impl ScreenshotOverlayView {
     fn dismiss_translate(&mut self) {
         self.translate_serial += 1;
         self.translate = TranslateUiState::Idle;
+        self.link_hover.clear();
         self.status_message = None;
     }
 
@@ -5115,28 +5145,90 @@ impl ScreenshotOverlayView {
         }
     }
 
-    /// 翻译结果面板叠加层（无翻译界面时为空）。
-    fn translate_overlay(&self, selection: PhysicalRect) -> Vec<AnyElement> {
+    /// 翻译结果浮层：选区内的行框描边（联动高亮）+ 白底译文面板（无翻译界面时为空）。
+    ///
+    /// # 参数
+    /// - `selection`：选区（画布物理坐标）。
+    /// - `screen`：本屏在画布里的逻辑矩形 `(x, y, 宽, 高)`，面板不超出它。
+    /// - `cx`：视图上下文（挂悬停与按钮回调）。
+    fn translate_overlay(
+        &self,
+        selection: PhysicalRect,
+        screen: (f32, f32, f32, f32),
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
         let lines = translate_panel_lines(&self.translate, self.i18n);
         if lines.is_empty() {
             return Vec::new();
         }
-        let width = (selection.width as f32 / self.scale).clamp(160.0, OCR_PANEL_MAX_WIDTH);
-        let mut panel = div()
-            .absolute()
-            .top(self.lp(selection.y) + px(6.0))
-            .left(self.lp(selection.x) + px(6.0))
-            .w(px(width))
-            .px_2()
-            .py_1()
-            .rounded_md()
-            .bg(rgba(OCR_PANEL_BG))
-            .text_color(rgba(0xFFFFFFFF))
-            .text_xs();
-        for line in lines {
-            panel = panel.child(div().child(line));
-        }
-        vec![panel.into_any_element()]
+        let mut parts: Vec<AnyElement> = Vec::new();
+        let mut confirm_enabled = false;
+        let rows: Vec<AnyElement> = if let TranslateUiState::Done {
+            pairs,
+            boxes,
+            translated,
+            ..
+        } = &self.translate
+        {
+            confirm_enabled = !translated.trim().is_empty();
+            for (ix, b) in boxes.iter().enumerate() {
+                let active = self.link_hover.box_active(pairs, ix);
+                parts.push(
+                    div()
+                        .id(("translate-box", ix))
+                        .absolute()
+                        .top(self.lp(selection.y + b.rect.y))
+                        .left(self.lp(selection.x + b.rect.x))
+                        .w(self.lp(b.rect.width))
+                        .h(self.lp(b.rect.height))
+                        .border_1()
+                        .border_color(if active {
+                            rgba(LINK_BORDER)
+                        } else {
+                            rgb(OCR_BOX_COLOR)
+                        })
+                        .when(active, |d| d.bg(rgba(LINK_FILL)))
+                        .on_hover(cx.listener(move |this, hovered: &bool, _w, cx| {
+                            this.link_hover.set_box(ix, *hovered);
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                );
+            }
+            // 第 0 行是标题，接着最多 PANEL_MAX_PARAGRAPHS 行对应译文段落，其余是提示行
+            let hoverable = pairs.len().min(PANEL_MAX_PARAGRAPHS);
+            let active_para = self.link_hover.active_paragraph(pairs);
+            lines
+                .iter()
+                .enumerate()
+                .map(
+                    |(row_ix, line)| match row_ix.checked_sub(1).filter(|p| *p < hoverable) {
+                        Some(p) => div()
+                            .id(("translate-para", p))
+                            .rounded_sm()
+                            .when(active_para == Some(p), |d| {
+                                d.bg(rgba(LINK_FILL))
+                                    .border_1()
+                                    .border_color(rgba(LINK_BORDER))
+                            })
+                            .on_hover(cx.listener(move |this, hovered: &bool, _w, cx| {
+                                this.link_hover.set_paragraph(p, *hovered);
+                                cx.notify();
+                            }))
+                            .child(line.clone())
+                            .into_any_element(),
+                        None => div().child(line.clone()).into_any_element(),
+                    },
+                )
+                .collect()
+        } else {
+            lines
+                .iter()
+                .map(|l| div().child(l.clone()).into_any_element())
+                .collect()
+        };
+        parts.push(self.result_panel(selection, screen, &lines, rows, confirm_enabled, cx));
+        parts
     }
 
     /// 执行双击 / 中键配置的选区动作；没有确定选区时只提示（`None` 动作除外）。
@@ -5209,15 +5301,27 @@ impl ScreenshotOverlayView {
         }
     }
 
-    /// 打开识别结果窗：带上选区图片、全文与文字块，覆盖窗保持不变。
-    fn open_recognition_window(&mut self) {
-        let OcrUiState::Done { text, boxes, .. } = &self.ocr else {
-            return;
+    /// 打开识别结果窗：带上选区图片、全文与文字块（翻译浮层则带原文、行框与译文对照），覆盖窗保持不变。
+    ///
+    /// # 返回
+    /// 结果窗是否已成功打开（无内容、选区无效或打开失败为 `false`）。
+    fn open_recognition_window(&mut self) -> bool {
+        let (text, boxes, translation) = match (&self.translate, &self.ocr) {
+            (
+                TranslateUiState::Done {
+                    source,
+                    boxes,
+                    pairs,
+                    ..
+                },
+                _,
+            ) => (source.clone(), boxes.clone(), Some(pairs.clone())),
+            (_, OcrUiState::Done { text, boxes, .. }) => (text.clone(), boxes.clone(), None),
+            _ => return false,
         };
-        let (text, boxes) = (text.clone(), boxes.clone());
         let Some((width, height, rgba)) = self.selection_image() else {
             self.status_message = Some(self.i18n.tr("overlay-msg-selection-invalid"));
-            return;
+            return false;
         };
         let data = crate::recognition_view::RecognitionData {
             width,
@@ -5228,6 +5332,7 @@ impl ScreenshotOverlayView {
             table: self.table_texts.clone(),
             latex: self.latex_text.clone(),
             conversion: crate::conversion_guide::ConversionGuide::NotConfigured,
+            translation,
         };
         if let Err(e) = self.output.open_recognition_window(data) {
             tracing::warn!(error = %e, "打开识别结果窗失败");
@@ -5235,7 +5340,9 @@ impl ScreenshotOverlayView {
                 "overlay-msg-recognition-window-failed",
                 &Args::new().arg(1, e.to_string()),
             ));
+            return false;
         }
+        true
     }
 
     /// 再次复制识别文本并关闭覆盖窗；复制失败保留窗口并提示。
@@ -5292,10 +5399,22 @@ impl ScreenshotOverlayView {
         }
     }
 
-    /// OCR 结果面板与文本框叠加层（无 OCR 界面或无选区时为空）。
-    fn ocr_overlay(&self, selection: PhysicalRect) -> Vec<AnyElement> {
+    /// OCR 结果浮层：文本框描边 + 白底结果面板（无 OCR 界面或无选区时为空）。
+    ///
+    /// # 参数
+    /// - `selection`：选区（画布物理坐标）。
+    /// - `screen`：本屏在画布里的逻辑矩形 `(x, y, 宽, 高)`，面板不超出它。
+    /// - `cx`：视图上下文（挂按钮回调）。
+    fn ocr_overlay(
+        &self,
+        selection: PhysicalRect,
+        screen: (f32, f32, f32, f32),
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
         let mut parts: Vec<AnyElement> = Vec::new();
-        if let OcrUiState::Done { boxes, .. } = &self.ocr {
+        let mut confirm_enabled = false;
+        if let OcrUiState::Done { boxes, text, .. } = &self.ocr {
+            confirm_enabled = !text.is_empty();
             for b in boxes {
                 parts.push(
                     div()
@@ -5310,29 +5429,121 @@ impl ScreenshotOverlayView {
                 );
             }
         }
-        let lines = panel_lines(&self.ocr, self.i18n);
-        if !lines.is_empty() {
-            let width = (selection.width as f32 / self.scale).clamp(160.0, OCR_PANEL_MAX_WIDTH);
-            let mut panel = div()
-                .absolute()
-                .top(self.lp(selection.y) + px(6.0))
-                .left(self.lp(selection.x) + px(6.0))
-                .w(px(width))
-                .px_2()
-                .py_1()
-                .rounded_md()
-                .bg(rgba(OCR_PANEL_BG))
-                .text_color(rgba(0xFFFFFFFF))
-                .text_xs();
-            for line in lines {
-                panel = panel.child(div().child(line));
-            }
-            if self.qr_link.is_some() {
-                panel = panel.child(div().child(self.i18n.tr("overlay-qr-open-link-hint")));
-            }
-            parts.push(panel.into_any_element());
+        let mut lines = panel_lines(&self.ocr, self.i18n);
+        if lines.is_empty() {
+            return parts;
         }
+        if self.qr_link.is_some() {
+            lines.push(self.i18n.tr("overlay-qr-open-link-hint"));
+        }
+        let rows: Vec<AnyElement> = lines
+            .iter()
+            .map(|l| div().child(l.clone()).into_any_element())
+            .collect();
+        parts.push(self.result_panel(selection, screen, &lines, rows, confirm_enabled, cx));
         parts
+    }
+
+    /// 白底黑字结果面板：文字行 + 底部“确定 / 撤销 / 关闭”三个按钮；位置贴选区左上并限制在本屏内。
+    ///
+    /// 面板自己吞掉左右键按下，点击面板不会被覆盖窗当成新的框选或右键退出。
+    ///
+    /// # 参数
+    /// - `selection`：选区（画布物理坐标）。
+    /// - `screen`：本屏在画布里的逻辑矩形。
+    /// - `lines`：文字行内容（只用来估算面板高度）。
+    /// - `rows`：文字行元素。
+    /// - `confirm_enabled`：“确定”是否可用（有可带入结果窗的内容）。
+    /// - `cx`：视图上下文。
+    fn result_panel(
+        &self,
+        selection: PhysicalRect,
+        screen: (f32, f32, f32, f32),
+        lines: &[String],
+        rows: Vec<AnyElement>,
+        confirm_enabled: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let width = (selection.width as f32 / self.scale)
+            .clamp(160.0, OCR_PANEL_MAX_WIDTH)
+            .min((screen.2 - 2.0 * RESULT_PANEL_MARGIN).max(1.0));
+        let max_height = (screen.3 - 2.0 * RESULT_PANEL_MARGIN).max(1.0);
+        let height = estimate_panel_height(lines, width).min(max_height);
+        let (x, y) = clamp_panel_origin(
+            (
+                selection.x as f32 / self.scale + RESULT_PANEL_MARGIN,
+                selection.y as f32 / self.scale + RESULT_PANEL_MARGIN,
+            ),
+            (width, height),
+            screen,
+        );
+        let confirm = Button::new("overlay-panel-confirm")
+            .with_size(ComponentSize::Small)
+            .label(self.i18n.tr("overlay-panel-confirm"))
+            .disabled(!confirm_enabled)
+            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                // 翻译面板确定：结果窗打开后退出截图状态，只留结果窗
+                let from_translate = this.translate.is_visible();
+                if this.open_recognition_window() && from_translate {
+                    this.finish(OverlayOutcome::Close, window, cx);
+                }
+                cx.notify();
+            }));
+        let undo = Button::new("overlay-panel-undo")
+            .with_size(ComponentSize::Small)
+            .label(self.i18n.tr("overlay-panel-undo"))
+            .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
+                this.undo_result_panel();
+                cx.notify();
+            }));
+        let close = Button::new("overlay-panel-close")
+            .with_size(ComponentSize::Small)
+            .label(self.i18n.tr("overlay-panel-close"))
+            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                this.finish(OverlayOutcome::Close, window, cx);
+            }));
+        div()
+            .absolute()
+            .top(px(y))
+            .left(px(x))
+            .w(px(width))
+            .max_h(px(max_height))
+            .flex()
+            .flex_col()
+            .gap_1()
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .border_1()
+            .border_color(rgba(OCR_PANEL_BORDER))
+            .bg(rgba(OCR_PANEL_BG))
+            .text_color(rgba(OCR_PANEL_TEXT))
+            .text_xs()
+            .occlude()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+            .child(div().flex_1().min_h_0().overflow_hidden().children(rows))
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .gap(px(RESULT_PANEL_BUTTON_GAP))
+                    .child(confirm)
+                    .child(undo)
+                    .child(close),
+            )
+            .into_any_element()
+    }
+
+    /// “撤销”：只关掉当前的 OCR / 翻译浮层，回到框选状态。
+    fn undo_result_panel(&mut self) {
+        if self.translate.is_visible() {
+            self.dismiss_translate();
+        } else if self.ocr.is_visible() {
+            self.dismiss_ocr();
+        }
     }
 
     /// 复制光标所在像素的颜色值（按当前色彩格式）到剪贴板。
@@ -5538,6 +5749,11 @@ impl ScreenshotOverlayView {
             if let Err(e) = window.drop_image(sprite.image) {
                 tracing::warn!(error = %e, "释放标注分块图集失败");
             }
+        }
+        // 截图结束后选区方式回到矩形，下次截图从矩形开始
+        if self.region_type != RegionType::Rectangle {
+            self.region_type = RegionType::Rectangle;
+            self.persist_region_type();
         }
         if let Some(hook) = &self.close_hook {
             hook();
@@ -6919,10 +7135,11 @@ impl ScreenshotOverlayView {
         if let Some(s) = sel
             && anchor_here
         {
-            for part in self.ocr_overlay(s) {
+            let screen_logical = (ox, oy, mon_w, mon_h);
+            for part in self.ocr_overlay(s, screen_logical, cx) {
                 root = root.child(part);
             }
-            for part in self.translate_overlay(s) {
+            for part in self.translate_overlay(s, screen_logical, cx) {
                 root = root.child(part);
             }
         }
@@ -7189,6 +7406,41 @@ impl Render for OverlayWindowView {
     }
 }
 
+/// 估算结果面板高度（逻辑像素）：按行宽估字符折行，再加按钮行与内边距，用来避免面板超出屏幕。
+///
+/// # 参数
+/// - `lines`：面板文字行。
+/// - `width`：面板逻辑宽度。
+fn estimate_panel_height(lines: &[String], width: f32) -> f32 {
+    let per_row =
+        (((width - RESULT_PANEL_PADDING_X) / RESULT_PANEL_CHAR_WIDTH).floor() as usize).max(1);
+    let rows: usize = lines
+        .iter()
+        .map(|l| l.chars().count().div_ceil(per_row).max(1))
+        .sum();
+    rows as f32 * RESULT_PANEL_LINE_HEIGHT + RESULT_PANEL_BUTTON_ROW_HEIGHT + RESULT_PANEL_PADDING_Y
+}
+
+/// 把面板左上角限制在屏幕内（四边各留 [`RESULT_PANEL_MARGIN`]；放不下时优先保证左上可见）。
+///
+/// # 参数
+/// - `want`：期望的左上角。
+/// - `size`：面板 `(宽, 高)`。
+/// - `screen`：屏幕 `(x, y, 宽, 高)`。
+fn clamp_panel_origin(
+    want: (f32, f32),
+    size: (f32, f32),
+    screen: (f32, f32, f32, f32),
+) -> (f32, f32) {
+    let (sx, sy, sw, sh) = screen;
+    let max_x = sx + sw - size.0 - RESULT_PANEL_MARGIN;
+    let max_y = sy + sh - size.1 - RESULT_PANEL_MARGIN;
+    (
+        want.0.min(max_x).max(sx + RESULT_PANEL_MARGIN),
+        want.1.min(max_y).max(sy + RESULT_PANEL_MARGIN),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -7231,6 +7483,8 @@ mod tests {
         scrolls: Vec<PhysicalRect>,
         /// 打开识别结果窗的次数。
         recognition_windows: u32,
+        /// 每次打开识别结果窗带入的译文段数（无译文为 `None`）。
+        recognition_translations: Vec<Option<usize>>,
     }
 
     /// 记录型输出通道；`fail` 为真时所有操作返回错误。
@@ -7351,12 +7605,15 @@ mod tests {
         /// 记录打开识别结果窗的请求。
         fn open_recognition_window(
             &mut self,
-            _data: crate::recognition_view::RecognitionData,
+            data: crate::recognition_view::RecognitionData,
         ) -> Result<(), String> {
             if self.fail {
                 return Err("boom".into());
             }
-            self.rec.borrow_mut().recognition_windows += 1;
+            let mut rec = self.rec.borrow_mut();
+            rec.recognition_windows += 1;
+            rec.recognition_translations
+                .push(data.translation.as_ref().map(Vec::len));
             Ok(())
         }
         /// 记录 OCR 下载请求。
@@ -9237,7 +9494,16 @@ mod tests {
         TranslateOutcome {
             source: "hello".into(),
             translated: translated.into(),
-            pairs: vec![("hello".into(), translated.into())],
+            pairs: vec![crate::translate_service::TranslatedParagraph {
+                source: "hello".into(),
+                translated: translated.into(),
+                box_indices: vec![0],
+            }],
+            boxes: vec![crate::ocr_service::OcrTextBox {
+                rect: PhysicalRect::new(1, 1, 10, 6),
+                text: "hello".into(),
+                confidence: None,
+            }],
             label: "fake-model".into(),
             ocr_ms: 5,
             translate_ms: 9,
@@ -9317,6 +9583,51 @@ mod tests {
             view.handle_key("escape", false, false),
             OverlayOutcome::Close
         );
+    }
+
+    /// 结果面板的“确定 / 撤销”：确定带着译文打开识别结果窗且浮层保留；撤销只关浮层、不关截图。
+    #[test]
+    fn result_panel_confirm_and_undo() {
+        let (mut view, rec) = view_with(100, 80, 1.0, false);
+        drag(&mut view, (5, 5), (44, 34));
+        view.apply_action(ToolbarAction::Translate);
+        view.finish_translate(1, Ok(translate_outcome("你好")));
+        view.open_recognition_window();
+        assert_eq!(rec.borrow().recognition_translations, vec![Some(1)]);
+        assert!(matches!(
+            view.translate_state(),
+            TranslateUiState::Done { .. }
+        ));
+        view.link_hover.set_paragraph(0, true);
+        view.undo_result_panel();
+        assert_eq!(view.translate_state(), &TranslateUiState::Idle);
+        assert_eq!(view.link_hover, LinkHover::default());
+    }
+
+    /// 结果面板位置：限制在屏幕内，估算高度随文字行增加。
+    #[test]
+    fn result_panel_stays_on_screen() {
+        let screen = (0.0, 0.0, 800.0, 600.0);
+        assert_eq!(
+            clamp_panel_origin((10.0, 10.0), (300.0, 100.0), screen),
+            (10.0, 10.0)
+        );
+        let (x, y) = clamp_panel_origin((700.0, 580.0), (300.0, 100.0), screen);
+        assert_eq!(
+            (x, y),
+            (
+                800.0 - 300.0 - RESULT_PANEL_MARGIN,
+                600.0 - 100.0 - RESULT_PANEL_MARGIN
+            )
+        );
+        // 比屏幕还大时保证左上可见
+        assert_eq!(
+            clamp_panel_origin((-50.0, -50.0), (900.0, 700.0), screen),
+            (RESULT_PANEL_MARGIN, RESULT_PANEL_MARGIN)
+        );
+        let one = estimate_panel_height(&["a".to_string()], 300.0);
+        let wrapped = estimate_panel_height(&["a".repeat(200)], 300.0);
+        assert!(wrapped > one);
     }
 
     /// 过期结果（用户已退出后才回来的）被丢弃，不会复活界面或改剪贴板。
@@ -9794,7 +10105,10 @@ mod tests {
         // 缺模型：引导卡片文案含官方来源与文件名，且不提供下载
         view.finish_ocr(
             serial,
-            Err(OcrError::LatexUnavailable(LatexUnavailable::NoDir)),
+            Err(OcrError::LatexUnavailable(LatexUnavailable::Missing {
+                dir: "D:/m".into(),
+                files: vec!["encoder.onnx"],
+            })),
         );
         let OcrUiState::Failed {
             message,

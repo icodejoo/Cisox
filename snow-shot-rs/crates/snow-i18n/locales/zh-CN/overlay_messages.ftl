@@ -150,3 +150,9 @@ overlay-toolbar-group-output = 输出
 overlay-toolbar-group-tip = { $arg1 }：{ $arg2 }
 
 overlay-region-bar-tip = 选区：{ $arg1 }
+
+overlay-panel-confirm = 确定
+
+overlay-panel-undo = 撤销
+
+overlay-panel-close = 关闭

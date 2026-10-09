@@ -5,8 +5,8 @@
 //! 因此换成任意镜像地址也不会降低校验强度。下载在调用线程里阻塞执行，调用方应放到后台线程。
 
 use crate::ocr_assets::{
-    AssetFile, COMPLETE_MARKER, Manifest, OcrUnavailable, dir_complete, find_model, manifest,
-    model_dir, ocr_root, runtime_dir,
+    AssetFile, COMPLETE_MARKER, Manifest, OcrUnavailable, dir_complete, find_model, find_model_dir,
+    manifest, model_search_dirs, models_dir, ocr_root, runtime_dir,
 };
 use snow_i18n::{Args, I18n};
 use std::path::{Path, PathBuf};
@@ -307,7 +307,8 @@ impl DownloadPlan {
 /// 规划要下载的内容：运行时与所选模型各自缺失才下载。
 ///
 /// # 参数
-/// - `root`：资产根目录。
+/// - `root`：资产根目录（运行时落在它下面）。
+/// - `model_dirs`：模型读取目录，第一项是下载落盘目录；任一目录里该模型已齐全就不再下载。
 /// - `model_kind`：配置里的模型类型。
 /// - `need_runtime`：为 `false` 时不规划运行时（已通过环境变量指定 exe）。
 ///
@@ -315,6 +316,7 @@ impl DownloadPlan {
 /// 下载计划；清单或模型类型无效返回错误说明。
 pub fn plan_downloads(
     root: &Path,
+    model_dirs: &[PathBuf],
     model_kind: &str,
     need_runtime: bool,
 ) -> Result<DownloadPlan, FetchError> {
@@ -322,13 +324,14 @@ pub fn plan_downloads(
         what: OCR_MANIFEST_NAME,
         detail,
     })?;
-    plan_from_manifest(manifest, root, model_kind, need_runtime)
+    plan_from_manifest(manifest, root, model_dirs, model_kind, need_runtime)
 }
 
 /// 用给定清单规划下载（测试可注入自定义清单）。
 pub fn plan_from_manifest(
     manifest: &Manifest,
     root: &Path,
+    model_dirs: &[PathBuf],
     model_kind: &str,
     need_runtime: bool,
 ) -> Result<DownloadPlan, FetchError> {
@@ -346,8 +349,13 @@ pub fn plan_from_manifest(
             files: runtime.files.clone(),
         });
     }
-    let m_dir = model_dir(root, model);
-    if !dir_complete(&m_dir, &model.files) {
+    if find_model_dir(model_dirs, model).is_none() {
+        // 落盘到主目录（统一目录）；没有读取目录时退回资产根下的 models
+        let m_dir = model_dirs
+            .first()
+            .cloned()
+            .unwrap_or_else(|| models_dir(root))
+            .join(&model.id);
         let items = model
             .files
             .iter()
@@ -645,7 +653,8 @@ pub fn download_missing(
     progress: impl FnMut(DownloadStep),
 ) -> Result<(), FetchError> {
     let root = ocr_root(data_root, env_root);
-    let plan = plan_downloads(&root, model_kind, need_runtime)?;
+    let model_dirs = model_search_dirs(data_root, env_root);
+    let plan = plan_downloads(&root, &model_dirs, model_kind, need_runtime)?;
     execute_plan(&plan, cancel, progress)
 }
 
@@ -673,7 +682,7 @@ mod tests {
     }
 
     use super::*;
-    use crate::ocr_assets::{ModelSpec, RuntimeSpec};
+    use crate::ocr_assets::{ModelSpec, RuntimeSpec, model_dir};
 
     /// 唯一临时目录。
     fn temp_root(tag: &str) -> PathBuf {
@@ -751,16 +760,48 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// 只含资产根下 `models` 的读取目录（环境变量覆盖布局的测试用）。
+    fn dirs(root: &Path) -> Vec<PathBuf> {
+        vec![models_dir(root)]
+    }
+
+    /// 下载落盘到统一目录；已有齐全模型（含手动放入、无标记）就不再规划下载。
+    #[test]
+    fn plan_targets_primary_and_skips_existing() {
+        let data = temp_root("primary");
+        let root = ocr_root(&data, None);
+        let dirs = model_search_dirs(&data, None);
+        let plan = plan_downloads(&root, &dirs, "small", false).expect("规划");
+        let (dest, _) = plan.model.expect("要下载");
+        assert!(
+            dest.starts_with(data.join("models").join("ocr")),
+            "{dest:?}"
+        );
+        let m = manifest().expect("清单");
+        let model = find_model(m, "small").expect("模型");
+        let existing = dirs[0].join(&model.id);
+        std::fs::create_dir_all(&existing).expect("建");
+        for f in &model.files {
+            std::fs::write(existing.join(&f.name), b"x").expect("写");
+        }
+        let plan = plan_downloads(&root, &dirs, "small", false).expect("规划");
+        assert!(
+            plan.model.is_none(),
+            "统一目录里已有（含手动放入）就不重复下载"
+        );
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
     /// 计划：什么都没有时运行时与模型都要下；`need_runtime=false` 不含运行时；已就绪则为空。
     #[test]
     fn plan_reflects_missing_pieces() {
         let root = temp_root("plan");
-        let plan = plan_downloads(&root, "small", true).expect("规划");
+        let plan = plan_downloads(&root, &dirs(&root), "small", true).expect("规划");
         assert!(plan.runtime.is_some() && plan.model.is_some());
         assert_eq!(plan.model.as_ref().map(|(_, items)| items.len()), Some(3));
-        let plan = plan_downloads(&root, "small", false).expect("规划");
+        let plan = plan_downloads(&root, &dirs(&root), "small", false).expect("规划");
         assert!(plan.runtime.is_none() && plan.model.is_some());
-        assert!(plan_downloads(&root, "nope", true).is_err());
+        assert!(plan_downloads(&root, &dirs(&root), "nope", true).is_err());
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -792,13 +833,13 @@ mod tests {
             },
             models: vec![model],
         };
-        let plan = plan_from_manifest(&manifest, &root, "tiny", false).expect("规划");
+        let plan = plan_from_manifest(&manifest, &root, &dirs(&root), "tiny", false).expect("规划");
         let mut steps = Vec::new();
         let cancel = AtomicBool::new(false);
         execute_plan(&plan, &cancel, |s| steps.push(s)).expect("下载");
         assert_eq!(steps.len(), 3);
         assert!(
-            plan_from_manifest(&manifest, &root, "tiny", false)
+            plan_from_manifest(&manifest, &root, &dirs(&root), "tiny", false)
                 .expect("再规划")
                 .is_empty()
         );
@@ -809,7 +850,8 @@ mod tests {
         // 篡改源文件：内容变了但清单哈希没变 -> 校验失败，且不留 .part
         let root2 = temp_root("dst2");
         std::fs::write(src.join("det.onnx"), b"detector-BYTES").expect("篡改");
-        let plan = plan_from_manifest(&manifest, &root2, "tiny", false).expect("规划");
+        let plan =
+            plan_from_manifest(&manifest, &root2, &dirs(&root2), "tiny", false).expect("规划");
         let err = execute_plan(&plan, &cancel, |_| {}).unwrap_err();
         assert!(matches!(err, FetchError::HashMismatch { .. }), "{err:?}");
         let m_dir2 = model_dir(&root2, &manifest.models[0]);
@@ -817,7 +859,8 @@ mod tests {
         assert!(!m_dir2.join(COMPLETE_MARKER).exists());
         // 取消开关
         cancel.store(true, Ordering::Relaxed);
-        let plan = plan_from_manifest(&manifest, &root2, "tiny", false).expect("规划");
+        let plan =
+            plan_from_manifest(&manifest, &root2, &dirs(&root2), "tiny", false).expect("规划");
         assert_eq!(
             execute_plan(&plan, &cancel, |_| {}).unwrap_err(),
             FetchError::Cancelled

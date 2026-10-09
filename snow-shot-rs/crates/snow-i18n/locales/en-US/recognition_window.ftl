@@ -13,3 +13,5 @@ recwin-close = Close
 recwin-notice-copied = Copied.
 
 recwin-notice-copy-failed = Copy failed: { $arg1 }
+
+recwin-translation-title = Translation
