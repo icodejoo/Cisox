@@ -67,8 +67,9 @@ fn element_verdict(element: &UiaElement, caret: bool) -> Verdict {
         CONTROL_TYPE_EDIT | CONTROL_TYPE_DOCUMENT
     );
     if !input_type {
-        // 传统自绘控件常是 Pane/Custom，只有系统插入符能证明它在接收文字输入
-        return if caret && element.has_keyboard_focus {
+        // 传统自绘控件常是 Pane/Custom，UIA 焦点元素也可能只是外层容器（不标记持有键盘焦点），
+        // 此时只有系统插入符能证明前台线程在接收文字输入
+        return if caret {
             Verdict::Type
         } else {
             Verdict::NoType(NotEditable)
@@ -213,7 +214,8 @@ mod tests {
         assert_eq!(classify(&r), Verdict::NoType(NoTypeReason::Uncertain));
     }
 
-    /// 游戏 / 自绘 UI 等未知控件：不是 Edit/Document 且没有插入符 → 不可键入；有插入符且持有焦点才放行。
+    /// 游戏 / 自绘 UI 等未知控件：不是 Edit/Document 且没有插入符 → 不可键入；有插入符就放行，
+    /// 即使 UIA 焦点元素是外层容器、没标记持有键盘焦点（WinForms 等实测如此）。
     #[test]
     fn unknown_controls() {
         let pane = UiaElement {
@@ -225,9 +227,26 @@ mod tests {
             classify(&reading(Ok(Some(pane.clone())))),
             Verdict::NoType(NoTypeReason::NotEditable)
         );
-        let mut r = reading(Ok(Some(pane)));
+        let mut r = reading(Ok(Some(pane.clone())));
         r.caret = true;
         assert_eq!(classify(&r), Verdict::Type);
+        let container = UiaElement {
+            has_keyboard_focus: false,
+            keyboard_focusable: false,
+            ..pane
+        };
+        r.uia = Ok(Some(container.clone()));
+        assert_eq!(classify(&r), Verdict::Type);
+        // 禁用 / 密码框即使有插入符也不键入
+        for mutate in [
+            (|e: &mut UiaElement| e.enabled = false) as fn(&mut UiaElement),
+            |e| e.password = true,
+        ] {
+            let mut element = container.clone();
+            mutate(&mut element);
+            r.uia = Ok(Some(element));
+            assert_eq!(classify(&r), Verdict::NoType(NoTypeReason::NotEditable));
+        }
     }
 
     /// Edit 只有 TextPattern 也算可编辑；Document 只有 TextPattern 时需要插入符，否则判不确定（只读网页）。

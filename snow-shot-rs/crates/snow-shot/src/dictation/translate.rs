@@ -529,6 +529,14 @@ impl TranslationTracker {
         &self.entries
     }
 
+    /// 还在等译文的句子数（已送出、结果未回）。
+    pub fn pending_count(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|e| matches!(e, Some(TranslationState::Pending)))
+            .count()
+    }
+
     /// 登记一句定稿但不翻译（如收尾并入的残余文字）。
     ///
     /// # 返回
@@ -793,6 +801,23 @@ mod tests {
             t.on_result(r, s, o),
             Some((0, TranslationState::Done("[en]你好".into())))
         );
+    }
+
+    /// 待译句数随结果回填递减，失败也算处理完。
+    #[test]
+    fn pending_count_tracks_results() {
+        let fake = Arc::new(Fake::default());
+        let mut t = TranslationTracker::default();
+        let cfg = config(true, Dimension::Bilingual, TranslateTarget::Auto);
+        let _ = start(&mut t, 1, &cfg, any(), Arc::clone(&fake));
+        t.on_final("你好");
+        t.on_final("hello");
+        assert_eq!(t.pending_count(), 2);
+        t.on_result(1, 0, TranslationOutcome::Done("x".into()));
+        assert_eq!(t.pending_count(), 1);
+        t.on_result(1, 1, TranslationOutcome::Failed);
+        assert_eq!(t.pending_count(), 0);
+        t.finish_worker();
     }
 
     /// 开关关闭不翻译，但仍登记句序号。

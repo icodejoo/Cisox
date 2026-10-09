@@ -41,6 +41,8 @@ const OWN_ICONS: &[(&str, &str)] = &[
         "scroll-capture",
         include_str!("../assets/icons/snow/scroll-capture.svg"),
     ),
+    // 外部引入的耳朵线性图标（14x14 视口，用户提供，许可证待确认），语音转文字的聆听指示用
+    ("hearing", include_str!("../assets/icons/snow/hearing.svg")),
 ];
 
 /// 取 `prefix` 与 `.svg` 之间的图标名；路径不符合约定返回 `None`。
@@ -105,13 +107,20 @@ pub fn icon_asset_exists(path: &str) -> bool {
 mod tests {
     use super::*;
 
-    /// 自绘图标全部可加载，且是描边线性 SVG。
+    /// 外部原样引入、不走本 crate 24x24 描边约定的图标（视口尺寸不同）。
+    const EXTERNAL_ICONS: &[&str] = &["hearing"];
+
+    /// 自绘图标全部可加载；除外部图标例外清单外，都是 24x24 描边线性 SVG。
     #[test]
     fn own_icons_load() {
         for (name, _) in OWN_ICONS {
             let path = format!("{OWN_ICON_PREFIX}{name}{ICON_EXT}");
             let data = AppAssets.load(&path).unwrap().expect("自绘图标缺失");
             let text = String::from_utf8(data.into_owned()).unwrap();
+            if EXTERNAL_ICONS.contains(name) {
+                assert!(text.starts_with("<svg"), "{name}");
+                continue;
+            }
             assert!(text.contains("viewBox=\"0 0 24 24\""), "{name}");
             assert!(text.contains("stroke-width="), "{name}");
         }

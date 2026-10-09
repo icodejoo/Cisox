@@ -154,7 +154,9 @@ scripts\verify-snow-stt.ps1 -Mode offline -Kind offline-sense-voice -Itn `
 3. 结束：在听时发 `STOP`，等 `FINAL` + `STOPPED`（上限 10s）；超时改发 `CANCEL` 再等 3s；仍不退出则强制结束，并报错。还没开始听就要结束（按住说话点了一下），没有可冲刷的音频，直接结束进程。
 4. 异常：`ERROR`、进程意外退出（带退出码）、写命令失败都会结束会话并给出可读提示；`STOPPED` 之后给进程 2s 自行退出。
 5. 主程序退出：发 `CANCEL`、关闭 stdin（worker 视为中止），短宽限后强制结束。结束进程只用自己 `spawn` 得到的子进程句柄，不按进程名查杀。
-6. 状态提示：浮窗状态行 + 托盘悬停提示（进行中显示状态，结束后复原）。
+6. 结束请求（toggle 再按一次 / hold 松开，都走 `DictationCommand::Stop` 同一条路）：识别部分仍是第 3 条（worker 冲刷排队的段）；引擎结束后若还有句子在翻译（`TranslationTracker::pending_count() > 0`），宿主弹出浮窗并进入「正在完成翻译」（`dictation/drain.rs`，上限 12s，超时提示后结束），译文回齐后才落「已结束」；等待或收尾期间再次触发结束 = 强制立即结束（`Engine::force_stop` 发 CANCEL 并释放进程）。注意：worker 进程在识别冲刷完成后即退出、麦克风随之关闭，不会为等译文而保留（译文跑在主程序线程里，与 worker 无关）。
+7. 加载中提示：只键入模式的右下角聆听图标在引擎未就绪（拉起 / 加载模型，`!engine.listening()`）时暂停光环，并在图标下方显示循环进度条（`Progress::loading`），就绪后恢复原样。
+8. 状态提示：浮窗状态行 + 托盘悬停提示（进行中显示状态，结束后复原）。
 
 ## 输出行为
 输出有两条去向，设置项 `dictation/output_mode`：

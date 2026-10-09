@@ -30,6 +30,8 @@ pub enum Failure {
     StartTimeout,
     /// 等待结束超时，已强制结束。
     StopTimeout,
+    /// 等待剩余译文超时，已结束。
+    TranslateTimeout,
     /// 工作进程意外退出（退出码未知为 `None`）。
     Crashed(Option<i32>),
     /// 工作进程上报的错误。
@@ -49,6 +51,8 @@ pub enum Status {
     ListeningNotice(RouteNote, TranslateIssue),
     /// 已发出结束，等待收尾。
     Finishing,
+    /// 识别已收尾，等待剩余句子翻译完成。
+    Translating,
     /// 已结束。
     Done,
     /// 失败。
@@ -92,6 +96,7 @@ impl Status {
                 format!("{listening} {}", issue_message(issue, locale))
             }
             Status::Finishing => i18n.tr("dictation-status-finishing"),
+            Status::Translating => i18n.tr("dictation-status-translating"),
             Status::Done => i18n.tr("dictation-status-done"),
             Status::Failed(failure) => failure_message(failure, locale),
         }
@@ -201,6 +206,7 @@ fn failure_message(failure: &Failure, locale: &str) -> String {
         ),
         Failure::StartTimeout => i18n.tr("dictation-error-start-timeout"),
         Failure::StopTimeout => i18n.tr("dictation-error-stop-timeout"),
+        Failure::TranslateTimeout => i18n.tr("dictation-error-translate-timeout"),
         Failure::Crashed(code) => {
             let shown = code.map_or_else(|| "?".to_string(), |c| c.to_string());
             i18n.tr_with(
@@ -249,6 +255,7 @@ mod tests {
             Failure::ModelUnavailable("x".into()),
             Failure::StartTimeout,
             Failure::StopTimeout,
+            Failure::TranslateTimeout,
             Failure::Crashed(Some(3)),
             Failure::Crashed(None),
             Failure::Worker("bad".into()),
@@ -263,7 +270,12 @@ mod tests {
             NoTypeReason::Elevated,
             NoTypeReason::Uncertain,
         ];
-        let mut statuses = vec![Status::Loading, Status::Finishing, Status::Done];
+        let mut statuses = vec![
+            Status::Loading,
+            Status::Finishing,
+            Status::Translating,
+            Status::Done,
+        ];
         statuses.extend(
             failures
                 .into_iter()

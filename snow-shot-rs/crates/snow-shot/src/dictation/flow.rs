@@ -5,10 +5,11 @@
 //! 所有 GPUI 对象只在主线程触碰。
 
 use super::DictationCommand;
+use super::badge::{BADGE_WINDOW_ALPHA, ListeningBadge, badge_rect};
 use super::client::{ProcessSttLink, locate_stt_exe};
 use super::config::{DictationConfig, prepare_launch};
 use super::engine::{Effect, Engine, Launch};
-use super::focus::{SystemProbe, Verdict, probe_verdict};
+use super::focus::{FocusProbe, SystemProbe, Verdict, classify};
 use super::output::{OutputMode, OutputPlan, RouteNote, decide};
 use super::status::{Failure, Status};
 use super::text::Transcript;
@@ -66,6 +67,8 @@ pub struct DictationHost {
     flush_deadline: Option<Instant>,
     /// 浮窗（若已打开）。
     overlay: Option<(ShellWindow, Entity<DictationView>)>,
+    /// 聆听指示（主屏右下角的耳朵图标，仅“只键入、无浮窗”时显示）。
+    badge: Option<ShellWindow>,
     /// 浮窗是否曾经成功打开过（用来识别“被用户关掉”）。
     overlay_seen_open: bool,
     /// 本轮浮窗被用户关掉后不再自动重开。
@@ -111,6 +114,7 @@ impl DictationHost {
             probe_deadline: None,
             flush_deadline: None,
             overlay: None,
+            badge: None,
             overlay_seen_open: false,
             dismissed: false,
             ticker: None,
@@ -169,6 +173,7 @@ impl DictationHost {
             }
         }
         self.watch_overlay_dismissed(cx, tray, now);
+        self.sync_badge(cx);
         if !self.engine.active() && self.flush_deadline.is_none() && self.probe_deadline.is_none() {
             self.stop_ticker();
         }
@@ -313,7 +318,9 @@ impl DictationHost {
         let spawned = std::thread::Builder::new()
             .name("snow-dictation-probe".into())
             .spawn(move || {
-                let verdict = probe_verdict(&mut SystemProbe);
+                let reading = SystemProbe.read();
+                let verdict = classify(&reading);
+                tracing::info!(?verdict, ?reading, "语音转文字焦点探测");
                 inbox.push(UiEvent::DictationProbed { round, verdict });
             });
         if let Err(e) = spawned {
@@ -436,6 +443,7 @@ impl DictationHost {
                 self.flush_deadline = Some(now + TYPE_FLUSH_TIMEOUT);
             }
         }
+        self.sync_badge(cx);
     }
 
     /// 按焦点判定定下本轮输出方案（整轮不变）。
@@ -457,6 +465,7 @@ impl DictationHost {
         if self.plan.typing {
             self.type_sync(cx, tray, true);
         }
+        self.sync_badge(cx);
     }
 
     /// 把已键入内容修正到当前转写；目标变了或发送失败就退到浮窗。
@@ -483,6 +492,7 @@ impl DictationHost {
         // 浮窗已开（键入时同时显示）就不重铺，免得冲掉用户的编辑；没开则打开并铺上全部转写
         self.ensure_overlay(cx);
         self.flush_deadline = None;
+        self.sync_badge(cx);
     }
 
     /// 用当前转写与状态重新铺满浮窗。
@@ -495,6 +505,72 @@ impl DictationHost {
             v.seed(&finals, &partial, &translations, vcx);
             v.set_status(status, vcx);
         });
+    }
+
+    /// 聆听指示是否该显示：识别进行中，且文字只走键入（没有浮窗）。
+    fn badge_wanted(&self) -> bool {
+        self.engine.active() && self.plan.typing && !self.plan.overlay
+    }
+
+    /// 按当前状态显示或关闭聆听指示。
+    fn sync_badge(&mut self, cx: &mut ShellContext) {
+        if self.badge_wanted() {
+            self.show_badge(cx);
+        } else {
+            self.hide_badge(cx);
+        }
+    }
+
+    /// 在主屏右下角打开聆听指示（鼠标穿透、不抢焦点，避免改变键入目标）；已打开则不重复。
+    fn show_badge(&mut self, cx: &mut ShellContext) {
+        if self
+            .badge
+            .as_ref()
+            .is_some_and(|window| cx.is_window_open(window))
+        {
+            return;
+        }
+        self.badge = None;
+        let Some(rect) = cx
+            .monitors()
+            .ok()
+            .and_then(|monitors| monitors.primary().map(|m| badge_rect(m.work_area, m.scale)))
+        else {
+            tracing::warn!("取不到主显示器信息，无法显示聆听指示");
+            return;
+        };
+        let spec = WindowSpec {
+            title: String::new(),
+            placement: Placement::Physical(rect),
+            transparent: true,
+            always_on_top: true,
+            decorations: false,
+            show_in_taskbar: false,
+            focus: false,
+            resizable: false,
+        };
+        match cx.open_window(&spec, |_window, app| ListeningBadge::create(app)) {
+            Ok((window, _view)) => {
+                if let Err(e) = window.set_input_transparent(true) {
+                    tracing::warn!(error = %e, "聆听指示设置鼠标穿透失败");
+                }
+                // 窗口按不透明绘制时，用整窗 alpha 呈现半透明蒙层（须在鼠标穿透之后设置）
+                if let Err(e) = window.set_window_alpha(BADGE_WINDOW_ALPHA) {
+                    tracing::warn!(error = %e, "聆听指示设置整窗透明度失败");
+                }
+                self.badge = Some(window);
+            }
+            Err(e) => tracing::warn!(error = %e, "打开聆听指示失败"),
+        }
+    }
+
+    /// 关闭聆听指示（未打开则忽略）。
+    fn hide_badge(&mut self, cx: &mut ShellContext) {
+        if let Some(window) = self.badge.take()
+            && cx.is_window_open(&window)
+        {
+            window.close(cx.app());
+        }
     }
 
     /// 浮窗是否打开着。
@@ -567,7 +643,7 @@ impl DictationHost {
         Some(bottom_right_rect(monitor.work_area, monitor.scale))
     }
 
-    /// 浮窗被用户关掉：记下，并在浮窗是唯一输出时结束这一轮（否则继续听也没有去处）。
+    /// 浮窗被用户关掉（关闭按钮 / Esc）：记下，并结束这一轮，即退出语音识别模式。
     fn watch_overlay_dismissed(
         &mut self,
         cx: &mut ShellContext,
@@ -577,7 +653,7 @@ impl DictationHost {
         if self.overlay_seen_open && self.overlay.is_some() && !self.overlay_open(cx) {
             self.overlay = None;
             self.dismissed = true;
-            if self.engine.active() && !self.plan.typing {
+            if self.engine.active() {
                 self.stop(cx, tray, now);
             }
         }

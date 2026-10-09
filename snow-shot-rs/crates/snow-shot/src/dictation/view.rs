@@ -10,7 +10,7 @@ use super::translate::TranslationState;
 use crate::settings_state::UiPrefs;
 use crate::settings_view::{Palette, palette};
 use snow_platform::clipboard::copy_text_to_clipboard;
-use snow_ui::ui::component::button::{Button, ButtonVariants};
+use snow_ui::ui::component::button::Button;
 use snow_ui::ui::component::input::{Textarea, TextareaState};
 use snow_ui::ui::component::{Sizable, Size as ComponentSize, Theme, ThemeMode};
 use snow_ui::ui::*;
@@ -228,16 +228,7 @@ impl Render for DictationView {
                     .items_start()
                     .gap(px(GAP))
                     .text_size(px(STATUS_SIZE))
-                    .child(div().flex_1().text_color(status_color).child(status_text))
-                    .child(
-                        Button::new("dictation-close")
-                            .ghost()
-                            .with_size(ComponentSize::XSmall)
-                            .label("✕")
-                            .on_click(cx.listener(|_this, _event: &ClickEvent, window, _cx| {
-                                window.remove_window()
-                            })),
-                    ),
+                    .child(div().flex_1().text_color(status_color).child(status_text)),
             )
             .child(Textarea::new(&self.input))
             .child(
@@ -279,6 +270,15 @@ impl Render for DictationView {
                             .on_click(
                                 cx.listener(|this, _event: &ClickEvent, _window, cx| this.copy(cx)),
                             ),
+                    )
+                    .child(
+                        // 关窗即退出语音识别模式（流程层发现浮窗被关后结束本轮）
+                        Button::new("dictation-close")
+                            .with_size(ComponentSize::Small)
+                            .label(i18n.tr("dictation-overlay-close"))
+                            .on_click(cx.listener(|_this, _event: &ClickEvent, window, _cx| {
+                                window.remove_window()
+                            })),
                     ),
             )
     }

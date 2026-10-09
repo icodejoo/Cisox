@@ -6,6 +6,8 @@ dictation-status-listening = 正在听。{ $route }
 
 dictation-status-finishing = 正在收尾……
 
+dictation-status-translating = 正在完成最后几句的翻译……再按一次快捷键可立即结束
+
 dictation-status-done = 已结束
 
 dictation-route-typing = 正在键入到当前输入框
@@ -54,6 +56,8 @@ dictation-error-start-timeout = 语音引擎没能及时就绪，已停止
 
 dictation-error-stop-timeout = 语音引擎没能及时结束，已强制停止
 
+dictation-error-translate-timeout = 译文没能及时完成，已直接结束
+
 dictation-error-crashed = 语音引擎意外退出（退出码 { $code }）
 
 dictation-error-worker = 语音引擎出错：{ $detail }
@@ -100,45 +104,7 @@ stt-ui-row-installed = 已安装，占用 { $size }
 
 stt-ui-row-missing = 未安装，需下载约 { $archive }
 
-stt-ui-panel-title = 当前模型：{ $name }
-
-stt-ui-line-installed = 已安装。磁盘占用 { $size }，运行时内存约 { $mem } MiB（评测口径，仅供参考）。
-
-stt-ui-line-missing = 未安装。需下载约 { $archive }，磁盘占用 { $size }，运行时内存约 { $mem } MiB（评测口径，仅供参考）。
-
-stt-ui-line-license = 许可证：{ $license }
-
 stt-ui-license-unverified = 尚未核对
-
-stt-ui-line-vad-ok = 离线模式另用共享的语音活动检测文件：已安装
-
-stt-ui-line-vad-missing = 离线模式另需共享的语音活动检测文件（{ $size }），会随模型一起下载
-
-stt-ui-line-unpinned = 校验值待固定：下载文件目前只校验大小
-
-stt-ui-action-download = 下载
-
-stt-ui-action-cancel = 取消
-
-stt-ui-action-installed = 已安装
-
-stt-ui-action-busy = 正在下载其他模型
-
-stt-ui-stage-downloading = 下载中
-
-stt-ui-stage-verifying = 校验中
-
-stt-ui-stage-extracting = 解压中
-
-stt-ui-progress = { $stage } { $asset } { $percent }%
-
-stt-ui-progress-no-total = { $stage } { $asset }
-
-stt-ui-download-failed = 下载失败：{ $detail }
-
-stt-ui-download-cancelled = 已取消下载
-
-stt-ui-download-done = 下载完成
 
 stt-ui-lock-system = 系统语音引擎不使用这些模型
 

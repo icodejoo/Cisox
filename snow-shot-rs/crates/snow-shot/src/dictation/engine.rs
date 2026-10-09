@@ -157,6 +157,23 @@ impl Engine {
         self.phase == Phase::Listening
     }
 
+    /// 是否处于收尾阶段（已发出结束，等待 STOPPED）。
+    pub fn stopping(&self) -> bool {
+        matches!(self.phase, Phase::Stopping { .. })
+    }
+
+    /// 强制立即结束：收尾阶段下发 CANCEL 并立刻释放进程；其余阶段忽略。
+    ///
+    /// # 返回
+    /// 结束效果；不在收尾阶段返回空。
+    pub fn force_stop(&mut self) -> Vec<Effect> {
+        if !self.stopping() {
+            return Vec::new();
+        }
+        let _ = self.send(&Command::Cancel);
+        self.finish(Duration::ZERO, Effect::Done)
+    }
+
     /// 开始一轮。已有会话时忽略（按住说话的重复按下、切换式的连点）。
     ///
     /// # 参数
@@ -623,6 +640,20 @@ mod tests {
             vec![Effect::Failed(Failure::Link("broken pipe".into()))]
         );
         assert!(!engine.active());
+    }
+
+    /// 收尾阶段强制结束：发 CANCEL、立刻释放进程；听的阶段不受影响。
+    #[test]
+    fn force_stop_only_while_stopping() {
+        let (mut engine, shared, now) = listening();
+        assert!(engine.force_stop().is_empty());
+        assert!(engine.active() && !engine.stopping());
+        engine.stop(now);
+        assert!(engine.stopping());
+        assert_eq!(engine.force_stop(), vec![Effect::Done]);
+        assert!(!engine.active());
+        assert_eq!(shared.borrow().sent.last(), Some(&Command::Cancel));
+        assert_eq!(shared.borrow().shutdowns, vec![Duration::ZERO]);
     }
 
     /// 应用退出：发 CANCEL、带短宽限释放进程；空闲时什么都不做。

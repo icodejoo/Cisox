@@ -6,6 +6,8 @@ dictation-status-listening = Listening. { $route }
 
 dictation-status-finishing = Finishing...
 
+dictation-status-translating = Translating the last sentences... Press the hotkey again to finish now.
+
 dictation-status-done = Finished.
 
 dictation-route-typing = Typing into the current input box.
@@ -54,6 +56,8 @@ dictation-error-start-timeout = The speech engine did not become ready in time a
 
 dictation-error-stop-timeout = The speech engine did not finish in time and was stopped.
 
+dictation-error-translate-timeout = Translation did not finish in time. Finished anyway.
+
 dictation-error-crashed = The speech engine exited unexpectedly (exit code { $code }).
 
 dictation-error-worker = Speech engine error: { $detail }
@@ -100,45 +104,7 @@ stt-ui-row-installed = Installed, { $size } on disk
 
 stt-ui-row-missing = Not installed, download about { $archive }
 
-stt-ui-panel-title = Current model: { $name }
-
-stt-ui-line-installed = Installed. { $size } on disk, about { $mem } MiB of memory while running (benchmark figure, for reference only).
-
-stt-ui-line-missing = Not installed. Download is about { $archive }, { $size } on disk, about { $mem } MiB of memory while running (benchmark figure, for reference only).
-
-stt-ui-line-license = License: { $license }
-
 stt-ui-license-unverified = not verified yet
-
-stt-ui-line-vad-ok = Offline mode also uses the shared voice activity file: installed
-
-stt-ui-line-vad-missing = Offline mode also needs the shared voice activity file ({ $size }); it is downloaded together with the model
-
-stt-ui-line-unpinned = Checksum not pinned yet: downloads are only checked by size
-
-stt-ui-action-download = Download
-
-stt-ui-action-cancel = Cancel
-
-stt-ui-action-installed = Installed
-
-stt-ui-action-busy = Another model is downloading
-
-stt-ui-stage-downloading = Downloading
-
-stt-ui-stage-verifying = Verifying
-
-stt-ui-stage-extracting = Extracting
-
-stt-ui-progress = { $stage } { $asset } { $percent }%
-
-stt-ui-progress-no-total = { $stage } { $asset }
-
-stt-ui-download-failed = Download failed: { $detail }
-
-stt-ui-download-cancelled = Download cancelled
-
-stt-ui-download-done = Download finished
 
 stt-ui-lock-system = The system speech engine does not use these models
 

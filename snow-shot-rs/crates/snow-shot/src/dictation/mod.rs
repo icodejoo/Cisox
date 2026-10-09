@@ -6,6 +6,7 @@
 //! 分层：`engine`（进程生命周期状态机）、`typing` / `focus` / `output`（键入差异、焦点判定、去向决策）、
 //! `text` / `overlay_model`（文本合并）都是纯逻辑，可离屏单测；`client`、`flow`、`view` 负责接系统。
 
+pub mod badge;
 pub mod client;
 pub mod config;
 pub mod engine;
