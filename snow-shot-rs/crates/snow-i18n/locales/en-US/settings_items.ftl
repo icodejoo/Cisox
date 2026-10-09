@@ -85,7 +85,7 @@ setting-screen-recording-capture-toolbar-in-recording = Include toolbar in recor
 setting-screen-recording-start-delay-seconds = Start delay (seconds)
 setting-screen-recording-video-save-directory = Video save directory
 setting-screen-recording-video-filename-format = Video filename format
-setting-drawing-quick-selection-disabled-tools = Tools excluded from quick selection
+setting-drawing-quick-selection-disabled-tools = Tools disabled in quick selection (checked = disabled)
 setting-drawing-remember-last-used-tool = Remember last used tool
 setting-drawing-shape-style = Shape style
 setting-drawing-arrow-style = Arrow style

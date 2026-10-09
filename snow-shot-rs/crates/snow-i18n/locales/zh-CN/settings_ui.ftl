@@ -60,3 +60,4 @@ settings-pick-file = 选择文件…
 settings-pick-tray-icon-title = 选择托盘图标
 settings-pick-tray-icon-filter = 图片文件 (*.png, *.jpg, *.jpeg, *.webp, *.bmp)
 settings-multi-summary = 已选 { $arg1 } / { $arg2 } 项
+settings-multi-disabled-summary = 已禁用 { $arg1 } / { $arg2 } 项

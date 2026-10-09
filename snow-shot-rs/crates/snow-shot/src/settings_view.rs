@@ -474,6 +474,15 @@ fn dropdown_items(key: &str, options: &[&'static str], locale: &str) -> Vec<Drop
         .collect()
 }
 
+/// 多选下拉触发器摘要的 message id：「禁用」语义的键写「已禁用 n / 总数」，其余写「已选 n / 总数」。
+fn multi_summary_id(key: &str) -> &'static str {
+    if crate::settings_model::DISABLED_SEMANTICS_KEYS.contains(&key) {
+        "settings-multi-disabled-summary"
+    } else {
+        "settings-multi-summary"
+    }
+}
+
 /// 两组选中项是否相同（忽略顺序），用来判断多选下拉是否需要同步。
 fn same_selection(a: &[&str], b: &[&str]) -> bool {
     a.len() == b.len() && a.iter().all(|name| b.contains(name))
@@ -1543,6 +1552,7 @@ impl SettingsView {
             return row_div;
         };
         let locale = lang.locale();
+        let summary_id = multi_summary_id(key);
         row_div.child(
             div().w(px(DROPDOWN_WIDTH)).h(px(DROPDOWN_HEIGHT)).child(
                 Combobox::new(&entry.state)
@@ -1551,7 +1561,7 @@ impl SettingsView {
                     .menu_max_h(px(MULTI_CHOICE_MAX_HEIGHT))
                     .render_trigger(move |ctx, _window, _cx| {
                         let label = crate::ocr_backend::i18n_for(locale).tr_with(
-                            "settings-multi-summary",
+                            summary_id,
                             &Args::new()
                                 .arg(SUMMARY_SELECTED_ARG, ctx.selection().len())
                                 .arg(SUMMARY_TOTAL_ARG, total),
@@ -2846,6 +2856,36 @@ mod tests {
         assert!(!same_selection(&["a"], &["a", "b"]));
         assert!(!same_selection(&["a", "c"], &["a", "b"]));
         assert!(same_selection(&[], &[]));
+    }
+
+    /// 快速选区禁用工具：默认值回显、选中集合与配置值往返、未知值保留、已知项按候选顺序，摘要文案走「已禁用」。
+    #[test]
+    fn quick_selection_disabled_tools_roundtrip() {
+        use crate::tray_config::{enabled_menu_options, menu_options_from_selection};
+        const KEY: &str = "drawing/quick_selection_disabled_tools";
+        let entry = snow_config::schema::entry_for(KEY).expect("schema 应含该键");
+        let Control::MultiChoice(options) = crate::settings_model::control_for(entry) else {
+            panic!("应为多选下拉");
+        };
+        assert_eq!(options.len(), 13);
+        // 默认值：回显为 free-draw、pen-filter（按候选顺序）
+        assert_eq!(
+            enabled_menu_options(&entry.default, options),
+            ["free-draw", "pen-filter"]
+        );
+        // 乱序勾选 + 旧配置里的未知值：已知项按候选顺序，未知值在后保留
+        let current = json!(["legacy", "pen-filter"]);
+        let next = menu_options_from_selection(&current, options, &["text", "arrow", "pen-filter"]);
+        assert_eq!(next, json!(["arrow", "pen-filter", "text", "legacy"]));
+        // 回读选中集合，再写回结果不变
+        let back = enabled_menu_options(&next, options);
+        assert_eq!(back, ["arrow", "pen-filter", "text"]);
+        assert_eq!(menu_options_from_selection(&next, options, &back), next);
+        // 全部取消只留未知值
+        assert_eq!(menu_options_from_selection(&next, options, &[]), json!(["legacy"]));
+        // 摘要：禁用语义键与托盘键用不同文案
+        assert_eq!(multi_summary_id(KEY), "settings-multi-disabled-summary");
+        assert_eq!(multi_summary_id("tray/menu_options"), "settings-multi-summary");
     }
 
     /// 文本框同步：配置变了且框内不同才覆盖；用户输入中（配置没变）或已一致都不动。

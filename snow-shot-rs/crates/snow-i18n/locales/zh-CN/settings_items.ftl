@@ -85,7 +85,7 @@ setting-screen-recording-capture-toolbar-in-recording = 录制中包含工具栏
 setting-screen-recording-start-delay-seconds = 开始延时（秒）
 setting-screen-recording-video-save-directory = 视频保存目录
 setting-screen-recording-video-filename-format = 视频文件名格式
-setting-drawing-quick-selection-disabled-tools = 快速选择中排除的工具
+setting-drawing-quick-selection-disabled-tools = 快速选区中禁用的工具（勾选 = 禁用）
 setting-drawing-remember-last-used-tool = 记住上次使用的工具
 setting-drawing-shape-style = 图形样式
 setting-drawing-arrow-style = 箭头样式

@@ -39,7 +39,11 @@ pub const SECRET_KEYS: &[&str] = &["api_configuration/custom_models"];
 /// 颜色配置键的后缀。
 const COLOR_KEY_SUFFIX: &str = "_color";
 /// 用多选勾选列表编辑的字符串列表键（其余字符串列表仍是文本框）。
-const MULTI_CHOICE_KEYS: &[&str] = &["tray/menu_options"];
+const MULTI_CHOICE_KEYS: &[&str] = &["tray/menu_options", QUICK_SELECTION_DISABLED_TOOLS_KEY];
+/// 勾选语义为「禁用」的多选键（触发器摘要写「已禁用 n / 总数」）。
+pub const DISABLED_SEMANTICS_KEYS: &[&str] = &[QUICK_SELECTION_DISABLED_TOOLS_KEY];
+/// 快速选区中被禁用的工具列表键。
+const QUICK_SELECTION_DISABLED_TOOLS_KEY: &str = "drawing/quick_selection_disabled_tools";
 /// 单独允许 Shift 作为快捷键的分组前缀。
 const SHIFT_ONLY_GROUP_PREFIX: &str = "screenshot_shortcuts/";
 /// 步进按钮的最小分段数（范围跨度除以该值得到大步长）。
@@ -820,7 +824,10 @@ mod tests {
         );
         assert_eq!(control_of("global_mouse/screenshot_copy"), Control::JsonText);
         assert!(matches!(control_of("tray/menu_options"), Control::MultiChoice(o) if o.len() == 22));
-        assert_eq!(control_of("drawing/quick_selection_disabled_tools"), Control::ListText);
+        assert!(matches!(
+            control_of("drawing/quick_selection_disabled_tools"),
+            Control::MultiChoice(o) if o.len() == 13
+        ));
         assert_eq!(
             control_of("screenshot_shortcuts/move_tool"),
             Control::Shortcuts {

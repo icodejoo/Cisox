@@ -60,3 +60,4 @@ settings-pick-file = Choose file…
 settings-pick-tray-icon-title = Choose tray icon
 settings-pick-tray-icon-filter = Image files (*.png, *.jpg, *.jpeg, *.webp, *.bmp)
 settings-multi-summary = Selected { $arg1 } of { $arg2 }
+settings-multi-disabled-summary = { $arg1 } of { $arg2 } disabled
