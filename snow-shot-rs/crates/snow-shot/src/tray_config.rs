@@ -19,6 +19,9 @@ pub const KEY_MIDDLE_CLICK: &str = "tray/middle_click_action";
 /// 菜单项列表配置键。
 pub const KEY_MENU_OPTIONS: &str = "tray/menu_options";
 
+/// 托盘图标可选文件的扩展名（与 `image` 已启用的解码格式一致）。
+pub const ICON_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp", "bmp"];
+
 /// 托盘图标边长（像素）。
 pub const ICON_SIZE: u32 = 32;
 /// 内置图标（128 像素 PNG，取自旧版应用图标）。
@@ -67,7 +70,11 @@ impl TrayClick {
 /// - `key`：配置键。
 /// - `default`：默认动作。
 pub fn click_action(document: &ConfigDocument, key: &str, default: TrayClick) -> TrayClick {
-    document.value(key).as_str().and_then(TrayClick::parse).unwrap_or(default)
+    document
+        .value(key)
+        .as_str()
+        .and_then(TrayClick::parse)
+        .unwrap_or(default)
 }
 
 /// 托盘是否启用；配置缺失按启用。
@@ -86,7 +93,12 @@ pub fn menu_options(document: &ConfigDocument) -> HashSet<String> {
     document
         .value(KEY_MENU_OPTIONS)
         .as_array()
-        .map(|items| items.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -98,13 +110,18 @@ pub fn menu_options(document: &ConfigDocument) -> HashSet<String> {
 ///
 /// # 返回
 /// 筛选并规整后的菜单。
-pub fn filter_menu(entries: Vec<(Option<&'static str>, TrayMenuEntry)>, enabled: &HashSet<String>) -> Vec<TrayMenuEntry> {
+pub fn filter_menu(
+    entries: Vec<(Option<&'static str>, TrayMenuEntry)>,
+    enabled: &HashSet<String>,
+) -> Vec<TrayMenuEntry> {
     let mut out: Vec<TrayMenuEntry> = Vec::new();
     for (id, entry) in entries {
         if id.is_some_and(|id| !enabled.contains(id)) {
             continue;
         }
-        if matches!(entry, TrayMenuEntry::Separator) && matches!(out.last(), None | Some(TrayMenuEntry::Separator)) {
+        if matches!(entry, TrayMenuEntry::Separator)
+            && matches!(out.last(), None | Some(TrayMenuEntry::Separator))
+        {
             continue;
         }
         out.push(entry);
@@ -113,6 +130,72 @@ pub fn filter_menu(entries: Vec<(Option<&'static str>, TrayMenuEntry)>, enabled:
         out.pop();
     }
     out
+}
+
+/// 把多选下拉的选中集合转成配置值，保留列表里不认识的值，已知项按候选顺序排列。
+///
+/// # 参数
+/// - `current`：当前配置值（非数组按空列表），其中不在 `allowed` 内的值原样保留。
+/// - `allowed`：全部合法候选，决定已知项的顺序。
+/// - `selected`：下拉里当前选中的项（顺序与重复不影响结果）。
+///
+/// # 返回
+/// 新的 JSON 数组：选中的已知项（候选顺序）在前，未知值（原顺序）在后。
+///
+/// ```ignore
+/// let next = menu_options_from_selection(&json!(["a", "old"]), &["a", "b"], &["b"]);
+/// assert_eq!(next, json!(["b", "old"]));
+/// ```
+pub fn menu_options_from_selection(current: &Value, allowed: &[&str], selected: &[&str]) -> Value {
+    let mut out: Vec<Value> = allowed
+        .iter()
+        .filter(|name| selected.contains(name))
+        .map(|name| Value::String((*name).to_string()))
+        .collect();
+    out.extend(
+        current
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .filter(|name| !allowed.contains(name))
+            .map(|name| Value::String(name.to_string())),
+    );
+    Value::Array(out)
+}
+
+/// 配置值里属于 `allowed` 的已启用项（候选顺序），用来同步多选下拉的选中状态。
+///
+/// # 参数
+/// - `current`：当前配置值（非数组按空列表）。
+/// - `allowed`：全部合法候选。
+pub fn enabled_menu_options<'a>(current: &Value, allowed: &[&'a str]) -> Vec<&'a str> {
+    let items: Vec<&str> = current
+        .as_array()
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    allowed
+        .iter()
+        .copied()
+        .filter(|name| items.contains(name))
+        .collect()
+}
+
+/// 托盘图标文件过滤器的匹配模式（如 `*.png;*.jpg`）。
+pub fn icon_filter_pattern() -> String {
+    ICON_EXTENSIONS
+        .iter()
+        .map(|ext| format!("*.{ext}"))
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
+/// 把对话框选中的路径转成要写回 `tray/custom_icon` 的配置值。
+///
+/// # 参数
+/// - `path`：选中的文件路径。
+pub fn picked_icon_value(path: &std::path::Path) -> Value {
+    Value::String(path.to_string_lossy().into_owned())
 }
 
 /// 把 RGBA 图标着色成单色剪影（保留 alpha），用于 `light` / `dark` 样式。
@@ -131,7 +214,9 @@ pub fn tint_silhouette(rgba: &mut [u8], color: [u8; 3]) {
 /// 解码并缩放一张图片到托盘图标大小；失败返回 `None`。
 fn decode_icon(bytes: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
     let img = image::load_from_memory(bytes).ok()?;
-    let resized = img.resize_exact(ICON_SIZE, ICON_SIZE, image::imageops::FilterType::Lanczos3).to_rgba8();
+    let resized = img
+        .resize_exact(ICON_SIZE, ICON_SIZE, image::imageops::FilterType::Lanczos3)
+        .to_rgba8();
     Some((resized.into_raw(), ICON_SIZE, ICON_SIZE))
 }
 
@@ -162,7 +247,8 @@ pub fn tray_icon_image(document: &ConfigDocument) -> TrayIconImage {
         })
         .or_else(|| decode_icon(BUILTIN_ICON_PNG));
     let Some((mut rgba, w, h)) = decoded else {
-        return TrayIconImage::solid(ICON_SIZE, ICON_SIZE, [22, 119, 255, 255]).expect("纯色图标尺寸恒合法");
+        return TrayIconImage::solid(ICON_SIZE, ICON_SIZE, [22, 119, 255, 255])
+            .expect("纯色图标尺寸恒合法");
     };
     // 自定义图标保持原色；内置图标按样式着色
     if custom.is_none() {
@@ -225,10 +311,20 @@ mod tests {
     #[test]
     fn click_actions_parse_with_fallback() {
         let mut doc = ConfigDocument::from_bytes(None);
-        assert_eq!(click_action(&doc, KEY_LEFT_CLICK, TrayClick::ShowMainWindow), TrayClick::Screenshot);
-        assert_eq!(click_action(&doc, KEY_MIDDLE_CLICK, TrayClick::Screenshot), TrayClick::ScreenshotFixed);
-        doc.set_value(KEY_LEFT_CLICK, json!("open_function_settings")).unwrap();
-        assert_eq!(click_action(&doc, KEY_LEFT_CLICK, TrayClick::Screenshot), TrayClick::OpenFunctionSettings);
+        assert_eq!(
+            click_action(&doc, KEY_LEFT_CLICK, TrayClick::ShowMainWindow),
+            TrayClick::Screenshot
+        );
+        assert_eq!(
+            click_action(&doc, KEY_MIDDLE_CLICK, TrayClick::Screenshot),
+            TrayClick::ScreenshotFixed
+        );
+        doc.set_value(KEY_LEFT_CLICK, json!("open_function_settings"))
+            .unwrap();
+        assert_eq!(
+            click_action(&doc, KEY_LEFT_CLICK, TrayClick::Screenshot),
+            TrayClick::OpenFunctionSettings
+        );
         assert_eq!(TrayClick::parse("nope"), None);
     }
 
@@ -245,6 +341,71 @@ mod tests {
         assert!(!tray_enabled(&off));
     }
 
+    /// 选中集合转配置值：保留未知值、按候选顺序输出、空选中只剩未知值。
+    #[test]
+    fn selection_keeps_unknown_and_order() {
+        let allowed = ["a", "b", "c"];
+        assert_eq!(
+            menu_options_from_selection(&json!(["c", "legacy", "a"]), &allowed, &["c", "b", "a"]),
+            json!(["a", "b", "c", "legacy"])
+        );
+        assert_eq!(
+            menu_options_from_selection(&json!(["a", "legacy"]), &allowed, &[]),
+            json!(["legacy"])
+        );
+        assert_eq!(
+            menu_options_from_selection(&json!(null), &allowed, &["c"]),
+            json!(["c"])
+        );
+    }
+
+    /// 已启用项只取候选内的值并按候选顺序，非数组为空。
+    #[test]
+    fn enabled_options_follow_allowed_order() {
+        let allowed = ["a", "b", "c"];
+        assert_eq!(
+            enabled_menu_options(&json!(["c", "legacy", "a"]), &allowed),
+            vec!["a", "c"]
+        );
+        assert!(enabled_menu_options(&json!("x"), &allowed).is_empty());
+    }
+
+    /// 默认值逐项对应 schema 候选，经勾选往返后与旧配置序列化一致（顺序按候选）。
+    #[test]
+    fn menu_options_round_trip_through_document() {
+        let mut doc = ConfigDocument::from_bytes(None);
+        let allowed = snow_config::schema::entry_for(KEY_MENU_OPTIONS)
+            .unwrap()
+            .allowed;
+        let default = doc.value(KEY_MENU_OPTIONS);
+        let without_exit: Vec<&str> = enabled_menu_options(&default, allowed)
+            .into_iter()
+            .filter(|name| *name != "tray.exit")
+            .collect();
+        let next = menu_options_from_selection(&default, allowed, &without_exit);
+        doc.set_value(KEY_MENU_OPTIONS, next).unwrap();
+        assert!(!menu_options(&doc).contains("tray.exit") && menu_options(&doc).len() == 11);
+        let mut with_exit = enabled_menu_options(&doc.value(KEY_MENU_OPTIONS), allowed);
+        with_exit.push("tray.exit");
+        let back = menu_options_from_selection(&doc.value(KEY_MENU_OPTIONS), allowed, &with_exit);
+        assert_eq!(back, default);
+        let mut more = enabled_menu_options(&default, allowed);
+        more.push("tray.restart-app");
+        let enabled = menu_options_from_selection(&default, allowed, &more);
+        doc.set_value(KEY_MENU_OPTIONS, enabled).unwrap();
+        assert!(menu_options(&doc).contains("tray.restart-app"));
+    }
+
+    /// 过滤器扩展名表与匹配模式；选中路径写回配置并可读回。
+    #[test]
+    fn icon_filter_and_picked_value() {
+        assert_eq!(icon_filter_pattern(), "*.png;*.jpg;*.jpeg;*.webp;*.bmp");
+        let mut doc = ConfigDocument::from_bytes(None);
+        let value = picked_icon_value(std::path::Path::new("C:/icons/my.png"));
+        doc.set_value(KEY_CUSTOM_ICON, value).unwrap();
+        assert_eq!(doc.value(KEY_CUSTOM_ICON), json!("C:/icons/my.png"));
+    }
+
     /// 内置图标可解码；light / dark 变体是单色剪影；自定义路径不存在时回退内置图标。
     #[test]
     fn icon_styles() {
@@ -253,15 +414,24 @@ mod tests {
         assert!(default_icon.0.chunks_exact(4).any(|p| p[3] > 0));
         let mut silhouette = default_icon.0.clone();
         tint_silhouette(&mut silhouette, [255, 255, 255]);
-        assert!(silhouette.chunks_exact(4).all(|p| p[..3] == [255, 255, 255]));
+        assert!(
+            silhouette
+                .chunks_exact(4)
+                .all(|p| p[..3] == [255, 255, 255])
+        );
         assert_eq!(
             silhouette.chunks_exact(4).map(|p| p[3]).collect::<Vec<_>>(),
-            default_icon.0.chunks_exact(4).map(|p| p[3]).collect::<Vec<_>>(),
+            default_icon
+                .0
+                .chunks_exact(4)
+                .map(|p| p[3])
+                .collect::<Vec<_>>(),
             "着色保留 alpha"
         );
         let mut doc = ConfigDocument::from_bytes(None);
         doc.set_value(KEY_ICON, json!("snow-dark")).unwrap();
-        doc.set_value(KEY_CUSTOM_ICON, json!("Z:/definitely/missing.png")).unwrap();
+        doc.set_value(KEY_CUSTOM_ICON, json!("Z:/definitely/missing.png"))
+            .unwrap();
         let _ = tray_icon_image(&doc);
     }
 }

@@ -56,3 +56,7 @@ settings-group-api-configuration = AI models
 settings-group-extended-features = Extended features
 settings-group-storage = Storage
 settings-group-dictation = Dictation
+settings-pick-file = Choose file…
+settings-pick-tray-icon-title = Choose tray icon
+settings-pick-tray-icon-filter = Image files (*.png, *.jpg, *.jpeg, *.webp, *.bmp)
+settings-multi-summary = Selected { $arg1 } of { $arg2 }

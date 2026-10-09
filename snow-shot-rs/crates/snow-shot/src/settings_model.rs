@@ -38,6 +38,8 @@ pub const SLIDER_CELLS: usize = 20;
 pub const SECRET_KEYS: &[&str] = &["api_configuration/custom_models"];
 /// 颜色配置键的后缀。
 const COLOR_KEY_SUFFIX: &str = "_color";
+/// 用多选勾选列表编辑的字符串列表键（其余字符串列表仍是文本框）。
+const MULTI_CHOICE_KEYS: &[&str] = &["tray/menu_options"];
 /// 单独允许 Shift 作为快捷键的分组前缀。
 const SHIFT_ONLY_GROUP_PREFIX: &str = "screenshot_shortcuts/";
 /// 步进按钮的最小分段数（范围跨度除以该值得到大步长）。
@@ -84,6 +86,8 @@ pub enum Control {
     },
     /// 字符串列表（逗号分隔文本）。
     ListText,
+    /// 固定候选的多选勾选列表（每个候选一个勾选项）。
+    MultiChoice(&'static [&'static str]),
     /// 小型结构化 JSON（单行文本）。
     JsonText,
     /// 只读展示。
@@ -170,7 +174,13 @@ pub fn control_for(entry: &SchemaEntry) -> Control {
                 Control::Text
             }
         }
-        ValueKind::StringList => Control::ListText,
+        ValueKind::StringList => {
+            if MULTI_CHOICE_KEYS.contains(&entry.key) && !entry.allowed.is_empty() {
+                Control::MultiChoice(entry.allowed)
+            } else {
+                Control::ListText
+            }
+        }
         ValueKind::ShortcutList => Control::Shortcuts {
             max_items: entry.max_items,
             allow_shift_only: entry.key.starts_with(SHIFT_ONLY_GROUP_PREFIX),
@@ -759,7 +769,9 @@ mod tests {
             let ok = match item.kind {
                 ValueKind::Boolean => control == Control::Switch,
                 ValueKind::ShortcutList => matches!(control, Control::Shortcuts { .. }),
-                ValueKind::StringList => control == Control::ListText,
+                ValueKind::StringList => {
+                    control == Control::ListText || matches!(control, Control::MultiChoice(_))
+                }
                 ValueKind::Integer => matches!(
                     control,
                     Control::Slider(_) | Control::IntText | Control::ReadOnly(_)
@@ -807,7 +819,8 @@ mod tests {
             Control::ReadOnly(ReadOnlyReason::TooLarge)
         );
         assert_eq!(control_of("global_mouse/screenshot_copy"), Control::JsonText);
-        assert_eq!(control_of("tray/menu_options"), Control::ListText);
+        assert!(matches!(control_of("tray/menu_options"), Control::MultiChoice(o) if o.len() == 22));
+        assert_eq!(control_of("drawing/quick_selection_disabled_tools"), Control::ListText);
         assert_eq!(
             control_of("screenshot_shortcuts/move_tool"),
             Control::Shortcuts {

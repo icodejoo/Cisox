@@ -19,8 +19,6 @@ use crate::history_store::{
     HistoryRecorder, HistorySource, HistoryStore, Thumbnail, policy_from_document,
 };
 use crate::history_view::{HistoryAction, HistoryView};
-use crate::main_window_model::{SIDEBAR_COLLAPSED_KEY, TRANSLATION_PAGE_ENABLED_KEY};
-use crate::main_window_view::MainWindowView;
 use crate::ocr_assets::{ENV_OCR_ASSET_DIR, ocr_root};
 use crate::ocr_backend::{OcrInput, select_from_document};
 use crate::ocr_client::OcrError;
@@ -49,6 +47,9 @@ use crate::screenshot_output::{
 use crate::scroll_view::{ENV_SCROLL_AUTOTEST, ScrollHost, parse_scroll_autotest};
 use crate::settings_model::portable_to_hotkey_text;
 use crate::settings_model::{LANGUAGE_KEY, THEME_COLOR_KEY, THEME_MODE_KEY};
+use crate::settings_pages::{
+    OpenPlan, PageAction, TRANSLATION_PAGE_ENABLED_KEY, TranslateFactory, WindowEntry, plan_open,
+};
 use crate::settings_state::{ConfigChange, SharedConfig, SystemPrefs, UiPrefs, restore_value};
 use crate::settings_text::{Lang, window_title};
 use crate::settings_view::{AUTOTEST_STEP_INTERVAL, SettingsView, parse_autotest_ops};
@@ -113,7 +114,7 @@ use std::time::Duration;
 
 /// 设置页自动化脚本路径环境变量（JSON 操作数组，验收用）。
 pub const ENV_SETTINGS_AUTOTEST: &str = "SNOW_SETTINGS_AUTOTEST";
-/// 设置窗所在显示器的设备名子串环境变量（如 `DISPLAY2`，验收用）。
+/// 应用窗口所在显示器的设备名子串环境变量（如 `DISPLAY2`，验收用）。
 pub const ENV_SETTINGS_MONITOR: &str = "SNOW_SETTINGS_MONITOR";
 /// 托盘悬停提示。
 pub(crate) const TRAY_TOOLTIP: &str = PRODUCT_NAME;
@@ -254,8 +255,8 @@ pub enum UiEvent {
         /// 窗口缩放比，用来把物理外框换算成逻辑大小。
         scale: f32,
     },
-    /// 主窗口位置 / 大小停住了（该记忆几何）。
-    MainWindowSettled {
+    /// 设置窗口位置 / 大小停住了（该记忆几何）。
+    SettingsWindowSettled {
         /// 此刻是否最大化（最大化时只更新标记，不覆盖普通态外框）。
         maximized: bool,
     },
@@ -332,10 +333,8 @@ pub enum UiEvent {
     },
     /// 把剪贴板里的图像贴到屏幕上。
     PinFromClipboard,
-    /// 打开（或激活）主窗口。
+    /// 打开（或激活）设置窗口（主窗口已并入设置窗口，保持当前页）。
     OpenMainWindow,
-    /// 主窗口侧栏折叠状态变化（需要落盘）。
-    MainWindowSidebarCollapsed(bool),
     /// 打开（或激活）截图历史窗口。
     OpenHistory,
     /// 截图历史有新记录写入（刷新已打开的历史窗口）。
@@ -371,7 +370,7 @@ pub enum UiEvent {
     OpenPinManage,
     /// 全局鼠标手势的拖动事件（来自钩子线程）。
     MouseGesture(snow_platform::global_mouse::DragEvent),
-    /// 打开文字识别结果窗（每次新开一个，窗口自带数据）。
+    /// 打开文字识别结果窗（已开则复用，窗口自带数据）。
     OpenRecognitionWindow(Box<crate::recognition_view::RecognitionData>),
     /// 前台应用选中的文字已读取（`None` 表示没有选中或读取失败）。
     SelectedTextReady(Option<String>),
@@ -564,6 +563,10 @@ pub enum UiEvent {
         /// 结果（结构化错误，界面边界再翻译）。
         result: Result<(), ocr_download::FetchError>,
     },
+    /// 设置页请求为某个路径键选择文件（配置键）。
+    PathPickRequested(&'static str),
+    /// 文件对话框选中了路径：配置键与要写回的值。
+    PathPicked(&'static str, serde_json::Value),
     /// 设置页请求导出 / 导入设置。
     ConfigTransferRequested(crate::config_transfer::TransferAction),
     /// 设置页“更新”分组的动作（检查 / 下载 / 打开目录）。
@@ -1053,7 +1056,6 @@ fn apply_chrome_theme(state: &AppState) {
         .settings
         .as_ref()
         .into_iter()
-        .chain(state.main_window.as_ref().map(|(window, _)| window))
         .chain(state.history_window.as_ref().map(|(window, _)| window));
     for window in windows {
         if let Err(e) = window.set_dark_title(dark) {
@@ -1552,9 +1554,9 @@ struct GestureSession {
 pub struct AppState {
     /// 共享配置存储（设置页写入，截图 / 录制 / 热键从同一份读取）。
     config: SharedConfig,
-    /// 设置窗口（若已打开）。
+    /// 设置窗口（若已打开；主窗口已并入，它是应用唯一的常规窗口）。
     settings: Option<ShellWindow>,
-    /// 设置页视图（用于热键回滚后刷新界面）。
+    /// 设置页视图（用于配置 / 更新 / 翻译结果同步回界面）。
     settings_view: Option<Entity<SettingsView>>,
     /// 输入框翻译浮窗（若已打开）与其视图。
     translate_input: Option<(ShellWindow, Entity<TranslateInputView>)>,
@@ -1562,12 +1564,15 @@ pub struct AppState {
     translate_page: Option<(ShellWindow, Entity<TranslatePageView>)>,
     /// 截图历史后台写入器（启动失败时为 `None`，历史功能降级）。
     history: Option<Arc<HistoryRecorder>>,
-    /// 主窗口（若已打开）与其视图；关闭即释放。
-    main_window: Option<(ShellWindow, Entity<MainWindowView>)>,
     /// 截图历史窗口（若已打开）与其视图。
     history_window: Option<(ShellWindow, Entity<HistoryView>)>,
     /// 贴图管理窗口（打开时有值）。
     pin_manage_window: Option<(ShellWindow, Entity<PinManageView>)>,
+    /// 识别结果窗（单例，再次打开时复用并更新内容）。
+    recognition_window: Option<(
+        ShellWindow,
+        Entity<crate::recognition_view::RecognitionView>,
+    )>,
     /// 语音转文字宿主（独立工作进程、键入与右下角浮窗的生命周期）。
     dictation: DictationHost,
     /// 收到的截图请求累计数。
@@ -1688,9 +1693,9 @@ impl AppState {
             translate_input: None,
             translate_page: None,
             history,
-            main_window: None,
             history_window: None,
             pin_manage_window: None,
+            recognition_window: None,
             capture_requests: 0,
             overlay: None,
             capture_in_flight: false,
@@ -1711,7 +1716,8 @@ impl AppState {
 
     /// 按配置对齐 MCP 服务（启动时与设置变化时调用）。
     pub fn sync_mcp(&mut self) {
-        self.mcp.sync(self.config.borrow().document(), &self.data_root);
+        self.mcp
+            .sync(self.config.borrow().document(), &self.data_root);
     }
 
     /// 已收到的截图请求数。
@@ -2872,7 +2878,11 @@ fn run_table(
         beside.as_deref(),
     )
     .map_err(OcrError::TableUnavailable)?;
-    let ocr = engine.recognize(&OcrInput { width, height, rgba })?;
+    let ocr = engine.recognize(&OcrInput {
+        width,
+        height,
+        rgba,
+    })?;
     let runner = crate::table_service::ProcessRunner::new(assets);
     crate::table_service::table_result(&runner, width, height, rgba, ocr)
 }
@@ -2980,7 +2990,8 @@ fn run_latex_action(state: &AppState, action: crate::latex_assets::LatexAction) 
             snow_platform::shell::open_directory(std::path::Path::new(&dir))
         }
         LatexAction::OpenSource => {
-            let i18n = crate::ocr_backend::i18n_for(ui_prefs_from_document(document.document()).locale);
+            let i18n =
+                crate::ocr_backend::i18n_for(ui_prefs_from_document(document.document()).locale);
             snow_platform::shell::open_url(&i18n.tr("latex-source-url"))
         }
     };
@@ -3120,7 +3131,9 @@ fn run_config_transfer(
         pattern: ARCHIVE_PATTERN.to_string(),
     }];
     let (ui_state, reload) = match action {
-        TransferAction::Export { include_credentials } => {
+        TransferAction::Export {
+            include_credentials,
+        } => {
             let request = SaveDialogRequest {
                 title: i18n.tr("config-transfer-dialog-export"),
                 file_name: default_export_name(&snow_config::archive::iso_utc_now()),
@@ -3133,7 +3146,8 @@ fn run_config_transfer(
                     if path.extension().is_none() {
                         path.as_mut_os_string().push(ARCHIVE_EXTENSION);
                     }
-                    let result = export_configuration(&state.config.borrow(), &path, include_credentials);
+                    let result =
+                        export_configuration(&state.config.borrow(), &path, include_credentials);
                     if let Err(e) = &result {
                         tracing::warn!(error = %e, "导出设置失败");
                     }
@@ -3175,9 +3189,44 @@ fn run_config_transfer(
             }
         }
     };
-    for view in settings_views(state, cx.app()) {
+    if let Some(view) = settings_view(state, cx.app()) {
         let ui_state = ui_state.clone();
         view.update(cx.app(), |v, vcx| v.finish_transfer(ui_state, reload, vcx));
+    }
+}
+
+/// 在后台线程弹“选择文件”对话框，选中后把路径作为事件交回主线程，不占着界面借用。
+///
+/// # 参数
+/// - `state`：运行时状态（取事件收件箱与界面语言）。
+/// - `key`：要写回的配置键；目前只支持托盘自定义图标。
+fn run_path_pick(state: &AppState, key: &'static str) {
+    use snow_platform::file_dialog::{FileFilter, OpenDialogRequest, show_open_dialog};
+    if key != crate::tray_config::KEY_CUSTOM_ICON {
+        return;
+    }
+    let locale = ui_prefs_from_document(state.config.borrow().document()).locale;
+    let i18n = crate::ocr_backend::i18n_for(locale);
+    let request = OpenDialogRequest {
+        title: i18n.tr("settings-pick-tray-icon-title"),
+        filters: vec![FileFilter {
+            label: i18n.tr("settings-pick-tray-icon-filter"),
+            pattern: crate::tray_config::icon_filter_pattern(),
+        }],
+        ..OpenDialogRequest::default()
+    };
+    let inbox = state.inbox.clone();
+    let spawned = std::thread::Builder::new()
+        .name("snow-path-pick".into())
+        .spawn(move || match show_open_dialog(&request) {
+            Ok(Some(path)) => {
+                let _ = inbox.push(UiEvent::PathPicked(key, crate::tray_config::picked_icon_value(&path)));
+            }
+            Ok(None) => {}
+            Err(e) => tracing::warn!(error = %e, "选择文件对话框失败"),
+        });
+    if let Err(e) = spawned {
+        tracing::warn!(error = %e, "启动选择文件线程失败");
     }
 }
 
@@ -3441,51 +3490,7 @@ fn request_scroll_capture(cx: &mut ShellContext, state: &mut AppState) {
     state.scroll.begin(cx, spec.region, &monitor, Some(&spec));
 }
 
-/// 打开设置窗口；已打开则激活到前台。
-fn open_or_focus_settings(cx: &mut ShellContext, state: &mut AppState) {
-    if let Some(window) = state.settings
-        && cx.is_window_open(&window)
-    {
-        cx.activate_window(&window);
-        tracing::info!("settings window activated");
-        return;
-    }
-    let system = SystemPrefs::query();
-    let title = {
-        let store = state.config.borrow();
-        let text = |key: &str| store.value(key).as_str().unwrap_or_default().to_string();
-        window_title(Lang::from_config(&text(LANGUAGE_KEY), &system.language))
-    };
-    let mut spec = WindowSpec::normal(
-        title,
-        LogicalSize::new(SETTINGS_WINDOW_WIDTH, SETTINGS_WINDOW_HEIGHT),
-    );
-    if let Some(target) = settings_monitor_from_env(cx) {
-        spec.placement = Placement::Centered {
-            monitor: target,
-            size: LogicalSize::new(SETTINGS_WINDOW_WIDTH, SETTINGS_WINDOW_HEIGHT),
-        };
-    }
-    let config = Rc::clone(&state.config);
-    let inbox = state.inbox.clone();
-    let data_root = state.data_root.clone();
-    match cx.open_window(&spec, move |window, app| {
-        build_settings_view(window, app, config, system, inbox, data_root)
-    }) {
-        Ok((window, view)) => {
-            state.settings = Some(window);
-            state.settings_view = Some(view.clone());
-            apply_chrome_theme(state);
-            tracing::info!("settings window opened");
-            if let Ok(path) = std::env::var(ENV_SETTINGS_AUTOTEST) {
-                spawn_settings_autotest(cx, window, view, &path);
-            }
-        }
-        Err(e) => tracing::error!(error = %e, "打开设置窗口失败"),
-    }
-}
-
-/// 创建设置页视图并接好配置变更 / 语音模型 / 导入导出 / 更新检查回调（独立设置窗口与主窗口内嵌共用）。
+/// 创建设置页视图并接好配置变更 / 语音模型 / 导入导出 / 更新检查 / 追加页回调。
 ///
 /// # 参数
 /// - `window`：视图所在窗口。
@@ -3494,6 +3499,7 @@ fn open_or_focus_settings(cx: &mut ShellContext, state: &mut AppState) {
 /// - `system`：系统偏好快照。
 /// - `inbox`：主线程收件箱（各回调经它回到主线程）。
 /// - `data_root`：数据根目录（语音模型下载位置）。
+/// - `translate_factory`：内嵌翻译页的创建工厂。
 fn build_settings_view(
     window: &mut snow_ui::ui::Window,
     app: &mut snow_ui::ui::App,
@@ -3501,6 +3507,7 @@ fn build_settings_view(
     system: SystemPrefs,
     inbox: MainThreadInbox<UiEvent>,
     data_root: PathBuf,
+    translate_factory: TranslateFactory,
 ) -> Entity<SettingsView> {
     let notify_inbox = inbox.clone();
     let notify: Rc<dyn Fn(ConfigChange)> = Rc::new(move |change: ConfigChange| {
@@ -3519,8 +3526,10 @@ fn build_settings_view(
         }),
     };
     let transfer_inbox = inbox.clone();
+    let pick_inbox = inbox.clone();
     let latex_action_inbox = inbox.clone();
-    let update_inbox = inbox;
+    let update_inbox = inbox.clone();
+    let page_inbox = inbox;
     let mcp_descriptor = snow_mcp::descriptor::descriptor_path(&mcp_data_root);
     view.update(app, |v, _| {
         v.set_mcp_hook(Rc::new(move || {
@@ -3531,51 +3540,73 @@ fn build_settings_view(
         v.set_transfer_hook(Rc::new(move |action| {
             transfer_inbox.push(UiEvent::ConfigTransferRequested(action));
         }));
+        v.set_path_pick_hook(Rc::new(move |key| {
+            pick_inbox.push(UiEvent::PathPickRequested(key));
+        }));
         v.set_latex_hook(Rc::new(move |action| {
             latex_action_inbox.push(UiEvent::LatexActionRequested(action));
         }));
         v.set_update_hook(Rc::new(move |action| {
             update_inbox.push(UiEvent::UpdateActionRequested(action));
         }));
+        v.set_translate_factory(translate_factory);
+        v.set_page_hook(Rc::new(move |action| {
+            page_inbox.push(page_event(action));
+        }));
     });
     view
 }
 
-/// 当前存活的设置页视图：独立设置窗口与主窗口内嵌的各一份，设置结果要同步给所有可见的设置页。
+/// 把设置窗口的追加页动作转成主线程事件。
+///
+/// # 参数
+/// - `action`：设置窗口交出的动作。
+fn page_event(action: PageAction) -> UiEvent {
+    match action {
+        PageAction::OpenHistory => UiEvent::OpenHistory,
+        PageAction::OpenPinManage => UiEvent::OpenPinManage,
+        PageAction::OpenTranslateWindow => UiEvent::OpenTranslatePage,
+        PageAction::OpenFile(path) => UiEvent::OpenFile(path),
+        PageAction::WindowSettled { maximized } => UiEvent::SettingsWindowSettled { maximized },
+    }
+}
+
+/// 当前存活的设置页视图（窗口未开时为 `None`）。
 ///
 /// # 参数
 /// - `state`：运行时状态。
-/// - `app`：应用上下文（读取主窗口里内嵌的视图）。
-fn settings_views(state: &AppState, app: &snow_ui::ui::App) -> Vec<Entity<SettingsView>> {
-    let mut views: Vec<Entity<SettingsView>> = state.settings_view.iter().cloned().collect();
-    if let Some((_, main)) = &state.main_window
-        && let Some(embedded) = main.read(app).settings_view()
-    {
-        views.push(embedded);
-    }
-    views
+/// - `_app`：应用上下文（保留与旧签名一致，便于调用点统一）。
+fn settings_view(state: &AppState, _app: &snow_ui::ui::App) -> Option<Entity<SettingsView>> {
+    state.settings_view.clone()
 }
 
-/// 打开主窗口；已打开则激活到前台。窗口关闭即释放，不做后台常驻。
+/// 打开设置窗口（应用唯一的常规窗口，主窗口已并入）；已打开则置顶激活并按入口跳页，不重复创建。
+/// 窗口关闭即释放，不做后台常驻。
 ///
 /// # 参数
 /// - `cx`：外壳上下文。
 /// - `state`：运行时状态。
-fn open_or_focus_main_window(cx: &mut ShellContext, state: &mut AppState) {
-    if let Some((window, _)) = &state.main_window
-        && cx.is_window_open(window)
+/// - `entry`：唤起窗口的入口，决定落到哪一页（新开窗口落在第一个设置分组）。
+fn open_or_focus_settings(cx: &mut ShellContext, state: &mut AppState, entry: WindowEntry) {
+    let open = state.settings.filter(|window| cx.is_window_open(window));
+    if plan_open(open.is_some()) == OpenPlan::Activate
+        && let Some(window) = open
     {
-        cx.activate_window(window);
+        cx.activate_window(&window);
+        if let Some(view) = &state.settings_view {
+            view.update(cx.app(), |v, vcx| v.go_entry(entry, vcx));
+        }
+        tracing::info!("settings window activated");
         return;
     }
-    let prefs = ui_prefs_from_config(&state.config);
-    let mut spec = WindowSpec::normal(
-        PRODUCT_NAME.to_string(),
-        LogicalSize::new(
-            crate::main_window_view::WINDOW_WIDTH,
-            crate::main_window_view::WINDOW_HEIGHT,
-        ),
-    );
+    let system = SystemPrefs::query();
+    let title = {
+        let store = state.config.borrow();
+        let text = |key: &str| store.value(key).as_str().unwrap_or_default().to_string();
+        window_title(Lang::from_config(&text(LANGUAGE_KEY), &system.language))
+    };
+    let size = LogicalSize::new(SETTINGS_WINDOW_WIDTH, SETTINGS_WINDOW_HEIGHT);
+    let mut spec = WindowSpec::normal(title, size);
     // 恢复上次的位置与大小（修正到当前屏幕内）；没有记忆就保持居中
     let saved = parse_geometry(&state.config.borrow().value(MAIN_WINDOW_GEOMETRY_KEY));
     if let Some(saved) = saved
@@ -3593,42 +3624,42 @@ fn open_or_focus_main_window(cx: &mut ShellContext, state: &mut AppState) {
         ));
     }
     let maximized = saved.is_some_and(|g| g.maximized);
+    // 验收用：环境变量指定显示器时居中到该屏（优先于记忆的位置）
+    if let Some(target) = settings_monitor_from_env(cx) {
+        spec.placement = Placement::Centered {
+            monitor: target,
+            size,
+        };
+    }
     let config = Rc::clone(&state.config);
     let inbox = state.inbox.clone();
+    let data_root = state.data_root.clone();
     let translate_factory = translate_page_factory(state, true);
-    let factory: crate::main_window_view::SettingsFactory = {
-        let config = Rc::clone(&state.config);
-        let inbox = state.inbox.clone();
-        let data_root = state.data_root.clone();
-        Rc::new(move |window, app| {
-            build_settings_view(
-                window,
-                app,
-                Rc::clone(&config),
-                SystemPrefs::query(),
-                inbox.clone(),
-                data_root.clone(),
-            )
-        })
-    };
     match cx.open_window(&spec, move |window, app| {
-        MainWindowView::create(
+        if maximized {
+            // 等首帧落位后再最大化，避免和创建时的物理落位互相覆盖
+            window.on_next_frame(|window, _| window.zoom_window());
+        }
+        build_settings_view(
             window,
             app,
-            &config,
-            prefs,
+            config,
+            system,
             inbox,
-            factory,
+            data_root,
             translate_factory,
-            maximized,
         )
     }) {
         Ok((window, view)) => {
-            state.main_window = Some((window, view));
+            state.settings = Some(window);
+            state.settings_view = Some(view.clone());
             apply_chrome_theme(state);
-            tracing::info!("主窗口已打开");
+            tracing::info!("settings window opened");
+            if let Ok(path) = std::env::var(ENV_SETTINGS_AUTOTEST) {
+                spawn_settings_autotest(cx, window, view, &path);
+            }
         }
-        Err(e) => tracing::error!(error = %e, "打开主窗口失败"),
+        Err(e) => tracing::error!(error = %e, "打开设置窗口失败"),
     }
 }
 
@@ -3654,7 +3685,7 @@ fn save_config_value(state: &AppState, key: &str, value: Value, what: &str) {
     }
 }
 
-/// 把更新检查 / 下载的新状态同步给所有显示它的界面：各份设置页与主窗口的关于页。
+/// 把更新检查 / 下载的新状态同步给设置页（「更新」分组与关于页共用这份状态）。
 ///
 /// # 参数
 /// - `state`：运行时状态。
@@ -3665,22 +3696,18 @@ fn publish_update_state(
     cx: &mut ShellContext,
     ui_state: crate::net_settings::UpdateUiState,
 ) {
-    for view in settings_views(state, cx.app()) {
-        let ui_state = ui_state.clone();
+    if let Some(view) = settings_view(state, cx.app()) {
         view.update(cx.app(), |v, vcx| v.finish_update_check(ui_state, vcx));
-    }
-    if let Some((_, main)) = &state.main_window {
-        main.update(cx.app(), |v, vcx| v.finish_update_check(ui_state, vcx));
     }
 }
 
-/// 记忆主窗口位置与大小：最大化时只更新标记并保留普通态外框，最小化时不记。
+/// 记忆设置窗口位置与大小：最大化时只更新标记并保留普通态外框，最小化时不记。
 ///
 /// # 参数
 /// - `state`：运行时状态。
 /// - `maximized`：此刻是否最大化。
-fn save_main_window_geometry(state: &AppState, maximized: bool) {
-    let Some((window, _)) = &state.main_window else {
+fn save_settings_window_geometry(state: &AppState, maximized: bool) {
+    let Some(window) = &state.settings else {
         return;
     };
     let previous = parse_geometry(&state.config.borrow().value(MAIN_WINDOW_GEOMETRY_KEY));
@@ -3694,7 +3721,7 @@ fn save_main_window_geometry(state: &AppState, maximized: bool) {
             state,
             MAIN_WINDOW_GEOMETRY_KEY,
             geometry_to_json(rect, maximized),
-            "主窗口位置",
+            "设置窗口位置",
         );
     }
 }
@@ -3728,11 +3755,8 @@ fn save_translate_window_size(state: &AppState, scale: f32) {
 ///
 /// # 参数
 /// - `state`：运行时状态。
-/// - `embedded`：是否内嵌在主窗口里。
-fn translate_page_factory(
-    state: &AppState,
-    embedded: bool,
-) -> crate::main_window_view::TranslateFactory {
+/// - `embedded`：是否内嵌在设置窗口里。
+fn translate_page_factory(state: &AppState, embedded: bool) -> TranslateFactory {
     let config = Rc::clone(&state.config);
     let inbox = state.inbox.clone();
     let translator = Arc::clone(&state.translator);
@@ -3766,20 +3790,6 @@ fn translate_page_factory(
             options,
         )
     })
-}
-
-/// 把主窗口侧栏折叠状态写回配置并落盘；失败只记日志。
-///
-/// # 参数
-/// - `state`：运行时状态。
-/// - `collapsed`：新的折叠状态。
-fn save_sidebar_collapsed(state: &AppState, collapsed: bool) {
-    let mut store = state.config.borrow_mut();
-    if let Err(e) = store.set_value(SIDEBAR_COLLAPSED_KEY, serde_json::json!(collapsed)) {
-        tracing::warn!(error = %e, "写入侧栏折叠状态失败");
-    } else if let Err(e) = store.flush() {
-        tracing::warn!(error = %e, "侧栏折叠状态落盘失败");
-    }
 }
 
 /// 打开截图历史窗口；已打开则激活到前台。
@@ -3989,28 +3999,48 @@ fn apply_pending_gesture(cx: &mut ShellContext, state: &mut AppState) {
     }
 }
 
-/// 打开文字识别结果窗（每次新开一个，窗口关闭即释放）。
+/// 打开文字识别结果窗；已打开则更新内容并置顶激活（单例）。
 ///
 /// # 参数
 /// - `cx`：外壳上下文。
-/// - `state`：运行时状态（取界面偏好）。
+/// - `state`：运行时状态（取界面偏好、保存窗口句柄）。
 /// - `data`：识别结果数据。
 fn open_recognition_window(
     cx: &mut ShellContext,
     state: &mut AppState,
     data: crate::recognition_view::RecognitionData,
 ) {
-    use crate::recognition_view::{RecognitionView, WINDOW_HEIGHT, WINDOW_WIDTH};
+    use crate::recognition_view::RecognitionView;
     let mut data = data;
     data.conversion =
         crate::conversion_guide::ConversionGuide::from_document(state.config.borrow().document());
+    if let Some((window, view)) = &state.recognition_window
+        && cx.is_window_open(window)
+    {
+        let view = view.clone();
+        let handle = window.gpui_handle();
+        let updated = handle.update(cx.app(), move |_, win, app| {
+            view.update(app, |v, vcx| v.replace_data(data, win, vcx));
+        });
+        if updated.is_ok() {
+            if let Err(e) = window.raise(true) {
+                tracing::warn!(error = %e, "识别结果窗置顶失败");
+            }
+            cx.activate_window(window);
+        } else {
+            state.recognition_window = None;
+            tracing::warn!("识别结果窗更新失败");
+        }
+        return;
+    }
     let prefs = ui_prefs_from_config(&state.config);
     let title = crate::ocr_backend::i18n_for(prefs.locale).tr("recwin-window-title");
-    let spec = WindowSpec::normal(title, LogicalSize::new(WINDOW_WIDTH, WINDOW_HEIGHT));
+    let spec = crate::recognition_view::window_spec(title);
     match cx.open_window(&spec, move |window, app| {
         RecognitionView::create(window, app, data, prefs)
     }) {
-        Ok(_) => {
+        Ok((window, view)) => {
+            state.recognition_window = Some((window, view));
             apply_chrome_theme(state);
             tracing::info!("识别结果窗已打开");
         }
@@ -4232,7 +4262,7 @@ fn spawn_translate_page(
     }
 }
 
-/// 读取环境变量 `SNOW_SETTINGS_MONITOR`（设备名子串，如 `DISPLAY2`），选择设置窗所在显示器。
+/// 读取环境变量 `SNOW_SETTINGS_MONITOR`（设备名子串，如 `DISPLAY2`），选择应用窗口所在显示器。
 ///
 /// # 参数
 /// - `cx`：外壳上下文。
@@ -4442,17 +4472,15 @@ fn on_config_changed(cx: &mut ShellContext, state: &mut AppState, key: &str, pre
     }
     if key == TRANSLATION_PAGE_ENABLED_KEY {
         let enabled = state.config.borrow().value(key).as_bool().unwrap_or(false);
-        if let Some((_, view)) = &state.main_window {
+        if let Some(view) = settings_view(state, cx.app()) {
             view.update(cx.app(), |v, cx| v.set_translation_enabled(enabled, cx));
         }
         return;
     }
     if key == KEY_PAGE_AUTO_TRANSLATE {
         let enabled = state.config.borrow().value(key).as_bool().unwrap_or(false);
-        let embedded = state
-            .main_window
-            .as_ref()
-            .and_then(|(_, main)| main.read(cx.app()).translate_view());
+        let embedded =
+            settings_view(state, cx.app()).and_then(|view| view.read(cx.app()).translate_view());
         let standalone = state.translate_page.as_ref().map(|(_, view)| view.clone());
         for view in embedded.into_iter().chain(standalone) {
             view.update(cx.app(), |v, vcx| v.set_auto_translate(enabled, vcx));
@@ -4461,8 +4489,8 @@ fn on_config_changed(cx: &mut ShellContext, state: &mut AppState, key: &str, pre
     }
     if key == LANGUAGE_KEY || key == THEME_MODE_KEY {
         let prefs = ui_prefs_from_config(&state.config);
-        if let Some((_, view)) = &state.main_window {
-            view.update(cx.app(), |v, cx| v.set_prefs(prefs, cx));
+        if let Some(view) = settings_view(state, cx.app()) {
+            view.update(cx.app(), |v, cx| v.sync_prefs(prefs, cx));
         }
         if let Some((_, view)) = &state.translate_page {
             view.update(cx.app(), |v, vcx| v.set_prefs(prefs, vcx));
@@ -4542,7 +4570,7 @@ fn on_config_changed(cx: &mut ShellContext, state: &mut AppState, key: &str, pre
         "已恢复回滚后的全局热键"
     );
     state.hotkey_handles = restored.handles;
-    for view in settings_views(state, cx.app()) {
+    if let Some(view) = settings_view(state, cx.app()) {
         let message = format!(
             "{}: {reason}",
             crate::settings_text::t(
@@ -4623,7 +4651,7 @@ fn run_quick_action(cx: &mut ShellContext, state: &mut AppState, action: QuickAc
             request_capture(cx, state, ORIGIN_HOTKEY, CaptureMode::Quick(auto))
         }
         QuickPlan::Delayed => begin_delayed_capture(state),
-        QuickPlan::OpenSettings => open_or_focus_settings(cx, state),
+        QuickPlan::OpenSettings => open_or_focus_settings(cx, state, WindowEntry::Settings),
         QuickPlan::OpenHistory => open_or_focus_history(cx, state),
         QuickPlan::OpenPinManage => open_or_focus_pin_manage(cx, state),
         QuickPlan::PinSelectedFiles => spawn_pin_selected_files(state),
@@ -4946,10 +4974,9 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
         }
         UiEvent::Export(target) => export_from_overlay(cx, state, &target),
         UiEvent::DirectCapture(request) => direct_capture(cx, state, request),
-        UiEvent::OpenSettings => open_or_focus_settings(cx, state),
+        UiEvent::OpenSettings => open_or_focus_settings(cx, state, WindowEntry::Settings),
         UiEvent::Mcp(request) => handle_mcp_request(cx, state, &request),
-        UiEvent::OpenMainWindow => open_or_focus_main_window(cx, state),
-        UiEvent::MainWindowSidebarCollapsed(collapsed) => save_sidebar_collapsed(state, collapsed),
+        UiEvent::OpenMainWindow => open_or_focus_settings(cx, state, WindowEntry::Main),
         UiEvent::OpenHistory => open_or_focus_history(cx, state),
         UiEvent::HistoryChanged => {
             if let Some((_, view)) = &state.history_window {
@@ -4997,10 +5024,8 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
             embedded,
         } => {
             if embedded {
-                let page = state
-                    .main_window
-                    .as_ref()
-                    .and_then(|(_, main)| main.read(cx.app()).translate_view());
+                let page = settings_view(state, cx.app())
+                    .and_then(|view| view.read(cx.app()).translate_view());
                 if let Some(view) = page {
                     view.update(cx.app(), |v, vcx| v.finish(serial, result, vcx));
                 }
@@ -5011,7 +5036,9 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
             }
         }
         UiEvent::TranslateWindowSettled { scale } => save_translate_window_size(state, scale),
-        UiEvent::MainWindowSettled { maximized } => save_main_window_geometry(state, maximized),
+        UiEvent::SettingsWindowSettled { maximized } => {
+            save_settings_window_geometry(state, maximized)
+        }
         UiEvent::OpenFile(path) => {
             if let Err(e) = std::process::Command::new("explorer.exe")
                 .arg(&path)
@@ -5315,6 +5342,12 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
             }
         }
         UiEvent::ConfigTransferRequested(action) => run_config_transfer(cx, state, action),
+        UiEvent::PathPickRequested(key) => run_path_pick(state, key),
+        UiEvent::PathPicked(key, value) => {
+            if let Some(view) = settings_view(state, cx.app()) {
+                view.update(cx.app(), |v, vcx| v.apply_picked_value(key, value, vcx));
+            }
+        }
         UiEvent::UpdateActionRequested(action) => run_update_action(state, action),
         UiEvent::UpdateDownloadFinished(info, outcome) => {
             let locale = ui_prefs_from_document(state.config.borrow().document()).locale;
@@ -5343,7 +5376,7 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
             spawn_stt_download(state, model_id, cancel)
         }
         UiEvent::SttDownloadProgress(progress) => {
-            for view in settings_views(state, cx.app()) {
+            if let Some(view) = settings_view(state, cx.app()) {
                 let progress = progress.clone();
                 view.update(cx.app(), |v, vcx| v.update_stt_download(progress, vcx));
             }
@@ -5365,7 +5398,7 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
                 ui_prefs_from_document(state.config.borrow().document()).locale,
             );
             let result = result.map_err(|e| e.message(i18n));
-            for view in settings_views(state, cx.app()) {
+            if let Some(view) = settings_view(state, cx.app()) {
                 let (model_id, result) = (model_id.clone(), result.clone());
                 view.update(cx.app(), |v, vcx| {
                     v.finish_stt_download(model_id, result, vcx)
@@ -5537,6 +5570,25 @@ mod tests {
         );
         assert_eq!(map_ipc_command(&IpcCommand::Quit), Some(UiEvent::Quit));
         assert_eq!(map_ipc_command(&IpcCommand::Custom("x".into())), None);
+    }
+
+    /// 设置窗口追加页 / 几何动作映射成对应的主线程事件。
+    #[test]
+    fn settings_window_page_actions_map_to_events() {
+        use crate::settings_pages::PageAction;
+        assert_eq!(page_event(PageAction::OpenHistory), UiEvent::OpenHistory);
+        assert_eq!(
+            page_event(PageAction::OpenPinManage),
+            UiEvent::OpenPinManage
+        );
+        assert_eq!(
+            page_event(PageAction::OpenTranslateWindow),
+            UiEvent::OpenTranslatePage
+        );
+        assert_eq!(
+            page_event(PageAction::WindowSettled { maximized: true }),
+            UiEvent::SettingsWindowSettled { maximized: true }
+        );
     }
 
     /// 托盘信号映射：已知信号有事件，未知信号忽略。

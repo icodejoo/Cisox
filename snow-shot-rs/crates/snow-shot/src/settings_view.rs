@@ -4,19 +4,20 @@
 //! 每帧只构建屏幕内可见的几行，与配置项总数无关。
 
 use crate::config_transfer::{TRANSFER_GROUP_ID, TransferAction, TransferUiState, transfer_panel};
-use crate::latex_assets::{LATEX_GROUP_ID, LatexAction, latex_panel};
 use crate::dictation::status::backend_notice as dictation_backend_notice;
 use crate::dictation::translate::ModelSupport;
 use crate::language_names::{is_language_key, language_option_label};
+use crate::latex_assets::{LATEX_GROUP_ID, LatexAction, latex_panel};
 use crate::mcp_settings::{MCP_GROUP_ID, McpUiState, copy_result_state, mcp_panel};
 use crate::net_settings::{UPDATES_GROUP_ID, UpdateAction, UpdateUiState, update_panel};
 use crate::ocr_backend::{OcrBackend, OcrNotice};
 use crate::settings_model::{
     Control, SLIDER_CELLS, edit_text, parse_hex_color, preview_text, slider_active_cell,
-    slider_cell_value, step_int, window_text,
+    slider_cell_value, step_int,
 };
+use crate::settings_pages::{ExtraState, TRANSLATION_PAGE_ENABLED_KEY};
 use crate::settings_state::{
-    ConfigChange, EditTarget, KeyMods, RowModel, Scope, SettingsAction, SettingsState,
+    ConfigChange, KeyMods, RowModel, Scope, SettingsAction, SettingsState,
     SharedConfig, StatusKind, SystemPrefs, read_only_note,
 };
 use crate::settings_text::{Lang, Text, group_title, item_desc, item_label, option_text, t};
@@ -37,10 +38,15 @@ use snow_config::extensions::{
     KEY_DICTATION_BACKEND, KEY_DICTATION_MODEL_ID, KEY_LOCAL_MODEL_ID, KEY_LOCAL_ROUTE_MODE,
     KEY_OCR_BACKEND,
 };
+use snow_i18n::Args;
 use snow_ui::ui::component::button::Button;
 use snow_ui::ui::component::checkbox::Checkbox;
-use snow_ui::ui::component::searchable_list::{SearchableListItem, SearchableVec};
-use snow_ui::ui::component::select::{Select, SelectEvent, SelectState};
+use snow_ui::ui::component::combobox::{Combobox, ComboboxEvent, ComboboxState};
+use snow_ui::ui::component::input::{Input, InputEvent, InputState};
+use snow_ui::ui::component::searchable_list::{
+    SearchableListDelegate, SearchableListItem, SearchableVec,
+};
+use snow_ui::ui::component::select::{Caret, Select, SelectEvent, SelectState};
 use snow_ui::ui::component::{
     Disableable, IndexPath, Sizable, Size as ComponentSize, Theme, ThemeMode,
 };
@@ -68,14 +74,18 @@ const DROPDOWN_HEIGHT: f32 = 28.0;
 const DROPDOWN_MENU_MAX_HEIGHT: f32 = 280.0;
 /// 文本输入框宽度。
 const FIELD_WIDTH: f32 = 300.0;
+/// 多选下拉菜单的最大高度，超出滚动。
+const MULTI_CHOICE_MAX_HEIGHT: f32 = 360.0;
+/// 多选下拉菜单宽度（比触发器宽，容纳较长的选项名）。
+const MULTI_MENU_WIDTH: f32 = 280.0;
+/// 多选摘要文案里「已选数」的参数序号。
+const SUMMARY_SELECTED_ARG: u8 = 1;
+/// 多选摘要文案里「总数」的参数序号。
+const SUMMARY_TOTAL_ARG: u8 = 2;
 /// 搜索框宽度。
 const SEARCH_WIDTH: f32 = 240.0;
-/// 文本框可见字符数上限。
-const FIELD_VISIBLE_CHARS: usize = 36;
 /// 只读预览字符数上限。
 const READ_ONLY_PREVIEW_CHARS: usize = 28;
-/// 插入符字符。
-const CARET: &str = "\u{258F}";
 /// 单行最多显示的快捷键数量。
 const SHORTCUT_CHIPS_MAX: usize = 4;
 /// 自动化测试操作的间隔。
@@ -167,6 +177,90 @@ impl SearchableListItem for DropdownItem {
 
 /// 下拉状态实体的具体类型。
 type DropdownState = SelectState<SearchableVec<DropdownItem>>;
+
+/// 多选下拉状态实体的具体类型。
+type MultiDropdownState = ComboboxState<CheckedItems>;
+
+/// 判断某一行是否被勾选：行值在已选值集合里即为勾选。
+fn is_row_checked(value: &str, selected: &[&str]) -> bool {
+    selected.contains(&value)
+}
+
+/// 多选下拉的数据源：包一层 `SearchableVec`，只改行渲染（前置复选框），其余全委托。
+struct CheckedItems(SearchableVec<DropdownItem>);
+
+impl CheckedItems {
+    /// 用选项列表构造。
+    fn new(items: Vec<DropdownItem>) -> Self {
+        Self(SearchableVec::new(items))
+    }
+}
+
+impl SearchableListDelegate for CheckedItems {
+    type Item = DropdownItem;
+
+    /// 行数，委托给内部列表。
+    fn items_count(&self, section: usize) -> usize {
+        self.0.items_count(section)
+    }
+
+    /// 取指定行条目，委托给内部列表。
+    fn item(&self, ix: IndexPath) -> Option<&DropdownItem> {
+        self.0.item(ix)
+    }
+
+    /// 按值找行，委托给内部列表。
+    fn position<V>(&self, value: &V) -> Option<IndexPath>
+    where
+        DropdownItem: SearchableListItem<Value = V>,
+        V: PartialEq,
+    {
+        self.0.position(value)
+    }
+
+    /// 搜索过滤，委托给内部列表。
+    fn perform_search(&mut self, query: &str, window: &mut Window, cx: &mut App) -> Task<()> {
+        self.0.perform_search(query, window, cx)
+    }
+
+    /// 行是否勾选：当前行值在选中集合里。
+    fn is_item_checked(
+        &self,
+        _ix: IndexPath,
+        item: &DropdownItem,
+        current_selection: &[(IndexPath, DropdownItem)],
+        _cx: &App,
+    ) -> bool {
+        let selected: Vec<&str> = current_selection.iter().map(|(_, it)| it.value).collect();
+        is_row_checked(item.value, &selected)
+    }
+
+    /// 行内容：只读复选框加文案；勾选由选中集合决定，点击交给组件的行点击处理。
+    fn render_item(
+        &self,
+        ix: IndexPath,
+        item: &DropdownItem,
+        checked: bool,
+        _window: &mut Window,
+        _cx: &mut App,
+    ) -> Option<AnyElement> {
+        Some(
+            Checkbox::new(("multi-choice-row", ix.row))
+                .checked(checked)
+                .label(item.label.clone())
+                .tab_stop(false)
+                .into_any_element(),
+        )
+    }
+}
+
+/// 一个常驻的多选下拉：状态实体与其标签所用的语料语言。
+struct MultiDropdown {
+    /// gpui-component 的多选状态（常驻，行滚出视口后不丢）。
+    state: Entity<MultiDropdownState>,
+    /// 当前标签所用语料语言，语言切换时据此重建选项。
+    locale: &'static str,
+}
 
 /// 一个常驻的下拉选择器：状态实体与其标签所用的语料语言。
 struct Dropdown {
@@ -289,7 +383,7 @@ fn parse_autotest_op(item: &Value) -> Result<AutotestOp, String> {
 /// 设置页视图。
 pub struct SettingsView {
     /// 状态机。
-    state: SettingsState,
+    pub(crate) state: SettingsState,
     /// 变更通知出口（热键重注册等由上层响应）。
     notify: Rc<dyn Fn(ConfigChange)>,
     /// 根焦点句柄（接收键盘输入）。
@@ -302,6 +396,12 @@ pub struct SettingsView {
     hymt2_notice: Option<String>,
     /// 各配置键的下拉选择器（按需创建后常驻）。
     dropdowns: HashMap<&'static str, Dropdown>,
+    /// 多选下拉（如托盘菜单项）按配置键常驻的状态。
+    multi_dropdowns: HashMap<&'static str, MultiDropdown>,
+    /// 文本类行的真实输入框状态，按配置键在首次显示该行时创建。
+    text_inputs: HashMap<&'static str, Entity<InputState>>,
+    /// 各文本输入框最近一次对齐的配置文本，用来识别配置的外部变化（重置、导入、选文件）。
+    text_synced: HashMap<&'static str, String>,
     /// 已应用到组件主题的深浅色；`None` 表示尚未应用。
     themed_dark: Option<bool>,
     /// 窗口标题当前对应的界面语言代码（变化时刷新标题）。
@@ -311,15 +411,17 @@ pub struct SettingsView {
     /// 语音模型下载入口与数据根（未接入时为 `None`，面板按钮不可用）。
     stt_hooks: Option<SttHooks>,
     /// “检查更新”的界面状态。
-    update_state: UpdateUiState,
+    pub(crate) update_state: UpdateUiState,
     /// “更新”分组动作（检查 / 下载 / 打开目录）的入口（未接入时为 `None`，按钮不可用）。
-    update_hook: Option<Rc<dyn Fn(UpdateAction)>>,
+    pub(crate) update_hook: Option<Rc<dyn Fn(UpdateAction)>>,
     /// 设置导出 / 导入的界面状态。
     transfer_state: TransferUiState,
     /// 导出时是否包含 API 密钥（默认不含，只在本视图存活）。
     transfer_include_keys: bool,
     /// 请求导出 / 导入的入口（未接入时为 `None`，按钮不可用）。
     transfer_hook: Option<Rc<dyn Fn(TransferAction)>>,
+    /// 请求为某个路径键弹“选择文件”对话框的入口（未接入时按钮不可用）。
+    path_pick_hook: Option<Rc<dyn Fn(&'static str)>>,
     /// MCP 说明区的界面状态（复制客户端配置的结果）。
     mcp_state: McpUiState,
     /// 复制客户端配置入口；由上层写剪贴板并返回结果。
@@ -338,8 +440,10 @@ pub struct SettingsView {
     translate_support: Option<ModelSupport>,
     /// 模型下拉当前选项的签名，变化时重建选项。
     model_signature: String,
-    /// 内嵌在主窗口内容区：不画左侧分组栏，也不改窗口标题。
-    embedded: bool,
+    /// 追加在分组下方的页（翻译 / 历史 / 贴图管理 / 关于）的状态。
+    pub(crate) extra: ExtraState,
+    /// 顶部搜索框（真实输入组件，才会向系统注册 IME，中文输入法才能出候选框）。
+    search_input: Entity<InputState>,
 }
 
 /// 选项的显示标签：OCR 后端与本地路由模式有专用本地化，语言类选项固定显示各语言自称，其余原样显示。
@@ -368,6 +472,22 @@ fn dropdown_items(key: &str, options: &[&'static str], locale: &str) -> Vec<Drop
             label: option_label(key, option, locale).into(),
         })
         .collect()
+}
+
+/// 两组选中项是否相同（忽略顺序），用来判断多选下拉是否需要同步。
+fn same_selection(a: &[&str], b: &[&str]) -> bool {
+    a.len() == b.len() && a.iter().all(|name| b.contains(name))
+}
+
+/// 文本输入框该不该被配置值覆盖：配置相对上次对齐的文本变了（重置、导入、选文件），
+/// 且输入框内容与新配置不同，才返回要写入的新文本；用户正在输入而配置没变时返回 `None`。
+///
+/// # 参数
+/// - `synced`：上次对齐的配置文本（首次创建时与 `input` 一致）
+/// - `config`：当前配置对应的文本
+/// - `input`：输入框当前内容
+fn text_sync_target<'a>(synced: &str, config: &'a str, input: &str) -> Option<&'a str> {
+    (synced != config && input != config).then_some(config)
 }
 
 /// 当前配置值在候选里对应的选项；不在候选内返回 `None`。
@@ -411,33 +531,61 @@ impl SettingsView {
         system: SystemPrefs,
         notify: Rc<dyn Fn(ConfigChange)>,
     ) -> Entity<Self> {
-        let view = app.new(|cx| Self {
-            state: SettingsState::new(store, system),
-            notify,
-            focus: cx.focus_handle(),
-            list_scroll: UniformListScrollHandle::new(),
-            probe: RenderProbe::default(),
-            hymt2_notice: None,
-            dropdowns: HashMap::new(),
-            themed_dark: None,
-            titled_locale: None,
-            last_scroll_y: 0.0,
-            stt_hooks: None,
-            update_state: UpdateUiState::Idle,
-            update_hook: None,
-            transfer_state: TransferUiState::Idle,
-            transfer_include_keys: false,
-            transfer_hook: None,
-            mcp_state: McpUiState::Idle,
-            mcp_hook: None,
-            latex_hook: None,
-            stt_download: DownloadState::Idle,
-            stt_cancel: None,
-            stt_installed: HashSet::new(),
-            stt_vad_installed: false,
-            translate_support: None,
-            model_signature: String::new(),
-            embedded: false,
+        let translation_enabled = store
+            .borrow()
+            .value(TRANSLATION_PAGE_ENABLED_KEY)
+            .as_bool()
+            .unwrap_or(false);
+        let view = app.new(|cx| {
+            cx.observe_window_bounds(window, |this: &mut Self, window, cx| {
+                this.on_bounds_changed(window.is_maximized(), cx)
+            })
+            .detach();
+            let search_input = cx.new(|cx| InputState::new(window, cx));
+            cx.subscribe_in(
+                &search_input,
+                window,
+                |this: &mut Self, state, event: &InputEvent, _window, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        let text = state.read(cx).value().to_string();
+                        this.on_search_changed(text, cx);
+                    }
+                },
+            )
+            .detach();
+            Self {
+                search_input,
+                state: SettingsState::new(store, system),
+                notify,
+                focus: cx.focus_handle(),
+                list_scroll: UniformListScrollHandle::new(),
+                probe: RenderProbe::default(),
+                hymt2_notice: None,
+                dropdowns: HashMap::new(),
+                multi_dropdowns: HashMap::new(),
+                text_inputs: HashMap::new(),
+                text_synced: HashMap::new(),
+                themed_dark: None,
+                titled_locale: None,
+                last_scroll_y: 0.0,
+                stt_hooks: None,
+                update_state: UpdateUiState::Idle,
+                update_hook: None,
+                transfer_state: TransferUiState::Idle,
+                transfer_include_keys: false,
+                transfer_hook: None,
+                path_pick_hook: None,
+                mcp_state: McpUiState::Idle,
+                mcp_hook: None,
+                latex_hook: None,
+                stt_download: DownloadState::Idle,
+                stt_cancel: None,
+                stt_installed: HashSet::new(),
+                stt_vad_installed: false,
+                translate_support: None,
+                model_signature: String::new(),
+                extra: ExtraState::new(translation_enabled),
+            }
         });
         let handle = view.read(app).focus.clone();
         window.focus(&handle, app);
@@ -503,13 +651,108 @@ impl SettingsView {
         }
     }
 
+    /// 确保文本类行的真实输入框存在，并把配置的外部变化同步进去。
+    ///
+    /// 输入框只在首次显示该行时创建；回车或失焦提交，输入中实时校验，
+    /// 配置被重置、导入或选文件改动时（对比上次对齐的文本）覆盖输入框内容。
+    fn ensure_text_input(
+        &mut self,
+        key: &'static str,
+        config: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(state) = self.text_inputs.get(key).cloned() else {
+            let state = cx.new(|cx| InputState::new(window, cx).default_value(config.to_string()));
+            cx.subscribe_in(
+                &state,
+                window,
+                move |this: &mut Self, state, event: &InputEvent, window, cx| {
+                    let text = state.read(cx).value().to_string();
+                    match event {
+                        InputEvent::Change => {
+                            this.state.check_text_draft(key, &text);
+                            cx.notify();
+                        }
+                        InputEvent::PressEnter { .. } => {
+                            if this.commit_text_input(key, &text, cx) {
+                                window.focus(&this.focus, cx);
+                            }
+                        }
+                        InputEvent::Blur => {
+                            this.commit_text_input(key, &text, cx);
+                        }
+                        InputEvent::Focus => {}
+                    }
+                },
+            )
+            .detach();
+            self.text_inputs.insert(key, state);
+            self.text_synced.insert(key, config.to_string());
+            return;
+        };
+        let synced = self.text_synced.get(key).cloned().unwrap_or_default();
+        let input = state.read(cx).value().to_string();
+        if let Some(text) = text_sync_target(&synced, config, &input) {
+            let text = text.to_string();
+            state.update(cx, |input, cx| input.set_value(text, window, cx));
+        }
+        if synced != config {
+            self.text_synced.insert(key, config.to_string());
+        }
+    }
+
+    /// 提交文本输入框的内容：与配置相同则不动；否则解析并写回配置。
+    ///
+    /// # 返回
+    /// 是否提交成功（失败时行内显示错误，输入框保留草稿）。
+    fn commit_text_input(&mut self, key: &'static str, text: &str, cx: &mut Context<Self>) -> bool {
+        let unchanged = self
+            .state
+            .row_by_key(key)
+            .is_some_and(|row| edit_text(row.control, &row.value) == text);
+        if unchanged {
+            return true;
+        }
+        let ok = self.state.submit_text(key, text);
+        self.flush_changes();
+        cx.notify();
+        ok
+    }
+
+    /// Esc 取消编辑：输入框恢复为配置文本，清掉行内错误，焦点回到根节点。
+    fn cancel_text_input(
+        &mut self,
+        key: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let config = self
+            .state
+            .row_by_key(key)
+            .map(|row| edit_text(row.control, &row.value));
+        if let (Some(state), Some(config)) = (self.text_inputs.get(key).cloned(), config.clone()) {
+            state.update(cx, |input, cx| input.set_value(config, window, cx));
+        }
+        if let Some(text) = &config {
+            self.state.check_text_draft(key, text);
+        }
+        self.state.cancel_input();
+        window.focus(&self.focus, cx);
+        cx.notify();
+    }
+
     /// 收起展开中的下拉浮层：组件把焦点锁在浮层内，改焦点无效，
     /// 所以向持有焦点的浮层派发 Esc 同款的取消动作，走组件自己的关闭逻辑。
-    fn close_dropdowns(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn close_dropdowns(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let focused = self
             .dropdowns
             .values()
-            .any(|dropdown| dropdown.state.focus_handle(cx).contains_focused(window, cx));
+            .any(|dropdown| dropdown.state.focus_handle(cx).contains_focused(window, cx))
+            || self
+                .multi_dropdowns
+                .values()
+                .any(|dropdown| dropdown.state.focus_handle(cx).contains_focused(window, cx));
         if focused {
             window.dispatch_action(Box::new(Cancel), cx);
         }
@@ -556,6 +799,32 @@ impl SettingsView {
     /// - `hook`：点击按钮时调用，由上层弹文件对话框并执行
     pub fn set_transfer_hook(&mut self, hook: Rc<dyn Fn(TransferAction)>) {
         self.transfer_hook = Some(hook);
+    }
+
+    /// 接入路径键的“选择文件”入口。
+    ///
+    /// # 参数
+    /// - `hook`：点击按钮时调用，参数为配置键；由上层异步弹对话框
+    pub fn set_path_pick_hook(&mut self, hook: Rc<dyn Fn(&'static str)>) {
+        self.path_pick_hook = Some(hook);
+    }
+
+    /// 写入一个由外部给出的值（对话框选中的路径、勾选结果）并刷新界面，输入框随之显示新值。
+    ///
+    /// # 参数
+    /// - `key`：配置键
+    /// - `value`：要写入的值
+    /// - `cx`：视图上下文
+    pub fn apply_picked_value(
+        &mut self,
+        key: &'static str,
+        value: serde_json::Value,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.dispatch(SettingsAction::CancelInput);
+        self.state.dispatch(SettingsAction::Change { key, value });
+        self.flush_changes();
+        cx.notify();
     }
 
     /// 接入“公式模型”面板的按钮入口。
@@ -779,14 +1048,6 @@ impl SettingsView {
         }
     }
 
-    /// 切换为内嵌模式（主窗口里复用本视图时调用）：隐藏左侧分组栏，窗口标题归宿主管。
-    ///
-    /// # 参数
-    /// - `embedded`：是否内嵌。
-    pub fn set_embedded(&mut self, embedded: bool) {
-        self.embedded = embedded;
-    }
-
     /// 按分组 id 切到某个设置分组（不抢焦点，宿主跳转用）；id 不存在时忽略。
     ///
     /// # 参数
@@ -798,8 +1059,42 @@ impl SettingsView {
         else {
             return;
         };
+        self.extra.nav.leave();
         self.state.dispatch(SettingsAction::SwitchGroup(index));
         self.refresh_stt_cache();
+        self.scroll_to_top();
+        self.flush_changes();
+        cx.notify();
+    }
+
+    /// 让搜索框的占位符跟随界面语言，文本跟随状态（如自动化验收改了搜索词）。
+    fn sync_search_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let prefs = self.state.prefs();
+        // 占位符只在首帧与语言切换时设置（titled_locale 在本函数之后才更新）
+        let placeholder = (self.titled_locale != Some(prefs.locale))
+            .then(|| t(prefs.lang, Text::SearchPlaceholder).to_string());
+        let want = self.state.search().to_string();
+        self.search_input.update(cx, |input, cx| {
+            if let Some(placeholder) = placeholder {
+                input.set_placeholder(placeholder, window, cx);
+            }
+            if input.value().as_ref() != want {
+                input.set_value(want, window, cx);
+            }
+        });
+    }
+
+    /// 搜索框内容变化：更新过滤（不抢焦点，否则输入法组合会被打断）。
+    ///
+    /// # 参数
+    /// - `text`：搜索框当前文本
+    /// - `cx`：视图上下文
+    fn on_search_changed(&mut self, text: String, cx: &mut Context<Self>) {
+        if self.state.search() == text {
+            return;
+        }
+        self.extra.nav.leave();
+        self.state.dispatch(SettingsAction::SetSearch(text));
         self.scroll_to_top();
         self.flush_changes();
         cx.notify();
@@ -814,6 +1109,10 @@ impl SettingsView {
             SettingsAction::SwitchGroup(_) | SettingsAction::SetSearch(_)
         );
         let recheck = matches!(&action, SettingsAction::SwitchGroup(_));
+        if switched {
+            // 点分组或搜索：离开追加页回到设置列表
+            self.extra.nav.leave();
+        }
         self.state.dispatch(action);
         if recheck {
             self.refresh_stt_cache();
@@ -1098,10 +1397,29 @@ impl SettingsView {
                     .child(step_button("-", -1, cx))
                     .child(cells)
                     .child(step_button("+", 1, cx))
-                    .child(self.text_field(row, 84.0, p, lang, cx))
+                    .child(self.text_field(key, 84.0, cx))
+            }
+            Control::MultiChoice(options) => {
+                self.multi_choice_control(row_div, key, options.len(), lang)
+            }
+            Control::Text if key == crate::tray_config::KEY_CUSTOM_ICON => {
+                let mut button = Self::button(
+                    crate::ocr_backend::i18n_for(lang.locale()).tr("settings-pick-file"),
+                    self.path_pick_hook.is_some(),
+                    p,
+                );
+                if let Some(hook) = self.path_pick_hook.clone() {
+                    button = button.on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |_this, _event: &MouseDownEvent, _window, _cx| hook(key)),
+                    );
+                }
+                row_div
+                    .child(self.text_field(key, FIELD_WIDTH - 90.0, cx))
+                    .child(button)
             }
             Control::IntText | Control::Text | Control::ListText | Control::JsonText => {
-                row_div.child(self.text_field(row, FIELD_WIDTH, p, lang, cx))
+                row_div.child(self.text_field(key, FIELD_WIDTH, cx))
             }
             Control::Color => {
                 let swatch = parse_hex_color(row.value.as_str().unwrap_or_default())
@@ -1115,7 +1433,7 @@ impl SettingsView {
                             .border_color(p.border)
                             .bg(swatch),
                     )
-                    .child(self.text_field(row, FIELD_WIDTH - 30.0, p, lang, cx))
+                    .child(self.text_field(key, FIELD_WIDTH - 30.0, cx))
             }
             Control::Choice(_) => {
                 let locked = is_selector_key(key) && self.stt_inputs().lock_reason().is_some();
@@ -1152,6 +1470,104 @@ impl SettingsView {
         }
     }
 
+    /// 确保 `key` 的多选下拉存在，选项标签随界面语言重建，选中状态与当前配置值对齐。
+    ///
+    /// 勾选变化事件把全部选中项写回同一配置键（未知值保留）；本方法的同步不触发事件。
+    fn ensure_multi_dropdown(
+        &mut self,
+        key: &'static str,
+        options: &'static [&'static str],
+        current: &Value,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let locale = self.state.prefs().locale;
+        let want = crate::tray_config::enabled_menu_options(current, options);
+        let Some(existing) = self.multi_dropdowns.get(key) else {
+            let items = CheckedItems::new(dropdown_items(key, options, locale));
+            let selected = want
+                .iter()
+                .filter_map(|name| options.iter().position(|o| o == name))
+                .map(|row| IndexPath::default().row(row))
+                .collect();
+            let state = cx.new(|cx| {
+                ComboboxState::new(items, selected, window, cx)
+                    .multiple(true)
+                    .searchable(true)
+            });
+            cx.subscribe_in(
+                &state,
+                window,
+                move |this, _state, event: &ComboboxEvent<CheckedItems>, _w, cx| {
+                    if let ComboboxEvent::Change(values) = event {
+                        let current = this
+                            .state
+                            .row_by_key(key)
+                            .map_or(Value::Null, |row| row.value.clone());
+                        let next = crate::tray_config::menu_options_from_selection(
+                            &current, options, values,
+                        );
+                        this.apply_picked_value(key, next, cx);
+                    }
+                },
+            )
+            .detach();
+            self.multi_dropdowns
+                .insert(key, MultiDropdown { state, locale });
+            return;
+        };
+        let relabel = existing.locale != locale;
+        let state = existing.state.clone();
+        let stale = !same_selection(&state.read(cx).selected_values(), &want);
+        if relabel {
+            let items = CheckedItems::new(dropdown_items(key, options, locale));
+            state.update(cx, |combo, cx| combo.set_items(items, window, cx));
+        }
+        if relabel || stale {
+            state.update(cx, |combo, cx| combo.set_selected_values(&want, window, cx));
+        }
+        if let Some(entry) = self.multi_dropdowns.get_mut(key) {
+            entry.locale = locale;
+        }
+    }
+
+    /// 多选下拉控件：触发器显示「已选 n / 总数 项」，菜单里每项带勾选标记，选项可搜索。
+    fn multi_choice_control(
+        &self,
+        row_div: Div,
+        key: &'static str,
+        total: usize,
+        lang: Lang,
+    ) -> Div {
+        let Some(entry) = self.multi_dropdowns.get(key) else {
+            return row_div;
+        };
+        let locale = lang.locale();
+        row_div.child(
+            div().w(px(DROPDOWN_WIDTH)).h(px(DROPDOWN_HEIGHT)).child(
+                Combobox::new(&entry.state)
+                    .with_size(ComponentSize::Small)
+                    .menu_width(px(MULTI_MENU_WIDTH))
+                    .menu_max_h(px(MULTI_CHOICE_MAX_HEIGHT))
+                    .render_trigger(move |ctx, _window, _cx| {
+                        let label = crate::ocr_backend::i18n_for(locale).tr_with(
+                            "settings-multi-summary",
+                            &Args::new()
+                                .arg(SUMMARY_SELECTED_ARG, ctx.selection().len())
+                                .arg(SUMMARY_TOTAL_ARG, total),
+                        );
+                        div()
+                            .w_full()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(div().child(label))
+                            .child(Caret::new(ctx.size()))
+                    }),
+            ),
+        )
+    }
+
     /// 语音模型行的控件：下拉（候选来自清单）；被联动置灰时禁用，无候选时给占位文案。
     fn model_control(&self, row_div: Div, p: &Palette, locale: &'static str) -> Div {
         let inputs = self.stt_inputs();
@@ -1177,55 +1593,29 @@ impl SettingsView {
         }
     }
 
-    /// 单行文本框：编辑中显示带插入符的窗口化文本，否则显示预览，点击进入编辑。
-    fn text_field(
-        &self,
-        row: &RowModel,
-        width: f32,
-        p: &Palette,
-        lang: Lang,
-        cx: &mut Context<Self>,
-    ) -> Div {
-        let key = row.key;
-        let editing = self
-            .state
-            .edit()
-            .filter(|e| e.target == EditTarget::Row(key));
-        let (shown, active) = match editing {
-            Some(edit) => {
-                let (visible, cursor) = window_text(&edit.buffer, FIELD_VISIBLE_CHARS);
-                let left: String = visible.chars().take(cursor).collect();
-                let right: String = visible.chars().skip(cursor).collect();
-                (format!("{left}{CARET}{right}"), true)
-            }
-            None => (
-                preview_text(
-                    &Value::String(edit_text(row.control, &row.value)),
-                    FIELD_VISIBLE_CHARS,
-                ),
-                false,
-            ),
+    /// 单行文本框：真实输入组件（支持输入法），回车 / 失焦提交，Esc 取消并恢复。
+    ///
+    /// # 参数
+    /// - `key`：配置键（输入框状态在渲染该行时已创建）
+    /// - `width`：输入框宽度
+    /// - `cx`：视图上下文
+    fn text_field(&self, key: &'static str, width: f32, cx: &mut Context<Self>) -> Div {
+        let field = div().w(px(width)).h(px(DROPDOWN_HEIGHT));
+        let Some(state) = self.text_inputs.get(key) else {
+            return field;
         };
-        let _ = lang;
-        div()
-            .w(px(width))
-            .h(px(28.0))
-            .px_2()
-            .flex()
-            .items_center()
-            .overflow_hidden()
-            .whitespace_nowrap()
-            .rounded_md()
-            .cursor_text()
-            .border_1()
-            .border_color(if active { p.accent } else { p.border })
-            .bg(p.control)
-            .text_size(px(12.0))
-            .child(shown)
-            .on_mouse_down(
-                MouseButton::Left,
-                Self::click(cx, SettingsAction::BeginEdit(key)),
-            )
+        field
+            // 点输入框不能冒泡到根节点，否则根节点抢焦点会让输入框失焦
+            .on_mouse_down(MouseButton::Left, |_event, _window, cx| {
+                cx.stop_propagation()
+            })
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key == "escape" {
+                    this.cancel_text_input(key, window, cx);
+                    cx.stop_propagation();
+                }
+            }))
+            .child(Input::new(state).with_size(ComponentSize::Small))
     }
 
     /// 快捷键编辑器：已有绑定的芯片（点击替换、× 删除）与添加按钮。
@@ -1307,6 +1697,31 @@ impl SettingsView {
             });
         if let Some((key, options, current)) = cycle {
             self.ensure_dropdown(key, options, &current, window, cx);
+        }
+        let multi = self
+            .state
+            .visible_row(position)
+            .and_then(|row| match row.control {
+                Control::MultiChoice(options) => Some((row.key, options, row.value.clone())),
+                _ => None,
+            });
+        if let Some((key, options, current)) = multi {
+            self.ensure_multi_dropdown(key, options, &current, window, cx);
+        }
+        let text_row = self.state.visible_row(position).and_then(|row| {
+            matches!(
+                row.control,
+                Control::Text
+                    | Control::IntText
+                    | Control::ListText
+                    | Control::JsonText
+                    | Control::Color
+                    | Control::Slider(_)
+            )
+            .then(|| (row.key, edit_text(row.control, &row.value)))
+        });
+        if let Some((key, config)) = text_row {
+            self.ensure_text_input(key, &config, window, cx);
         }
         if self
             .state
@@ -1413,9 +1828,10 @@ impl SettingsView {
 
     /// 渲染侧栏。
     fn render_sidebar(&self, p: &Palette, lang: Lang, cx: &mut Context<Self>) -> impl IntoElement {
-        let active = match self.state.scope() {
-            Scope::Group(index) => Some(index),
-            Scope::Search => None,
+        let active = match (self.state.scope(), self.extra.nav.current()) {
+            (_, Some(_)) => None,
+            (Scope::Group(index), None) => Some(index),
+            (Scope::Search, None) => None,
         };
         let mut list = div()
             .id("settings-sidebar-list")
@@ -1458,6 +1874,9 @@ impl SettingsView {
                     ),
             );
         }
+        for item in self.render_extra_nav(p, cx) {
+            list = list.child(item);
+        }
         div()
             .w(px(SIDEBAR_WIDTH))
             .h_full()
@@ -1481,47 +1900,11 @@ impl SettingsView {
 
     /// 渲染顶部栏：标题、计数、搜索框、重置本组。
     fn render_header(&self, p: &Palette, lang: Lang, cx: &mut Context<Self>) -> impl IntoElement {
-        let searching = self
-            .state
-            .edit()
-            .is_some_and(|e| e.target == EditTarget::Search);
-        let search_text = if searching {
-            let edit = self.state.edit().map(|e| &e.buffer);
-            match edit {
-                Some(buffer) => {
-                    let (visible, cursor) = window_text(buffer, 24);
-                    let left: String = visible.chars().take(cursor).collect();
-                    let right: String = visible.chars().skip(cursor).collect();
-                    format!("{left}{CARET}{right}")
-                }
-                None => String::new(),
-            }
-        } else if self.state.search().is_empty() {
-            t(lang, Text::SearchPlaceholder).to_string()
-        } else {
-            self.state.search().to_string()
-        };
-        let dim_placeholder = !searching && self.state.search().is_empty();
+        // 点输入框别冒泡到根节点，否则根节点会把焦点抢走
         let search = div()
             .w(px(SEARCH_WIDTH))
-            .h(px(28.0))
-            .px_2()
-            .flex()
-            .items_center()
-            .overflow_hidden()
-            .whitespace_nowrap()
-            .rounded_md()
-            .cursor_text()
-            .border_1()
-            .border_color(if searching { p.accent } else { p.border })
-            .bg(p.control)
-            .text_size(px(12.0))
-            .text_color(if dim_placeholder { p.dim } else { p.text })
-            .child(search_text)
-            .on_mouse_down(
-                MouseButton::Left,
-                Self::click(cx, SettingsAction::BeginSearch),
-            );
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(Input::new(&self.search_input).with_size(ComponentSize::Small));
         let reset_group = Self::button(t(lang, Text::ResetGroup), true, p).on_mouse_down(
             MouseButton::Left,
             Self::click(cx, SettingsAction::ResetScope),
@@ -1799,15 +2182,19 @@ impl SettingsView {
                     self.update_state,
                     UpdateUiState::Running | UpdateUiState::Downloading
                 );
-                let mut button = Button::new("update-check").small().label(panel.button_label);
+                let mut button = Button::new("update-check")
+                    .small()
+                    .label(panel.button_label);
                 button = match &self.update_hook {
                     Some(hook) if !running => {
                         let hook = Rc::clone(hook);
-                        button.on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
-                            this.update_state = UpdateUiState::Running;
-                            hook(UpdateAction::Check);
-                            cx.notify();
-                        }))
+                        button.on_click(cx.listener(
+                            move |this, _event: &ClickEvent, _window, cx| {
+                                this.update_state = UpdateUiState::Running;
+                                hook(UpdateAction::Check);
+                                cx.notify();
+                            },
+                        ))
                     }
                     _ => button.disabled(true),
                 };
@@ -1819,11 +2206,13 @@ impl SettingsView {
                             Button::new("update-download")
                                 .small()
                                 .label(panel.download_label)
-                                .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
-                                    this.update_state = UpdateUiState::Downloading;
-                                    hook(UpdateAction::Download(info.clone()));
-                                    cx.notify();
-                                })),
+                                .on_click(cx.listener(
+                                    move |this, _event: &ClickEvent, _window, cx| {
+                                        this.update_state = UpdateUiState::Downloading;
+                                        hook(UpdateAction::Download(info.clone()));
+                                        cx.notify();
+                                    },
+                                )),
                         )
                     }
                     (UpdateUiState::Downloaded { dir, .. }, Some(hook)) => {
@@ -1851,7 +2240,15 @@ impl SettingsView {
                     .pt(px(2.0))
                     .border_b_1()
                     .border_color(p.border)
-                    .child(div().flex().items_center().gap_3().child(button).children(extra).children(notice))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .child(button)
+                            .children(extra)
+                            .children(notice),
+                    )
                     .into_any_element()
             }
         }
@@ -1885,15 +2282,20 @@ impl SettingsView {
                 )
                 .into_any_element(),
             Hymt2Row::Actions => {
-                let mut button = Button::new("mcp-copy-config").small().label(panel.copy_label);
+                let mut button = Button::new("mcp-copy-config")
+                    .small()
+                    .label(panel.copy_label);
                 button = match &self.mcp_hook {
                     Some(hook) => {
                         let hook = Rc::clone(hook);
-                        button.on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
-                            let result = hook();
-                            this.mcp_state = copy_result_state(this.state.prefs().locale, &result);
-                            cx.notify();
-                        }))
+                        button.on_click(cx.listener(
+                            move |this, _event: &ClickEvent, _window, cx| {
+                                let result = hook();
+                                this.mcp_state =
+                                    copy_result_state(this.state.prefs().locale, &result);
+                                cx.notify();
+                            },
+                        ))
                     }
                     None => button.disabled(true),
                 };
@@ -1909,14 +2311,26 @@ impl SettingsView {
                     .pt(px(2.0))
                     .border_b_1()
                     .border_color(p.border)
-                    .child(div().flex().items_center().gap_3().child(button).children(notice))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .child(button)
+                            .children(notice),
+                    )
                     .into_any_element()
             }
         }
     }
 
     /// 渲染“公式模型”说明区的第 `row_index` 个定高行（标题与状态行、按钮行）。
-    fn render_latex_row(&self, row_index: usize, p: &Palette, cx: &mut Context<Self>) -> AnyElement {
+    fn render_latex_row(
+        &self,
+        row_index: usize,
+        p: &Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let i18n = crate::ocr_backend::i18n_for(self.state.prefs().locale);
         let panel = latex_panel(i18n, &self.latex_model_dir());
         let frame = div()
@@ -1946,8 +2360,16 @@ impl SettingsView {
             Hymt2Row::Actions => {
                 let mut buttons = Vec::new();
                 for (id, label, action) in [
-                    ("latex-open-folder", panel.open_folder_label, LatexAction::OpenFolder),
-                    ("latex-open-source", panel.open_source_label, LatexAction::OpenSource),
+                    (
+                        "latex-open-folder",
+                        panel.open_folder_label,
+                        LatexAction::OpenFolder,
+                    ),
+                    (
+                        "latex-open-source",
+                        panel.open_source_label,
+                        LatexAction::OpenSource,
+                    ),
                 ] {
                     let mut button = Button::new(id).small().label(label);
                     button = match &self.latex_hook {
@@ -2012,7 +2434,9 @@ impl SettingsView {
                     (
                         "config-export",
                         panel.export_label,
-                        TransferAction::Export { include_credentials: self.transfer_include_keys },
+                        TransferAction::Export {
+                            include_credentials: self.transfer_include_keys,
+                        },
                     ),
                     ("config-import", panel.import_label, TransferAction::Import),
                 ] {
@@ -2181,17 +2605,19 @@ impl Render for SettingsView {
         if scroll_y != self.last_scroll_y {
             // 列表滚动时收起已展开的下拉：焦点回根即触发选择器的失焦关闭。
             self.last_scroll_y = scroll_y;
-            if !self.dropdowns.is_empty() {
+            if !self.dropdowns.is_empty() || !self.multi_dropdowns.is_empty() {
                 // 渲染中改焦点不会触发失焦通知，推迟到本帧之后再做。
                 cx.defer_in(window, |this, window, cx| this.close_dropdowns(window, cx));
             }
         }
         let prefs = self.state.prefs();
-        if !self.embedded && self.titled_locale != Some(prefs.locale) {
+        if self.titled_locale != Some(prefs.locale) {
             // 窗口标题跟随界面语言（首帧与语言切换后各设一次）。
             self.titled_locale = Some(prefs.locale);
             window.set_window_title(&crate::settings_text::window_title(prefs.lang));
         }
+        self.sync_search_input(window, cx);
+        let prefs = self.state.prefs();
         if self.themed_dark != Some(prefs.dark) {
             // 组件库（下拉选择器）的主题跟随设置页深浅色。
             self.themed_dark = Some(prefs.dark);
@@ -2211,6 +2637,7 @@ impl Render for SettingsView {
         let visible = self.state.visible_len();
         let total = header + visible;
 
+        let extra_page = self.extra.nav.current();
         let body = if total == 0 {
             div()
                 .flex_1()
@@ -2256,6 +2683,10 @@ impl Render for SettingsView {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _event: &MouseDownEvent, window, cx| {
+                    if this.extra.nav.current().is_some() {
+                        // 追加页（如内嵌翻译页）自己管焦点，别抢
+                        return;
+                    }
                     window.focus(&this.focus, cx);
                     if this.state.edit().is_some() || this.state.capture().is_some() {
                         this.state.cancel_input();
@@ -2263,7 +2694,27 @@ impl Render for SettingsView {
                     }
                 }),
             )
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if this.extra.nav.current().is_some() {
+                    return;
+                }
+                if this
+                    .search_input
+                    .read(cx)
+                    .focus_handle(cx)
+                    .is_focused(window)
+                {
+                    // 搜索框自己处理按键与输入法
+                    return;
+                }
+                if this
+                    .text_inputs
+                    .values()
+                    .any(|input| input.read(cx).focus_handle(cx).is_focused(window))
+                {
+                    // 行内文本输入框自己处理按键与输入法
+                    return;
+                }
                 let m = event.keystroke.modifiers;
                 let mods = KeyMods {
                     ctrl: m.control,
@@ -2287,11 +2738,16 @@ impl Render for SettingsView {
                     cx.notify();
                 }
             }))
-            .when(!self.embedded, |root| {
-                root.child(self.render_sidebar(&p, lang, cx))
-            })
-            .child(
-                div()
+            .child(self.render_sidebar(&p, lang, cx))
+            .child(match extra_page {
+                Some(page) => div()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .flex()
+                    .flex_col()
+                    .child(self.render_extra_page(page, &p, window, cx)),
+                None => div()
                     .flex_1()
                     .min_w_0()
                     .h_full()
@@ -2300,7 +2756,7 @@ impl Render for SettingsView {
                     .child(self.render_header(&p, lang, cx))
                     .child(body)
                     .child(self.render_status(&p)),
-            );
+            });
 
         let elapsed = started.elapsed();
         self.probe.frames += 1;
@@ -2320,6 +2776,14 @@ impl Drop for SettingsView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 行勾选状态由选中集合推出。
+    #[test]
+    fn row_checked_follows_selection() {
+        assert!(is_row_checked("a", &["a", "b"]));
+        assert!(!is_row_checked("c", &["a", "b"]));
+        assert!(!is_row_checked("a", &[]));
+    }
 
     /// 选项标签：路由模式本地化，其余原样；下拉与平铺共用。
     #[test]
@@ -2373,6 +2837,26 @@ mod tests {
         assert_eq!(dropdown_value(OPTIONS, "zzz"), None);
         assert_eq!(dropdown_index(OPTIONS, "e"), Some(4));
         assert_eq!(dropdown_index(OPTIONS, ""), None);
+    }
+
+    /// 多选选中集合比较忽略顺序，长度或成员不同则不同。
+    #[test]
+    fn same_selection_ignores_order() {
+        assert!(same_selection(&["a", "b"], &["b", "a"]));
+        assert!(!same_selection(&["a"], &["a", "b"]));
+        assert!(!same_selection(&["a", "c"], &["a", "b"]));
+        assert!(same_selection(&[], &[]));
+    }
+
+    /// 文本框同步：配置变了且框内不同才覆盖；用户输入中（配置没变）或已一致都不动。
+    #[test]
+    fn text_sync_target_rules() {
+        // 配置没变：保留用户输入
+        assert_eq!(text_sync_target("a", "a", "draft"), None);
+        // 配置被重置 / 导入：覆盖草稿
+        assert_eq!(text_sync_target("a", "b", "draft"), Some("b"));
+        // 刚提交过的值：框内已是新配置，无需再写
+        assert_eq!(text_sync_target("a", "b", "b"), None);
     }
 
     /// 自动化操作 JSON 解析：全部操作类型与错误输入。

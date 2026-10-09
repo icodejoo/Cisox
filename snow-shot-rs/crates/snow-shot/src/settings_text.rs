@@ -463,7 +463,8 @@ mod tests {
                 continue;
             }
             let options = match crate::settings_model::control_for(entry) {
-                crate::settings_model::Control::Choice(o) => o,
+                crate::settings_model::Control::Choice(o)
+                | crate::settings_model::Control::MultiChoice(o) => o,
                 _ => continue,
             };
             for value in options {

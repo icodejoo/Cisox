@@ -778,6 +778,44 @@ impl SettingsState {
         true
     }
 
+    /// 文本输入框草稿的实时校验：能解析则清掉行内错误，否则显示错误（不写配置）。
+    ///
+    /// # 参数
+    /// - `key`：配置键
+    /// - `text`：输入框当前文本
+    pub fn check_text_draft(&mut self, key: &'static str, text: &str) {
+        let Some(control) = self.row_by_key(key).map(|row| row.control) else {
+            return;
+        };
+        let error = parse_input(control, text)
+            .err()
+            .map(|error| describe_input_error(self.prefs.lang, &error));
+        self.set_row_error(key, error);
+    }
+
+    /// 提交文本输入框的内容：解析失败显示错误并返回 `false`，否则写入配置。
+    ///
+    /// # 参数
+    /// - `key`：配置键
+    /// - `text`：输入框当前文本
+    ///
+    /// # 返回
+    /// 是否已成功落到配置（文本与现值相同也算成功）。
+    pub fn submit_text(&mut self, key: &'static str, text: &str) -> bool {
+        let Some(control) = self.row_by_key(key).map(|row| row.control) else {
+            return false;
+        };
+        match parse_input(control, text) {
+            Err(error) => {
+                let message = describe_input_error(self.prefs.lang, &error);
+                self.set_row_error(key, Some(message.clone()));
+                self.set_status(StatusKind::Error, message);
+                false
+            }
+            Ok(value) => self.apply(key, value).is_ok(),
+        }
+    }
+
     /// 提交文本编辑：解析失败或校验失败时留在编辑态并显示错误。
     fn commit_edit(&mut self) {
         let Some(edit) = self.edit.clone() else {
@@ -1285,6 +1323,23 @@ mod tests {
         state.on_key("9", Some("9"), mods, None);
         state.on_key("escape", None, mods, None);
         assert!(state.edit().is_none());
+        assert_eq!(disk_value(&path, key), Some(json!(60)));
+    }
+
+    /// 输入框草稿：非法整数实时报错、改回合法即清除；提交非法不写盘，合法后落盘。
+    #[test]
+    fn text_input_draft_and_submit() {
+        let (mut state, _, path) = fixture();
+        let key = "screen_recording/frame_rate";
+        state.check_text_draft(key, "x");
+        assert!(state.row_by_key(key).unwrap().error.is_some());
+        state.check_text_draft(key, "60");
+        assert!(state.row_by_key(key).unwrap().error.is_none());
+        assert!(!state.submit_text(key, "x"));
+        assert!(state.row_by_key(key).unwrap().error.is_some());
+        assert_ne!(disk_value(&path, key), Some(json!(60)));
+        assert!(state.submit_text(key, " 60 "));
+        assert!(state.row_by_key(key).unwrap().error.is_none());
         assert_eq!(disk_value(&path, key), Some(json!(60)));
     }
 

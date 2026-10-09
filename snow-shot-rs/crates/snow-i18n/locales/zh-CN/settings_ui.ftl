@@ -56,3 +56,7 @@ settings-group-api-configuration = 模型接口
 settings-group-extended-features = 扩展功能
 settings-group-storage = 存储
 settings-group-dictation = 语音转文字
+settings-pick-file = 选择文件…
+settings-pick-tray-icon-title = 选择托盘图标
+settings-pick-tray-icon-filter = 图片文件 (*.png, *.jpg, *.jpeg, *.webp, *.bmp)
+settings-multi-summary = 已选 { $arg1 } / { $arg2 } 项
