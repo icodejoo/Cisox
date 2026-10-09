@@ -51,6 +51,7 @@ use snow_canvas_raster::region::{
 };
 use snow_canvas_text::{CanvasTextInput, CanvasTextStyle, EditKeyOutcome};
 use snow_config::store::ConfigStore;
+use snow_draw_engine::ColorRgba8;
 use snow_i18n::{Args, I18n};
 use snow_platform::clipboard::{copy_image_to_clipboard, copy_text_to_clipboard};
 use snow_platform::text_raster::DEFAULT_FONT_FAMILY;
@@ -652,6 +653,38 @@ struct DecorationUi {
     wm_color: Entity<ColorPickerState>,
     /// 聚光灯颜色取色器（含透明度）。
     sp_color: Entity<ColorPickerState>,
+}
+
+/// 取色器临时预览的状态推进（纯函数，便于测试）。
+///
+/// 临时预览 = 取色器的预览色与已提交色不同。进入预览时记下还原色；预览期间返回要显示的色；
+/// 预览结束时，若显示色没被提交（取色器已提交色不等于显示色）则返回还原色。
+///
+/// # 参数
+/// - `state`：`(还原色, 当前显示色)`，预览期间为 `Some`。
+/// - `current`：标注层当前颜色。
+/// - `value`：取色器已提交色。
+/// - `preview`：取色器预览色。
+///
+/// # 返回
+/// 需要应用到标注层的颜色；无需变化为 `None`。
+fn color_preview_step(
+    state: &mut Option<(ColorRgba8, ColorRgba8)>,
+    current: ColorRgba8,
+    value: Option<ColorRgba8>,
+    preview: Option<ColorRgba8>,
+) -> Option<ColorRgba8> {
+    match preview.filter(|p| Some(*p) != value) {
+        Some(shown) => {
+            let original = state.map_or(current, |(orig, _)| orig);
+            *state = Some((original, shown));
+            (shown != current).then_some(shown)
+        }
+        None => {
+            let (original, shown) = state.take()?;
+            (current == shown && value != Some(shown) && original != current).then_some(original)
+        }
+    }
 }
 
 /// 样式面板用到的三个下拉实体（首次显示面板时创建）。
@@ -1513,6 +1546,8 @@ pub struct ScreenshotOverlayView {
     decoration_text_focused: bool,
     /// 已把配置里保存的聚光灯 / 水印样式套到当前标注层（避免重复写入撤销历史）。
     decoration_loaded: bool,
+    /// 取色器悬停 / 手输十六进制时的临时预览状态（还原色与当前显示色）。
+    decoration_color_preview: Option<(ColorRgba8, ColorRgba8)>,
     /// 标注预览分块（只保留非空块）。
     tile_sprites: HashMap<TileKey, TileSprite>,
     /// 已被替换、等待在下一次渲染时从 GPU 图集释放的图像。
@@ -1670,6 +1705,7 @@ impl ScreenshotOverlayView {
             decoration_prepared: None,
             decoration_text_focused: false,
             decoration_loaded: false,
+            decoration_color_preview: None,
             tile_sprites: HashMap::new(),
             pending_drops: Vec::new(),
             annotating: false,
@@ -5643,11 +5679,55 @@ impl ScreenshotOverlayView {
             return;
         }
         if self.decoration_prepared == Some(self.tool) {
+            self.follow_color_preview(cx);
             return;
         }
         self.ensure_decoration_ui(window, cx);
         self.sync_decoration_ui(window, cx);
         self.decoration_prepared = Some(self.tool);
+    }
+
+    /// 让覆盖窗预览跟随取色器的临时预览色（悬停调色板 / 手输十六进制），不写配置。
+    fn follow_color_preview(&mut self, cx: &mut Context<Self>) {
+        let watermark = self.tool == AnnotationTool::Watermark;
+        let Some(ui) = &self.decoration_ui else {
+            return;
+        };
+        let picker = if watermark {
+            &ui.wm_color
+        } else {
+            &ui.sp_color
+        };
+        let (value, preview) = {
+            let state = picker.read(cx);
+            (state.value(), state.preview())
+        };
+        let to_color = |c: Hsla| {
+            let rgba = c.to_rgb();
+            color_from_unit([rgba.r, rgba.g, rgba.b, rgba.a])
+        };
+        let Some(layer) = &self.annotations else {
+            return;
+        };
+        let current = if watermark {
+            layer.watermark_config().color
+        } else {
+            layer.spotlight_config().color
+        };
+        let apply = color_preview_step(
+            &mut self.decoration_color_preview,
+            current,
+            value.map(to_color),
+            preview.map(to_color),
+        );
+        if let Some(color) = apply {
+            if watermark {
+                self.apply_watermark_edit(WatermarkEdit::Color(color), false);
+            } else {
+                self.apply_spotlight_edit(SpotlightEdit::Color(color), false);
+            }
+            cx.notify();
+        }
     }
 
     /// 构造一组档位下拉的选项。
@@ -5686,7 +5766,7 @@ impl ScreenshotOverlayView {
                     this.commit_watermark_text(window, cx);
                     this.refocus_root(window, cx);
                 }
-                InputEvent::Change => {}
+                InputEvent::Change => this.commit_watermark_text(window, cx),
             },
         )
         .detach();
@@ -6049,6 +6129,11 @@ impl ScreenshotOverlayView {
     /// # 参数
     /// - `edit`：控件产生的编辑。
     fn edit_watermark(&mut self, edit: WatermarkEdit) {
+        self.apply_watermark_edit(edit, true);
+    }
+
+    /// 水印编辑的实际实现：`persist` 为假时只刷新预览，不写配置（临时预览用）。
+    fn apply_watermark_edit(&mut self, edit: WatermarkEdit, persist: bool) {
         let Some(layer) = &self.annotations else {
             return;
         };
@@ -6059,7 +6144,9 @@ impl ScreenshotOverlayView {
         }
         let saved = watermark_to_json(&after);
         self.run_layer(|layer, base| layer.set_watermark(after, base));
-        self.persist_decoration(WATERMARK_STYLE_KEY, saved);
+        if persist {
+            self.persist_decoration(WATERMARK_STYLE_KEY, saved);
+        }
     }
 
     /// 对聚光灯样式做一次编辑，写回 `drawing/spotlight_style`。
@@ -6067,6 +6154,11 @@ impl ScreenshotOverlayView {
     /// # 参数
     /// - `edit`：控件产生的编辑。
     fn edit_spotlight(&mut self, edit: SpotlightEdit) {
+        self.apply_spotlight_edit(edit, true);
+    }
+
+    /// 聚光灯编辑的实际实现：`persist` 为假时只刷新预览，不写配置。
+    fn apply_spotlight_edit(&mut self, edit: SpotlightEdit, persist: bool) {
         let Some(layer) = &self.annotations else {
             return;
         };
@@ -6077,7 +6169,9 @@ impl ScreenshotOverlayView {
         }
         let saved = spotlight_to_json(&after);
         self.run_layer(|layer, base| layer.set_spotlight_style(after, base));
-        self.persist_decoration(SPOTLIGHT_STYLE_KEY, saved);
+        if persist {
+            self.persist_decoration(SPOTLIGHT_STYLE_KEY, saved);
+        }
     }
 
     /// 把装饰样式写回配置并落盘；失败只记日志。
@@ -9886,6 +9980,45 @@ mod tests {
         assert_eq!(view.current_tool(), AnnotationTool::None);
         view.apply_drawing_key(DrawingKey::Watermark);
         assert_eq!(view.current_tool(), AnnotationTool::Watermark);
+    }
+
+    /// 取色器临时预览：悬停时显示预览色，离开且未提交时还原，提交后保留。
+    #[test]
+    fn color_preview_follows_and_restores() {
+        let c = |r| ColorRgba8 {
+            r,
+            g: 0,
+            b: 0,
+            a: 255,
+        };
+        let mut st = None;
+        // 进入预览：显示预览色
+        assert_eq!(
+            color_preview_step(&mut st, c(1), Some(c(1)), Some(c(9))),
+            Some(c(9))
+        );
+        // 预览换色：继续跟随，还原色仍是最初的
+        assert_eq!(
+            color_preview_step(&mut st, c(9), Some(c(1)), Some(c(7))),
+            Some(c(7))
+        );
+        // 离开未提交：还原
+        assert_eq!(
+            color_preview_step(&mut st, c(7), Some(c(1)), Some(c(1))),
+            Some(c(1))
+        );
+        assert!(st.is_none());
+        // 预览后提交：不还原
+        color_preview_step(&mut st, c(1), Some(c(1)), Some(c(5)));
+        assert_eq!(
+            color_preview_step(&mut st, c(5), Some(c(5)), Some(c(5))),
+            None
+        );
+        // 无预览：什么也不做
+        assert_eq!(
+            color_preview_step(&mut st, c(5), Some(c(5)), Some(c(5))),
+            None
+        );
     }
 
     /// 水印 / 聚光灯编辑：即时作用于标注层、写回配置，新覆盖窗选中工具时读回（文本不持久化）。

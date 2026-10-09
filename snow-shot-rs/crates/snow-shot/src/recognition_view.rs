@@ -9,6 +9,8 @@ use crate::table_structure::TableTexts;
 use image::{Frame, RgbaImage};
 use snow_i18n::Args;
 use snow_platform::clipboard::copy_text_to_clipboard;
+use snow_ui::shell::geometry::LogicalSize;
+use snow_ui::shell::window::WindowSpec;
 use snow_ui::ui::component::button::Button;
 use snow_ui::ui::component::input::{Textarea, TextareaState};
 use snow_ui::ui::component::{Sizable, Size as ComponentSize, Theme, ThemeMode};
@@ -67,6 +69,16 @@ pub fn render_image(width: u32, height: u32, rgba: &[u8]) -> Option<Arc<RenderIm
     Some(Arc::new(RenderImage::new(vec![Frame::new(buffer)])))
 }
 
+/// 识别结果窗的窗口规格：置顶，否则会被置顶的覆盖窗盖住。
+///
+/// # 参数
+/// - `title`：窗口标题。
+pub fn window_spec(title: String) -> WindowSpec {
+    let mut spec = WindowSpec::normal(title, LogicalSize::new(WINDOW_WIDTH, WINDOW_HEIGHT));
+    spec.always_on_top = true;
+    spec
+}
+
 /// 识别结果窗视图。
 pub struct RecognitionView {
     /// 识别数据。
@@ -90,8 +102,21 @@ impl RecognitionView {
     /// - `window` / `app`：窗口与应用上下文。
     /// - `data`：识别数据。
     /// - `prefs`：界面偏好。
-    pub fn create(window: &mut Window, app: &mut App, data: RecognitionData, prefs: UiPrefs) -> Entity<Self> {
-        Theme::change(if prefs.dark { ThemeMode::Dark } else { ThemeMode::Light }, None, app);
+    pub fn create(
+        window: &mut Window,
+        app: &mut App,
+        data: RecognitionData,
+        prefs: UiPrefs,
+    ) -> Entity<Self> {
+        Theme::change(
+            if prefs.dark {
+                ThemeMode::Dark
+            } else {
+                ThemeMode::Light
+            },
+            None,
+            app,
+        );
         let initial = data.text.clone();
         let text = app.new(|cx| {
             let mut state = TextareaState::new(window, cx).auto_grow(12, 24);
@@ -99,7 +124,37 @@ impl RecognitionView {
             state
         });
         let image = render_image(data.width, data.height, &data.rgba);
-        app.new(|_| Self { data, image, text, prefs, notice: None, pending_drops: Vec::new() })
+        app.new(|_| Self {
+            data,
+            image,
+            text,
+            prefs,
+            notice: None,
+            pending_drops: Vec::new(),
+        })
+    }
+
+    /// 用新识别结果替换窗口内容（单例复用）：重建图片与全文，清掉旧提示。
+    ///
+    /// # 参数
+    /// - `data`：新的识别数据。
+    /// - `window` / `cx`：窗口与视图上下文。
+    pub fn replace_data(
+        &mut self,
+        data: RecognitionData,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(old) = self.image.take() {
+            self.pending_drops.push(old);
+        }
+        self.image = render_image(data.width, data.height, &data.rgba);
+        let text = data.text.clone();
+        self.text
+            .update(cx, |state, cx| state.set_value(text, window, cx));
+        self.data = data;
+        self.notice = None;
+        cx.notify();
     }
 
     /// 图像缩放到图片区后的逻辑尺寸与缩放系数（图像像素 → 逻辑像素）。
@@ -122,7 +177,10 @@ impl RecognitionView {
         let i18n = crate::ocr_backend::i18n_for(self.prefs.locale);
         self.notice = Some(match copy_text_to_clipboard(text) {
             Ok(()) => (i18n.tr("recwin-notice-copied"), false),
-            Err(e) => (i18n.tr_with("recwin-notice-copy-failed", &Args::new().arg(1, e)), true),
+            Err(e) => (
+                i18n.tr_with("recwin-notice-copy-failed", &Args::new().arg(1, e)),
+                true,
+            ),
         });
         cx.notify();
     }
@@ -163,7 +221,9 @@ impl Render for RecognitionView {
                     .border_color(rgba(BOX_BORDER))
                     .bg(rgba(BOX_FILL))
                     .cursor_pointer()
-                    .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| this.copy(&text, cx))),
+                    .on_click(
+                        cx.listener(move |this, _e: &ClickEvent, _w, cx| this.copy(&text, cx)),
+                    ),
             );
         }
 
@@ -173,7 +233,12 @@ impl Render for RecognitionView {
             .flex_col()
             .gap(px(GAP))
             .child(image_box)
-            .child(div().text_size(px(12.0)).text_color(p.dim).child(i18n.tr("recwin-hint-click-box")));
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(p.dim)
+                    .child(i18n.tr("recwin-hint-click-box")),
+            );
 
         let copy_all = Button::new("recwin-copy-all")
             .with_size(ComponentSize::Small)
@@ -194,13 +259,17 @@ impl Render for RecognitionView {
                     Button::new("recwin-copy-markdown")
                         .with_size(ComponentSize::Small)
                         .label(i18n.tr("recwin-copy-markdown"))
-                        .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| this.copy(&markdown, cx))),
+                        .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| {
+                            this.copy(&markdown, cx)
+                        })),
                 )
                 .child(
                     Button::new("recwin-copy-html")
                         .with_size(ComponentSize::Small)
                         .label(i18n.tr("recwin-copy-html"))
-                        .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| this.copy(&html, cx))),
+                        .on_click(
+                            cx.listener(move |this, _e: &ClickEvent, _w, cx| this.copy(&html, cx)),
+                        ),
                 );
         }
         if let Some(latex) = self.data.latex.clone() {
@@ -210,13 +279,17 @@ impl Render for RecognitionView {
                     Button::new("recwin-copy-latex")
                         .with_size(ComponentSize::Small)
                         .label(i18n.tr("recwin-copy-latex"))
-                        .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| this.copy(&latex, cx))),
+                        .on_click(
+                            cx.listener(move |this, _e: &ClickEvent, _w, cx| this.copy(&latex, cx)),
+                        ),
                 )
                 .child(
                     Button::new("recwin-copy-latex-block")
                         .with_size(ComponentSize::Small)
                         .label(i18n.tr("recwin-copy-latex-block"))
-                        .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| this.copy(&block, cx))),
+                        .on_click(
+                            cx.listener(move |this, _e: &ClickEvent, _w, cx| this.copy(&block, cx)),
+                        ),
                 );
         }
         for (id, key) in [
@@ -227,7 +300,9 @@ impl Render for RecognitionView {
                 Button::new(id)
                     .with_size(ComponentSize::Small)
                     .label(i18n.tr(key))
-                    .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| this.show_conversion_guide(cx))),
+                    .on_click(
+                        cx.listener(|this, _e: &ClickEvent, _w, cx| this.show_conversion_guide(cx)),
+                    ),
             );
         }
         let right = div()
@@ -252,10 +327,16 @@ impl Render for RecognitionView {
                     .flex()
                     .items_center()
                     .gap(px(GAP))
-                    .child(div().flex_1().text_size(px(12.0)).text_color(match &self.notice {
-                        Some((_, true)) => p.danger,
-                        _ => p.ok,
-                    }).child(self.notice.clone().map(|(t, _)| t).unwrap_or_default()))
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(px(12.0))
+                            .text_color(match &self.notice {
+                                Some((_, true)) => p.danger,
+                                _ => p.ok,
+                            })
+                            .child(self.notice.clone().map(|(t, _)| t).unwrap_or_default()),
+                    )
                     .child(copy_all)
                     .child(close),
             );
@@ -292,6 +373,13 @@ mod tests {
         assert!(data.table.is_none());
         assert!(data.latex.is_none());
         assert_eq!(data.conversion, ConversionGuide::NotConfigured);
+    }
+
+    /// 窗口必须置顶，覆盖窗存在时才看得见。
+    #[test]
+    fn window_spec_is_topmost() {
+        let spec = window_spec("t".into());
+        assert!(spec.always_on_top && spec.decorations);
     }
 
     /// RGBA 转 GPUI 渲染图：尺寸对得上才有图。

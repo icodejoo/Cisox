@@ -2335,6 +2335,74 @@ mod tests {
         assert!(!layer.raster.decoration().watermark_visible());
     }
 
+    /// 水印逐字段改（颜色 / 字号 / 不透明度 / 角度 / 间距）：每次都立刻产出非空预览增量。
+    #[test]
+    fn watermark_field_edits_each_emit_tiles() {
+        let (w, h) = (300, 200);
+        let data = gradient(w, h);
+        let base = BaseView {
+            width: w,
+            height: h,
+            bgra: &data,
+        };
+        let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
+        layer.set_tool(AnnotationTool::Watermark).unwrap();
+        let mut wm = layer.watermark_config();
+        wm.text = "Wm".into();
+        wm.opacity = 0.5;
+        assert!(!layer.set_watermark(wm, base).unwrap().tiles.is_empty());
+        let edits: [fn(&mut snow_draw_engine::WatermarkConfig); 5] = [
+            |c| c.color.r = c.color.r.wrapping_add(100),
+            |c| c.font_size += 10.0,
+            |c| c.opacity = 0.9,
+            |c| c.angle += 20.0,
+            |c| c.gap += 12.0,
+        ];
+        for (i, edit) in edits.iter().enumerate() {
+            let mut cfg = layer.watermark_config();
+            edit(&mut cfg);
+            let update = layer.set_watermark(cfg, base).unwrap();
+            assert!(!update.tiles.is_empty(), "第 {i} 项水印编辑没有产出预览块");
+        }
+    }
+
+    /// 聚光灯改颜色 / 不透明度：画出聚光灯后每次编辑都立刻产出预览块。
+    #[test]
+    fn spotlight_style_edits_emit_tiles() {
+        let (w, h) = (300, 200);
+        let data = gradient(w, h);
+        let base = BaseView {
+            width: w,
+            height: h,
+            bgra: &data,
+        };
+        let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
+        layer.set_tool(AnnotationTool::Spotlight).unwrap();
+        drag(&mut layer, base, (50.0, 50.0), (200.0, 150.0));
+        assert!(
+            layer.raster.decoration().spotlight_visible(),
+            "聚光灯应已画出"
+        );
+        let mut cfg = layer.spotlight_config();
+        cfg.color.r = cfg.color.r.wrapping_add(100);
+        assert!(
+            !layer
+                .set_spotlight_style(cfg, base)
+                .unwrap()
+                .tiles
+                .is_empty()
+        );
+        let mut cfg = layer.spotlight_config();
+        cfg.opacity = 0.2;
+        assert!(
+            !layer
+                .set_spotlight_style(cfg, base)
+                .unwrap()
+                .tiles
+                .is_empty()
+        );
+    }
+
     /// 内容没变的分块不重复输出：原地不动的移动事件产生空更新。
     #[test]
     fn unchanged_tiles_are_not_reemitted() {
