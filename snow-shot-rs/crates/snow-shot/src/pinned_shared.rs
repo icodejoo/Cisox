@@ -309,7 +309,7 @@ impl PinShared {
             border: color(KEY_BORDER, DEFAULT_BORDER),
             border_active: color(KEY_BORDER_ACTIVE, DEFAULT_BORDER_ACTIVE),
             keymap: PinKeymap::from_document(doc),
-            locale: crate::app_runtime::ui_prefs_from_document(doc).locale,
+            locale: crate::app_runtime::locale_of(doc),
         }
     }
 
@@ -774,7 +774,7 @@ impl PinShared {
         let image = payload.image.ok_or(PinError::SourceMissing)?;
         let decoded = image::load_from_memory_with_format(&image.bytes, ImageFormat::Png)
             .map_err(|e| PinError::DecodeFailed(e.to_string()))?
-            .to_rgba8();
+            .into_rgba8();
         let (width, height) = decoded.dimensions();
         Ok(RestoredPin {
             id: id.to_string(),
@@ -967,11 +967,7 @@ mod tests {
 
     /// 创建唯一的临时目录。
     fn temp_dir(tag: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("snow-pin-shared-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+        crate::test_util::unique_temp_dir("snow-pin-shared", tag)
     }
 
     /// 生成 `w x h` 的渐变 RGBA（像素随坐标变化，便于对比）。

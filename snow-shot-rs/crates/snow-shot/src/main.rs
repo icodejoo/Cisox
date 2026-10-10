@@ -9,7 +9,9 @@ use snow_app_core::PRODUCT_NAME;
 use snow_app_core::bus::CommandBus;
 use snow_app_core::logging::{CRASH_DIR_NAME, LOG_DIR_NAME, LogConfig, LogGuard, init_logging};
 use snow_capability::CapabilityRegistry;
-use snow_config::paths::{StorageDirectorySelection, default_app_data_directory, resolve_directory};
+use snow_config::paths::{
+    StorageDirectorySelection, default_app_data_directory, resolve_directory,
+};
 use snow_platform::crash::{
     CrashDumpConfig, CrashGuard, DEFAULT_MAX_REPORTS, install as install_crash_handler,
 };
@@ -27,7 +29,10 @@ pub mod app_runtime;
 pub mod auto_filter;
 pub mod capture_flow;
 pub mod config_transfer;
+pub mod conversion_guide;
+pub mod custom_models_edit;
 pub mod decoration_style;
+pub mod desktop_frames;
 pub mod dictation;
 pub mod direct_capture;
 pub mod export_format;
@@ -35,20 +40,19 @@ pub mod export_naming;
 pub mod export_pdf;
 pub mod frozen_frame;
 pub mod fullscreen_gate;
+pub mod history_nav;
 pub mod history_store;
 pub mod history_view;
-pub mod settings_pages;
+pub mod language_names;
+pub mod latex_assets;
+pub mod latex_ocr;
+pub mod latex_service;
 pub mod mcp_host;
 pub mod mcp_settings;
-pub mod custom_models_edit;
 pub mod model_catalog;
 pub mod model_pick;
 pub mod mouse_gesture;
 pub mod net_settings;
-pub mod conversion_guide;
-pub mod latex_assets;
-pub mod latex_ocr;
-pub mod latex_service;
 pub mod ocr_assets;
 pub mod ocr_backend;
 pub mod ocr_client;
@@ -67,47 +71,46 @@ pub mod pinned_manager;
 pub mod pinned_model;
 pub mod pinned_shared;
 pub mod pinned_view;
+pub mod previous_selection;
+pub mod qr_decode;
 pub mod quick_actions;
+pub mod recognition_view;
 pub mod recording;
 pub mod recording_flow;
+pub mod region_select;
 pub mod screenshot_output;
 pub mod scroll_capture;
 pub mod scroll_view;
 pub mod settings_model;
+pub mod settings_pages;
 pub mod settings_state;
 pub mod settings_text;
 pub mod settings_view;
+pub mod shared_keys;
+#[cfg(test)]
+mod stitch_audit_tests;
 pub mod stitch_service;
 pub mod stt_download;
 pub mod stt_models;
 pub mod stt_settings;
 #[cfg(test)]
-mod stitch_audit_tests;
-#[cfg(test)]
 mod test_util;
 pub mod sys_prefs;
-pub mod tray_config;
 pub mod system_settings;
-pub mod translate_flow;
-pub mod translate_input;
-pub mod translate_input_view;
-pub mod translate_history;
-pub mod translate_page;
-pub mod translate_page_view;
-pub mod window_geometry;
-pub mod translate_layout;
-pub mod translate_service;
-pub mod language_names;
-pub mod translate_settings;
-pub mod desktop_frames;
-pub mod history_nav;
-pub mod previous_selection;
-pub mod qr_decode;
 pub mod table_assets;
 pub mod table_service;
 pub mod table_structure;
-pub mod recognition_view;
-pub mod region_select;
+pub mod translate_flow;
+pub mod translate_history;
+pub mod translate_input;
+pub mod translate_input_view;
+pub mod translate_layout;
+pub mod translate_page;
+pub mod translate_page_view;
+pub mod translate_service;
+pub mod translate_settings;
+pub mod tray_config;
+pub mod window_geometry;
 pub mod window_pick;
 
 /// 单实例互斥体 / 管道名使用的应用标识。
@@ -150,8 +153,8 @@ pub fn parse_cli(args: impl IntoIterator<Item = String>) -> Result<CliOptions, S
             let name = iter
                 .next()
                 .ok_or_else(|| format!("{CLI_FLAG_COMMAND} 缺少参数"))?;
-            command = IpcCommand::from_cli_name(&name)
-                .ok_or_else(|| format!("未知命令: {name}"))?;
+            command =
+                IpcCommand::from_cli_name(&name).ok_or_else(|| format!("未知命令: {name}"))?;
         } else {
             return Err(format!("未知参数: {arg}"));
         }
@@ -165,12 +168,12 @@ pub struct AppBootstrap {
     pub storage: StorageDirectorySelection,
     /// 实际生效的数据根目录。
     pub data_root: PathBuf,
-    /// 全局日志守卫（必须在进程存活期间持有）。
-    pub log_guard: LogGuard,
-    /// 本地崩溃转储守卫（若安装成功）。
+    /// 全局日志守卫（必须在进程存活期间持有）；从属实例不初始化，为 `None`。
+    pub log_guard: Option<LogGuard>,
+    /// 本地崩溃转储守卫（若安装成功）；从属实例不安装，为 `None`。
     pub crash_guard: Option<CrashGuard>,
-    /// 当前平台能力表。
-    pub capabilities: CapabilityRegistry,
+    /// 当前平台能力表；仅主实例构建，从属实例为 `None`。
+    pub capabilities: Option<CapabilityRegistry>,
     /// 单实例独占守卫；`None` 表示已有主实例在运行（本进程为从属实例）。
     pub single_instance: Option<SingleInstanceGuard>,
 }
@@ -201,8 +204,7 @@ pub fn bootstrap(exe_dir: Option<&Path>) -> AppBootstrap {
         })
         .unwrap_or_else(|| PathBuf::from("."));
 
-    let app_data_dir =
-        default_app_data_directory().unwrap_or_else(|| current_exe_dir.join("data"));
+    let app_data_dir = default_app_data_directory().unwrap_or_else(|| current_exe_dir.join("data"));
 
     let storage = resolve_directory(&current_exe_dir, &app_data_dir);
     let data_root = storage
@@ -210,32 +212,38 @@ pub fn bootstrap(exe_dir: Option<&Path>) -> AppBootstrap {
         .clone()
         .unwrap_or_else(|| current_exe_dir.clone());
 
-    let log_config = LogConfig::new(&data_root);
-    let log_guard = init_logging(log_config);
-
-    let crash_dir = data_root.join(LOG_DIR_NAME).join(CRASH_DIR_NAME);
-    let crash_config = CrashDumpConfig {
-        crash_dir,
-        app_name: PRODUCT_NAME.to_string(),
-        app_version: env!("CARGO_PKG_VERSION").to_string(),
-        max_reports: DEFAULT_MAX_REPORTS,
-    };
-    let crash_guard = install_crash_handler(crash_config).ok();
-    let capabilities = CapabilityRegistry::for_current_platform();
-
+    // 先抢单实例锁：从属实例只转发命令就退出，不必白做日志/崩溃处理器/能力表初始化
     let single_instance = match SingleInstanceManager::acquire(SINGLE_INSTANCE_APP_ID) {
         SingleInstanceStatus::Primary(guard) => Some(guard),
         SingleInstanceStatus::Secondary => None,
     };
 
-    tracing::info!(
-        app = PRODUCT_NAME,
-        version = env!("CARGO_PKG_VERSION"),
-        data_root = %data_root.display(),
-        storage_mode = ?storage.mode,
-        is_primary = single_instance.is_some(),
-        "runtime bootstrap completed"
-    );
+    let (log_guard, crash_guard, capabilities) = if single_instance.is_some() {
+        let log_guard = init_logging(LogConfig::new(&data_root));
+
+        let crash_dir = data_root.join(LOG_DIR_NAME).join(CRASH_DIR_NAME);
+        let crash_config = CrashDumpConfig {
+            crash_dir,
+            app_name: PRODUCT_NAME.to_string(),
+            app_version: env!("CARGO_PKG_VERSION").to_string(),
+            max_reports: DEFAULT_MAX_REPORTS,
+        };
+        let crash_guard = install_crash_handler(crash_config).ok();
+        let capabilities = CapabilityRegistry::for_current_platform();
+
+        tracing::info!(
+            app = PRODUCT_NAME,
+            version = env!("CARGO_PKG_VERSION"),
+            data_root = %data_root.display(),
+            storage_mode = ?storage.mode,
+            is_primary = true,
+            "runtime bootstrap completed"
+        );
+        (Some(log_guard), crash_guard, Some(capabilities))
+    } else {
+        // 从属实例无 tracing 订阅者，日志调用为空操作；关键错误由 eprintln 与退出码承载
+        (None, None, None)
+    };
 
     AppBootstrap {
         storage,
@@ -254,7 +262,10 @@ pub fn banner() -> String {
 
 /// 从属实例：把命令交给主实例，返回进程退出码。
 fn run_secondary(command: &IpcCommand) -> ExitCode {
-    tracing::info!(?command, "secondary instance: delegating command to primary");
+    tracing::info!(
+        ?command,
+        "secondary instance: delegating command to primary"
+    );
     match SingleInstanceManager::send_command_to_primary(SINGLE_INSTANCE_APP_ID, command) {
         Ok(()) => {
             tracing::info!("secondary instance: command delivered, exiting");
@@ -273,19 +284,21 @@ fn run_primary(ctx: &AppBootstrap, guard: &SingleInstanceGuard) -> ExitCode {
     let inbox: MainThreadInbox<app_runtime::UiEvent> = MainThreadInbox::new();
 
     let ipc_inbox = inbox.clone();
-    if let Err(e) = SingleInstanceManager::start_listener(guard, move |cmd| {
-        match app_runtime::map_ipc_command(&cmd) {
+    if let Err(e) =
+        SingleInstanceManager::start_listener(guard, move |cmd| match app_runtime::map_ipc_command(
+            &cmd,
+        ) {
             Some(event) => {
                 ipc_inbox.push(event);
             }
             None => tracing::warn!(?cmd, "IPC 命令无对应动作，已忽略"),
-        }
-    }) {
+        })
+    {
         // 不静默：无 IPC 时第二实例无法唤醒本实例，但本实例仍可正常运行
         tracing::error!(error = %e, "单实例 IPC 不可用，第二实例将无法唤醒本实例");
     }
 
-    let caps = ctx.capabilities.clone();
+    let caps = ctx.capabilities.clone().expect("主实例引导必须构建能力表");
     let data_root = ctx.data_root.clone();
     ui::run_resident(move |cx| {
         let bus = CommandBus::new();
@@ -332,7 +345,9 @@ fn main() -> ExitCode {
     let options = match parse_cli(std::env::args().skip(1)) {
         Ok(o) => o,
         Err(e) => {
-            eprintln!("{e}\n用法: snow-shot [{CLI_FLAG_COMMAND} screenshot|recording|scroll-capture|pin-clipboard|settings|show|quit]");
+            eprintln!(
+                "{e}\n用法: snow-shot [{CLI_FLAG_COMMAND} screenshot|recording|scroll-capture|pin-clipboard|settings|show|quit]"
+            );
             return ExitCode::from(EXIT_CODE_BAD_ARGS);
         }
     };
@@ -360,7 +375,15 @@ mod tests {
         let temp = std::env::temp_dir().join(format!("snow-shot-test-{}", std::process::id()));
         let ctx = bootstrap(Some(&temp));
         assert!(!ctx.data_root.as_os_str().is_empty());
-        assert!(ctx.capabilities.query(snow_capability::Capability::CrashDump).is_usable());
+        // 本机若已有主实例在运行，本进程是从属实例，不构建能力表
+        if let Some(caps) = &ctx.capabilities {
+            assert!(
+                caps.query(snow_capability::Capability::CrashDump)
+                    .is_usable()
+            );
+        } else {
+            assert!(ctx.single_instance.is_none());
+        }
         let _ = std::fs::remove_dir_all(&temp);
     }
 

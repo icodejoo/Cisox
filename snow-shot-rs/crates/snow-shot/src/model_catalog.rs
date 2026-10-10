@@ -376,7 +376,13 @@ pub fn translate_options(dir: &Path) -> Vec<ModelOption> {
         .collect()
 }
 
-/// 把字节数格式化成 `MiB` / `GiB` 文本；0 视为未知，返回 `None`。
+/// 把字节数格式化成 `MiB` / `GiB` 文本（一位小数）；0 视为未知，返回 `None`。
+///
+/// # 参数
+/// - `bytes`：字节数。
+///
+/// # 返回值
+/// 1 GiB 以上用 `GiB`，其余用 `MiB`（不足 1 MiB 也按 `MiB` 显示）；0 返回 `None`。
 ///
 /// # 示例
 /// ```ignore
@@ -393,6 +399,22 @@ pub fn format_size(bytes: u64) -> Option<String> {
     } else {
         format!("{:.1} MiB", size / MIB)
     })
+}
+
+/// 同 [`format_size`]，但 0 字节也给出文本（`0.0 MiB`），用于必须显示数值的列。
+///
+/// # 参数
+/// - `bytes`：字节数。
+///
+/// # 返回值
+/// 总是返回文本。
+///
+/// # 示例
+/// ```ignore
+/// assert_eq!(format_size_or_zero(0), "0.0 MiB");
+/// ```
+pub fn format_size_or_zero(bytes: u64) -> String {
+    format_size(bytes).unwrap_or_else(|| format!("{:.1} MiB", 0.0))
 }
 
 /// 弹窗里的一行（已按语言整理好的展示数据）。
@@ -455,14 +477,7 @@ mod tests {
 
     /// 建一个独立的临时目录。
     fn temp_dir(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "cisox-model-catalog-{tag}-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("建目录");
-        dir
+        crate::test_util::unique_temp_dir("cisox-model-catalog", tag)
     }
 
     /// 内置清单可解析，五个功能都有条目，且各功能至多一个默认以外的字段齐全。
@@ -693,10 +708,24 @@ mod tests {
         assert_eq!(dirs.primary(), root.join("models").join("stt"));
     }
 
-    /// 大小格式：0 未知，MiB / GiB 一位小数。
+    /// 大小格式：0 未知，MiB / GiB 一位小数，含边界与舍入。
     #[test]
     fn size_formatting() {
         assert_eq!(format_size(0), None);
+        assert_eq!(format_size(1).as_deref(), Some("0.0 MiB"));
+        assert_eq!(format_size(512 * 1024).as_deref(), Some("0.5 MiB"));
+        assert_eq!(format_size(1024 * 1024).as_deref(), Some("1.0 MiB"));
+        assert_eq!(format_size(76_326_475).as_deref(), Some("72.8 MiB"));
+        assert_eq!(
+            format_size(1024 * 1024 * 1024 - 1).as_deref(),
+            Some("1024.0 MiB")
+        );
+        assert_eq!(
+            format_size(1024 * 1024 * 1024).as_deref(),
+            Some("1.0 GiB")
+        );
+        assert_eq!(format_size_or_zero(0), "0.0 MiB");
+        assert_eq!(format_size_or_zero(7_758_305), "7.4 MiB");
         assert_eq!(format_size(7_758_305).as_deref(), Some("7.4 MiB"));
         assert_eq!(
             format_size(3 * 1024 * 1024 * 1024).as_deref(),

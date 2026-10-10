@@ -10,7 +10,7 @@ use crate::pinned_manage::{GroupFilter, PinRow, build_rows, default_group_id, va
 use crate::pinned_shared::PinShared;
 use crate::settings_state::UiPrefs;
 use crate::settings_view::{Palette, palette};
-use crate::stt_settings::format_size;
+use crate::model_catalog::format_size_or_zero;
 use image::{Frame, RgbaImage};
 use snow_history::timeutil::format_iso_utc_ms;
 use snow_i18n::Args;
@@ -312,7 +312,7 @@ impl PinManageView {
             &Args::new()
                 .arg(1, row.width)
                 .arg(2, row.height)
-                .arg(3, format_size(row.payload_bytes)),
+                .arg(3, format_size_or_zero(row.payload_bytes)),
         );
         let show_id = row.id.clone();
         let delete_id = row.id.clone();

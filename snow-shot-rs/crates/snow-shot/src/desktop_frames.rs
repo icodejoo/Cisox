@@ -7,6 +7,7 @@
 
 use crate::annotation::BaseView;
 use crate::frozen_frame::FrozenFrame;
+use crate::history_store::BgraSource;
 use snow_platform::capture::CapturedScreen;
 use snow_ui::shell::geometry::{PhysicalPoint, PhysicalRect};
 use snow_ui::ui::RenderImage;
@@ -256,6 +257,14 @@ impl DesktopFrames {
             }
         }
         Some((clipped.width as u32, clipped.height as u32, out))
+    }
+
+    /// 单屏时返回该屏 BGRA 的共享来源（不拷贝）；多屏或缓冲为空返回 `None`，调用方改走 `crop_rgba`。
+    pub fn single_bgra_source(&self) -> Option<Arc<dyn BgraSource>> {
+        match self.monitors.as_slice() {
+            [only] => only.frame.bgra_source(),
+            _ => None,
+        }
     }
 
     /// 标注合成用的只读底图视图。单屏直接借用该屏缓冲（零拷贝）；多屏第一次调用时合成整画布，之后复用。

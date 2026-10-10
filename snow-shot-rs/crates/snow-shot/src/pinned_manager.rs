@@ -528,7 +528,7 @@ impl PinnedManager {
         };
         let decoded = image::load_from_memory_with_format(&closed.png, image::ImageFormat::Png)
             .map_err(|e| format!("源图解码失败: {e}"))?
-            .to_rgba8();
+            .into_rgba8();
         let (width, height) = decoded.dimensions();
         let monitors = cx.monitors().unwrap_or_default();
         let mut geometry = closed.geometry.unwrap_or_else(|| {

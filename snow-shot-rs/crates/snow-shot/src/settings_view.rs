@@ -205,6 +205,59 @@ fn pick_items(
     items
 }
 
+/// “默认模型”下拉的缓存条目：扫描结果已转成下拉选项，只在重扫或语言变化时重建。
+struct PickCache {
+    /// 扫描时刻；超过 [`CATALOG_RESCAN`] 后重扫。
+    at: Instant,
+    /// 构建选项时的界面语言代码。
+    locale: &'static str,
+    /// 下拉选项（含开头的“自动”项）。
+    items: Vec<DropdownItem>,
+    /// 选项内容摘要；重扫后内容没变时据此保持 `generation` 不变。
+    items_sig: String,
+    /// 选项内容版本号；内容变化时换新，用来判断是否要重设下拉选项。
+    generation: u64,
+}
+
+/// 分配一个全局唯一的选项版本号（缓存被清空重建后也不会与旧签名撞号）。
+fn next_pick_generation() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+/// 由扫描结果重建下拉缓存条目；内容与语言都没变时沿用旧版本号，避免无谓地重设下拉选项。
+///
+/// # 参数
+/// - `old`：旧条目
+/// - `locale`：界面语言代码
+/// - `scanned`：扫描得到的已下载模型
+/// - `auto_label`：“自动”的本地化标签；`None` 表示没有“自动”项
+fn build_pick_cache(
+    old: Option<&PickCache>,
+    locale: &'static str,
+    scanned: &[model_catalog::ModelOption],
+    auto_label: Option<&str>,
+) -> PickCache {
+    let items = pick_items(scanned, auto_label);
+    let items_sig = items
+        .iter()
+        .map(|item| format!("{}={}", item.value, item.label))
+        .collect::<Vec<_>>()
+        .join(";");
+    let generation = match old {
+        Some(old) if old.locale == locale && old.items_sig == items_sig => old.generation,
+        _ => next_pick_generation(),
+    };
+    PickCache {
+        at: Instant::now(),
+        locale,
+        items,
+        items_sig,
+        generation,
+    }
+}
+
 /// 各功能里“一个模型”怎么数：翻译包与 OCR 的 det/rec/dict 组是文件夹，其余文件夹与文件都算。
 fn catalog_scan_kind(feature: Feature) -> ScanKind {
     match feature {
@@ -568,9 +621,9 @@ pub struct SettingsView {
     /// 编辑页顶部的操作提示（如保存失败）。
     cm_notice: Option<String>,
     /// 各“默认模型”下拉的扫描缓存（配置键 → 扫描时刻与已下载模型），避免每帧读盘。
-    pick_cache: HashMap<&'static str, (Instant, Vec<model_catalog::ModelOption>)>,
+    pick_cache: HashMap<&'static str, PickCache>,
     /// 各“默认模型”下拉当前选项的签名，变化时重建选项。
-    pick_signature: HashMap<&'static str, String>,
+    pick_signature: HashMap<&'static str, (u64, String)>,
     /// 已安装的语音模型 ID 缓存（避免每帧访问磁盘）。
     stt_installed: HashSet<String>,
     /// 共享 VAD 是否已安装（缓存）。
@@ -1199,47 +1252,57 @@ impl SettingsView {
         if matches!(source, PickSource::Catalog(_)) && self.catalog_data_root.is_none() {
             return;
         }
-        if self
+        let locale = self.state.prefs().locale;
+        let rebuild = self
             .pick_cache
             .get(key)
-            .is_none_or(|(at, _)| at.elapsed() >= CATALOG_RESCAN)
-        {
+            .is_none_or(|c| c.at.elapsed() >= CATALOG_RESCAN || c.locale != locale);
+        if rebuild {
             let scanned = self.scan_pick_options(source);
-            self.pick_cache.insert(key, (Instant::now(), scanned));
+            let i18n = crate::ocr_backend::i18n_for(locale);
+            let auto = i18n.tr("model-select-auto");
+            let auto_label = matches!(source, PickSource::Catalog(f) if f != Feature::Ocr)
+                .then_some(auto.as_str());
+            let entry = build_pick_cache(self.pick_cache.get(key), locale, &scanned, auto_label);
+            self.pick_cache.insert(key, entry);
         }
-        let locale = self.state.prefs().locale;
-        let i18n = crate::ocr_backend::i18n_for(locale);
-        let current = self
+        let Some(cache) = self.pick_cache.get(key) else {
+            return;
+        };
+        let generation = cache.generation;
+        let current: &str = self
             .state
             .row_by_key(key)
-            .and_then(|row| row.value.as_str().map(str::to_owned))
+            .and_then(|row| row.value.as_str())
             .unwrap_or_default();
-        let scanned = self
-            .pick_cache
-            .get(key)
-            .map(|(_, list)| list.clone())
-            .unwrap_or_default();
-        let auto = i18n.tr("model-select-auto");
-        let auto_label =
-            matches!(source, PickSource::Catalog(f) if f != Feature::Ocr).then_some(auto.as_str());
-        let items = pick_items(&scanned, auto_label);
-        let signature = format!(
-            "{locale}|{}|{current}",
-            items
-                .iter()
-                .map(|item| format!("{}={}", item.value, item.label))
-                .collect::<Vec<_>>()
-                .join(";")
-        );
         // 当前值在选项里才选中；不在（旧配置 / 模型被删 / 没有任何已下载模型）则不选，显示占位文案
-        let want = items
+        let want = cache
+            .items
             .iter()
             .find(|item| item.value == current)
             .map(|item| item.value);
-        let index = items
+        let index = cache
+            .items
             .iter()
             .position(|item| Some(item.value) == want)
             .map(|row| IndexPath::default().row(row));
+        let unchanged = self
+            .pick_signature
+            .get(key)
+            .is_some_and(|(g, c)| *g == generation && c == current);
+        if unchanged && self.dropdowns.contains_key(key) {
+            // 选项与当前值都没变：只需在下拉选中项被外部改动时纠正
+            let state = self.dropdowns[key].state.clone();
+            if state.read(cx).selected_value().copied() != want {
+                state.update(cx, |select, cx| match want {
+                    Some(value) => select.set_selected_value(&value, window, cx),
+                    None => select.set_selected_index(index, window, cx),
+                });
+            }
+            return;
+        }
+        let signature = (generation, current.to_owned());
+        let items = cache.items.clone();
         let Some(existing) = self.dropdowns.get(key) else {
             let state = cx.new(|cx| SelectState::new(SearchableVec::new(items), index, window, cx));
             cx.subscribe_in(
@@ -1900,7 +1963,7 @@ impl SettingsView {
                 cx.stop_propagation()
             })
             .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
-                if event.keystroke.key == "escape" {
+                if crate::shared_keys::is_dismiss(&event.keystroke.key) {
                     this.cancel_text_input(key, window, cx);
                     cx.stop_propagation();
                 }
@@ -1974,57 +2037,60 @@ impl SettingsView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let cycle = self
-            .state
-            .visible_row(position)
-            .and_then(|row| match row.control {
-                Control::Choice(options) if pick_source(row.key).is_none() => Some((
-                    row.key,
-                    options,
-                    self.state.choice_value(row.key, &row.value),
-                )),
-                _ => None,
-            });
-        if let Some((key, options, current)) = cycle {
-            self.ensure_dropdown(key, options, &current, window, cx);
+        // 只查一次行，按控件类型决定要确保哪种控件
+        enum Ensure {
+            Cycle(&'static str, &'static [&'static str], String),
+            Multi(&'static str, &'static [&'static str], Value),
+            Text(&'static str, String),
+            None,
         }
-        let multi = self
-            .state
-            .visible_row(position)
-            .and_then(|row| match row.control {
-                Control::MultiChoice(options) => Some((row.key, options, row.value.clone())),
-                _ => None,
-            });
-        if let Some((key, options, current)) = multi {
-            self.ensure_multi_dropdown(key, options, &current, window, cx);
-        }
-        let text_row = self.state.visible_row(position).and_then(|row| {
-            matches!(
-                row.control,
-                Control::Text
+        let (ensure, is_model_row, needs_stt, pick) = match self.state.visible_row(position) {
+            Some(row) => {
+                let pick = pick_source(row.key).map(|source| (row.key, source));
+                let ensure = match row.control {
+                    Control::Choice(options) if pick.is_none() => Ensure::Cycle(
+                        row.key,
+                        options,
+                        self.state.choice_value(row.key, &row.value),
+                    ),
+                    Control::MultiChoice(options) => {
+                        Ensure::Multi(row.key, options, row.value.clone())
+                    }
+                    Control::Text
                     | Control::IntText
                     | Control::ListText
                     | Control::JsonText
                     | Control::Color
-                    | Control::Slider(_)
-            )
-            .then(|| (row.key, edit_text(row.control, &row.value)))
-        });
-        if let Some((key, config)) = text_row {
-            self.ensure_text_input(key, &config, window, cx);
+                    | Control::Slider(_) => {
+                        Ensure::Text(row.key, edit_text(row.control, &row.value))
+                    }
+                    _ => Ensure::None,
+                };
+                let is_model_row = row.key == KEY_DICTATION_MODEL_ID;
+                (
+                    ensure,
+                    is_model_row,
+                    is_model_row || is_selector_key(row.key),
+                    pick,
+                )
+            }
+            None => (Ensure::None, false, false, None),
+        };
+        match ensure {
+            Ensure::Cycle(key, options, current) => {
+                self.ensure_dropdown(key, options, &current, window, cx)
+            }
+            Ensure::Multi(key, options, current) => {
+                self.ensure_multi_dropdown(key, options, &current, window, cx)
+            }
+            Ensure::Text(key, config) => self.ensure_text_input(key, &config, window, cx),
+            Ensure::None => {}
         }
-        if self
-            .state
-            .visible_row(position)
-            .is_some_and(|row| row.key == KEY_DICTATION_MODEL_ID)
-        {
-            let inputs = self.stt_inputs();
-            self.ensure_model_dropdown(&inputs, window, cx);
+        // 语音输入快照按需只构造一次，模型下拉与行说明共用
+        let stt_inputs = needs_stt.then(|| self.stt_inputs());
+        if is_model_row && let Some(inputs) = &stt_inputs {
+            self.ensure_model_dropdown(inputs, window, cx);
         }
-        let pick = self
-            .state
-            .visible_row(position)
-            .and_then(|row| pick_source(row.key).map(|source| (row.key, source)));
         if let Some((key, source)) = pick {
             self.ensure_pick_dropdown(key, source, window, cx);
         }
@@ -2056,7 +2122,7 @@ impl SettingsView {
         } else {
             None
         };
-        let stt_note = self.stt_row_note(key);
+        let stt_note = self.stt_row_note(key, stt_inputs.as_ref());
         let audio_note = self
             .state
             .row_by_key(crate::recording::output::KEY_FORMAT)
@@ -2138,8 +2204,9 @@ impl SettingsView {
             .flex()
             .flex_col()
             .gap_1();
+        let item_counts = self.state.group_item_counts();
         for (index, group) in crate::settings_model::groups().iter().enumerate() {
-            let item_count = self.state.group_item_count(index);
+            let item_count = item_counts[index];
             let is_active = active == Some(index);
             list = list.child(
                 div()
@@ -2273,7 +2340,8 @@ impl SettingsView {
     ///
     /// # 返回
     /// `(文案, 是否为警示)`；与语音转文字无关的键返回 `None`。
-    fn stt_row_note(&self, key: &str) -> Option<(String, bool)> {
+    /// `inputs` 为调用方已构造的语音输入快照；传 `None` 时按需现取。
+    fn stt_row_note(&self, key: &str, inputs: Option<&SttInputs>) -> Option<(String, bool)> {
         if is_translate_note_key(key) {
             let (config, _) = self.state.translate_snapshot();
             return translate_note(
@@ -2286,11 +2354,15 @@ impl SettingsView {
             return None;
         }
         let locale = self.state.prefs().locale;
-        let inputs = self.stt_inputs();
-        if let Some(note) = selector_note(&inputs, key, locale) {
-            return Some(note);
-        }
-        None
+        let owned;
+        let inputs = match inputs {
+            Some(inputs) => inputs,
+            None => {
+                owned = self.stt_inputs();
+                &owned
+            }
+        };
+        selector_note(inputs, key, locale)
     }
 
     /// 渲染说明区的第 `row_index` 个定高行：翻译分组走 Hy-MT2 说明，语音分组走模型面板。
@@ -3444,7 +3516,7 @@ impl Render for SettingsView {
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 if this.catalog_open.is_some() {
                     // 推荐模型弹窗打开时只响应 Esc，其余按键不落到下面的列表
-                    if event.keystroke.key == "escape" {
+                    if crate::shared_keys::is_dismiss(&event.keystroke.key) {
                         this.close_catalog();
                         cx.notify();
                     }
@@ -3479,7 +3551,8 @@ impl Render for SettingsView {
                     win: m.platform,
                 };
                 let key = event.keystroke.key.as_str();
-                let paste = (m.control && key == "v")
+                let paste = (crate::shared_keys::resolve(key, m.control)
+                    == Some(crate::shared_keys::SharedKeyAction::Paste))
                     .then(|| cx.read_from_clipboard().and_then(|item| item.text()))
                     .flatten();
                 let handled = this.state.on_key(
@@ -3588,6 +3661,29 @@ mod tests {
     }
 
     /// 哪些配置键走扫描类下拉：翻译、OCR 档位、表格、公式；语音与其它键不走。
+    #[test]
+    fn pick_cache_rebuilds_only_on_content_or_locale_change() {
+        let scanned = vec![model_catalog::ModelOption {
+            value: "a".into(),
+            label: "A".into(),
+        }];
+        let first = build_pick_cache(None, "en-US", &scanned, Some("Auto"));
+        let same = build_pick_cache(Some(&first), "en-US", &scanned, Some("Auto"));
+        assert_eq!(same.generation, first.generation);
+        let zh = build_pick_cache(Some(&same), "zh-CN", &scanned, Some("Auto"));
+        assert_ne!(zh.generation, first.generation);
+        let more = vec![
+            scanned[0].clone(),
+            model_catalog::ModelOption {
+                value: "b".into(),
+                label: "B".into(),
+            },
+        ];
+        let grown = build_pick_cache(Some(&zh), "zh-CN", &more, Some("Auto"));
+        assert_ne!(grown.generation, zh.generation);
+        assert_eq!(grown.items.len(), 3);
+    }
+
     #[test]
     fn pick_feature_keys() {
         assert_eq!(pick_feature(KEY_LOCAL_MODEL_ID), Some(Feature::Translate));

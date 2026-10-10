@@ -30,8 +30,6 @@ const SAMPLE_ZH: &str = "你";
 const SAMPLE_EN: &str = "a";
 /// 多个语言方向之间的分隔。
 const PAIR_SEPARATOR: &str = " / ";
-/// 字节换算成 MB 的除数。
-const MIB: u64 = 1024 * 1024;
 /// 模型名称 message id 的前缀（后接模型 ID）。
 const MODEL_NAME_PREFIX: &str = "stt-model-";
 
@@ -261,11 +259,6 @@ pub fn option_value(spec: &'static SttModelSpec) -> &'static str {
     }
 }
 
-/// 字节数的 MB 文本（四舍五入，至少 1）。
-pub fn format_size(bytes: u64) -> String {
-    format!("{} MB", ((bytes + MIB / 2) / MIB).max(1))
-}
-
 /// 下拉标签可容纳的最大字符数（对应设置页模型下拉的宽度）。
 #[cfg(test)]
 const MAX_OPTION_LABEL_CHARS: usize = 66;
@@ -475,13 +468,6 @@ mod tests {
         assert!(affects_layout(KEY_DICTATION_MODEL_ID));
         assert!(affects_layout(KEY_DICTATION_BACKEND));
         assert!(!affects_layout("dictation/threads"));
-    }
-
-    /// 体积文本：四舍五入且至少 1 MB。
-    #[test]
-    fn size_formatting() {
-        assert_eq!(format_size(0), "1 MB");
-        assert_eq!(format_size(76_326_475), "73 MB");
     }
 
     /// 清单里每个模型两种语言都有名称，选项标签含名称且不超过下拉宽度可容纳的字符数。

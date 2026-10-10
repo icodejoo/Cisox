@@ -4150,9 +4150,7 @@ impl ScreenshotOverlayView {
         }
         // 仓储里的 RGBA 换成 GPUI 约定的 BGRA
         let mut data = entry.frame_rgba;
-        for pixel in data.chunks_exact_mut(4) {
-            pixel.swap(0, 2);
-        }
+        crate::pinned_model::swap_rb_in_place(&mut data);
         // 历史里是整张画布；按当前各显示器的矩形切回每屏一帧
         let rects: Vec<PhysicalRect> = (0..self.frame.count())
             .map(|i| self.frame.rect(i))
@@ -4267,7 +4265,18 @@ impl ScreenshotOverlayView {
     fn history_snapshot(&self, width: u32, height: u32, rgba: &[u8]) -> Option<HistorySnapshot> {
         self.history_sink.as_ref()?;
         let selection = self.current_selection()?;
-        let (frame_width, frame_height, frame_rgba) = self.frame.crop_rgba(self.frame.bounds())?;
+        // 单屏只共享 BGRA 引用，转换留给写盘线程；多屏拼接没有单一缓冲，沿用整帧裁切
+        let (frame_width, frame_height, frame_rgba, frame_bgra) =
+            match self.frame.single_bgra_source() {
+                Some(source) => {
+                    let (w, h) = self.frame.size();
+                    (w, h, Vec::new(), Some(source))
+                }
+                None => {
+                    let (w, h, rgba) = self.frame.crop_rgba(self.frame.bounds())?;
+                    (w, h, rgba, None)
+                }
+            };
         let canvas_history = self
             .annotations
             .as_ref()
@@ -4278,6 +4287,7 @@ impl ScreenshotOverlayView {
             frame_width,
             frame_height,
             frame_rgba,
+            frame_bgra,
             selection: (selection.x, selection.y, selection.width, selection.height),
             canvas_history,
             result_width: width,
@@ -7253,7 +7263,7 @@ impl ScreenshotOverlayView {
                 let mods = ev.keystroke.modifiers;
                 // 水印文字框持有焦点：快捷键让路，Esc 把焦点还给覆盖窗
                 if this.decoration_text_focused {
-                    if ev.keystroke.key == "escape" {
+                    if crate::shared_keys::is_dismiss(&ev.keystroke.key) {
                         this.refocus_root(window, cx);
                     }
                     cx.stop_propagation();
@@ -7866,7 +7876,13 @@ mod tests {
         let (source, snapshot) = &recorded[0];
         assert_eq!(*source, HistorySource::Copied);
         assert_eq!((snapshot.frame_width, snapshot.frame_height), (120, 80));
-        assert_eq!(snapshot.frame_rgba.len(), 120 * 80 * 4);
+        assert_eq!(
+            snapshot
+                .frame_bgra
+                .as_ref()
+                .map(|s| crate::history_store::BgraSource::bgra(s.as_ref()).len()),
+            Some(120 * 80 * 4)
+        );
         assert_eq!(snapshot.selection, (10, 10, 61, 41));
         assert_eq!((snapshot.result_width, snapshot.result_height), (61, 41));
         assert!(snapshot.canvas_history.is_empty());
@@ -8253,14 +8269,7 @@ mod tests {
         let mut view = hover_view(1.0);
         view.handle_mouse_move(PhysicalPoint::new(60, 50));
         assert!(view.window_highlight().is_some());
-        let dir = std::env::temp_dir().join(format!(
-            "cisox-region-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_nanos())
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_util::unique_temp_dir("cisox-region", "t");
         let config = Rc::new(RefCell::new(ConfigStore::open(dir.join("config.json"))));
         view.set_style_config(config.clone(), "zh-CN");
         view.handle_keystroke("tab", true, false, false);
@@ -8396,14 +8405,7 @@ mod tests {
     /// 上一次选区按桌面坐标存取：同样的屏幕排布下能选回；换了排布（画布原点不同）对不上时不乱选。
     #[test]
     fn previous_selection_uses_desktop_coordinates() {
-        let dir = std::env::temp_dir().join(format!(
-            "cisox-prevsel-origin-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_nanos())
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_util::unique_temp_dir("cisox-prevsel-origin", "t");
         let path = dir.join("config.json");
         let open = || Rc::new(RefCell::new(ConfigStore::open(&path)));
 
@@ -8438,14 +8440,7 @@ mod tests {
     /// 导出时记下选区；新一次截图里用快捷键动作就能选回同一块区域。
     #[test]
     fn previous_selection_is_saved_on_export_and_restored() {
-        let dir = std::env::temp_dir().join(format!(
-            "cisox-prevsel-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_nanos())
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_util::unique_temp_dir("cisox-prevsel", "t");
         let path = dir.join("config.json");
 
         let (mut first, _) = view_with(300, 200, 1.0, false);
@@ -10319,14 +10314,7 @@ mod tests {
     /// 样式写回配置并能被新的覆盖窗读回（键沿用旧版 `drawing/*_style`）。
     #[test]
     fn style_persists_and_reloads() {
-        let dir = std::env::temp_dir().join(format!(
-            "cisox-style-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_nanos())
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_util::unique_temp_dir("cisox-style", "t");
         let path = dir.join("config.json");
         let (mut first, _) = view_with(100, 80, 1.0, false);
         first.set_style_config(Rc::new(RefCell::new(ConfigStore::open(&path))), "en-US");
@@ -10538,14 +10526,7 @@ mod tests {
     /// 水印 / 聚光灯编辑：即时作用于标注层、写回配置，新覆盖窗选中工具时读回（文本不持久化）。
     #[test]
     fn decoration_edits_persist_and_reload() {
-        let dir = std::env::temp_dir().join(format!(
-            "cisox-deco-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_nanos())
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_util::unique_temp_dir("cisox-deco", "t");
         let path = dir.join("config.json");
 
         let (mut first, _) = view_with(300, 200, 1.0, false);

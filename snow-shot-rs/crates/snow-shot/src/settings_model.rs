@@ -28,7 +28,12 @@ pub const TARGET_LANGUAGE_KEY: &str = "screenshot_translation/target_language";
 /// ```
 pub fn language_options() -> &'static [&'static str] {
     static OPTIONS: OnceLock<Vec<&'static str>> = OnceLock::new();
-    OPTIONS.get_or_init(|| snow_i18n::locales().iter().map(|l| l.config_value).collect())
+    OPTIONS.get_or_init(|| {
+        snow_i18n::locales()
+            .iter()
+            .map(|l| l.config_value)
+            .collect()
+    })
 }
 /// 结构化 JSON 默认值序列化长度超过该值时只读展示。
 pub const JSON_EDIT_MAX_LEN: usize = 120;
@@ -526,7 +531,7 @@ pub fn slider_active_cell(range: IntRange, value: i64) -> usize {
     (((value.clamp(min, max) - min) * cells + span / 2) / span) as usize
 }
 
-/// 解析 `#RRGGBBAA`（也接受 `#RRGGBB`）颜色。
+/// 解析 `#RRGGBBAA`（也接受 `#RRGGBB`）颜色；会先 trim 首尾空白。
 ///
 /// # 参数
 /// - `text`：颜色文本
@@ -534,13 +539,7 @@ pub fn slider_active_cell(range: IntRange, value: i64) -> usize {
 /// # 返回
 /// `[r, g, b, a]`；格式不对返回 `None`。
 pub fn parse_hex_color(text: &str) -> Option<[u8; 4]> {
-    let hex = text.trim().strip_prefix('#')?;
-    if !hex.is_ascii() || !(hex.len() == 6 || hex.len() == 8) {
-        return None;
-    }
-    let byte = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).ok();
-    let alpha = if hex.len() == 8 { byte(6)? } else { u8::MAX };
-    Some([byte(0)?, byte(2)?, byte(4)?, alpha])
+    crate::annotation_style::parse_hex_digits(text.trim().strip_prefix('#')?)
 }
 
 /// 是否为纯修饰键的按键名（单独按下不构成快捷键）。
@@ -588,8 +587,7 @@ fn portable_key_name(key: &str) -> Option<String> {
         return Some(c.to_uppercase().collect());
     }
     let digits = lower.strip_prefix('f')?;
-    (!digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()))
-        .then(|| format!("F{digits}"))
+    (!digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())).then(|| format!("F{digits}"))
 }
 
 /// 由一次按键事件生成规范的可移植快捷键文本。
@@ -614,7 +612,12 @@ pub fn shortcut_from_keystroke(
 ) -> Option<String> {
     let name = portable_key_name(key)?;
     let mut text = String::new();
-    for (on, prefix) in [(win, "Meta+"), (ctrl, "Ctrl+"), (alt, "Alt+"), (shift, "Shift+")] {
+    for (on, prefix) in [
+        (win, "Meta+"),
+        (ctrl, "Ctrl+"),
+        (alt, "Alt+"),
+        (shift, "Shift+"),
+    ] {
         if on {
             text.push_str(prefix);
         }
@@ -758,7 +761,10 @@ mod tests {
             }
         }
         assert_eq!(seen.len(), entries().len());
-        assert_eq!(seen.len(), snow_config::schema::CORE_ENTRY_COUNT + snow_config::extensions::EXTENSION_ENTRY_COUNT);
+        assert_eq!(
+            seen.len(),
+            snow_config::schema::CORE_ENTRY_COUNT + snow_config::extensions::EXTENSION_ENTRY_COUNT
+        );
         assert_eq!(groups().len(), 28);
         let schema_groups: HashSet<_> = entries().iter().map(|e| group_id_of(e.key)).collect();
         let table_groups: HashSet<_> = groups().iter().map(|g| g.id).collect();
@@ -780,15 +786,18 @@ mod tests {
                     control,
                     Control::Slider(_) | Control::IntText | Control::ReadOnly(_)
                 ),
-                ValueKind::String => matches!(
-                    control,
-                    Control::Choice(_) | Control::Text | Control::Color
-                ),
+                ValueKind::String => {
+                    matches!(control, Control::Choice(_) | Control::Text | Control::Color)
+                }
                 ValueKind::Structured => {
                     matches!(control, Control::JsonText | Control::ReadOnly(_))
                 }
             };
-            assert!(ok, "{} 的控件 {control:?} 与类型 {:?} 不符", item.key, item.kind);
+            assert!(
+                ok,
+                "{} 的控件 {control:?} 与类型 {:?} 不符",
+                item.key, item.kind
+            );
         }
     }
 
@@ -796,15 +805,24 @@ mod tests {
     #[test]
     fn representative_controls() {
         assert_eq!(control_of("mcp/enabled"), Control::Switch);
-        assert!(matches!(control_of("screenshot/image_quality"), Control::Slider(r) if r.max == 100));
+        assert!(
+            matches!(control_of("screenshot/image_quality"), Control::Slider(r) if r.max == 100)
+        );
         assert!(matches!(control_of("interface/theme_mode"), Control::Choice(o) if o.len() == 3));
         assert!(matches!(control_of("screenshot/image_format"), Control::Choice(o) if o.len() > 4));
-        assert!(matches!(control_of("screenshot_translation/backend"), Control::Choice(o) if o.len() == 2));
-        assert_eq!(control_of("interface/language"), Control::Choice(language_options()));
+        assert!(
+            matches!(control_of("screenshot_translation/backend"), Control::Choice(o) if o.len() == 2)
+        );
+        assert_eq!(
+            control_of("interface/language"),
+            Control::Choice(language_options())
+        );
         // 界面语言候选来自已发现的语言，没有“跟随系统”与繁体
         assert_eq!(language_options(), ["en_US", "zh_CN"]);
         // 目标语言直接用 schema 白名单，没有“跟随系统”与繁体
-        let Control::Choice(target) = control_of(TARGET_LANGUAGE_KEY) else { panic!("目标语言应为下拉") };
+        let Control::Choice(target) = control_of(TARGET_LANGUAGE_KEY) else {
+            panic!("目标语言应为下拉")
+        };
         assert!(!target.contains(&"system") && !target.contains(&"zh-Hant"));
         assert!(target.contains(&"zh-Hans") && target.contains(&"ja"));
         assert_eq!(control_of("interface/theme_primary_color"), Control::Color);
@@ -822,8 +840,13 @@ mod tests {
             control_of("screenshot_toolbar/layout"),
             Control::ReadOnly(ReadOnlyReason::TooLarge)
         );
-        assert_eq!(control_of("global_mouse/screenshot_copy"), Control::JsonText);
-        assert!(matches!(control_of("tray/menu_options"), Control::MultiChoice(o) if o.len() == 22));
+        assert_eq!(
+            control_of("global_mouse/screenshot_copy"),
+            Control::JsonText
+        );
+        assert!(
+            matches!(control_of("tray/menu_options"), Control::MultiChoice(o) if o.len() == 22)
+        );
         assert!(matches!(
             control_of("drawing/quick_selection_disabled_tools"),
             Control::MultiChoice(o) if o.len() == 13
@@ -837,7 +860,10 @@ mod tests {
         );
         assert!(matches!(
             control_of("global_shortcuts/screenshot"),
-            Control::Shortcuts { allow_shift_only: false, .. }
+            Control::Shortcuts {
+                allow_shift_only: false,
+                ..
+            }
         ));
     }
 
@@ -852,13 +878,31 @@ mod tests {
     #[test]
     fn parse_input_rules() {
         assert_eq!(parse_input(Control::IntText, " 30 "), Ok(json!(30)));
-        assert_eq!(parse_input(Control::IntText, "3.5"), Err(InputError::NotInteger));
-        assert_eq!(parse_input(Control::IntText, ""), Err(InputError::NotInteger));
-        assert_eq!(parse_input(Control::ListText, "a, b,, c"), Ok(json!(["a", "b", "c"])));
+        assert_eq!(
+            parse_input(Control::IntText, "3.5"),
+            Err(InputError::NotInteger)
+        );
+        assert_eq!(
+            parse_input(Control::IntText, ""),
+            Err(InputError::NotInteger)
+        );
+        assert_eq!(
+            parse_input(Control::ListText, "a, b,, c"),
+            Ok(json!(["a", "b", "c"]))
+        );
         assert_eq!(parse_input(Control::ListText, ""), Ok(json!([])));
-        assert_eq!(parse_input(Control::JsonText, "{\"a\":1}"), Ok(json!({"a": 1})));
-        assert_eq!(parse_input(Control::JsonText, "{"), Err(InputError::BadJson));
-        assert_eq!(parse_input(Control::Switch, "x"), Err(InputError::NotEditable));
+        assert_eq!(
+            parse_input(Control::JsonText, "{\"a\":1}"),
+            Ok(json!({"a": 1}))
+        );
+        assert_eq!(
+            parse_input(Control::JsonText, "{"),
+            Err(InputError::BadJson)
+        );
+        assert_eq!(
+            parse_input(Control::Switch, "x"),
+            Err(InputError::NotEditable)
+        );
         assert_eq!(parse_input(Control::Text, "  hi "), Ok(json!("hi")));
     }
 
@@ -890,15 +934,33 @@ mod tests {
     #[test]
     fn apply_edit_keys() {
         let mut b = TextBuffer::new("");
-        assert_eq!(apply_edit_key(&mut b, "a", Some("a"), false, None), EditOutcome::Continue);
-        assert_eq!(apply_edit_key(&mut b, "v", Some("v"), true, Some("xy\n")), EditOutcome::Continue);
+        assert_eq!(
+            apply_edit_key(&mut b, "a", Some("a"), false, None),
+            EditOutcome::Continue
+        );
+        assert_eq!(
+            apply_edit_key(&mut b, "v", Some("v"), true, Some("xy\n")),
+            EditOutcome::Continue
+        );
         assert_eq!(b.text(), "axy");
-        assert_eq!(apply_edit_key(&mut b, "backspace", None, false, None), EditOutcome::Continue);
+        assert_eq!(
+            apply_edit_key(&mut b, "backspace", None, false, None),
+            EditOutcome::Continue
+        );
         assert_eq!(b.text(), "ax");
-        assert_eq!(apply_edit_key(&mut b, "enter", None, false, None), EditOutcome::Commit);
-        assert_eq!(apply_edit_key(&mut b, "escape", None, false, None), EditOutcome::Cancel);
+        assert_eq!(
+            apply_edit_key(&mut b, "enter", None, false, None),
+            EditOutcome::Commit
+        );
+        assert_eq!(
+            apply_edit_key(&mut b, "escape", None, false, None),
+            EditOutcome::Cancel
+        );
         // Ctrl 组合键不产生字符
-        assert_eq!(apply_edit_key(&mut b, "c", Some("c"), true, None), EditOutcome::Continue);
+        assert_eq!(
+            apply_edit_key(&mut b, "c", Some("c"), true, None),
+            EditOutcome::Continue
+        );
         assert_eq!(b.text(), "ax");
     }
 
@@ -920,7 +982,11 @@ mod tests {
     /// 步进与滑条格值不越界、按步长对齐。
     #[test]
     fn slider_math() {
-        let range = IntRange { min: 100, max: 2000, step: 100 };
+        let range = IntRange {
+            min: 100,
+            max: 2000,
+            step: 100,
+        };
         assert_eq!(step_int(2000, range, 1, false), 2000);
         assert_eq!(step_int(100, range, -1, false), 100);
         assert_eq!(step_int(500, range, 1, false), 600);
@@ -932,7 +998,11 @@ mod tests {
         }
         assert_eq!(slider_active_cell(range, 100), 0);
         assert_eq!(slider_active_cell(range, 2000), SLIDER_CELLS - 1);
-        let quality = IntRange { min: 0, max: 100, step: 1 };
+        let quality = IntRange {
+            min: 0,
+            max: 100,
+            step: 1,
+        };
         assert_eq!(step_int(50, quality, 1, true), 52);
     }
 
@@ -946,18 +1016,42 @@ mod tests {
         assert_eq!(parse_hex_color("#12345"), None);
         assert_eq!(parse_hex_color("#GGGGGGGG"), None);
         assert_eq!(parse_hex_color("#中文中文"), None);
+        // 带 trim，与 pinned 版（u32 大端 RRGGBBAA）语义一致
+        assert_eq!(parse_hex_color(" #112233 "), Some([0x11, 0x22, 0x33, 0xFF]));
+        assert_eq!(crate::pinned_model::parse_hex_color("#11223344"), Some(0x11223344));
     }
 
     /// 按键转快捷键文本。
     #[test]
     fn keystroke_to_shortcut() {
-        assert_eq!(shortcut_from_keystroke("a", true, false, true, false), Some("Ctrl+Shift+A".into()));
-        assert_eq!(shortcut_from_keystroke("f1", false, false, false, false), Some("F1".into()));
-        assert_eq!(shortcut_from_keystroke("escape", true, true, false, false), Some("Ctrl+Alt+Esc".into()));
-        assert_eq!(shortcut_from_keystroke("printscreen", false, false, false, true), Some("Meta+Print".into()));
-        assert_eq!(shortcut_from_keystroke("pagedown", true, false, false, false), Some("Ctrl+PgDown".into()));
-        assert_eq!(shortcut_from_keystroke("control", true, false, false, false), None);
-        assert_eq!(shortcut_from_keystroke("shift", false, false, true, false), None);
+        assert_eq!(
+            shortcut_from_keystroke("a", true, false, true, false),
+            Some("Ctrl+Shift+A".into())
+        );
+        assert_eq!(
+            shortcut_from_keystroke("f1", false, false, false, false),
+            Some("F1".into())
+        );
+        assert_eq!(
+            shortcut_from_keystroke("escape", true, true, false, false),
+            Some("Ctrl+Alt+Esc".into())
+        );
+        assert_eq!(
+            shortcut_from_keystroke("printscreen", false, false, false, true),
+            Some("Meta+Print".into())
+        );
+        assert_eq!(
+            shortcut_from_keystroke("pagedown", true, false, false, false),
+            Some("Ctrl+PgDown".into())
+        );
+        assert_eq!(
+            shortcut_from_keystroke("control", true, false, false, false),
+            None
+        );
+        assert_eq!(
+            shortcut_from_keystroke("shift", false, false, true, false),
+            None
+        );
         assert_eq!(shortcut_from_keystroke("", true, false, false, false), None);
     }
 
@@ -979,7 +1073,9 @@ mod tests {
     #[test]
     fn shortcut_conflicts() {
         let read = |key: &str| match key {
-            "global_shortcuts/screenshot" => json!([{"portable": "F1"}, {"portable": "Ctrl+Alt+A"}]),
+            "global_shortcuts/screenshot" => {
+                json!([{"portable": "F1"}, {"portable": "Ctrl+Alt+A"}])
+            }
             "global_shortcuts/screen_record" => json!([{"portable": "F2"}]),
             "drawing_shortcuts/brush" => json!([{"portable": "F1"}]),
             _ => json!([]),
@@ -987,17 +1083,30 @@ mod tests {
         let hit = find_shortcut_conflict(&read, "global_shortcuts/screen_record", "F1", None);
         assert_eq!(
             hit,
-            Some(Conflict { key: "global_shortcuts/screenshot", text: "F1".into() })
+            Some(Conflict {
+                key: "global_shortcuts/screenshot",
+                text: "F1".into()
+            })
         );
         // 大小写与别名等价
-        assert!(find_shortcut_conflict(&read, "global_shortcuts/screen_record", "ctrl+alt+a", None).is_some());
+        assert!(
+            find_shortcut_conflict(&read, "global_shortcuts/screen_record", "ctrl+alt+a", None)
+                .is_some()
+        );
         // 替换自身那一项
-        assert!(find_shortcut_conflict(&read, "global_shortcuts/screen_record", "F2", Some(0)).is_none());
+        assert!(
+            find_shortcut_conflict(&read, "global_shortcuts/screen_record", "F2", Some(0))
+                .is_none()
+        );
         // 未替换时与自己已有项冲突
-        assert!(find_shortcut_conflict(&read, "global_shortcuts/screen_record", "F2", None).is_some());
+        assert!(
+            find_shortcut_conflict(&read, "global_shortcuts/screen_record", "F2", None).is_some()
+        );
         // 绘图组的 F1 不影响全局组之外的键
         assert!(find_shortcut_conflict(&read, "drawing_shortcuts/eraser", "F3", None).is_none());
-        assert!(find_shortcut_conflict(&read, "global_shortcuts/screen_record", "F9", None).is_none());
+        assert!(
+            find_shortcut_conflict(&read, "global_shortcuts/screen_record", "F9", None).is_none()
+        );
     }
 
     /// 快捷键列表的替换、追加与删除。
@@ -1005,9 +1114,18 @@ mod tests {
     fn shortcut_list_edits() {
         let list = json!([{"portable": "F1"}, {"portable": "Ctrl+A"}]);
         assert_eq!(shortcut_texts(&list), ["F1", "Ctrl+A"]);
-        assert_eq!(shortcut_texts(&with_shortcut(&list, Some(0), "F5")), ["F5", "Ctrl+A"]);
-        assert_eq!(shortcut_texts(&with_shortcut(&list, None, "F6")), ["F1", "Ctrl+A", "F6"]);
+        assert_eq!(
+            shortcut_texts(&with_shortcut(&list, Some(0), "F5")),
+            ["F5", "Ctrl+A"]
+        );
+        assert_eq!(
+            shortcut_texts(&with_shortcut(&list, None, "F6")),
+            ["F1", "Ctrl+A", "F6"]
+        );
         assert_eq!(shortcut_texts(&without_shortcut(&list, 0)), ["Ctrl+A"]);
-        assert_eq!(shortcut_texts(&without_shortcut(&list, 9)), ["F1", "Ctrl+A"]);
+        assert_eq!(
+            shortcut_texts(&without_shortcut(&list, 9)),
+            ["F1", "Ctrl+A"]
+        );
     }
 }

@@ -3,6 +3,7 @@
 //! 整屏像素只在构造时“移动”进图像资源（不拷贝），之后放大镜取样、选区裁切都直接读
 //! 图像资源里的同一份缓冲，渲染阶段只复用 `Arc<RenderImage>`，不会逐帧拷贝整屏数据。
 
+use crate::history_store::BgraSource;
 use image::{Frame, RgbaImage};
 use snow_platform::capture::CapturedScreen;
 use snow_ui::shell::geometry::PhysicalRect;
@@ -11,6 +12,21 @@ use std::sync::Arc;
 
 /// 每像素字节数（BGRA）。
 const BYTES_PER_PIXEL: usize = 4;
+
+/// 冻结底图的 BGRA 共享来源，供历史写盘线程读取。
+struct FrameBgra(Arc<RenderImage>);
+
+impl std::fmt::Debug for FrameBgra {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("FrameBgra")
+    }
+}
+
+impl BgraSource for FrameBgra {
+    fn bgra(&self) -> &[u8] {
+        self.0.as_bytes(0).unwrap_or(&[])
+    }
+}
 
 /// 冻结的屏幕底图（BGRA，不透明）。
 pub struct FrozenFrame {
@@ -82,6 +98,14 @@ impl FrozenFrame {
     /// BGRA 像素缓冲（多屏画布合成用）。
     pub(crate) fn bgra_pixels(&self) -> &[u8] {
         self.pixels()
+    }
+
+    /// 整帧 BGRA 的共享来源（只增加引用计数，不拷贝像素）；缓冲为空时返回 `None`。
+    pub fn bgra_source(&self) -> Option<Arc<dyn BgraSource>> {
+        if self.pixels().is_empty() {
+            return None;
+        }
+        Some(Arc::new(FrameBgra(Arc::clone(&self.image))))
     }
 
     /// 标注合成用的只读底图视图（借用图像资源里的 BGRA 缓冲，不拷贝）。

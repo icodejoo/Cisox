@@ -565,23 +565,13 @@ pub fn parse_middle_click_action(value: &str) -> PinClickAction {
 /// assert_eq!(parse_hex_color("red"), None);
 /// ```
 pub fn parse_hex_color(text: &str) -> Option<u32> {
-    let hex = text.trim().strip_prefix('#')?;
-    if !hex.is_ascii() {
-        return None;
-    }
-    match hex.len() {
-        6 => u32::from_str_radix(hex, 16)
-            .ok()
-            .map(|rgb| (rgb << 8) | 0xFF),
-        8 => u32::from_str_radix(hex, 16).ok(),
-        _ => None,
-    }
+    crate::settings_model::parse_hex_color(text).map(u32::from_be_bytes)
 }
 
-/// 把 RGBA 缓冲原地转成 BGRA（交换 R / B；每张图创建时只转一次，渲染阶段不再转换）。
+/// 把 RGBA 缓冲原地转成 BGRA（交换 R / B，反向同理；全程序唯一的 R/B 交换实现）。
 ///
 /// # 参数
-/// - `pixels`：4 字节一像素的缓冲。
+/// - `pixels`：4 字节一像素的缓冲；长度非 4 的倍数时尾部不足一像素的字节保持不动。
 ///
 /// ```
 /// use snow_shot::pinned_model::swap_rb_in_place;
@@ -1122,5 +1112,19 @@ mod tests {
         let mut px = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 9];
         swap_rb_in_place(&mut px);
         assert_eq!(px, vec![3, 2, 1, 4, 7, 6, 5, 8, 9, 9]);
+    }
+
+    /// R/B 交换：空切片与不足一像素的切片不动，连换两次还原。
+    #[test]
+    fn swap_rb_empty_short_and_roundtrip() {
+        swap_rb_in_place(&mut []);
+        let mut short = [1u8, 2, 3];
+        swap_rb_in_place(&mut short);
+        assert_eq!(short, [1, 2, 3]);
+        let mut px = [10u8, 20, 30, 40, 50, 60, 70, 80];
+        swap_rb_in_place(&mut px);
+        assert_eq!(px, [30, 20, 10, 40, 70, 60, 50, 80]);
+        swap_rb_in_place(&mut px);
+        assert_eq!(px, [10, 20, 30, 40, 50, 60, 70, 80]);
     }
 }

@@ -6,7 +6,7 @@
 use crate::settings_model::{
     Control, EditOutcome, GLOBAL_SHORTCUT_GROUP, LANGUAGE_KEY, ReadOnlyReason, THEME_COLOR_KEY,
     THEME_MODE_KEY, TextBuffer, apply_edit_key, control_for, describe_input_error, edit_text,
-    find_shortcut_conflict, group_id_of, groups, humanize, is_modifier_key, parse_hex_color,
+    find_shortcut_conflict, group_id_of, groups, is_modifier_key, parse_hex_color,
     parse_input, portable_to_hotkey_text, shortcut_from_keystroke, shortcut_texts, with_shortcut,
     without_shortcut,
 };
@@ -17,12 +17,13 @@ use snow_config::extensions::{
     KEY_DICTATION_MODEL_DIR, KEY_DICTATION_MODEL_ID, KEY_DICTATION_SENSEVOICE_ITN,
     KEY_LATEX_MODEL_DIR, KEY_LOCAL_MODEL_ID, KEY_LOCAL_MODELS_DIR,
 };
-use snow_config::schema::{self, entries};
+use snow_config::schema::{self, entries, index_of as schema_index_of};
 use snow_config::store::ConfigStore;
 use snow_config::value::json_eq;
 use snow_ui::shell::hotkey::Hotkey;
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 /// 主线程共享的配置存储：设置页、截图、录制等模块从同一份取值。
@@ -51,8 +52,6 @@ pub struct ConfigChange {
 pub struct RowModel {
     /// 配置键。
     pub key: &'static str,
-    /// 可读标签。
-    pub label: String,
     /// 控件类型。
     pub control: Control,
     /// 当前值。
@@ -132,13 +131,63 @@ pub struct SystemPrefs {
     pub language: String,
 }
 
+/// 系统偏好缓存的有效期：系统语言/主题切换最迟这么久后反映到界面。
+const SYSTEM_PREFS_TTL: Duration = Duration::from_secs(5);
+
+/// 系统偏好缓存：上次读取时刻与结果。
+static SYSTEM_PREFS_CACHE: Mutex<Option<(Instant, SystemPrefs)>> = Mutex::new(None);
+
 impl SystemPrefs {
-    /// 读取当前系统偏好（会调用一次 `reg query`，不要放进每帧路径）。
+    /// 读取当前系统偏好（会调用 `reg query`，不要放进每帧路径；不经缓存）。
     pub fn query() -> Self {
         Self {
             dark: crate::sys_prefs::system_prefers_dark(),
             language: crate::sys_prefs::system_ui_language(),
         }
+    }
+
+    /// 读取系统偏好并刷新缓存（用户改了“跟随系统”相关配置时调用）。
+    pub fn refresh() -> Self {
+        Self::cached_with(
+            &SYSTEM_PREFS_CACHE,
+            Instant::now(),
+            Duration::ZERO,
+            Self::query,
+        )
+    }
+
+    /// 读取系统偏好，`SYSTEM_PREFS_TTL` 内复用上次结果，避免主线程反复起 `reg.exe`。
+    pub fn cached() -> Self {
+        Self::cached_with(
+            &SYSTEM_PREFS_CACHE,
+            Instant::now(),
+            SYSTEM_PREFS_TTL,
+            Self::query,
+        )
+    }
+
+    /// 带缓存读取的可注入实现（测试用，不真实查询系统）。
+    ///
+    /// # 参数
+    /// - `cache`：缓存槽。
+    /// - `now`：当前时刻。
+    /// - `ttl`：有效期，为零时总是重新查询。
+    /// - `query`：缓存失效时调用的查询函数。
+    fn cached_with(
+        cache: &Mutex<Option<(Instant, SystemPrefs)>>,
+        now: Instant,
+        ttl: Duration,
+        query: impl FnOnce() -> SystemPrefs,
+    ) -> Self {
+        let mut slot = cache.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((at, prefs)) = slot.as_ref()
+            && now.saturating_duration_since(*at) < ttl
+        {
+            return prefs.clone();
+        }
+        let fresh = query();
+        *slot = Some((now, fresh.clone()));
+        fresh
     }
 }
 
@@ -164,12 +213,34 @@ impl UiPrefs {
     /// - `accent`：主色文本
     /// - `system`：系统偏好
     pub fn resolve(theme_mode: &str, language: &str, accent: &str, system: &SystemPrefs) -> Self {
+        Self::resolve_lazy(theme_mode, language, accent, || system.clone())
+    }
+
+    /// 同 [`UiPrefs::resolve`]，但系统偏好惰性获取：主题与语言都显式指定时不会调用 `system`。
+    ///
+    /// # 参数
+    /// - `system`：取系统偏好的函数，最多调用一次。
+    pub fn resolve_lazy(
+        theme_mode: &str,
+        language: &str,
+        accent: &str,
+        system: impl FnOnce() -> SystemPrefs,
+    ) -> Self {
+        let theme_explicit = matches!(theme_mode, THEME_DARK | THEME_LIGHT);
+        let saved = language.trim();
+        let language_explicit = !saved.is_empty() && snow_i18n::match_locale(saved).is_some();
+        let sys = if theme_explicit && language_explicit {
+            None
+        } else {
+            Some(system())
+        };
         let dark = match theme_mode {
             THEME_DARK => true,
             THEME_LIGHT => false,
-            _ => system.dark,
+            _ => sys.as_ref().is_some_and(|s| s.dark),
         };
-        let lang = Lang::from_config(language, &system.language);
+        let system_language = sys.as_ref().map_or("", |s| s.language.as_str());
+        let lang = Lang::from_config(language, system_language);
         Self {
             dark,
             lang,
@@ -395,7 +466,7 @@ impl SettingsState {
 
     /// 按键取行模型。
     pub fn row_by_key(&self, key: &str) -> Option<&RowModel> {
-        self.all_rows.iter().find(|r| r.key == key)
+        schema_index_of(key).and_then(|i| self.all_rows.get(i))
     }
 
     /// 当前范围。
@@ -560,7 +631,27 @@ impl SettingsState {
     /// # 返回
     /// 可见条目数（被隐藏的条目不计）。
     pub fn group_item_count(&self, group: usize) -> usize {
-        self.group_visible_entries(group).len()
+        self.group_visible_count(group, self.itn_hidden())
+    }
+
+    /// 全部分组当前可见的条目数（下标与分组一致）；itn 显隐只算一次，供侧栏渲染用。
+    pub fn group_item_counts(&self) -> Vec<usize> {
+        let itn_hidden = self.itn_hidden();
+        (0..groups().len())
+            .map(|group| self.group_visible_count(group, itn_hidden))
+            .collect()
+    }
+
+    /// 只计数的可见条目数，口径与 `group_visible_entries` 一致（重排不影响数量）。
+    fn group_visible_count(&self, group: usize, itn_hidden: bool) -> usize {
+        groups()[group]
+            .entries
+            .iter()
+            .filter(|i| {
+                let key = self.all_rows[**i].key;
+                !(itn_hidden && key == KEY_DICTATION_SENSEVOICE_ITN) && !is_hidden_key(key)
+            })
+            .count()
     }
 
     /// 语音转文字的 itn 开关当前是否应隐藏（只有选中 SenseVoice 才显示）。
@@ -673,7 +764,7 @@ impl SettingsState {
         }
         if matches!(key, THEME_MODE_KEY | LANGUAGE_KEY | THEME_COLOR_KEY) {
             if self.system_follow_needed(key) {
-                self.system = SystemPrefs::query();
+                self.system = SystemPrefs::refresh();
             }
             self.prefs = resolve_prefs(&self.store.borrow(), &self.system);
         }
@@ -921,7 +1012,7 @@ impl SettingsState {
 
     /// 处理录入态下的一次按键。
     fn on_capture_key(&mut self, capture: CaptureState, key: &str, mods: KeyMods) {
-        if key == "escape" {
+        if crate::shared_keys::is_dismiss(key) {
             self.cancel_input();
             return;
         }
@@ -1017,17 +1108,25 @@ impl SettingsState {
 
     /// 从配置存储重新读取某一行的值。
     fn refresh_row(&mut self, key: &str) {
-        let Some(position) = self.all_rows.iter().position(|r| r.key == key) else {
+        let Some(position) = schema_index_of(key) else {
             return;
         };
-        let row = build_row(position, &self.store.borrow());
-        let error = self.all_rows[position].error.take();
-        self.all_rows[position] = RowModel { error, ..row };
+        // 只刷新值相关字段；haystack 与控件类型不随值变化，保留
+        let store = self.store.borrow();
+        let row = &mut self.all_rows[position];
+        let value = store.value(row.key);
+        row.is_default = json_eq(&value, &entries()[position].default);
+        row.shortcuts = if matches!(row.control, Control::Shortcuts { .. }) {
+            shortcut_texts(&value)
+        } else {
+            Vec::new()
+        };
+        row.value = value;
     }
 
     /// 设置或清除行内错误。
     fn set_row_error(&mut self, key: &str, error: Option<String>) {
-        if let Some(row) = self.all_rows.iter_mut().find(|r| r.key == key) {
+        if let Some(row) = schema_index_of(key).and_then(|i| self.all_rows.get_mut(i)) {
             row.error = error;
         }
     }
@@ -1055,7 +1154,6 @@ fn build_row(entry_index: usize, store: &ConfigStore) -> RowModel {
     let control = control_for(entry);
     let value = store.value(entry.key);
     let is_default = json_eq(&value, &entry.default);
-    let label = humanize(entry.key);
     let shortcuts = if matches!(control, Control::Shortcuts { .. }) {
         shortcut_texts(&value)
     } else {
@@ -1074,7 +1172,6 @@ fn build_row(entry_index: usize, store: &ConfigStore) -> RowModel {
     let haystack = haystack.to_lowercase();
     RowModel {
         key: entry.key,
-        label,
         control,
         value,
         is_default,
@@ -1146,9 +1243,7 @@ mod tests {
 
     /// 生成唯一的夹具目录路径（进程号 + 纳秒时间 + 原子计数），避免进程号复用读到旧配置。
     fn unique_fixture_dir() -> PathBuf {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos());
+        let nanos = snow_platform::unix_time::unix_nanos();
         std::env::temp_dir().join(format!(
             "snow-settings-state-{}-{nanos}-{}",
             std::process::id(),
@@ -1166,6 +1261,39 @@ mod tests {
             a.to_string_lossy()
                 .contains(&std::process::id().to_string())
         );
+    }
+
+    /// 按键下标索引与顺序扫描一致；refresh_row 保留 haystack，只更新值相关字段。
+    #[test]
+    fn indexed_lookup_and_refresh_row_keep_haystack() {
+        let (mut state, _, _) = fixture();
+        for (i, entry) in entries().iter().enumerate() {
+            assert_eq!(state.row_by_key(entry.key).map(|r| r.key), Some(entry.key));
+            assert_eq!(schema_index_of(entry.key), Some(i));
+        }
+        assert!(state.row_by_key("no/such_key").is_none());
+        let key = "dictation/mode";
+        let haystack = state.row_by_key(key).unwrap().haystack.clone();
+        state.apply(key, json!("offline")).unwrap();
+        let row = state.row_by_key(key).unwrap();
+        assert_eq!(row.haystack, haystack);
+        assert_eq!(row.value, json!("offline"));
+        state.set_row_error(key, Some("boom".into()));
+        state.refresh_row(key);
+        let row = state.row_by_key(key).unwrap();
+        assert_eq!(row.haystack, haystack);
+        assert_eq!(row.error.as_deref(), Some("boom"));
+    }
+
+    /// 全部分组计数与逐组计数一致。
+    #[test]
+    fn group_item_counts_match_per_group() {
+        let (state, _, _) = fixture();
+        let all = state.group_item_counts();
+        for (i, count) in all.iter().enumerate() {
+            assert_eq!(*count, state.group_item_count(i));
+            assert_eq!(*count, state.group_visible_entries(i).len());
+        }
     }
 
     /// 侧栏徽标与分组标题的条目数以可见条目为准：itn 开关隐藏时不计入，显示后加一。
@@ -1710,5 +1838,54 @@ mod tests {
     #[test]
     fn schema_version_key_constant_matches() {
         assert_eq!(schema::SCHEMA_VERSION_KEY, "storage/schema_version");
+    }
+
+    /// 主题与语言都显式指定时不查询系统。
+    #[test]
+    fn resolve_lazy_skips_system_when_explicit() {
+        let p = UiPrefs::resolve_lazy("dark", "zh_CN", "bad", || panic!("不应查询系统"));
+        assert!(p.dark);
+        assert_eq!(p.locale, "zh-CN");
+    }
+
+    /// 跟随系统时才取系统值，且只取一次。
+    #[test]
+    fn resolve_lazy_queries_once_when_following() {
+        let calls = std::cell::Cell::new(0);
+        let p = UiPrefs::resolve_lazy("system", "", "bad", || {
+            calls.set(calls.get() + 1);
+            SystemPrefs {
+                dark: true,
+                language: "zh-CN".into(),
+            }
+        });
+        assert!(p.dark);
+        assert_eq!(p.locale, "zh-CN");
+        assert_eq!(calls.get(), 1);
+    }
+
+    /// 缓存在有效期内复用，过期或 ttl 为零时重新查询。
+    #[test]
+    fn system_prefs_cache_ttl() {
+        let cache = Mutex::new(None);
+        let calls = std::cell::Cell::new(0);
+        let query = || {
+            calls.set(calls.get() + 1);
+            SystemPrefs {
+                dark: calls.get() % 2 == 0,
+                language: "en-US".into(),
+            }
+        };
+        let t0 = Instant::now();
+        let ttl = Duration::from_secs(5);
+        let a = SystemPrefs::cached_with(&cache, t0, ttl, query);
+        let b = SystemPrefs::cached_with(&cache, t0 + Duration::from_secs(1), ttl, query);
+        assert_eq!(a, b);
+        assert_eq!(calls.get(), 1);
+        let c = SystemPrefs::cached_with(&cache, t0 + Duration::from_secs(6), ttl, query);
+        assert_eq!(calls.get(), 2);
+        assert_ne!(a, c);
+        SystemPrefs::cached_with(&cache, t0 + Duration::from_secs(6), Duration::ZERO, query);
+        assert_eq!(calls.get(), 3);
     }
 }

@@ -1006,13 +1006,29 @@ fn spawn_restart_helper() -> std::io::Result<()> {
 ///
 /// # 参数
 /// - `document`：配置文档。
+///
+/// 配置显式指定主题/语言时不查系统；“跟随系统”时用带 5 秒缓存的系统偏好。
 pub(crate) fn ui_prefs_from_document(document: &ConfigDocument) -> UiPrefs {
-    UiPrefs::resolve(
+    UiPrefs::resolve_lazy(
         document.value(THEME_MODE_KEY).as_str().unwrap_or_default(),
         document.value(LANGUAGE_KEY).as_str().unwrap_or_default(),
         document.value(THEME_COLOR_KEY).as_str().unwrap_or_default(),
-        &SystemPrefs::query(),
+        SystemPrefs::cached,
     )
+}
+
+/// 只取界面语言（locale 代码），不解析主题；语言显式指定时不查系统。
+///
+/// # 参数
+/// - `document`：配置文档。
+pub(crate) fn locale_of(document: &ConfigDocument) -> &'static str {
+    UiPrefs::resolve_lazy(
+        "light",
+        document.value(LANGUAGE_KEY).as_str().unwrap_or_default(),
+        "",
+        SystemPrefs::cached,
+    )
+    .locale
 }
 
 /// 按界面深浅色设置弹出菜单（托盘右键菜单）主题。
@@ -2326,7 +2342,7 @@ fn configure_overlay(
         });
     }
     // 标注样式：读取已保存的各工具样式，之后的修改写回同一份配置
-    let style_locale = ui_prefs_from_document(state.config.borrow().document()).locale;
+    let style_locale = locale_of(state.config.borrow().document());
     let style_config = state.config.clone();
     view.update(cx.app(), |v, _| {
         v.set_style_config(style_config, style_locale)
@@ -2777,7 +2793,7 @@ fn spawn_translate_runtime_download(state: &AppState) {
     let data_root = state.data_root.clone();
     let inbox = state.inbox.clone();
     let i18n = crate::ocr_backend::i18n_for(
-        ui_prefs_from_document(state.config.borrow().document()).locale,
+        locale_of(state.config.borrow().document()),
     );
     let spawned = std::thread::Builder::new()
         .name("snow-ort-download".into())
@@ -2947,7 +2963,7 @@ fn spawn_latex_download(state: &AppState) {
     let data_root = state.data_root.clone();
     let inbox = state.inbox.clone();
     let i18n = crate::ocr_backend::i18n_for(
-        ui_prefs_from_document(state.config.borrow().document()).locale,
+        locale_of(state.config.borrow().document()),
     );
     let spawned = std::thread::Builder::new()
         .name("snow-latex-download".into())
@@ -2975,7 +2991,7 @@ fn spawn_table_download(state: &AppState) {
     let data_root = state.data_root.clone();
     let inbox = state.inbox.clone();
     let i18n = crate::ocr_backend::i18n_for(
-        ui_prefs_from_document(state.config.borrow().document()).locale,
+        locale_of(state.config.borrow().document()),
     );
     let spawned = std::thread::Builder::new()
         .name("snow-table-download".into())
@@ -3011,7 +3027,7 @@ fn spawn_ocr_download(state: &AppState) {
     let need_runtime = state.ocr.exe_override().is_none();
     let inbox = state.inbox.clone();
     let i18n = crate::ocr_backend::i18n_for(
-        ui_prefs_from_document(state.config.borrow().document()).locale,
+        locale_of(state.config.borrow().document()),
     );
     let spawned = std::thread::Builder::new().name("snow-ocr-download".into()).spawn(move || {
         let env_root = std::env::var(ENV_OCR_ASSET_DIR).ok();
@@ -3056,7 +3072,7 @@ fn run_config_transfer(
     use snow_platform::file_dialog::{
         FileFilter, OpenDialogRequest, SaveDialogRequest, show_open_dialog, show_save_dialog,
     };
-    let locale = ui_prefs_from_document(state.config.borrow().document()).locale;
+    let locale = locale_of(state.config.borrow().document());
     let i18n = crate::ocr_backend::i18n_for(locale);
     let filters = vec![FileFilter {
         label: i18n.tr("config-transfer-filter"),
@@ -3137,7 +3153,7 @@ fn run_path_pick(state: &AppState, key: &'static str) {
     if key != crate::tray_config::KEY_CUSTOM_ICON {
         return;
     }
-    let locale = ui_prefs_from_document(state.config.borrow().document()).locale;
+    let locale = locale_of(state.config.borrow().document());
     let i18n = crate::ocr_backend::i18n_for(locale);
     let request = OpenDialogRequest {
         title: i18n.tr("settings-pick-tray-icon-title"),
@@ -3152,7 +3168,10 @@ fn run_path_pick(state: &AppState, key: &'static str) {
         .name("snow-path-pick".into())
         .spawn(move || match show_open_dialog(&request) {
             Ok(Some(path)) => {
-                let _ = inbox.push(UiEvent::PathPicked(key, crate::tray_config::picked_icon_value(&path)));
+                let _ = inbox.push(UiEvent::PathPicked(
+                    key,
+                    crate::tray_config::picked_icon_value(&path),
+                ));
             }
             Ok(None) => {}
             Err(e) => tracing::warn!(error = %e, "选择文件对话框失败"),
@@ -3205,7 +3224,7 @@ fn run_update_action(state: &AppState, action: crate::net_settings::UpdateAction
 /// # 参数
 /// - `state`：运行时状态。
 fn start_update_check(state: &AppState) {
-    let locale = ui_prefs_from_document(state.config.borrow().document()).locale;
+    let locale = locale_of(state.config.borrow().document());
     let url = match crate::net_settings::update_target(state.config.borrow().document(), locale) {
         Ok(url) => url,
         Err(text) => {
@@ -3992,7 +4011,7 @@ fn refresh_pin_manage(cx: &mut ShellContext, state: &AppState) {
 fn report_pin_manage_error(cx: &mut ShellContext, state: &AppState, error: PinError) {
     if let Some((_, view)) = &state.pin_manage_window {
         let message = error.message(crate::ocr_backend::i18n_for(
-            ui_prefs_from_document(state.config.borrow().document()).locale,
+            locale_of(state.config.borrow().document()),
         ));
         view.update(cx.app(), |v, cx| v.show_error(message, cx));
     }
@@ -4003,7 +4022,7 @@ fn report_pin_manage_error(cx: &mut ShellContext, state: &AppState, error: PinEr
 /// # 参数
 /// - `state`：运行时状态。
 fn pin_group_i18n(state: &AppState) -> &'static snow_i18n::I18n {
-    crate::ocr_backend::i18n_for(ui_prefs_from_document(state.config.borrow().document()).locale)
+    crate::ocr_backend::i18n_for(locale_of(state.config.borrow().document()))
 }
 
 /// 光标所在显示器作为输入框翻译浮窗的落点；取不到光标或显示器时用主屏。
@@ -4023,14 +4042,7 @@ fn translate_input_monitor(cx: &ShellContext) -> MonitorTarget {
 /// # 参数
 /// - `config`：共享配置。
 pub(crate) fn ui_prefs_from_config(config: &SharedConfig) -> UiPrefs {
-    let store = config.borrow();
-    let text = |key: &str| store.value(key).as_str().unwrap_or_default().to_string();
-    UiPrefs::resolve(
-        &text(THEME_MODE_KEY),
-        &text(LANGUAGE_KEY),
-        &text(THEME_COLOR_KEY),
-        &SystemPrefs::query(),
-    )
+    ui_prefs_from_document(config.borrow().document())
 }
 
 /// 打开输入框翻译浮窗；已打开则只激活，不重复创建。
@@ -4322,7 +4334,7 @@ fn refresh_tray_menu(state: &AppState) {
     let Some(tray) = state.tray.as_ref() else {
         return;
     };
-    let locale = ui_prefs_from_document(state.config.borrow().document()).locale;
+    let locale = locale_of(state.config.borrow().document());
     let groups = tray_group_labels(state, locale);
     let built = build_tray_spec_with_groups(
         locale,
@@ -4538,7 +4550,7 @@ const NOTICE_TOOLTIP_MAX_CHARS: usize = 100;
 /// - `id`：消息 id。
 /// - `args`：消息参数。
 fn notice_text(state: &AppState, id: &str, args: Args) -> String {
-    let locale = ui_prefs_from_document(state.config.borrow().document()).locale;
+    let locale = locale_of(state.config.borrow().document());
     crate::ocr_backend::i18n_for(locale).tr_with(id, &args)
 }
 
@@ -5272,13 +5284,13 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
         }
         UiEvent::UpdateActionRequested(action) => run_update_action(state, action),
         UiEvent::UpdateDownloadFinished(info, outcome) => {
-            let locale = ui_prefs_from_document(state.config.borrow().document()).locale;
+            let locale = locale_of(state.config.borrow().document());
             let ui_state = crate::net_settings::download_outcome_state(&info, &outcome, locale);
             tracing::info!(version = %info.version, ?outcome, "更新包下载结束");
             publish_update_state(state, cx, ui_state);
         }
         UiEvent::UpdateCheckFinished(outcome) => {
-            let locale = ui_prefs_from_document(state.config.borrow().document()).locale;
+            let locale = locale_of(state.config.borrow().document());
             let ui_state = crate::net_settings::update_outcome_state(&outcome, locale);
             tracing::info!(?outcome, "检查更新结束");
             publish_update_state(state, cx, ui_state);
@@ -5287,7 +5299,7 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
         UiEvent::OcrWarmUp => start_ocr_warm_up(state),
         UiEvent::AutoUpdateFinished(outcome) => {
             tracing::info!(?outcome, "自动检查更新结束");
-            let locale = ui_prefs_from_document(state.config.borrow().document()).locale;
+            let locale = locale_of(state.config.borrow().document());
             if let Some(text) = crate::net_settings::auto_check_notice(&outcome, locale) {
                 show_notice(state, &text);
                 let ui_state = crate::net_settings::update_outcome_state(&outcome, locale);

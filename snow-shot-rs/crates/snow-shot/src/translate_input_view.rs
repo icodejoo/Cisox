@@ -190,7 +190,9 @@ impl TranslateInputView {
     /// - `text`：要翻译的原文。
     /// - `window`：当前窗口。
     pub fn prefill_and_submit(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.input.update(cx, |state, cx| state.set_value(text.to_string(), window, cx));
+        self.input.update(cx, |state, cx| {
+            state.set_value(text.to_string(), window, cx)
+        });
         self.submit(window, cx);
     }
 
@@ -282,7 +284,7 @@ impl Render for TranslateInputView {
             .flex_col()
             .gap(px(GAP))
             .on_key_down(cx.listener(|_this, ev: &KeyDownEvent, window, _cx| {
-                if ev.keystroke.key == "escape" {
+                if crate::shared_keys::is_dismiss(&ev.keystroke.key) {
                     window.remove_window();
                 }
             }))

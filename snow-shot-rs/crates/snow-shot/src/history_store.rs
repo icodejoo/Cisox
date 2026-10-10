@@ -42,10 +42,8 @@ const DISPLAY_STABLE_ID: &str = "cisox-capture";
 const DISPLAY_NAME: &str = "capture";
 /// 缩略图字节数 / 像素。
 const BYTES_PER_PIXEL: usize = 4;
-/// FNV-1a 64 位偏移基数。
-const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-/// FNV-1a 64 位质数。
-const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+/// 尺寸混入指纹时使用的 64 位质数。
+const DIMENSION_MIX_PRIME: u64 = 0x0000_0100_0000_01b3;
 /// 每秒毫秒数。
 const MILLIS_PER_SECOND: i64 = 1000;
 /// 本地时区偏移取整粒度（15 分钟）。
@@ -147,17 +145,20 @@ pub fn policy_from_document(document: &ConfigDocument) -> CaptureHistoryPolicy {
     if policy.is_valid() { policy } else { defaults }
 }
 
-/// 计算像素内容的 FNV-1a 指纹（带尺寸），用于短时间内的重复判断。
+/// 计算像素内容的指纹（带尺寸），用于短时间内的重复判断；仅内存使用，不落盘。
 ///
 /// # 参数
 /// - `width` / `height`：图像尺寸。
 /// - `rgba`：像素。
+///
+/// # 返回
+/// 64 位指纹；内容或尺寸任一不同则几乎必然不同。
 pub fn content_fingerprint(width: u32, height: u32, rgba: &[u8]) -> u64 {
-    let mut hash = FNV_OFFSET ^ (u64::from(width) << 32 | u64::from(height));
-    for byte in rgba {
-        hash = (hash ^ u64::from(*byte)).wrapping_mul(FNV_PRIME);
-    }
-    hash
+    let dims = u64::from(width) << 32 | u64::from(height);
+    (crate::annotation::hash_pixels(rgba) ^ dims)
+        .wrapping_mul(DIMENSION_MIX_PRIME)
+        .rotate_left(31)
+        ^ dims
 }
 
 /// 去重器：窗口期内内容指纹相同的写入只保留第一条。
@@ -191,6 +192,29 @@ impl Deduper {
     }
 }
 
+/// BGRA 像素来源：让快照只持有共享引用，把 BGRA 到 RGBA 的整帧转换留给写盘线程。
+pub trait BgraSource: Send + Sync + std::fmt::Debug {
+    /// 紧密排列的 BGRA 字节，长度应为 `宽 * 高 * 4`。
+    fn bgra(&self) -> &[u8];
+}
+
+/// 把 BGRA 字节转成 RGBA（逐像素交换 B/R，Alpha 不变）。
+///
+/// # 参数
+/// - `bgra`：BGRA 字节。
+///
+/// # 返回
+/// 等长的 RGBA 字节；末尾不足一个像素的残余字节被丢弃。
+///
+/// ```ignore
+/// assert_eq!(bgra_to_rgba(&[1, 2, 3, 4]), vec![3, 2, 1, 4]);
+/// ```
+pub fn bgra_to_rgba(bgra: &[u8]) -> Vec<u8> {
+    let mut out = bgra[..bgra.len() / BYTES_PER_PIXEL * BYTES_PER_PIXEL].to_vec();
+    crate::pinned_model::swap_rb_in_place(&mut out);
+    out
+}
+
 /// 一次导出的完整现场：整帧底图、选区、标注文档历史与导出结果图。
 #[derive(Debug, Clone)]
 pub struct HistorySnapshot {
@@ -200,6 +224,8 @@ pub struct HistorySnapshot {
     pub frame_height: u32,
     /// 底图 RGBA 像素。
     pub frame_rgba: Vec<u8>,
+    /// 底图 BGRA 来源（共享引用，不拷贝）；为 `Some` 时忽略 `frame_rgba`，由写盘线程转成 RGBA。
+    pub frame_bgra: Option<Arc<dyn BgraSource>>,
     /// 选区 `(x, y, 宽, 高)`，底图物理坐标。
     pub selection: (i32, i32, i32, i32),
     /// 标注文档历史 JSON（[`crate::annotation::AnnotationLayer::serialize_history`] 产出）；空表示没有标注。
@@ -222,9 +248,21 @@ fn clamp_selection(selection: (i32, i32, i32, i32), width: i64, height: i64) -> 
     let (cw, ch) = if right > left && bottom > top {
         (right - left, bottom - top)
     } else {
-        return Rect { x: 0, y: 0, width, height, extra: Default::default() };
+        return Rect {
+            x: 0,
+            y: 0,
+            width,
+            height,
+            extra: Default::default(),
+        };
     };
-    Rect { x: left, y: top, width: cw, height: ch, extra: Default::default() }
+    Rect {
+        x: left,
+        y: top,
+        width: cw,
+        height: ch,
+        extra: Default::default(),
+    }
 }
 
 /// 由底图、选区、画布历史与结果图组装草稿（单显示器）。
@@ -303,7 +341,11 @@ pub fn build_draft(
         height: i64::from(height),
         png,
     };
-    let selection = clamp_selection((0, 0, width as i32, height as i32), image.width, image.height);
+    let selection = clamp_selection(
+        (0, 0, width as i32, height as i32),
+        image.width,
+        image.height,
+    );
     Ok(assemble_draft(
         source,
         image.clone(),
@@ -332,15 +374,27 @@ pub fn build_snapshot_draft(
     snapshot: &HistorySnapshot,
     now_ms: i64,
 ) -> Result<HistoryDraft, String> {
+    let converted;
+    let frame_pixels: &[u8] = match &snapshot.frame_bgra {
+        Some(source) => {
+            converted = bgra_to_rgba(source.bgra());
+            &converted
+        }
+        None => &snapshot.frame_rgba,
+    };
     let frame = DraftImage {
         width: i64::from(snapshot.frame_width),
         height: i64::from(snapshot.frame_height),
-        png: encode_png(snapshot.frame_width, snapshot.frame_height, &snapshot.frame_rgba)?,
+        png: encode_png(snapshot.frame_width, snapshot.frame_height, frame_pixels)?,
     };
     let result = DraftImage {
         width: i64::from(snapshot.result_width),
         height: i64::from(snapshot.result_height),
-        png: encode_png(snapshot.result_width, snapshot.result_height, &snapshot.result_rgba)?,
+        png: encode_png(
+            snapshot.result_width,
+            snapshot.result_height,
+            &snapshot.result_rgba,
+        )?,
     };
     let selection = clamp_selection(snapshot.selection, frame.width, frame.height);
     let canvas = if snapshot.canvas_history.is_empty() {
@@ -348,7 +402,9 @@ pub fn build_snapshot_draft(
     } else {
         snapshot.canvas_history.clone()
     };
-    Ok(assemble_draft(source, frame, selection, canvas, result, now_ms))
+    Ok(assemble_draft(
+        source, frame, selection, canvas, result, now_ms,
+    ))
 }
 
 /// 分页结果。
@@ -474,7 +530,7 @@ pub struct Thumbnail {
 pub fn make_thumbnail(png: &[u8], max_edge: u32) -> Result<Thumbnail, String> {
     let rgba = image::load_from_memory_with_format(png, image::ImageFormat::Png)
         .map_err(|e| format!("解码历史图片失败: {e}"))?
-        .to_rgba8();
+        .into_rgba8();
     let (w, h) = rgba.dimensions();
     let longest = w.max(h).max(1);
     let small = if longest > max_edge {
@@ -487,9 +543,7 @@ pub fn make_thumbnail(png: &[u8], max_edge: u32) -> Result<Thumbnail, String> {
     };
     let (width, height) = small.dimensions();
     let mut bgra = small.into_raw();
-    for px in bgra.chunks_exact_mut(BYTES_PER_PIXEL) {
-        px.swap(0, 2);
-    }
+    crate::pinned_model::swap_rb_in_place(&mut bgra);
     Ok(Thumbnail {
         width,
         height,
@@ -504,7 +558,7 @@ pub fn make_thumbnail(png: &[u8], max_edge: u32) -> Result<Thumbnail, String> {
 pub fn decode_rgba(png: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
     let rgba = image::load_from_memory_with_format(png, image::ImageFormat::Png)
         .map_err(|e| format!("解码历史图片失败: {e}"))?
-        .to_rgba8();
+        .into_rgba8();
     let (w, h) = rgba.dimensions();
     Ok((w, h, rgba.into_raw()))
 }
@@ -619,11 +673,11 @@ impl HistoryStore {
             {
                 tracing::warn!(error = %e, "截图历史维护失败");
             }
-            let all = repo.records();
-            let (page, start, end, page_count) = paginate(all.len(), page, page_size);
+            let total = repo.records_slice().len();
+            let (page, start, end, page_count) = paginate(total, page, page_size);
             HistoryPage {
-                total: all.len(),
-                records: all[start..end].to_vec(),
+                total,
+                records: repo.records_range(start, end),
                 page,
                 page_count,
             }
@@ -681,7 +735,12 @@ impl HistoryStore {
             frame_width,
             frame_height,
             frame_rgba,
-            selection: (to_i32(rect.x)?, to_i32(rect.y)?, to_i32(rect.width)?, to_i32(rect.height)?),
+            selection: (
+                to_i32(rect.x)?,
+                to_i32(rect.y)?,
+                to_i32(rect.width)?,
+                to_i32(rect.height)?,
+            ),
             canvas_history,
         })
     }
@@ -926,13 +985,7 @@ mod tests {
 
     /// 生成唯一的临时数据根（不触碰上游数据目录）。
     fn temp_root(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "cisox-history-test-{tag}-{}-{}",
-            std::process::id(),
-            new_uuid_v4()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+        crate::test_util::unique_temp_dir("cisox-history-test", tag)
     }
 
     /// 测试基准时间：取当前时刻，避免记录被保留期淘汰。
@@ -950,6 +1003,7 @@ mod tests {
             frame_width: 40,
             frame_height: 30,
             frame_rgba: solid(40, 30, 200),
+            frame_bgra: None,
             selection: (5, 6, 20, 10),
             canvas_history: canvas.clone(),
             result_width: 20,
@@ -960,7 +1014,13 @@ mod tests {
             .record_snapshot(HistorySource::Copied, &snapshot, base_ms())
             .unwrap();
         assert_eq!(record.selection.rectangle.x, 5);
-        assert_eq!((record.selection.rectangle.width, record.selection.rectangle.height), (20, 10));
+        assert_eq!(
+            (
+                record.selection.rectangle.width,
+                record.selection.rectangle.height
+            ),
+            (20, 10)
+        );
         assert_eq!(record_size(&record), (20, 10));
         assert_eq!(store.list_page(0, 10).total, 1);
         let _ = std::fs::remove_dir_all(&root);
@@ -976,6 +1036,7 @@ mod tests {
             frame_width: 16,
             frame_height: 12,
             frame_rgba: solid(16, 12, shade),
+            frame_bgra: None,
             selection: (2, 3, 8, 6),
             canvas_history: canvas.clone(),
             result_width: 8,
@@ -983,8 +1044,12 @@ mod tests {
             result_rgba: solid(8, 6, shade),
         };
         let t0 = base_ms();
-        store.record_snapshot(HistorySource::Copied, &snapshot(10), t0).unwrap();
-        store.record_snapshot(HistorySource::Saved, &snapshot(20), t0 + 1000).unwrap();
+        store
+            .record_snapshot(HistorySource::Copied, &snapshot(10), t0)
+            .unwrap();
+        store
+            .record_snapshot(HistorySource::Saved, &snapshot(20), t0 + 1000)
+            .unwrap();
         let records = store.records();
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].source, "saved_to_file");
@@ -1003,6 +1068,7 @@ mod tests {
             frame_width: 8,
             frame_height: 8,
             frame_rgba: solid(8, 8, 1),
+            frame_bgra: None,
             selection: (100, 100, 5, 5),
             canvas_history: Vec::new(),
             result_width: 8,
@@ -1010,9 +1076,18 @@ mod tests {
             result_rgba: solid(8, 8, 2),
         };
         let draft = build_snapshot_draft(HistorySource::Saved, &snapshot, base_ms()).unwrap();
-        assert_eq!((draft.selection.rectangle.width, draft.selection.rectangle.height), (8, 8));
+        assert_eq!(
+            (
+                draft.selection.rectangle.width,
+                draft.selection.rectangle.height
+            ),
+            (8, 8)
+        );
         assert_eq!(draft.canvas_history, EMPTY_CANVAS);
-        let partly = HistorySnapshot { selection: (-4, -4, 10, 10), ..snapshot };
+        let partly = HistorySnapshot {
+            selection: (-4, -4, 10, 10),
+            ..snapshot
+        };
         let draft = build_snapshot_draft(HistorySource::Saved, &partly, base_ms()).unwrap();
         assert_eq!(
             (draft.selection.rectangle.x, draft.selection.rectangle.width),
@@ -1028,6 +1103,7 @@ mod tests {
             frame_width: 8,
             frame_height: 8,
             frame_rgba: solid(8, 8, 1),
+            frame_bgra: None,
             selection: (0, 0, 8, 8),
             canvas_history: Vec::new(),
             result_width: 8,
@@ -1037,13 +1113,37 @@ mod tests {
         let mut dedupe = Deduper::default();
         let enabled = policy(10);
         let now = base_ms();
-        let first = process_snapshot(&root, &mut dedupe, &enabled, HistorySource::Copied, &snapshot, now).unwrap();
+        let first = process_snapshot(
+            &root,
+            &mut dedupe,
+            &enabled,
+            HistorySource::Copied,
+            &snapshot,
+            now,
+        )
+        .unwrap();
         assert!(matches!(first, RecordOutcome::Recorded(_)));
-        let second = process_snapshot(&root, &mut dedupe, &enabled, HistorySource::Saved, &snapshot, now + 1).unwrap();
+        let second = process_snapshot(
+            &root,
+            &mut dedupe,
+            &enabled,
+            HistorySource::Saved,
+            &snapshot,
+            now + 1,
+        )
+        .unwrap();
         assert_eq!(second, RecordOutcome::Duplicate);
         let mut off = policy(10);
         off.enabled = false;
-        let third = process_snapshot(&root, &mut Deduper::default(), &off, HistorySource::Copied, &snapshot, now).unwrap();
+        let third = process_snapshot(
+            &root,
+            &mut Deduper::default(),
+            &off,
+            HistorySource::Copied,
+            &snapshot,
+            now,
+        )
+        .unwrap();
         assert_eq!(third, RecordOutcome::Disabled);
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1106,6 +1206,18 @@ mod tests {
             content_fingerprint(2, 2, &solid(2, 2, 2))
         );
         assert_ne!(content_fingerprint(2, 2, &a), content_fingerprint(4, 1, &a));
+    }
+
+    /// 只改动一个像素（含尾部字节）指纹也必须变化。
+    #[test]
+    fn fingerprint_detects_single_pixel_change() {
+        let a = solid(3, 3, 7);
+        let base = content_fingerprint(3, 3, &a);
+        for i in [0, 5, a.len() - 1] {
+            let mut b = a.clone();
+            b[i] ^= 1;
+            assert_ne!(base, content_fingerprint(3, 3, &b));
+        }
     }
 
     /// 配置缺省与非法值回退到旧版默认策略。
@@ -1327,5 +1439,42 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// 测试用 BGRA 来源。
+    #[derive(Debug)]
+    struct TestBgra(Vec<u8>);
+
+    impl BgraSource for TestBgra {
+        fn bgra(&self) -> &[u8] {
+            &self.0
+        }
+    }
+
+    /// BGRA 共享来源与直接给 RGBA 生成的草稿底图 PNG 完全一致。
+    #[test]
+    fn bgra_source_draft_matches_rgba_draft() {
+        let bgra: Vec<u8> = (0..8 * 8 * 4).map(|i| (i * 7 % 251) as u8).collect();
+        let rgba = bgra_to_rgba(&bgra);
+        assert_eq!(&rgba[..4], &[bgra[2], bgra[1], bgra[0], bgra[3]]);
+        let base = HistorySnapshot {
+            frame_width: 8,
+            frame_height: 8,
+            frame_rgba: rgba,
+            frame_bgra: None,
+            selection: (0, 0, 8, 8),
+            canvas_history: Vec::new(),
+            result_width: 8,
+            result_height: 8,
+            result_rgba: solid(8, 8, 2),
+        };
+        let shared = HistorySnapshot {
+            frame_rgba: Vec::new(),
+            frame_bgra: Some(Arc::new(TestBgra(bgra))),
+            ..base.clone()
+        };
+        let a = build_snapshot_draft(HistorySource::Saved, &base, base_ms()).unwrap();
+        let b = build_snapshot_draft(HistorySource::Saved, &shared, base_ms()).unwrap();
+        assert_eq!(a.displays[0].image.png, b.displays[0].image.png);
     }
 }

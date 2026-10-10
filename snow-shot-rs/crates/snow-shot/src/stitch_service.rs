@@ -287,9 +287,7 @@ pub fn export_part_rows(width: u32) -> u32 {
 /// assert_eq!(px, [3, 2, 1, 4]);
 /// ```
 pub fn swap_red_blue(pixels: &mut [u8]) {
-    for pixel in pixels.chunks_exact_mut(BYTES_PER_PIXEL) {
-        pixel.swap(0, 2);
-    }
+    crate::pinned_model::swap_rb_in_place(pixels);
 }
 
 /// 计算 BGRA/RGBA 缓冲字节数；乘法溢出返回 `None`。

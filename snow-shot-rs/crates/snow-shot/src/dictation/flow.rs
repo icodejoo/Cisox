@@ -497,12 +497,11 @@ impl DictationHost {
 
     /// 用当前转写与状态重新铺满浮窗。
     fn reseed(&mut self, cx: &mut ShellContext) {
-        let finals = self.transcript.finals().to_string();
-        let partial = self.transcript.partial().to_string();
         let status = self.status.clone();
-        let translations = self.translation.entries().to_vec();
+        let (finals, partial) = (self.transcript.finals(), self.transcript.partial());
+        let translations = self.translation.entries();
         self.with_view(cx, |v, vcx| {
-            v.seed(&finals, &partial, &translations, vcx);
+            v.seed(finals, partial, translations, vcx);
             v.set_status(status, vcx);
         });
     }
@@ -661,7 +660,7 @@ impl DictationHost {
 
     /// 更新状态：记录、同步到浮窗，并刷新托盘悬停提示（进行中显示状态，结束后复原）。
     fn set_status(&mut self, cx: &mut ShellContext, tray: Option<&TrayService>, status: Status) {
-        let locale = ui_prefs_from_config(&self.config).locale;
+        let locale = crate::app_runtime::locale_of(self.config.borrow().document());
         let tooltip = match status {
             Status::Done | Status::Failed(_) => TRAY_TOOLTIP.to_string(),
             _ => format!("{TRAY_TOOLTIP} - {}", status.message(locale)),

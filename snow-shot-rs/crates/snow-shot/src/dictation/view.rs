@@ -218,7 +218,7 @@ impl Render for DictationView {
             .flex_col()
             .gap(px(GAP))
             .on_key_down(cx.listener(|_this, ev: &KeyDownEvent, window, _cx| {
-                if ev.keystroke.key == "escape" {
+                if crate::shared_keys::is_dismiss(&ev.keystroke.key) {
                     window.remove_window();
                 }
             }))

@@ -417,6 +417,7 @@ mod tests {
             frame_width: 16,
             frame_height: 12,
             frame_rgba: vec![shade; 16 * 12 * 4],
+            frame_bgra: None,
             selection: (1, 2, 8, 6),
             canvas_history: canvas.clone(),
             result_width: 8,

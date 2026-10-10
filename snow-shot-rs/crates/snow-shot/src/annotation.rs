@@ -277,11 +277,19 @@ pub fn hash_pixels(bytes: &[u8]) -> u64 {
     hash
 }
 
-/// 把预乘 RGBA 就地交换 R / B 成预乘 BGRA。
-fn swap_rb(buf: &mut [u8]) {
-    for p in buf.chunks_exact_mut(BPP) {
-        p.swap(0, 2);
+/// 登记块的内容哈希；内容有变化时把 `rgba` 就地换成 BGRA 并返回 `true`，没变则不动缓冲并返回 `false`。
+///
+/// # 参数
+/// - `emitted`：已上传块的哈希表（仅本模块使用，不落盘）。
+/// - `key`：块键。
+/// - `rgba`：该块的预乘 RGBA 像素。
+fn mark_emitted(emitted: &mut HashMap<TileKey, u64>, key: TileKey, rgba: &mut [u8]) -> bool {
+    let hash = hash_pixels(rgba);
+    if emitted.insert(key, hash) == Some(hash) {
+        return false;
     }
+    crate::pinned_model::swap_rb_in_place(rgba);
+    true
 }
 
 /// 元素旋转后的轴对齐包围盒（物理像素，向外取整）。
@@ -421,43 +429,107 @@ fn draw_filter(layer: &mut [u8], rect: IntRect, render: &FilterRender, base: Bas
     }
 }
 
-/// 文字缓存键：`(文本, 字号位模式, 字体族)`。
-type TextKey = (String, u32, String);
+/// 文字缓存的一条记录：完整键（防哈希碰撞）、光栅结果与最近使用序号。
+struct TextCacheEntry {
+    /// 文本。
+    text: String,
+    /// 字号位模式。
+    size_bits: u32,
+    /// 实际使用的字体族。
+    family: String,
+    /// 光栅结果；光栅化失败为 `None`（同样缓存，避免反复重试）。
+    bitmap: Option<Arc<TextBitmap>>,
+    /// 最近使用序号，淘汰时取最小者。
+    used: u64,
+}
+
+/// 文字光栅缓存：以 `(文本, 字号, 字体族)` 的哈希为索引，命中时不分配；满载时只淘汰最久未用的一条。
+#[derive(Default)]
+struct TextCache {
+    /// 哈希 -> 记录。
+    map: HashMap<u64, TextCacheEntry>,
+    /// 单调递增的使用计数。
+    tick: u64,
+}
+
+impl TextCache {
+    /// 当前缓存条数（仅测试用）。
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    /// 取缓存的光栅结果，未命中时调用 `raster` 生成并写入；满载时淘汰最久未用的一条。
+    ///
+    /// # 参数
+    /// - `text`：文本。
+    /// - `size_bits`：字号的 `f32` 位模式。
+    /// - `family`：实际使用的字体族。
+    /// - `raster`：未命中时的光栅化函数。
+    fn get_or_insert_with(
+        &mut self,
+        text: &str,
+        size_bits: u32,
+        family: &str,
+        raster: impl FnOnce() -> Option<Arc<TextBitmap>>,
+    ) -> Option<Arc<TextBitmap>> {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        text.hash(&mut hasher);
+        size_bits.hash(&mut hasher);
+        family.hash(&mut hasher);
+        let hash = hasher.finish();
+        self.tick += 1;
+        if let Some(entry) = self.map.get_mut(&hash)
+            && entry.size_bits == size_bits
+            && entry.text == text
+            && entry.family == family
+        {
+            entry.used = self.tick;
+            return entry.bitmap.clone();
+        }
+        if self.map.len() >= TEXT_CACHE_LIMIT
+            && !self.map.contains_key(&hash)
+            && let Some(oldest) = self.map.iter().min_by_key(|(_, e)| e.used).map(|(k, _)| *k)
+        {
+            self.map.remove(&oldest);
+        }
+        let bitmap = raster();
+        self.map.insert(
+            hash,
+            TextCacheEntry {
+                text: text.to_owned(),
+                size_bits,
+                family: family.to_owned(),
+                bitmap: bitmap.clone(),
+                used: self.tick,
+            },
+        );
+        bitmap
+    }
+}
 
 /// 把一个文字元素与 `rect` 相交的部分画进图层（预乘 RGBA）。
 fn draw_text(
     layer: &mut [u8],
     rect: IntRect,
     item: &TextDisplayItem,
-    cache: &mut HashMap<TextKey, Option<Arc<TextBitmap>>>,
+    cache: &mut TextCache,
 ) {
     if item.text.trim().is_empty() {
         return;
     }
-    let family = item
-        .font_family
-        .clone()
-        .unwrap_or_else(|| DEFAULT_FONT_FAMILY.to_string());
-    let key: TextKey = (
-        item.text.clone(),
-        (item.font_size as f32).to_bits(),
-        family.clone(),
-    );
-    if cache.len() >= TEXT_CACHE_LIMIT && !cache.contains_key(&key) {
-        cache.clear();
-    }
-    let bitmap = cache
-        .entry(key)
-        .or_insert_with(|| {
-            match text_raster::rasterize_text(&item.text, &family, item.font_size as f32, false) {
-                Ok(b) => Some(Arc::new(b)),
-                Err(e) => {
-                    tracing::warn!(error = %e, "文字光栅化失败，该文字元素不会绘制");
-                    None
-                }
+    let family = item.font_family.as_deref().unwrap_or(DEFAULT_FONT_FAMILY);
+    let font_size = item.font_size as f32;
+    let bitmap = cache.get_or_insert_with(&item.text, font_size.to_bits(), family, || {
+        match text_raster::rasterize_text(&item.text, family, font_size, false) {
+            Ok(b) => Some(Arc::new(b)),
+            Err(e) => {
+                tracing::warn!(error = %e, "文字光栅化失败，该文字元素不会绘制");
+                None
             }
-        })
-        .clone();
+        }
+    });
     let Some(bitmap) = bitmap else {
         return;
     };
@@ -650,7 +722,7 @@ pub struct AnnotationLayer {
     /// 预览层已经输出过的块及其像素哈希（用于判断释放与跳过内容未变的块）。
     emitted: HashMap<TileKey, u64>,
     /// 文字光栅缓存。
-    text_cache: HashMap<TextKey, Option<Arc<TextBitmap>>>,
+    text_cache: TextCache,
     /// 指针是否处于按下（正在绘制）状态。
     drawing: bool,
     /// 自动滤镜铺的滤镜类型。
@@ -840,7 +912,7 @@ impl AnnotationLayer {
             tool: AnnotationTool::None,
             style,
             emitted: HashMap::new(),
-            text_cache: HashMap::new(),
+            text_cache: TextCache::default(),
             drawing: false,
             auto_filter_kind: AutoFilterKind::default(),
         })
@@ -905,19 +977,14 @@ impl AnnotationLayer {
             spotlight_style,
             &self.engine.spotlight_config(),
         );
-        let mut update = self.set_watermark(watermark, base)?;
-        let second = self.set_spotlight_style(spotlight, base)?;
-        // 两次更新可能触及同一块：后者覆盖前者
-        update.tiles.retain(|t| {
-            !second.tiles.iter().any(|n| n.key == t.key) && !second.released.contains(&t.key)
-        });
-        update
-            .released
-            .retain(|k| !second.tiles.iter().any(|n| n.key == *k));
-        update.tiles.extend(second.tiles);
-        update.released.extend(second.released);
-        update.touched_pixels += second.touched_pixels;
-        Ok(update)
+        // 两处设置都只改引擎状态，补丁按游标取并集，最后统一同步一次
+        self.engine
+            .set_viewport_watermark_config(self.viewport, watermark)
+            .map_err(|e| format!("设置水印失败: {e:?}"))?;
+        self.engine
+            .set_viewport_spotlight_config(self.viewport, spotlight)
+            .map_err(|e| format!("设置聚光灯失败: {e:?}"))?;
+        self.sync(base)
     }
 
     /// 引擎里当前的水印配置（含文本）。
@@ -1376,10 +1443,9 @@ impl AnnotationLayer {
             let layer = compose_decoration(&mut self.raster, rect, layer);
             match layer {
                 Some(mut rgba) => {
-                    swap_rb(&mut rgba);
-                    // 引擎的脏区是新旧包围盒的并集，其中很多块内容并没有变：哈希相同就不再上传
-                    let hash = hash_pixels(&rgba);
-                    if self.emitted.insert(key, hash) == Some(hash) {
+                    // 引擎的脏区是新旧包围盒的并集，其中很多块内容并没有变：
+                    // 先对未交换的 RGBA 算哈希，相同就不再上传，也省掉 R/B 交换
+                    if !mark_emitted(&mut self.emitted, key, &mut rgba) {
                         continue;
                     }
                     let (w, h) = rect_size(rect);
@@ -1537,7 +1603,7 @@ fn finish_layer(
     base: BaseView,
     dpr: f64,
     filters: &mut HashMap<usize, Option<FilterRender>>,
-    text_cache: &mut HashMap<TextKey, Option<Arc<TextBitmap>>>,
+    text_cache: &mut TextCache,
 ) -> Option<Vec<u8>> {
     let deferred: Vec<usize> = items
         .iter()
@@ -2423,6 +2489,116 @@ mod tests {
             again.is_empty(),
             "原地不动不应再上传分块: {} 块",
             again.tiles.len()
+        );
+    }
+
+    /// 内容没变的块不做 R/B 交换：缓冲保持原样；变化的块才被换成 BGRA。
+    #[test]
+    fn unchanged_tile_skips_swap() {
+        let key = TileKey { col: 0, row: 0 };
+        let mut emitted = HashMap::new();
+        let mut a = vec![1u8, 2, 3, 4, 5, 6, 7, 8];
+        assert!(mark_emitted(&mut emitted, key, &mut a));
+        assert_eq!(a, [3, 2, 1, 4, 7, 6, 5, 8], "首次应交换 R/B");
+        let mut same = vec![1u8, 2, 3, 4, 5, 6, 7, 8];
+        assert!(!mark_emitted(&mut emitted, key, &mut same));
+        assert_eq!(same, [1, 2, 3, 4, 5, 6, 7, 8], "未变化的块不应被交换");
+        let mut changed = vec![9u8, 2, 3, 4, 5, 6, 7, 8];
+        assert!(mark_emitted(&mut emitted, key, &mut changed));
+        assert_eq!(changed[0], 3);
+    }
+
+    /// 文字缓存超容量时只淘汰最久未用的一条：近期条目仍命中，结果与未缓存一致。
+    #[test]
+    fn text_cache_evicts_one_and_keeps_recent() {
+        let make = |n: usize| {
+            Some(Arc::new(TextBitmap {
+                width: n as u32,
+                height: 1,
+                coverage: vec![n as u8; n],
+            }))
+        };
+        let mut cache = TextCache::default();
+        for i in 0..TEXT_CACHE_LIMIT {
+            cache.get_or_insert_with(&i.to_string(), 1, "F", || make(i + 1));
+        }
+        // 刷新第 0 条，使第 1 条成为最久未用
+        let hit = cache.get_or_insert_with("0", 1, "F", || panic!("应命中"));
+        assert_eq!(hit.unwrap().width, 1);
+        let fresh = cache.get_or_insert_with("new", 1, "F", || make(99));
+        assert_eq!(fresh.unwrap().width, 99);
+        assert_eq!(cache.len(), TEXT_CACHE_LIMIT, "只淘汰一条，不整体清空");
+        for i in [0usize, 2, 30, TEXT_CACHE_LIMIT - 1] {
+            let got = cache.get_or_insert_with(&i.to_string(), 1, "F", || panic!("近期条目应命中"));
+            assert_eq!(got.unwrap().width as usize, i + 1);
+        }
+        let mut redone = false;
+        cache.get_or_insert_with("1", 1, "F", || {
+            redone = true;
+            make(2)
+        });
+        assert!(redone, "最久未用的条目应已被淘汰");
+        // 字号或字体族不同是不同的键
+        let other = cache.get_or_insert_with("0", 2, "F", || make(7));
+        assert_eq!(other.unwrap().width, 7);
+    }
+
+    /// 装饰样式一次 sync：与旧的“两次 sync 再合并”得到相同的客户端块集合。
+    #[test]
+    fn decoration_style_single_sync_matches_two_step() {
+        let (w, h) = (700, 500);
+        let data = gradient(w, h);
+        let base = BaseView {
+            width: w,
+            height: h,
+            bgra: &data,
+        };
+        let build = || {
+            let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
+            layer.set_tool(AnnotationTool::Spotlight).unwrap();
+            drag(&mut layer, base, (50.0, 50.0), (400.0, 300.0));
+            // 配置 JSON 不含水印文本，先把文本设好
+            let mut seed = layer.watermark_config();
+            seed.text = "Wm".into();
+            seed.opacity = 0.5;
+            layer.set_watermark(seed, base).unwrap();
+            layer
+        };
+        let mut wm = build().watermark_config();
+        wm.opacity = 0.8;
+        wm.angle += 15.0;
+        let mut sp = build().spotlight_config();
+        sp.opacity = 0.3;
+        sp.color.r = sp.color.r.wrapping_add(90);
+        let apply = |state: &mut HashMap<TileKey, Vec<u8>>, u: LayerUpdate| {
+            for t in u.tiles {
+                state.insert(t.key, t.bgra);
+            }
+            for k in u.released {
+                state.remove(&k);
+            }
+        };
+        let mut old = build();
+        let mut old_state = HashMap::new();
+        let u = old.set_watermark(wm.clone(), base).unwrap();
+        apply(&mut old_state, u);
+        let u = old.set_spotlight_style(sp, base).unwrap();
+        apply(&mut old_state, u);
+        let mut new = build();
+        let mut new_state = HashMap::new();
+        let u = new
+            .apply_decoration_style(
+                &crate::decoration_style::watermark_to_json(&wm),
+                &crate::decoration_style::spotlight_to_json(&sp),
+                base,
+            )
+            .unwrap();
+        apply(&mut new_state, u);
+        assert!(!new_state.is_empty());
+        assert_eq!(old_state, new_state);
+        assert_eq!(
+            old.export_rgba([0, 0, 700, 500], base),
+            new.export_rgba([0, 0, 700, 500], base)
         );
     }
 

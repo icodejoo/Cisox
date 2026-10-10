@@ -312,7 +312,7 @@ pub fn format_hex(color: Rgba) -> String {
     )
 }
 
-/// 解析 `#RRGGBB` 或 `#RRGGBBAA`；非法返回 `None`。
+/// 解析 `#RRGGBB` 或 `#RRGGBBAA`；非法返回 `None`。不做 trim，须以 `#` 开头。
 ///
 /// # 参数
 /// - `text`：颜色文本。
@@ -322,7 +322,22 @@ pub fn format_hex(color: Rgba) -> String {
 /// assert_eq!(parse_hex("red"), None);
 /// ```
 pub fn parse_hex(text: &str) -> Option<Rgba> {
-    let digits = text.strip_prefix('#')?;
+    parse_hex_digits(text.strip_prefix('#')?)
+}
+
+/// 解析不带 `#` 的 6 或 8 位十六进制颜色（6 位时 alpha 为 0xFF）；各处 `#` 颜色解析的共用内核。
+///
+/// # 参数
+/// - `digits`：十六进制数字串（不含 `#`，大小写均可）。
+///
+/// # 返回
+/// `[r, g, b, a]`；长度不对、含非 ASCII 或非十六进制字符返回 `None`。
+///
+/// ```ignore
+/// assert_eq!(parse_hex_digits("112233"), Some([0x11, 0x22, 0x33, 0xFF]));
+/// assert_eq!(parse_hex_digits("1122"), None);
+/// ```
+pub fn parse_hex_digits(digits: &str) -> Option<Rgba> {
     if !digits.is_ascii() || !(digits.len() == 6 || digits.len() == 8) {
         return None;
     }
@@ -685,6 +700,13 @@ mod tests {
         assert_eq!(parse_hex("#GG0000"), None);
         assert_eq!(parse_hex("#12345"), None);
         assert_eq!(parse_hex("#é12345"), None);
+        // 不 trim：首尾空白一律拒绝
+        assert_eq!(parse_hex(" #FF0000"), None);
+        assert_eq!(parse_hex("#FF0000 "), None);
+        assert_eq!(parse_hex("#ff000080"), Some([255, 0, 0, 0x80]));
+        assert_eq!(parse_hex_digits("112233"), Some([0x11, 0x22, 0x33, 0xFF]));
+        assert_eq!(parse_hex_digits("11223344"), Some([0x11, 0x22, 0x33, 0x44]));
+        assert_eq!(parse_hex_digits("1122"), None);
     }
 
     #[test]

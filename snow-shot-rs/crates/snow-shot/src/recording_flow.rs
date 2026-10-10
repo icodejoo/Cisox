@@ -219,7 +219,7 @@ impl RecordingHost {
         let countdown = config.countdown_secs;
         let mut view = RecordingAreaView::new(config, monitor.bounds, monitor.scale.value());
         view.set_locale(
-            crate::app_runtime::ui_prefs_from_document(self.config.borrow().document()).locale,
+            crate::app_runtime::locale_of(self.config.borrow().document()),
         );
         view.set_keymap(crate::recording::keymap::RecordKeymap::from_document(
             self.config.borrow().document(),

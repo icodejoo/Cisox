@@ -66,9 +66,7 @@ pub struct RecognitionData {
 /// - `rgba`：RGBA 像素。
 pub fn render_image(width: u32, height: u32, rgba: &[u8]) -> Option<Arc<RenderImage>> {
     let mut bgra = rgba.to_vec();
-    for px in bgra.chunks_exact_mut(4) {
-        px.swap(0, 2);
-    }
+    crate::pinned_model::swap_rb_in_place(&mut bgra);
     let buffer = RgbaImage::from_raw(width, height, bgra)?;
     Some(Arc::new(RenderImage::new(vec![Frame::new(buffer)])))
 }

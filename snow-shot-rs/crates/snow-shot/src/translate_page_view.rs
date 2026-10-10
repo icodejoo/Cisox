@@ -611,7 +611,7 @@ impl Render for TranslatePageView {
             .gap(px(GAP))
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, _cx| {
                 // 内嵌在主窗口里时 Esc 不该关掉整个主窗口
-                if ev.keystroke.key == "escape" && !this.options.embedded {
+                if crate::shared_keys::is_dismiss(&ev.keystroke.key) && !this.options.embedded {
                     window.remove_window();
                 }
             }))
