@@ -513,6 +513,21 @@ impl TranslationTracker {
             .count()
     }
 
+    /// 放弃仍在等的译文：把待译句标为失败，免得浮窗里一直转圈。
+    ///
+    /// # 返回
+    /// 被标为失败的句序号。
+    pub fn abandon_pending(&mut self) -> Vec<usize> {
+        let mut seqs = Vec::new();
+        for (seq, slot) in self.entries.iter_mut().enumerate() {
+            if matches!(slot, Some(TranslationState::Pending)) {
+                *slot = Some(TranslationState::Failed);
+                seqs.push(seq);
+            }
+        }
+        seqs
+    }
+
     /// 登记一句定稿但不翻译（如收尾并入的残余文字）。
     ///
     /// # 返回
@@ -603,6 +618,7 @@ mod tests {
     use super::*;
     use snow_config::document::ConfigDocument;
     use std::sync::Mutex;
+    use std::time::{Duration, Instant};
 
     /// 假翻译器：记录调用，译文为 `[tgt]原文`，含 `FAIL` 的句子失败。
     #[derive(Default)]
@@ -781,6 +797,72 @@ mod tests {
         t.on_result(1, 1, TranslationOutcome::Failed);
         assert_eq!(t.pending_count(), 0);
         t.finish_worker();
+    }
+
+    /// 停止时的等待译文：有待译句才进入等待，译文回齐即完成。
+    #[test]
+    fn drain_waits_for_pending_then_completes() {
+        use super::super::drain::{Drain, DrainStep};
+        let fake = Arc::new(Fake::default());
+        let mut t = TranslationTracker::default();
+        let cfg = config(true, Dimension::Bilingual, TranslateTarget::Auto);
+        let _ = start(&mut t, 1, &cfg, any(), Arc::clone(&fake));
+        t.on_final("你好");
+        t.on_final("hello");
+        let now = Instant::now();
+        let drain = Drain::begin(now, t.pending_count()).expect("有待译句应进入等待");
+        assert_eq!(drain.step(now, t.pending_count()), DrainStep::Wait);
+        t.on_result(1, 0, TranslationOutcome::Done("a".into()));
+        let later = now + Duration::from_secs(1);
+        assert_eq!(drain.step(later, t.pending_count()), DrainStep::Wait);
+        t.on_result(1, 1, TranslationOutcome::Done("b".into()));
+        assert_eq!(drain.step(later, t.pending_count()), DrainStep::Complete);
+        t.finish_worker();
+    }
+
+    /// 等待超时：放弃剩余待译句并标为失败，已回的译文保留。
+    #[test]
+    fn drain_timeout_abandons_pending() {
+        use super::super::drain::{Drain, DrainStep, TRANSLATE_DRAIN_TIMEOUT};
+        let fake = Arc::new(Fake::default());
+        let mut t = TranslationTracker::default();
+        let cfg = config(true, Dimension::Bilingual, TranslateTarget::Auto);
+        let _ = start(&mut t, 1, &cfg, any(), Arc::clone(&fake));
+        t.on_final("你好");
+        t.on_final("hello");
+        t.on_result(1, 0, TranslationOutcome::Done("a".into()));
+        let now = Instant::now();
+        let drain = Drain::begin(now, t.pending_count()).unwrap();
+        assert_eq!(
+            drain.step(now + TRANSLATE_DRAIN_TIMEOUT, t.pending_count()),
+            DrainStep::TimedOut
+        );
+        assert_eq!(t.abandon_pending(), vec![1]);
+        assert_eq!(t.entries()[0], Some(TranslationState::Done("a".into())));
+        assert_eq!(t.entries()[1], Some(TranslationState::Failed));
+        assert_eq!(t.pending_count(), 0);
+        t.finish_worker();
+    }
+
+    /// 等待中再按快捷键：立即强制结束，不看译文是否回齐。
+    #[test]
+    fn drain_can_be_forced() {
+        use super::super::drain::{Drain, DrainStep};
+        let now = Instant::now();
+        let drain = Drain::begin(now, 3).unwrap();
+        assert_eq!(drain.step(now, 3), DrainStep::Wait);
+        assert_eq!(drain.force(), DrainStep::Forced);
+    }
+
+    /// 翻译未启用 / 没有待译句：不进入等待，行为与原来一致。
+    #[test]
+    fn drain_skipped_without_pending() {
+        use super::super::drain::Drain;
+        let mut t = TranslationTracker::default();
+        t.reset(1);
+        t.on_final("你好");
+        assert_eq!(t.pending_count(), 0);
+        assert!(Drain::begin(Instant::now(), t.pending_count()).is_none());
     }
 
     /// 开关关闭不翻译，但仍登记句序号。

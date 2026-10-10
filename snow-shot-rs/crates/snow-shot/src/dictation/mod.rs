@@ -9,6 +9,7 @@
 pub mod badge;
 pub mod client;
 pub mod config;
+pub mod drain;
 pub mod engine;
 pub mod flow;
 pub mod focus;

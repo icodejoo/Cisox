@@ -8,6 +8,7 @@ use super::DictationCommand;
 use super::badge::{BADGE_WINDOW_ALPHA, ListeningBadge, badge_rect};
 use super::client::{ProcessSttLink, locate_stt_exe};
 use super::config::{DictationConfig, prepare_launch};
+use super::drain::{Drain, DrainStep};
 use super::engine::{Effect, Engine, Launch};
 use super::focus::{FocusProbe, SystemProbe, Verdict, classify};
 use super::output::{OutputMode, OutputPlan, RouteNote, decide};
@@ -65,10 +66,12 @@ pub struct DictationHost {
     probe_deadline: Option<Instant>,
     /// 结束后补发键入的截止时间。
     flush_deadline: Option<Instant>,
+    /// 结束后等待剩余译文的计时；`Some` 表示正处于 Translating 阶段（识别已结束、进程已释放）。
+    drain: Option<Drain>,
     /// 浮窗（若已打开）。
     overlay: Option<(ShellWindow, Entity<DictationView>)>,
     /// 聆听指示（主屏右下角的耳朵图标，仅“只键入、无浮窗”时显示）。
-    badge: Option<ShellWindow>,
+    badge: Option<(ShellWindow, Entity<ListeningBadge>)>,
     /// 浮窗是否曾经成功打开过（用来识别“被用户关掉”）。
     overlay_seen_open: bool,
     /// 本轮浮窗被用户关掉后不再自动重开。
@@ -113,6 +116,7 @@ impl DictationHost {
             round: 0,
             probe_deadline: None,
             flush_deadline: None,
+            drain: None,
             overlay: None,
             badge: None,
             overlay_seen_open: false,
@@ -141,6 +145,12 @@ impl DictationHost {
         let now = Instant::now();
         let active = self.engine.active();
         match command {
+            // 等译文期间再按一次：立即强制结束
+            DictationCommand::Toggle | DictationCommand::Stop
+                if !active && self.drain.is_some() =>
+            {
+                self.finish_drain(cx, tray, DrainStep::Forced)
+            }
             DictationCommand::Toggle if active => self.stop(cx, tray, now),
             DictationCommand::Stop if active => self.stop(cx, tray, now),
             DictationCommand::Toggle | DictationCommand::Start if !active => {
@@ -173,8 +183,13 @@ impl DictationHost {
             }
         }
         self.watch_overlay_dismissed(cx, tray, now);
+        self.tick_drain(cx, tray, now);
         self.sync_badge(cx);
-        if !self.engine.active() && self.flush_deadline.is_none() && self.probe_deadline.is_none() {
+        if !self.engine.active()
+            && self.flush_deadline.is_none()
+            && self.probe_deadline.is_none()
+            && self.drain.is_none()
+        {
             self.stop_ticker();
         }
     }
@@ -220,6 +235,7 @@ impl DictationHost {
     /// 应用退出：尽力结束工作进程（不按名查杀，只动自己拉起的那个）。
     pub fn shutdown(&mut self) {
         self.translation.shutdown();
+        self.drain = None;
         self.stop_ticker();
         self.engine.shutdown();
     }
@@ -244,6 +260,7 @@ impl DictationHost {
         self.with_overlay = config.type_with_overlay;
         self.probe_deadline = None;
         self.flush_deadline = None;
+        self.drain = None;
         self.dismissed = false;
         self.plan = if self.mode == OutputMode::Overlay {
             OutputPlan::overlay_only()
@@ -438,6 +455,7 @@ impl DictationHost {
         if status.is_failed() {
             self.plan.overlay = true;
         }
+        let finished_ok = !status.is_failed();
         self.set_status(cx, tray, status);
         if self.plan.overlay {
             self.ensure_overlay(cx);
@@ -448,7 +466,60 @@ impl DictationHost {
                 self.flush_deadline = Some(now + TYPE_FLUSH_TIMEOUT);
             }
         }
+        if finished_ok {
+            self.begin_drain(cx, tray, now);
+        }
         self.sync_badge(cx);
+    }
+
+    /// 识别正常收尾后，若还有句子在翻译，进入 Translating 等译文回来（上限见 `TRANSLATE_DRAIN_TIMEOUT`）。
+    ///
+    /// 译文只显示在浮窗里，所以只键入的方案也会打开浮窗；浮窗被用户关掉或打不开时不等。
+    /// 没有待译句（含翻译未启用）时什么都不做，行为与原来一致。
+    fn begin_drain(&mut self, cx: &mut ShellContext, tray: Option<&TrayService>, now: Instant) {
+        let Some(drain) = Drain::begin(now, self.translation.pending_count()) else {
+            return;
+        };
+        self.plan.overlay = true;
+        self.ensure_overlay(cx);
+        if !self.overlay_open(cx) {
+            tracing::warn!("浮窗不可用，放弃等待剩余译文");
+            return;
+        }
+        self.drain = Some(drain);
+        self.set_status(cx, tray, Status::Translating);
+    }
+
+    /// 等译文期间的定时检查：译文回齐则完成，超时则带提示结束。
+    fn tick_drain(&mut self, cx: &mut ShellContext, tray: Option<&TrayService>, now: Instant) {
+        let Some(drain) = self.drain else { return };
+        let step = if self.dismissed {
+            // 浮窗被用户关掉，译文已无处可看
+            drain.force()
+        } else {
+            drain.step(now, self.translation.pending_count())
+        };
+        if step != DrainStep::Wait {
+            self.finish_drain(cx, tray, step);
+        }
+    }
+
+    /// 结束等译文：放弃仍未回的句子；超时用提示状态说明一次，其余回到“已结束”。
+    ///
+    /// # 参数
+    /// - `step`：结束原因（`Wait` 不应传入，按完成处理）。
+    fn finish_drain(&mut self, cx: &mut ShellContext, tray: Option<&TrayService>, step: DrainStep) {
+        self.drain = None;
+        for seq in self.translation.abandon_pending() {
+            self.with_view(cx, |v, vcx| {
+                v.set_translation(seq, TranslationState::Failed, vcx)
+            });
+        }
+        let status = match step {
+            DrainStep::TimedOut => Status::Failed(Failure::TranslateTimeout),
+            _ => Status::Done,
+        };
+        self.set_status(cx, tray, status);
     }
 
     /// 按焦点判定定下本轮输出方案（整轮不变）。
@@ -527,11 +598,12 @@ impl DictationHost {
 
     /// 在主屏右下角打开聆听指示（鼠标穿透、不抢焦点，避免改变键入目标）；已打开则不重复。
     fn show_badge(&mut self, cx: &mut ShellContext) {
-        if self
-            .badge
-            .as_ref()
-            .is_some_and(|window| cx.is_window_open(window))
+        if let Some((window, view)) = &self.badge
+            && cx.is_window_open(window)
         {
+            // 已打开：只按引擎状态刷新“加载中 / 已就绪”
+            let loading = self.engine.loading();
+            view.update(cx.app(), |v, vcx| v.set_loading(loading, vcx));
             return;
         }
         self.badge = None;
@@ -554,7 +626,7 @@ impl DictationHost {
             resizable: false,
         };
         match cx.open_window(&spec, |_window, app| ListeningBadge::create(app)) {
-            Ok((window, _view)) => {
+            Ok((window, view)) => {
                 if let Err(e) = window.set_input_transparent(true) {
                     tracing::warn!(error = %e, "聆听指示设置鼠标穿透失败");
                 }
@@ -562,7 +634,9 @@ impl DictationHost {
                 if let Err(e) = window.set_window_alpha(BADGE_WINDOW_ALPHA) {
                     tracing::warn!(error = %e, "聆听指示设置整窗透明度失败");
                 }
-                self.badge = Some(window);
+                let loading = self.engine.loading();
+                view.update(cx.app(), |v, vcx| v.set_loading(loading, vcx));
+                self.badge = Some((window, view));
             }
             Err(e) => tracing::warn!(error = %e, "打开聆听指示失败"),
         }
@@ -570,7 +644,7 @@ impl DictationHost {
 
     /// 关闭聆听指示（未打开则忽略）。
     fn hide_badge(&mut self, cx: &mut ShellContext) {
-        if let Some(window) = self.badge.take()
+        if let Some((window, _)) = self.badge.take()
             && cx.is_window_open(&window)
         {
             window.close(cx.app());

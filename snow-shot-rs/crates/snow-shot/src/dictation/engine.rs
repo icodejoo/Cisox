@@ -157,6 +157,11 @@ impl Engine {
         self.phase == Phase::Listening
     }
 
+    /// 是否还在启动 / 加载模型（READY 之前或加载中，此时说话不会被识别）。
+    pub fn loading(&self) -> bool {
+        matches!(self.phase, Phase::WaitReady { .. } | Phase::Loading { .. })
+    }
+
     /// 是否处于收尾阶段（已发出结束，等待 STOPPED）。
     pub fn stopping(&self) -> bool {
         matches!(self.phase, Phase::Stopping { .. })
@@ -640,6 +645,21 @@ mod tests {
             vec![Effect::Failed(Failure::Link("broken pipe".into()))]
         );
         assert!(!engine.active());
+    }
+
+    /// 加载阶段 `loading()` 为真，听与收尾阶段为假。
+    #[test]
+    fn loading_only_before_listening() {
+        let (mut engine, shared, now) = started();
+        assert!(engine.loading());
+        feed(&shared, [ev(Event::Ready)]);
+        engine.poll(now);
+        assert!(engine.loading());
+        feed(&shared, [ev(Event::Pong)]);
+        engine.poll(now);
+        assert!(!engine.loading() && engine.listening());
+        engine.stop(now);
+        assert!(!engine.loading());
     }
 
     /// 收尾阶段强制结束：发 CANCEL、立刻释放进程；听的阶段不受影响。

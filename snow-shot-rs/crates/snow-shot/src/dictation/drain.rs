@@ -16,6 +16,8 @@ pub enum DrainStep {
     Complete,
     /// 等太久了，放弃剩下的并结束。
     TimedOut,
+    /// 用户再按了一次快捷键，立即结束。
+    Forced,
 }
 
 /// 等待剩余译文的计时。
@@ -50,6 +52,16 @@ impl Drain {
         } else {
             DrainStep::Wait
         }
+    }
+}
+
+impl Drain {
+    /// 用户强制结束等待。
+    ///
+    /// # 返回
+    /// 恒为 [`DrainStep::Forced`]，供流程层与其他结论统一收尾。
+    pub fn force(&self) -> DrainStep {
+        DrainStep::Forced
     }
 }
 
