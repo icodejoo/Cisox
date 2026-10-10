@@ -1,20 +1,15 @@
 //! gpui-kit 缺口补齐组件库（方案 ADR-3）。
 //!
-//! 提供基于 `snow-ui-shell` 门面的自研组件集（Checkerboard、Segmented、Popconfirm 等），
+//! 提供基于 `snow-ui-shell` 门面的自研组件集（Popconfirm、工具栏等），
 //! 严格隔离外部直接依赖 `gpui`。
 
-mod checkerboard;
 mod magnifier;
 mod menu_button;
 mod popconfirm;
-mod segmented;
 mod text_measure;
 mod toolbar;
 mod toolbar_groups;
 
-pub use checkerboard::{
-    Checkerboard, DEFAULT_CELL_SIZE, DEFAULT_DARK_COLOR, DEFAULT_LIGHT_COLOR,
-};
 pub use magnifier::{
     ColorFormat, Magnifier, MagnifierGrid, calculate_magnifier_placement,
 };
@@ -27,11 +22,6 @@ pub use text_measure::{
 };
 pub use popconfirm::{
     Popconfirm, PopconfirmHandler, PopconfirmPlacement,
-};
-pub use segmented::{
-    DEFAULT_ACTIVE_BG_COLOR, DEFAULT_ACTIVE_TEXT_COLOR, DEFAULT_BG_COLOR,
-    DEFAULT_SEGMENTED_HEIGHT, DEFAULT_TEXT_COLOR, Segmented, SegmentedChangeHandler,
-    SegmentedItem,
 };
 pub use toolbar::{
     AnnotationTool, ScreenshotToolbar, ToolbarAction, ToolbarGroups, ToolbarLabel,

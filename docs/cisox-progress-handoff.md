@@ -184,7 +184,7 @@ Windows 主线已经能跑通「热键 / 托盘 / IPC → 截图覆盖窗（单�
 - **`snow-history`/`snow-config` 已知偏差**：见各自作者报告（越界配置只报 Err、`shadow_color` 只近似校验等）。
 - **滤镜**：`cargo test --workspace` 曾在编译 `lyon_algorithms`/`strum_macros` 失败，原因未查，怀疑是并发改依赖。
 - **`snow-capability` & 运行时接线（✅ 已完成，2026-09-29）**：`snow-capability` 已补入 `Capability::CrashDump` 能力项；`snow-shot/src/main.rs` 已完成存储解析、按天滚动文件日志初始化、本地崩溃转储安装与能力表加载接线，可正常编译运行。
-- **守卫与视图层矛盾（✅ 已解决，2026-09-29）**：`snow-ui-widgets` 统一依赖 `snow-ui-shell` 门面（`use snow_ui_shell::ui::*`）而非直接声明 `gpui` 依赖，既满足了视图层开发需求，又严格遵守了 `workspace-guard` 隔离守卫。已落地自研缺口组件 `Checkerboard`（透明棋盘底纹）、`Segmented`（胶囊型分段选择器）与 `Popconfirm`（气泡确认框，缺口用量榜首 32 处），单元测试与 doctests 全过，通过 clippy 0 warning 检查。
+- **守卫与视图层矛盾（✅ 已解决，2026-09-29）**：`snow-ui-widgets` 统一依赖 `snow-ui-shell` 门面（`use snow_ui_shell::ui::*`）而非直接声明 `gpui` 依赖，既满足了视图层开发需求，又严格遵守了 `workspace-guard` 隔离守卫。已落地自研缺口组件 `Checkerboard`（透明棋盘底纹）、`Segmented`（胶囊型分段选择器）与 `Popconfirm`（气泡确认框，缺口用量榜首 32 处），单元测试与 doctests 全过，通过 clippy 0 warning 检查。（后续清理：Checkerboard、Segmented 因无人使用已于 2026-10 删除）
 - **P2 `snow-canvas-text`（✅ 已完成，2026-09-29）**〔审计更正：文本组件属实；P2 整体的「15 种标注工具」只接了 8 个，智能擦除未移植，见审计 D08、D12〕：完成标注文本草稿管理 `TextDraft`、样式模型 `CanvasTextStyle`、多行排版测量 `TextLayoutResult` 以及 GPUI `EntityInputHandler` 接入实体 `CanvasTextInput`，全套 10 个单元测试与 7 个文档测试全绿，通过 clippy 0 warning 与 workspace-guard 检查。
 - **P3 `snow-ui` 聚合器（✅ 已完成，2026-09-29）**：完成 `snow-ui` 总入口聚合（`shell`、`theme`、`icons`、`widgets` 与 `ui` 门面），验证通过单元测试、clippy 0 warning 与 `workspace-guard` 守卫检查。
 - **P3 选区几何与交互模型（✅ 已完成，2026-09-29）**：在 `snow-ui-shell::selection` 落地橡皮筋框选（Marquee）、八向手柄命中测试与外框生成、边界限制（`bounded_selection_rect`）、拖拽位移更新（`dragged_selection_rect`）、宽高比锁定处理以及选区状态机（`SelectionState`），并通过 46 个单测与 44 个文档测试。
@@ -212,7 +212,7 @@ Windows 主线已经能跑通「热键 / 托盘 / IPC → 截图覆盖窗（单�
 - **P7 外围收口、设置页、单实例与托盘（✅ 已完成，2026-09-30）**〔审计更正：设置页只有 31 / 238 个键生效；托盘图标占位；MCP / 更新 / 网络仍是骨架，见审计 A05、A09、A10、A12、C03〕：
   - 在 `snow-shot::settings_view` 落地基于 `snow_config::schema` 驱动的 `SettingsView`，对齐 238 个配置项至 9 大导航分类，支持动态控件渲染与重置；
   - 在 `snow-platform::single_instance` 落地 Windows 原生 `CreateMutexW` 互斥保护与本地 IPC 端口监听（`IpcCommand` 指令派发）；
-  - 在 `snow-platform::tray` 落地 `TrayAndHotkeyManager`，对接系统托盘菜单与全局快捷键注册；
+  - 在 `snow-platform::tray` 落地 `TrayAndHotkeyManager`，对接系统托盘菜单与全局快捷键注册；（后续已被 snow-ui-shell 的托盘取代，该模块已于 2026-10 清理删除）
   - 在 `snow-shot::main` 完成单实例引导、从属实例委托投递与托盘上下文接入；
   - `cargo test --workspace` 全工作区全量测试 100% 通过，`workspace-guard` 零违规，clippy 0 warning 全绿。
 - **依赖状态**：已批准 `fluent-bundle`、`unic-langid`、`quick-xml`、`tracing*`、`windows`、`serde`、`serde_json`、`image`。

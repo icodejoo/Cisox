@@ -224,8 +224,8 @@ UI 按钮、全局热键、托盘菜单、**MCP 的全部 tool** 全部收敛为
 
 | 缺口 | 用量 | 处置 |
 | Popconfirm | 32 | ✅ **已落地（2026-09-29）**：锚定内联气泡确认框（基于 `popover` + 提示图标/确认/取消按钮薄封装，进 `snow-ui-widgets`），单测与 doctest 全过 |
-| Checkerboard | 低 | ✅ **已落地（2026-09-29）**：截图工具特有的透明背景网格，自研完成（进 `snow-ui-widgets`） |
-| Segmented | 低 | ✅ **已落地（2026-09-29）**：胶囊型分段控制器，自研完成（进 `snow-ui-widgets`），单测与 doctest 全过 |
+| Checkerboard | 低 | ✅ **已落地（2026-09-29）**：截图工具特有的透明背景网格，自研完成（进 `snow-ui-widgets`；2026-10 因无人使用已删除） |
+| Segmented | 低 | ✅ **已落地（2026-09-29）**：胶囊型分段控制器，自研完成（进 `snow-ui-widgets`；2026-10 因无人使用已删除），单测与 doctest 全过 |
 | Flow layout | 低 | 无换行流式容器，需在 gpui flex 上扩展 |
 | 弹层几何助手 | — | gpui-kit 的锚定定位逻辑散落在 `popup_menu` 内部，无独立可复用 API，需自建胶水 |
 
@@ -558,7 +558,7 @@ workspace 骨架 · `snow-ui-shell` 隔离层 · `snow-capability` 能力注册�
 覆盖窗 · 选区交互与几何 · 放大镜 / 取色器 · 智能元素选区（接 `snow-ui-selector`）· 工具栏与浮动工具面板 · 导出 / 剪贴板 / 保存 / PDF · 历史记录
 
 **进度（2026-09-29）**：
-- (a) `snow-ui` 聚合器 ✅ **已完成**：聚合 `snow-ui-shell`（外壳与 GPUI 隔离门面）、`snow-ui-theme`（色彩计算与 Ant Design 令牌）、`snow-ui-icons`（829 个规范化矢量图标系统）与 `snow-ui-widgets`（Checkerboard、Segmented、Popconfirm 等补齐组件），并通过 `workspace-guard` 守卫与 clippy 检查。
+- (a) `snow-ui` 聚合器 ✅ **已完成**：聚合 `snow-ui-shell`（外壳与 GPUI 隔离门面）、`snow-ui-theme`（色彩计算与 Ant Design 令牌）、`snow-ui-icons`（829 个规范化矢量图标系统）与 `snow-ui-widgets`（Checkerboard、Segmented、Popconfirm 等补齐组件（后续清理：Checkerboard、Segmented 因无人使用已于 2026-10 删除）），并通过 `workspace-guard` 守卫与 clippy 检查。
 - (b) 选区交互几何与拖拽状态机 ✅ **已完成**（`snow-ui-shell::selection`）：提供橡皮筋框选（Marquee）、八向手柄命中测试与矩形计算、边界限制（`bounded_selection_rect`）、拖拽位移更新（`dragged_selection_rect`）、宽高比锁定处理以及选区状态机（`SelectionState`），并通过 46 个单测与 44 个文档测试。
 - (c) 放大镜与取色器浮层 ✅ **已完成**（`snow-ui-widgets::magnifier`）：提供像素级局部采样放大网格（`MagnifierGrid`）、中心十字准星指示、HEX/RGB/HSL 色彩实时格式化切换（`ColorFormat`）、屏幕坐标与选区几何尺寸展示、防遮挡与边界自适应翻转定位（`calculate_magnifier_placement`）。
 - (d) 截图浮动操作工具栏 ✅ **已完成**（`snow-ui-widgets::toolbar`）：提供标注工具切换（矩形、椭圆、箭头、直线、画笔、文字、马赛克等）、撤销/重做堆栈状态控制、导出动作按钮组（贴图、OCR、翻译、保存、复制、取消）以及依据选区上下空间自适应嵌入或翻转的智能定位算法（`calculate_toolbar_placement`）。
@@ -611,7 +611,7 @@ RapidOCR 接入与独立进程 worker · 表格/公式提取（走自定义模�
 
 - (a) Schema 驱动设置页视图组件 ✅ **已完成**（`snow-shot::settings_view`）：依据 `snow_config::schema::entries()` 自动归集 238 个配置项，映射为通用、快捷键、截图、贴图、画板标注、文字与翻译、屏幕录制、存储、高级等 9 大分类导航，支持动态控件渲染、即时修改与恢复默认，通过单元测试。
 - (b) Win32 原生单实例互斥与本地 IPC 通信 ✅ **已完成**（`snow-platform::single_instance`）：通过 Windows 命名互斥体 `CreateMutexW` 实现严格单实例防止多开，并通过 Windows 命名管道（管道名含用户 SID，仅当前用户 ACL）在主从实例间传递控制指令（`TriggerScreenshot`、`TriggerRecording`、`OpenSettings`、`ShowMainWindow`）。macOS/Linux 暂为返回明确错误的占位，未编译验证。
-- (c) 系统托盘与全局热键管理器 ✅ **已完成**（`snow-platform::tray`）：实现 `TrayAndHotkeyManager`，初始化托盘菜单项与快捷键注册查询，并在主应用引导中统一生命周期管理。
+- (c) 系统托盘与全局热键管理器 ✅ **已完成**（`snow-platform::tray`）：实现 `TrayAndHotkeyManager`，初始化托盘菜单项与快捷键注册查询，并在主应用引导中统一生命周期管理。（后续已被 snow-ui-shell 的托盘取代，该模块已于 2026-10 清理删除）
 - (d) 全工作区全量测试与架构隔离验证 ✅ **已完成**：`cargo test --workspace` 全量通过；`workspace-guard` 零违规；clippy 0 warning 保持全绿。
 
 **并行性**：P1 完成后，P2 / P5 / P6 相互独立，适合多代理并行。P3 依赖 P2，P4 依赖 P3。P7 外围收口已全面落地。

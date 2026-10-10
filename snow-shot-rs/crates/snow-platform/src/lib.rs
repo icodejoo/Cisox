@@ -26,7 +26,6 @@ pub mod single_instance;
 pub mod system_integration;
 pub mod text_inject;
 pub mod text_raster;
-pub mod tray;
 pub mod unix_time;
 pub mod win_ocr;
 pub mod window_rect;
