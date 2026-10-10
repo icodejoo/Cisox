@@ -4573,9 +4573,6 @@ fn run_quick_action(cx: &mut ShellContext, state: &mut AppState, action: QuickAc
         QuickPlan::ToggleHotkeys => toggle_global_hotkeys(state),
         QuickPlan::ToggleFullscreenGate => toggle_fullscreen_gate(state),
         QuickPlan::OpenRecordingFolder => open_recording_folder(state),
-        QuickPlan::Placeholder(id) => {
-            notify(state, id, Args::new());
-        }
     }
 }
 

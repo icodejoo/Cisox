@@ -133,8 +133,6 @@ pub enum QuickPlan {
     ToggleFullscreenGate,
     /// 打开录屏保存目录。
     OpenRecordingFolder,
-    /// 暂无实现：只给出本地化提示（携带提示消息 id）。
-    Placeholder(&'static str),
 }
 
 /// 提示消息 id：没有读取到选中的文字。

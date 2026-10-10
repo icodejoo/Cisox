@@ -13,21 +13,19 @@ use snow_stitch_images::{
 };
 
 /// 每像素字节数（BGRA / RGBA）。
-pub const BYTES_PER_PIXEL: usize = 4;
+const BYTES_PER_PIXEL: usize = 4;
 /// 画布高度上限（行）；到限后不再接收新帧。
-pub const MAX_CANVAS_ROWS: u32 = 32768;
+const MAX_CANVAS_ROWS: u32 = 32768;
 /// 分块导出时每块的字节数上限（限制单次拷贝与 PNG 编码的峰值内存）。
-pub const EXPORT_PART_BYTES: usize = 32 * 1024 * 1024;
+const EXPORT_PART_BYTES: usize = 32 * 1024 * 1024;
 /// 分块导出时每块的最少行数（避免宽图被切得过碎）。
-pub const EXPORT_PART_MIN_ROWS: u32 = 256;
+const EXPORT_PART_MIN_ROWS: u32 = 256;
 /// 分块导出时每块的最大行数（限制单张 PNG 的高度）。
-pub const EXPORT_PART_ROWS: u32 = 16384;
+const EXPORT_PART_ROWS: u32 = 16384;
 /// 库默认的单次最大位移占帧高比例（超过则该帧被库拒绝）。
-pub const MAX_MOTION_RATIO: f32 = 0.6;
-/// 建议的单次滚动占帧高比例上限（留出余量，UI 提示用）。
-pub const RECOMMENDED_STEP_RATIO: f32 = 0.5;
+const MAX_MOTION_RATIO: f32 = 0.6;
 /// 连续被拒绝多少帧后向用户提示。
-pub const REJECT_WARN_STREAK: u32 = 3;
+const REJECT_WARN_STREAK: u32 = 3;
 /// 帧指纹的乘法常数（64 位混合）。
 const FINGERPRINT_MULTIPLIER: u64 = 0x9E37_79B1_85EB_CA87;
 /// 帧指纹的初始种子。
@@ -504,11 +502,6 @@ impl StitchService {
     /// 累计统计。
     pub fn stats(&self) -> StitchStats {
         self.stats
-    }
-
-    /// 画布高度上限。
-    pub fn max_height(&self) -> u32 {
-        self.max_height
     }
 
     /// 连续被拒绝达到阈值时，返回最近一次的原因（用于提示用户）。
