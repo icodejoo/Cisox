@@ -764,6 +764,43 @@ enum StyleSelectKind {
     FilterKind,
 }
 
+/// 装饰面板文本框一次事件要执行的动作。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DecorationInputPlan {
+    /// 要设置的“文本框有焦点”标记；`None` 表示不改。
+    set_focused: Option<bool>,
+    /// 是否提交输入内容。
+    commit: bool,
+    /// 是否把焦点还给根视图。
+    refocus: bool,
+}
+
+/// 把文本框事件映射成动作。
+///
+/// # 参数
+/// - `event`：输入框事件。
+/// - `commit_on_change`：内容变化时是否也提交。
+fn decoration_input_plan(event: &InputEvent, commit_on_change: bool) -> DecorationInputPlan {
+    let mut plan = DecorationInputPlan {
+        set_focused: None,
+        commit: false,
+        refocus: false,
+    };
+    match event {
+        InputEvent::Focus => plan.set_focused = Some(true),
+        InputEvent::Blur => {
+            plan.set_focused = Some(false);
+            plan.commit = true;
+        }
+        InputEvent::PressEnter { .. } => {
+            plan.commit = true;
+            plan.refocus = true;
+        }
+        InputEvent::Change => plan.commit = commit_on_change,
+    }
+    plan
+}
+
 /// 聚光灯 / 水印设置面板里会触发变更的下拉种类。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DecorationSelectKind {
@@ -2801,7 +2838,7 @@ impl ScreenshotOverlayView {
             crate::settings_text::Lang::new(&self.locale),
             config_key,
         );
-        self.status_message = Some(crate::ocr_backend::i18n_for(&self.locale).tr_with(
+        self.status_message = Some(self.i18n.tr_with(
             "overlay-key-not-implemented",
             &snow_i18n::Args::new().named("action", name),
         ));
@@ -2815,12 +2852,16 @@ impl ScreenshotOverlayView {
         self.keymap = keymap;
     }
 
-    /// 设置界面语言（提示文案用）。
+    /// 设置界面语言（提示文案用），同时更新文案语料，二者保持一致。
+    ///
+    /// 调用顺序：`app_runtime::configure_overlay` 先调本方法，再调 `set_style_config`；
+    /// 后者会按它收到的语言重设文案语料，所以最终文案语言以后者为准。
     ///
     /// # 参数
     /// - `locale`：语言代码。
     pub fn set_locale(&mut self, locale: &str) {
         self.locale = locale.to_string();
+        self.i18n = crate::ocr_backend::i18n_for(locale);
     }
 
     /// 执行工具栏动作。
@@ -6128,172 +6169,200 @@ impl ScreenshotOverlayView {
         Theme::change(ThemeMode::Dark, None, cx);
         let placeholder: SharedString = self.i18n.tr("annot-deco-text-placeholder").into();
         let text = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
-        cx.subscribe_in(
-            &text,
-            window,
-            |this, _state, event: &InputEvent, window, cx| match event {
-                InputEvent::Focus => this.decoration_text_focused = true,
-                InputEvent::Blur => {
-                    this.decoration_text_focused = false;
-                    this.commit_watermark_text(window, cx);
-                }
-                InputEvent::PressEnter { .. } => {
-                    this.commit_watermark_text(window, cx);
-                    this.refocus_root(window, cx);
-                }
-                InputEvent::Change => this.commit_watermark_text(window, cx),
-            },
-        )
-        .detach();
+        Self::subscribe_decoration_input(&text, Self::commit_watermark_text, true, window, cx);
         let template_placeholder: SharedString =
             self.i18n.tr("annot-deco-template-placeholder").into();
         let template = cx.new(|cx| InputState::new(window, cx).placeholder(template_placeholder));
-        cx.subscribe_in(
+        Self::subscribe_decoration_input(
             &template,
+            Self::commit_watermark_template,
+            false,
             window,
-            |this, _state, event: &InputEvent, window, cx| match event {
-                InputEvent::Focus => this.decoration_text_focused = true,
-                InputEvent::Blur => {
-                    this.decoration_text_focused = false;
-                    this.commit_watermark_template(window, cx);
-                }
-                InputEvent::PressEnter { .. } => {
-                    this.commit_watermark_template(window, cx);
-                    this.refocus_root(window, cx);
-                }
-                InputEvent::Change => {}
-            },
-        )
-        .detach();
+            cx,
+        );
         let family_items = self.font_family_items();
         let wm_family = cx.new(|cx| {
             SelectState::new(SearchableVec::new(family_items), None, window, cx).searchable(true)
         });
-        cx.subscribe_in(
+        Self::subscribe_decoration_select(
             &wm_family,
+            DecorationSelectKind::WatermarkFamily,
             window,
-            |this, _state, event: &SelectEvent<SearchableVec<StyleItem>>, window, cx| {
-                if let SelectEvent::Confirm(Some(value)) = event {
-                    this.on_decoration_select(
-                        DecorationSelectKind::WatermarkFamily,
-                        value,
-                        window,
-                        cx,
-                    );
-                }
-            },
-        )
-        .detach();
+            cx,
+        );
         let template_items = self.template_items();
         let wm_template =
             cx.new(|cx| SelectState::new(SearchableVec::new(template_items), None, window, cx));
-        cx.subscribe_in(
+        Self::subscribe_decoration_select(
             &wm_template,
+            DecorationSelectKind::WatermarkTemplate,
             window,
-            |this, _state, event: &SelectEvent<SearchableVec<StyleItem>>, window, cx| {
-                if let SelectEvent::Confirm(Some(value)) = event {
-                    this.on_decoration_select(
-                        DecorationSelectKind::WatermarkTemplate,
-                        value,
-                        window,
-                        cx,
-                    );
+            cx,
+        );
+        let wm_color = cx.new(|cx| ColorPickerState::new(window, cx));
+        Self::subscribe_decoration_color(
+            &wm_color,
+            |this, color| this.edit_watermark(WatermarkEdit::Color(color)),
+            window,
+            cx,
+        );
+        let sp_color = cx.new(|cx| ColorPickerState::new(window, cx));
+        Self::subscribe_decoration_color(
+            &sp_color,
+            |this, color| this.edit_spotlight(SpotlightEdit::Color(color)),
+            window,
+            cx,
+        );
+        let signed = |values: &[u32]| values.iter().map(|v| *v as i32).collect::<Vec<_>>();
+        let wm_font = self.make_decoration_select(
+            DecorationSelectKind::WatermarkFont,
+            &signed(&WATERMARK_FONT_PRESETS),
+            "annot-size-px",
+            window,
+            cx,
+        );
+        let wm_opacity = self.make_decoration_select(
+            DecorationSelectKind::WatermarkOpacity,
+            &signed(&WATERMARK_OPACITY_PRESETS),
+            "annot-deco-percent",
+            window,
+            cx,
+        );
+        let wm_angle = self.make_decoration_select(
+            DecorationSelectKind::WatermarkAngle,
+            &WATERMARK_ANGLE_PRESETS,
+            "annot-deco-degree",
+            window,
+            cx,
+        );
+        let wm_gap = self.make_decoration_select(
+            DecorationSelectKind::WatermarkGap,
+            &signed(&WATERMARK_GAP_PRESETS),
+            "annot-size-px",
+            window,
+            cx,
+        );
+        let sp_opacity = self.make_decoration_select(
+            DecorationSelectKind::SpotlightOpacity,
+            &signed(&SPOTLIGHT_OPACITY_PRESETS),
+            "annot-deco-percent",
+            window,
+            cx,
+        );
+        self.decoration_ui = Some(DecorationUi {
+            text,
+            wm_font,
+            wm_opacity,
+            wm_angle,
+            wm_gap,
+            sp_opacity,
+            template,
+            wm_template,
+            wm_family,
+            wm_color,
+            sp_color,
+        });
+    }
+
+    /// 订阅装饰面板文本框事件：焦点标记、提交与回车后还焦点按 [`decoration_input_plan`] 执行。
+    ///
+    /// # 参数
+    /// - `input`：被订阅的输入框。
+    /// - `commit`：提交输入内容的方法。
+    /// - `commit_on_change`：内容每次变化是否也提交。
+    fn subscribe_decoration_input(
+        input: &Entity<InputState>,
+        commit: fn(&mut Self, &mut Window, &mut Context<Self>),
+        commit_on_change: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.subscribe_in(
+            input,
+            window,
+            move |this, _state, event: &InputEvent, window, cx| {
+                let plan = decoration_input_plan(event, commit_on_change);
+                if let Some(focused) = plan.set_focused {
+                    this.decoration_text_focused = focused;
+                }
+                if plan.commit {
+                    commit(this, window, cx);
+                }
+                if plan.refocus {
+                    this.refocus_root(window, cx);
                 }
             },
         )
         .detach();
-        let wm_color = cx.new(|cx| ColorPickerState::new(window, cx));
+    }
+
+    /// 订阅装饰面板下拉的确认事件，转给 `on_decoration_select`。
+    ///
+    /// # 参数
+    /// - `state`：被订阅的下拉。
+    /// - `kind`：该下拉对应的字段种类。
+    fn subscribe_decoration_select(
+        state: &Entity<StyleSelect>,
+        kind: DecorationSelectKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         cx.subscribe_in(
-            &wm_color,
+            state,
             window,
-            |this, _state, event: &ColorPickerEvent, _window, cx| {
+            move |this, _state, event: &SelectEvent<SearchableVec<StyleItem>>, window, cx| {
+                if let SelectEvent::Confirm(Some(value)) = event {
+                    this.on_decoration_select(kind, value, window, cx);
+                }
+            },
+        )
+        .detach();
+    }
+
+    /// 订阅装饰面板取色器的变更事件，把新颜色交给 `apply` 后刷新。
+    ///
+    /// # 参数
+    /// - `state`：被订阅的取色器。
+    /// - `apply`：把颜色写入水印或聚光灯的方法。
+    fn subscribe_decoration_color(
+        state: &Entity<ColorPickerState>,
+        apply: fn(&mut Self, snow_draw_engine::ColorRgba8),
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.subscribe_in(
+            state,
+            window,
+            move |this, _state, event: &ColorPickerEvent, _window, cx| {
                 let ColorPickerEvent::Change(Some(color)) = event else {
                     return;
                 };
                 let rgba = color.to_rgb();
-                this.edit_watermark(WatermarkEdit::Color(color_from_unit([
-                    rgba.r, rgba.g, rgba.b, rgba.a,
-                ])));
+                apply(this, color_from_unit([rgba.r, rgba.g, rgba.b, rgba.a]));
                 cx.notify();
             },
         )
         .detach();
-        let sp_color = cx.new(|cx| ColorPickerState::new(window, cx));
-        cx.subscribe_in(
-            &sp_color,
-            window,
-            |this, _state, event: &ColorPickerEvent, _window, cx| {
-                let ColorPickerEvent::Change(Some(color)) = event else {
-                    return;
-                };
-                let rgba = color.to_rgb();
-                this.edit_spotlight(SpotlightEdit::Color(color_from_unit([
-                    rgba.r, rgba.g, rgba.b, rgba.a,
-                ])));
-                cx.notify();
-            },
-        )
-        .detach();
-        let signed = |values: &[u32]| values.iter().map(|v| *v as i32).collect::<Vec<_>>();
-        let sets: [(DecorationSelectKind, Vec<StyleItem>); 5] = [
-            (
-                DecorationSelectKind::WatermarkFont,
-                self.decoration_items(&signed(&WATERMARK_FONT_PRESETS), "annot-size-px"),
-            ),
-            (
-                DecorationSelectKind::WatermarkOpacity,
-                self.decoration_items(&signed(&WATERMARK_OPACITY_PRESETS), "annot-deco-percent"),
-            ),
-            (
-                DecorationSelectKind::WatermarkAngle,
-                self.decoration_items(&WATERMARK_ANGLE_PRESETS, "annot-deco-degree"),
-            ),
-            (
-                DecorationSelectKind::WatermarkGap,
-                self.decoration_items(&signed(&WATERMARK_GAP_PRESETS), "annot-size-px"),
-            ),
-            (
-                DecorationSelectKind::SpotlightOpacity,
-                self.decoration_items(&signed(&SPOTLIGHT_OPACITY_PRESETS), "annot-deco-percent"),
-            ),
-        ];
-        let mut made: Vec<Entity<StyleSelect>> = Vec::new();
-        for (kind, items) in sets {
-            let state = cx.new(|cx| SelectState::new(SearchableVec::new(items), None, window, cx));
-            cx.subscribe_in(
-                &state,
-                window,
-                move |this, _state, event: &SelectEvent<SearchableVec<StyleItem>>, window, cx| {
-                    if let SelectEvent::Confirm(Some(value)) = event {
-                        this.on_decoration_select(kind, value, window, cx);
-                    }
-                },
-            )
-            .detach();
-            made.push(state);
-        }
-        let mut made = made.into_iter();
-        if let (Some(wm_font), Some(wm_opacity), Some(wm_angle), Some(wm_gap), Some(sp_opacity)) = (
-            made.next(),
-            made.next(),
-            made.next(),
-            made.next(),
-            made.next(),
-        ) {
-            self.decoration_ui = Some(DecorationUi {
-                text,
-                wm_font,
-                wm_opacity,
-                wm_angle,
-                wm_gap,
-                sp_opacity,
-                template,
-                wm_template,
-                wm_family,
-                wm_color,
-                sp_color,
-            });
-        }
+    }
+
+    /// 创建一个档位下拉并订阅其确认事件。
+    ///
+    /// # 参数
+    /// - `kind`：下拉对应的字段种类。
+    /// - `values`：档位取值。
+    /// - `label_id`：标签的消息 id。
+    fn make_decoration_select(
+        &self,
+        kind: DecorationSelectKind,
+        values: &[i32],
+        label_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<StyleSelect> {
+        let items = self.decoration_items(values, label_id);
+        let state = cx.new(|cx| SelectState::new(SearchableVec::new(items), None, window, cx));
+        Self::subscribe_decoration_select(&state, kind, window, cx);
+        state
     }
 
     /// 让文字框与下拉的显示与标注层当前的水印 / 聚光灯配置一致。
@@ -10893,5 +10962,60 @@ mod tests {
         let reopened = ConfigStore::open(&path);
         assert_eq!(reopened.value(LAST_TOOL_KEY).as_str(), Some("arrow"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 文本框事件映射：焦点、失焦提交、回车提交并还焦点、变化按开关提交。
+    #[test]
+    fn decoration_input_plan_maps_events() {
+        let plan = |event: InputEvent, on_change: bool| decoration_input_plan(&event, on_change);
+        let enter = InputEvent::PressEnter {
+            secondary: false,
+            shift: false,
+        };
+        assert_eq!(
+            plan(InputEvent::Focus, true),
+            DecorationInputPlan {
+                set_focused: Some(true),
+                commit: false,
+                refocus: false
+            }
+        );
+        assert_eq!(
+            plan(InputEvent::Blur, false),
+            DecorationInputPlan {
+                set_focused: Some(false),
+                commit: true,
+                refocus: false
+            }
+        );
+        assert_eq!(
+            plan(enter, false),
+            DecorationInputPlan {
+                set_focused: None,
+                commit: true,
+                refocus: true
+            }
+        );
+        assert!(plan(InputEvent::Change, true).commit);
+        assert!(!plan(InputEvent::Change, false).commit);
+        assert_eq!(plan(InputEvent::Change, true).set_focused, None);
+    }
+
+    /// `set_locale` 同步更新文案语料：未实现键位的提示随语言变化。
+    #[test]
+    fn set_locale_syncs_messages() {
+        let (mut view, _rec) = view_with(10, 10, 1.0, false);
+        view.set_locale("zh-CN");
+        assert!(std::ptr::eq(
+            view.i18n,
+            crate::ocr_backend::i18n_for("zh-CN")
+        ));
+        view.show_not_implemented("screenshot_translation/source_language");
+        let zh = view.status_message.clone().unwrap();
+        assert!(zh.contains("尚未实现"), "{zh}");
+        view.set_locale("en-US");
+        view.show_not_implemented("screenshot_translation/source_language");
+        let en = view.status_message.clone().unwrap();
+        assert!(en.contains("not implemented"), "{en}");
     }
 }
