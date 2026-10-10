@@ -200,14 +200,7 @@ mod tests {
 
     /// 唯一临时目录。
     fn temp_dir(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "cisox-model-pick-{tag}-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("建目录");
-        dir
+        crate::test_util::unique_temp_dir("cisox-model-pick", tag)
     }
 
     /// 在目录里放四个公式模型文件（稀疏占位到下限大小）。

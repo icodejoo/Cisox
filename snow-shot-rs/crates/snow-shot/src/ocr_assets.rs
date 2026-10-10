@@ -361,11 +361,7 @@ mod tests {
 
     /// 生成唯一临时目录。
     fn temp_root(tag: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("snow-ocr-assets-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("建根目录");
-        dir
+        crate::test_util::unique_temp_dir("snow-ocr-assets", tag)
     }
 
     /// 只含资产根下 `models` 的读取目录（环境变量覆盖布局的测试用）。

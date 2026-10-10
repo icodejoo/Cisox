@@ -210,10 +210,7 @@ mod tests {
 
     /// 建一个临时目录（不碰上游数据目录）。
     fn temp_dir(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("cisox-transfer-{}-{tag}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        dir
+        crate::test_util::unique_temp_dir("cisox-transfer", tag)
     }
 
     /// 默认文件名由时间戳生成。

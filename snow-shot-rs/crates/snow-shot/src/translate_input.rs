@@ -377,11 +377,7 @@ mod tests {
 
     /// 唯一临时目录。
     fn temp_dir(tag: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("snow-translate-input-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("建目录");
-        dir
+        crate::test_util::unique_temp_dir("snow-translate-input", tag)
     }
 
     /// 在模型根下写一份最小模型包。

@@ -256,10 +256,7 @@ mod tests {
 
     /// 唯一临时目录。
     fn temp_root(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("snow-ort-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("建目录");
-        dir
+        crate::test_util::unique_temp_dir("snow-ort", tag)
     }
 
     /// 内置清单可解析：版本、哈希长度、URL 协议、成员路径都合理。

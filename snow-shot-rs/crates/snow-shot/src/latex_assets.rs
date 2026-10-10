@@ -278,11 +278,7 @@ mod tests {
 
     /// 唯一临时目录。
     fn temp_root(tag: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("snow-latex-assets-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("建根目录");
-        dir
+        crate::test_util::unique_temp_dir("snow-latex-assets", tag)
     }
 
     /// 在目录里放占位文件（稀疏设长，不真写数据）。

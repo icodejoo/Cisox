@@ -2180,10 +2180,7 @@ mod tests {
 
     /// 创建唯一的临时目录。
     fn temp_dir(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("snow-pin-view-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+        crate::test_util::unique_temp_dir("snow-pin-view", tag)
     }
 
     /// 在目录里打开共享上下文。

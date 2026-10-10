@@ -83,6 +83,8 @@ pub mod stt_models;
 pub mod stt_settings;
 #[cfg(test)]
 mod stitch_audit_tests;
+#[cfg(test)]
+mod test_util;
 pub mod sys_prefs;
 pub mod tray_config;
 pub mod system_settings;

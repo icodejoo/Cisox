@@ -337,10 +337,7 @@ mod tests {
 
     /// 唯一临时数据根。
     fn temp_root(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("snow-dict-cfg-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("建目录");
-        dir
+        crate::test_util::unique_temp_dir("snow-dict-cfg", tag)
     }
 
     /// 在数据根下伪造一个已安装的清单模型（文件齐全 + 完成标记）。

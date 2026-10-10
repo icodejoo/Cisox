@@ -316,11 +316,7 @@ mod tests {
 
     /// 唯一临时目录。
     fn temp_root(tag: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("snow-table-assets-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("建根目录");
-        dir
+        crate::test_util::unique_temp_dir("snow-table-assets", tag)
     }
 
     /// 内置清单可解析：官方 SLANet_plus 发布包的大小、哈希与地址都填全。
