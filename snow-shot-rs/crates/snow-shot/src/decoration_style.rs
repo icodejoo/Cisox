@@ -80,6 +80,41 @@ pub enum SpotlightEdit {
     Opacity(f64),
 }
 
+/// 把值夹进范围；非有限值取范围下限。
+///
+/// # 参数
+/// - `value`：原值。
+/// - `range`：`(下限, 上限)`。
+fn clamp_finite(value: f64, range: (f64, f64)) -> f64 {
+    if value.is_finite() {
+        value.clamp(range.0, range.1)
+    } else {
+        range.0
+    }
+}
+
+/// 换颜色的 RGB 三通道，保留原透明度。
+///
+/// # 参数
+/// - `color`：原颜色。
+/// - `rgb`：新的 RGB。
+fn with_rgb(color: ColorRgba8, [r, g, b]: [u8; 3]) -> ColorRgba8 {
+    ColorRgba8 {
+        r,
+        g,
+        b,
+        a: color.a,
+    }
+}
+
+/// 颜色序列化为 `#RRGGBBAA` 文本。
+///
+/// # 参数
+/// - `color`：8 位颜色。
+fn color_hex(color: ColorRgba8) -> String {
+    format_hex([color.r, color.g, color.b, color.a])
+}
+
 /// 按字节上限截断文本，不切断字符。
 ///
 /// # 参数
@@ -111,22 +146,8 @@ fn truncate_bytes(text: &str, max_bytes: usize) -> &str {
 /// ```
 pub fn apply_watermark_edit(base: &WatermarkConfig, edit: WatermarkEdit) -> WatermarkConfig {
     let mut out = base.clone();
-    let clamp = |v: f64, range: (f64, f64)| {
-        if v.is_finite() {
-            v.clamp(range.0, range.1)
-        } else {
-            range.0
-        }
-    };
     match edit {
-        WatermarkEdit::ColorRgb([r, g, b]) => {
-            out.color = ColorRgba8 {
-                r,
-                g,
-                b,
-                a: out.color.a,
-            }
-        }
+        WatermarkEdit::ColorRgb(rgb) => out.color = with_rgb(out.color, rgb),
         WatermarkEdit::Color(color) => out.color = color,
         WatermarkEdit::FontFamily(family) => out.font_family = family.trim().to_owned(),
         WatermarkEdit::Template { value, applied_at } => {
@@ -137,10 +158,10 @@ pub fn apply_watermark_edit(base: &WatermarkConfig, edit: WatermarkEdit) -> Wate
         WatermarkEdit::Text(text) => {
             out.text = truncate_bytes(text.trim(), WATERMARK_TEXT_MAX_BYTES).to_owned();
         }
-        WatermarkEdit::FontSize(v) => out.font_size = clamp(v, WATERMARK_FONT_RANGE),
-        WatermarkEdit::Opacity(v) => out.opacity = clamp(v, OPACITY_RANGE),
-        WatermarkEdit::Angle(v) => out.angle = clamp(v, WATERMARK_ANGLE_RANGE),
-        WatermarkEdit::Gap(v) => out.gap = clamp(v, WATERMARK_GAP_RANGE),
+        WatermarkEdit::FontSize(v) => out.font_size = clamp_finite(v, WATERMARK_FONT_RANGE),
+        WatermarkEdit::Opacity(v) => out.opacity = clamp_finite(v, OPACITY_RANGE),
+        WatermarkEdit::Angle(v) => out.angle = clamp_finite(v, WATERMARK_ANGLE_RANGE),
+        WatermarkEdit::Gap(v) => out.gap = clamp_finite(v, WATERMARK_GAP_RANGE),
     }
     out
 }
@@ -153,22 +174,9 @@ pub fn apply_watermark_edit(base: &WatermarkConfig, edit: WatermarkEdit) -> Wate
 pub fn apply_spotlight_edit(base: &SpotlightConfig, edit: SpotlightEdit) -> SpotlightConfig {
     let mut out = *base;
     match edit {
-        SpotlightEdit::ColorRgb([r, g, b]) => {
-            out.color = ColorRgba8 {
-                r,
-                g,
-                b,
-                a: out.color.a,
-            }
-        }
+        SpotlightEdit::ColorRgb(rgb) => out.color = with_rgb(out.color, rgb),
         SpotlightEdit::Color(color) => out.color = color,
-        SpotlightEdit::Opacity(v) => {
-            out.opacity = if v.is_finite() {
-                v.clamp(OPACITY_RANGE.0, OPACITY_RANGE.1)
-            } else {
-                0.0
-            };
-        }
+        SpotlightEdit::Opacity(v) => out.opacity = clamp_finite(v, OPACITY_RANGE),
     }
     out
 }
@@ -308,7 +316,7 @@ pub fn font_family_options(system: Vec<String>, current: &str) -> Vec<String> {
 /// - `config`：水印配置。
 pub fn watermark_to_json(config: &WatermarkConfig) -> Value {
     json!({
-        "color": format_hex([config.color.r, config.color.g, config.color.b, config.color.a]),
+        "color": color_hex(config.color),
         "font_size": config.font_size,
         "font_family": config.font_family,
         "angle": config.angle,
@@ -323,7 +331,7 @@ pub fn watermark_to_json(config: &WatermarkConfig) -> Value {
 /// - `config`：聚光灯样式。
 pub fn spotlight_to_json(config: &SpotlightConfig) -> Value {
     json!({
-        "color": format_hex([config.color.r, config.color.g, config.color.b, config.color.a]),
+        "color": color_hex(config.color),
         "opacity": config.opacity,
     })
 }
@@ -556,6 +564,30 @@ mod tests {
             (-15.0, 80.0, 24.0, 0.32)
         );
         assert!(back.text.is_empty());
+    }
+
+    /// 夹取辅助：越界夹住、非有限值取下限；换 RGB 保留透明度。
+    #[test]
+    fn clamp_and_rgb_helpers() {
+        assert_eq!(clamp_finite(5.0, (0.0, 1.0)), 1.0);
+        assert_eq!(clamp_finite(-5.0, (2.0, 9.0)), 2.0);
+        assert_eq!(clamp_finite(f64::INFINITY, (2.0, 9.0)), 2.0);
+        let c = ColorRgba8 {
+            r: 1,
+            g: 2,
+            b: 3,
+            a: 4,
+        };
+        assert_eq!(
+            with_rgb(c, [7, 8, 9]),
+            ColorRgba8 {
+                r: 7,
+                g: 8,
+                b: 9,
+                a: 4
+            }
+        );
+        assert_eq!(color_hex(c), "#01020304");
     }
 
     /// 档位表最近项查找。

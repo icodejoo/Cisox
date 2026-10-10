@@ -5,6 +5,7 @@
 //! 传输层是泛型的（任意 `Read` / `Write`），测试用管道 + 假 worker 线程驱动，不需要真实模型。
 
 use crate::ocr_assets::{OcrAssets, OcrUnavailable};
+use crate::ocr_download::quiet_command;
 use snow_i18n::{Args, I18n};
 use snow_ocr_protocol::{
     CompleteResult, Frame, FrameReader, Kind, MAX_PIXELS, OcrLine, ProtocolError, SLOT_HEADER_LEN,
@@ -14,14 +15,12 @@ use snow_ocr_protocol::{
 };
 use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-#[cfg(windows)]
-use snow_platform::CREATE_NO_WINDOW;
 /// 每像素字节数（RGBA）。
 const BYTES_PER_PIXEL: usize = 4;
 /// stderr 只保留末尾这么多字节（用于错误说明）。
@@ -286,18 +285,13 @@ impl OcrWorker {
     /// ```
     pub fn spawn(assets: &OcrAssets, timeouts: Timeouts) -> Result<Self, OcrError> {
         let _ = std::fs::create_dir_all(&assets.state_dir);
-        let mut command = Command::new(&assets.exe);
+        let mut command = quiet_command(&assets.exe);
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         if let Some(dir) = assets.exe.parent() {
             command.current_dir(dir);
-        }
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            command.creation_flags(CREATE_NO_WINDOW);
         }
         let mut child = command
             .spawn()

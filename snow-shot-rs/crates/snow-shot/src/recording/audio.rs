@@ -57,10 +57,7 @@ pub fn restrict_to_format(audio: AudioRequest, format: RecordingFormat) -> Audio
 /// assert_eq!(req.mic_volume, 100);
 /// ```
 pub fn audio_request(document: &ConfigDocument, format: RecordingFormat) -> AudioRequest {
-    let flag = |key: &str, fallback: bool| match document.value(key) {
-        Value::Bool(b) => b,
-        _ => fallback,
-    };
+    let flag = |key: &str, fallback: bool| document.bool_or(key, fallback);
     restrict_to_format(
         AudioRequest {
             microphone: flag(KEY_MICROPHONE, DEFAULT_MICROPHONE),

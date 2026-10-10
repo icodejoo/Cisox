@@ -21,7 +21,7 @@ use snow_ui::shell::monitor::Monitors;
 use snow_ui::shell::overlay::cursor_screen_position;
 use snow_ui::shell::window::{Placement, WindowSpec};
 use snow_ui::ui::{AppContext, Entity, ShellContext, ShellWindow};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::rc::Rc;
 use std::time::Duration;
@@ -37,6 +37,53 @@ const PIN_WINDOW_TITLE_SUFFIX: &str = "Pin";
 fn pin_window_title() -> String {
     format!("{} {PIN_WINDOW_TITLE_SUFFIX}", snow_app_core::PRODUCT_NAME)
 }
+/// 贴图附属小窗（把手 / 退出按钮）的窗口规格：无边框、不抢焦点、不进任务栏。
+///
+/// # 参数
+/// - `rect`：窗口外框（屏幕物理像素）。
+/// - `topmost`：是否置顶。
+fn pin_aux_spec(rect: PhysicalRect, topmost: bool) -> WindowSpec {
+    WindowSpec {
+        title: pin_window_title(),
+        placement: Placement::Physical(rect),
+        transparent: false,
+        always_on_top: topmost,
+        decorations: false,
+        show_in_taskbar: false,
+        focus: false,
+        resizable: false,
+    }
+}
+
+/// 没有保存几何时的默认几何：左上角原尺寸、置顶。
+fn fallback_geometry(width: u32, height: u32) -> PinGeometry {
+    PinGeometry::new(
+        PhysicalRect::new(0, 0, width as i32, height as i32),
+        1.0,
+        1.0,
+        true,
+    )
+}
+
+/// 把几何的位置与尺寸校正到可见区域内。
+///
+/// # 参数
+/// - `geometry`：保存的几何。
+/// - `monitors`：显示器范围（主显示器在前）。
+/// - `index`：同批恢复时的序号（用于错开重叠位置）。
+fn clamp_to_visible(
+    mut geometry: PinGeometry,
+    monitors: &[PhysicalRect],
+    index: usize,
+) -> PinGeometry {
+    let rect = visible_rect(geometry.rect(), monitors, index);
+    geometry.x = rect.x;
+    geometry.y = rect.y;
+    geometry.width = rect.width;
+    geometry.height = rect.height;
+    geometry
+}
+
 /// 自动化脚本首步之前等待窗口稳定的时间。
 const AUTOTEST_START_DELAY: Duration = Duration::from_millis(1500);
 /// 自动化脚本两步之间的间隔。
@@ -164,16 +211,7 @@ impl PinnedManager {
                     tracing::warn!(id = %id, "工作区放不下隐藏把手");
                     return;
                 };
-                let spec = WindowSpec {
-                    title: pin_window_title(),
-                    placement: Placement::Physical(handle),
-                    transparent: false,
-                    always_on_top: topmost,
-                    decorations: false,
-                    show_in_taskbar: false,
-                    focus: false,
-                    resizable: false,
-                };
+                let spec = pin_aux_spec(handle, topmost);
                 let view_id = id.clone();
                 let view_inbox = inbox.clone();
                 match cx.open_window(&spec, move |_window, app| {
@@ -205,16 +243,7 @@ impl PinnedManager {
                     tracing::warn!(id = %id, "显示器放不下穿透退出按钮");
                     return;
                 };
-                let spec = WindowSpec {
-                    title: pin_window_title(),
-                    placement: Placement::Physical(target),
-                    transparent: false,
-                    always_on_top: topmost,
-                    decorations: false,
-                    show_in_taskbar: false,
-                    focus: false,
-                    resizable: false,
-                };
+                let spec = pin_aux_spec(target, topmost);
                 let view_id = id.clone();
                 let view_inbox = inbox.clone();
                 match cx.open_window(&spec, move |_window, app| {
@@ -380,7 +409,7 @@ impl PinnedManager {
     }
 
     /// 当前有窗口的贴图 ID。
-    pub fn open_ids(&self) -> std::collections::BTreeSet<String> {
+    pub fn open_ids(&self) -> BTreeSet<String> {
         self.windows.keys().cloned().collect()
     }
 
@@ -461,22 +490,9 @@ impl PinnedManager {
     /// # 返回
     /// 新贴图 ID；剪贴板没有图像 / 读取失败 / 建窗失败返回错误说明。
     pub fn create_from_clipboard(&mut self, cx: &mut ShellContext) -> Result<String, String> {
-        let (width, height, mut rgba) =
+        let (width, height, rgba) =
             read_image_from_clipboard()?.ok_or_else(|| "剪贴板里没有图像".to_string())?;
-        flatten_alpha_on_white(&mut rgba);
-        let monitors = cx.monitors().map_err(|e| e.to_string())?;
-        let cursor = cursor_screen_position().ok();
-        let work_area = pick_monitor(&monitors, cursor)
-            .map(|m| m.work_area)
-            .ok_or_else(|| "系统没有可用显示器".to_string())?;
-        let (rect, zoom) = initial_pin_rect(
-            width,
-            height,
-            work_area,
-            self.shared.config_bool(AUTO_RESIZE_KEY),
-        );
-        let geometry = PinGeometry::new(rect, zoom, 1.0, true);
-        self.create(cx, width, height, rgba, geometry)
+        self.create_from_image(cx, width, height, rgba)
     }
 
     /// 把一张已有图像（如截图历史里的）贴到光标所在显示器的中央。
@@ -531,19 +547,13 @@ impl PinnedManager {
             .into_rgba8();
         let (width, height) = decoded.dimensions();
         let monitors = cx.monitors().unwrap_or_default();
-        let mut geometry = closed.geometry.unwrap_or_else(|| {
-            PinGeometry::new(
-                PhysicalRect::new(0, 0, width as i32, height as i32),
-                1.0,
-                1.0,
-                true,
-            )
-        });
-        let rect = visible_rect(geometry.rect(), &monitor_rects(&monitors), 0);
-        geometry.x = rect.x;
-        geometry.y = rect.y;
-        geometry.width = rect.width;
-        geometry.height = rect.height;
+        let geometry = clamp_to_visible(
+            closed
+                .geometry
+                .unwrap_or_else(|| fallback_geometry(width, height)),
+            &monitor_rects(&monitors),
+            0,
+        );
         let id = self.create_with_session(
             cx,
             width,
@@ -695,20 +705,13 @@ impl PinnedManager {
                     continue;
                 }
             };
-            let saved = pin.geometry.unwrap_or_else(|| {
-                PinGeometry::new(
-                    PhysicalRect::new(0, 0, pin.width as i32, pin.height as i32),
-                    1.0,
-                    1.0,
-                    true,
-                )
-            });
-            let mut geometry = saved;
-            let rect = visible_rect(saved.rect(), &monitor_bounds, index);
-            geometry.x = rect.x;
-            geometry.y = rect.y;
-            geometry.width = rect.width;
-            geometry.height = rect.height;
+            let geometry = clamp_to_visible(
+                pin.geometry
+                    .unwrap_or_else(|| fallback_geometry(pin.width, pin.height)),
+                &monitor_bounds,
+                index,
+            );
+            let rect = geometry.rect();
             let frame = match frame_from_rgba(pin.width, pin.height, pin.rgba) {
                 Ok(f) => f,
                 Err(e) => {
@@ -819,6 +822,26 @@ mod tests {
         assert_eq!(rects[0], PhysicalRect::new(0, 0, 2560, 1440));
         assert_eq!(rects.len(), 3);
         assert!(monitor_rects(&Monitors::default()).is_empty());
+    }
+
+    /// 校正到可见区域：屏外的几何被拉回；没保存几何时用原尺寸默认值。
+    #[test]
+    fn clamp_to_visible_pulls_back_and_fallback_is_origin_sized() {
+        let screens = [PhysicalRect::new(0, 0, 1920, 1080)];
+        let off = PinGeometry::new(PhysicalRect::new(5000, 5000, 200, 100), 1.0, 1.0, true);
+        let fixed = clamp_to_visible(off, &screens, 0);
+        assert_eq!(fixed.rect(), visible_rect(off.rect(), &screens, 0));
+        let fallback = fallback_geometry(30, 20);
+        assert_eq!(fallback.rect(), PhysicalRect::new(0, 0, 30, 20));
+        assert!(fallback.topmost);
+    }
+
+    /// 附属小窗规格：无边框、不抢焦点、置顶跟随参数。
+    #[test]
+    fn aux_spec_is_borderless_and_unfocused() {
+        let spec = pin_aux_spec(PhysicalRect::new(1, 2, 3, 4), true);
+        assert!(spec.always_on_top && !spec.decorations && !spec.focus && !spec.show_in_taskbar);
+        assert!(!pin_aux_spec(PhysicalRect::new(1, 2, 3, 4), false).always_on_top);
     }
 
     /// 自动化脚本解析：合法数组通过，坏 JSON / 未知操作被拒绝。

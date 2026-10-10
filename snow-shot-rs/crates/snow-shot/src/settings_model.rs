@@ -151,7 +151,7 @@ pub fn groups() -> &'static [GroupInfo] {
             })
             .collect();
         for (index, item) in entries().iter().enumerate() {
-            let prefix = item.key.split('/').next().unwrap_or_default();
+            let prefix = group_id_of(item.key);
             if let Some(group) = list.iter_mut().find(|g| g.id == prefix) {
                 group.entries.push(index);
             }
@@ -578,10 +578,10 @@ pub fn is_modifier_key(key: &str) -> bool {
 /// # 参数
 /// - `key`：GPUI `Keystroke.key`
 fn portable_key_name(key: &str) -> Option<String> {
-    let lower = key.to_ascii_lowercase();
-    if MODIFIER_KEYS.contains(&lower.as_str()) {
+    if is_modifier_key(key) {
         return None;
     }
+    let lower = key.to_ascii_lowercase();
     let named = match lower.as_str() {
         "escape" => "Esc",
         "enter" => "Return",
@@ -618,7 +618,6 @@ fn portable_key_name(key: &str) -> Option<String> {
 /// # 参数
 /// - `key`：GPUI 按键名
 /// - `ctrl` / `alt` / `shift` / `win`：修饰键状态
-/// - `allow_shift_only`：是否允许无修饰的 Shift 类快捷键（保留参数，与 schema 语义一致）
 ///
 /// # 返回
 /// 规范文本（如 `Ctrl+Shift+A`）；纯修饰键或不支持的键返回 `None`。
@@ -675,13 +674,25 @@ pub struct Conflict {
     pub text: String,
 }
 
+/// 解析快捷键配置值为绑定列表（非法项丢弃）。
+fn bindings_of(value: &Value) -> Vec<ShortcutBinding> {
+    shortcut_bindings_from_json(value, true, None).0
+}
+
+/// 由可移植文本构造一条绑定（不带 macOS 键）。
+fn portable_binding(text: &str) -> ShortcutBinding {
+    ShortcutBinding {
+        portable_text: text.to_string(),
+        macos_key: None,
+    }
+}
+
 /// 读出某个快捷键配置值里的可移植文本列表。
 ///
 /// # 参数
 /// - `value`：配置值
 pub fn shortcut_texts(value: &Value) -> Vec<String> {
-    shortcut_bindings_from_json(value, true, None)
-        .0
+    bindings_of(value)
         .into_iter()
         .map(|b| b.portable_text)
         .collect()
@@ -704,16 +715,12 @@ pub fn find_shortcut_conflict(
     skip_index: Option<usize>,
 ) -> Option<Conflict> {
     let group = group_id_of(key);
-    let wanted = ShortcutBinding {
-        portable_text: candidate.to_string(),
-        macos_key: None,
-    };
+    let wanted = portable_binding(candidate);
     for item in entries() {
         if item.kind != ValueKind::ShortcutList || group_id_of(item.key) != group {
             continue;
         }
-        let (bindings, _, _) = shortcut_bindings_from_json(&read(item.key), true, None);
-        for (index, binding) in bindings.iter().enumerate() {
+        for (index, binding) in bindings_of(&read(item.key)).iter().enumerate() {
             if item.key == key && Some(index) == skip_index {
                 continue;
             }
@@ -735,11 +742,8 @@ pub fn find_shortcut_conflict(
 /// - `index`：替换的下标；`None` 表示追加
 /// - `text`：新的快捷键文本
 pub fn with_shortcut(current: &Value, index: Option<usize>, text: &str) -> Value {
-    let (mut bindings, _, _) = shortcut_bindings_from_json(current, true, None);
-    let binding = ShortcutBinding {
-        portable_text: text.to_string(),
-        macos_key: None,
-    };
+    let mut bindings = bindings_of(current);
+    let binding = portable_binding(text);
     match index {
         Some(i) if i < bindings.len() => bindings[i] = binding,
         _ => bindings.push(binding),
@@ -753,7 +757,7 @@ pub fn with_shortcut(current: &Value, index: Option<usize>, text: &str) -> Value
 /// - `current`：当前配置值
 /// - `index`：删除的下标（越界则不变）
 pub fn without_shortcut(current: &Value, index: usize) -> Value {
-    let (mut bindings, _, _) = shortcut_bindings_from_json(current, true, None);
+    let mut bindings = bindings_of(current);
     if index < bindings.len() {
         bindings.remove(index);
     }

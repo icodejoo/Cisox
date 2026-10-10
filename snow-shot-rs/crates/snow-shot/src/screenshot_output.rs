@@ -182,7 +182,7 @@ pub struct ExportSettings {
 
 /// 读字符串配置，非字符串当空串。
 fn text_of(document: &ConfigDocument, key: &str) -> String {
-    document.value(key).as_str().unwrap_or_default().to_string()
+    document.str_or(key, "").to_string()
 }
 
 impl ExportSettings {
@@ -374,11 +374,9 @@ pub fn resolve_save_directory(
     document: &ConfigDocument,
     home: Option<&Path>,
 ) -> (PathBuf, &'static str) {
-    if let Value::String(text) = document.value(SAVE_DIRECTORY_CONFIG_KEY) {
-        let text = text.trim();
-        if !text.is_empty() {
-            return (PathBuf::from(text), "config");
-        }
+    let text = document.str_or(SAVE_DIRECTORY_CONFIG_KEY, "").trim();
+    if !text.is_empty() {
+        return (PathBuf::from(text), "config");
     }
     match home {
         Some(home) => (home.join(PICTURES_DIR_NAME), "default-pictures"),

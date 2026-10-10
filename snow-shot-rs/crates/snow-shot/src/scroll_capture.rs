@@ -481,7 +481,13 @@ pub fn finalize_with_part_rows(
     if service.is_empty() || height == 0 {
         return Err(ScrollFailure::NothingCaptured);
     }
+    let bytes = (width as usize)
+        .saturating_mul(height as usize)
+        .saturating_mul(BYTES_PER_PIXEL);
+    let want_copy = copy_to_clipboard && bytes <= CLIPBOARD_MAX_BYTES;
     let mut files = Vec::new();
+    // 只有一块且要复制时，整图像素就是这一块，留着复用，省一次整图导出
+    let mut whole = None;
     for (top, rows) in plan_parts(height, part_rows) {
         let rgba = service
             .export_rows(top, rows)
@@ -490,19 +496,19 @@ pub fn finalize_with_part_rows(
             sink.save_png(width, rows, &rgba)
                 .map_err(ScrollFailure::Output)?,
         );
+        if want_copy && rows == height {
+            whole = Some(rgba);
+        }
     }
-    let bytes = (width as usize)
-        .saturating_mul(height as usize)
-        .saturating_mul(BYTES_PER_PIXEL);
     let copied = if !copy_to_clipboard {
         CopyStatus::Skipped(CopySkip::Disabled)
-    } else if bytes > CLIPBOARD_MAX_BYTES {
+    } else if !want_copy {
         CopyStatus::Skipped(CopySkip::TooLarge {
             megabytes: bytes / (1024 * 1024),
         })
     } else {
-        match service.export_all_rgba() {
-            Ok((w, h, rgba)) => match sink.copy_image(w, h, &rgba) {
+        match whole.map_or_else(|| service.export_all_rgba().map(|(_, _, d)| d), Ok) {
+            Ok(rgba) => match sink.copy_image(width, height, &rgba) {
                 Ok(()) => CopyStatus::Copied,
                 Err(e) => CopyStatus::Failed(e),
             },

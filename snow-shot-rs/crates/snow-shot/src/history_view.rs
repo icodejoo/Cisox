@@ -182,6 +182,138 @@ enum ThumbState {
     Failed,
 }
 
+/// 按主题深浅切换组件库主题（各窗口创建 / 首帧时调用）。
+///
+/// # 参数
+/// - `dark`：是否深色。
+/// - `cx`：应用上下文。
+pub(crate) fn apply_theme(dark: bool, cx: &mut App) {
+    let mode = if dark {
+        ThemeMode::Dark
+    } else {
+        ThemeMode::Light
+    };
+    Theme::change(mode, None, cx);
+}
+
+/// 列表缩略图缓存：已就绪 / 失败的结果、正在加载的 ID、待释放的图像资源（历史窗与贴图管理窗共用）。
+#[derive(Default)]
+pub(crate) struct ThumbCache {
+    /// 记录 ID → 加载结果。
+    thumbs: HashMap<String, ThumbState>,
+    /// 正在后台加载的记录 ID。
+    pending: HashSet<String>,
+    /// 待释放的图像资源（下一帧交还给窗口）。
+    pending_drops: Vec<Arc<RenderImage>>,
+}
+
+impl ThumbCache {
+    /// 收到一张后台生成的缩略图。
+    ///
+    /// # 参数
+    /// - `id`：记录 ID。
+    /// - `thumb`：缩略图；`None` 表示解码失败。
+    /// - `in_list`：该记录是否仍在当前列表里；不在则直接丢弃。
+    ///
+    /// # 返回
+    /// 是否写入了缓存（需要重绘）。
+    pub(crate) fn accept(&mut self, id: &str, thumb: Option<Thumbnail>, in_list: bool) -> bool {
+        self.pending.remove(id);
+        if !in_list {
+            return false;
+        }
+        let state = thumb
+            .and_then(|t| {
+                let buffer = RgbaImage::from_raw(t.width, t.height, t.bgra)?;
+                Some(ThumbState::Ready(Arc::new(RenderImage::new(vec![
+                    Frame::new(buffer),
+                ]))))
+            })
+            .unwrap_or(ThumbState::Failed);
+        if let Some(ThumbState::Ready(old)) = self.thumbs.insert(id.to_string(), state) {
+            self.pending_drops.push(old);
+        }
+        true
+    }
+
+    /// 只保留给定 ID 的缓存与加载标记，其余的图像资源进入待释放队列。
+    pub(crate) fn retain<'a>(&mut self, ids: impl Iterator<Item = &'a str>) {
+        let keep: HashSet<&str> = ids.collect();
+        let stale: Vec<String> = self
+            .thumbs
+            .keys()
+            .filter(|id| !keep.contains(id.as_str()))
+            .cloned()
+            .collect();
+        for id in stale {
+            if let Some(ThumbState::Ready(image)) = self.thumbs.remove(&id) {
+                self.pending_drops.push(image);
+            }
+        }
+        self.pending.retain(|id| keep.contains(id.as_str()));
+    }
+
+    /// 该记录既没有结果也没在加载（需要请求）。
+    pub(crate) fn is_missing(&self, id: &str) -> bool {
+        !self.thumbs.contains_key(id) && !self.pending.contains(id)
+    }
+
+    /// 标记一批记录正在后台加载。
+    pub(crate) fn mark_pending(&mut self, ids: impl Iterator<Item = String>) {
+        self.pending.extend(ids);
+    }
+
+    /// 把待释放的图像资源交还给窗口（每帧渲染开头调用）。
+    ///
+    /// # 参数
+    /// - `window`：当前窗口。
+    /// - `failure_note`：释放失败时的日志文案。
+    pub(crate) fn release(&mut self, window: &mut Window, failure_note: &str) {
+        for image in self.pending_drops.drain(..) {
+            if let Err(e) = window.drop_image(image) {
+                tracing::debug!(error = %e, "{failure_note}");
+            }
+        }
+    }
+
+    /// 缩略图或占位文字，装进定宽定高的框。
+    ///
+    /// # 参数
+    /// - `id`：记录 ID。
+    /// - `width` / `height`：框尺寸（逻辑像素）。
+    /// - `p`：调色板。
+    /// - `loading`：未就绪时的占位文案。
+    pub(crate) fn thumb_box(
+        &self,
+        id: &str,
+        width: f32,
+        height: f32,
+        p: &Palette,
+        loading: String,
+    ) -> Div {
+        let frame = div()
+            .w(px(width))
+            .h(px(height))
+            .flex()
+            .items_center()
+            .justify_center()
+            .overflow_hidden()
+            .bg(p.control)
+            .text_size(px(SMALL_SIZE))
+            .text_color(p.dim);
+        match self.thumbs.get(id) {
+            Some(ThumbState::Ready(image)) => frame.child(
+                img(ImageSource::Render(Arc::clone(image)))
+                    .w(px(width))
+                    .h(px(height))
+                    .object_fit(ObjectFit::Contain),
+            ),
+            Some(ThumbState::Failed) => frame.child("-"),
+            None => frame.child(loading),
+        }
+    }
+}
+
 /// 截图历史窗口视图。
 pub struct HistoryView {
     /// 列表模型。
@@ -191,11 +323,7 @@ pub struct HistoryView {
     /// 主线程收件箱（后台线程回传用）。
     inbox: MainThreadInbox<UiEvent>,
     /// 当前页缩略图。
-    thumbs: HashMap<String, ThumbState>,
-    /// 正在加载缩略图的记录 ID。
-    pending: HashSet<String>,
-    /// 待释放的图像资源（下一帧交还给窗口）。
-    pending_drops: Vec<Arc<RenderImage>>,
+    thumbs: ThumbCache,
     /// 底部提示 `(文案, 是否错误)`。
     notice: Option<(String, bool)>,
     /// 历史记录是否开启（关闭时在空状态提示）。
@@ -225,22 +353,12 @@ impl HistoryView {
         prefs: UiPrefs,
         inbox: MainThreadInbox<UiEvent>,
     ) -> Entity<Self> {
-        Theme::change(
-            if prefs.dark {
-                ThemeMode::Dark
-            } else {
-                ThemeMode::Light
-            },
-            None,
-            app,
-        );
+        apply_theme(prefs.dark, app);
         let view = Self {
             model: HistoryModel::new(store, PAGE_SIZE),
             prefs,
             inbox,
-            thumbs: HashMap::new(),
-            pending: HashSet::new(),
-            pending_drops: Vec::new(),
+            thumbs: ThumbCache::default(),
             notice: None,
             enabled,
             offset_secs: local_offset_secs(),
@@ -265,22 +383,10 @@ impl HistoryView {
     /// - `id`：记录 ID。
     /// - `thumb`：缩略图；`None` 表示解码失败。
     pub fn set_thumb(&mut self, id: &str, thumb: Option<Thumbnail>, cx: &mut Context<Self>) {
-        self.pending.remove(id);
-        if !self.model.records().iter().any(|r| r.id == id) {
-            return;
+        let in_page = self.model.records().iter().any(|r| r.id == id);
+        if self.thumbs.accept(id, thumb, in_page) {
+            cx.notify();
         }
-        let state = thumb
-            .and_then(|t| {
-                let buffer = RgbaImage::from_raw(t.width, t.height, t.bgra)?;
-                Some(ThumbState::Ready(Arc::new(RenderImage::new(vec![
-                    Frame::new(buffer),
-                ]))))
-            })
-            .unwrap_or(ThumbState::Failed);
-        if let Some(ThumbState::Ready(old)) = self.thumbs.insert(id.to_string(), state) {
-            self.pending_drops.push(old);
-        }
-        cx.notify();
     }
 
     /// 异步动作（复制 / 贴图）完成后的提示。
@@ -312,19 +418,8 @@ impl HistoryView {
 
     /// 页面数据变化后：丢弃不在当前页的缩略图并补请求缺失的。
     fn after_page_change(&mut self) {
-        let ids: HashSet<&str> = self.model.records().iter().map(|r| r.id.as_str()).collect();
-        let stale: Vec<String> = self
-            .thumbs
-            .keys()
-            .filter(|id| !ids.contains(id.as_str()))
-            .cloned()
-            .collect();
-        for id in stale {
-            if let Some(ThumbState::Ready(image)) = self.thumbs.remove(&id) {
-                self.pending_drops.push(image);
-            }
-        }
-        self.pending.retain(|id| ids.contains(id.as_str()));
+        self.thumbs
+            .retain(self.model.records().iter().map(|r| r.id.as_str()));
         self.request_thumbs();
     }
 
@@ -334,13 +429,14 @@ impl HistoryView {
             .model
             .records()
             .iter()
-            .filter(|r| !self.thumbs.contains_key(&r.id) && !self.pending.contains(&r.id))
+            .filter(|r| self.thumbs.is_missing(&r.id))
             .cloned()
             .collect();
         if missing.is_empty() {
             return;
         }
-        self.pending.extend(missing.iter().map(|r| r.id.clone()));
+        self.thumbs
+            .mark_pending(missing.iter().map(|r| r.id.clone()));
         let store = self.model.store().clone();
         let inbox = self.inbox.clone();
         let spawned = std::thread::Builder::new()
@@ -378,29 +474,27 @@ impl HistoryView {
     fn delete(&mut self, id: &str, cx: &mut Context<Self>) {
         let result = self.model.delete(id);
         self.after_page_change();
-        self.finish_mutation(result, "history-notice-delete-failed", cx);
+        self.finish_mutation(result, cx);
     }
 
     /// 清空全部。
     fn clear(&mut self, cx: &mut Context<Self>) {
         let result = self.model.clear();
         self.after_page_change();
-        self.finish_mutation(result, "history-notice-delete-failed", cx);
+        self.finish_mutation(result, cx);
     }
 
     /// 删除 / 清空后的收尾：失败给出提示，成功清掉旧提示。
-    fn finish_mutation(
-        &mut self,
-        result: Result<(), String>,
-        fail_id: &str,
-        cx: &mut Context<Self>,
-    ) {
+    fn finish_mutation(&mut self, result: Result<(), String>, cx: &mut Context<Self>) {
         self.notice = match result {
             Ok(()) => None,
             Err(e) => {
                 tracing::warn!(error = %e, "截图历史删除失败");
                 let i18n = crate::ocr_backend::i18n_for(self.prefs.locale);
-                Some((i18n.tr_with(fail_id, &Args::new().arg(1, e)), true))
+                Some((
+                    i18n.tr_with("history-notice-delete-failed", &Args::new().arg(1, e)),
+                    true,
+                ))
             }
         };
         cx.notify();
@@ -412,10 +506,7 @@ impl HistoryView {
         let record = record.clone();
         let inbox = self.inbox.clone();
         std::thread::spawn(move || {
-            let result = store
-                .read_png(&record)
-                .ok_or_else(|| "read failed".to_string())
-                .and_then(|png| decode_rgba(&png))
+            let result = load_rgba(&store, &record)
                 .and_then(|(w, h, rgba)| copy_image_to_clipboard(w, h, &rgba));
             inbox.push(UiEvent::HistoryActionDone {
                 action: HistoryAction::Copy,
@@ -429,25 +520,19 @@ impl HistoryView {
         let store = self.model.store().clone();
         let record = record.clone();
         let inbox = self.inbox.clone();
-        std::thread::spawn(move || {
-            let decoded = store
-                .read_png(&record)
-                .ok_or_else(|| "read failed".to_string())
-                .and_then(|png| decode_rgba(&png));
-            match decoded {
-                Ok((width, height, rgba)) => {
-                    inbox.push(UiEvent::HistoryPin {
-                        width,
-                        height,
-                        rgba,
-                    });
-                }
-                Err(error) => {
-                    inbox.push(UiEvent::HistoryActionDone {
-                        action: HistoryAction::Pin,
-                        error: Some(error),
-                    });
-                }
+        std::thread::spawn(move || match load_rgba(&store, &record) {
+            Ok((width, height, rgba)) => {
+                inbox.push(UiEvent::HistoryPin {
+                    width,
+                    height,
+                    rgba,
+                });
+            }
+            Err(error) => {
+                inbox.push(UiEvent::HistoryActionDone {
+                    action: HistoryAction::Pin,
+                    error: Some(error),
+                });
             }
         });
     }
@@ -477,26 +562,8 @@ impl HistoryView {
         p: &Palette,
         i18n: &snow_i18n::I18n,
     ) -> Div {
-        let frame = div()
-            .w(px(width))
-            .h(px(height))
-            .flex()
-            .items_center()
-            .justify_center()
-            .overflow_hidden()
-            .bg(p.control)
-            .text_size(px(SMALL_SIZE))
-            .text_color(p.dim);
-        match self.thumbs.get(id) {
-            Some(ThumbState::Ready(image)) => frame.child(
-                img(ImageSource::Render(Arc::clone(image)))
-                    .w(px(width))
-                    .h(px(height))
-                    .object_fit(ObjectFit::Contain),
-            ),
-            Some(ThumbState::Failed) => frame.child("-"),
-            None => frame.child(i18n.tr("history-thumb-loading")),
-        }
+        self.thumbs
+            .thumb_box(id, width, height, p, i18n.tr("history-thumb-loading"))
     }
 
     /// 描述文字三行：来源、本地时间、尺寸。
@@ -698,22 +765,10 @@ impl HistoryView {
 
 impl Render for HistoryView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        for image in self.pending_drops.drain(..) {
-            if let Err(e) = window.drop_image(image) {
-                tracing::debug!(error = %e, "释放历史缩略图失败");
-            }
-        }
+        self.thumbs.release(window, "释放历史缩略图失败");
         if self.themed {
             self.themed = false;
-            Theme::change(
-                if self.prefs.dark {
-                    ThemeMode::Dark
-                } else {
-                    ThemeMode::Light
-                },
-                None,
-                cx,
-            );
+            apply_theme(self.prefs.dark, cx);
         }
         let p = palette(self.prefs.dark, self.prefs.accent);
         let i18n = crate::ocr_backend::i18n_for(self.prefs.locale);
@@ -758,12 +813,8 @@ impl Render for HistoryView {
                 "history-rows",
                 self.model.records().len(),
                 cx.processor(move |this, range: Range<usize>, _window, cx| {
-                    let records: Vec<(usize, Record)> = range
-                        .map(|ix| (ix, this.model.records()[ix].clone()))
-                        .collect();
-                    records
-                        .iter()
-                        .map(|(ix, record)| this.render_row(*ix, record, &p, cx))
+                    range
+                        .map(|ix| this.render_row(ix, &this.model.records()[ix], &p, cx))
                         .collect::<Vec<_>>()
                 }),
             )
@@ -828,6 +879,17 @@ impl Render for HistoryView {
     }
 }
 
+/// 读取记录的 PNG 并解码成 RGBA（后台线程用）。
+///
+/// # 返回
+/// `(宽, 高, RGBA)`；读盘或解码失败返回原因。
+fn load_rgba(store: &HistoryStore, record: &Record) -> Result<(u32, u32, Vec<u8>), String> {
+    store
+        .read_png(record)
+        .ok_or_else(|| "read failed".to_string())
+        .and_then(|png| decode_rgba(&png))
+}
+
 /// 在资源管理器中选中文件。
 ///
 /// # 参数
@@ -857,10 +919,7 @@ mod tests {
 
     /// 建一个临时数据根并写入 `count` 条不同内容的记录。
     fn seeded(tag: &str, count: u8) -> (PathBuf, HistoryStore) {
-        let root =
-            std::env::temp_dir().join(format!("cisox-history-view-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
+        let root = crate::test_util::unique_temp_dir("cisox-history-view", tag);
         let policy = CaptureHistoryPolicy::default();
         let mut dedupe = Deduper::default();
         for i in 0..count {

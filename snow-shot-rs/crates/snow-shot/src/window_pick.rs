@@ -198,11 +198,13 @@ impl<Q: DesktopHover> DisplayHover<Q> {
         Self { query, monitor }
     }
 
-    /// 桌面路径换成本屏底图坐标，丢掉与本屏无交集的层。
-    fn to_frame(&self, path: &[PhysicalRect]) -> PickRects {
-        path.iter()
+    /// 桌面路径换成本屏底图坐标，丢掉与本屏无交集的层；一层都不剩时为 `None`。
+    fn to_frame(&self, path: &[PhysicalRect]) -> Option<PickRects> {
+        let frame: PickRects = path
+            .iter()
             .filter_map(|rect| screen_rect_to_frame(*rect, self.monitor))
-            .collect()
+            .collect();
+        (!frame.is_empty()).then_some(frame)
     }
 }
 
@@ -210,12 +212,12 @@ impl<Q: DesktopHover> WindowHover for DisplayHover<Q> {
     fn hover(&mut self, point: PhysicalPoint, target: PickTarget) -> Option<PickRects> {
         let desktop = PhysicalPoint::new(point.x + self.monitor.x, point.y + self.monitor.y);
         let path = self.query.borrow_mut().query(desktop, target)?;
-        Some(self.to_frame(&path)).filter(|frame| !frame.is_empty())
+        self.to_frame(&path)
     }
 
     fn refinement(&mut self) -> Option<PickRects> {
         let path = self.query.borrow_mut().take_refinement_in(self.monitor)?;
-        Some(self.to_frame(&path)).filter(|frame| !frame.is_empty())
+        self.to_frame(&path)
     }
 
     fn refinement_pending(&self) -> bool {
@@ -607,12 +609,17 @@ impl HoverMailbox {
         Self::default()
     }
 
+    /// 取状态锁；持锁线程 panic 导致的中毒按可继续使用处理。
+    fn lock(&self) -> std::sync::MutexGuard<'_, MailboxState> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// 提交一个查询请求，覆盖尚未被取走的旧请求，并作废旧的细化结果。
     ///
     /// # 返回
     /// 本次请求序号（严格递增）。
     pub fn submit(&self, point: PhysicalPoint, target: PickTarget) -> u64 {
-        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = self.lock();
         s.last_seq += 1;
         let seq = s.last_seq;
         s.pending = Some((seq, point, target));
@@ -623,7 +630,7 @@ impl HoverMailbox {
 
     /// 阻塞等待下一个请求；邮箱关闭后返回 `None`。
     pub fn next_request(&self) -> Option<(u64, PhysicalPoint, PickTarget)> {
-        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = self.lock();
         loop {
             if s.closed {
                 return None;
@@ -637,13 +644,13 @@ impl HoverMailbox {
 
     /// 是否已有更新的请求排队或邮箱已关闭（细化查询据此取消）。
     pub fn superseded(&self) -> bool {
-        let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let s = self.lock();
         s.closed || s.pending.is_some()
     }
 
     /// 发布一次查询结果；序号比已发布结果更旧时丢弃。
     pub fn publish(&self, seq: u64, path: Option<PickRects>) {
-        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = self.lock();
         if s.result.as_ref().is_none_or(|(old, _)| seq >= *old) {
             s.result = Some((seq, path));
         }
@@ -652,7 +659,7 @@ impl HoverMailbox {
 
     /// 发布细化路径；已有更新的请求时丢弃。
     pub fn publish_refinement(&self, seq: u64, path: PickRects) {
-        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = self.lock();
         if seq == s.last_seq {
             s.refined = Some((seq, path));
         }
@@ -660,25 +667,25 @@ impl HoverMailbox {
 
     /// 标记后台细化开始 / 结束。
     pub fn set_refining(&self, refining: bool) {
-        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = self.lock();
         s.refining = refining;
     }
 
     /// 后台是否正在细化，或还有结果没被取走。
     pub fn refinement_pending(&self) -> bool {
-        let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let s = self.lock();
         s.refining || s.refined.is_some()
     }
 
     /// 取走细化路径。
     pub fn take_refinement(&self) -> Option<PickRects> {
-        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = self.lock();
         s.refined.take().map(|(_, path)| path)
     }
 
     /// 最新已发布的结果（可能对应更早的请求）。
     pub fn latest(&self) -> Option<Option<PickRects>> {
-        let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let s = self.lock();
         s.result.as_ref().map(|(_, path)| path.clone())
     }
 
@@ -687,7 +694,7 @@ impl HoverMailbox {
     /// # 返回
     /// 结果已就绪返回 `Some(路径)`；超时返回 `None`。
     pub fn wait_result(&self, seq: u64, timeout: Duration) -> Option<Option<PickRects>> {
-        let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let s = self.lock();
         let (s, _) = self
             .changed
             .wait_timeout_while(s, timeout, |s| {
@@ -702,7 +709,7 @@ impl HoverMailbox {
 
     /// 关闭邮箱，唤醒工作线程退出。
     pub fn close(&self) {
-        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = self.lock();
         s.closed = true;
         self.changed.notify_all();
     }
@@ -736,6 +743,11 @@ mod native {
     }
 
     impl WindowPicker {
+        /// 最近一次查询点是否落在 `monitor` 内（细化结果只归该显示器）。
+        fn last_point_in(&self, monitor: PhysicalRect) -> bool {
+            self.last_point.is_some_and(|p| monitor.contains(p))
+        }
+
         /// 启动命中线程并立即抓取窗口快照（应在所有覆盖窗显示之前调用）。
         ///
         /// # 参数
@@ -782,7 +794,7 @@ mod native {
         }
 
         fn take_refinement_in(&mut self, monitor: PhysicalRect) -> Option<PickRects> {
-            if self.last_point.is_some_and(|p| monitor.contains(p)) {
+            if self.last_point_in(monitor) {
                 self.mailbox.take_refinement()
             } else {
                 None
@@ -790,8 +802,7 @@ mod native {
         }
 
         fn refinement_pending_in(&self, monitor: PhysicalRect) -> bool {
-            self.last_point.is_some_and(|p| monitor.contains(p))
-                && self.mailbox.refinement_pending()
+            self.last_point_in(monitor) && self.mailbox.refinement_pending()
         }
     }
 

@@ -185,17 +185,15 @@ impl OcrUiState {
     }
 }
 
-/// 把一行文字截到面板宽度（按字符计，超出加省略号）。
+/// 把一行文字截到面板宽度（按字符计，超出加省略号；OCR 与翻译面板共用）。
 ///
 /// # 参数
 /// - `line`：原文。
 /// - `max_chars`：最多字符数。
 pub fn truncate_line(line: &str, max_chars: usize) -> String {
-    if line.chars().count() <= max_chars {
-        line.to_string()
-    } else {
-        let head: String = line.chars().take(max_chars).collect();
-        format!("{head}…")
+    match line.char_indices().nth(max_chars) {
+        Some((end, _)) => format!("{}…", &line[..end]),
+        None => line.to_string(),
     }
 }
 

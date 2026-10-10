@@ -24,8 +24,15 @@ pub fn sanitize(text: &str) -> String {
             c => Some(c),
         })
         .collect();
-    // 折叠连续空白，避免换行变空格后留下多个空格
-    mapped.split_whitespace().collect::<Vec<_>>().join(" ")
+    // 折叠连续空白，避免换行变空格后留下多个空格（直接拼接，省掉中间 Vec）
+    let mut out = String::with_capacity(mapped.len());
+    for word in mapped.split_whitespace() {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(word);
+    }
+    out
 }
 
 /// 两段文字拼接处是否需要补一个空格：前一段以英文字母数字或句读结尾、后一段以英文字母数字开头。
@@ -120,6 +127,26 @@ impl Transcript {
     pub fn full(&self) -> String {
         join(&self.finals, &self.partial)
     }
+
+    /// 全文是否恰好等于 `other`（与 `full() == other` 等价，但不分配字符串；定时器每轮都要比对键入进度）。
+    ///
+    /// # 参数
+    /// - `other`：要比较的文本，通常是已键入的内容。
+    ///
+    /// ```ignore
+    /// assert!(transcript.matches_full(&transcript.full()));
+    /// ```
+    pub fn matches_full(&self, other: &str) -> bool {
+        let (f, p) = (self.finals.as_str(), self.partial.as_str());
+        if f.is_empty() || p.is_empty() {
+            return other == if f.is_empty() { p } else { f };
+        }
+        let gap = usize::from(needs_space(f, p));
+        other.len() == f.len() + gap + p.len()
+            && other.starts_with(f)
+            && other.ends_with(p)
+            && (gap == 0 || other.as_bytes()[f.len()] == b' ')
+    }
 }
 
 #[cfg(test)]
@@ -185,6 +212,39 @@ mod tests {
         t.set_partial("c\r\nd");
         assert!(!t.full().contains(['\n', '\r']));
         assert_eq!(t.full(), "a b c d");
+    }
+
+    /// `matches_full` 与 `full() == other` 在各种拼接形态下结论一致。
+    #[test]
+    fn matches_full_agrees_with_full() {
+        let samples = [
+            ("", ""),
+            ("", "你"),
+            ("你", ""),
+            ("你好", "世界"),
+            ("hello", "world"),
+            ("done.", "Next"),
+            ("hi", "世"),
+        ];
+        for (f, p) in samples {
+            let mut t = Transcript::default();
+            t.push_final(f);
+            t.set_partial(p);
+            let full = t.full();
+            assert!(t.matches_full(&full), "{f:?}+{p:?}");
+            assert!(!t.matches_full(&format!("{full}x")), "{f:?}+{p:?}");
+            if !full.is_empty() {
+                let mut cut = full.clone();
+                cut.pop();
+                assert!(!t.matches_full(&cut), "{f:?}+{p:?}");
+            }
+        }
+        // 缺空格 / 空格位置不对都不算相等
+        let mut t = Transcript::default();
+        t.push_final("hello");
+        t.set_partial("world");
+        assert!(!t.matches_full("helloworld"));
+        assert!(!t.matches_full("hello-world"));
     }
 
     /// clear 开始新一轮。

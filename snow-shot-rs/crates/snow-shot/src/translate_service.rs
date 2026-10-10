@@ -389,29 +389,16 @@ pub fn default_models_dir(data_root: &Path) -> PathBuf {
 /// # 返回
 /// 可执行文件路径；找不到返回 `WorkerUnavailable`（说明查找位置）。
 pub fn locate_worker_exe(env_exe: Option<&Path>) -> Result<PathBuf, TranslateError> {
-    if let Some(path) = env_exe.filter(|p| !p.as_os_str().is_empty()) {
-        return if path.is_file() {
-            Ok(path.to_path_buf())
-        } else {
-            Err(TranslateError::WorkerUnavailable(format!(
-                "{ENV_TRANSLATOR_EXE} points to a file that does not exist: {}",
-                path.display()
-            )))
-        };
-    }
-    let beside = std::env::current_exe()
+    let beside_exe = std::env::current_exe()
         .ok()
-        .and_then(|exe| exe.parent().map(|dir| dir.join(WORKER_EXE_NAME)));
-    match beside {
-        Some(path) if path.is_file() => Ok(path),
-        Some(path) => Err(TranslateError::WorkerUnavailable(format!(
-            "{WORKER_EXE_NAME} not found (expected at {})",
-            path.display()
-        ))),
-        None => Err(TranslateError::WorkerUnavailable(format!(
-            "{WORKER_EXE_NAME} not found"
-        ))),
-    }
+        .and_then(|exe| exe.parent().map(Path::to_path_buf));
+    crate::ocr_assets::locate_worker_exe(
+        env_exe,
+        beside_exe.as_deref(),
+        ENV_TRANSLATOR_EXE,
+        WORKER_EXE_NAME,
+    )
+    .map_err(TranslateError::WorkerUnavailable)
 }
 
 /// 字符串指纹（配置指纹里避免明文放密钥）。

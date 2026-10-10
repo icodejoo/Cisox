@@ -151,12 +151,10 @@ pub fn pad_to_content(src: &Gray) -> Option<Gray> {
         return None;
     }
     let span = f64::from(max - min);
-    let data: Vec<f64> = src
-        .data
-        .iter()
-        .map(|v| f64::from(*v - min) / span * 255.0)
-        .collect();
-    let dark_text = data.iter().sum::<f64>() / data.len() as f64 > THRESHOLD;
+    // 按需归一化到 0..255，不再整图落一份 f64 副本
+    let norm = |v: u8| f64::from(v - min) / span * 255.0;
+    let dark_text = src.data.iter().map(|v| norm(*v)).sum::<f64>() / src.data.len() as f64
+        > THRESHOLD;
     let is_ink = |v: f64| {
         if dark_text {
             v < THRESHOLD
@@ -166,8 +164,8 @@ pub fn pad_to_content(src: &Gray) -> Option<Gray> {
     };
     let w = src.width as usize;
     let (mut x0, mut y0, mut x1, mut y1) = (usize::MAX, usize::MAX, 0usize, 0usize);
-    for (i, v) in data.iter().enumerate() {
-        if is_ink(*v) {
+    for (i, v) in src.data.iter().enumerate() {
+        if is_ink(norm(*v)) {
             let (x, y) = (i % w, i / w);
             x0 = x0.min(x);
             y0 = y0.min(y);
@@ -186,7 +184,7 @@ pub fn pad_to_content(src: &Gray) -> Option<Gray> {
     let mut out = Gray::filled(pw, ph, 255);
     for y in 0..ch as usize {
         for x in 0..cw as usize {
-            let raw = data[(y0 + y) * w + x0 + x];
+            let raw = norm(src.data[(y0 + y) * w + x0 + x]);
             let v = if dark_text { raw } else { 255.0 - raw };
             // PIL 的 F -> L：截断到 0..255 后取整（向零）
             out.data[y * pw as usize + x] = v.clamp(0.0, 255.0) as u8;
@@ -533,9 +531,12 @@ fn squeeze_text_commands(chars: &[char]) -> Vec<char> {
     'scan: while i < n {
         if chars[i] == '\\' {
             for name in TEXT_COMMANDS {
-                let name: Vec<char> = name.chars().collect();
+                // 命令名全是 ASCII，字节数即字符数
                 let after = i + 1 + name.len();
-                if chars.get(i + 1..after) != Some(name.as_slice()) {
+                if !chars
+                    .get(i + 1..after)
+                    .is_some_and(|s| s.iter().copied().eq(name.chars()))
+                {
                     continue;
                 }
                 for take_space in [true, false] {
@@ -579,7 +580,7 @@ fn squeeze_text_commands(chars: &[char]) -> Vec<char> {
 
 /// 字符是否属于上游的 `[\W_^\d]`（非字母数字下划线、下划线、脱字符或数字）。
 fn is_non_letter(c: char) -> bool {
-    !(c.is_alphanumeric() || c == '_') || c == '_' || c == '^' || c.is_numeric()
+    !c.is_alphanumeric() || c == '_' || c == '^' || c.is_numeric()
 }
 
 /// 字符是否属于上游的 `[a-zA-Z]`。
@@ -972,6 +973,35 @@ mod tests {
         for (input, want) in cases {
             assert_eq!(post_process(input), *want, "{input:?}");
         }
+    }
+
+    /// 字符分类：字母不算“非字母”，数字、下划线、脱字符、符号与空白都算。
+    #[test]
+    fn non_letter_classification() {
+        for c in ['a', 'Z'] {
+            assert!(!is_non_letter(c), "{c}");
+            assert!(is_letter(c), "{c}");
+        }
+        for c in ['5', '_', '^', ' ', '{', '+'] {
+            assert!(is_non_letter(c), "{c:?}");
+            assert!(!is_letter(c), "{c:?}");
+        }
+    }
+
+    /// 浅灰渐变图：裁边后内容与手算的归一化结果一致（无整图 f64 副本也不改数值）。
+    #[test]
+    fn pad_normalizes_contrast() {
+        let mut g = Gray::filled(40, 40, 100);
+        for y in 5..9 {
+            for x in 3..9 {
+                g.data[y * 40 + x] = 60;
+            }
+        }
+        let p = pad_to_content(&g).expect("有内容");
+        // 亮底暗字：最暗 60 -> 0，底 100 -> 255
+        assert_eq!((p.width, p.height), (32, 32));
+        assert_eq!(p.at(0, 0), 0);
+        assert_eq!(p.at(5, 3), 0);
     }
 
     /// 块级包装。

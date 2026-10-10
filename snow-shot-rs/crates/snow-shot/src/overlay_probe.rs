@@ -139,11 +139,6 @@ impl FrameProbe {
         )
     }
 
-    /// 已记录的渲染次数。
-    pub fn render_count(&self) -> usize {
-        self.render_build.len()
-    }
-
     /// 三条序列的统计：`(构建耗时, 帧间隔, 鼠标移动处理)`。
     pub fn summary(&self) -> (SeriesStats, SeriesStats, SeriesStats) {
         (
@@ -209,7 +204,6 @@ mod tests {
         let (build, interval, moves) = p.summary();
         assert_eq!((build.count, interval.count, moves.count), (2, 1, 1));
         assert_eq!(moves.max_us, 50);
-        assert_eq!(p.render_count(), 2);
         assert!(p.describe().contains("frame_interval"));
     }
 

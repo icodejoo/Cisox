@@ -92,7 +92,7 @@ impl OcrRequestConfig {
             Value::String(s) if !s.trim().is_empty() => s,
             _ => default.to_string(),
         };
-        let flag = |key: &str| document.value(key).as_bool().unwrap_or(false);
+        let flag = |key: &str| document.bool_or(key, false);
         Self {
             model_kind: text(KEY_MODEL_TYPE, "small"),
             directml: flag(KEY_DIRECT_ML),
@@ -110,7 +110,7 @@ impl OcrRequestConfig {
 /// # 参数
 /// - `document`：配置文档。
 pub fn hot_start_enabled(document: &ConfigDocument) -> bool {
-    let flag = |key: &str| document.value(key).as_bool().unwrap_or(false);
+    let flag = |key: &str| document.bool_or(key, false);
     flag(KEY_RESIDENT) && flag(KEY_HOT_START)
 }
 

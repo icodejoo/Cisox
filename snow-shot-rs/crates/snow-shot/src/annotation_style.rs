@@ -170,6 +170,17 @@ pub struct ToolStyle {
     pub arrowhead: ArrowheadChoice,
 }
 
+/// 有持久化样式的工具（样式槽代表，椭圆并入矩形）。
+const STYLED_TOOLS: [AnnotationTool; 7] = [
+    AnnotationTool::Rectangle,
+    AnnotationTool::Arrow,
+    AnnotationTool::Line,
+    AnnotationTool::Pencil,
+    AnnotationTool::Text,
+    AnnotationTool::Highlighter,
+    AnnotationTool::Counter,
+];
+
 /// 把工具归并到样式槽：椭圆与矩形共用引擎的形状样式，因此共用一份。
 ///
 /// # 参数
@@ -439,16 +450,14 @@ pub fn engine_color(color: Rgba) -> ColorRgba8 {
 /// assert_eq!(fill_color(&default_style(AnnotationTool::Rectangle)).a, 0);
 /// ```
 pub fn fill_color(style: &ToolStyle) -> ColorRgba8 {
-    if style.fill {
-        ColorRgba8 {
-            a: FILL_ALPHA.min(style.color[3]),
-            ..engine_color(style.color)
-        }
+    let a = if style.fill {
+        FILL_ALPHA.min(style.color[3])
     } else {
-        ColorRgba8 {
-            a: 0,
-            ..engine_color(style.color)
-        }
+        0
+    };
+    ColorRgba8 {
+        a,
+        ..engine_color(style.color)
     }
 }
 
@@ -565,15 +574,7 @@ impl ToolStyleStore {
     /// ```
     pub fn load(read: impl Fn(&str) -> Value) -> Self {
         let mut store = Self::new();
-        for tool in [
-            AnnotationTool::Rectangle,
-            AnnotationTool::Arrow,
-            AnnotationTool::Line,
-            AnnotationTool::Pencil,
-            AnnotationTool::Text,
-            AnnotationTool::Highlighter,
-            AnnotationTool::Counter,
-        ] {
+        for tool in STYLED_TOOLS {
             let Some(key) = config_key(tool) else {
                 continue;
             };
@@ -753,15 +754,7 @@ mod tests {
         assert_eq!(config_key(AnnotationTool::Mosaic), None);
         assert_eq!(config_key(AnnotationTool::None), None);
         // 键必须真实存在于 schema，且默认值是对象
-        for tool in [
-            AnnotationTool::Rectangle,
-            AnnotationTool::Arrow,
-            AnnotationTool::Line,
-            AnnotationTool::Pencil,
-            AnnotationTool::Text,
-            AnnotationTool::Highlighter,
-            AnnotationTool::Counter,
-        ] {
+        for tool in STYLED_TOOLS {
             let key = config_key(tool).unwrap();
             assert!(snow_config::schema::default_value(key).is_object(), "{key}");
         }

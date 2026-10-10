@@ -5,7 +5,7 @@
 //! 不要求完成标记，文件齐全即可。
 //! 模型不随包；下载复用 OCR 下载器（curl 断点续传 + SHA-256 校验 + 原子改名），onnxruntime 复用翻译的那份运行时。
 
-use crate::ocr_assets::{AssetFile, COMPLETE_MARKER, model_ready};
+use crate::ocr_assets::{AssetFile, asset_root, locate_worker_exe, model_ready};
 use crate::ocr_download::{DownloadItem, DownloadStep, FetchError, fetch_verified, write_marker};
 use crate::ort_runtime;
 use serde::Deserialize;
@@ -20,8 +20,6 @@ pub const ENV_TABLE_ASSET_DIR: &str = "SNOW_TABLE_ASSET_DIR";
 pub const ENV_TABLE_EXE: &str = "SNOW_TABLE_EXE";
 /// 工作进程可执行文件名。
 pub const TABLE_WORKER_EXE_NAME: &str = "snow-table.exe";
-/// 资产目录名（位于数据根下）。
-const ASSETS_DIR: &str = "assets";
 /// 表格子目录名。
 const TABLE_DIR: &str = "table";
 /// 表格清单的组件名（错误文案里的技术名词）。
@@ -77,10 +75,7 @@ pub fn manifest() -> Result<&'static TableManifest, String> {
 /// - `data_root`：应用数据根目录。
 /// - `env_override`：`SNOW_TABLE_ASSET_DIR` 的值（空白视为未设置）。
 pub fn table_root(data_root: &Path, env_override: Option<&str>) -> PathBuf {
-    match env_override.map(str::trim).filter(|v| !v.is_empty()) {
-        Some(dir) => PathBuf::from(dir),
-        None => data_root.join(ASSETS_DIR).join(TABLE_DIR),
-    }
+    asset_root(data_root, env_override, TABLE_DIR)
 }
 
 /// 模型文件夹：`<模型根>/<模型 ID>`。
@@ -239,27 +234,13 @@ fn locate_worker(
     exe_override: Option<&Path>,
     beside_exe: Option<&Path>,
 ) -> Result<PathBuf, TableUnavailable> {
-    if let Some(path) = exe_override.filter(|p| !p.as_os_str().is_empty()) {
-        return if path.is_file() {
-            Ok(path.to_path_buf())
-        } else {
-            Err(TableUnavailable::NoWorker(format!(
-                "{ENV_TABLE_EXE} points to a file that does not exist: {}",
-                path.display()
-            )))
-        };
-    }
-    let candidate = beside_exe.map(|dir| dir.join(TABLE_WORKER_EXE_NAME));
-    match candidate {
-        Some(path) if path.is_file() => Ok(path),
-        Some(path) => Err(TableUnavailable::NoWorker(format!(
-            "{TABLE_WORKER_EXE_NAME} not found (expected at {})",
-            path.display()
-        ))),
-        None => Err(TableUnavailable::NoWorker(format!(
-            "{TABLE_WORKER_EXE_NAME} not found"
-        ))),
-    }
+    locate_worker_exe(
+        exe_override,
+        beside_exe,
+        ENV_TABLE_EXE,
+        TABLE_WORKER_EXE_NAME,
+    )
+    .map_err(TableUnavailable::NoWorker)
 }
 
 /// 下载并安装缺失的表格识别组件：SLANet_plus 模型，以及（如缺）onnxruntime 运行时。
@@ -307,12 +288,10 @@ pub fn download_missing(
 /// 环境变量：onnxruntime 动态库路径（与翻译共用）。
 const ENV_ORT: &str = snow_translate::worker::ENV_ORT_DYLIB;
 
-/// 完成标记文件名（供测试伪造就绪目录）。
-pub const MARKER_NAME: &str = COMPLETE_MARKER;
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ocr_assets::COMPLETE_MARKER;
 
     /// 唯一临时目录。
     fn temp_root(tag: &str) -> PathBuf {
@@ -367,7 +346,7 @@ mod tests {
                 .and_then(|h| h.set_len(f.size))
                 .expect("占位");
         }
-        std::fs::write(dir.join(MARKER_NAME), b"{}").expect("标记");
+        std::fs::write(dir.join(COMPLETE_MARKER), b"{}").expect("标记");
         assert_eq!(
             resolve_assets(&root, None, "", None, None, Some(&beside)),
             Err(TableUnavailable::NoRuntime)

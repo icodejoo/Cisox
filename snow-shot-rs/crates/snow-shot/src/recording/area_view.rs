@@ -331,6 +331,11 @@ impl RecordingAreaView {
 
     /// 当前状态下的窗口布局。
     pub fn layout(&self) -> AreaLayout {
+        self.layout_with_notice(self.audio_notice_text().is_some())
+    }
+
+    /// 同 [`Self::layout`]，但音频提示是否显示由调用方给出（渲染时已取过提示文本，免得再算一遍）。
+    fn layout_with_notice(&self, notice: bool) -> AreaLayout {
         let window = PhysicalRect::new(0, 0, self.window_size.0, self.window_size.1);
         let countdown = matches!(self.session.state(), RecordingState::Countdown { .. });
         compute_layout(
@@ -338,7 +343,7 @@ impl RecordingAreaView {
             window,
             self.scale,
             countdown,
-            self.audio_notice_text().is_some(),
+            notice,
         )
     }
 
@@ -384,10 +389,6 @@ impl RecordingAreaView {
             && self.error_since.is_none()
         {
             tracing::error!(reason = ?reason, "录制出错");
-        }
-        if matches!(self.session.state(), RecordingState::Error { .. })
-            && self.error_since.is_none()
-        {
             self.error_since = Some(now);
         }
         changed
@@ -495,7 +496,8 @@ impl Render for RecordingAreaView {
     /// 渲染边框、倒计时数字与控制条。
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state = self.session.state().clone();
-        let layout = self.layout();
+        let notice_text = self.audio_notice_text();
+        let layout = self.layout_with_notice(notice_text.is_some());
         let bounds = self.bounds();
         let accent = match state {
             RecordingState::Recording {
@@ -563,7 +565,6 @@ impl Render for RecordingAreaView {
         }
 
         let (l, t, w, h) = self.logical(layout.toolbar);
-        let notice_text = self.audio_notice_text();
         let i18n = crate::ocr_backend::i18n_for(self.locale);
         let mut bar = div()
             .w_full()
@@ -722,14 +723,20 @@ mod tests {
         fn shutdown(&mut self) {}
     }
 
-    /// 构造视图（区域 100,100 800x600，显示器原点 0,0 1920x1080）。
-    fn view(countdown: u32) -> (RecordingAreaView, Shared) {
+    /// 构造未开始的视图与假通道（区域 100,100 800x600，显示器原点 0,0 1920x1080）。
+    fn idle_view(config: RecordingConfig) -> (RecordingAreaView, Shared) {
         let shared = Rc::new(RefCell::new((Vec::new(), Vec::new())));
         let config = RecordingConfig {
             region: PhysicalRect::new(100, 100, 800, 600),
-            ..RecordingConfig::default()
+            ..config
         };
-        let mut v = RecordingAreaView::new(config, PhysicalRect::new(0, 0, 1920, 1080), 1.0);
+        let v = RecordingAreaView::new(config, PhysicalRect::new(0, 0, 1920, 1080), 1.0);
+        (v, shared)
+    }
+
+    /// 构造已开始的视图（同 [`idle_view`]，默认配置）。
+    fn view(countdown: u32) -> (RecordingAreaView, Shared) {
+        let (mut v, shared) = idle_view(RecordingConfig::default());
         v.session.begin(Box::new(Link(shared.clone())), countdown);
         (v, shared)
     }
@@ -737,12 +744,7 @@ mod tests {
     /// 键位动作按状态生效：录制中可导出 / 暂停 / 复制，Esc 只放弃倒计时，录制中的 Esc 不丢录像。
     #[test]
     fn key_actions_follow_state() {
-        let shared = Rc::new(RefCell::new((Vec::new(), Vec::new())));
-        let config = RecordingConfig {
-            region: PhysicalRect::new(100, 100, 800, 600),
-            ..RecordingConfig::default()
-        };
-        let mut v = RecordingAreaView::new(config, PhysicalRect::new(0, 0, 1920, 1080), 1.0);
+        let (mut v, shared) = idle_view(RecordingConfig::default());
         // 空闲时导出 / Esc 都不起作用
         v.handle_key_action(RecordKeyAction::Export);
         v.handle_key_action(RecordKeyAction::EndRecording);
@@ -757,13 +759,7 @@ mod tests {
         v.handle_key_action(RecordKeyAction::EndRecording);
         assert!(v.cancelled, "倒计时中 Esc 放弃");
 
-        let shared = Rc::new(RefCell::new((Vec::new(), Vec::new())));
-        let config = RecordingConfig {
-            region: PhysicalRect::new(100, 100, 800, 600),
-            ..RecordingConfig::default()
-        };
-        let mut v = RecordingAreaView::new(config, PhysicalRect::new(0, 0, 1920, 1080), 1.0);
-        v.session.begin(Box::new(Link(shared.clone())), 0);
+        let (mut v, shared) = view(0);
         v.handle_key_action(RecordKeyAction::ToggleRecording);
         assert_eq!(shared.borrow().0.last(), Some(&Command::Pause));
         v.handle_key_action(RecordKeyAction::EndRecording);
@@ -777,17 +773,14 @@ mod tests {
     #[test]
     fn audio_notice_shows_and_grows_toolbar() {
         use snow_recorder_protocol::{AudioRequest, AudioSource, AudioStatus};
-        let shared = Rc::new(RefCell::new((Vec::new(), Vec::new())));
-        let config = RecordingConfig {
-            region: PhysicalRect::new(100, 100, 800, 600),
+        let (mut v, shared) = idle_view(RecordingConfig {
             audio: AudioRequest {
                 microphone: true,
                 system: true,
                 ..AudioRequest::default()
             },
             ..RecordingConfig::default()
-        };
-        let mut v = RecordingAreaView::new(config, PhysicalRect::new(0, 0, 1920, 1080), 1.0);
+        });
         v.set_locale("zh-CN");
         v.session.begin(Box::new(Link(shared.clone())), 0);
         let plain_h = v.layout().toolbar.height;
@@ -800,6 +793,7 @@ mod tests {
         assert!(v.advance(Instant::now()));
         assert_eq!(v.audio_notice_text().as_deref(), Some("麦克风不可用"));
         assert!(v.layout().toolbar.height > plain_h);
+        assert_eq!(v.layout(), v.layout_with_notice(true));
         shared
             .borrow_mut()
             .1

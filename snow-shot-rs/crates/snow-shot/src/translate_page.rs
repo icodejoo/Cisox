@@ -45,6 +45,11 @@ pub fn page_languages() -> Vec<Lang> {
     SUPPORTED_TARGETS.iter().map(|(lang, _)| *lang).collect()
 }
 
+/// 语言是否在页面支持的集合内（不含自动检测）。
+fn is_page_language(lang: Lang) -> bool {
+    SUPPORTED_TARGETS.iter().any(|(l, _)| *l == lang)
+}
+
 /// 语言选项列表。
 ///
 /// # 参数
@@ -70,7 +75,7 @@ pub fn language_choices(with_auto: bool, locale: &str) -> Vec<LangChoice> {
 pub fn normalize_language(lang: Lang, is_source: bool) -> Lang {
     if is_source && lang == Lang::Auto {
         Lang::Auto
-    } else if page_languages().contains(&lang) {
+    } else if is_page_language(lang) {
         lang
     } else if is_source {
         Lang::Auto
@@ -134,11 +139,22 @@ struct InFlight {
 }
 
 /// 语言的代码拼写（自动检测为 [`AUTO_LANGUAGE_ID`]）。
-fn lang_code(lang: Lang) -> String {
+///
+/// # 参数
+/// - `lang`：语言。
+///
+/// # 返回
+/// 下拉取值 / 历史记录用的代码。
+///
+/// # 示例
+/// ```ignore
+/// assert_eq!(lang_code(Lang::Auto), "auto");
+/// ```
+pub fn lang_code(lang: Lang) -> &'static str {
     if lang == Lang::Auto {
-        AUTO_LANGUAGE_ID.to_string()
+        AUTO_LANGUAGE_ID
     } else {
-        lang.code().to_string()
+        lang.code()
     }
 }
 
@@ -307,11 +323,7 @@ impl TranslatePageModel {
     /// 设置目标语言（代码拼写，未知值或自动检测忽略）；返回是否变化。
     pub fn set_target(&mut self, code: &str) -> bool {
         match Lang::from_code(code) {
-            Some(lang)
-                if lang != self.target
-                    && lang != Lang::Auto
-                    && page_languages().contains(&lang) =>
-            {
+            Some(lang) if lang != self.target && is_page_language(lang) => {
                 self.target = lang;
                 true
             }
@@ -355,8 +367,8 @@ impl TranslatePageModel {
         }
         if let (Some(request), Phase::Done { text, .. }) = (self.in_flight.take(), &self.flow.phase)
             && self.history.push(HistoryEntry {
-                source_lang: lang_code(request.source),
-                target_lang: lang_code(request.target),
+                source_lang: lang_code(request.source).to_string(),
+                target_lang: lang_code(request.target).to_string(),
                 source_text: request.text,
                 translation: text.clone(),
                 label,

@@ -50,6 +50,10 @@ const COLOR_CAPTURING: u32 = 0x1677FFFF;
 const COLOR_DONE: u32 = 0x52C41AFF;
 /// 边框：失败（红）。
 const COLOR_FAILED: u32 = 0xFF4D4FFF;
+/// 按钮文字（白）。
+const COLOR_TEXT_LIGHT: u32 = 0xFFFFFFFF;
+/// 中性按钮底色（取消 / 关闭）。
+const COLOR_BUTTON_NEUTRAL: u32 = 0x434343FF;
 /// 自动化参数的最少字段数（区域 4 个）。
 const AUTOTEST_MIN_FIELDS: usize = 4;
 
@@ -387,8 +391,8 @@ impl Render for ScrollAreaView {
                         } else {
                             "scroll-btn-auto-off"
                         }),
-                        if auto { 0x1677FFFF } else { 0x303030FF },
-                        0xFFFFFFFF,
+                        if auto { COLOR_CAPTURING } else { 0x303030FF },
+                        COLOR_TEXT_LIGHT,
                         cx,
                         move |_| toggle.set_auto_scroll(!toggle.auto_scroll()),
                     ))
@@ -396,7 +400,7 @@ impl Render for ScrollAreaView {
                         "scroll-finish",
                         self.i18n.tr("scroll-btn-finish"),
                         COLOR_CAPTURING,
-                        0xFFFFFFFF,
+                        COLOR_TEXT_LIGHT,
                         cx,
                         move |_| control.request_finish(),
                     ));
@@ -404,8 +408,8 @@ impl Render for ScrollAreaView {
                 buttons = buttons.child(self.button(
                     "scroll-cancel",
                     self.i18n.tr("scroll-btn-cancel"),
-                    0x434343FF,
-                    0xFF4D4FFF,
+                    COLOR_BUTTON_NEUTRAL,
+                    COLOR_FAILED,
                     cx,
                     move |_| cancel.request_cancel(),
                 ));
@@ -415,8 +419,8 @@ impl Render for ScrollAreaView {
                 buttons = buttons.child(self.button(
                     "scroll-close",
                     self.i18n.tr("scroll-btn-close"),
-                    0x434343FF,
-                    0xFFFFFFFF,
+                    COLOR_BUTTON_NEUTRAL,
+                    COLOR_TEXT_LIGHT,
                     cx,
                     |this| this.dismissed = true,
                 ));

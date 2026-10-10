@@ -105,14 +105,7 @@ impl DictationConfig {
     /// # 参数
     /// - `document`：配置文档。
     pub fn from_document(document: &ConfigDocument) -> Self {
-        let text = |key: &str| {
-            document
-                .value(key)
-                .as_str()
-                .unwrap_or_default()
-                .trim()
-                .to_string()
-        };
+        let text = |key: &str| document.str_or(key, "").trim().to_string();
         let number = |key: &str| document.value(key).as_u64().unwrap_or_default() as u32;
         Self {
             backend: if text(KEY_DICTATION_BACKEND) == DICTATION_BACKEND_SYSTEM {
@@ -125,35 +118,14 @@ impl DictationConfig {
             recognition: mode_from_config(&text(KEY_DICTATION_RECOGNITION_MODE)),
             dimension: Dimension::from_config(&text(KEY_DICTATION_LANGUAGE_DIMENSION)),
             model_id: text(KEY_DICTATION_MODEL_ID),
-            sensevoice_itn: document
-                .value(KEY_DICTATION_SENSEVOICE_ITN)
-                .as_bool()
-                .unwrap_or(true),
+            sensevoice_itn: document.bool_or(KEY_DICTATION_SENSEVOICE_ITN, true),
             language: text(KEY_DICTATION_LANGUAGE),
             threads: number(KEY_DICTATION_THREADS).max(1),
             max_seconds: number(KEY_DICTATION_MAX_SECONDS),
             output: OutputMode::from_config(&text(KEY_DICTATION_OUTPUT_MODE)),
-            type_with_overlay: document
-                .value(KEY_DICTATION_TYPE_WITH_OVERLAY)
-                .as_bool()
-                .unwrap_or(false),
-            translate_enabled: document
-                .value(KEY_DICTATION_TRANSLATE_ENABLED)
-                .as_bool()
-                .unwrap_or(false),
+            type_with_overlay: document.bool_or(KEY_DICTATION_TYPE_WITH_OVERLAY, false),
+            translate_enabled: document.bool_or(KEY_DICTATION_TRANSLATE_ENABLED, false),
             translate_target: TranslateTarget::from_config(&text(KEY_DICTATION_TRANSLATE_TARGET)),
-        }
-    }
-
-    /// 手动目录或旧版默认目录：配置为空时取 `<数据根>/models/stt`（清单模型在其子目录里，不走这里）。
-    ///
-    /// # 参数
-    /// - `data_root`：应用数据根目录。
-    pub fn resolved_model_dir(&self, data_root: &Path) -> PathBuf {
-        if self.model_dir.is_empty() {
-            stt_models::models_root(data_root)
-        } else {
-            PathBuf::from(&self.model_dir)
         }
     }
 }
@@ -317,22 +289,6 @@ mod tests {
         assert!(TriggerMode::Toggle.toggle_enabled() && !TriggerMode::Toggle.hold_enabled());
         assert!(!TriggerMode::Hold.toggle_enabled() && TriggerMode::Hold.hold_enabled());
         assert_eq!(TriggerMode::from_config("???"), TriggerMode::Both);
-    }
-
-    /// 模型目录：为空取数据根下默认目录，否则用配置值。
-    #[test]
-    fn model_dir_resolution() {
-        let mut config = DictationConfig::from_document(&ConfigDocument::from_bytes(None));
-        let root = Path::new("D:/data");
-        assert_eq!(
-            config.resolved_model_dir(root),
-            PathBuf::from("D:/data").join("models").join("stt")
-        );
-        config.model_dir = "E:/my models".into();
-        assert_eq!(
-            config.resolved_model_dir(root),
-            PathBuf::from("E:/my models")
-        );
     }
 
     /// 唯一临时数据根。

@@ -45,7 +45,7 @@ pub fn exit_button_rect(
 /// 隐藏到顶部的把手宽（逻辑像素，同旧版）。
 const HANDLE_WIDTH: f32 = 30.0;
 /// 隐藏到顶部的把手高（逻辑像素，同旧版）。
-pub const HANDLE_HEIGHT: f32 = 6.0;
+const HANDLE_HEIGHT: f32 = 6.0;
 
 /// 计算「隐藏到顶部」把手的屏幕外框：贴在工作区上边缘，水平居中于贴图并钳制在工作区内。
 ///

@@ -82,7 +82,7 @@ pub fn click_action(document: &ConfigDocument, key: &str, default: TrayClick) ->
 /// # 参数
 /// - `document`：配置文档。
 pub fn tray_enabled(document: &ConfigDocument) -> bool {
-    !matches!(document.value(KEY_ENABLED), Value::Bool(false))
+    document.bool_or(KEY_ENABLED, true)
 }
 
 /// 读取菜单项列表（`quick.screenshot`、`tray.exit` 等）；缺失或类型不对得到空集合。
@@ -233,10 +233,8 @@ fn decode_icon(bytes: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
 /// let icon = tray_icon_image(&document);
 /// ```
 pub fn tray_icon_image(document: &ConfigDocument) -> TrayIconImage {
-    let style = document.value(KEY_ICON);
-    let style = style.as_str().unwrap_or("default");
-    let custom = document.value(KEY_CUSTOM_ICON);
-    let custom = custom.as_str().map(str::trim).filter(|p| !p.is_empty());
+    let style = document.str_or(KEY_ICON, "default");
+    let custom = Some(document.str_or(KEY_CUSTOM_ICON, "").trim()).filter(|p| !p.is_empty());
     let decoded = custom
         .and_then(|path| match std::fs::read(path) {
             Ok(bytes) => decode_icon(&bytes),

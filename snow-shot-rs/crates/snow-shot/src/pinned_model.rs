@@ -38,6 +38,8 @@ const MS_PER_DAY: i64 = 86_400_000;
 /// 一 MiB 的字节数。
 const BYTES_PER_MIB: u64 = 1024 * 1024;
 
+/// 清单记录里分组 ID 的键。
+const KEY_GROUP_ID: &str = "group_id";
 /// 清单记录里窗口几何对象的键。
 const KEY_GEOMETRY: &str = "window_geometry";
 /// 清单记录里创建时间（UTC 毫秒）的键。
@@ -160,7 +162,7 @@ pub fn build_record(
 ) -> Map<String, Value> {
     let mut record = Map::new();
     record.insert("id".into(), json!(id));
-    record.insert("group_id".into(), json!(group_id));
+    record.insert(KEY_GROUP_ID.into(), json!(group_id));
     record.insert("source_kind".into(), json!(SourceKind::ImageData.as_str()));
     record.insert(KEY_GEOMETRY.into(), geometry.to_json());
     record.insert(KEY_CREATED_MS.into(), json!(created_ms));
@@ -174,6 +176,22 @@ pub fn build_record(
 /// - `record`：清单记录。
 pub fn record_geometry(record: &Map<String, Value>) -> Option<PinGeometry> {
     PinGeometry::from_json(record.get(KEY_GEOMETRY)?)
+}
+
+/// 读取记录所属的分组 ID；缺失或类型不对返回 `None`。
+///
+/// # 参数
+/// - `record`：清单记录。
+///
+/// ```
+/// use snow_shot::pinned_model::{build_record, record_group_id, PinGeometry};
+/// use snow_ui::shell::geometry::PhysicalRect;
+/// let g = PinGeometry::new(PhysicalRect::new(0, 0, 10, 10), 1.0, 1.0, true);
+/// let rec = build_record("a", "work", &g, 1, 1);
+/// assert_eq!(record_group_id(&rec), Some("work"));
+/// ```
+pub fn record_group_id(record: &Map<String, Value>) -> Option<&str> {
+    record.get(KEY_GROUP_ID)?.as_str()
 }
 
 /// 读取记录的创建时间（UTC 毫秒）；缺失按 0（最老，优先淘汰）。
@@ -227,7 +245,7 @@ impl PinPolicy {
                 .filter(|n| *n > 0)
                 .unwrap_or(default)
         };
-        let flag = |key: &str, default: bool| document.value(key).as_bool().unwrap_or(default);
+        let flag = |key: &str, default: bool| document.bool_or(key, default);
         Self {
             enabled: flag("pinned_history/enabled", true),
             keep_permanently: flag("pinned_history/keep_permanently", false),
@@ -637,13 +655,17 @@ pub fn initial_clipboard_rect(
     let zoom = fit_w.min(fit_h).clamp(f32::MIN_POSITIVE, 1.0);
     let target_w = ((w * zoom).round() as i32).max(1);
     let target_h = ((h * zoom).round() as i32).max(1);
-    let rect = PhysicalRect::new(
-        work_area.x + (work_area.width - target_w) / 2,
-        work_area.y + (work_area.height - target_h) / 2,
-        target_w,
-        target_h,
-    );
-    (rect, zoom)
+    (centered_rect(work_area, target_w, target_h), zoom)
+}
+
+/// 在工作区里居中放置 `w x h` 的矩形（比工作区大时允许超出）。
+fn centered_rect(work_area: PhysicalRect, w: i32, h: i32) -> PhysicalRect {
+    PhysicalRect::new(
+        work_area.x + (work_area.width - w) / 2,
+        work_area.y + (work_area.height - h) / 2,
+        w,
+        h,
+    )
 }
 
 /// 按「自动调整窗口大小」设置算贴图初始外框：开启时等同 [`initial_clipboard_rect`]（超大图缩到工作区内），
@@ -673,13 +695,7 @@ pub fn initial_pin_rect(
         return initial_clipboard_rect(width, height, work_area);
     }
     let (w, h) = (width.max(1) as i32, height.max(1) as i32);
-    let rect = PhysicalRect::new(
-        work_area.x + (work_area.width - w) / 2,
-        work_area.y + (work_area.height - h) / 2,
-        w,
-        h,
-    );
-    (rect, 1.0)
+    (centered_rect(work_area, w, h), 1.0)
 }
 
 /// 把带透明度的 RGBA 图像铺在白底上（结果不透明）。
@@ -725,6 +741,7 @@ mod tests {
         assert_eq!(record_geometry(&rec), Some(geometry()));
         assert_eq!(record_created_ms(&rec), 1234);
         assert_eq!(record_payload_bytes(&rec), 999);
+        assert_eq!(record_group_id(&rec), Some("default"));
     }
 
     /// 几何缺字段、尺寸为 0 或超上限时被拒绝；缩放与透明度越界会被钳制。
@@ -747,6 +764,7 @@ mod tests {
     #[test]
     fn record_metadata_defaults() {
         let empty = Map::new();
+        assert_eq!(record_group_id(&empty), None);
         assert_eq!(record_created_ms(&empty), 0);
         assert_eq!(record_payload_bytes(&empty), 0);
         assert!(record_geometry(&empty).is_none());

@@ -2,7 +2,6 @@
 //! 并支持按分组筛选。不依赖 GPUI，可离屏单测；窗口视图见 [`crate::pinned_manage_view`]。
 
 use crate::pinned_shared::PinShared;
-use snow_history::pinned::DEFAULT_GROUP_ID;
 use std::collections::BTreeSet;
 
 /// 管理页里的一行。
@@ -10,8 +9,6 @@ use std::collections::BTreeSet;
 pub struct PinRow {
     /// 贴图 ID。
     pub id: String,
-    /// 所属分组 ID。
-    pub group_id: String,
     /// 所属分组显示名（默认分组为 `None`，由视图换成本地化文案）。
     pub group_name: Option<String>,
     /// 当前是否有窗口正在显示（`false` 表示只保留在存储里，如其它分组的贴图）。
@@ -76,7 +73,6 @@ pub fn build_rows(
                 width: geometry.map_or(0, |g| g.width),
                 height: geometry.map_or(0, |g| g.height),
                 id: entry.id,
-                group_id,
                 group_name,
                 created_ms: entry.created_ms,
                 payload_bytes: entry.bytes,
@@ -103,11 +99,6 @@ pub fn valid_filter(filter: GroupFilter, shared: &PinShared) -> GroupFilter {
     }
 }
 
-/// 默认分组的 ID（供视图判断「删除此分组」是否可用）。
-pub const fn default_group_id() -> &'static str {
-    DEFAULT_GROUP_ID
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -122,10 +113,7 @@ mod tests {
 
     /// 在唯一临时目录里打开共享上下文。
     fn open(tag: &str) -> (Rc<PinShared>, PathBuf) {
-        let dir =
-            std::env::temp_dir().join(format!("snow-pin-manage-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_util::unique_temp_dir("snow-pin-manage", tag);
         let config: SharedConfig = Rc::new(RefCell::new(ConfigStore::open(dir.join("cfg.json"))));
         (PinShared::open(&dir, config, Box::new(|_| {})), dir)
     }
@@ -172,7 +160,6 @@ mod tests {
             valid_filter(GroupFilter::Group(work.clone()), &shared),
             GroupFilter::Group(work)
         );
-        assert_eq!(default_group_id(), "default");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

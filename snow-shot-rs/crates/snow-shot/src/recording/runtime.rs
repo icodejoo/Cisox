@@ -203,10 +203,7 @@ impl ScreenRecordingSession {
     pub fn poll(&mut self, now: Instant) -> bool {
         let before = self.state.clone();
         let before_audio = self.audio.clone();
-        let events = match self.link.as_mut() {
-            Some(link) => link.poll(),
-            None => Vec::new(),
-        };
+        let events = self.link.as_mut().map(|link| link.poll()).unwrap_or_default();
         for event in events {
             self.apply(event);
         }
@@ -328,10 +325,7 @@ impl ScreenRecordingSession {
 impl Drop for ScreenRecordingSession {
     /// 会话销毁时若通道仍在（窗口被强制关闭等），取消录制并清理进程。
     fn drop(&mut self) {
-        if let Some(mut link) = self.link.take() {
-            let _ = link.send(&Command::Cancel);
-            link.shutdown();
-        }
+        self.cancel();
     }
 }
 
@@ -511,7 +505,8 @@ mod tests {
     /// 停止 → Saving → Finished，并读取文件大小、关闭通道。
     #[test]
     fn stop_then_finished() {
-        let file = std::env::temp_dir().join(format!("snow-rec-rt-{}.bin", std::process::id()));
+        let dir = crate::test_util::unique_temp_dir("snow-rec-rt", "finish");
+        let file = dir.join("out.bin");
         std::fs::write(&file, b"12345").unwrap();
         let (mut s, probe) = session(0);
         push(
@@ -544,7 +539,7 @@ mod tests {
         );
         assert_eq!(probe.borrow().shutdowns, 1);
         assert!(!s.needs_polling());
-        let _ = std::fs::remove_file(file);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// 录制进程中途退出：转入 Error 并清理，不卡在录制中。

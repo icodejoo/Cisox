@@ -1,12 +1,10 @@
 //! 系统偏好读取:深色模式与界面语言(经 `reg query`,无额外依赖)。
 
 #[cfg(windows)]
-use std::os::windows::process::CommandExt;
-#[cfg(windows)]
-use std::process::Command;
+use std::path::Path;
 
 #[cfg(windows)]
-use snow_platform::CREATE_NO_WINDOW;
+use snow_net::quiet_command;
 
 /// 系统个性化主题的注册表路径。
 #[cfg(windows)]
@@ -34,6 +32,29 @@ const REG_TYPE_DWORD: &str = "REG_DWORD";
 /// `reg query` 输出中字符串类型词。
 const REG_TYPE_SZ: &str = "REG_SZ";
 
+/// 在 `reg query` 输出里找值名匹配、类型词为 `type_word` 的那一行。
+///
+/// 参数:
+/// - `output`: `reg query` 的完整标准输出。
+/// - `type_word`: 类型词(如 `REG_SZ`)。
+/// - `name`: 值名(大小写不敏感)。
+///
+/// 返回:`(整行, 类型词之后的各字段)`;没有匹配行返回 `None`。
+fn find_reg_line<'a>(
+    output: &'a str,
+    type_word: &str,
+    name: &str,
+) -> Option<(&'a str, Vec<&'a str>)> {
+    output.lines().find_map(|line| {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        let type_idx = parts.iter().position(|&p| p == type_word)?;
+        parts[..type_idx]
+            .join(" ")
+            .eq_ignore_ascii_case(name)
+            .then(|| (line, parts[type_idx + 1..].to_vec()))
+    })
+}
+
 /// 解析 `reg query` 输出中指定值名的 REG_DWORD 数值。
 ///
 /// 参数:
@@ -44,19 +65,10 @@ const REG_TYPE_SZ: &str = "REG_SZ";
 ///
 /// 示例输出行:`    AppsUseLightTheme    REG_DWORD    0x0`
 pub fn parse_reg_dword(output: &str, name: &str) -> Option<u32> {
-    for line in output.lines() {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        let Some(type_idx) = parts.iter().position(|&p| p == REG_TYPE_DWORD) else {
-            continue;
-        };
-        if !parts[..type_idx].join(" ").eq_ignore_ascii_case(name) {
-            continue;
-        }
-        let val = parts.get(type_idx + 1)?;
-        let hex = val.strip_prefix("0x").or_else(|| val.strip_prefix("0X"))?;
-        return u32::from_str_radix(hex, 16).ok();
-    }
-    None
+    let (_, rest) = find_reg_line(output, REG_TYPE_DWORD, name)?;
+    let val = rest.first()?;
+    let hex = val.strip_prefix("0x").or_else(|| val.strip_prefix("0X"))?;
+    u32::from_str_radix(hex, 16).ok()
 }
 
 /// 解析 `reg query` 输出中指定值名的 REG_SZ 字符串。
@@ -69,26 +81,16 @@ pub fn parse_reg_dword(output: &str, name: &str) -> Option<u32> {
 ///
 /// 示例输出行:`    LocaleName    REG_SZ    zh-CN`
 pub fn parse_reg_sz(output: &str, name: &str) -> Option<String> {
-    for line in output.lines() {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        let Some(type_idx) = parts.iter().position(|&p| p == REG_TYPE_SZ) else {
-            continue;
-        };
-        if !parts[..type_idx].join(" ").eq_ignore_ascii_case(name) {
-            continue;
-        }
-        let pos = line.find(REG_TYPE_SZ)?;
-        return Some(line[pos + REG_TYPE_SZ.len()..].trim().to_string());
-    }
-    None
+    let (line, _) = find_reg_line(output, REG_TYPE_SZ, name)?;
+    let pos = line.find(REG_TYPE_SZ)?;
+    Some(line[pos + REG_TYPE_SZ.len()..].trim().to_string())
 }
 
 /// 执行 `reg query <path> /v <value>` 并返回标准输出,失败返回 `None`。
 #[cfg(windows)]
 fn reg_query(path: &str, value: &str) -> Option<String> {
-    let output = Command::new("reg")
+    let output = quiet_command(Path::new("reg"))
         .args(["query", path, "/v", value])
-        .creation_flags(CREATE_NO_WINDOW)
         .output()
         .ok()?;
     if !output.status.success() {

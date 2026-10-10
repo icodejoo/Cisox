@@ -12,7 +12,7 @@ use crate::settings_view::{Palette, palette};
 use snow_platform::clipboard::copy_text_to_clipboard;
 use snow_ui::ui::component::button::Button;
 use snow_ui::ui::component::input::{Textarea, TextareaState};
-use snow_ui::ui::component::{Sizable, Size as ComponentSize, Theme, ThemeMode};
+use snow_ui::ui::component::{Sizable, Size as ComponentSize};
 use snow_ui::ui::*;
 
 /// 浮窗逻辑宽度。
@@ -55,15 +55,7 @@ impl DictationView {
     /// - `window` / `app`：窗口与应用上下文。
     /// - `prefs`：界面偏好。
     pub fn create(window: &mut Window, app: &mut App, prefs: UiPrefs) -> Entity<Self> {
-        Theme::change(
-            if prefs.dark {
-                ThemeMode::Dark
-            } else {
-                ThemeMode::Light
-            },
-            None,
-            app,
-        );
+        crate::history_view::apply_theme(prefs.dark, app);
         let placeholder =
             crate::ocr_backend::i18n_for(prefs.locale).tr("dictation-overlay-placeholder");
         let input = app.new(|cx| {
@@ -164,20 +156,17 @@ impl DictationView {
 impl DictationView {
     /// 译文区的行：最近几句已参与翻译的句子，待出显示占位符，失败显示淡色提示；没有翻译时为空。
     fn translation_lines(&self, i18n: &snow_i18n::I18n) -> Vec<String> {
-        let mut lines: Vec<String> = self
-            .model
-            .translations()
+        // 先只收集引用，裁到最近几句之后再克隆文本，避免每次重绘复制全部译文
+        let states: Vec<&TranslationState> = self.model.translations().iter().flatten().collect();
+        let skip = states.len().saturating_sub(TRANSLATION_MAX_SENTENCES);
+        states[skip..]
             .iter()
-            .flatten()
             .map(|state| match state {
                 TranslationState::Pending => TRANSLATION_PENDING.to_string(),
                 TranslationState::Done(text) => text.clone(),
                 TranslationState::Failed => i18n.tr("dictation-translate-failed"),
             })
-            .collect();
-        let skip = lines.len().saturating_sub(TRANSLATION_MAX_SENTENCES);
-        lines.drain(..skip);
-        lines
+            .collect()
     }
 }
 

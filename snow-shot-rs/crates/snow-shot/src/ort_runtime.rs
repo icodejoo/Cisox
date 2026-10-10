@@ -6,7 +6,7 @@
 //! 下载后逐个文件核对大小与 SHA-256，清单见 `resources/ort-runtime-manifest.json`。
 //! 下载复用 OCR 资产下载的 curl / 哈希校验 / 解压工具，不新增任何依赖。
 
-use crate::ocr_assets::{AssetFile, COMPLETE_MARKER};
+use crate::ocr_assets::{AssetFile, files_complete};
 use crate::ocr_download::{
     DownloadItem, DownloadStep, FetchError, extract_members, fetch_verified, verify_file,
     write_marker,
@@ -95,10 +95,7 @@ pub fn runtime_dir(data_root: &Path, manifest: &OrtManifest) -> PathBuf {
 /// - `dir`：运行时目录。
 /// - `members`：清单里的文件。
 pub fn runtime_complete(dir: &Path, members: &[OrtMember]) -> bool {
-    dir.join(COMPLETE_MARKER).is_file()
-        && members.iter().all(|m| {
-            std::fs::metadata(dir.join(&m.name)).is_ok_and(|f| f.is_file() && f.len() == m.size)
-        })
+    files_complete(dir, members.iter().map(|m| (m.name.as_str(), m.size)))
 }
 
 /// onnxruntime 不可用的原因。
@@ -251,6 +248,7 @@ pub fn install(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ocr_assets::COMPLETE_MARKER;
     use crate::ocr_download::sha256_file;
     use std::process::Command;
 

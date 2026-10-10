@@ -1136,7 +1136,7 @@ impl SettingsState {
 
 /// 由配置与系统偏好解析界面偏好。
 fn resolve_prefs(store: &ConfigStore, system: &SystemPrefs) -> UiPrefs {
-    let text = |key: &str| store.value(key).as_str().unwrap_or_default().to_string();
+    let text = |key: &str| store.document().str_or(key, "").to_string();
     UiPrefs::resolve(
         &text(THEME_MODE_KEY),
         &text(LANGUAGE_KEY),

@@ -6,7 +6,7 @@ use crate::pinned_keymap::PinKeymap;
 use crate::pinned_model::{
     PinClickAction, PinEntryInfo, PinGeometry, PinPolicy, build_record, parse_double_click_action,
     parse_hex_color, parse_middle_click_action, record_created_ms, record_geometry,
-    record_payload_bytes, select_evictions,
+    record_group_id, record_payload_bytes, select_evictions,
 };
 use crate::screenshot_output::compression_from_key;
 use crate::settings_state::SharedConfig;
@@ -346,10 +346,7 @@ impl PinShared {
         let store = self.store.borrow();
         store
             .record(id)
-            .and_then(|r| {
-                r.get("group_id")
-                    .and_then(|g| g.as_str().map(str::to_string))
-            })
+            .and_then(|r| record_group_id(&r).map(str::to_string))
             .unwrap_or_else(|| store.active_group_id())
     }
 
@@ -358,7 +355,7 @@ impl PinShared {
     /// # 参数
     /// - `id`：贴图 ID。
     pub fn pin_geometry(&self, id: &str) -> Option<PinGeometry> {
-        crate::pinned_model::record_geometry(&self.store.borrow().record(id)?)
+        record_geometry(&self.store.borrow().record(id)?)
     }
 
     /// 贴图源图的 PNG 字节（管理页缩略图用）；读取失败返回 `None`。
@@ -392,11 +389,7 @@ impl PinShared {
             .filter(|id| {
                 store
                     .record(id)
-                    .and_then(|r| {
-                        r.get("group_id")
-                            .and_then(|g| g.as_str().map(|g| g == group))
-                    })
-                    .unwrap_or(false)
+                    .is_some_and(|r| record_group_id(&r) == Some(group))
             })
             .collect()
     }
@@ -406,12 +399,7 @@ impl PinShared {
     /// # 参数
     /// - `key`：配置键。
     pub fn config_bool(&self, key: &str) -> bool {
-        self.config
-            .borrow()
-            .document()
-            .value(key)
-            .as_bool()
-            .unwrap_or(false)
+        self.config.borrow().document().bool_or(key, false)
     }
 
     /// 贴图所属分组 ID；仓储里没有这条记录时返回 `None`。
@@ -419,10 +407,10 @@ impl PinShared {
     /// # 参数
     /// - `id`：贴图 ID。
     pub fn pin_group(&self, id: &str) -> Option<String> {
-        self.store.borrow().record(id).and_then(|r| {
-            r.get("group_id")
-                .and_then(|g| g.as_str().map(str::to_string))
-        })
+        let store = self.store.borrow();
+        store
+            .record(id)
+            .and_then(|r| record_group_id(&r).map(str::to_string))
     }
 
     /// 新建分组。
@@ -633,10 +621,7 @@ impl PinShared {
         payload.canvas_session = session;
         let group = store
             .record(id)
-            .and_then(|r| {
-                r.get("group_id")
-                    .and_then(|g| g.as_str().map(str::to_string))
-            })
+            .and_then(|r| record_group_id(&r).map(str::to_string))
             .unwrap_or_else(|| store.active_group_id());
         let record = build_record(id, &group, geometry, created_ms, total);
         store
@@ -656,9 +641,7 @@ impl PinShared {
     pub fn remove_remembering(&self, id: &str) -> bool {
         let snapshot = {
             let store = self.store.borrow();
-            let geometry = store
-                .record(id)
-                .and_then(|r| crate::pinned_model::record_geometry(&r));
+            let geometry = store.record(id).and_then(|r| record_geometry(&r));
             store.load_payload(id).ok().flatten().and_then(|payload| {
                 payload.image.map(|image| ClosedPin {
                     png: image.bytes,

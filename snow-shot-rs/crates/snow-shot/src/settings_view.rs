@@ -47,9 +47,7 @@ use snow_ui::ui::component::searchable_list::{
     SearchableListDelegate, SearchableListItem, SearchableVec,
 };
 use snow_ui::ui::component::select::{Caret, Select, SelectEvent, SelectState};
-use snow_ui::ui::component::{
-    Disableable, IndexPath, Sizable, Size as ComponentSize, Theme, ThemeMode,
-};
+use snow_ui::ui::component::{Disableable, IndexPath, Sizable, Size as ComponentSize};
 use snow_ui::ui::*;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
@@ -3356,15 +3354,7 @@ impl Render for SettingsView {
         if self.themed_dark != Some(prefs.dark) {
             // 组件库（下拉选择器）的主题跟随设置页深浅色。
             self.themed_dark = Some(prefs.dark);
-            Theme::change(
-                if prefs.dark {
-                    ThemeMode::Dark
-                } else {
-                    ThemeMode::Light
-                },
-                None,
-                cx,
-            );
+            crate::history_view::apply_theme(prefs.dark, cx);
         }
         let p = palette(prefs.dark, prefs.accent);
         let lang = prefs.lang;

@@ -2,7 +2,6 @@
 
 use crate::recording::audio::audio_request;
 use crate::recording::model::{DEFAULT_FPS, RecordingConfig, RecordingFormat};
-use serde_json::Value;
 use snow_config::document::ConfigDocument;
 use snow_platform::local_time::LocalDateTime;
 use snow_ui::shell::geometry::PhysicalRect;
@@ -98,11 +97,9 @@ fn expand_tokens(body: &str, now: LocalDateTime) -> String {
 /// - `document`：配置文档。
 /// - `home`：用户目录。
 pub fn resolve_video_directory(document: &ConfigDocument, home: Option<&Path>) -> PathBuf {
-    if let Value::String(text) = document.value(KEY_SAVE_DIR) {
-        let text = text.trim();
-        if !text.is_empty() {
-            return PathBuf::from(text);
-        }
+    let text = document.str_or(KEY_SAVE_DIR, "").trim();
+    if !text.is_empty() {
+        return PathBuf::from(text);
     }
     match home {
         Some(home) => home.join(VIDEOS_DIR_NAME),
@@ -132,11 +129,6 @@ pub fn unique_path(dir: &Path, stem: &str, extension: &str) -> Result<PathBuf, S
         }
     }
     Err("could not find a file name that does not collide".to_string())
-}
-
-/// 读取布尔配置，非布尔时回退。
-fn bool_of(document: &ConfigDocument, key: &str, fallback: bool) -> bool {
-    document.value(key).as_bool().unwrap_or(fallback)
 }
 
 /// 读取正整数配置，缺失或非法时回退。
@@ -172,7 +164,7 @@ pub fn build_recording_config(
     now: LocalDateTime,
 ) -> Result<RecordingConfig, String> {
     let format =
-        RecordingFormat::from_config(document.value(KEY_FORMAT).as_str().unwrap_or_default());
+        RecordingFormat::from_config(document.str_or(KEY_FORMAT, ""));
     // 视频与动图各有一套帧率配置
     let fps_key = if format == RecordingFormat::Mp4 {
         KEY_FPS
@@ -186,7 +178,7 @@ pub fn build_recording_config(
     Ok(RecordingConfig {
         region,
         fps: u32_of(document, fps_key, DEFAULT_FPS),
-        show_cursor: bool_of(document, KEY_SHOW_CURSOR, true),
+        show_cursor: document.bool_or(KEY_SHOW_CURSOR, true),
         format,
         output_path,
         countdown_secs: document
@@ -206,6 +198,7 @@ pub fn build_recording_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
 
     /// 固定测试时间。
     fn t() -> LocalDateTime {
@@ -251,8 +244,7 @@ mod tests {
     /// 同名文件存在时自动加序号。
     #[test]
     fn unique_path_avoids_collision() {
-        let dir = std::env::temp_dir().join(format!("snow-rec-out-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_util::unique_temp_dir("snow-rec-out", "unique");
         let first = unique_path(&dir, "a", "mp4").unwrap();
         std::fs::write(&first, b"x").unwrap();
         let second = unique_path(&dir, "a", "mp4").unwrap();
@@ -264,7 +256,7 @@ mod tests {
     /// 配置构造：读取格式、帧率、光标、延迟；动图使用动图帧率键。
     #[test]
     fn config_from_document() {
-        let dir = std::env::temp_dir().join(format!("snow-rec-cfg-{}", std::process::id()));
+        let dir = crate::test_util::unique_temp_dir("snow-rec-cfg", "doc");
         let mut doc = ConfigDocument::from_bytes(None);
         doc.set_value(
             KEY_SAVE_DIR,
@@ -295,7 +287,7 @@ mod tests {
     /// MP4 时音频请求来自两个旧键，且每次构造都读最新值。
     #[test]
     fn config_audio_follows_latest_switches() {
-        let dir = std::env::temp_dir().join(format!("snow-rec-aud-{}", std::process::id()));
+        let dir = crate::test_util::unique_temp_dir("snow-rec-aud", "switch");
         let mut doc = ConfigDocument::from_bytes(None);
         doc.set_value(
             KEY_SAVE_DIR,

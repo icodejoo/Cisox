@@ -1,8 +1,7 @@
 //! 录屏输入特效的配置读取：把 `screen_recording/*` 里的轨迹、点击、高亮、按键回显设置翻成协议里的
 //! [`EffectsRequest`]。颜色在设置里是 `#RRGGBB` / `#RRGGBBAA` 文本，缺失或非法按「关闭」处理。
 
-use crate::pinned_model::parse_hex_color;
-use serde_json::Value;
+use crate::settings_model::parse_hex_color;
 use snow_config::document::ConfigDocument;
 use snow_recorder_protocol::EffectsRequest;
 
@@ -29,13 +28,7 @@ pub const KEY_HIGHLIGHT_COLOR: &str = "screen_recording/mouse_highlight_color";
 
 /// 读取 `#RRGGBBAA` 颜色设置；缺失或非法返回 `None`。
 fn color_of(document: &ConfigDocument, key: &str) -> Option<[u8; 4]> {
-    let rgba = parse_hex_color(document.value(key).as_str()?)?;
-    Some(rgba.to_be_bytes())
-}
-
-/// 读取布尔设置；类型不对按 `false`。
-fn flag_of(document: &ConfigDocument, key: &str) -> bool {
-    matches!(document.value(key), Value::Bool(true))
+    parse_hex_color(document.value(key).as_str()?)
 }
 
 /// 读取整数设置并夹到范围内；缺失或类型不对取默认值。
@@ -65,13 +58,13 @@ pub fn effects_request(document: &ConfigDocument) -> EffectsRequest {
         trail: color_of(document, KEY_TRAIL_COLOR).unwrap_or(defaults.trail),
         trail_ms: int_of(document, KEY_TRAIL_DURATION, defaults.trail_ms, 100, 2000),
         click: color_of(document, KEY_CLICK_COLOR).unwrap_or(defaults.click),
-        highlight: if flag_of(document, KEY_HIGHLIGHT_ENABLED) {
+        highlight: if document.bool_or(KEY_HIGHLIGHT_ENABLED, false) {
             color_of(document, KEY_HIGHLIGHT_COLOR).unwrap_or(defaults.highlight)
         } else {
             defaults.highlight
         },
-        record_clicks: flag_of(document, KEY_RECORD_CLICKS),
-        keyboard: flag_of(document, KEY_SHOW_KEYBOARD),
+        record_clicks: document.bool_or(KEY_RECORD_CLICKS, false),
+        keyboard: document.bool_or(KEY_SHOW_KEYBOARD, false),
         keyboard_size: int_of(document, KEY_KEYBOARD_SIZE, defaults.keyboard_size, 32, 128),
         keyboard_background: color_of(document, KEY_KEYBOARD_BACKGROUND).unwrap_or(defaults.keyboard_background),
         keyboard_text: color_of(document, KEY_KEYBOARD_FOREGROUND).unwrap_or(defaults.keyboard_text),

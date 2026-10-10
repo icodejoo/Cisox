@@ -115,11 +115,6 @@ impl OverlayModel {
         &self.translations
     }
 
-    /// 是否有任何一句参与了翻译（没有时视图不多画任何东西）。
-    pub fn has_translations(&self) -> bool {
-        self.translations.iter().any(Option::is_some)
-    }
-
     /// 用已有的转写内容整体铺底（键入中途兜底到浮窗时用）：清空后放入已落定文本，并带上未落定部分。
     ///
     /// # 参数
@@ -327,13 +322,11 @@ mod tests {
     #[test]
     fn translations_track_sentences() {
         let mut m = OverlayModel::default();
-        assert!(!m.has_translations());
         m.push_final("你好");
         m.push_final("  ");
         m.push_final("世界");
         assert_eq!(m.translations(), &[None, None]);
         m.set_translation(1, TranslationState::Done("world".into()));
-        assert!(m.has_translations());
         m.set_translation(0, TranslationState::Failed);
         assert_eq!(
             m.translations(),
@@ -353,7 +346,7 @@ mod tests {
         m.set_translations(&[Some(TranslationState::Pending)]);
         assert_eq!(m.translations().len(), 1);
         m.begin_round();
-        assert!(m.translations().is_empty() && !m.has_translations());
+        assert!(m.translations().is_empty());
     }
 
     /// 状态可更新与读取。

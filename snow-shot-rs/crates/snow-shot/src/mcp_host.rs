@@ -78,6 +78,14 @@ impl McpRequest {
     }
 }
 
+/// 应用正在退出时的统一错误。
+fn app_closing() -> ToolError {
+    ToolError {
+        code: "app_closing",
+        message: "application is shutting down".into(),
+    }
+}
+
 /// 投请求给主线程并等回复。
 ///
 /// # 参数
@@ -94,10 +102,7 @@ pub fn round_trip(
 ) -> McpReply {
     let (tx, rx) = mpsc::channel();
     if !inbox.push(UiEvent::Mcp(McpRequest::new(kind, tx))) {
-        return Err(ToolError {
-            code: "app_closing",
-            message: "application is shutting down".into(),
-        });
+        return Err(app_closing());
     }
     rx.recv_timeout(timeout).unwrap_or_else(|_| {
         Err(ToolError {
@@ -189,7 +194,7 @@ pub fn apply_settings(
     Ok(done)
 }
 
-/// 把写入结果整理成 tool 返回值，并给出需要广播的 `(键, 旧值)`。
+/// 把写入结果整理成 tool 返回值（只列出有变化的键名）。
 fn changed_reply(done: &[(String, Value)]) -> Value {
     json!({"changed": done.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>()})
 }
@@ -222,10 +227,6 @@ pub fn handle_request<E: std::fmt::Display>(
             settings_outcome(apply_settings(store, changes.clone()))
         }
         McpRequestKind::SettingsReset(keys) => {
-            let changes = keys
-                .iter()
-                .map(|k| (k.clone(), default_value(k)))
-                .collect::<Vec<_>>();
             // 未知键要先报错：默认值函数对未知键给 Null，会被后续校验当成不合法值
             if let Some(bad) = keys.iter().find(|k| entry_for(k).is_none()) {
                 let err = ToolError {
@@ -234,6 +235,10 @@ pub fn handle_request<E: std::fmt::Display>(
                 };
                 return (Err(err), Vec::new());
             }
+            let changes = keys
+                .iter()
+                .map(|k| (k.clone(), default_value(k)))
+                .collect::<Vec<_>>();
             settings_outcome(apply_settings(store, changes))
         }
     }
@@ -271,18 +276,10 @@ pub fn action_event(action: &str) -> Option<UiEvent> {
 /// - `document`：配置文档。
 pub fn scopes_from_document(document: &ConfigDocument) -> Vec<Scope> {
     let mut scopes = vec![Scope::ReadOnly];
-    if document
-        .value(KEY_MCP_ALLOW_CAPTURE)
-        .as_bool()
-        .unwrap_or(true)
-    {
+    if document.bool_or(KEY_MCP_ALLOW_CAPTURE, true) {
         scopes.push(Scope::Capture);
     }
-    if document
-        .value(KEY_MCP_ALLOW_CONTROL)
-        .as_bool()
-        .unwrap_or(false)
-    {
+    if document.bool_or(KEY_MCP_ALLOW_CONTROL, false) {
         scopes.push(Scope::Control);
     }
     scopes
@@ -397,7 +394,12 @@ impl AppBackend for ShellBackend {
 
     /// 只报告配置的更新模式，不发网络请求。
     fn updates_status(&self) -> Value {
-        let mode = self.settings_snapshot().remove(KEY_UPDATE_MODE);
+        let mode = self
+            .settings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(KEY_UPDATE_MODE)
+            .cloned();
         json!({"mode": mode})
     }
 
@@ -433,10 +435,7 @@ impl AppBackend for ShellBackend {
             });
         };
         if !self.inbox.push(event) {
-            return Err(ToolError {
-                code: "app_closing",
-                message: "application is shutting down".into(),
-            });
+            return Err(app_closing());
         }
         Ok(json!({"accepted": action}))
     }
@@ -500,7 +499,7 @@ impl McpHost {
     /// - `document`：当前配置文档。
     /// - `data_root`：应用数据根目录（描述符所在）。
     pub fn sync(&mut self, document: &ConfigDocument, data_root: &Path) {
-        let enabled = document.value(KEY_ENABLED).as_bool().unwrap_or(false);
+        let enabled = document.bool_or(KEY_ENABLED, false);
         if enabled {
             *self.settings.lock().unwrap_or_else(|e| e.into_inner()) = document.values().clone();
         }
@@ -558,6 +557,7 @@ impl McpHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_util::unique_temp_dir;
     use serde_json::json;
     use snow_config::store::ConfigStore;
     use snow_ui::shell::geometry::{PhysicalRect, ScaleFactor};
@@ -576,9 +576,7 @@ mod tests {
 
     /// 临时配置存储（路径唯一）。
     fn temp_store(tag: &str) -> (SharedConfig, PathBuf) {
-        let dir = std::env::temp_dir().join(format!("cisox-mcp-host-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = unique_temp_dir("cisox-mcp-host", tag);
         let path = dir.join("config.json");
         (Rc::new(RefCell::new(ConfigStore::open(&path))), dir)
     }
@@ -764,8 +762,7 @@ mod tests {
     /// 存储概况：统计各一级子项，预算用尽标记截断。
     #[test]
     fn storage_summary_counts_and_truncates() {
-        let dir = std::env::temp_dir().join(format!("cisox-mcp-storage-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = unique_temp_dir("cisox-mcp-storage", "summary");
         std::fs::create_dir_all(dir.join("a")).unwrap();
         std::fs::write(dir.join("a").join("x.bin"), [0u8; 10]).unwrap();
         std::fs::write(dir.join("b.bin"), [0u8; 5]).unwrap();

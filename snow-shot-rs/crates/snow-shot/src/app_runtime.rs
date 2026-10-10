@@ -987,16 +987,14 @@ pub fn build_tray_spec_with_groups(
 /// # 返回
 /// 成功拉起辅助进程为 `Ok`；取不到自身路径或拉起失败返回错误。
 fn spawn_restart_helper() -> std::io::Result<()> {
-    use snow_platform::CREATE_NO_WINDOW;
     use std::os::windows::process::CommandExt;
     let exe = std::env::current_exe()?;
     let line = format!(
         "/C ping -n {RESTART_WAIT_PINGS} 127.0.0.1 >NUL & start \"\" \"{}\"",
         exe.display()
     );
-    std::process::Command::new("cmd")
+    snow_net::quiet_command(std::path::Path::new("cmd"))
         .raw_arg(line)
-        .creation_flags(CREATE_NO_WINDOW)
         .spawn()
         .map(|_| ())
 }
@@ -1009,9 +1007,9 @@ fn spawn_restart_helper() -> std::io::Result<()> {
 /// 配置显式指定主题/语言时不查系统；“跟随系统”时用带 5 秒缓存的系统偏好。
 pub(crate) fn ui_prefs_from_document(document: &ConfigDocument) -> UiPrefs {
     UiPrefs::resolve_lazy(
-        document.value(THEME_MODE_KEY).as_str().unwrap_or_default(),
-        document.value(LANGUAGE_KEY).as_str().unwrap_or_default(),
-        document.value(THEME_COLOR_KEY).as_str().unwrap_or_default(),
+        document.str_or(THEME_MODE_KEY, ""),
+        document.str_or(LANGUAGE_KEY, ""),
+        document.str_or(THEME_COLOR_KEY, ""),
         SystemPrefs::cached,
     )
 }
@@ -1023,7 +1021,7 @@ pub(crate) fn ui_prefs_from_document(document: &ConfigDocument) -> UiPrefs {
 pub(crate) fn locale_of(document: &ConfigDocument) -> &'static str {
     UiPrefs::resolve_lazy(
         "light",
-        document.value(LANGUAGE_KEY).as_str().unwrap_or_default(),
+        document.str_or(LANGUAGE_KEY, ""),
         "",
         SystemPrefs::cached,
     )
@@ -2316,9 +2314,7 @@ fn configure_overlay(
                 .config
                 .borrow()
                 .document()
-                .value("screenshot_selection/region_type")
-                .as_str()
-                .unwrap_or_default(),
+                .str_or("screenshot_selection/region_type", ""),
         );
         view.update(cx.app(), |v, _| v.set_initial_region_type(region_type));
     }
@@ -3513,7 +3509,7 @@ fn open_or_focus_settings(cx: &mut ShellContext, state: &mut AppState, entry: Wi
     let system = SystemPrefs::query();
     let title = {
         let store = state.config.borrow();
-        let text = |key: &str| store.value(key).as_str().unwrap_or_default().to_string();
+        let text = |key: &str| store.document().str_or(key, "").to_string();
         window_title(Lang::from_config(&text(LANGUAGE_KEY), &system.language))
     };
     let size = LogicalSize::new(SETTINGS_WINDOW_WIDTH, SETTINGS_WINDOW_HEIGHT);
@@ -4368,14 +4364,14 @@ fn on_config_changed(cx: &mut ShellContext, state: &mut AppState, key: &str, pre
         state.sync_mcp();
     }
     if key == TRANSLATION_PAGE_ENABLED_KEY {
-        let enabled = state.config.borrow().value(key).as_bool().unwrap_or(false);
+        let enabled = state.config.borrow().document().bool_or(key, false);
         if let Some(view) = state.settings_view.clone() {
             view.update(cx.app(), |v, cx| v.set_translation_enabled(enabled, cx));
         }
         return;
     }
     if key == KEY_PAGE_AUTO_TRANSLATE {
-        let enabled = state.config.borrow().value(key).as_bool().unwrap_or(false);
+        let enabled = state.config.borrow().document().bool_or(key, false);
         let embedded = state
             .settings_view
             .clone()

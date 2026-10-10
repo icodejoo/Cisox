@@ -22,8 +22,6 @@ use std::path::{Path, PathBuf};
 
 /// 默认模型在下拉里对应的配置值（空串表示跟随默认）。
 pub const DEFAULT_OPTION_VALUE: &str = "";
-/// 语音转文字所在的设置分组 id。
-pub const DICTATION_GROUP_ID: &str = "dictation";
 /// 中文样句（探测中英混合维度下的中文方向）。
 const SAMPLE_ZH: &str = "你";
 /// 英文样句（探测中英混合维度下的英文方向）。

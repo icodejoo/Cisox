@@ -30,9 +30,7 @@ static ENABLED: AtomicBool = AtomicBool::new(false);
 /// assert!(!configured(&doc));
 /// ```
 pub fn configured(doc: &ConfigDocument) -> bool {
-    doc.value(DISABLE_ON_FULLSCREEN_CONFIG_KEY)
-        .as_bool()
-        .unwrap_or(false)
+    doc.bool_or(DISABLE_ON_FULLSCREEN_CONFIG_KEY, false)
 }
 
 /// 把开关状态同步到进程内镜像（启动与切换时调用）。
@@ -66,6 +64,11 @@ fn is_gate_toggle(cmd: &AppCommand) -> bool {
     )
 }
 
+/// 命令是否受闸门约束（开关打开、来自热键、且不是开关热键）；受约束时才需要探测前台全屏。
+fn is_gated(enabled: bool, source: CommandSource, cmd: &AppCommand) -> bool {
+    enabled && source == CommandSource::Hotkey && !is_gate_toggle(cmd)
+}
+
 /// 判断是否应当丢弃这条命令。
 ///
 /// # 参数
@@ -87,7 +90,7 @@ pub fn should_drop(
     cmd: &AppCommand,
     fullscreen_focused: bool,
 ) -> bool {
-    enabled && source == CommandSource::Hotkey && !is_gate_toggle(cmd) && fullscreen_focused
+    is_gated(enabled, source, cmd) && fullscreen_focused
 }
 
 /// 在热键派发器外包一层闸门。
@@ -103,8 +106,7 @@ pub fn gate_dispatcher(
     probe: impl Fn() -> bool + Send + Sync + 'static,
 ) -> Dispatcher {
     Dispatcher::from_fn(move |source, cmd| {
-        let candidate = is_enabled() && source == CommandSource::Hotkey && !is_gate_toggle(&cmd);
-        if candidate && probe() {
+        if is_gated(is_enabled(), source, &cmd) && probe() {
             tracing::info!("前台为全屏窗口，已忽略全局热键");
             return;
         }

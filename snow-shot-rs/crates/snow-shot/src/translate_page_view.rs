@@ -4,25 +4,24 @@
 //! 翻译在后台线程执行，结果经收件箱回到 [`TranslatePageView::finish`]。
 
 use crate::app_runtime::UiEvent;
+use crate::history_view::apply_theme;
+use crate::ocr_backend::i18n_for;
 use crate::settings_state::UiPrefs;
 use crate::settings_view::{Palette, palette};
 use crate::translate_history::{self, TranslateHistory};
 use crate::translate_input::{InputError, PackChoice, dropdown_choices};
 use crate::translate_page::{
-    AUTO_LANGUAGE_ID, AUTO_TRANSLATE_DEBOUNCE_MS, AutoDecision, LangChoice, TranslatePageModel,
+    AUTO_TRANSLATE_DEBOUNCE_MS, AutoDecision, LangChoice, TranslatePageModel, lang_code,
     language_choices,
 };
 use crate::translate_service::{TranslateConfig, Translated};
 use snow_platform::clipboard::copy_text_to_clipboard;
-use snow_translate::Lang;
 use snow_ui::shell::inbox::MainThreadInbox;
 use snow_ui::ui::component::button::Button;
 use snow_ui::ui::component::input::{InputEvent, Textarea, TextareaState};
 use snow_ui::ui::component::searchable_list::{SearchableListItem, SearchableVec};
 use snow_ui::ui::component::select::{Select, SelectEvent, SelectState};
-use snow_ui::ui::component::{
-    Disableable, IndexPath, Sizable, Size as ComponentSize, Theme, ThemeMode,
-};
+use snow_ui::ui::component::{Disableable, IndexPath, Sizable, Size as ComponentSize};
 use snow_ui::ui::*;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -93,15 +92,6 @@ fn lang_items(choices: Vec<LangChoice>) -> Vec<ChoiceItem> {
         .collect()
 }
 
-/// 语言的下拉取值：自动检测用 [`AUTO_LANGUAGE_ID`]，其余用语言代码。
-fn lang_id(lang: Lang) -> &'static str {
-    if lang == Lang::Auto {
-        AUTO_LANGUAGE_ID
-    } else {
-        lang.code()
-    }
-}
-
 /// 取值在选项里的位置。
 fn index_of(items: &[ChoiceItem], id: &str) -> Option<IndexPath> {
     items
@@ -112,7 +102,7 @@ fn index_of(items: &[ChoiceItem], id: &str) -> Option<IndexPath> {
 
 /// 取界面语言下的文案。
 fn text(locale: &str, id: &str) -> String {
-    crate::ocr_backend::i18n_for(locale).tr(id)
+    i18n_for(locale).tr(id)
 }
 
 /// 翻译页的创建选项。
@@ -169,15 +159,7 @@ impl TranslatePageView {
         inbox: MainThreadInbox<UiEvent>,
         options: PageOptions,
     ) -> Entity<Self> {
-        Theme::change(
-            if prefs.dark {
-                ThemeMode::Dark
-            } else {
-                ThemeMode::Light
-            },
-            None,
-            app,
-        );
+        apply_theme(prefs.dark, app);
         let mut model = TranslatePageModel::new(config, &packs);
         model.set_auto(options.auto_translate);
         if let Some(path) = &options.history_path {
@@ -206,12 +188,12 @@ impl TranslatePageView {
             };
         let source_select = make_select(
             source_items.clone(),
-            index_of(&source_items, lang_id(model.source)),
+            index_of(&source_items, lang_code(model.source)),
             app,
         );
         let target_select = make_select(
             target_items.clone(),
-            index_of(&target_items, lang_id(model.target)),
+            index_of(&target_items, lang_code(model.target)),
             app,
         );
         let pack_select = make_select(pack_items, Some(IndexPath::default()), app);
@@ -413,7 +395,7 @@ impl TranslatePageView {
     /// 渲染历史区：标题行（含清空按钮）加可滚动的记录列表。
     fn render_history(&self, p: &Palette, locale: &str, cx: &mut Context<Self>) -> Div {
         let history: &TranslateHistory = &self.model.history;
-        let i18n = crate::ocr_backend::i18n_for(locale);
+        let i18n = i18n_for(locale);
         let title = i18n.tr_with(
             "translate-page-history-title",
             &snow_i18n::Args::new().arg(1, history.len() as i64),
@@ -497,8 +479,8 @@ impl TranslatePageView {
         if !self.model.swap_languages() {
             return;
         }
-        let source = lang_id(self.model.source).to_string();
-        let target = lang_id(self.model.target).to_string();
+        let source = lang_code(self.model.source).to_string();
+        let target = lang_code(self.model.target).to_string();
         self.source_select
             .update(cx, |s, cx| s.set_selected_value(&source, window, cx));
         self.target_select

@@ -23,6 +23,11 @@ pub struct SelectionStyle {
     pub lock_aspect_ratio: bool,
 }
 
+/// 缩放比兜底：非正数按 1 处理。
+fn sane_scale(scale: f32) -> f32 {
+    if scale > 0.0 { scale } else { 1.0 }
+}
+
 /// 物理像素换算为逻辑像素（四舍五入）。
 fn to_logical(value: i32, scale: f32) -> i32 {
     (value as f32 / scale).round() as i32
@@ -42,7 +47,7 @@ fn to_logical(value: i32, scale: f32) -> i32 {
 /// let value = encode(PhysicalRect::new(10, 20, 300, 200), 1.5, SelectionStyle::default());
 /// ```
 pub fn encode(rect: PhysicalRect, scale: f32, style: SelectionStyle) -> Value {
-    let scale = if scale > 0.0 { scale } else { 1.0 };
+    let scale = sane_scale(scale);
     let x = to_logical(rect.x, scale);
     let y = to_logical(rect.y, scale);
     // 宽高按右下角换算，避免取整累积误差；至少 1
@@ -78,7 +83,7 @@ pub fn decode(
     bounds: PhysicalRect,
     min_size: i32,
 ) -> Option<PhysicalRect> {
-    let scale = if scale > 0.0 { scale } else { 1.0 };
+    let scale = sane_scale(scale);
     let rectangle = value.as_object()?.get("rectangle")?.as_object()?;
     let field = |key: &str| {
         rectangle
@@ -103,6 +108,14 @@ mod tests {
     /// 测试用矩形构造。
     fn r(x: i32, y: i32, w: i32, h: i32) -> PhysicalRect {
         PhysicalRect::new(x, y, w, h)
+    }
+
+    /// 非正数缩放比按 1 处理。
+    #[test]
+    fn non_positive_scale_falls_back_to_one() {
+        assert_eq!(sane_scale(0.0), 1.0);
+        assert_eq!(sane_scale(-2.0), 1.0);
+        assert_eq!(sane_scale(1.5), 1.5);
     }
 
     /// 缩放 1 时往返不变，且字段与旧版格式一致。

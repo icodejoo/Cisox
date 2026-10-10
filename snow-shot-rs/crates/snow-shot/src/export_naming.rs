@@ -424,9 +424,7 @@ mod tests {
     /// 重名时按 `_1`、`_2` 递增（对照 Qt `collisionSafePath`）。
     #[test]
     fn collision_suffixes_increment() {
-        let dir = std::env::temp_dir().join(format!("cisox-naming-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_util::unique_temp_dir("cisox-naming", "collision");
         let first = collision_safe_path(&dir, "shot", "png").unwrap();
         assert_eq!(first, dir.join("shot.png"));
         std::fs::write(&first, b"x").unwrap();

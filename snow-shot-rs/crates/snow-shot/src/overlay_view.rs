@@ -2952,8 +2952,8 @@ impl ScreenshotOverlayView {
                 .as_str()
                 .and_then(OcrAutoAction::parse)
                 .unwrap_or_default();
-            self.auto_qr = store.value(AUTO_QR_KEY).as_bool().unwrap_or(false);
-            self.remember_tool = store.value(REMEMBER_TOOL_KEY).as_bool().unwrap_or(false);
+            self.auto_qr = store.document().bool_or(AUTO_QR_KEY, false);
+            self.remember_tool = store.document().bool_or(REMEMBER_TOOL_KEY, false);
             self.double_click_action = action(DOUBLE_CLICK_ACTION_KEY, ClickAction::Copy);
             self.middle_click_action = action(MIDDLE_CLICK_ACTION_KEY, ClickAction::Pin);
             self.border_color = color_setting(

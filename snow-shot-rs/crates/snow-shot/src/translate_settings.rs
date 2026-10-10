@@ -25,6 +25,14 @@ const ROUTE_MODE_MESSAGES: &[(&str, &str, &str)] = &[
     ),
 ];
 
+/// 查路由模式取值对应的（标签消息 ID，说明消息 ID）；未知取值返回 `None`。
+fn route_messages(mode: &str) -> Option<(&'static str, &'static str)> {
+    ROUTE_MODE_MESSAGES
+        .iter()
+        .find(|(value, _, _)| *value == mode)
+        .map(|(_, label, hint)| (*label, *hint))
+}
+
 /// 取路由模式取值的显示名。
 ///
 /// # 参数
@@ -39,9 +47,7 @@ const ROUTE_MODE_MESSAGES: &[(&str, &str, &str)] = &[
 /// assert_eq!(route_mode_label("single", "zh-CN").as_deref(), Some("仅用指定模型"));
 /// ```
 pub fn route_mode_label(mode: &str, locale: &str) -> Option<String> {
-    let (_, label, _) = ROUTE_MODE_MESSAGES
-        .iter()
-        .find(|(value, _, _)| *value == mode)?;
+    let (label, _) = route_messages(mode)?;
     Some(i18n_for(locale).tr(label))
 }
 
@@ -64,8 +70,7 @@ pub fn route_hint(key: &str, value: &serde_json::Value, locale: &str) -> Option<
         return Some(i18n_for(locale).tr("translate-route-resident-hint"));
     }
     if key == KEY_LOCAL_ROUTE_MODE {
-        let mode = value.as_str()?;
-        let (_, _, hint) = ROUTE_MODE_MESSAGES.iter().find(|(v, _, _)| *v == mode)?;
+        let (_, hint) = route_messages(value.as_str()?)?;
         return Some(i18n_for(locale).tr(hint));
     }
     None

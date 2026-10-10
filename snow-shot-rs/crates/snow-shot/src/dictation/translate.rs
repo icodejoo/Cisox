@@ -9,11 +9,10 @@ use super::config::DictationConfig;
 use super::text::sanitize;
 use crate::stt_models::Dimension;
 use crate::translate_service::{
-    Backend, TranslateConfig, TranslateHost, Translator, default_models_dir, is_mostly_cjk,
+    Backend, TranslateConfig, TranslateHost, Translator, is_mostly_cjk,
 };
 use snow_config::extensions::{DICTATION_TARGET_EN, DICTATION_TARGET_ZH_HANS};
-use snow_translate::{Lang, ModelScanner, ScanReport};
-use std::path::Path;
+use snow_translate::{Lang, ScanReport};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Sender, channel};
@@ -245,29 +244,6 @@ pub fn assess(config: &DictationConfig, support: &ModelSupport) -> TranslationAv
             tgt: first.1,
         }
     }
-}
-
-/// 翻译可用性（默认模型目录、本地后端）。
-///
-/// # 参数
-/// - `config`：听写配置。
-/// - `data_root`：应用数据根目录。
-///
-/// # 返回
-/// 可用性；开关关闭时不扫描目录，直接 `Disabled`。
-///
-/// ```ignore
-/// let ok = translation_availability(&config, &data_root).is_ready();
-/// ```
-pub fn translation_availability(
-    config: &DictationConfig,
-    data_root: &Path,
-) -> TranslationAvailability {
-    if !config.translate_enabled {
-        return TranslationAvailability::Disabled;
-    }
-    let report = ModelScanner::new(&default_models_dir(data_root)).scan();
-    assess(config, &ModelSupport::from_scan(&report))
 }
 
 /// 一句话的翻译状态。
@@ -542,7 +518,12 @@ impl TranslationTracker {
     /// # 返回
     /// 句序号；清洗后为空不登记，返回 `None`。
     pub fn register(&mut self, text: &str) -> Option<usize> {
-        if sanitize(text).is_empty() {
+        self.register_clean(&sanitize(text))
+    }
+
+    /// 登记一句已清洗的文本；为空返回 `None`。
+    fn register_clean(&mut self, clean: &str) -> Option<usize> {
+        if clean.is_empty() {
             return None;
         }
         self.entries.push(None);
@@ -557,8 +538,8 @@ impl TranslationTracker {
     /// # 返回
     /// `(句序号, 是否已送翻译)`；清洗后为空返回 `None`。
     pub fn on_final(&mut self, text: &str) -> Option<(usize, bool)> {
-        let seq = self.register(text)?;
         let clean = sanitize(text);
+        let seq = self.register_clean(&clean)?;
         let sent = self.active.as_ref().is_some_and(|(plan, worker)| {
             plan.pair_for(&clean).is_some_and(|(src, tgt)| {
                 worker.submit(Job {
@@ -754,24 +735,6 @@ mod tests {
             Some(TranslateIssue::NoModel)
         );
         assert!(TranslationAvailability::Disabled.issue().is_none());
-    }
-
-    /// 空目录（没有模型）与关闭开关的对外入口。
-    #[test]
-    fn availability_entry_with_empty_dir() {
-        let root = std::env::temp_dir().join(format!("snow-dict-tr-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&root);
-        let on = config(true, Dimension::Zh, TranslateTarget::Auto);
-        assert_eq!(
-            translation_availability(&on, &root),
-            TranslationAvailability::NoModel
-        );
-        let off = config(false, Dimension::Zh, TranslateTarget::Auto);
-        assert_eq!(
-            translation_availability(&off, &root),
-            TranslationAvailability::Disabled
-        );
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// 只有定稿句触发翻译；译文按序号回填。

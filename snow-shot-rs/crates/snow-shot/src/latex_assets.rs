@@ -3,8 +3,8 @@
 //!
 //! 同时提供设置页“公式模型”面板的文案与状态，以及缺模型时覆盖窗里显示的本地化引导。
 
+use crate::ocr_assets::locate_worker_exe;
 use crate::ort_runtime;
-use serde_json::Value;
 use snow_config::document::ConfigDocument;
 use snow_config::extensions::KEY_LATEX_MODEL_DIR;
 use snow_i18n::{Args, I18n};
@@ -14,8 +14,6 @@ use std::path::{Path, PathBuf};
 pub const ENV_LATEX_EXE: &str = "SNOW_LATEX_EXE";
 /// 工作进程可执行文件名。
 pub const LATEX_WORKER_EXE_NAME: &str = "snow-latex.exe";
-/// 设置页里承载“公式模型”面板的分组 id。
-pub const LATEX_GROUP_ID: &str = "screenshot_conversion";
 /// 官方来源地址在语料里的 message id（文档性文本，随语言可调）。
 const SOURCE_URL_MESSAGE: &str = "latex-source-url";
 
@@ -162,10 +160,7 @@ pub fn check_model_dir(dir: &Path) -> Result<ModelPaths, Vec<&'static str>> {
 /// # 参数
 /// - `document`：配置文档。
 pub fn model_dir_from_document(document: &ConfigDocument) -> String {
-    match document.value(KEY_LATEX_MODEL_DIR) {
-        Value::String(s) => s.trim().to_string(),
-        _ => String::new(),
-    }
+    document.str_or(KEY_LATEX_MODEL_DIR, "").trim().to_string()
 }
 
 /// 公式模型的读取目录：配置里用户自设的目录优先，其后是统一目录 `<数据根>/models/latex`；没设置时只有统一目录。
@@ -250,26 +245,13 @@ fn locate_worker(
     exe_override: Option<&Path>,
     beside_exe: Option<&Path>,
 ) -> Result<PathBuf, LatexUnavailable> {
-    if let Some(path) = exe_override.filter(|p| !p.as_os_str().is_empty()) {
-        return if path.is_file() {
-            Ok(path.to_path_buf())
-        } else {
-            Err(LatexUnavailable::NoWorker(format!(
-                "{ENV_LATEX_EXE} points to a file that does not exist: {}",
-                path.display()
-            )))
-        };
-    }
-    match beside_exe.map(|dir| dir.join(LATEX_WORKER_EXE_NAME)) {
-        Some(path) if path.is_file() => Ok(path),
-        Some(path) => Err(LatexUnavailable::NoWorker(format!(
-            "{LATEX_WORKER_EXE_NAME} not found (expected at {})",
-            path.display()
-        ))),
-        None => Err(LatexUnavailable::NoWorker(format!(
-            "{LATEX_WORKER_EXE_NAME} not found"
-        ))),
-    }
+    locate_worker_exe(
+        exe_override,
+        beside_exe,
+        ENV_LATEX_EXE,
+        LATEX_WORKER_EXE_NAME,
+    )
+    .map_err(LatexUnavailable::NoWorker)
 }
 
 #[cfg(test)]

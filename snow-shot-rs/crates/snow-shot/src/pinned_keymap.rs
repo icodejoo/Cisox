@@ -151,7 +151,8 @@ impl Default for PinKeymap {
 }
 
 /// 键位表里涉及的全部配置键（供测试核对 15 键都已接线）。
-pub fn wired_config_keys() -> Vec<&'static str> {
+#[cfg(test)]
+fn wired_config_keys() -> Vec<&'static str> {
     PIN_KEYS.iter().map(|(k, _)| *k).collect()
 }
 

@@ -1,7 +1,6 @@
 //! 录屏编码质量的配置读取：把 `screen_recording/{clarity, animated_image_clarity, encoder,
 //! encoding_preset, loop_animated_images}` 翻成协议里的 [`QualityRequest`]。
 
-use serde_json::Value;
 use snow_config::document::ConfigDocument;
 use snow_recorder_protocol::QualityRequest;
 
@@ -69,7 +68,7 @@ pub fn quality_request(document: &ConfigDocument, animated: bool) -> QualityRequ
         max_size: document.value(clarity_key).as_str().and_then(clarity_limit),
         hardware: document.value(KEY_ENCODER).as_str() != Some(ENCODER_H264),
         preset,
-        loop_animated: !matches!(document.value(KEY_LOOP), Value::Bool(false)),
+        loop_animated: document.bool_or(KEY_LOOP, true),
     }
 }
 

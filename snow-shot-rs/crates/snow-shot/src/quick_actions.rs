@@ -6,7 +6,7 @@ use crate::overlay_view::AutoConfirm;
 use serde_json::Value;
 use snow_app_core::command::QuickAction;
 use snow_config::document::ConfigDocument;
-use snow_ui::shell::geometry::{PhysicalPoint, PhysicalRect};
+use snow_ui::shell::geometry::PhysicalRect;
 use snow_ui::shell::monitor::{MonitorInfo, Monitors};
 use std::path::{Path, PathBuf};
 
@@ -308,7 +308,7 @@ pub fn direct_output_plan(auto_save: bool, copy_file: bool) -> DirectOutputPlan 
 /// # 参数
 /// - `document`：配置文档。
 pub fn direct_output_plan_from(document: &ConfigDocument) -> DirectOutputPlan {
-    let flag = |key: &str| document.value(key).as_bool().unwrap_or(false);
+    let flag = |key: &str| document.bool_or(key, false);
     direct_output_plan(flag(AUTO_SAVE_CONFIG_KEY), flag(COPY_FILE_CONFIG_KEY))
 }
 
@@ -322,11 +322,9 @@ pub fn direct_output_plan_from(document: &ConfigDocument) -> DirectOutputPlan {
 /// let dir = recording_directory(&doc, Some(Path::new("C:/Users/a")));
 /// ```
 pub fn recording_directory(document: &ConfigDocument, home: Option<&Path>) -> PathBuf {
-    if let Value::String(text) = document.value(RECORDING_DIR_CONFIG_KEY) {
-        let text = text.trim();
-        if !text.is_empty() {
-            return PathBuf::from(text);
-        }
+    let text = document.str_or(RECORDING_DIR_CONFIG_KEY, "").trim();
+    if !text.is_empty() {
+        return PathBuf::from(text);
     }
     match home {
         Some(home) => home.join(VIDEOS_DIR_NAME),
@@ -350,7 +348,7 @@ pub type DirectRegion = (MonitorInfo, (i32, i32, u32, u32));
 /// ```
 pub fn clip_to_monitor(rect: (i32, i32, i32, i32), monitors: &Monitors) -> Option<DirectRegion> {
     let window = PhysicalRect::new(rect.0, rect.1, rect.2, rect.3);
-    let center = PhysicalPoint::new(rect.0 + rect.2 / 2, rect.1 + rect.3 / 2);
+    let center = window.center();
     let overlap_area = |m: &MonitorInfo| {
         m.bounds
             .intersect(&window)

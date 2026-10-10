@@ -1,7 +1,6 @@
 //! Markdown / HTML 转换的“未配置”引导：转换走用户自己配置的聊天模型（ADR-5 的自定义模型通道），
 //! 这里只判断当前配置状态并给出引导文案，**不发起任何模型调用**。
 
-use serde_json::Value;
 use snow_config::custom_models::custom_ai_models_from_json;
 use snow_config::document::ConfigDocument;
 use snow_i18n::{Args, I18n};
@@ -34,10 +33,7 @@ impl ConversionGuide {
     /// let guide = ConversionGuide::from_document(store.document());
     /// ```
     pub fn from_document(document: &ConfigDocument) -> Self {
-        let id = match document.value(KEY_VISION_MODEL) {
-            Value::String(s) => s.trim().to_string(),
-            _ => String::new(),
-        };
+        let id = document.str_or(KEY_VISION_MODEL, "").trim().to_string();
         let (models, _) = custom_ai_models_from_json(&document.value(KEY_CUSTOM_MODELS));
         Self::from_selection(&id, &models)
     }

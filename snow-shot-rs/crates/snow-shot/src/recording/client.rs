@@ -31,8 +31,6 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
 const EXIT_POLL_INTERVAL: Duration = Duration::from_millis(30);
 /// 读线程见到 EOF 后等待退出码的最长时间。
 const EXIT_CODE_WAIT: Duration = Duration::from_millis(500);
-#[cfg(windows)]
-use snow_platform::CREATE_NO_WINDOW;
 
 /// 查找录制进程可执行文件。
 ///
@@ -116,16 +114,11 @@ impl ProcessRecorderLink {
     /// let link = ProcessRecorderLink::spawn(&exe, Arc::new(|| inbox.push(UiEvent::RecorderPoll)))?;
     /// ```
     pub fn spawn(exe: &Path, wake: Arc<dyn Fn() + Send + Sync>) -> Result<Self, RecordingFailure> {
-        let mut command = std::process::Command::new(exe);
+        let mut command = snow_net::quiet_command(exe);
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            command.creation_flags(CREATE_NO_WINDOW);
-        }
         let mut child = command.spawn().map_err(|e| RecordingFailure::SpawnFailed {
             exe: exe.display().to_string(),
             detail: e.to_string(),

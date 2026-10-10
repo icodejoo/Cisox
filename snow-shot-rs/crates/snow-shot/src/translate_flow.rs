@@ -5,6 +5,7 @@
 //! 问题只给出清晰说明，绝不显示假译文。
 
 use crate::ocr_client::OcrError;
+use crate::ocr_flow::truncate_line;
 use crate::ocr_service::OcrTextBox;
 use crate::translate_service::{
     TranslateFlowError, TranslateOutcome, TranslateStage, TranslatedParagraph,
@@ -33,6 +34,15 @@ pub struct LinkHover {
     box_ix: Option<usize>,
 }
 
+/// 更新一个悬停槽：进入时记录，离开时只清除自己（避免晚到的“离开”清掉新的“进入”）。
+fn set_hover(slot: &mut Option<usize>, index: usize, hovered: bool) {
+    if hovered {
+        *slot = Some(index);
+    } else if *slot == Some(index) {
+        *slot = None;
+    }
+}
+
 impl LinkHover {
     /// 更新译文段落的悬停：进入时记录，离开时只清除自己（避免晚到的“离开”清掉新的“进入”）。
     ///
@@ -40,11 +50,7 @@ impl LinkHover {
     /// - `index`：段落下标。
     /// - `hovered`：鼠标是进入（`true`）还是离开（`false`）。
     pub fn set_paragraph(&mut self, index: usize, hovered: bool) {
-        if hovered {
-            self.paragraph = Some(index);
-        } else if self.paragraph == Some(index) {
-            self.paragraph = None;
-        }
+        set_hover(&mut self.paragraph, index, hovered);
     }
 
     /// 更新行框的悬停，规则同 [`Self::set_paragraph`]。
@@ -53,11 +59,7 @@ impl LinkHover {
     /// - `index`：行框下标。
     /// - `hovered`：鼠标是进入还是离开。
     pub fn set_box(&mut self, index: usize, hovered: bool) {
-        if hovered {
-            self.box_ix = Some(index);
-        } else if self.box_ix == Some(index) {
-            self.box_ix = None;
-        }
+        set_hover(&mut self.box_ix, index, hovered);
     }
 
     /// 清空悬停（界面切换或关闭时用）。
@@ -290,20 +292,6 @@ impl TranslateUiState {
     }
 }
 
-/// 把文字截到指定字符数（超出加省略号）。
-///
-/// # 参数
-/// - `text`：原文。
-/// - `max_chars`：最多字符数。
-pub fn truncate_text(text: &str, max_chars: usize) -> String {
-    if text.chars().count() <= max_chars {
-        text.to_string()
-    } else {
-        let head: String = text.chars().take(max_chars).collect();
-        format!("{head}…")
-    }
-}
-
 /// 结果面板要显示的文字行。
 ///
 /// # 参数
@@ -348,7 +336,7 @@ pub fn panel_lines(state: &TranslateUiState, i18n: &I18n) -> Vec<String> {
             lines.extend(
                 all.iter()
                     .take(PANEL_MAX_PARAGRAPHS)
-                    .map(|l| truncate_text(l, PANEL_MAX_CHARS)),
+                    .map(|l| truncate_line(l, PANEL_MAX_CHARS)),
             );
             if all.len() > PANEL_MAX_PARAGRAPHS {
                 lines.push(i18n.tr_with(
@@ -367,7 +355,7 @@ pub fn panel_lines(state: &TranslateUiState, i18n: &I18n) -> Vec<String> {
             message,
             can_download,
         } => {
-            let mut lines = vec![truncate_text(message, FAILURE_MAX_CHARS)];
+            let mut lines = vec![truncate_line(message, FAILURE_MAX_CHARS)];
             if *can_download {
                 lines.push(i18n.tr("translate-flow-download-hint"));
             }
@@ -511,7 +499,7 @@ mod tests {
             zh(),
         );
         assert_eq!(lines[1].chars().count(), PANEL_MAX_CHARS + 1);
-        assert_eq!(truncate_text("abc", 5), "abc");
+        assert_eq!(truncate_line("abc", 5), "abc");
     }
 
     /// 各类失败文案不同：缺运行时可下载，其余不可；OCR 缺资产指引去点 OCR 按钮。

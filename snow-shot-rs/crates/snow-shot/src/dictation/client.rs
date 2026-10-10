@@ -29,8 +29,6 @@ const DEV_TOOL_DIR: [&str; 5] = ["snow-shot-rs", "tools", "snow-stt", "target", 
 const EXIT_POLL_INTERVAL: Duration = Duration::from_millis(20);
 /// 读线程见到 EOF 后等待退出码的最长时间。
 const EXIT_CODE_WAIT: Duration = Duration::from_millis(500);
-#[cfg(windows)]
-use snow_platform::CREATE_NO_WINDOW;
 
 /// 查找工作进程可执行文件。
 ///
@@ -134,7 +132,7 @@ impl ProcessSttLink {
         args: &[String],
         wake: Arc<dyn Fn() + Send + Sync>,
     ) -> Result<Self, String> {
-        let mut command = std::process::Command::new(exe);
+        let mut command = snow_net::quiet_command(exe);
         command
             .args(args)
             .stdin(Stdio::piped())
@@ -143,11 +141,6 @@ impl ProcessSttLink {
         // 工作进程的 DLL 与 exe 同目录；把工作目录设到那里，避免依赖调用方的当前目录
         if let Some(dir) = exe.parent() {
             command.current_dir(dir);
-        }
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            command.creation_flags(CREATE_NO_WINDOW);
         }
         let mut child = command
             .spawn()

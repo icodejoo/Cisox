@@ -132,6 +132,11 @@ pub fn issue_message(issue: &TranslateIssue, locale: &str) -> String {
     }
 }
 
+/// 取带单个命名参数的文案。
+fn tr_arg(i18n: &snow_i18n::I18n, id: &str, name: &str, value: &str) -> String {
+    i18n.tr_with(id, &Args::new().named(name, value))
+}
+
 /// 不能键入原因的文案。
 fn reason_message(reason: NoTypeReason, locale: &str) -> String {
     let id = match reason {
@@ -155,19 +160,22 @@ pub fn route_message(note: &RouteNote, locale: &str) -> String {
         RouteNote::Typing => i18n.tr("dictation-route-typing"),
         RouteNote::TypingWithOverlay => i18n.tr("dictation-route-typing-overlay"),
         RouteNote::OverlayOnly => i18n.tr("dictation-route-overlay"),
-        RouteNote::Fallback(reason) => i18n.tr_with(
+        RouteNote::Fallback(reason) => tr_arg(
+            i18n,
             "dictation-route-fallback",
-            &Args::new().named("reason", reason_message(*reason, locale).as_str()),
+            "reason",
+            &reason_message(*reason, locale),
         ),
-        RouteNote::Blocked(reason) => i18n.tr_with(
+        RouteNote::Blocked(reason) => tr_arg(
+            i18n,
             "dictation-route-blocked",
-            &Args::new().named("reason", reason_message(*reason, locale).as_str()),
+            "reason",
+            &reason_message(*reason, locale),
         ),
         RouteNote::TargetLost => i18n.tr("dictation-route-target-lost"),
-        RouteNote::SendFailed(detail) => i18n.tr_with(
-            "dictation-route-send-failed",
-            &Args::new().named("detail", detail.as_str()),
-        ),
+        RouteNote::SendFailed(detail) => {
+            tr_arg(i18n, "dictation-route-send-failed", "detail", detail)
+        }
         RouteNote::TypingStuck => i18n.tr("dictation-route-typing-stuck"),
     }
 }
@@ -184,44 +192,27 @@ fn failure_message(failure: &Failure, locale: &str) -> String {
                 SystemError::Network => "dictation-error-system-network",
                 SystemError::Other => "dictation-error-system-other",
             };
-            i18n.tr_with(id, &Args::new().named("detail", detail.as_str()))
+            tr_arg(i18n, id, "detail", detail)
         }
         Failure::WorkerMissing => i18n.tr("dictation-error-worker-missing"),
-        Failure::Spawn(detail) => i18n.tr_with(
-            "dictation-error-spawn",
-            &Args::new().named("detail", detail.as_str()),
-        ),
-        Failure::ModelDirMissing(path) => i18n.tr_with(
-            "dictation-error-model-dir",
-            &Args::new().named("path", path.as_str()),
-        ),
-        Failure::ModelNotInstalled(id) => i18n.tr_with(
-            "dictation-error-model-not-installed",
-            &Args::new().named("model", id.as_str()),
-        ),
+        Failure::Spawn(detail) => tr_arg(i18n, "dictation-error-spawn", "detail", detail),
+        Failure::ModelDirMissing(path) => tr_arg(i18n, "dictation-error-model-dir", "path", path),
+        Failure::ModelNotInstalled(id) => {
+            tr_arg(i18n, "dictation-error-model-not-installed", "model", id)
+        }
         Failure::ManualDirNeedsStreaming => i18n.tr("dictation-error-manual-dir-streaming"),
-        Failure::ModelUnavailable(detail) => i18n.tr_with(
-            "dictation-error-model-unavailable",
-            &Args::new().named("detail", detail.as_str()),
-        ),
+        Failure::ModelUnavailable(detail) => {
+            tr_arg(i18n, "dictation-error-model-unavailable", "detail", detail)
+        }
         Failure::StartTimeout => i18n.tr("dictation-error-start-timeout"),
         Failure::StopTimeout => i18n.tr("dictation-error-stop-timeout"),
         Failure::TranslateTimeout => i18n.tr("dictation-error-translate-timeout"),
         Failure::Crashed(code) => {
             let shown = code.map_or_else(|| "?".to_string(), |c| c.to_string());
-            i18n.tr_with(
-                "dictation-error-crashed",
-                &Args::new().named("code", shown.as_str()),
-            )
+            tr_arg(i18n, "dictation-error-crashed", "code", &shown)
         }
-        Failure::Worker(detail) => i18n.tr_with(
-            "dictation-error-worker",
-            &Args::new().named("detail", detail.as_str()),
-        ),
-        Failure::Link(detail) => i18n.tr_with(
-            "dictation-error-link",
-            &Args::new().named("detail", detail.as_str()),
-        ),
+        Failure::Worker(detail) => tr_arg(i18n, "dictation-error-worker", "detail", detail),
+        Failure::Link(detail) => tr_arg(i18n, "dictation-error-link", "detail", detail),
     }
 }
 

@@ -6,24 +6,24 @@
 
 use crate::app_runtime::UiEvent;
 use crate::history_store::{Thumbnail, format_local, local_offset_secs, make_thumbnail};
-use crate::pinned_manage::{GroupFilter, PinRow, build_rows, default_group_id, valid_filter};
+use crate::history_view::{ThumbCache, apply_theme};
+use crate::model_catalog::format_size_or_zero;
+use crate::pinned_manage::{GroupFilter, PinRow, build_rows, valid_filter};
 use crate::pinned_shared::PinShared;
 use crate::settings_state::UiPrefs;
 use crate::settings_view::{Palette, palette};
-use crate::model_catalog::format_size_or_zero;
-use image::{Frame, RgbaImage};
+use snow_history::pinned::DEFAULT_GROUP_ID;
 use snow_history::timeutil::format_iso_utc_ms;
 use snow_i18n::Args;
 use snow_ui::shell::inbox::MainThreadInbox;
 use snow_ui::ui::component::button::Button;
 use snow_ui::ui::component::input::{InputEvent, Textarea, TextareaState};
-use snow_ui::ui::component::{Disableable, Sizable, Size as ComponentSize, Theme, ThemeMode};
+use snow_ui::ui::component::{Disableable, Sizable, Size as ComponentSize};
 use snow_ui::ui::*;
 use snow_ui::widgets::Popconfirm;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::BTreeSet;
 use std::ops::Range;
 use std::rc::Rc;
-use std::sync::Arc;
 
 /// 窗口逻辑宽度。
 pub const WINDOW_WIDTH: f32 = 860.0;
@@ -52,14 +52,6 @@ const NAME_INPUT_WIDTH: f32 = 180.0;
 /// 缩略图后台线程名称。
 const THUMB_THREAD_NAME: &str = "snow-pin-thumbs";
 
-/// 缩略图加载状态。
-enum ThumbState {
-    /// 已就绪。
-    Ready(Arc<RenderImage>),
-    /// 解码失败。
-    Failed,
-}
-
 /// 贴图管理窗口视图。
 pub struct PinManageView {
     /// 贴图共享上下文（只在主线程读仓储）。
@@ -75,11 +67,7 @@ pub struct PinManageView {
     /// 当前有窗口的贴图 ID。
     open_ids: BTreeSet<String>,
     /// 缩略图。
-    thumbs: HashMap<String, ThumbState>,
-    /// 正在加载缩略图的贴图 ID。
-    pending: HashSet<String>,
-    /// 待释放的图像资源。
-    pending_drops: Vec<Arc<RenderImage>>,
+    thumbs: ThumbCache,
     /// 底部提示（错误）。
     notice: Option<String>,
     /// 新分组名输入框。
@@ -107,15 +95,7 @@ impl PinManageView {
         prefs: UiPrefs,
         inbox: MainThreadInbox<UiEvent>,
     ) -> Entity<Self> {
-        Theme::change(
-            if prefs.dark {
-                ThemeMode::Dark
-            } else {
-                ThemeMode::Light
-            },
-            None,
-            app,
-        );
+        apply_theme(prefs.dark, app);
         let placeholder =
             crate::ocr_backend::i18n_for(prefs.locale).tr("pinmgr-new-group-placeholder");
         let name_input = app.new(|cx| {
@@ -143,9 +123,7 @@ impl PinManageView {
                 filter: GroupFilter::All,
                 rows,
                 open_ids,
-                thumbs: HashMap::new(),
-                pending: HashSet::new(),
-                pending_drops: Vec::new(),
+                thumbs: ThumbCache::default(),
                 notice: None,
                 name_input: name_input.clone(),
                 offset_secs: local_offset_secs(),
@@ -174,22 +152,10 @@ impl PinManageView {
     /// - `id`：贴图 ID。
     /// - `thumb`：缩略图；`None` 表示解码失败。
     pub fn set_thumb(&mut self, id: &str, thumb: Option<Thumbnail>, cx: &mut Context<Self>) {
-        self.pending.remove(id);
-        if !self.rows.iter().any(|r| r.id == id) {
-            return;
+        let in_list = self.rows.iter().any(|r| r.id == id);
+        if self.thumbs.accept(id, thumb, in_list) {
+            cx.notify();
         }
-        let state = thumb
-            .and_then(|t| {
-                let buffer = RgbaImage::from_raw(t.width, t.height, t.bgra)?;
-                Some(ThumbState::Ready(Arc::new(RenderImage::new(vec![
-                    Frame::new(buffer),
-                ]))))
-            })
-            .unwrap_or(ThumbState::Failed);
-        if let Some(ThumbState::Ready(old)) = self.thumbs.insert(id.to_string(), state) {
-            self.pending_drops.push(old);
-        }
-        cx.notify();
     }
 
     /// 显示一条失败提示。
@@ -204,19 +170,7 @@ impl PinManageView {
 
     /// 行变化后：丢弃已不在列表里的缩略图并补请求缺失的。
     fn after_rows_change(&mut self) {
-        let ids: HashSet<&str> = self.rows.iter().map(|r| r.id.as_str()).collect();
-        let stale: Vec<String> = self
-            .thumbs
-            .keys()
-            .filter(|id| !ids.contains(id.as_str()))
-            .cloned()
-            .collect();
-        for id in stale {
-            if let Some(ThumbState::Ready(image)) = self.thumbs.remove(&id) {
-                self.pending_drops.push(image);
-            }
-        }
-        self.pending.retain(|id| ids.contains(id.as_str()));
+        self.thumbs.retain(self.rows.iter().map(|r| r.id.as_str()));
         self.request_thumbs();
     }
 
@@ -226,13 +180,14 @@ impl PinManageView {
             .rows
             .iter()
             .take(THUMB_BATCH)
-            .filter(|r| !self.thumbs.contains_key(&r.id) && !self.pending.contains(&r.id))
+            .filter(|r| self.thumbs.is_missing(&r.id))
             .filter_map(|r| self.shared.source_png(&r.id).map(|png| (r.id.clone(), png)))
             .collect();
         if jobs.is_empty() {
             return;
         }
-        self.pending.extend(jobs.iter().map(|(id, _)| id.clone()));
+        self.thumbs
+            .mark_pending(jobs.iter().map(|(id, _)| id.clone()));
         let inbox = self.inbox.clone();
         let spawned = std::thread::Builder::new()
             .name(THUMB_THREAD_NAME.into())
@@ -266,26 +221,13 @@ impl PinManageView {
 
     /// 缩略图或占位文字，装进定宽定高的框。
     fn thumb_box(&self, id: &str, p: &Palette, i18n: &snow_i18n::I18n) -> Div {
-        let frame = div()
-            .w(px(ROW_THUMB_W))
-            .h(px(ROW_THUMB_H))
-            .flex()
-            .items_center()
-            .justify_center()
-            .overflow_hidden()
-            .bg(p.control)
-            .text_size(px(SMALL_SIZE))
-            .text_color(p.dim);
-        match self.thumbs.get(id) {
-            Some(ThumbState::Ready(image)) => frame.child(
-                img(ImageSource::Render(Arc::clone(image)))
-                    .w(px(ROW_THUMB_W))
-                    .h(px(ROW_THUMB_H))
-                    .object_fit(ObjectFit::Contain),
-            ),
-            Some(ThumbState::Failed) => frame.child("-"),
-            None => frame.child(i18n.tr("pinmgr-thumb-loading")),
-        }
+        self.thumbs.thumb_box(
+            id,
+            ROW_THUMB_W,
+            ROW_THUMB_H,
+            p,
+            i18n.tr("pinmgr-thumb-loading"),
+        )
     }
 
     /// 渲染一行。
@@ -317,22 +259,22 @@ impl PinManageView {
         let show_id = row.id.clone();
         let delete_id = row.id.clone();
         let entity = cx.entity();
-        let delete = Popconfirm::new(("pinmgr-delete-pop", ix), i18n.tr("pinmgr-delete-title"))
-            .description(i18n.tr("pinmgr-delete-desc"))
-            .ok_text(i18n.tr("pinmgr-confirm-delete"))
-            .cancel_text(i18n.tr("pinmgr-confirm-cancel"))
-            .ok_danger(true)
-            .trigger_button(
-                Button::new(("pinmgr-delete", ix))
-                    .with_size(ComponentSize::Small)
-                    .label(i18n.tr("pinmgr-action-delete")),
-            )
-            .on_confirm(move |_window, app| {
-                let id = delete_id.clone();
-                entity.update(app, |this, _| {
-                    this.inbox.push(UiEvent::PinManageDelete { id })
-                });
+        let delete = delete_confirm(
+            ("pinmgr-delete-pop", ix),
+            ("pinmgr-delete", ix),
+            [
+                i18n.tr("pinmgr-delete-title"),
+                i18n.tr("pinmgr-delete-desc"),
+                i18n.tr("pinmgr-action-delete"),
+            ],
+            i18n,
+        )
+        .on_confirm(move |_window, app| {
+            let id = delete_id.clone();
+            entity.update(app, |this, _| {
+                this.inbox.push(UiEvent::PinManageDelete { id })
             });
+        });
         div()
             .id(("pinmgr-row", ix))
             .h(px(ROW_HEIGHT))
@@ -428,23 +370,22 @@ impl PinManageView {
                 cx,
             ));
         }
-        let delete_all =
-            Popconfirm::new("pinmgr-delete-all-pop", i18n.tr("pinmgr-delete-all-title"))
-                .description(i18n.tr("pinmgr-delete-all-desc"))
-                .ok_text(i18n.tr("pinmgr-confirm-delete"))
-                .cancel_text(i18n.tr("pinmgr-confirm-cancel"))
-                .ok_danger(true)
-                .trigger_button(
-                    Button::new("pinmgr-delete-all")
-                        .with_size(ComponentSize::Small)
-                        .label(i18n.tr("pinmgr-action-delete-all")),
-                )
-                .on_confirm({
-                    let entity = entity.clone();
-                    move |_window, app| {
-                        entity.update(app, |this, _| this.inbox.push(UiEvent::PinManageDeleteAll));
-                    }
-                });
+        let delete_all = delete_confirm(
+            "pinmgr-delete-all-pop",
+            "pinmgr-delete-all",
+            [
+                i18n.tr("pinmgr-delete-all-title"),
+                i18n.tr("pinmgr-delete-all-desc"),
+                i18n.tr("pinmgr-action-delete-all"),
+            ],
+            i18n,
+        )
+        .on_confirm({
+            let entity = entity.clone();
+            move |_window, app| {
+                entity.update(app, |this, _| this.inbox.push(UiEvent::PinManageDeleteAll));
+            }
+        });
         let mut actions = div()
             .flex()
             .items_center()
@@ -469,23 +410,20 @@ impl PinManageView {
                     })),
             );
         if let GroupFilter::Group(group_id) = &self.filter
-            && group_id != default_group_id()
+            && group_id != DEFAULT_GROUP_ID
         {
             let group_id = group_id.clone();
             let entity = entity.clone();
             actions = actions.child(
-                Popconfirm::new(
+                delete_confirm(
                     "pinmgr-delete-group-pop",
-                    i18n.tr("pinmgr-delete-group-title"),
-                )
-                .description(i18n.tr("pinmgr-delete-group-desc"))
-                .ok_text(i18n.tr("pinmgr-confirm-delete"))
-                .cancel_text(i18n.tr("pinmgr-confirm-cancel"))
-                .ok_danger(true)
-                .trigger_button(
-                    Button::new("pinmgr-delete-group")
-                        .with_size(ComponentSize::Small)
-                        .label(i18n.tr("pinmgr-action-delete-group")),
+                    "pinmgr-delete-group",
+                    [
+                        i18n.tr("pinmgr-delete-group-title"),
+                        i18n.tr("pinmgr-delete-group-desc"),
+                        i18n.tr("pinmgr-action-delete-group"),
+                    ],
+                    i18n,
                 )
                 .on_confirm(move |_window, app| {
                     let id = group_id.clone();
@@ -533,13 +471,37 @@ impl PinManageView {
     }
 }
 
+/// 带确认气泡的删除按钮。
+///
+/// # 参数
+/// - `pop_id` / `button_id`：气泡与触发按钮的元素 ID。
+/// - `texts`：`[标题, 说明, 按钮文字]`（已本地化）。
+/// - `i18n`：取「确认 / 取消」文案。
+///
+/// # 返回
+/// 还没挂确认回调的气泡，调用处接 `.on_confirm(..)`。
+fn delete_confirm(
+    pop_id: impl Into<ElementId>,
+    button_id: impl Into<ElementId>,
+    texts: [String; 3],
+    i18n: &snow_i18n::I18n,
+) -> Popconfirm {
+    let [title, description, action] = texts;
+    Popconfirm::new(pop_id, title)
+        .description(description)
+        .ok_text(i18n.tr("pinmgr-confirm-delete"))
+        .cancel_text(i18n.tr("pinmgr-confirm-cancel"))
+        .ok_danger(true)
+        .trigger_button(
+            Button::new(button_id)
+                .with_size(ComponentSize::Small)
+                .label(action),
+        )
+}
+
 impl Render for PinManageView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        for image in self.pending_drops.drain(..) {
-            if let Err(e) = window.drop_image(image) {
-                tracing::debug!(error = %e, "释放贴图缩略图失败");
-            }
-        }
+        self.thumbs.release(window, "释放贴图缩略图失败");
         let p = palette(self.prefs.dark, self.prefs.accent);
         let i18n = crate::ocr_backend::i18n_for(self.prefs.locale);
         let total = self.rows.len();
@@ -551,10 +513,8 @@ impl Render for PinManageView {
                 "pinmgr-rows",
                 total,
                 cx.processor(move |this, range: Range<usize>, _window, cx| {
-                    let rows: Vec<(usize, PinRow)> =
-                        range.map(|ix| (ix, this.rows[ix].clone())).collect();
-                    rows.iter()
-                        .map(|(ix, row)| this.render_row(*ix, row, &p, cx))
+                    range
+                        .map(|ix| this.render_row(ix, &this.rows[ix], &p, cx))
                         .collect::<Vec<_>>()
                 }),
             )

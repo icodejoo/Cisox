@@ -4,6 +4,8 @@
 //! 窗口失焦或按 Esc 即关闭；翻译在后台线程执行，结果经收件箱回到 [`TranslateInputView::finish`]。
 
 use crate::app_runtime::UiEvent;
+use crate::history_view::apply_theme;
+use crate::ocr_backend::i18n_for;
 use crate::settings_state::UiPrefs;
 use crate::settings_view::{Palette, palette};
 use crate::translate_input::{
@@ -16,7 +18,7 @@ use snow_ui::ui::component::button::Button;
 use snow_ui::ui::component::input::{InputEvent, Textarea, TextareaState};
 use snow_ui::ui::component::searchable_list::{SearchableListItem, SearchableVec};
 use snow_ui::ui::component::select::{Select, SelectEvent, SelectState};
-use snow_ui::ui::component::{Disableable, Sizable, Size as ComponentSize, Theme, ThemeMode};
+use snow_ui::ui::component::{Disableable, Sizable, Size as ComponentSize};
 use snow_ui::ui::*;
 
 /// 浮窗逻辑宽度。
@@ -103,16 +105,8 @@ impl TranslateInputView {
         prefs: UiPrefs,
         inbox: MainThreadInbox<UiEvent>,
     ) -> Entity<Self> {
-        Theme::change(
-            if prefs.dark {
-                ThemeMode::Dark
-            } else {
-                ThemeMode::Light
-            },
-            None,
-            app,
-        );
-        let placeholder = snow_i18n_text(prefs.locale, "translate-input-placeholder");
+        apply_theme(prefs.dark, app);
+        let placeholder = text(prefs.locale, "translate-input-placeholder");
         let input = app.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(INPUT_MIN_ROWS, INPUT_MAX_ROWS)
@@ -233,8 +227,8 @@ impl TranslateInputView {
 }
 
 /// 取界面语言下的文案。
-fn snow_i18n_text(locale: &str, id: &str) -> String {
-    crate::ocr_backend::i18n_for(locale).tr(id)
+fn text(locale: &str, id: &str) -> String {
+    i18n_for(locale).tr(id)
 }
 
 impl Render for TranslateInputView {
@@ -270,9 +264,9 @@ impl Render for TranslateInputView {
             })
             .when(!has_translation, |d| {
                 d.text_color(p.dim)
-                    .child(snow_i18n_text(locale, "translate-input-result-empty"))
+                    .child(text(locale, "translate-input-result-empty"))
             });
-        let hint = has_translation.then(|| snow_i18n_text(locale, "translate-input-click-copy"));
+        let hint = has_translation.then(|| text(locale, "translate-input-click-copy"));
         div()
             .size_full()
             .bg(p.bg)
@@ -304,7 +298,7 @@ impl Render for TranslateInputView {
                     .child(div().flex_1())
                     .child(
                         Button::new("translate-input-go")
-                            .label(snow_i18n_text(locale, "translate-input-button"))
+                            .label(text(locale, "translate-input-button"))
                             .loading(busy)
                             .disabled(busy)
                             .on_click(cx.listener(|this, _event: &ClickEvent, window, cx| {

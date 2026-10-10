@@ -179,9 +179,63 @@ impl OcrUnavailable {
 /// assert!(ocr_root(Path::new("D"), None).ends_with("ocr"));
 /// ```
 pub fn ocr_root(data_root: &Path, env_override: Option<&str>) -> PathBuf {
+    asset_root(data_root, env_override, OCR_DIR)
+}
+
+/// 计算某类资产根目录：环境变量（去空白，空串视为未设置）优先，否则 `<数据根>/assets/<子目录>`。
+///
+/// # 参数
+/// - `data_root`：应用数据根目录。
+/// - `env_override`：覆盖目录环境变量的值。
+/// - `sub`：`assets` 下的子目录名（如 `ocr`、`table`）。
+///
+/// ```ignore
+/// assert!(asset_root(Path::new("D"), None, "table").ends_with("table"));
+/// ```
+pub fn asset_root(data_root: &Path, env_override: Option<&str>, sub: &str) -> PathBuf {
     match env_override.map(str::trim).filter(|v| !v.is_empty()) {
         Some(dir) => PathBuf::from(dir),
-        None => data_root.join(ASSETS_DIR).join(OCR_DIR),
+        None => data_root.join(ASSETS_DIR).join(sub),
+    }
+}
+
+/// 定位工作进程可执行文件：环境变量指定的文件优先（必须存在），其次主程序同目录的默认文件名。
+///
+/// # 参数
+/// - `exe_override`：环境变量指定的路径（空串视为未设置）。
+/// - `beside_exe`：主程序所在目录。
+/// - `env_name`：环境变量名（只用于错误说明）。
+/// - `exe_name`：同目录下的默认文件名。
+///
+/// # 返回
+/// 可执行文件路径；找不到返回英文技术说明（调用方包成各自的“无工作进程”错误）。
+///
+/// ```ignore
+/// let exe = locate_worker_exe(None, Some(dir), "SNOW_TABLE_EXE", "snow-table.exe")?;
+/// ```
+pub fn locate_worker_exe(
+    exe_override: Option<&Path>,
+    beside_exe: Option<&Path>,
+    env_name: &str,
+    exe_name: &str,
+) -> Result<PathBuf, String> {
+    if let Some(path) = exe_override.filter(|p| !p.as_os_str().is_empty()) {
+        return if path.is_file() {
+            Ok(path.to_path_buf())
+        } else {
+            Err(format!(
+                "{env_name} points to a file that does not exist: {}",
+                path.display()
+            ))
+        };
+    }
+    match beside_exe.map(|dir| dir.join(exe_name)) {
+        Some(path) if path.is_file() => Ok(path),
+        Some(path) => Err(format!(
+            "{exe_name} not found (expected at {})",
+            path.display()
+        )),
+        None => Err(format!("{exe_name} not found")),
     }
 }
 
@@ -235,9 +289,18 @@ pub fn state_dir(root: &Path, runtime: &RuntimeSpec) -> PathBuf {
 /// - `dir`：目标目录。
 /// - `files`：清单里应有的文件。
 pub fn dir_complete(dir: &Path, files: &[AssetFile]) -> bool {
+    files_complete(dir, files.iter().map(|f| (f.name.as_str(), f.size)))
+}
+
+/// 目录里是否有完成标记，且每个 `(文件名, 字节数)` 都存在并大小一致（供不同清单结构共用）。
+///
+/// # 参数
+/// - `dir`：目标目录。
+/// - `entries`：应有的文件名与大小。
+pub fn files_complete<'a>(dir: &Path, entries: impl IntoIterator<Item = (&'a str, u64)>) -> bool {
     dir.join(COMPLETE_MARKER).is_file()
-        && files.iter().all(|f| {
-            std::fs::metadata(dir.join(&f.name)).is_ok_and(|m| m.is_file() && m.len() == f.size)
+        && entries.into_iter().all(|(name, size)| {
+            std::fs::metadata(dir.join(name)).is_ok_and(|m| m.is_file() && m.len() == size)
         })
 }
 
@@ -553,5 +616,51 @@ mod tests {
                 .message(en)
                 .contains("m1")
         );
+    }
+
+    /// 通用资产根与工作进程定位：环境变量优先，缺失时给出说明，同目录兜底。
+    #[test]
+    fn asset_root_and_worker_lookup() {
+        assert_eq!(
+            asset_root(Path::new("D"), None, "table"),
+            Path::new("D").join("assets").join("table")
+        );
+        assert_eq!(
+            asset_root(Path::new("D"), Some(" X "), "t"),
+            PathBuf::from("X")
+        );
+        let root = temp_root("worker");
+        let exe = root.join("w.exe");
+        std::fs::write(&exe, b"x").expect("写");
+        assert_eq!(
+            locate_worker_exe(Some(&exe), None, "ENV_X", "w.exe"),
+            Ok(exe.clone())
+        );
+        let err = locate_worker_exe(Some(&root.join("no.exe")), None, "ENV_X", "w.exe");
+        assert!(err.unwrap_err().starts_with("ENV_X points to"));
+        assert_eq!(
+            locate_worker_exe(None, Some(&root), "ENV_X", "w.exe"),
+            Ok(exe)
+        );
+        let missing = locate_worker_exe(None, Some(&root), "ENV_X", "none.exe").unwrap_err();
+        assert!(missing.starts_with("none.exe not found (expected at"));
+        assert_eq!(
+            locate_worker_exe(None, None, "ENV_X", "w.exe"),
+            Err("w.exe not found".to_string())
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `files_complete`：缺标记、大小不符都不算齐全。
+    #[test]
+    fn files_complete_checks_marker_and_size() {
+        let root = temp_root("files-complete");
+        std::fs::write(root.join("a.bin"), b"abc").expect("写");
+        assert!(!files_complete(&root, [("a.bin", 3)]));
+        std::fs::write(root.join(COMPLETE_MARKER), b"{}").expect("标记");
+        assert!(files_complete(&root, [("a.bin", 3)]));
+        assert!(!files_complete(&root, [("a.bin", 4)]));
+        assert!(!files_complete(&root, [("b.bin", 0)]));
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

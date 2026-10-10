@@ -1,7 +1,6 @@
 //! `system/*` 设置的落地：进程优先级与开机自启。计划由配置算出（纯逻辑，可离屏测试），
 //! 再交给 `snow-platform` 执行。开发构建（`debug_assertions`）从不改注册表，避免调试版把自己登记成开机启动。
 
-use serde_json::Value;
 use snow_app_core::PRODUCT_NAME;
 use snow_config::document::ConfigDocument;
 use snow_platform::system_integration::{PriorityLevel, set_auto_start, set_process_priority};
@@ -32,7 +31,7 @@ pub struct SystemPlan {
 pub fn plan_from_document(document: &ConfigDocument) -> SystemPlan {
     SystemPlan {
         priority: document.value(KEY_PRIORITY).as_str().and_then(PriorityLevel::parse),
-        auto_start: !matches!(document.value(KEY_AUTO_START), Value::Bool(false)),
+        auto_start: document.bool_or(KEY_AUTO_START, true),
     }
 }
 

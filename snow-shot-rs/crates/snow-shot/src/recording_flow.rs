@@ -335,13 +335,13 @@ impl RecordingHost {
                 region.union_rect(*rect);
             }
             match active.window.overlay(&self.caps) {
-                Ok(mut overlay) => match overlay.set_hit_region(&region) {
-                    Ok(()) => active.applied_hit = layout_rects,
-                    Err(e) => {
+                Ok(mut overlay) => {
+                    if let Err(e) = overlay.set_hit_region(&region) {
                         tracing::warn!(error = %e, "设置录制窗命中区域失败");
-                        active.applied_hit = layout_rects;
                     }
-                },
+                    // 成功与失败都记下，失败时不逐帧重试刷屏
+                    active.applied_hit = layout_rects;
+                }
                 Err(e) => tracing::warn!(error = %e, "无法取得录制窗句柄"),
             }
         }

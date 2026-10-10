@@ -364,34 +364,36 @@ fn fetch_package(info: &UpdateInfo, dest: &Path) -> Result<bool, FetchError> {
     let mut part = dest.as_os_str().to_owned();
     part.push(".part");
     let part = PathBuf::from(part);
+    let verified = !info.sha256.is_empty();
+    // 清单给了 sha256 才比对；失败由 fetch_resumable 删除 `.part`，避免续传坏数据
+    let verify = |p: &Path| -> Result<(), FetchError> {
+        if !verified {
+            return Ok(());
+        }
+        let actual = sha256_file(p)?;
+        if actual == info.sha256 {
+            return Ok(());
+        }
+        Err(FetchError::HashMismatch {
+            name: dest
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            expected: info.sha256.clone(),
+            actual,
+        })
+    };
+    let fetch = || {
+        snow_net::fetch_resumable::<FetchError>(&info.url, &part, dest, None, |_| {}, &verify)
+    };
     // 已有 `.part` 就续传（curl `-C -`）；续传被拒（残留已完整 / 源已变）时删掉残留从头再下一次
     let resumed = part.is_file();
-    let mut result = snow_net::download_blocking(&info.url, &part).map_err(FetchError::from);
-    if result.is_err() && resumed {
+    let mut result = fetch();
+    if resumed && matches!(result, Err(FetchError::DownloadFailed { .. })) {
         let _ = std::fs::remove_file(&part);
-        result = snow_net::download_blocking(&info.url, &part).map_err(FetchError::from);
+        result = fetch();
     }
-    result?;
-    let verified = !info.sha256.is_empty();
-    if verified {
-        let actual = sha256_file(&part).inspect_err(|_| {
-            let _ = std::fs::remove_file(&part);
-        })?;
-        if actual != info.sha256 {
-            let _ = std::fs::remove_file(&part);
-            return Err(FetchError::HashMismatch {
-                name: dest
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default(),
-                expected: info.sha256.clone(),
-                actual,
-            });
-        }
-    }
-    let _ = std::fs::remove_file(dest);
-    std::fs::rename(&part, dest).map_err(|_| FetchError::Rename(dest.display().to_string()))?;
-    Ok(verified)
+    result.map(|()| verified)
 }
 
 /// 上次自动检查时间记录文件的路径。
@@ -444,7 +446,7 @@ pub fn unix_now() -> u64 {
 /// - `data_root`：应用数据根目录（读取上次检查时间）。
 /// - `now`：当前 Unix 秒。
 pub fn auto_check_target(document: &ConfigDocument, data_root: &Path, now: u64) -> Option<String> {
-    let mode = UpdateMode::parse(document.value(KEY_UPDATE_MODE).as_str().unwrap_or_default());
+    let mode = UpdateMode::parse(document.str_or(KEY_UPDATE_MODE, ""));
     if !should_auto_check(
         mode,
         read_last_check(data_root),

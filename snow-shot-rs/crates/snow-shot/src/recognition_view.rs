@@ -15,7 +15,7 @@ use snow_ui::shell::geometry::LogicalSize;
 use snow_ui::shell::window::WindowSpec;
 use snow_ui::ui::component::button::Button;
 use snow_ui::ui::component::input::{Textarea, TextareaState};
-use snow_ui::ui::component::{Sizable, Size as ComponentSize, Theme, ThemeMode};
+use snow_ui::ui::component::{Sizable, Size as ComponentSize};
 use snow_ui::ui::*;
 use std::sync::Arc;
 
@@ -31,6 +31,8 @@ const PADDING: f32 = 12.0;
 const GAP: f32 = 8.0;
 /// 正文字号。
 const TEXT_SIZE: f32 = 13.0;
+/// 次要文字字号。
+const SMALL_SIZE: f32 = 12.0;
 /// 文字块框描边色。
 const BOX_BORDER: u32 = 0x4096FFFF;
 /// 文字块框填充色（半透明）。
@@ -112,15 +114,7 @@ impl RecognitionView {
         data: RecognitionData,
         prefs: UiPrefs,
     ) -> Entity<Self> {
-        Theme::change(
-            if prefs.dark {
-                ThemeMode::Dark
-            } else {
-                ThemeMode::Light
-            },
-            None,
-            app,
-        );
+        crate::history_view::apply_theme(prefs.dark, app);
         let initial = data.text.clone();
         let text = app.new(|cx| {
             let mut state = TextareaState::new(window, cx);
@@ -197,6 +191,25 @@ impl RecognitionView {
     }
 }
 
+/// 点击后复制固定文本的小按钮。
+///
+/// # 参数
+/// - `id`：按钮元素 ID。
+/// - `label`：按钮文字（已本地化）。
+/// - `text`：点击时复制的文本。
+/// - `cx`：视图上下文。
+fn copy_button(
+    id: &'static str,
+    label: String,
+    text: String,
+    cx: &mut Context<RecognitionView>,
+) -> Button {
+    Button::new(id)
+        .with_size(ComponentSize::Small)
+        .label(label)
+        .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| this.copy(&text, cx)))
+}
+
 impl Render for RecognitionView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         for image in self.pending_drops.drain(..) {
@@ -254,7 +267,7 @@ impl Render for RecognitionView {
             .child(image_box)
             .child(
                 div()
-                    .text_size(px(12.0))
+                    .text_size(px(SMALL_SIZE))
                     .text_color(p.dim)
                     .child(i18n.tr("recwin-hint-click-box")),
             );
@@ -271,54 +284,47 @@ impl Render for RecognitionView {
             .label(i18n.tr("recwin-close"))
             .on_click(cx.listener(|_this, _e: &ClickEvent, window, _cx| window.remove_window()));
         let mut format_row = div().flex().flex_wrap().items_center().gap(px(GAP));
-        if let Some(table) = self.data.table.clone() {
-            let (markdown, html) = (table.markdown, table.html);
+        if let Some(table) = &self.data.table {
             format_row = format_row
-                .child(
-                    Button::new("recwin-copy-markdown")
-                        .with_size(ComponentSize::Small)
-                        .label(i18n.tr("recwin-copy-markdown"))
-                        .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| {
-                            this.copy(&markdown, cx)
-                        })),
-                )
-                .child(
-                    Button::new("recwin-copy-html")
-                        .with_size(ComponentSize::Small)
-                        .label(i18n.tr("recwin-copy-html"))
-                        .on_click(
-                            cx.listener(move |this, _e: &ClickEvent, _w, cx| this.copy(&html, cx)),
-                        ),
-                );
+                .child(copy_button(
+                    "recwin-copy-markdown",
+                    i18n.tr("recwin-copy-markdown"),
+                    table.markdown.clone(),
+                    cx,
+                ))
+                .child(copy_button(
+                    "recwin-copy-html",
+                    i18n.tr("recwin-copy-html"),
+                    table.html.clone(),
+                    cx,
+                ));
         }
-        if let Some(latex) = self.data.latex.clone() {
-            let block = crate::latex_ocr::wrap_display(&latex);
+        if let Some(latex) = &self.data.latex {
             format_row = format_row
-                .child(
-                    Button::new("recwin-copy-latex")
-                        .with_size(ComponentSize::Small)
-                        .label(i18n.tr("recwin-copy-latex"))
-                        .on_click(
-                            cx.listener(move |this, _e: &ClickEvent, _w, cx| this.copy(&latex, cx)),
-                        ),
-                )
-                .child(
-                    Button::new("recwin-copy-latex-block")
-                        .with_size(ComponentSize::Small)
-                        .label(i18n.tr("recwin-copy-latex-block"))
-                        .on_click(
-                            cx.listener(move |this, _e: &ClickEvent, _w, cx| this.copy(&block, cx)),
-                        ),
-                );
+                .child(copy_button(
+                    "recwin-copy-latex",
+                    i18n.tr("recwin-copy-latex"),
+                    latex.clone(),
+                    cx,
+                ))
+                .child(copy_button(
+                    "recwin-copy-latex-block",
+                    i18n.tr("recwin-copy-latex-block"),
+                    crate::latex_ocr::wrap_display(latex),
+                    cx,
+                ));
         }
-        for (id, key) in [
-            ("recwin-convert-markdown", "recwin-convert-markdown"),
-            ("recwin-convert-html", "recwin-convert-html"),
+        for (id, label) in [
+            (
+                "recwin-convert-markdown",
+                i18n.tr("recwin-convert-markdown"),
+            ),
+            ("recwin-convert-html", i18n.tr("recwin-convert-html")),
         ] {
             format_row = format_row.child(
                 Button::new(id)
                     .with_size(ComponentSize::Small)
-                    .label(i18n.tr(key))
+                    .label(label)
                     .on_click(
                         cx.listener(|this, _e: &ClickEvent, _w, cx| this.show_conversion_guide(cx)),
                     ),
@@ -406,7 +412,7 @@ impl Render for RecognitionView {
                     .child(
                         div()
                             .flex_1()
-                            .text_size(px(12.0))
+                            .text_size(px(SMALL_SIZE))
                             .text_color(match &self.notice {
                                 Some((_, true)) => p.danger,
                                 _ => p.ok,

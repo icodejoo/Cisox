@@ -149,7 +149,7 @@ pub fn load(path: &Path) -> TranslateHistory {
         .unwrap_or_default()
 }
 
-/// 写历史文件（先写临时文件再改名，避免写一半断电留下坏文件）。
+/// 写历史文件（经 [`snow_platform::atomic_file::atomic_write`] 原子替换，避免写一半断电留下坏文件）。
 ///
 /// # 参数
 /// - `path`：历史文件路径。
@@ -158,14 +158,13 @@ pub fn save(path: &Path, history: &TranslateHistory) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, history.to_json())?;
-    std::fs::rename(&tmp, path)
+    snow_platform::atomic_file::atomic_write(path, history.to_json().as_bytes())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_util::unique_temp_dir;
 
     /// 造一条记录。
     fn entry(src: &str, dst: &str) -> HistoryEntry {
@@ -241,14 +240,33 @@ mod tests {
     /// 落盘读回一致；文件不存在得到空历史；写入时自动建目录。
     #[test]
     fn save_and_load_use_given_dir() {
-        let dir = std::env::temp_dir().join(format!("cisox-trans-history-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = unique_temp_dir("cisox-trans-history", "roundtrip");
         let path = history_path(&dir.join("nested"));
         assert!(load(&path).is_empty());
         let mut h = TranslateHistory::default();
         h.push(entry("你好", "hello"));
         save(&path, &h).unwrap();
         assert_eq!(load(&path), h);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 覆盖写入保留最新内容，且目录里只剩历史文件本身（无临时文件残留）。
+    #[test]
+    fn save_overwrites_without_leftovers() {
+        let dir = unique_temp_dir("cisox-trans-history", "overwrite");
+        let path = history_path(&dir);
+        let mut h = TranslateHistory::default();
+        h.push(entry("a", "A"));
+        save(&path, &h).unwrap();
+        h.push(entry("b", "B"));
+        save(&path, &h).unwrap();
+        assert_eq!(load(&path), h);
+        let names: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec![HISTORY_FILE.to_string()]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

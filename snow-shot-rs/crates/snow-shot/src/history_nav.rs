@@ -127,15 +127,6 @@ pub enum FinishStep {
     Stay,
 }
 
-/// 读取中的目标。
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Pending {
-    /// 目标导航索引（1 起）。
-    target: usize,
-    /// 目标记录 ID。
-    id: String,
-}
-
 /// 历史翻页状态机。
 #[derive(Debug, Clone, Default)]
 pub struct HistoryNav {
@@ -145,8 +136,8 @@ pub struct HistoryNav {
     index: usize,
     /// 正在显示的历史记录 ID（索引 0 时为 `None`）。
     current_id: Option<String>,
-    /// 正在进行的读取。
-    pending: Option<Pending>,
+    /// 正在进行的读取（目标记录 ID；索引在完成时按 ID 重新定位）。
+    pending: Option<String>,
     /// 本次会话里读取失败或不适用的记录 ID：刷新列表时不再出现，免得反复卡在同一条。
     skipped: HashSet<String>,
 }
@@ -235,10 +226,7 @@ impl HistoryNav {
             return NavStep::ShowLive;
         }
         let id = self.ids[target - 1].clone();
-        self.pending = Some(Pending {
-            target,
-            id: id.clone(),
-        });
+        self.pending = Some(id.clone());
         NavStep::Load { id }
     }
 
@@ -251,22 +239,19 @@ impl HistoryNav {
     /// # 返回
     /// [`FinishStep::Apply`] 表示应当应用这条记录；失败、过期或记录已消失时为 [`FinishStep::Stay`]。
     pub fn finish(&mut self, id: &str, outcome: LoadOutcome) -> FinishStep {
-        let Some(pending) = self.pending.take_if(|p| p.id == id) else {
+        let Some(pending) = self.pending.take_if(|p| p == id) else {
             return FinishStep::Stay;
         };
         // 读取期间列表可能已刷新：以 ID 重新定位目标
-        let position = self
-            .ids
-            .iter()
-            .position(|candidate| *candidate == pending.id);
+        let position = self.ids.iter().position(|candidate| *candidate == pending);
         match (outcome, position) {
             (LoadOutcome::Loaded, Some(position)) => {
                 self.index = position + 1;
-                self.current_id = Some(pending.id);
+                self.current_id = Some(pending);
                 FinishStep::Apply
             }
             (LoadOutcome::Failed, Some(position)) => {
-                self.skipped.insert(pending.id);
+                self.skipped.insert(pending);
                 self.ids.remove(position);
                 // 被移除的记录比当前位置更靠前（更新）时，当前索引随之前移
                 if position < self.index.saturating_sub(1) {
@@ -398,16 +383,10 @@ mod tests {
     #[test]
     fn threaded_provider_loads_entries_from_disk() {
         use crate::history_store::{HistorySnapshot, HistorySource};
-        use snow_history::pin_id::new_uuid_v4;
         use snow_history::timeutil::now_utc_ms;
         use std::time::{Duration, Instant};
 
-        let root = std::env::temp_dir().join(format!(
-            "cisox-nav-{}-{}",
-            std::process::id(),
-            new_uuid_v4()
-        ));
-        std::fs::create_dir_all(&root).unwrap();
+        let root = crate::test_util::unique_temp_dir("cisox-nav", "threaded");
         let policy = crate::history_store::policy_from_document(
             &snow_config::document::ConfigDocument::from_bytes(None),
         );

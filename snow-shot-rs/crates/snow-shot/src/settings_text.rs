@@ -2,7 +2,6 @@
 //! `settings_options.ftl`），这里只保留 message id 的规则与语言选择，没有按语言写死的文案表。
 
 use crate::ocr_backend::i18n_for;
-use snow_i18n::Args;
 
 /// 界面语言：内置语言之一，持有语言代码（如 `zh-CN`），按代码到语料取文案。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -179,7 +178,17 @@ impl Text {
 /// # 返回
 /// 对应语言的文案。
 pub fn t(lang: Lang, text: Text) -> String {
-    i18n_for(lang.locale()).tr_with(text.id(), &Args::new())
+    i18n_for(lang.locale()).tr(text.id())
+}
+
+/// 取语料里存在的消息；缺失返回 `None`（避免各查词函数重复 `has` + `tr`）。
+///
+/// # 参数
+/// - `locale`：已校验的界面语言代码
+/// - `id`：消息 id
+fn tr_if_present(locale: &str, id: &str) -> Option<String> {
+    let i18n = i18n_for(locale);
+    i18n.has(id).then(|| i18n.tr(id))
 }
 
 /// 分组 id 列表，顺序即侧栏顺序；标题在 `settings_ui.ftl` 的 `settings-group-<id>`。
@@ -231,13 +240,7 @@ pub fn group_message_id(group_id: &str) -> String {
 /// # 返回
 /// 对应语言的分组标题，找不到时返回空字符串。
 pub fn group_title(lang: Lang, group_id: &str) -> String {
-    let id = group_message_id(group_id);
-    let i18n = i18n_for(lang.locale());
-    if i18n.has(&id) {
-        i18n.tr(&id)
-    } else {
-        String::new()
-    }
+    tr_if_present(lang.locale(), &group_message_id(group_id)).unwrap_or_default()
 }
 
 /// 配置项名称/说明的 message id 前缀。
@@ -262,13 +265,8 @@ pub fn item_message_id(key: &str) -> String {
 /// # 返回
 /// 该语言下行标题文案。
 pub fn item_label(lang: Lang, key: &str) -> String {
-    let id = item_message_id(key);
-    let i18n = i18n_for(lang.locale());
-    if i18n.has(&id) {
-        i18n.tr(&id)
-    } else {
-        crate::settings_model::humanize(key)
-    }
+    tr_if_present(lang.locale(), &item_message_id(key))
+        .unwrap_or_else(|| crate::settings_model::humanize(key))
 }
 
 /// 取配置项的本地化说明；没有说明时返回 `None`。
@@ -277,9 +275,10 @@ pub fn item_label(lang: Lang, key: &str) -> String {
 /// - `lang`：界面语言
 /// - `key`：配置键
 pub fn item_desc(lang: Lang, key: &str) -> Option<String> {
-    let id = format!("{}{ITEM_DESC_SUFFIX}", item_message_id(key));
-    let i18n = i18n_for(lang.locale());
-    i18n.has(&id).then(|| i18n.tr(&id))
+    tr_if_present(
+        lang.locale(),
+        &format!("{}{ITEM_DESC_SUFFIX}", item_message_id(key)),
+    )
 }
 
 /// 原样显示的选项值白名单：文件/编码格式名，各语言写法一致，不需要翻译。
@@ -291,14 +290,16 @@ const OPTION_ID_PREFIX: &str = "setting-option-";
 
 /// 把配置键或选项值规范成 message id 片段：非字母数字一律换成 `-`。
 fn id_part(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for ch in text.chars() {
-        out.push(if ch.is_ascii_alphanumeric() {
-            ch.to_ascii_lowercase()
-        } else {
-            '-'
-        });
-    }
+    let out: String = text
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
     let trimmed = out.trim_matches('-');
     if trimmed.is_empty() {
         "empty".to_string()
@@ -328,9 +329,7 @@ pub fn option_message_id(key: &str, value: &str) -> String {
 /// assert_eq!(option_text("zh-CN", "tray/icon", "dark").as_deref(), Some("深色"));
 /// ```
 pub fn option_text(locale: &str, key: &str, value: &str) -> Option<String> {
-    let id = option_message_id(key, value);
-    let i18n = i18n_for(Lang::new(locale).locale());
-    i18n.has(&id).then(|| i18n.tr(&id))
+    tr_if_present(Lang::new(locale).locale(), &option_message_id(key, value))
 }
 
 /// 设置窗口标题（随界面语言）。

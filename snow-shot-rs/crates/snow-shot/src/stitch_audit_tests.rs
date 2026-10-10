@@ -401,10 +401,7 @@ fn audit_07_small_and_mismatched_sizes() {
     // (d) 帧高 6，步长 1
     let scrolls: Vec<u32> = (0..6).collect();
     let (st, d) = raw_run(vertical_frames(32, 6, &scrolls, &doc), opts());
-    let (h, _) = {
-        let img = st.image().expect("画布");
-        (img.height(), ())
-    };
+    let h = st.image().expect("画布").height();
     report("7d", true, &format!("branches={} height={h} (no panic, overflow-checks on)", branches(&d)));
 }
 

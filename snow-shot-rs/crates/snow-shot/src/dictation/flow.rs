@@ -163,12 +163,12 @@ impl DictationHost {
         if self.probe_deadline.is_some_and(|d| now >= d) && self.plan_pending() {
             self.decide_route(cx, tray, None);
         }
-        if self.plan.typing && self.typer.typed() != self.transcript.full() {
+        if self.typing_behind() {
             self.type_sync(cx, tray, !self.engine.listening());
         }
         if self.flush_deadline.is_some_and(|d| now >= d) {
             self.flush_deadline = None;
-            if self.plan.typing && self.typer.typed() != self.transcript.full() {
+            if self.typing_behind() {
                 self.fall_back(cx, tray, RouteNote::TypingStuck);
             }
         }
@@ -222,6 +222,11 @@ impl DictationHost {
         self.translation.shutdown();
         self.stop_ticker();
         self.engine.shutdown();
+    }
+
+    /// 键入方案下，已键入内容是否还没追上当前转写（不分配字符串）。
+    fn typing_behind(&self) -> bool {
+        self.plan.typing && !self.transcript.matches_full(self.typer.typed())
     }
 
     /// 方案是否还在等焦点判定。
@@ -439,7 +444,7 @@ impl DictationHost {
         }
         if self.plan.typing {
             self.type_sync(cx, tray, true);
-            if self.plan.typing && self.typer.typed() != self.transcript.full() {
+            if self.typing_behind() {
                 self.flush_deadline = Some(now + TYPE_FLUSH_TIMEOUT);
             }
         }

@@ -229,18 +229,12 @@ impl DesktopFrames {
             return only.frame.crop_rgba(rect);
         }
         let clipped = self.bounds().intersect(&rect)?;
-        if clipped.is_empty() {
-            return None;
-        }
         let (w, h) = (clipped.width as usize, clipped.height as usize);
         let mut out = vec![0u8; w * h * BYTES_PER_PIXEL];
         for monitor in &self.monitors {
             let Some(part) = monitor.rect.intersect(&clipped) else {
                 continue;
             };
-            if part.is_empty() {
-                continue;
-            }
             let local = PhysicalRect::new(
                 part.x - monitor.rect.x,
                 part.y - monitor.rect.y,
