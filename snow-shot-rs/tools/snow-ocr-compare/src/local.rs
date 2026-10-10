@@ -1,9 +1,10 @@
-//! 本地模型（PP-OCR，`snow-ocr-process` 独立进程）后端：直接复用主程序的资产定位与 worker 客户端。
+//! 本地模型（PP-OCR，`snow-ocr-process` 独立进程）后端：经 `worker` 模块定位资产并走 v4 协议。
 
-use crate::ocr_assets::{ENV_OCR_ASSET_DIR, ENV_OCR_PROCESS_EXE, OcrAssets, resolve_assets};
-use crate::ocr_client::{OcrWorker, SessionConfig, Timeouts};
 use crate::runner::Recognizer;
 use crate::samples::Case;
+use crate::worker::{
+    ENV_OCR_ASSET_DIR, ENV_OCR_PROCESS_EXE, OcrAssets, OcrWorker, SessionConfig, resolve_assets,
+};
 use snow_platform::process_mem::{ProcessMemory, process_memory};
 use std::path::{Path, PathBuf};
 
@@ -11,6 +12,9 @@ use std::path::{Path, PathBuf};
 const APP_DIR: &str = "Cisox";
 /// 检测缩放策略：取较大边（主程序默认）。
 const RESIZE_POLICY_MAX: u8 = 0;
+
+/// 模型目录名。
+const MODELS_DIR: &str = "models";
 
 /// 默认的 OCR 资产根目录：环境变量优先，否则 `%LOCALAPPDATA%\Cisox\assets\ocr`。
 ///
@@ -34,6 +38,17 @@ pub fn env_exe_override() -> Option<PathBuf> {
     std::env::var_os(ENV_OCR_PROCESS_EXE)
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
+}
+
+/// 模型读取目录：自定义资产根（环境变量或 `--asset-dir`）只认 `<根>/models`；
+/// 默认资产根 `%LOCALAPPDATA%\Cisox\assets\ocr` 对应主程序统一目录 `%LOCALAPPDATA%\Cisox\models\ocr`。
+fn model_dirs(root: &Path) -> Vec<PathBuf> {
+    let is_default = std::env::var_os(ENV_OCR_ASSET_DIR).is_none_or(|v| v.is_empty())
+        && default_asset_root().as_deref() == Some(root);
+    match root.parent().and_then(Path::parent) {
+        Some(data) if is_default => vec![data.join(MODELS_DIR).join("ocr")],
+        _ => vec![root.join(MODELS_DIR)],
+    }
 }
 
 /// 本地模型后端：第一次识别时才拉起 worker 并加载模型。
@@ -68,7 +83,7 @@ impl LocalRecognizer {
         model_kind: &str,
         directml: bool,
     ) -> Result<Self, String> {
-        let assets = resolve_assets(root, exe_override, model_kind).map_err(|e| e.message())?;
+        let assets = resolve_assets(root, &model_dirs(root), exe_override, model_kind)?;
         let session = SessionConfig {
             directml,
             resize_policy: RESIZE_POLICY_MAX,
@@ -93,18 +108,15 @@ impl Recognizer for LocalRecognizer {
     /// 首次调用拉起 worker 并准备会话；之后复用。
     fn recognize(&mut self, case: &Case) -> Result<String, String> {
         if self.worker.is_none() {
-            let mut worker =
-                OcrWorker::spawn(&self.assets, Timeouts::default()).map_err(|e| e.message())?;
+            let mut worker = OcrWorker::spawn(&self.assets)?;
             if let Err(e) = worker.prepare(&self.session) {
                 worker.shutdown();
-                return Err(e.message());
+                return Err(e);
             }
             self.worker = Some(worker);
         }
         let worker = self.worker.as_mut().ok_or("worker missing")?;
-        let lines = worker
-            .recognize(case.width, case.height, &case.rgba)
-            .map_err(|e| e.message())?;
+        let lines = worker.recognize(case.width, case.height, &case.rgba)?;
         Ok(lines
             .iter()
             .map(|l| l.text.trim())

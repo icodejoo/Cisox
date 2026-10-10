@@ -9,13 +9,4 @@ pub mod local;
 pub mod report;
 pub mod runner;
 pub mod samples;
-
-/// 复用主程序的 OCR 资产定位（同一份源码，不复制）。
-#[path = "../../../crates/snow-shot/src/ocr_assets.rs"]
-#[allow(dead_code)]
-pub mod ocr_assets;
-
-/// 复用主程序的 worker 客户端（同一份源码，不复制）。
-#[path = "../../../crates/snow-shot/src/ocr_client.rs"]
-#[allow(dead_code)]
-pub mod ocr_client;
+pub mod worker;
