@@ -107,13 +107,15 @@ pub fn paint_bar_segment(pixels: &mut [u32], width: u32, height: u32, seq: u32, 
         return;
     }
     let bits = seq_bits(seq);
-    for row in 0..bar_h {
-        let line = &mut pixels[row * w..(row + 1) * w];
-        for (x, px) in line.iter_mut().enumerate() {
-            // 每位占 total/32 像素宽；余数并入最后一位
-            let idx = ((x + offset_x as usize) * SEQ_BITS / total).min(SEQ_BITS - 1);
-            *px = if bits[idx] { PIXEL_ONE } else { PIXEL_ZERO };
-        }
+    // 各行内容相同：只算首行，其余行整行拷贝
+    let (first, rest) = pixels[..bar_h * w].split_at_mut(w);
+    for (x, px) in first.iter_mut().enumerate() {
+        // 每位占 total/32 像素宽；余数并入最后一位
+        let idx = ((x + offset_x as usize) * SEQ_BITS / total).min(SEQ_BITS - 1);
+        *px = if bits[idx] { PIXEL_ONE } else { PIXEL_ZERO };
+    }
+    for line in rest.chunks_exact_mut(w) {
+        line.copy_from_slice(first);
     }
 }
 
@@ -169,6 +171,20 @@ mod tests {
         assert_eq!(decode_samples(&[255; 31]), None);
         assert_eq!(decode_samples(&[127; 32]), Some(0));
         assert_eq!(decode_samples(&[128; 32]), Some(u32::MAX));
+    }
+
+    /// 条带每一行都与首行一致，条带之下的行不被改动。
+    #[test]
+    fn all_bar_rows_match_and_rest_untouched() {
+        let (w, h) = (640u32, 360u32);
+        let mut buf = vec![7u32; (w * h) as usize];
+        paint_bar(&mut buf, w, h, 0xA5A5_0F0F);
+        let bar_h = bar_height(h) as usize;
+        let first = buf[..w as usize].to_vec();
+        for row in 1..bar_h {
+            assert_eq!(&buf[row * w as usize..(row + 1) * w as usize], &first[..], "row {row}");
+        }
+        assert!(buf[bar_h * w as usize..].iter().all(|&p| p == 7));
     }
 
     /// 窄画面或缓冲过小不绘制也不越界。

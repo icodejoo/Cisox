@@ -72,6 +72,21 @@ fn pick_onnx_by(
         .or_else(|| hits.first().copied())
 }
 
+/// 把挑到的文件名拼成完整路径。
+///
+/// # 参数
+/// - `dir`：模型目录。
+/// - `found`：挑选结果。
+/// - `what`：缺失时提示用的文件描述。
+///
+/// # 返回
+/// 完整路径文本；没挑到时返回中文原因。
+fn need_file(dir: &Path, found: Option<&String>, what: &str) -> Result<String, String> {
+    found
+        .map(|n| dir.join(n).to_string_lossy().into_owned())
+        .ok_or_else(|| format!("模型目录缺少 {what}: {}", dir.display()))
+}
+
 /// 从模型目录的文件名中挑出 encoder/decoder/joiner/tokens。
 ///
 /// 规则：encoder 与 joiner 优先 int8，decoder 优先非 int8，词表固定为 `tokens.txt`。
@@ -83,12 +98,7 @@ fn pick_onnx_by(
 /// # 返回
 /// 四个文件的完整路径；缺任何一个返回中文原因。
 pub fn pick_model_files(dir: &Path, names: &[String]) -> Result<ModelFiles, String> {
-    let full = |n: &String| dir.join(n).to_string_lossy().into_owned();
-    let need = |found: Option<&String>, what: &str| {
-        found
-            .map(full)
-            .ok_or_else(|| format!("模型目录缺少 {what}: {}", dir.display()))
-    };
+    let need = |found: Option<&String>, what: &str| need_file(dir, found, what);
     let tokens = names.iter().find(|n| n.eq_ignore_ascii_case("tokens.txt"));
     Ok(ModelFiles {
         encoder: need(pick_onnx(names, "encoder", true), "encoder*.onnx")?,
@@ -149,12 +159,7 @@ pub enum KindFiles {
 /// # 返回
 /// 文件集合；缺文件时返回中文原因。
 pub fn pick_kind_files(dir: &Path, names: &[String], kind: ModelKind) -> Result<KindFiles, String> {
-    let full = |n: &String| dir.join(n).to_string_lossy().into_owned();
-    let need = |found: Option<&String>, what: &str| {
-        found
-            .map(full)
-            .ok_or_else(|| format!("模型目录缺少 {what}: {}", dir.display()))
-    };
+    let need = |found: Option<&String>, what: &str| need_file(dir, found, what);
     let exact = |want: &str| names.iter().find(|n| n.eq_ignore_ascii_case(want));
     match kind {
         ModelKind::OnlineTransducer | ModelKind::OfflineTransducer => {
@@ -276,6 +281,15 @@ mod tests {
         assert!(e.contains("joiner"), "{e}");
         let e = pick_model_files(Path::new("M"), &[]).unwrap_err();
         assert!(e.contains("encoder"), "{e}");
+    }
+
+    #[test]
+    fn need_file_joins_dir_or_reports_missing() {
+        let name = "tokens.txt".to_string();
+        let ok = need_file(Path::new("M"), Some(&name), "tokens.txt").unwrap();
+        assert!(ok.starts_with('M') && ok.ends_with("tokens.txt"), "{ok}");
+        let e = need_file(Path::new("M"), None, "joiner*.onnx").unwrap_err();
+        assert!(e.contains("joiner*.onnx") && e.contains('M'), "{e}");
     }
 
     #[test]

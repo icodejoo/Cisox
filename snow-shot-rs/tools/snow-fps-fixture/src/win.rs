@@ -35,6 +35,12 @@ pub fn set_dpi_aware() {
     }
 }
 
+/// 把以 0 结尾的 UTF-16 定长缓冲转成字符串（无结尾 0 时取整段）。
+fn wide_to_string(buf: &[u16]) -> String {
+    let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    String::from_utf16_lossy(&buf[..len])
+}
+
 /// 枚举回调：把显示器信息追加进 `LPARAM` 指向的向量。
 unsafe extern "system" fn enum_proc(monitor: HMONITOR, _: HDC, _: *mut RECT, data: LPARAM) -> windows::core::BOOL {
     // SAFETY: data 是 enumerate_monitors 传入的 &mut Vec<MonitorInfo>，回调期间有效。
@@ -46,9 +52,8 @@ unsafe extern "system" fn enum_proc(monitor: HMONITOR, _: HDC, _: *mut RECT, dat
     // SAFETY: MONITORINFOEXW 以 MONITORINFO 开头，cbSize 已按扩展结构设置。
     if unsafe { GetMonitorInfoW(monitor, (&mut info as *mut MONITORINFOEXW).cast::<MONITORINFO>()) }.as_bool() {
         let r = info.monitorInfo.rcMonitor;
-        let len = info.szDevice.iter().position(|&c| c == 0).unwrap_or(info.szDevice.len());
         list.push(MonitorInfo {
-            device: String::from_utf16_lossy(&info.szDevice[..len]),
+            device: wide_to_string(&info.szDevice),
             rect: Rect {
                 x: r.left,
                 y: r.top,
@@ -173,11 +178,10 @@ pub fn dxgi_output_lines() -> Result<Vec<String>, String> {
             let mut o = 0;
             while let Ok(output) = adapter.EnumOutputs(o) {
                 if let Ok(desc) = output.GetDesc() {
-                    let len = desc.DeviceName.iter().position(|&c| c == 0).unwrap_or(desc.DeviceName.len());
                     let r = desc.DesktopCoordinates;
                     lines.push(format!(
                         "adapter={a} output={o} {} rect={},{},{}x{}",
-                        String::from_utf16_lossy(&desc.DeviceName[..len]),
+                        wide_to_string(&desc.DeviceName),
                         r.left,
                         r.top,
                         r.right - r.left,

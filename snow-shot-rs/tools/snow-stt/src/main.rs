@@ -20,6 +20,7 @@ use snow_stt_protocol::{BackendKind, Command, Event, RecognitionMode, SystemErro
 
 use backend::SttBackend;
 use session::{Ctl, SessionEnd, SessionStats, run_session, wait_for_start};
+use sherpa::SAMPLE_RATE;
 use source::{AudioSource, ClockSource, MicSource, WavSource};
 
 /// 进程退出码：正常结束。
@@ -98,6 +99,15 @@ fn spawn_stdin_reader() -> mpsc::Receiver<Ctl> {
     rx
 }
 
+/// 发出错误事件并以失败码退出进程。
+///
+/// # 参数
+/// - `why`：单行错误原因。
+fn fail(why: String) -> ! {
+    emit(&Event::Error(why));
+    std::process::exit(EXIT_FAILED)
+}
+
 /// 打印统计到 stderr：加载耗时、块数、p50/p95/最大耗时与 RTF。
 fn print_stats(load_ms: u128, stats: &SessionStats) {
     let mut v = stats.chunk_micros.clone();
@@ -108,7 +118,7 @@ fn print_stats(load_ms: u128, stats: &SessionStats) {
             .unwrap_or(0) as f64
             / 1000.0
     };
-    let audio_s = stats.fed_samples as f64 / 16_000.0;
+    let audio_s = stats.fed_samples as f64 / f64::from(SAMPLE_RATE);
     let total_s: f64 = v.iter().sum::<u64>() as f64 / 1e6;
     eprintln!(
         "stats: load_ms={load_ms} chunks={} audio_s={audio_s:.2} p50_ms={:.1} p95_ms={:.1} max_ms={:.1} rtf={:.3}",
@@ -158,13 +168,7 @@ fn main() {
             system::SystemBackend::load(&req).map(|b| Box::new(b) as Box<dyn SttBackend>)
         }
     };
-    let mut backend = match loaded {
-        Ok(b) => b,
-        Err(why) => {
-            emit(&Event::Error(why));
-            std::process::exit(EXIT_FAILED);
-        }
-    };
+    let mut backend = loaded.unwrap_or_else(|why| fail(why));
     let load_ms = t0.elapsed().as_millis();
 
     // 本地模型加载完才开麦克风，避免把加载期间的旧音频喂进去；系统语音只需节拍
@@ -175,13 +179,7 @@ fn main() {
         }
         (None, _) => MicSource::open().map(|s| Box::new(s) as Box<dyn AudioSource>),
     };
-    let mut source = match opened {
-        Ok(s) => s,
-        Err(why) => {
-            emit(&Event::Error(why));
-            std::process::exit(EXIT_FAILED);
-        }
-    };
+    let mut source = opened.unwrap_or_else(|why| fail(why));
 
     let (end, stats) = run_session(
         backend.as_mut(),

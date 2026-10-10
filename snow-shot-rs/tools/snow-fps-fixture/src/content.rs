@@ -9,7 +9,7 @@ const PALETTE_LEN: usize = 16;
 /// 每帧条纹平移量（像素）。
 const STRIPE_STEP: i32 = 7;
 /// 噪声区域占宽/高的分母（约 1/4 边长）。
-const NOISE_DIVISOR: u32 = 4;
+pub const NOISE_DIVISOR: u32 = 4;
 /// 轻负载模式移动方块边长。
 const BOX_SIZE: i32 = 240;
 /// 轻负载模式方块每帧位移。

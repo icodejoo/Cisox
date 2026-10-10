@@ -14,7 +14,7 @@ use ort::session::Session;
 use ort::value::Tensor;
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 /// 环境变量：onnxruntime 动态库路径。
@@ -103,12 +103,12 @@ struct Engine {
     encoder: Session,
     /// 解码器。
     decoder: Session,
-    /// 编码器输出（形状与数据），`step` 用。
-    context: Option<(Vec<usize>, Vec<f32>)>,
+    /// 编码器输出张量，`step` 每步按引用复用，不再逐步拷贝。
+    context: Option<Tensor<f32>>,
 }
 
 /// 加载一个模型。
-fn load(path: &PathBuf) -> Result<Session, String> {
+fn load(path: &Path) -> Result<Session, String> {
     Session::builder()
         .map_err(|e| e.to_string())?
         .commit_from_file(path)
@@ -123,15 +123,23 @@ fn io_names(session: &Session) -> serde_json::Value {
     })
 }
 
-/// 取一个会话输出里第一个 `f32` 张量（形状与数据）。
-fn first_output(
+/// 在借用状态下读取会话输出里第一个 `f32` 张量，把形状与数据交给 `f`，只拷贝 `f` 需要的部分。
+fn with_first_output<R>(
     outputs: &ort::session::SessionOutputs<'_>,
-) -> Result<(Vec<i64>, Vec<f32>), String> {
+    f: impl FnOnce(Vec<i64>, &[f32]) -> R,
+) -> Result<R, String> {
     let (_, value) = outputs.iter().next().ok_or("model returned no output")?;
     let (shape, data) = value
         .try_extract_tensor::<f32>()
         .map_err(|e| format!("output: {e}"))?;
-    Ok((shape.iter().copied().collect(), data.to_vec()))
+    Ok(f(shape.iter().copied().collect(), data))
+}
+
+/// 取一个会话输出里第一个 `f32` 张量（形状与整段数据拷贝）。
+fn first_output(
+    outputs: &ort::session::SessionOutputs<'_>,
+) -> Result<(Vec<i64>, Vec<f32>), String> {
+    with_first_output(outputs, |shape, data| (shape, data.to_vec()))
 }
 
 impl Engine {
@@ -160,7 +168,7 @@ impl Engine {
             .map_err(|e| format!("encoder: {e}"))?;
         let (shape, data) = first_output(&outputs)?;
         let dims: Vec<usize> = shape.iter().map(|d| *d as usize).collect();
-        self.context = Some((dims, data));
+        self.context = Some(Tensor::from_array((dims, data)).map_err(|e| e.to_string())?);
         Ok(Response {
             ok: Some(true),
             shape: Some(shape),
@@ -170,7 +178,7 @@ impl Engine {
 
     /// 解码一步：整段 token 重算，只回最后一个位置的 logits。
     fn step(&mut self, tokens: Vec<i64>) -> Result<Response, String> {
-        let (dims, ctx) = self.context.clone().ok_or("no encoded context")?;
+        let context = self.context.as_ref().ok_or("no encoded context")?;
         let len = tokens.len();
         if len == 0 {
             return Err("empty token sequence".into());
@@ -178,7 +186,6 @@ impl Engine {
         let ids = Tensor::from_array(([1usize, len], tokens)).map_err(|e| e.to_string())?;
         let mask =
             Tensor::from_array(([1usize, len], vec![true; len])).map_err(|e| e.to_string())?;
-        let context = Tensor::from_array((dims, ctx)).map_err(|e| e.to_string())?;
         let names: Vec<String> = self
             .decoder
             .inputs()
@@ -196,13 +203,16 @@ impl Engine {
                 names[2].as_str() => context
             ])
             .map_err(|e| format!("decoder: {e}"))?;
-        let (shape, data) = first_output(&outputs)?;
-        let vocab = *shape.last().ok_or("decoder output has no shape")? as usize;
-        if vocab == 0 || data.len() < vocab {
-            return Err("decoder output is empty".into());
-        }
+        let logits = with_first_output(&outputs, |shape, data| {
+            let vocab = *shape.last().ok_or("decoder output has no shape")? as usize;
+            if vocab == 0 || data.len() < vocab {
+                return Err("decoder output is empty".to_string());
+            }
+            // 只拷贝最后一个位置的 logits，不复制整段输出
+            Ok(data[data.len() - vocab..].to_vec())
+        })??;
         Ok(Response {
-            logits: Some(data[data.len() - vocab..].to_vec()),
+            logits: Some(logits),
             ..Response::default()
         })
     }

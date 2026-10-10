@@ -450,10 +450,10 @@ pub fn summarize(records: &[FrameRecord]) -> Option<Summary> {
         .collect();
     let span_s = records[records.len() - 1].submit_ns.saturating_sub(records[0].submit_ns) as f64 / NANOS_PER_SEC;
     let max_gap_ms = gaps.iter().copied().fold(0.0, f64::max);
-    let mut sorted = gaps.clone();
-    sorted.sort_by(f64::total_cmp);
-    let median = sorted[sorted.len() / 2];
-    let late_frames = gaps.iter_mut().filter(|g| **g > median * 1.5).count();
+    // 中位数与超阈值计数都与顺序无关，直接原地排序，省掉一份拷贝
+    gaps.sort_by(f64::total_cmp);
+    let median = gaps[gaps.len() / 2];
+    let late_frames = gaps.iter().filter(|g| **g > median * 1.5).count();
     Some(Summary {
         frames: records.len(),
         span_s,

@@ -15,7 +15,7 @@ pub const SAMPLE_RATE: i32 = 16_000;
 /// 冲刷尾部时补的静音时长（秒），让模型把最后几帧吐完。
 const TAIL_PAD_SECONDS: f32 = 0.66;
 /// 毫秒转秒的除数。
-const MS_PER_SECOND: f32 = 1000.0;
+pub const MS_PER_SECOND: f32 = 1000.0;
 
 /// sherpa 流式识别后端，持有识别器与单路流。
 pub struct SherpaBackend {

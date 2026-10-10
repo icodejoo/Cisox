@@ -22,9 +22,27 @@ const EXIT_REJECTED: i32 = 2;
 /// 退出码：运行时失败。
 const EXIT_FAILED: i32 = 1;
 /// 看门狗余量：无论如何超过 `seconds + 该值` 就退出（防挂起）。
-const WATCHDOG_EXTRA_S: f64 = 3.0;
+pub(crate) const WATCHDOG_EXTRA_S: f64 = 3.0;
 /// 每秒预留的帧记录容量（高刷新率余量）。
 const RECORDS_PER_SECOND: usize = 130;
+
+/// 打印错误并以“校验被拒绝”退出码结束（此时尚未创建任何窗口）。
+///
+/// # 参数
+/// - `msg`：错误说明。
+fn reject(msg: impl std::fmt::Display) -> ! {
+    eprintln!("{msg}");
+    std::process::exit(EXIT_REJECTED)
+}
+
+/// 打印错误并以“运行时失败”退出码结束。
+///
+/// # 参数
+/// - `msg`：错误说明。
+fn fail(msg: impl std::fmt::Display) -> ! {
+    eprintln!("{msg}");
+    std::process::exit(EXIT_FAILED)
+}
 
 /// 打印显示器清单。
 fn print_monitors(monitors: &[MonitorInfo]) {
@@ -92,21 +110,12 @@ fn run_loop(
 /// 程序入口。
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let options = match parse_args(&args) {
-        Ok(o) => o,
-        Err(e) => {
-            eprintln!("参数错误: {e}");
-            std::process::exit(EXIT_REJECTED);
-        }
-    };
+    let options = parse_args(&args).unwrap_or_else(|e| reject(format_args!("参数错误: {e}")));
     win::set_dpi_aware();
     if options.mode == Mode::DxgiList {
         match win::dxgi_output_lines() {
             Ok(lines) => lines.iter().for_each(|l| println!("{l}")),
-            Err(e) => {
-                eprintln!("{e}");
-                std::process::exit(EXIT_FAILED);
-            }
+            Err(e) => fail(e),
         }
         return;
     }
@@ -124,26 +133,15 @@ fn main() {
             }
             Err(e) => {
                 print_monitors(&monitors);
-                eprintln!("{e}");
-                std::process::exit(EXIT_REJECTED);
+                reject(e)
             }
         }
     } else {
-        let target = match pick_target(&monitors, options.allow_primary) {
-            Ok(t) => t,
-            Err(e) => {
-                print_monitors(&monitors);
-                eprintln!("{e}");
-                std::process::exit(EXIT_REJECTED);
-            }
-        };
-        let rect = match resolve_region(target, &options) {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("{e}");
-                std::process::exit(EXIT_REJECTED);
-            }
-        };
+        let target = pick_target(&monitors, options.allow_primary).unwrap_or_else(|e| {
+            print_monitors(&monitors);
+            reject(e)
+        });
+        let rect = resolve_region(target, &options).unwrap_or_else(|e| reject(e));
         println!("target={} primary={} monitor={:?} window={:?}", target.device, target.primary, target.rect, rect);
         rect
     };
@@ -157,10 +155,7 @@ fn main() {
                 }
                 p
             }
-            Err(e) => {
-                eprintln!("{e}");
-                std::process::exit(EXIT_REJECTED);
-            }
+            Err(e) => reject(e),
         }
     } else {
         Vec::new()
@@ -170,23 +165,16 @@ fn main() {
     }
     win::keep_display_awake();
     if pieces.len() > 1 {
-        let result = dual::run_dual(&pieces, rect, &options);
+        let result = dual::run_dual(&pieces, &options);
         finish(&options, result);
         return;
     }
-    let window = match win::FixtureWindow::create(rect) {
-        Ok(w) => w,
-        Err(e) => {
-            eprintln!("创建窗口失败: {e}");
-            std::process::exit(EXIT_FAILED);
-        }
-    };
+    let window = win::FixtureWindow::create(rect).unwrap_or_else(|e| fail(format_args!("创建窗口失败: {e}")));
     let mut renderer = match gpu::Renderer::new(&window, rect.w, rect.h, options.load == Load::Noise) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("初始化 GPU 失败: {e}");
             drop(window);
-            std::process::exit(EXIT_FAILED);
+            fail(format_args!("初始化 GPU 失败: {e}"))
         }
     };
     let result = run_loop(&window, &mut renderer, &options, rect.w, rect.h, (rect.x, rect.y), None);
@@ -201,13 +189,7 @@ fn main() {
 /// - `options`：命令行选项（取日志路径）。
 /// - `result`：主节拍的帧记录或失败原因。
 fn finish(options: &Options, result: Result<Vec<FrameRecord>, String>) {
-    let records = match result {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("出帧失败: {e}");
-            std::process::exit(EXIT_FAILED);
-        }
-    };
+    let records = result.unwrap_or_else(|e| fail(format_args!("出帧失败: {e}")));
     if let Some(path) = &options.log
         && let Err(e) = std::fs::write(path, frames_to_csv(&records))
     {

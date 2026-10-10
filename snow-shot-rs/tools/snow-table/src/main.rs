@@ -12,7 +12,7 @@
 use ort::session::Session;
 use ort::value::Tensor;
 use serde::Serialize;
-use std::io::{Read, Write};
+use std::io::{BufWriter, Read, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -26,6 +26,8 @@ const ENV_ORT_DYLIB: &str = "SNOW_ORT_DYLIB";
 const CHARACTER_KEY: &str = "character";
 /// 失败退出码。
 const EXIT_FAILED: u8 = 2;
+/// 输出缓冲字节数：响应含整段输出张量，直接流式写出，避免先拼出整份 JSON。
+const OUT_BUFFER_BYTES: usize = 64 * 1024;
 
 /// 一个输出张量。
 #[derive(Serialize)]
@@ -134,15 +136,13 @@ fn run(args: &Args, input: Vec<f32>) -> Result<Response, String> {
     })
 }
 
-/// 入口：成功把 JSON 写到 stdout；失败写 stderr 并以 2 退出。
+/// 入口：成功把 JSON 流式写到 stdout；失败写 stderr 并以 2 退出。
 fn main() -> ExitCode {
-    let result = parse_args()
-        .and_then(|args| read_input().and_then(|input| run(&args, input)))
-        .and_then(|response| serde_json::to_vec(&response).map_err(|e| e.to_string()));
+    let result = parse_args().and_then(|args| read_input().and_then(|input| run(&args, input)));
     match result {
-        Ok(json) => {
-            let mut out = std::io::stdout().lock();
-            if out.write_all(&json).and_then(|()| out.flush()).is_err() {
+        Ok(response) => {
+            let mut out = BufWriter::with_capacity(OUT_BUFFER_BYTES, std::io::stdout().lock());
+            if serde_json::to_writer(&mut out, &response).is_err() || out.flush().is_err() {
                 return ExitCode::from(EXIT_FAILED);
             }
             ExitCode::SUCCESS

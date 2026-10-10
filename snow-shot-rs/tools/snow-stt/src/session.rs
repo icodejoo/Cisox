@@ -13,8 +13,8 @@ use crate::source::{AudioSource, SourceEvent};
 pub const CHUNK_SAMPLES: usize = 5120;
 /// 取样等待上限，同时决定命令响应延迟。
 const SOURCE_POLL: Duration = Duration::from_millis(50);
-/// 采样率，用于换算最长录音时长。
-const SAMPLE_RATE: u64 = 16_000;
+/// 采样率，用于换算最长录音时长（与后端采样率同源）。
+const SAMPLE_RATE: u64 = crate::sherpa::SAMPLE_RATE as u64;
 
 /// 命令通道上的消息。
 #[derive(Debug, Clone, PartialEq)]

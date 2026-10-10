@@ -3,7 +3,7 @@
 //! 画面全部由 GPU 完成：背景用 `ClearView` 批量填充矩形，序号条/噪声块由 CPU 生成小块像素后上传并拷贝，
 //! 这样 2560x1440 下 CPU 与带宽占用都很低，不会成为 60fps 的瓶颈。
 
-use snow_fps_fixture::content::{Fill, Scene, fill_noise};
+use snow_fps_fixture::content::{Fill, NOISE_DIVISOR, Scene, fill_noise};
 use snow_fps_fixture::seqbar::{bar_height, paint_bar_segment};
 use windows::Win32::Foundation::{HMODULE, RECT};
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
@@ -141,7 +141,7 @@ impl Renderer {
         let bar_h = bar_height(height);
         let bar_tex = make_texture(&device, width, bar_h)?;
         let noise = if with_noise {
-            let (nw, nh) = (width / 4, height / 4);
+            let (nw, nh) = (width / NOISE_DIVISOR, height / NOISE_DIVISOR);
             Some((make_texture(&device, nw, nh)?, vec![0u32; (nw * nh) as usize]))
         } else {
             None

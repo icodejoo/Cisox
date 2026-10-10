@@ -240,17 +240,24 @@ mod win {
         Ok((supported, system))
     }
 
+    /// 把 WinRT 错误归类并取单行说明。
+    ///
+    /// # 参数
+    /// - `e`：WinRT 错误。
+    /// - `online`：联机语音识别开关是否已开。
+    pub(super) fn describe_error(e: &windows::core::Error, online: bool) -> (SystemError, String) {
+        (
+            classify_hresult(e.code().0, online),
+            e.message().trim().to_string(),
+        )
+    }
+
     /// 创建识别器并编译默认听写约束；失败时已归类。
     fn create_compiled(
         requested: &str,
         online: bool,
     ) -> Result<(SpeechRecognizer, String), (SystemError, String)> {
-        let other = |e: windows::core::Error| {
-            (
-                classify_hresult(e.code().0, online),
-                e.message().trim().to_string(),
-            )
-        };
+        let other = |e: windows::core::Error| describe_error(&e, online);
         let (supported, system) = languages().map_err(other)?;
         let tag = resolve_language(requested, &supported, &system).ok_or_else(|| {
             (
@@ -328,24 +335,19 @@ mod win {
             let online = read_online_flag();
             let fail = |(kind, detail): (SystemError, String)| kind.to_error_text(&detail);
             let (recognizer, _tag) = create_compiled(&req.language, online).map_err(fail)?;
-            let session = recognizer.ContinuousRecognitionSession().map_err(|e| {
-                fail((
-                    classify_hresult(e.code().0, online),
-                    e.message().trim().to_string(),
-                ))
-            })?;
+            let session = recognizer
+                .ContinuousRecognitionSession()
+                .map_err(|e| fail(describe_error(&e, online)))?;
             let (tx, rx) = mpsc::channel();
             Self::attach_handlers(&recognizer, &session, &tx)
                 .map_err(|e| fail((SystemError::Other, e.message().trim().to_string())))?;
             let _ = session.SetAutoStopSilenceTimeout(TimeSpan {
                 Duration: SILENCE_TIMEOUT_TICKS,
             });
-            session.StartAsync().and_then(|op| op.join()).map_err(|e| {
-                fail((
-                    classify_hresult(e.code().0, online),
-                    e.message().trim().to_string(),
-                ))
-            })?;
+            session
+                .StartAsync()
+                .and_then(|op| op.join())
+                .map_err(|e| fail(describe_error(&e, online)))?;
             Ok(Self {
                 recognizer,
                 session,
@@ -538,6 +540,18 @@ mod tests {
             vec![SttEvent::Partial("a".into()), SttEvent::Final("a。".into())]
         );
         assert!(drain(&rx, &mut t, false).is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn describe_error_classifies_by_hresult() {
+        use super::win::describe_error;
+        let e = windows::core::Error::from_hresult(windows::core::HRESULT(HR_ACCESS_DENIED));
+        let (kind, detail) = describe_error(&e, true);
+        assert_eq!(kind, SystemError::MicrophoneDenied);
+        assert_eq!(detail, detail.trim());
+        let e = windows::core::Error::from_hresult(windows::core::HRESULT(0x1234));
+        assert_eq!(describe_error(&e, false).0, SystemError::OnlineSpeechOff);
     }
 
     #[cfg(windows)]

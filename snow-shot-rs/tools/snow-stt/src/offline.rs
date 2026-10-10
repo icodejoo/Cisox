@@ -23,7 +23,7 @@ use snow_stt_protocol::{
 };
 
 use crate::backend::{KindFiles, SttBackend, SttEvent, discover};
-use crate::sherpa::SAMPLE_RATE;
+use crate::sherpa::{MS_PER_SECOND, SAMPLE_RATE};
 
 /// VAD 默认阈值（sherpa 示例常见值，未经评测，需在真实音频上复测）。
 pub const DEFAULT_VAD_THRESHOLD: f32 = 0.5;
@@ -39,8 +39,6 @@ const VAD_WINDOW_SIZE: i32 = 512;
 const VAD_THREADS: i32 = 1;
 /// VAD 内部缓冲秒数，需大于单段最长时长。
 const VAD_BUFFER_SECONDS: f32 = 60.0;
-/// 毫秒转秒的除数。
-const MS_PER_SECOND: f32 = 1000.0;
 /// 每段前补的前导音频毫秒数：Silero 在语音起点之后才触发，不补会吃掉句首 1-2 个词。
 const PRE_ROLL_MS: usize = 400;
 /// 输入历史保留的秒数，需大于单段最长时长加前导。

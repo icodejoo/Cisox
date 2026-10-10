@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use snow_fps_fixture::content::{Load, build_scene_at};
 use snow_fps_fixture::{FrameRecord, bar_segment_for, MAX_SECONDS, Options, Rect};
 
-use crate::{gpu, win};
+use crate::{WATCHDOG_EXTRA_S, gpu, win};
 
 /// 起跑信号：等待各窗口初始化。
 const GO_WAIT: u8 = 0;
@@ -20,8 +20,6 @@ const GO_RUN: u8 = 1;
 const GO_ABORT: u8 = 2;
 /// 等待信号时的轮询间隔。
 const POLL: Duration = Duration::from_millis(1);
-/// 看门狗余量（秒），与单窗口一致。
-const WATCHDOG_EXTRA_S: f64 = 3.0;
 
 /// 各窗口线程共享的状态。
 pub struct Shared {
@@ -98,12 +96,11 @@ fn worker(
 ///
 /// # 参数
 /// - `pieces`：按 x 升序的子矩形，每块一个窗口，第一个为主节拍（至少一个）。
-/// - `_region`：完整跨屏区域（保留以便调用方一致传参）。
 /// - `options`：命令行选项。
 ///
 /// # 返回
 /// 主节拍的帧记录（序号单调、统计语义与单窗口一致）；任一窗口失败返回原因。
-pub fn run_dual(pieces: &[Rect], _region: Rect, options: &Options) -> Result<Vec<FrameRecord>, String> {
+pub fn run_dual(pieces: &[Rect], options: &Options) -> Result<Vec<FrameRecord>, String> {
     let shared = Shared { seq: AtomicU32::new(0), stop: AtomicBool::new(false), go: AtomicU8::new(GO_WAIT) };
     let (tx, rx) = mpsc::channel();
     std::thread::scope(|scope| {
