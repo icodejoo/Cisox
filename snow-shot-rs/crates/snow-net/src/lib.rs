@@ -2,6 +2,9 @@
 //!
 //! 所属阶段：P5。真正的下载由系统自带的 `curl.exe` 完成，这里只负责算参数。
 
+mod fetch;
+pub use fetch::*;
+
 /// 本 crate 的阶段标记，用于骨架连通性测试。
 pub const PHASE: &str = "P5";
 

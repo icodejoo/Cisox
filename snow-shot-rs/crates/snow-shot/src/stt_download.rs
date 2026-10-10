@@ -8,16 +8,13 @@
 
 use crate::ocr_assets::COMPLETE_MARKER;
 use crate::ocr_download::{
-    FetchError, TOOL_CURL, TOOL_TAR, curl_command, quiet_command, sha256_file, system_tool,
-    write_marker,
+    FetchError, TOOL_TAR, quiet_command, sha256_file, system_tool, write_marker,
 };
 use crate::stt_models::{self, SharedAsset, SttModelSpec, mode_as_str};
 use snow_stt_protocol::ModelKind;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
 
 /// 模型元数据文件名。
 pub const MODEL_META_FILE: &str = "model.json";
@@ -35,8 +32,6 @@ const UNPACK_DIR: &str = ".unbz2";
 const UNPACKED_TAR: &str = "archive.tar";
 /// 错误里标识「用户指定的解压程序」的工具名。
 const TOOL_UNPACK: &str = "extractor";
-/// 轮询下载进程与进度的间隔。
-const POLL_INTERVAL: Duration = Duration::from_millis(250);
 /// 下载结束的归类，用于决定日志级别。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
@@ -211,52 +206,6 @@ pub fn verify_asset(path: &Path, name: &str, size: u64, sha256: &str) -> Result<
     Ok(true)
 }
 
-/// 下载到 `part`（支持续传），期间每个轮询周期回调已下载字节数并检查取消；取消时结束 curl 进程并保留 `.part` 以便续传。
-fn download_to_part(
-    url: &str,
-    part: &Path,
-    cancel: &AtomicBool,
-    mut on_bytes: impl FnMut(u64),
-) -> Result<(), FetchError> {
-    let mut child = curl_command(url, part)
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| FetchError::RunTool {
-            tool: TOOL_CURL,
-            detail: e.to_string(),
-        })?;
-    loop {
-        if cancel.load(Ordering::Relaxed) {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(FetchError::Cancelled);
-        }
-        match child.try_wait().map_err(|e| FetchError::WaitTool {
-            tool: TOOL_CURL,
-            detail: e.to_string(),
-        })? {
-            Some(status) => {
-                let mut stderr = String::new();
-                if let Some(mut pipe) = child.stderr.take() {
-                    let _ = pipe.read_to_string(&mut stderr);
-                }
-                // 个别情况下 curl 报错却返回 0（如 file:// 源不存在），所以还要确认确实产出了文件
-                if status.success() && part.is_file() {
-                    return Ok(());
-                }
-                return Err(FetchError::DownloadFailed {
-                    url: url.to_string(),
-                    detail: stderr.trim().to_string(),
-                });
-            }
-            None => {
-                on_bytes(std::fs::metadata(part).map_or(0, |m| m.len()));
-                std::thread::sleep(POLL_INTERVAL);
-            }
-        }
-    }
-}
-
 /// 下载并校验一个资产，成功后原子改名到 `dest`；返回哈希是否已固定。校验失败会删除 `.part`，避免续传坏数据。
 fn fetch_asset(
     name: &str,
@@ -273,8 +222,9 @@ fn fetch_asset(
     let parent = dest.parent().ok_or(FetchError::InvalidTarget)?;
     std::fs::create_dir_all(parent).map_err(|e| FetchError::CreateDir(e.to_string()))?;
     let part = PathBuf::from(format!("{}{PART_SUFFIX}", dest.display()));
-    let mut report = |stage, done| {
-        on_progress(&Progress {
+    let on_progress = std::cell::RefCell::new(on_progress);
+    let report = |stage, done| {
+        (*on_progress.borrow_mut())(&Progress {
             stage,
             asset: name.to_string(),
             done,
@@ -294,12 +244,19 @@ fn fetch_asset(
         }
     }
     report(Stage::Downloading, 0);
-    download_to_part(url, &part, cancel, |done| report(Stage::Downloading, done))?;
-    report(Stage::Verifying, size);
-    let pinned = verify_asset(&part, name, size, sha256).inspect_err(|_| {
-        let _ = std::fs::remove_file(&part);
-    })?;
-    std::fs::rename(&part, dest).map_err(|e| FetchError::Rename(e.to_string()))?;
+    let mut pinned = false;
+    snow_net::fetch_resumable::<FetchError>(
+        url,
+        &part,
+        dest,
+        Some(cancel),
+        |done| report(Stage::Downloading, done),
+        |p| {
+            report(Stage::Verifying, size);
+            pinned = verify_asset(p, name, size, sha256)?;
+            Ok(())
+        },
+    )?;
     Ok(pinned)
 }
 
@@ -638,10 +595,7 @@ mod tests {
 
     /// 唯一临时目录。
     fn temp_root(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("snow-stt-dl-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("建目录");
-        dir
+        crate::test_util::unique_temp_dir("snow-stt-dl", tag)
     }
 
     /// 本地路径转 file:// 地址（离线可测）。

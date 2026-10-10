@@ -10,28 +10,14 @@ use crate::ocr_assets::{
 };
 use snow_i18n::{Args, I18n};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// Windows 不弹控制台窗口的进程创建标志。
-#[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 /// 下载中的临时文件后缀。
 const PART_SUFFIX: &str = ".part";
-/// curl 连接超时（秒）。
-const CURL_CONNECT_TIMEOUT: &str = "20";
-/// curl 失败重试次数。
-const CURL_RETRIES: &str = "3";
-/// 追加给 curl 的代理参数（由 `network/proxy` 配置算出，空表示不走代理）。
-static CURL_PROXY_ARGS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 /// OCR 清单的组件名（错误文案里的技术名词）。
 pub(crate) const OCR_MANIFEST_NAME: &str = "OCR";
-/// 调用 `curl` 的工具名。
-pub(crate) const TOOL_CURL: &str = "curl";
 /// 调用 `tar` 的工具名。
 pub(crate) const TOOL_TAR: &str = "tar";
-/// 调用 `certutil` 的工具名。
-pub(crate) const TOOL_CERTUTIL: &str = "certutil";
 /// 完成标记的内容。
 const MARKER_CONTENT: &str = "{\"schema\":1}";
 
@@ -369,47 +355,22 @@ pub fn plan_from_manifest(
     Ok(plan)
 }
 
-/// 从 `certutil -hashfile` 的输出里取出 SHA-256（第二行，去掉空格）。
-///
-/// # 参数
-/// - `output`：certutil 标准输出。
-///
-/// # 返回
-/// 64 位小写十六进制；输出不符合预期返回 `None`。
-///
-/// ```ignore
-/// let out = "SHA256 的 a 哈希:\r\nab cd ...\r\nCertUtil: -hashfile 命令成功完成。";
-/// ```
-pub fn parse_certutil_sha256(output: &str) -> Option<String> {
-    output
-        .lines()
-        .map(|line| {
-            line.chars()
-                .filter(|c| !c.is_whitespace())
-                .collect::<String>()
-        })
-        .find(|line| line.len() == 64 && line.chars().all(|c| c.is_ascii_hexdigit()))
-        .map(|line| line.to_ascii_lowercase())
-}
+pub use snow_net::parse_certutil_sha256;
+pub(crate) use snow_net::{quiet_command, system_tool};
 
-/// 系统工具路径：优先 `%SystemRoot%\System32\<name>`，否则直接用名字走 PATH。
-pub(crate) fn system_tool(name: &str) -> PathBuf {
-    std::env::var_os("SystemRoot")
-        .map(|root| PathBuf::from(root).join("System32").join(name))
-        .filter(|p| p.is_file())
-        .unwrap_or_else(|| PathBuf::from(name))
-}
-
-/// 构造不弹窗的子进程命令。
-pub(crate) fn quiet_command(program: &Path) -> Command {
-    let mut command = Command::new(program);
-    command.stdin(Stdio::null());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(CREATE_NO_WINDOW);
+impl From<snow_net::NetError> for FetchError {
+    /// 把下载底层错误转成本模块的错误类型。
+    fn from(e: snow_net::NetError) -> Self {
+        use snow_net::NetError as N;
+        match e {
+            N::RunTool { tool, detail } => FetchError::RunTool { tool, detail },
+            N::WaitTool { tool, detail } => FetchError::WaitTool { tool, detail },
+            N::HashUnreadable { path } => FetchError::HashUnreadable { path },
+            N::DownloadFailed { url, detail } => FetchError::DownloadFailed { url, detail },
+            N::Cancelled => FetchError::Cancelled,
+            N::Rename(detail) => FetchError::Rename(detail),
+        }
     }
-    command
 }
 
 /// 计算文件的 SHA-256。
@@ -420,20 +381,7 @@ pub(crate) fn quiet_command(program: &Path) -> Command {
 /// # 返回
 /// 小写十六进制；`certutil` 不可用或输出异常返回错误说明。
 pub fn sha256_file(path: &Path) -> Result<String, FetchError> {
-    let output = quiet_command(&system_tool("certutil.exe"))
-        .arg("-hashfile")
-        .arg(path)
-        .arg("SHA256")
-        .output()
-        .map_err(|e| FetchError::RunTool {
-            tool: TOOL_CERTUTIL,
-            detail: e.to_string(),
-        })?;
-    parse_certutil_sha256(&String::from_utf8_lossy(&output.stdout)).ok_or_else(|| {
-        FetchError::HashUnreadable {
-            path: path.display().to_string(),
-        }
-    })
+    Ok(snow_net::sha256_file(path)?)
 }
 
 /// 校验文件大小与哈希是否与清单一致。
@@ -469,55 +417,6 @@ pub fn verify_file(path: &Path, file: &AssetFile) -> Result<(), FetchError> {
     Ok(())
 }
 
-/// 设置此后所有 curl 下载追加的代理参数。
-///
-/// # 参数
-/// - `args`：形如 `["--proxy", 地址]`；传空表示不走代理。
-pub fn set_curl_proxy_args(args: Vec<String>) {
-    if let Ok(mut guard) = CURL_PROXY_ARGS.lock() {
-        *guard = args;
-    }
-}
-
-/// 构造 curl 下载命令（写 `part`，支持续传、重试，带 `--ssl-no-revoke`）；OCR 与语音模型下载共用。
-pub(crate) fn curl_command(url: &str, part: &Path) -> Command {
-    let mut command = quiet_command(&system_tool("curl.exe"));
-    command
-        .args([
-            "--fail",
-            "--location",
-            "--silent",
-            "--show-error",
-            "--ssl-no-revoke",
-        ])
-        .args(["--connect-timeout", CURL_CONNECT_TIMEOUT])
-        .args(["--retry", CURL_RETRIES, "-C", "-"]);
-    if let Ok(guard) = CURL_PROXY_ARGS.lock() {
-        command.args(guard.iter());
-    }
-    command.arg("-o").arg(part).arg(url);
-    command
-}
-
-/// 用 curl 下载到 `dest`（先写 `.part`，支持续传，成功后由调用方校验并改名）。
-fn curl_download(url: &str, part: &Path) -> Result<(), FetchError> {
-    let status = curl_command(url, part)
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|e| FetchError::RunTool {
-            tool: TOOL_CURL,
-            detail: e.to_string(),
-        })?;
-    if status.status.success() {
-        Ok(())
-    } else {
-        Err(FetchError::DownloadFailed {
-            url: url.to_string(),
-            detail: String::from_utf8_lossy(&status.stderr).trim().to_string(),
-        })
-    }
-}
-
 /// 下载并校验一个文件，成功后原子改名到 `dest_dir/<name>`。
 ///
 /// # 参数
@@ -535,12 +434,9 @@ pub fn fetch_verified(item: &DownloadItem, cancel: &AtomicBool) -> Result<PathBu
     let part = item
         .dest_dir
         .join(format!("{}{PART_SUFFIX}", item.file.name));
-    curl_download(&item.file.url, &part)?;
-    if let Err(e) = verify_file(&part, &item.file) {
-        let _ = std::fs::remove_file(&part);
-        return Err(e);
-    }
-    std::fs::rename(&part, &dest).map_err(|e| FetchError::Rename(e.to_string()))?;
+    snow_net::fetch_resumable::<FetchError>(&item.file.url, &part, &dest, None, |_| {}, |p| {
+        verify_file(p, &item.file)
+    })?;
     Ok(dest)
 }
 
@@ -660,36 +556,12 @@ pub fn download_missing(
 
 #[cfg(test)]
 mod tests {
-    /// 代理参数追加到 curl 命令里：设置后出现在 `-o` 之前，清空后消失。
-    #[test]
-    fn curl_command_appends_proxy_args() {
-        let args_of = || {
-            super::curl_command("https://a.b/x", std::path::Path::new("x.part"))
-                .get_args()
-                .map(|a| a.to_string_lossy().into_owned())
-                .collect::<Vec<_>>()
-        };
-        super::set_curl_proxy_args(vec!["--proxy".into(), "http://127.0.0.1:7890".into()]);
-        let with = args_of();
-        let at = with
-            .iter()
-            .position(|a| a == "--proxy")
-            .expect("应带 --proxy");
-        assert_eq!(with[at + 1], "http://127.0.0.1:7890");
-        assert!(at < with.iter().position(|a| a == "-o").unwrap());
-        super::set_curl_proxy_args(Vec::new());
-        assert!(!args_of().iter().any(|a| a == "--proxy"));
-    }
-
     use super::*;
     use crate::ocr_assets::{ModelSpec, RuntimeSpec, model_dir};
 
     /// 唯一临时目录。
     fn temp_root(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("snow-ocr-dl-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("建目录");
-        dir
+        crate::test_util::unique_temp_dir("snow-ocr-dl", tag)
     }
 
     /// 写一个源文件并生成对应的清单条目（url 用 file:// 本地地址，离线可测）。
@@ -877,11 +749,11 @@ mod tests {
         let en = crate::ocr_backend::i18n_for("en-US");
         let errors = [
             FetchError::RunTool {
-                tool: TOOL_CURL,
+                tool: snow_net::TOOL_CURL,
                 detail: "d".into(),
             },
             FetchError::WaitTool {
-                tool: TOOL_CURL,
+                tool: snow_net::TOOL_CURL,
                 detail: "d".into(),
             },
             FetchError::HashUnreadable { path: "p".into() },

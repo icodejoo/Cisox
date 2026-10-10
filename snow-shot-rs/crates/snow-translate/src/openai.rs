@@ -242,12 +242,9 @@ pub fn split_curl_output(output: &[u8]) -> Option<(u16, String)> {
 /// 用系统 `curl.exe` 发请求的传输实现。
 pub struct CurlHttp;
 
-/// 系统工具路径：优先 `%SystemRoot%\System32\curl.exe`，否则走 PATH。
+/// 系统 `curl.exe` 路径：优先 `%SystemRoot%\System32`，否则走 PATH。
 fn curl_program() -> PathBuf {
-    std::env::var_os("SystemRoot")
-        .map(|root| PathBuf::from(root).join("System32").join("curl.exe"))
-        .filter(|p| p.is_file())
-        .unwrap_or_else(|| PathBuf::from("curl"))
+    snow_net::system_tool("curl.exe")
 }
 
 /// 一次性临时请求文件，析构时删除。

@@ -2,7 +2,8 @@
 //! 以及“检查更新”的下载、比对与结果文案。计算部分是纯逻辑，可离屏测试。
 
 use crate::ocr_backend::i18n_for;
-use crate::ocr_download::{FetchError, curl_command, sha256_file};
+use crate::ocr_download::{FetchError, sha256_file};
+use snow_net::curl_command;
 use snow_config::document::ConfigDocument;
 use snow_config::extensions::KEY_UPDATE_MANIFEST_URL;
 use snow_i18n::Args;
@@ -260,11 +261,9 @@ pub fn fetch_manifest(url: &str) -> Result<String, String> {
     let part: PathBuf = std::env::temp_dir().join(format!(
         "cisox-update-{}-{}.json",
         std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos())
+        snow_platform::unix_time::unix_nanos()
     ));
-    let output = crate::ocr_download::curl_command(url, &part)
+    let output = curl_command(url, &part)
         .args(["--max-time", MANIFEST_TIMEOUT_SECS])
         .args(["--max-filesize", &MAX_MANIFEST_BYTES.to_string()])
         .stderr(std::process::Stdio::piped())
@@ -358,29 +357,6 @@ pub fn download_update(info: &UpdateInfo, data_root: &Path) -> UpdateDownloadOut
     }
 }
 
-/// 用 curl 下载到 `part`（带续传参数）；失败返回错误，并在没产出文件时视为失败。
-///
-/// # 参数
-/// - `url`：下载地址。
-/// - `part`：`.part` 文件路径（已存在则从其末尾续传）。
-fn run_curl(url: &str, part: &Path) -> Result<(), FetchError> {
-    let output = curl_command(url, part)
-        .stderr(std::process::Stdio::piped())
-        .output()
-        .map_err(|e| FetchError::RunTool {
-            tool: crate::ocr_download::TOOL_CURL,
-            detail: e.to_string(),
-        })?;
-    // 个别情况下 curl 报错却返回 0（如 file:// 源不存在），所以还要确认确实产出了文件
-    if !output.status.success() || !part.is_file() {
-        return Err(FetchError::DownloadFailed {
-            url: url.to_string(),
-            detail: String::from_utf8_lossy(&output.stderr).trim().to_string(),
-        });
-    }
-    Ok(())
-}
-
 /// 下载（可续传）到 `.part`、校验、改名为 `dest`；返回是否做过哈希校验。
 fn fetch_package(info: &UpdateInfo, dest: &Path) -> Result<bool, FetchError> {
     let dir = dest.parent().unwrap_or(Path::new("."));
@@ -390,10 +366,10 @@ fn fetch_package(info: &UpdateInfo, dest: &Path) -> Result<bool, FetchError> {
     let part = PathBuf::from(part);
     // 已有 `.part` 就续传（curl `-C -`）；续传被拒（残留已完整 / 源已变）时删掉残留从头再下一次
     let resumed = part.is_file();
-    let mut result = run_curl(&info.url, &part);
+    let mut result = snow_net::download_blocking(&info.url, &part).map_err(FetchError::from);
     if result.is_err() && resumed {
         let _ = std::fs::remove_file(&part);
-        result = run_curl(&info.url, &part);
+        result = snow_net::download_blocking(&info.url, &part).map_err(FetchError::from);
     }
     result?;
     let verified = !info.sha256.is_empty();
@@ -456,9 +432,7 @@ pub fn write_last_check(data_root: &Path, now: u64) {
 
 /// 当前 Unix 秒（时钟早于 1970 年时取 0）。
 pub fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
+    snow_platform::unix_time::unix_secs()
 }
 
 /// 启动时的自动检查方案：策略允许、已过最小间隔且清单地址可用时返回要拉取的地址。
@@ -547,7 +521,7 @@ pub fn apply_proxy(document: &ConfigDocument) {
         snow_net::system_proxy_from_env().as_deref(),
     );
     tracing::info!(enabled = !args.is_empty(), "下载代理已同步");
-    crate::ocr_download::set_curl_proxy_args(args);
+    snow_net::set_curl_proxy_args(args);
 }
 
 /// 检查更新的目标：取配置里的清单地址，失败时给出已本地化的提示。
