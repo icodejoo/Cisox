@@ -29,9 +29,8 @@ const DEV_TOOL_DIR: [&str; 5] = ["snow-shot-rs", "tools", "snow-stt", "target", 
 const EXIT_POLL_INTERVAL: Duration = Duration::from_millis(20);
 /// 读线程见到 EOF 后等待退出码的最长时间。
 const EXIT_CODE_WAIT: Duration = Duration::from_millis(500);
-/// Windows：不为子进程创建控制台窗口。
 #[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+use snow_platform::CREATE_NO_WINDOW;
 
 /// 查找工作进程可执行文件。
 ///

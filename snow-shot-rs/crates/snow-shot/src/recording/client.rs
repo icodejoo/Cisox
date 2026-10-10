@@ -31,9 +31,8 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
 const EXIT_POLL_INTERVAL: Duration = Duration::from_millis(30);
 /// 读线程见到 EOF 后等待退出码的最长时间。
 const EXIT_CODE_WAIT: Duration = Duration::from_millis(500);
-/// Windows：不为子进程创建控制台窗口。
 #[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+use snow_platform::CREATE_NO_WINDOW;
 
 /// 查找录制进程可执行文件。
 ///

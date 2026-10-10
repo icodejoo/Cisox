@@ -20,9 +20,8 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-/// Windows 不弹控制台窗口的进程创建标志。
 #[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+use snow_platform::CREATE_NO_WINDOW;
 /// 每像素字节数（RGBA）。
 const BYTES_PER_PIXEL: usize = 4;
 /// stderr 只保留末尾这么多字节（用于错误说明）。

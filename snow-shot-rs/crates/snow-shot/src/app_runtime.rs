@@ -48,7 +48,7 @@ use crate::scroll_view::{ENV_SCROLL_AUTOTEST, ScrollHost, parse_scroll_autotest}
 use crate::settings_model::portable_to_hotkey_text;
 use crate::settings_model::{LANGUAGE_KEY, THEME_COLOR_KEY, THEME_MODE_KEY};
 use crate::settings_pages::{
-    OpenPlan, PageAction, TRANSLATION_PAGE_ENABLED_KEY, TranslateFactory, WindowEntry, plan_open,
+    PageAction, TRANSLATION_PAGE_ENABLED_KEY, TranslateFactory, WindowEntry,
 };
 use crate::settings_state::{ConfigChange, SharedConfig, SystemPrefs, UiPrefs, restore_value};
 use crate::settings_text::{Lang, window_title};
@@ -134,6 +134,8 @@ pub const TRAY_SIGNAL_PIN_MANAGE: &str = "pin_manage";
 pub const TRAY_SIGNAL_GROUP_NEW: &str = "group_new";
 /// 托盘信号：删除空的贴图分组。
 pub const TRAY_SIGNAL_GROUP_DELETE_EMPTY: &str = "group_delete_empty";
+/// 托盘信号：重启应用。
+pub const TRAY_SIGNAL_RESTART: &str = "restart";
 /// 设置窗口逻辑宽度。
 const SETTINGS_WINDOW_WIDTH: f32 = 1000.0;
 /// 设置窗口逻辑高度。
@@ -156,7 +158,7 @@ pub const DICTATION_HOLD_HOTKEY_CONFIG_KEY: &str =
 /// 语音转文字触发模式的配置键（决定上面两个热键哪个生效）。
 pub const DICTATION_TRIGGER_MODE_CONFIG_KEY: &str =
     snow_config::extensions::KEY_DICTATION_TRIGGER_MODE;
-/// “语音转文字·切换式”全局热键的配置键。
+/// 热键配置值（对象形式）里跨平台热键文本的字段名。
 const PORTABLE_FIELD: &str = "portable";
 /// 事件来源标签：全局热键。
 pub const ORIGIN_HOTKEY: &str = "hotkey";
@@ -635,8 +637,6 @@ pub fn map_tray_signal(signal: &str) -> Option<UiEvent> {
 
 /// 托盘菜单图标边长（逻辑像素）。
 const TRAY_MENU_ICON_SIZE: u32 = 16;
-/// 托盘信号：重启应用。
-pub const TRAY_SIGNAL_RESTART: &str = "restart";
 /// 托盘延迟截图文案的秒数变量位置（`$arg1`）。
 const TRAY_DELAY_ARG_INDEX: u8 = 1;
 /// 重启时等待旧进程退出的 ping 次数（约 1 秒/次，借 ping 做无控制台延时）。
@@ -987,9 +987,8 @@ pub fn build_tray_spec_with_groups(
 /// # 返回
 /// 成功拉起辅助进程为 `Ok`；取不到自身路径或拉起失败返回错误。
 fn spawn_restart_helper() -> std::io::Result<()> {
+    use snow_platform::CREATE_NO_WINDOW;
     use std::os::windows::process::CommandExt;
-    /// 不创建控制台窗口。
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let exe = std::env::current_exe()?;
     let line = format!(
         "/C ping -n {RESTART_WAIT_PINGS} 127.0.0.1 >NUL & start \"\" \"{}\"",
@@ -1195,6 +1194,14 @@ pub struct HotkeyFailure {
     pub reason: String,
 }
 
+/// 把失败项拼成 `热键: 原因; 热键: 原因`。
+fn describe_failures<'a>(failures: impl Iterator<Item = &'a HotkeyFailure>) -> String {
+    failures
+        .map(|f| format!("{}: {}", f.shortcut, f.reason))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
 /// 一批热键注册的结果。
 #[derive(Debug, Default)]
 pub struct HotkeyRegistration {
@@ -1218,12 +1225,12 @@ impl HotkeyRegistration {
     /// # 参数
     /// - `key`：配置键。
     pub fn describe_for(&self, key: &str) -> String {
-        self.failures
-            .iter()
-            .filter(|f| f.config_key == key)
-            .map(|f| format!("{}: {}", f.shortcut, f.reason))
-            .collect::<Vec<_>>()
-            .join("; ")
+        describe_failures(self.failures.iter().filter(|f| f.config_key == key))
+    }
+
+    /// 汇总全部失败原因（`热键: 原因`，以 `; ` 连接）。
+    pub fn describe_all(&self) -> String {
+        describe_failures(self.failures.iter())
     }
 
     /// 合并另一批结果。
@@ -1311,96 +1318,30 @@ fn register_hotkeys_with_release(
     result
 }
 
-/// 按配置注册截图全局热键；单个失败只记日志，不影响其余。
-///
-/// # 参数
-/// - `service`：热键服务。
-/// - `document`：配置文档。
-///
-/// # 返回
-/// 成功句柄与失败列表。
-///
-/// ```ignore
-/// let result = register_capture_hotkeys(&service, &document);
-/// ```
-pub fn register_capture_hotkeys(
-    service: &HotkeyService,
-    document: &ConfigDocument,
-) -> HotkeyRegistration {
-    register_hotkeys(
-        service,
-        document,
-        SCREENSHOT_HOTKEY_CONFIG_KEY,
-        "screenshot",
-        &AppCommand::Capture(CaptureRequest::default()),
-    )
-}
-
-/// 按配置注册录屏全局热键（`global_shortcuts/screen_record`，默认未绑定）。
-///
-/// # 参数
-/// - `service`：热键服务。
-/// - `document`：配置文档。
-///
-/// # 返回
-/// 成功句柄与失败列表。
-///
-/// ```ignore
-/// let result = register_recording_hotkeys(&service, &document);
-/// ```
-pub fn register_recording_hotkeys(
-    service: &HotkeyService,
-    document: &ConfigDocument,
-) -> HotkeyRegistration {
-    register_hotkeys(
-        service,
-        document,
-        RECORDING_HOTKEY_CONFIG_KEY,
-        "recording",
-        &AppCommand::StartRecording(RecordingRequest::default()),
-    )
-}
-
-/// 按配置注册“贴图剪贴板内容”全局热键（`global_shortcuts/pin_clipboard_content`，默认未绑定）。
-///
-/// # 参数
-/// - `service`：热键服务。
-/// - `document`：配置文档。
-///
-/// # 返回
-/// 成功句柄与失败列表。
-pub fn register_pin_clipboard_hotkeys(
-    service: &HotkeyService,
-    document: &ConfigDocument,
-) -> HotkeyRegistration {
-    register_hotkeys(
-        service,
-        document,
-        PIN_CLIPBOARD_HOTKEY_CONFIG_KEY,
-        "pin_clipboard",
-        &AppCommand::PinSelection,
-    )
-}
-
-/// 按配置注册“输入框翻译浮窗”全局热键（`global_shortcuts/translate_input`，默认未绑定，未绑定时不注册）。
-///
-/// # 参数
-/// - `service`：热键服务。
-/// - `document`：配置文档。
-///
-/// # 返回
-/// 成功句柄与失败列表。
-pub fn register_translate_input_hotkeys(
-    service: &HotkeyService,
-    document: &ConfigDocument,
-) -> HotkeyRegistration {
-    register_hotkeys(
-        service,
-        document,
-        TRANSLATE_INPUT_HOTKEY_CONFIG_KEY,
-        "translate_input",
-        &AppCommand::OpenTranslateInput,
-    )
+/// 同构的“单键单命令”热键表：（配置键，日志功能名，按下时的命令）；覆盖截图、录屏、贴图剪贴板内容、输入框翻译四类。
+fn simple_hotkey_table() -> [(&'static str, &'static str, AppCommand); 4] {
+    [
+        (
+            SCREENSHOT_HOTKEY_CONFIG_KEY,
+            "screenshot",
+            AppCommand::Capture(CaptureRequest::default()),
+        ),
+        (
+            RECORDING_HOTKEY_CONFIG_KEY,
+            "recording",
+            AppCommand::StartRecording(RecordingRequest::default()),
+        ),
+        (
+            PIN_CLIPBOARD_HOTKEY_CONFIG_KEY,
+            "pin_clipboard",
+            AppCommand::PinSelection,
+        ),
+        (
+            TRANSLATE_INPUT_HOTKEY_CONFIG_KEY,
+            "translate_input",
+            AppCommand::OpenTranslateInput,
+        ),
+    ]
 }
 
 /// 按配置注册语音转文字的两个全局热键：切换式（按一下开始、再按一下结束）与按住说话（按下开始、松开结束）。
@@ -1497,13 +1438,26 @@ pub fn register_all_hotkeys_gated(
     if paused {
         return register_quick_action_hotkeys(service, document, true);
     }
-    let mut result = register_capture_hotkeys(service, document);
-    result.merge(register_recording_hotkeys(service, document));
-    result.merge(register_pin_clipboard_hotkeys(service, document));
-    result.merge(register_translate_input_hotkeys(service, document));
+    let mut result = HotkeyRegistration::default();
+    for (key, label, command) in &simple_hotkey_table() {
+        result.merge(register_hotkeys(service, document, key, label, command));
+    }
     result.merge(register_dictation_hotkeys(service, document));
     result.merge(register_quick_action_hotkeys(service, document, false));
     result
+}
+
+/// 注销一批热键句柄（失败只记日志），并清空 `handles`。
+///
+/// # 参数
+/// - `service`：热键服务。
+/// - `handles`：待注销的句柄，调用后为空。
+fn unregister_all(service: &HotkeyService, handles: &mut Vec<HotkeyHandle>) {
+    for handle in handles.drain(..) {
+        if let Err(e) = service.unregister(handle) {
+            tracing::warn!(error = %e, "注销旧热键失败");
+        }
+    }
 }
 
 /// 打开数据根下的配置存储（损坏留档、缺失用默认值），全程序共享同一份。
@@ -1792,6 +1746,19 @@ pub fn parse_size(text: &str) -> Option<(u32, u32)> {
     (w > 0 && h > 0).then_some((w, h))
 }
 
+/// 解析基准合成底图尺寸环境变量的值；未设置或格式不对返回 `None`。
+///
+/// # 参数
+/// - `value`：环境变量原始值。
+fn synth_size_from(value: Option<&str>) -> Option<(u32, u32)> {
+    value.and_then(parse_size)
+}
+
+/// 读取 `SNOW_OVERLAY_SYNTH`：基准合成底图尺寸，未启用时为 `None`。
+fn synth_size() -> Option<(u32, u32)> {
+    synth_size_from(std::env::var(ENV_OVERLAY_SYNTH).ok().as_deref())
+}
+
 /// 读取性能基准步数；未设置、非数字或为 0 时返回 `None`。
 ///
 /// # 参数
@@ -1914,10 +1881,7 @@ fn request_capture(
     state.capture_mode = mode;
     // 基准合成底图模式：底图由 open_overlay 用合成渐变替换，不需要真实屏幕采集
     // （锁屏 / 屏保期间 GDI 采集必失败，此模式仍可跑标注性能基准）
-    let synth = std::env::var(ENV_OVERLAY_SYNTH)
-        .ok()
-        .and_then(|v| parse_size(&v))
-        .is_some();
+    let synth = synth_size().is_some();
     // 所有显示器同时出覆盖窗；合成底图的性能基准只开光标所在屏
     let targets: Vec<MonitorInfo> = if synth {
         vec![monitor.clone()]
@@ -1991,9 +1955,7 @@ fn open_overlays(cx: &mut ShellContext, state: &mut AppState, payloads: Vec<Capt
         return;
     }
     // 性能基准可用合成底图替换真实截图（例如在非 4K 屏上测 4K 纹理）
-    let synth = std::env::var(ENV_OVERLAY_SYNTH)
-        .ok()
-        .and_then(|v| parse_size(&v));
+    let synth = synth_size();
     // 画布 = 所有显示器的虚拟桌面外接矩形（桌面物理坐标，可为负）
     let canvas = canvas_bounds(payloads.iter().map(|p| p.monitor.bounds));
     let mut scale_override = None;
@@ -2540,6 +2502,21 @@ fn direct_capture(cx: &mut ShellContext, state: &mut AppState, request: DirectCa
     }
 }
 
+/// 按配置选出当前 OCR 引擎；发生回落时记一条 warn。
+///
+/// # 参数
+/// - `state`：运行时状态（取 OCR 服务与配置）。
+///
+/// # 返回
+/// 实际生效的 OCR 引擎。
+fn select_ocr_engine(state: &AppState) -> Arc<dyn crate::ocr_backend::OcrEngine> {
+    let selection = select_from_document(state.config.borrow().document(), Arc::clone(&state.ocr));
+    if let Some(notice) = selection.notice {
+        tracing::warn!(?notice, requested = ?selection.requested, effective = ?selection.effective, "OCR 后端回落");
+    }
+    selection.engine
+}
+
 /// 在后台线程执行文字识别（阻塞调用不进主线程），结果经收件箱回到主线程。
 ///
 /// # 参数
@@ -2547,11 +2524,7 @@ fn direct_capture(cx: &mut ShellContext, state: &mut AppState, request: DirectCa
 /// - `serial`：请求序号。
 /// - `width` / `height` / `rgba`：待识别图像。
 fn spawn_ocr(state: &AppState, serial: u64, width: u32, height: u32, rgba: Vec<u8>) {
-    let selection = select_from_document(state.config.borrow().document(), Arc::clone(&state.ocr));
-    if let Some(notice) = selection.notice {
-        tracing::warn!(?notice, requested = ?selection.requested, effective = ?selection.effective, "OCR 后端回落");
-    }
-    let engine = selection.engine;
+    let engine = select_ocr_engine(state);
     let inbox = state.inbox.clone();
     let spawned = std::thread::Builder::new()
         .name("snow-ocr-request".into())
@@ -2703,11 +2676,7 @@ fn spawn_pin_selected_files(state: &AppState) {
 /// - `id`：贴图 ID。
 /// - `width` / `height` / `rgba`：贴图图像。
 fn spawn_pin_ocr(state: &AppState, id: String, width: u32, height: u32, rgba: Vec<u8>) {
-    let selection = select_from_document(state.config.borrow().document(), Arc::clone(&state.ocr));
-    if let Some(notice) = selection.notice {
-        tracing::warn!(?notice, requested = ?selection.requested, effective = ?selection.effective, "OCR 后端回落");
-    }
-    let engine = selection.engine;
+    let engine = select_ocr_engine(state);
     let inbox = state.inbox.clone();
     let done_id = id.clone();
     let spawned = std::thread::Builder::new()
@@ -2741,17 +2710,9 @@ fn spawn_pin_ocr(state: &AppState, id: String, width: u32, height: u32, rgba: Ve
 /// - `serial`：请求序号。
 /// - `width` / `height` / `rgba`：选区图像。
 fn spawn_translate(state: &AppState, serial: u64, width: u32, height: u32, rgba: Vec<u8>) {
-    let (selection, translate_config) = {
-        let config = state.config.borrow();
-        (
-            select_from_document(config.document(), Arc::clone(&state.ocr)),
-            TranslateConfig::from_document(config.document(), &system_ui_language()),
-        )
-    };
-    if let Some(notice) = selection.notice {
-        tracing::warn!(?notice, requested = ?selection.requested, effective = ?selection.effective, "OCR 后端回落");
-    }
-    let ocr = selection.engine;
+    let ocr = select_ocr_engine(state);
+    let translate_config =
+        TranslateConfig::from_document(state.config.borrow().document(), &system_ui_language());
     let translator = Arc::clone(&state.translator);
     let inbox = state.inbox.clone();
     let spawned = std::thread::Builder::new()
@@ -2785,35 +2746,71 @@ fn spawn_translate(state: &AppState, serial: u64, width: u32, height: u32, rgba:
     }
 }
 
+/// 后台下载任务的骨架：取界面语料、建线程、跑 `job`，线程创建失败时回报 `FetchError::TaskStart`。
+///
+/// # 参数
+/// - `state`：运行时状态（取数据根、收件箱与界面语言）。
+/// - `name`：线程名。
+/// - `progress`：把进度文案包成事件的构造函数。
+/// - `finished`：把最终结果包成事件的构造函数。
+/// - `job`：阻塞的下载主体；入参为界面语料、进度回调，返回本地化后的成败。
+fn spawn_download(
+    state: &AppState,
+    name: &'static str,
+    progress: fn(String) -> UiEvent,
+    finished: fn(Result<(), String>) -> UiEvent,
+    job: impl FnOnce(&'static snow_i18n::I18n, &dyn Fn(String)) -> Result<(), String> + Send + 'static,
+) {
+    let inbox = state.inbox.clone();
+    let i18n = state_i18n(state);
+    let spawned = std::thread::Builder::new().name(name.into()).spawn({
+        let inbox = inbox.clone();
+        move || {
+            let result = job(i18n, &|message| {
+                inbox.push(progress(message));
+            });
+            inbox.push(finished(result));
+        }
+    });
+    if let Err(e) = spawned {
+        let message = ocr_download::FetchError::TaskStart(e.to_string()).message(i18n);
+        state.inbox.push(finished(Err(message)));
+    }
+}
+
+/// 安装 onnxruntime 运行时（翻译与公式识别共用），进度经 `progress` 回报，错误已本地化。
+///
+/// # 参数
+/// - `data_root`：数据根目录。
+/// - `i18n`：界面语料。
+/// - `progress`：进度回调（已本地化文案）。
+fn install_ort_runtime(
+    data_root: &std::path::Path,
+    i18n: &snow_i18n::I18n,
+    progress: &dyn Fn(String),
+) -> Result<(), String> {
+    let cancel = AtomicBool::new(false);
+    ort_runtime::install(data_root, &cancel, |step| progress(step.message(i18n)))
+        .map(|_| ())
+        .map_err(|e| e.message(i18n))
+}
+
 /// 在后台线程下载翻译用的 onnxruntime 运行时（curl + 哈希校验），进度与结果经收件箱回到主线程。
 ///
 /// # 参数
 /// - `state`：运行时状态。
 fn spawn_translate_runtime_download(state: &AppState) {
     let data_root = state.data_root.clone();
-    let inbox = state.inbox.clone();
-    let i18n = crate::ocr_backend::i18n_for(
-        locale_of(state.config.borrow().document()),
-    );
-    let spawned = std::thread::Builder::new()
-        .name("snow-ort-download".into())
-        .spawn(move || {
+    spawn_download(
+        state,
+        "snow-ort-download",
+        UiEvent::TranslateDownloadProgress,
+        UiEvent::TranslateDownloadFinished,
+        move |i18n, progress| {
             tracing::info!(root = %data_root.display(), "开始下载 onnxruntime 运行时");
-            let cancel = AtomicBool::new(false);
-            let progress_inbox = inbox.clone();
-            let result = ort_runtime::install(&data_root, &cancel, |step| {
-                progress_inbox.push(UiEvent::TranslateDownloadProgress(step.message(i18n)));
-            })
-            .map(|_| ())
-            .map_err(|e| e.message(i18n));
-            inbox.push(UiEvent::TranslateDownloadFinished(result));
-        });
-    if let Err(e) = spawned {
-        let message = ocr_download::FetchError::TaskStart(e.to_string()).message(i18n);
-        state
-            .inbox
-            .push(UiEvent::TranslateDownloadFinished(Err(message)));
-    }
+            install_ort_runtime(&data_root, i18n, progress)
+        },
+    );
 }
 
 /// 在后台线程做表格识别：先查组件是否齐全，再跑 OCR 取文字框，最后拉起 `snow-table` 做结构推理并合并。
@@ -2825,8 +2822,7 @@ fn spawn_translate_runtime_download(state: &AppState) {
 /// - `serial`：请求序号。
 /// - `width` / `height` / `rgba`：选区图像。
 fn spawn_table(state: &AppState, serial: u64, width: u32, height: u32, rgba: Vec<u8>) {
-    let selection = select_from_document(state.config.borrow().document(), Arc::clone(&state.ocr));
-    let engine = selection.engine;
+    let engine = select_ocr_engine(state);
     let data_root = state.data_root.clone();
     let table_model = crate::model_pick::selected_from_document(
         state.config.borrow().document(),
@@ -2848,6 +2844,13 @@ fn spawn_table(state: &AppState, serial: u64, width: u32, height: u32, rgba: Vec
     }
 }
 
+/// 当前可执行文件所在目录；取不到时为 `None`。
+fn exe_dir() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf))
+}
+
 /// 表格识别的阻塞主体（后台线程里调用）。
 ///
 /// # 参数
@@ -2863,9 +2866,7 @@ fn run_table(
     height: u32,
     rgba: &[u8],
 ) -> Result<OcrResult, OcrError> {
-    let beside = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf));
+    let beside = exe_dir();
     let assets = crate::table_assets::resolve_assets(
         data_root,
         std::env::var(crate::table_assets::ENV_TABLE_ASSET_DIR)
@@ -2936,9 +2937,7 @@ fn run_latex_job(
     height: u32,
     rgba: &[u8],
 ) -> Result<OcrResult, OcrError> {
-    let beside = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf));
+    let beside = exe_dir();
     let assets = crate::latex_assets::resolve_assets(
         model_dir,
         latex_model,
@@ -2961,26 +2960,13 @@ fn run_latex_job(
 /// - `state`：运行时状态。
 fn spawn_latex_download(state: &AppState) {
     let data_root = state.data_root.clone();
-    let inbox = state.inbox.clone();
-    let i18n = crate::ocr_backend::i18n_for(
-        locale_of(state.config.borrow().document()),
+    spawn_download(
+        state,
+        "snow-latex-download",
+        UiEvent::OcrDownloadProgress,
+        UiEvent::OcrDownloadFinished,
+        move |i18n, progress| install_ort_runtime(&data_root, i18n, progress),
     );
-    let spawned = std::thread::Builder::new()
-        .name("snow-latex-download".into())
-        .spawn(move || {
-            let cancel = AtomicBool::new(false);
-            let progress_inbox = inbox.clone();
-            let result = ort_runtime::install(&data_root, &cancel, |step| {
-                progress_inbox.push(UiEvent::OcrDownloadProgress(step.message(i18n)));
-            })
-            .map(|_| ())
-            .map_err(|e| e.message(i18n));
-            inbox.push(UiEvent::OcrDownloadFinished(result));
-        });
-    if let Err(e) = spawned {
-        let message = ocr_download::FetchError::TaskStart(e.to_string()).message(i18n);
-        state.inbox.push(UiEvent::OcrDownloadFinished(Err(message)));
-    }
 }
 
 /// 在后台线程下载表格识别组件（模型与缺失的 onnxruntime），进度与结果复用 OCR 下载事件。
@@ -2989,32 +2975,24 @@ fn spawn_latex_download(state: &AppState) {
 /// - `state`：运行时状态。
 fn spawn_table_download(state: &AppState) {
     let data_root = state.data_root.clone();
-    let inbox = state.inbox.clone();
-    let i18n = crate::ocr_backend::i18n_for(
-        locale_of(state.config.borrow().document()),
-    );
-    let spawned = std::thread::Builder::new()
-        .name("snow-table-download".into())
-        .spawn(move || {
+    spawn_download(
+        state,
+        "snow-table-download",
+        UiEvent::OcrDownloadProgress,
+        UiEvent::OcrDownloadFinished,
+        move |i18n, progress| {
             let env_root = std::env::var(crate::table_assets::ENV_TABLE_ASSET_DIR).ok();
             tracing::info!(models_dir = %crate::table_assets::model_search_dirs(&data_root, env_root.as_deref())[0].display(), "开始下载表格识别组件");
             let cancel = AtomicBool::new(false);
-            let progress_inbox = inbox.clone();
-            let result = crate::table_assets::download_missing(
+            crate::table_assets::download_missing(
                 &data_root,
                 env_root.as_deref(),
                 &cancel,
-                |step| {
-                    progress_inbox.push(UiEvent::OcrDownloadProgress(step.message(i18n)));
-                },
+                |step| progress(step.message(i18n)),
             )
-            .map_err(|e| e.message(i18n));
-            inbox.push(UiEvent::OcrDownloadFinished(result));
-        });
-    if let Err(e) = spawned {
-        let message = ocr_download::FetchError::TaskStart(e.to_string()).message(i18n);
-        state.inbox.push(UiEvent::OcrDownloadFinished(Err(message)));
-    }
+            .map_err(|e| e.message(i18n))
+        },
+    );
 }
 
 /// 在后台线程下载缺失的 OCR 组件（curl + 哈希校验），进度与结果经收件箱回到主线程。
@@ -3025,32 +3003,26 @@ fn spawn_ocr_download(state: &AppState) {
     let model_kind = OcrRequestConfig::from_document(state.config.borrow().document()).model_kind;
     let data_root = state.data_root.clone();
     let need_runtime = state.ocr.exe_override().is_none();
-    let inbox = state.inbox.clone();
-    let i18n = crate::ocr_backend::i18n_for(
-        locale_of(state.config.borrow().document()),
+    spawn_download(
+        state,
+        "snow-ocr-download",
+        UiEvent::OcrDownloadProgress,
+        UiEvent::OcrDownloadFinished,
+        move |i18n, progress| {
+            let env_root = std::env::var(ENV_OCR_ASSET_DIR).ok();
+            tracing::info!(root = %ocr_root(&data_root, env_root.as_deref()).display(), model = %model_kind, "开始下载 OCR 组件");
+            let cancel = AtomicBool::new(false);
+            ocr_download::download_missing(
+                &data_root,
+                env_root.as_deref(),
+                &model_kind,
+                need_runtime,
+                &cancel,
+                |step| progress(step.message(i18n)),
+            )
+            .map_err(|e| e.message(i18n))
+        },
     );
-    let spawned = std::thread::Builder::new().name("snow-ocr-download".into()).spawn(move || {
-        let env_root = std::env::var(ENV_OCR_ASSET_DIR).ok();
-        tracing::info!(root = %ocr_root(&data_root, env_root.as_deref()).display(), model = %model_kind, "开始下载 OCR 组件");
-        let cancel = AtomicBool::new(false);
-        let progress_inbox = inbox.clone();
-        let result = ocr_download::download_missing(
-            &data_root,
-            env_root.as_deref(),
-            &model_kind,
-            need_runtime,
-            &cancel,
-            |step| {
-                progress_inbox.push(UiEvent::OcrDownloadProgress(step.message(i18n)));
-            },
-        )
-        .map_err(|e| e.message(i18n));
-        inbox.push(UiEvent::OcrDownloadFinished(result));
-    });
-    if let Err(e) = spawned {
-        let message = ocr_download::FetchError::TaskStart(e.to_string()).message(i18n);
-        state.inbox.push(UiEvent::OcrDownloadFinished(Err(message)));
-    }
 }
 
 /// 执行设置导出 / 导入：弹原生文件对话框（阻塞）、读写归档，再把结果交给设置页；
@@ -3137,7 +3109,7 @@ fn run_config_transfer(
             }
         }
     };
-    if let Some(view) = settings_view(state, cx.app()) {
+    if let Some(view) = state.settings_view.clone() {
         let ui_state = ui_state.clone();
         view.update(cx.app(), |v, vcx| v.finish_transfer(ui_state, reload, vcx));
     }
@@ -3212,7 +3184,7 @@ fn run_update_action(state: &AppState, action: crate::net_settings::UpdateAction
             }
         }
         UpdateAction::OpenFolder(dir) => {
-            if let Err(e) = std::process::Command::new("explorer.exe").arg(&dir).spawn() {
+            if let Err(e) = open_in_explorer(&dir) {
                 tracing::warn!(dir = %dir.display(), error = %e, "打开更新包目录失败");
             }
         }
@@ -3373,6 +3345,30 @@ fn spawn_overlay_bench(
         .detach();
 }
 
+/// 自动化验收路径：枚举显示器并找出包含指定区域的那块；失败时记错误日志。
+///
+/// # 参数
+/// - `cx`：GPUI 外壳上下文。
+/// - `region`：自动化参数里的选区（虚拟桌面物理坐标）。
+/// - `what`：日志里的功能名（如 `录屏`）。
+///
+/// # 返回
+/// 目标显示器；枚举失败或没有可用显示器时为 `None`。
+fn autotest_target(cx: &mut ShellContext, region: PhysicalRect, what: &str) -> Option<MonitorInfo> {
+    let monitors = match cx.monitors() {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::error!(error = %e, "枚举显示器失败，无法{what}");
+            return None;
+        }
+    };
+    let monitor = monitor_for_region(monitors.all(), region).cloned();
+    if monitor.is_none() {
+        tracing::error!("系统没有可用显示器，无法{what}");
+    }
+    monitor
+}
+
 /// 处理录屏请求：普通路径进入“录屏选区”覆盖窗；设置了自动化环境变量时跳过选区直接开始。
 ///
 /// # 参数
@@ -3391,15 +3387,7 @@ fn request_recording(cx: &mut ShellContext, state: &mut AppState) {
         tracing::error!(value = %text, env = ENV_RECORDING_AUTOTEST, "自动化录屏参数格式无效");
         return;
     };
-    let monitors = match cx.monitors() {
-        Ok(m) => m,
-        Err(e) => {
-            tracing::error!(error = %e, "枚举显示器失败，无法录屏");
-            return;
-        }
-    };
-    let Some(monitor) = monitor_for_region(monitors.all(), spec.region).cloned() else {
-        tracing::error!("系统没有可用显示器，无法录屏");
+    let Some(monitor) = autotest_target(cx, spec.region, "录屏") else {
         return;
     };
     tracing::info!(region = ?spec.region, plan = ?spec.plan, "自动化录屏（跳过选区）");
@@ -3426,15 +3414,7 @@ fn request_scroll_capture(cx: &mut ShellContext, state: &mut AppState) {
         tracing::error!(value = %text, env = ENV_SCROLL_AUTOTEST, "自动化长截图参数格式无效");
         return;
     };
-    let monitors = match cx.monitors() {
-        Ok(m) => m,
-        Err(e) => {
-            tracing::error!(error = %e, "枚举显示器失败，无法长截图");
-            return;
-        }
-    };
-    let Some(monitor) = monitor_for_region(monitors.all(), spec.region).cloned() else {
-        tracing::error!("系统没有可用显示器，无法长截图");
+    let Some(monitor) = autotest_target(cx, spec.region, "长截图") else {
         return;
     };
     tracing::info!(region = ?spec.region, auto = spec.auto_scroll, stop_after = ?spec.stop_after_secs, "自动化长截图（跳过选区）");
@@ -3513,15 +3493,6 @@ fn page_event(action: PageAction) -> UiEvent {
     }
 }
 
-/// 当前存活的设置页视图（窗口未开时为 `None`）。
-///
-/// # 参数
-/// - `state`：运行时状态。
-/// - `_app`：应用上下文（保留与旧签名一致，便于调用点统一）。
-fn settings_view(state: &AppState, _app: &snow_ui::ui::App) -> Option<Entity<SettingsView>> {
-    state.settings_view.clone()
-}
-
 /// 打开设置窗口（应用唯一的常规窗口，主窗口已并入）；已打开则置顶激活并按入口跳页，不重复创建。
 /// 窗口关闭即释放，不做后台常驻。
 ///
@@ -3531,9 +3502,7 @@ fn settings_view(state: &AppState, _app: &snow_ui::ui::App) -> Option<Entity<Set
 /// - `entry`：唤起窗口的入口，决定落到哪一页（新开窗口落在第一个设置分组）。
 fn open_or_focus_settings(cx: &mut ShellContext, state: &mut AppState, entry: WindowEntry) {
     let open = state.settings.filter(|window| cx.is_window_open(window));
-    if plan_open(open.is_some()) == OpenPlan::Activate
-        && let Some(window) = open
-    {
+    if let Some(window) = open {
         cx.activate_window(&window);
         if let Some(view) = &state.settings_view {
             view.update(cx.app(), |v, vcx| v.go_entry(entry, vcx));
@@ -3638,7 +3607,7 @@ fn publish_update_state(
     cx: &mut ShellContext,
     ui_state: crate::net_settings::UpdateUiState,
 ) {
-    if let Some(view) = settings_view(state, cx.app()) {
+    if let Some(view) = state.settings_view.clone() {
         view.update(cx.app(), |v, vcx| v.finish_update_check(ui_state, vcx));
     }
 }
@@ -3869,12 +3838,7 @@ fn on_mouse_gesture(
             if let Some(session) = state.gesture.as_mut().filter(|s| s.id == id) {
                 session.latest = pos;
                 if session.applied {
-                    drive_gesture(
-                        cx,
-                        state,
-                        snow_platform::global_mouse::Point { x: pos.x, y: pos.y },
-                        crate::overlay_view::GestureStep::Move,
-                    );
+                    drive_gesture(cx, state, pos, crate::overlay_view::GestureStep::Move);
                 }
             }
         }
@@ -4010,18 +3974,16 @@ fn refresh_pin_manage(cx: &mut ShellContext, state: &AppState) {
 /// - `error`：失败原因。
 fn report_pin_manage_error(cx: &mut ShellContext, state: &AppState, error: PinError) {
     if let Some((_, view)) = &state.pin_manage_window {
-        let message = error.message(crate::ocr_backend::i18n_for(
-            locale_of(state.config.borrow().document()),
-        ));
+        let message = error.message(state_i18n(state));
         view.update(cx.app(), |v, cx| v.show_error(message, cx));
     }
 }
 
-/// 新建分组默认名所用的界面语料。
+/// 取当前界面语言对应的界面语料。
 ///
 /// # 参数
-/// - `state`：运行时状态。
-fn pin_group_i18n(state: &AppState) -> &'static snow_i18n::I18n {
+/// - `state`：运行时状态（读取界面语言）。
+fn state_i18n(state: &AppState) -> &'static snow_i18n::I18n {
     crate::ocr_backend::i18n_for(locale_of(state.config.borrow().document()))
 }
 
@@ -4407,15 +4369,17 @@ fn on_config_changed(cx: &mut ShellContext, state: &mut AppState, key: &str, pre
     }
     if key == TRANSLATION_PAGE_ENABLED_KEY {
         let enabled = state.config.borrow().value(key).as_bool().unwrap_or(false);
-        if let Some(view) = settings_view(state, cx.app()) {
+        if let Some(view) = state.settings_view.clone() {
             view.update(cx.app(), |v, cx| v.set_translation_enabled(enabled, cx));
         }
         return;
     }
     if key == KEY_PAGE_AUTO_TRANSLATE {
         let enabled = state.config.borrow().value(key).as_bool().unwrap_or(false);
-        let embedded =
-            settings_view(state, cx.app()).and_then(|view| view.read(cx.app()).translate_view());
+        let embedded = state
+            .settings_view
+            .clone()
+            .and_then(|view| view.read(cx.app()).translate_view());
         let standalone = state.translate_page.as_ref().map(|(_, view)| view.clone());
         for view in embedded.into_iter().chain(standalone) {
             view.update(cx.app(), |v, vcx| v.set_auto_translate(enabled, vcx));
@@ -4424,7 +4388,7 @@ fn on_config_changed(cx: &mut ShellContext, state: &mut AppState, key: &str, pre
     }
     if key == LANGUAGE_KEY || key == THEME_MODE_KEY {
         let prefs = ui_prefs_from_config(&state.config);
-        if let Some(view) = settings_view(state, cx.app()) {
+        if let Some(view) = state.settings_view.clone() {
             view.update(cx.app(), |v, cx| v.sync_prefs(prefs, cx));
         }
         if let Some((_, view)) = &state.translate_page {
@@ -4461,11 +4425,7 @@ fn on_config_changed(cx: &mut ShellContext, state: &mut AppState, key: &str, pre
         tracing::warn!(key, "热键服务未运行，无法重新注册");
         return;
     };
-    for handle in state.hotkey_handles.drain(..) {
-        if let Err(e) = service.unregister(handle) {
-            tracing::warn!(error = %e, "注销旧热键失败");
-        }
-    }
+    unregister_all(service, &mut state.hotkey_handles);
     let attempt = register_all_hotkeys_gated(
         service,
         state.config.borrow().document(),
@@ -4505,7 +4465,7 @@ fn on_config_changed(cx: &mut ShellContext, state: &mut AppState, key: &str, pre
         "已恢复回滚后的全局热键"
     );
     state.hotkey_handles = restored.handles;
-    if let Some(view) = settings_view(state, cx.app()) {
+    if let Some(view) = state.settings_view.clone() {
         let message = format!(
             "{}: {reason}",
             crate::settings_text::t(
@@ -4550,8 +4510,17 @@ const NOTICE_TOOLTIP_MAX_CHARS: usize = 100;
 /// - `id`：消息 id。
 /// - `args`：消息参数。
 fn notice_text(state: &AppState, id: &str, args: Args) -> String {
-    let locale = locale_of(state.config.borrow().document());
-    crate::ocr_backend::i18n_for(locale).tr_with(id, &args)
+    state_i18n(state).tr_with(id, &args)
+}
+
+/// 取本地化提示并显示（`notice_text` + `show_notice` 的合并）。
+///
+/// # 参数
+/// - `state`：运行时状态。
+/// - `id`：消息 id。
+/// - `args`：消息参数。
+fn notify(state: &AppState, id: &str, args: Args) {
+    show_notice(state, &notice_text(state, id, args));
 }
 
 /// 显示一条轻量提示：写日志，并放到托盘悬停提示里（下次状态变化时被覆盖）。
@@ -4601,8 +4570,7 @@ fn run_quick_action(cx: &mut ShellContext, state: &mut AppState, action: QuickAc
                 refresh_pin_manage(cx, state);
             }
             Ok(None) => {
-                let text = notice_text(state, NOTICE_RESTORE_CLOSED, Args::new());
-                show_notice(state, &text);
+                notify(state, NOTICE_RESTORE_CLOSED, Args::new());
             }
             Err(e) => tracing::warn!(error = %e, "恢复最近关闭的贴图失败"),
         },
@@ -4610,8 +4578,7 @@ fn run_quick_action(cx: &mut ShellContext, state: &mut AppState, action: QuickAc
         QuickPlan::ToggleFullscreenGate => toggle_fullscreen_gate(state),
         QuickPlan::OpenRecordingFolder => open_recording_folder(state),
         QuickPlan::Placeholder(id) => {
-            let text = notice_text(state, id, Args::new());
-            show_notice(state, &text);
+            notify(state, id, Args::new());
         }
     }
 }
@@ -4625,8 +4592,7 @@ fn run_quick_action(cx: &mut ShellContext, state: &mut AppState, action: QuickAc
 fn begin_delayed_capture(state: &mut AppState) {
     let seconds = delay_seconds(state.config.borrow().document());
     let Some(serial) = state.delay.begin() else {
-        let text = notice_text(state, "quick-notice-delay-busy", Args::new());
-        show_notice(state, &text);
+        notify(state, "quick-notice-delay-busy", Args::new());
         return;
     };
     let inbox = state.inbox.clone();
@@ -4639,12 +4605,11 @@ fn begin_delayed_capture(state: &mut AppState) {
     match spawned {
         Ok(_) => {
             tracing::info!(seconds, serial, "延迟截图开始倒计时");
-            let text = notice_text(
+            notify(
                 state,
                 "quick-notice-delay-started",
                 Args::new().arg(1, seconds),
             );
-            show_notice(state, &text);
         }
         Err(e) => {
             state.delay.cancel();
@@ -4668,8 +4633,7 @@ fn request_direct_capture(cx: &mut ShellContext, state: &mut AppState, kind: Dir
         || capture_gate(state.capture_in_flight, overlay_open) != CaptureGate::Proceed
     {
         tracing::info!(?kind, "直接截图被忽略：已有截图在进行");
-        let text = notice_text(state, "quick-notice-capture-busy", Args::new());
-        show_notice(state, &text);
+        notify(state, "quick-notice-capture-busy", Args::new());
         return;
     }
     let monitors = match cx.monitors() {
@@ -4686,8 +4650,7 @@ fn request_direct_capture(cx: &mut ShellContext, state: &mut AppState, kind: Dir
             .and_then(|rect| clip_to_monitor(rect, &monitors)),
     };
     let Some((monitor, region)) = region else {
-        let text = notice_text(state, "quick-notice-no-focused-window", Args::new());
-        show_notice(state, &text);
+        notify(state, "quick-notice-no-focused-window", Args::new());
         return;
     };
     let (plan, dir, policy) = {
@@ -4795,8 +4758,7 @@ fn toggle_fullscreen_gate(state: &mut AppState) {
     } else {
         NOTICE_FULLSCREEN_GATE_OFF
     };
-    let text = notice_text(state, id, Args::new());
-    show_notice(state, &text);
+    notify(state, id, Args::new());
 }
 
 /// 暂停 / 恢复全部全局热键：暂停时只保留开关本身，并在托盘悬停提示与日志里体现。
@@ -4808,15 +4770,12 @@ fn toggle_global_hotkeys(state: &mut AppState) {
         tracing::warn!("热键服务未运行，无法暂停 / 恢复热键");
         return;
     };
-    for handle in state.hotkey_handles.drain(..) {
-        if let Err(e) = service.unregister(handle) {
-            tracing::warn!(error = %e, "注销旧热键失败");
-        }
-    }
+    unregister_all(service, &mut state.hotkey_handles);
     let paused = !state.hotkeys_paused;
     let attempt = register_all_hotkeys_gated(service, state.config.borrow().document(), paused);
     state.hotkeys_paused = paused;
     refresh_tray_menu(state);
+    let failure_text = attempt.describe_all();
     state.hotkey_handles = attempt.handles;
     tracing::info!(
         paused,
@@ -4825,19 +4784,13 @@ fn toggle_global_hotkeys(state: &mut AppState) {
     );
     let text = if paused {
         notice_text(state, "quick-notice-hotkeys-paused", Args::new())
-    } else if attempt.failures.is_empty() {
+    } else if failure_text.is_empty() {
         notice_text(state, "quick-notice-hotkeys-resumed", Args::new())
     } else {
-        let reasons = attempt
-            .failures
-            .iter()
-            .map(|f| format!("{}: {}", f.shortcut, f.reason))
-            .collect::<Vec<_>>()
-            .join("; ");
         notice_text(
             state,
             "quick-notice-hotkeys-resume-failed",
-            Args::new().arg(1, reasons),
+            Args::new().arg(1, failure_text),
         )
     };
     show_notice(state, &text);
@@ -4848,6 +4801,20 @@ fn toggle_global_hotkeys(state: &mut AppState) {
             tracing::warn!(error = %e, "更新托盘提示失败");
         }
     }
+}
+
+/// 用系统资源管理器打开文件或目录（不等待其退出）。
+///
+/// # 参数
+/// - `path`：要打开的路径。
+///
+/// # 返回
+/// 成功拉起为 `Ok`，否则为启动错误。
+fn open_in_explorer(path: &std::path::Path) -> std::io::Result<()> {
+    std::process::Command::new("explorer.exe")
+        .arg(path)
+        .spawn()
+        .map(|_| ())
 }
 
 /// 在资源管理器里打开录屏保存目录（不存在则先创建）。
@@ -4861,23 +4828,16 @@ fn open_recording_folder(state: &AppState) {
     );
     let opened = std::fs::create_dir_all(&dir)
         .map_err(|e| e.to_string())
-        .and_then(|()| {
-            std::process::Command::new("explorer.exe")
-                .arg(&dir)
-                .spawn()
-                .map(|_| ())
-                .map_err(|e| e.to_string())
-        });
+        .and_then(|()| open_in_explorer(&dir).map_err(|e| e.to_string()));
     match opened {
         Ok(()) => tracing::info!(dir = %dir.display(), "已打开录屏保存目录"),
         Err(reason) => {
             tracing::warn!(dir = %dir.display(), %reason, "打开录屏保存目录失败");
-            let text = notice_text(
+            notify(
                 state,
                 "quick-notice-folder-failed",
                 Args::new().arg(1, reason),
             );
-            show_notice(state, &text);
         }
     }
 }
@@ -4959,7 +4919,9 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
             embedded,
         } => {
             if embedded {
-                let page = settings_view(state, cx.app())
+                let page = state
+                    .settings_view
+                    .clone()
                     .and_then(|view| view.read(cx.app()).translate_view());
                 if let Some(view) = page {
                     view.update(cx.app(), |v, vcx| v.finish(serial, result, vcx));
@@ -4975,10 +4937,7 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
             save_settings_window_geometry(state, maximized)
         }
         UiEvent::OpenFile(path) => {
-            if let Err(e) = std::process::Command::new("explorer.exe")
-                .arg(&path)
-                .spawn()
-            {
+            if let Err(e) = open_in_explorer(&path) {
                 tracing::warn!(path = %path.display(), error = %e, "打开文件失败");
             }
         }
@@ -5050,8 +5009,7 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
         UiEvent::MouseGesture(event) => on_mouse_gesture(cx, state, event),
         UiEvent::OpenRecognitionWindow(data) => open_recognition_window(cx, state, *data),
         UiEvent::SelectedTextReady(None) => {
-            let text = notice_text(state, NOTICE_NO_SELECTED_TEXT, Args::new());
-            show_notice(state, &text);
+            notify(state, NOTICE_NO_SELECTED_TEXT, Args::new());
         }
         UiEvent::SelectedTextReady(Some(text)) => {
             open_or_focus_translate_input(cx, state);
@@ -5073,8 +5031,7 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
             refresh_pin_manage(cx, state);
         }
         UiEvent::PinFilesEmpty => {
-            let text = notice_text(state, NOTICE_PIN_SELECTED_FILES, Args::new());
-            show_notice(state, &text);
+            notify(state, NOTICE_PIN_SELECTED_FILES, Args::new());
         }
         UiEvent::PinManageThumb { id, thumb } => {
             if let Some((_, view)) = &state.pin_manage_window {
@@ -5101,7 +5058,7 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
             if let Err(e) = state
                 .pins
                 .shared()
-                .create_group(Some(&name), pin_group_i18n(state))
+                .create_group(Some(&name), state_i18n(state))
             {
                 report_pin_manage_error(cx, state, e);
             }
@@ -5124,11 +5081,7 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
             refresh_pin_manage(cx, state);
         }
         UiEvent::PinGroupNew => {
-            match state
-                .pins
-                .shared()
-                .create_group(None, pin_group_i18n(state))
-            {
+            match state.pins.shared().create_group(None, state_i18n(state)) {
                 Ok(id) => tracing::info!(group = %id, "已新建贴图分组"),
                 Err(e) => tracing::warn!(error = %e, "新建贴图分组失败"),
             }
@@ -5278,7 +5231,7 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
         UiEvent::ConfigTransferRequested(action) => run_config_transfer(cx, state, action),
         UiEvent::PathPickRequested(key) => run_path_pick(state, key),
         UiEvent::PathPicked(key, value) => {
-            if let Some(view) = settings_view(state, cx.app()) {
+            if let Some(view) = state.settings_view.clone() {
                 view.update(cx.app(), |v, vcx| v.apply_picked_value(key, value, vcx));
             }
         }
@@ -5925,6 +5878,61 @@ mod tests {
         assert!(
             describe_hotkey_failure(&attempt, DICTATION_TRIGGER_MODE_CONFIG_KEY).contains("F9")
         );
+    }
+
+    /// `describe_all` 汇总全部失败，`describe_for` 只汇总指定键。
+    #[test]
+    fn describe_all_joins_every_failure() {
+        let mut attempt = HotkeyRegistration::default();
+        assert_eq!(attempt.describe_all(), "");
+        for (key, shortcut, reason) in [
+            (SCREENSHOT_HOTKEY_CONFIG_KEY, "F1", "占用"),
+            (RECORDING_HOTKEY_CONFIG_KEY, "F2", "无效"),
+        ] {
+            attempt.failures.push(HotkeyFailure {
+                config_key: key,
+                shortcut: shortcut.into(),
+                reason: reason.into(),
+            });
+        }
+        assert_eq!(attempt.describe_all(), "F1: 占用; F2: 无效");
+        assert_eq!(
+            attempt.describe_for(RECORDING_HOTKEY_CONFIG_KEY),
+            "F2: 无效"
+        );
+    }
+
+    /// 同构热键表覆盖截图 / 录屏 / 贴图剪贴板 / 输入框翻译四类，键与功能名互不重复。
+    #[test]
+    fn simple_hotkey_table_covers_four_kinds() {
+        let table = simple_hotkey_table();
+        let keys: Vec<_> = table.iter().map(|(k, _, _)| *k).collect();
+        assert_eq!(
+            keys,
+            [
+                SCREENSHOT_HOTKEY_CONFIG_KEY,
+                RECORDING_HOTKEY_CONFIG_KEY,
+                PIN_CLIPBOARD_HOTKEY_CONFIG_KEY,
+                TRANSLATE_INPUT_HOTKEY_CONFIG_KEY,
+            ]
+        );
+        let labels: std::collections::HashSet<_> = table.iter().map(|(_, l, _)| *l).collect();
+        assert_eq!(labels.len(), 4);
+    }
+
+    /// 合成底图尺寸：未设置、非法、为 0 均视为未启用。
+    #[test]
+    fn synth_size_from_parses_env_value() {
+        assert_eq!(synth_size_from(Some("3840x2160")), Some((3840, 2160)));
+        assert_eq!(synth_size_from(Some("0x10")), None);
+        assert_eq!(synth_size_from(Some("abc")), None);
+        assert_eq!(synth_size_from(None), None);
+    }
+
+    /// 可执行文件目录存在且是目录。
+    #[test]
+    fn exe_dir_points_to_a_directory() {
+        assert!(exe_dir().is_some_and(|dir| dir.is_dir()));
     }
 
     /// 贴图热键配置键与 schema 一致，默认值（F3）可解析为合法热键。

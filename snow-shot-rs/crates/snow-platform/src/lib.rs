@@ -27,6 +27,9 @@ pub mod unix_time;
 pub mod win_ocr;
 pub mod window_rect;
 
+/// Windows 进程创建标志：不为子进程创建控制台窗口。
+pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 /// 本 crate 的阶段标记，用于骨架连通性测试。
 pub const PHASE: &str = "P1";
 

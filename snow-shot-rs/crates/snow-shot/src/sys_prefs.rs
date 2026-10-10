@@ -5,9 +5,8 @@ use std::os::windows::process::CommandExt;
 #[cfg(windows)]
 use std::process::Command;
 
-/// 创建进程时不显示控制台窗口的标志。
 #[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+use snow_platform::CREATE_NO_WINDOW;
 
 /// 系统个性化主题的注册表路径。
 #[cfg(windows)]
