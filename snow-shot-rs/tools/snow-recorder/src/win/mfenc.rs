@@ -449,6 +449,7 @@ impl MfEncoder {
         init_com();
         // SAFETY: 以下均为 Media Foundation 初始化与对象创建的 FFI 调用，参数都是局部有效值。
         unsafe {
+            // 录制 worker 一进程只录一次，随进程退出回收 MF，故不配对 MFShutdown（编辑/转码走 edit::system 自带的 MfSession 配对关闭）
             MFStartup(MF_VERSION, MFSTARTUP_FULL).map_err(|e| fail("MFStartup", e))?;
             let luid = adapter_luid(&ctx);
             let names = enumerate_hardware_h264(luid)?;
@@ -612,6 +613,7 @@ impl VideoEncoder for MfEncoder {
 
     /// 冲刷编码器并写完 MP4。
     fn finish(mut self, _end_pts: i64) -> Result<EncoderStats, String> {
+        // 失败直接返回即可：COM 对象由 Drop 释放；半截输出位于 worker 的临时目录，`main::fail` 会整体清掉并回报 Error 事件
         // SAFETY: SinkWriter 有效，Finalize 阻塞到封装完成。
         unsafe { self.writer.Finalize() }.map_err(|e| fail("Finalize", e))?;
         eprintln!("MF 编码器: {}", self.description);

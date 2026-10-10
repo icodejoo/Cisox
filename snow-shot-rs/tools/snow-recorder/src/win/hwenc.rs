@@ -417,8 +417,6 @@ impl<T> DurationStitcher<T> {
 pub struct HwStats {
     /// 已送入编码器的帧数。
     pub frames: u64,
-    /// 已写出的视频包数。
-    pub packets: u64,
     /// 每帧 `映射+send_frame` 耗时样本（毫秒）。
     pub send_ms: Vec<f32>,
 }
@@ -662,7 +660,6 @@ impl HwEncoder {
         packet.rescale_ts(self.encoder.time_base(), self.stream_time_base);
         let mut output = self.output.lock().map_err(|_| "封装锁已损坏".to_string())?;
         packet.write_interleaved(&mut output).map_err(|e| format!("写包失败: {e}"))?;
-        self.stats.packets += 1;
         Ok(())
     }
 

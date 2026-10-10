@@ -31,7 +31,7 @@ param(
     [ValidateSet(30, 60)][int]$Fps = 60,
     [ValidateRange(2, 8)][int]$Seconds = 6,
     [ValidateSet("mp4", "gif", "apng", "webp")][string]$Format = "mp4",
-    [ValidateSet("light", "stripes", "noise")][string]$Load = "noise",
+    [ValidateSet("light", "stripes", "noise", "grid")][string]$Load = "noise",
     [double]$Refresh = 0,
     [string]$Tag = "run",
     [string]$OutDir = (Join-Path $env:TEMP "snow-fps-test"),

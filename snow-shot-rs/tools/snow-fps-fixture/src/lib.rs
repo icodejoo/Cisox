@@ -393,7 +393,7 @@ pub struct FrameRecord {
     pub seq: u32,
     /// 提交完成（BitBlt 返回）时刻，相对起点纳秒。
     pub submit_ns: u64,
-    /// `DwmFlush` 返回时刻，相对起点纳秒。
+    /// `Present` 返回时刻，相对起点纳秒（现与 `submit_ns` 取同一时钟读数，保留该列以兼容分析脚本）。
     pub flush_ns: u64,
     /// 提交时的 Unix 时间（微秒），用于与录制侧墙钟对账。
     pub unix_us: u64,
