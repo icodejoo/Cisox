@@ -23,7 +23,10 @@ $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 if (-not $Exe) { $Exe = Join-Path $repoRoot "snow-shot-rs/tools/snow-recorder/target/release/snow-recorder.exe" }
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 $out = Join-Path $OutDir ("verify-{0}-{1}.{2}" -f $Scenario, (Get-Date -Format "HHmmss"), $Format)
-$x, $y, $w, $h = $Region.Split(@(",", " "), [System.StringSplitOptions]::RemoveEmptyEntries) | ForEach-Object { [int]$_ }
+# 注意：不要用 .Split(@(...), options)，PowerShell 7 下会把 "0,0,1280,720" 当成一个整数 1280720。
+$regionParts = @($Region -split '[,\s]+' | Where-Object { $_ } | ForEach-Object { [int]$_ })
+if ($regionParts.Count -ne 4) { Write-Error "-Region 需要恰好 4 个整数（x,y,w,h），实际: '$Region'"; exit 2 }
+$x, $y, $w, $h = $regionParts
 
 $psi = New-Object System.Diagnostics.ProcessStartInfo
 $psi.FileName = $Exe
