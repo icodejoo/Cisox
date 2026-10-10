@@ -214,6 +214,24 @@ struct PoolState {
     closed: bool,
 }
 
+impl PoolState {
+    /// 该包是否“占着”：有请求在飞或正被卸载。
+    fn is_busy(&self, index: usize) -> bool {
+        self.in_flight[index] > 0 || self.unloading[index]
+    }
+
+    /// 全部包的“占着”标记（按包顺序）。
+    fn busy_flags(&self) -> Vec<bool> {
+        (0..self.in_flight.len()).map(|i| self.is_busy(i)).collect()
+    }
+
+    /// 推进逻辑时钟并记下该包刚被使用。
+    fn touch(&mut self, index: usize) {
+        self.clock += 1;
+        self.last_used[index] = self.clock;
+    }
+}
+
 /// 一次占用：存活期间该包不会被驱逐，释放时顺带收缩超限的常驻包。
 struct Lease<'a> {
     /// 所属路由器。
@@ -438,10 +456,7 @@ impl RoutedEngine {
 
     /// 每个包是否“占着”：有请求在飞或正被卸载（这类包不查询引擎状态，也不可被驱逐）。
     fn busy_flags(&self) -> Vec<bool> {
-        let pool = self.lock_pool();
-        (0..self.slots.len())
-            .map(|i| pool.in_flight[i] > 0 || pool.unloading[i])
-            .collect()
+        self.lock_pool().busy_flags()
     }
 
     /// 加驱逐状态的锁（忽略中毒）。
@@ -476,9 +491,7 @@ impl RoutedEngine {
             }
             busy_elsewhere = pool.in_flight[index] > 0;
             pool.in_flight[index] += 1;
-            pool.clock += 1;
-            let now = pool.clock;
-            pool.last_used[index] = now;
+            pool.touch(index);
         }
         {
             let mut used = self.used.lock().unwrap_or_else(PoisonError::into_inner);
@@ -503,9 +516,7 @@ impl RoutedEngine {
         {
             let mut pool = self.lock_pool();
             pool.in_flight[index] = pool.in_flight[index].saturating_sub(1);
-            pool.clock += 1;
-            let now = pool.clock;
-            pool.last_used[index] = now;
+            pool.touch(index);
         }
         self.evict_idle(max_resident, None);
     }
@@ -521,10 +532,7 @@ impl RoutedEngine {
                 if pool.closed {
                     return;
                 }
-                let busy: Vec<bool> = (0..self.slots.len())
-                    .map(|i| pool.in_flight[i] > 0 || pool.unloading[i])
-                    .collect();
-                (busy, pool.last_used.clone())
+                (pool.busy_flags(), pool.last_used.clone())
             };
             let mut resident = 0;
             let mut victim: Option<usize> = None;
@@ -550,7 +558,7 @@ impl RoutedEngine {
                 if pool.closed {
                     return;
                 }
-                if pool.in_flight[victim] > 0 || pool.unloading[victim] {
+                if pool.is_busy(victim) {
                     // 快照之后它被占用了：重新评估
                     continue;
                 }
@@ -624,9 +632,7 @@ impl RoutedEngine {
             let batch: Vec<String> = members.iter().map(|&i| texts[i].clone()).collect();
             let lease = self.acquire(index, policy.max_resident)?;
             let translated = lease.engine().translate_batch(&batch, lang, tgt)?;
-            if translated.len() != batch.len() {
-                return Err(TranslateError::Inference("后端返回的译文条数不符".into()));
-            }
+            crate::ensure_same_len(translated.len(), batch.len())?;
             for (&i, text) in members.iter().zip(translated) {
                 out[i] = text;
             }
@@ -721,9 +727,7 @@ impl RoutedEngine {
                     .collect();
                 let batch: Vec<String> = members.iter().map(|&j| jobs[j].text.clone()).collect();
                 let translated = lease.engine().translate_batch(&batch, source, tgt)?;
-                if translated.len() != batch.len() {
-                    return Err(TranslateError::Inference("后端返回的译文条数不符".into()));
-                }
+                crate::ensure_same_len(translated.len(), batch.len())?;
                 for (&member, text) in members.iter().zip(translated) {
                     jobs[member].out = Some(text);
                 }
@@ -756,9 +760,8 @@ impl RoutedEngine {
 impl TranslationEngine for RoutedEngine {
     /// 翻译单条文本（走批量路径）。
     fn translate(&self, text: &str, src: Lang, tgt: Lang) -> Result<String, TranslateError> {
-        let mut out = self.translate_batch(&[text.to_string()], src, tgt)?;
-        out.pop()
-            .ok_or_else(|| TranslateError::Inference("后端没有返回译文".into()))
+        let out = self.translate_batch(&[text.to_string()], src, tgt)?;
+        crate::take_single(out, "后端没有返回译文")
     }
 
     /// 批量翻译：全是空白时不占用任何引擎；否则按当前路由策略分流。
@@ -1034,6 +1037,27 @@ mod tests {
         tgt: Lang,
     ) -> Result<String, TranslateError> {
         engine.translate(text, src, tgt)
+    }
+
+    /// 驱逐记账：`is_busy` 认在飞与卸载中，`touch` 单调推进时钟，`busy_flags` 与逐个判定一致。
+    #[test]
+    fn pool_state_busy_and_touch() {
+        let mut pool = PoolState {
+            in_flight: vec![0, 1, 0],
+            last_used: vec![0; 3],
+            clock: 0,
+            unloading: vec![false, false, true],
+            closed: false,
+        };
+        assert!(!pool.is_busy(0) && pool.is_busy(1) && pool.is_busy(2));
+        assert_eq!(pool.busy_flags(), [false, true, true]);
+        pool.touch(1);
+        pool.touch(0);
+        assert_eq!(
+            (pool.last_used[1], pool.last_used[0], pool.clock),
+            (1, 2, 2)
+        );
+        assert_eq!(pool.last_used[2], 0, "未触碰的包不变");
     }
 
     /// 路由模式代号往返。

@@ -6,7 +6,7 @@
 //! 按钮全部是图标，文案作 tooltip；同类按钮折成「当前项图标 + 小箭头」合一的分组按钮，
 //! 分组表、悬停状态机与尺寸计算见 [`crate::toolbar_groups`]。
 
-use crate::text_measure::{LABEL_FONT_PX, max_label_width, menu_outer_width};
+use crate::text_measure::{LABEL_FONT_PX, ROW_ICON, max_label_width, menu_outer_width};
 use crate::toolbar_groups::{
     ARROW_GAP, ARROW_ICON, BAR_BORDER, BAR_PADDING_X, BAR_PADDING_Y, BUTTON_SIZE, CHECK_ICON,
     CHECK_ICON_SIZE, COLOR_CHECK_GREEN, DIVIDER_WIDTH, GroupMemory, ITEM_GAP, MENU_PADDING,
@@ -331,23 +331,21 @@ const COLOR_HOVER_BG: u32 = 0xFFFFFF1A;
 /// 按下背景（RGBA）。
 const COLOR_PRESSED_BG: u32 = 0xFFFFFF33;
 /// 工具栏与弹出菜单的背景色（RGBA）。
-const COLOR_BAR_BG: u32 = 0x1F1F1FE6;
+pub(crate) const COLOR_BAR_BG: u32 = 0x1F1F1FE6;
 /// 工具栏与弹出菜单的边框色（RGBA）。
-const COLOR_BAR_BORDER: u32 = 0x00000080;
+pub(crate) const COLOR_BAR_BORDER: u32 = 0x00000080;
 /// 分割线颜色（RGBA）。
-const COLOR_DIVIDER: u32 = 0xFFFFFF33;
+pub(crate) const COLOR_DIVIDER: u32 = 0xFFFFFF33;
 /// 选中态背景透明度（叠在主色上）。
 const ALPHA_ACTIVE_BG: u32 = 0x33;
 /// 选中态悬停背景透明度。
 const ALPHA_ACTIVE_HOVER: u32 = 0x4D;
 /// 悬停提示（tooltip）出现前的延迟。
-const TOOLTIP_DELAY: Duration = Duration::from_millis(350);
+pub(crate) const TOOLTIP_DELAY: Duration = Duration::from_millis(350);
 /// 图标按钮内图标的边长。
 const ICON_SIZE: f32 = 18.0;
 /// 下箭头图标边长。
 const ARROW_ICON_SIZE: f32 = 10.0;
-/// 菜单行内图标边长。
-const MENU_ICON_SIZE: f32 = 16.0;
 
 /// 当前项文字的提亮颜色。
 pub(crate) const COLOR_CURRENT_TEXT: u32 = 0xFFFFFF;
@@ -366,6 +364,50 @@ pub(crate) fn menu_check_slot(is_current: bool) -> Div {
                     .text_color(rgb(COLOR_CHECK_GREEN)),
             )
         })
+}
+
+/// 给元素套一层原生悬停提示（组件库的托管提示需要 Root，覆盖窗没有）。
+///
+/// # 参数
+/// - `id`：被包元素的 id，提示层 id 为 `{id}-tip`。
+/// - `text`：提示文字。
+/// - `child`：被包元素。
+pub(crate) fn with_tooltip(id: String, text: String, child: impl IntoElement) -> impl IntoElement {
+    let text = SharedString::from(text);
+    div()
+        .id(SharedString::from(format!("{id}-tip")))
+        .tooltip_show_delay(TOOLTIP_DELAY)
+        .tooltip(move |window, cx| Tooltip::new(text.clone()).build(window, cx))
+        .child(child)
+}
+
+/// 弹出菜单一行的内容：图标 + 文字（当前项提亮）+ 末尾选中标记槽。
+///
+/// # 参数
+/// - `icon`：图标资源路径。
+/// - `label`：已本地化的文字。
+/// - `checked`：是否当前项。
+pub(crate) fn menu_row_content(icon: &'static str, label: String, checked: bool) -> Div {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .w_full()
+        .px_2()
+        .text_sm()
+        .child(
+            Icon::default()
+                .path(icon)
+                .with_size(ComponentSize::Size(px(ROW_ICON))),
+        )
+        .child(
+            div()
+                .flex_1()
+                .when(checked, |l| l.text_color(rgb(COLOR_CURRENT_TEXT)))
+                .child(label),
+        )
+        .child(menu_check_slot(checked))
 }
 
 /// 按钮外观：普通 / 选中 / 主操作 / 危险。
@@ -669,6 +711,23 @@ impl ScreenshotToolbar {
         }
     }
 
+    /// 条目被点击时的完整行为：先记为所属组当前项并收起菜单，再调用回调。
+    ///
+    /// 条目置灰或对应回调没注册时返回 `None`（按钮不挂点击）。
+    fn item_click(&self, item: ToolbarItem) -> Option<ItemRunner> {
+        if self.item_disabled(item) {
+            return None;
+        }
+        let run = self.runner(item)?;
+        let groups = self.groups.clone();
+        Some(Rc::new(move |window, cx| {
+            if let Some(groups) = &groups {
+                groups.update(cx, |state, gcx| state.choose(item, gcx));
+            }
+            run(window, cx);
+        }))
+    }
+
     /// 条目按钮的外观：激活中的工具为选中色。
     fn item_look(&self, item: ToolbarItem) -> Look {
         match item {
@@ -698,16 +757,6 @@ impl ScreenshotToolbar {
             .accessibility_label(SharedString::from(self.label_text(item.label())))
     }
 
-    /// 给元素套一层原生悬停提示（组件库的托管提示需要 Root，覆盖窗没有）。
-    fn with_tooltip(id: String, text: String, child: impl IntoElement) -> impl IntoElement {
-        let text = SharedString::from(text);
-        div()
-            .id(SharedString::from(format!("{id}-tip")))
-            .tooltip_show_delay(TOOLTIP_DELAY)
-            .tooltip(move |window, cx| Tooltip::new(text.clone()).build(window, cx))
-            .child(child)
-    }
-
     /// 独立图标按钮（撤销 / 重做 / 复制 / 取消）。
     fn solo_button(
         &self,
@@ -722,7 +771,7 @@ impl ScreenshotToolbar {
         if enabled && let Some(run) = self.runner(item) {
             btn = btn.on_click(move |_, window, cx| run(window, cx));
         }
-        Self::with_tooltip(id, self.label_text(item.label()), btn).into_any_element()
+        with_tooltip(id, self.label_text(item.label()), btn).into_any_element()
     }
 
     /// 一个分组的复合按钮：图标 + 小箭头合成同一个按钮，悬停弹出同组菜单。
@@ -743,17 +792,11 @@ impl ScreenshotToolbar {
         if !group.has_menu() {
             // 只有一项：退化为普通图标按钮
             let mut main = self.icon_button(btn_id.clone(), current, look, disabled, cx);
-            if !disabled && let Some(run) = self.runner(current) {
-                let groups = self.groups.clone();
-                main = main.on_click(move |_, window, cx| {
-                    if let Some(groups) = &groups {
-                        groups.update(cx, |state, gcx| state.choose(current, gcx));
-                    }
-                    run(window, cx);
-                });
+            if let Some(act) = self.item_click(current) {
+                main = main.on_click(move |_, window, cx| act(window, cx));
             }
             let tip = self.label_text(current.label());
-            return Self::with_tooltip(btn_id, tip, main).into_any_element();
+            return with_tooltip(btn_id, tip, main).into_any_element();
         }
 
         // 整体一个按钮：当前项图标 + 小箭头；点击 = 执行当前项，右键 = 打开菜单
@@ -789,20 +832,14 @@ impl ScreenshotToolbar {
                 groups.update(cx, |state, gcx| state.click_arrow(group, gcx));
             });
         }
-        if !disabled && let Some(run) = self.runner(current) {
-            let groups = self.groups.clone();
-            btn = btn.on_click(move |_, window, cx| {
-                if let Some(groups) = &groups {
-                    groups.update(cx, |state, gcx| state.choose(current, gcx));
-                }
-                run(window, cx);
-            });
+        if let Some(act) = self.item_click(current) {
+            btn = btn.on_click(move |_, window, cx| act(window, cx));
         }
         let row = if is_open {
             div().child(btn)
         } else {
             let tip = self.label_text(ToolbarLabel::GroupTip(group, current));
-            div().child(Self::with_tooltip(btn_id, tip, btn))
+            div().child(with_tooltip(btn_id, tip, btn))
         };
 
         let mut popup = Popup::new(SharedString::from(format!("tb-group-{key}")), row)
@@ -861,43 +898,17 @@ impl ScreenshotToolbar {
         for item in group.items().iter().copied() {
             let disabled = self.item_disabled(item);
             let is_current = item == current;
-            let content = div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap_2()
-                .w_full()
-                .px_2()
-                .text_sm()
-                .child(
-                    Icon::default()
-                        .path(item.icon_path())
-                        .with_size(ComponentSize::Size(px(MENU_ICON_SIZE))),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .when(is_current, |label| {
-                            label.text_color(rgb(COLOR_CURRENT_TEXT))
-                        })
-                        .child(self.label_text(item.label())),
-                )
-                .child(menu_check_slot(is_current));
+            let content =
+                menu_row_content(item.icon_path(), self.label_text(item.label()), is_current);
             let mut row = Button::new(SharedString::from(format!("tb-{key}-item-{item:?}")))
                 .custom(self.item_look(item).variant(cx))
-                .with_size(ComponentSize::Size(px(MENU_ICON_SIZE)))
+                .with_size(ComponentSize::Size(px(ROW_ICON)))
                 .w_full()
                 .h(px(MENU_ROW_HEIGHT))
                 .disabled(disabled)
                 .child(content);
-            if !disabled && let Some(run) = self.runner(item) {
-                let groups = self.groups.clone();
-                row = row.on_click(move |_, window, cx| {
-                    if let Some(groups) = &groups {
-                        groups.update(cx, |state, gcx| state.choose(item, gcx));
-                    }
-                    run(window, cx);
-                });
+            if let Some(act) = self.item_click(item) {
+                row = row.on_click(move |_, window, cx| act(window, cx));
             }
             menu = menu.child(row);
         }
@@ -1074,5 +1085,22 @@ mod tests {
         assert_eq!(seen.len(), 10);
         assert!(seen.contains(&ToolbarAction::Record));
         assert!(!seen.contains(&ToolbarAction::Undo) && !seen.contains(&ToolbarAction::Redo));
+    }
+
+    /// 条目点击行为：置灰或没注册回调时不挂点击，有回调才返回。
+    #[test]
+    fn item_click_requires_enabled_and_handler() {
+        let copy = ToolbarItem::Action(ToolbarAction::Copy);
+        let tool = ToolbarItem::Tool(AnnotationTool::Arrow);
+        let bare = ScreenshotToolbar::new("t");
+        assert!(bare.item_click(copy).is_none());
+        assert!(bare.item_click(tool).is_none());
+        let wired = ScreenshotToolbar::new("t")
+            .on_action(|_, _, _| {})
+            .on_tool_change(|_, _, _| {})
+            .disabled_actions(&[ToolbarAction::Copy]);
+        assert!(wired.item_click(copy).is_none());
+        assert!(wired.item_click(tool).is_some());
+        assert!(wired.item_click(ToolbarItem::Action(ToolbarAction::Save)).is_some());
     }
 }

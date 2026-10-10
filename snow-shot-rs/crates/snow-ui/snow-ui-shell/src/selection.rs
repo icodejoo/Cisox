@@ -244,39 +244,20 @@ pub fn handle_rects(selection: PhysicalRect, handle_size: i32) -> [(SelectionDra
     let cx = selection.x + selection.width / 2;
     let cy = selection.y + selection.height / 2;
 
+    // 以手柄中心点 (x, y) 生成手柄矩形
+    let handle = |x: i32, y: i32| PhysicalRect::new(x - half, y - half, handle_size, handle_size);
+    let (left, right) = (selection.x, selection.right());
+    let (top, bottom) = (selection.y, selection.bottom());
+
     [
-        (
-            SelectionDragMode::TopLeft,
-            PhysicalRect::new(selection.x - half, selection.y - half, handle_size, handle_size),
-        ),
-        (
-            SelectionDragMode::Top,
-            PhysicalRect::new(cx - half, selection.y - half, handle_size, handle_size),
-        ),
-        (
-            SelectionDragMode::TopRight,
-            PhysicalRect::new(selection.right() - half, selection.y - half, handle_size, handle_size),
-        ),
-        (
-            SelectionDragMode::Right,
-            PhysicalRect::new(selection.right() - half, cy - half, handle_size, handle_size),
-        ),
-        (
-            SelectionDragMode::BottomRight,
-            PhysicalRect::new(selection.right() - half, selection.bottom() - half, handle_size, handle_size),
-        ),
-        (
-            SelectionDragMode::Bottom,
-            PhysicalRect::new(cx - half, selection.bottom() - half, handle_size, handle_size),
-        ),
-        (
-            SelectionDragMode::BottomLeft,
-            PhysicalRect::new(selection.x - half, selection.bottom() - half, handle_size, handle_size),
-        ),
-        (
-            SelectionDragMode::Left,
-            PhysicalRect::new(selection.x - half, cy - half, handle_size, handle_size),
-        ),
+        (SelectionDragMode::TopLeft, handle(left, top)),
+        (SelectionDragMode::Top, handle(cx, top)),
+        (SelectionDragMode::TopRight, handle(right, top)),
+        (SelectionDragMode::Right, handle(right, cy)),
+        (SelectionDragMode::BottomRight, handle(right, bottom)),
+        (SelectionDragMode::Bottom, handle(cx, bottom)),
+        (SelectionDragMode::BottomLeft, handle(left, bottom)),
+        (SelectionDragMode::Left, handle(left, cy)),
     ]
 }
 
@@ -395,35 +376,20 @@ pub fn dragged_selection_rect(
             }
             return moved;
         }
-        SelectionDragMode::TopLeft => {
-            left += dx;
-            top += dy;
-        }
-        SelectionDragMode::Top => {
-            top += dy;
-        }
-        SelectionDragMode::TopRight => {
-            right += dx;
-            top += dy;
-        }
-        SelectionDragMode::Right => {
-            right += dx;
-        }
-        SelectionDragMode::BottomRight => {
-            right += dx;
-            bottom += dy;
-        }
-        SelectionDragMode::Bottom => {
-            bottom += dy;
-        }
-        SelectionDragMode::BottomLeft => {
-            left += dx;
-            bottom += dy;
-        }
-        SelectionDragMode::Left => {
-            left += dx;
-        }
         SelectionDragMode::None => return origin,
+        // 八个手柄：按方向分量移动对应的边
+        _ => {
+            match mode.horizontal_direction() {
+                -1 => left += dx,
+                1 => right += dx,
+                _ => {}
+            }
+            match mode.vertical_direction() {
+                -1 => top += dy,
+                1 => bottom += dy,
+                _ => {}
+            }
+        }
     }
 
     // 翻转处理：当手柄拖动越过对边时，自适应对调
@@ -662,5 +628,27 @@ mod tests {
             selection_size_label(PhysicalRect::new(10, 20, 800, 600)),
             "800 × 600"
         );
+    }
+
+    /// 八个手柄按方向分量移动对应的边；越过对边时翻转。
+    #[test]
+    fn test_dragged_rect_all_handles() {
+        let origin = PhysicalRect::new(100, 100, 200, 200);
+        let start = PhysicalPoint::new(0, 0);
+        let cur = PhysicalPoint::new(10, 20);
+        let run = |mode| dragged_selection_rect(mode, origin, start, cur, None, 8, None);
+        assert_eq!(run(SelectionDragMode::TopLeft), PhysicalRect::new(110, 120, 190, 180));
+        assert_eq!(run(SelectionDragMode::Top), PhysicalRect::new(100, 120, 200, 180));
+        assert_eq!(run(SelectionDragMode::TopRight), PhysicalRect::new(100, 120, 210, 180));
+        assert_eq!(run(SelectionDragMode::Right), PhysicalRect::new(100, 100, 210, 200));
+        assert_eq!(run(SelectionDragMode::BottomRight), PhysicalRect::new(100, 100, 210, 220));
+        assert_eq!(run(SelectionDragMode::Bottom), PhysicalRect::new(100, 100, 200, 220));
+        assert_eq!(run(SelectionDragMode::BottomLeft), PhysicalRect::new(110, 100, 190, 220));
+        assert_eq!(run(SelectionDragMode::Left), PhysicalRect::new(110, 100, 190, 200));
+        assert_eq!(run(SelectionDragMode::None), origin);
+        // 右边拖过左边：翻转
+        let far = PhysicalPoint::new(-250, 0);
+        let flipped = dragged_selection_rect(SelectionDragMode::Right, origin, start, far, None, 8, None);
+        assert_eq!(flipped, PhysicalRect::new(50, 100, 50, 200));
     }
 }

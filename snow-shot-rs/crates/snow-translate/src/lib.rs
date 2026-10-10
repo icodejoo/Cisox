@@ -482,6 +482,35 @@ pub(crate) fn resolve_in_pairs(pairs: &[(Lang, Lang)], src: Lang, tgt: Lang) -> 
     pairs.contains(&(src, tgt)).then_some(src)
 }
 
+/// 校验后端返回的译文条数与请求条数一致。
+///
+/// # 参数
+/// - `got`：返回条数。
+/// - `expected`：请求条数。
+///
+/// # 返回
+/// 一致返回 `Ok(())`，否则 `Inference` 错误。
+pub(crate) fn ensure_same_len(got: usize, expected: usize) -> Result<(), TranslateError> {
+    if got == expected {
+        Ok(())
+    } else {
+        Err(TranslateError::Inference("后端返回的译文条数不符".into()))
+    }
+}
+
+/// 取单条翻译的结果（批量路径的唯一一条）。
+///
+/// # 参数
+/// - `out`：批量结果。
+/// - `missing`：结果为空时的错误说明。
+///
+/// # 返回
+/// 最后一条译文；为空时返回 `Inference(missing)`。
+pub(crate) fn take_single(mut out: Vec<String>, missing: &str) -> Result<String, TranslateError> {
+    out.pop()
+        .ok_or_else(|| TranslateError::Inference(missing.into()))
+}
+
 /// 扫描到的一个模型：清单与所在目录。
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScannedModel {
@@ -790,9 +819,8 @@ impl TranslationService {
     /// - `text`：待翻译文本。
     /// - `src` / `tgt`：语言对。
     pub fn translate(&self, text: &str, src: Lang, tgt: Lang) -> Result<String, TranslateError> {
-        let mut out = self.translate_batch(&[text.to_string()], src, tgt)?;
-        out.pop()
-            .ok_or_else(|| TranslateError::Inference("后端没有返回译文".into()))
+        let out = self.translate_batch(&[text.to_string()], src, tgt)?;
+        take_single(out, "后端没有返回译文")
     }
 
     /// 批量翻译：命中缓存的条目不再请求后端，其余合并成一次后端调用。
@@ -838,9 +866,7 @@ impl TranslationService {
                 }
             }
             let translated = engine.translate_batch(&unique, src, tgt)?;
-            if translated.len() != unique.len() {
-                return Err(TranslateError::Inference("后端返回的译文条数不符".into()));
-            }
+            ensure_same_len(translated.len(), unique.len())?;
             let mut cache = self.cache.lock().unwrap_or_else(PoisonError::into_inner);
             for (source, target) in unique.iter().zip(&translated) {
                 cache.put(key_of(source), target.clone());
@@ -859,6 +885,21 @@ impl TranslationService {
 
 #[cfg(test)]
 mod tests {
+    /// 条数校验与单条取值 helper。
+    #[test]
+    fn same_len_and_single_helpers() {
+        assert!(ensure_same_len(2, 2).is_ok());
+        assert!(matches!(
+            ensure_same_len(1, 2),
+            Err(TranslateError::Inference(_))
+        ));
+        assert_eq!(take_single(vec!["a".into(), "b".into()], "x").unwrap(), "b");
+        assert_eq!(
+            take_single(Vec::new(), "空"),
+            Err(TranslateError::Inference("空".into()))
+        );
+    }
+
     /// `resolve_in_pairs`：Auto 取第一个目标匹配的源，显式要求语言对存在，不支持返回 None。
     #[test]
     fn resolve_in_pairs_rules() {

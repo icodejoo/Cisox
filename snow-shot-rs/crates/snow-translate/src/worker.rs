@@ -563,11 +563,10 @@ impl Shared {
         if let Ok(line) = encode_command(&Command::Unload)
             && session.transport.send(&line).is_ok()
         {
-            let grace = self.config.timeouts.unload_grace;
-            if session.transport.wait_exit(grace) {
-                session.transport.terminate();
-                return;
-            }
+            // 无论是否在宽限内自行退出，最后都 terminate 回收句柄
+            session
+                .transport
+                .wait_exit(self.config.timeouts.unload_grace);
         }
         session.transport.terminate();
     }
@@ -850,9 +849,8 @@ fn spawn_idle_monitor(shared: Arc<Shared>) {
 impl TranslationEngine for WorkerEngine {
     /// 翻译单条文本（走批量路径）。
     fn translate(&self, text: &str, src: Lang, tgt: Lang) -> Result<String, TranslateError> {
-        let mut out = self.translate_batch(&[text.to_string()], src, tgt)?;
-        out.pop()
-            .ok_or_else(|| TranslateError::Inference("worker 没有返回译文".into()))
+        let out = self.translate_batch(&[text.to_string()], src, tgt)?;
+        crate::take_single(out, "worker 没有返回译文")
     }
 
     /// 批量翻译：空白文本原样返回不占用 worker；其余分块串行发给 worker。

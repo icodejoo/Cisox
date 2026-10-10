@@ -149,6 +149,23 @@ const NAMED_KEYS: &[(&[&str], &str, &str)] = &[
     (&["backslash", "\\"], "Backslash", "\\"),
 ];
 
+/// 字母主键（`c` 为 ASCII 字母，大小写均可）。
+fn letter_key(c: char) -> Key {
+    let up = c.to_ascii_uppercase();
+    Key {
+        code: format!("Key{up}"),
+        label: up.to_string(),
+    }
+}
+
+/// 数字主键（`c` 为 ASCII 数字）。
+fn digit_key(c: char) -> Key {
+    Key {
+        code: format!("Digit{c}"),
+        label: c.to_string(),
+    }
+}
+
 /// 解析主键片段；不是主键时返回 `UnknownKey`。
 fn parse_key(token: &str) -> Result<Key, HotkeyParseError> {
     let lower = token.to_ascii_lowercase();
@@ -163,36 +180,22 @@ fn parse_key(token: &str) -> Result<Key, HotkeyParseError> {
     // 单字符：字母 / 数字
     if let Some(c) = single(&lower) {
         if c.is_ascii_lowercase() {
-            let up = c.to_ascii_uppercase();
-            return Ok(Key {
-                code: format!("Key{up}"),
-                label: up.to_string(),
-            });
+            return Ok(letter_key(c));
         }
         if c.is_ascii_digit() {
-            return Ok(Key {
-                code: format!("Digit{c}"),
-                label: c.to_string(),
-            });
+            return Ok(digit_key(c));
         }
     }
     // 显式 code 名：KeyS / Digit1
     if let Some(rest) = lower.strip_prefix("key")
         && let Some(c) = single(rest).filter(char::is_ascii_lowercase)
     {
-        let up = c.to_ascii_uppercase();
-        return Ok(Key {
-            code: format!("Key{up}"),
-            label: up.to_string(),
-        });
+        return Ok(letter_key(c));
     }
     if let Some(rest) = lower.strip_prefix("digit")
         && let Some(c) = single(rest).filter(char::is_ascii_digit)
     {
-        return Ok(Key {
-            code: format!("Digit{c}"),
-            label: c.to_string(),
-        });
+        return Ok(digit_key(c));
     }
     // 功能键 F1..F24
     if let Some(n) = lower.strip_prefix('f').and_then(|n| n.parse::<u8>().ok())
@@ -904,6 +907,16 @@ mod tests {
         assert!(Hotkey::parse("Alt+S").is_ok());
         assert!(Hotkey::parse("F5").is_ok());
         assert!(Hotkey::parse("Insert").is_ok());
+    }
+
+    /// 字母 / 数字主键的 code 与显示名（大小写不敏感）。
+    #[test]
+    fn letter_and_digit_keys() {
+        let k = letter_key('s');
+        assert_eq!((k.code(), k.label.as_str()), ("KeyS", "S"));
+        let k = digit_key('7');
+        assert_eq!((k.code(), k.label.as_str()), ("Digit7", "7"));
+        assert_eq!(Hotkey::parse("ctrl+digit7").unwrap().to_string(), "Ctrl+7");
     }
 
     /// 错误可转换为适配层错误。

@@ -31,8 +31,19 @@ impl Default for FastColor {
 }
 
 /// 保留两位小数（四舍五入）。
-fn round_to_two(value: f64) -> f64 {
+pub(crate) fn round_to_two(value: f64) -> f64 {
     (value * 100.0).round() / 100.0
+}
+
+/// 与 C++ 一致的钳制到 `[min, max]`（刻意不用 `f64::clamp`，保持 NaN 行为一致）。
+pub(crate) fn clamp(value: f64, min_value: f64, max_value: f64) -> f64 {
+    if value < min_value {
+        return min_value;
+    }
+    if value > max_value {
+        return max_value;
+    }
+    value
 }
 
 impl FastColor {
@@ -231,15 +242,7 @@ impl FastColor {
     /// assert_eq!(c.to_hex_string(), "#f5f5f5");
     /// ```
     pub fn darken(&self, amount_percent: f64) -> Self {
-        let hsv = self.to_hsv();
-        let max_channel = self.r.max(self.g).max(self.b);
-        let min_channel = self.r.min(self.g).min(self.b);
-
-        let mut lightness = (max_channel + min_channel) as f64 / 510.0;
-        lightness -= amount_percent / 100.0;
-        lightness = Self::clamp_unit(lightness);
-
-        Self::from_hsl(hsv.h, hsv.s, lightness, self.a)
+        self.shift_lightness(-amount_percent / 100.0)
     }
 
     /// 调亮（实现同 [`FastColor::darken`]，方向相反）。
@@ -252,14 +255,15 @@ impl FastColor {
     /// assert_eq!(c.to_hex_string(), "#141414");
     /// ```
     pub fn lighten(&self, amount_percent: f64) -> Self {
+        self.shift_lightness(amount_percent / 100.0)
+    }
+
+    /// 亮度偏移 `delta`（0..1 小数，负为变暗）：保持色相与 HSV 饱和度，按钳制后的新亮度做 HSL 转换。
+    fn shift_lightness(&self, delta: f64) -> Self {
         let hsv = self.to_hsv();
         let max_channel = self.r.max(self.g).max(self.b);
         let min_channel = self.r.min(self.g).min(self.b);
-
-        let mut lightness = (max_channel + min_channel) as f64 / 510.0;
-        lightness += amount_percent / 100.0;
-        lightness = Self::clamp_unit(lightness);
-
+        let lightness = Self::clamp_unit((max_channel + min_channel) as f64 / 510.0 + delta);
         Self::from_hsl(hsv.h, hsv.s, lightness, self.a)
     }
 
@@ -273,7 +277,7 @@ impl FastColor {
     /// assert_eq!(m.to_hex_string(), "#808080");
     /// ```
     pub fn mix(&self, other: &Self, amount_percent: f64) -> Self {
-        let p = Self::clamp(amount_percent / 100.0, 0.0, 1.0);
+        let p = clamp(amount_percent / 100.0, 0.0, 1.0);
         let r = ((other.r - self.r) as f64 * p + self.r as f64).round() as i32;
         let g = ((other.g - self.g) as f64 * p + self.g as f64).round() as i32;
         let b = ((other.b - self.b) as f64 * p + self.b as f64).round() as i32;
@@ -451,18 +455,7 @@ impl FastColor {
 
     /// 数值钳制到 0..1。
     fn clamp_unit(value: f64) -> f64 {
-        Self::clamp(value, 0.0, 1.0)
-    }
-
-    /// 与 C++ 一致的钳制（不使用 f64::clamp，避免 NaN 时 panic 差异）。
-    fn clamp(value: f64, min_value: f64, max_value: f64) -> f64 {
-        if value < min_value {
-            return min_value;
-        }
-        if value > max_value {
-            return max_value;
-        }
-        value
+        clamp(value, 0.0, 1.0)
     }
 
     /// 格式化 alpha：保留两位并去掉多余的 0 与小数点。
@@ -516,5 +509,20 @@ impl FastColor {
             ((b + m) * 255.0).round() as i32,
             a,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 调暗与调亮互为镜像，并夹在 0..1。
+    #[test]
+    fn darken_lighten_mirror_and_clamp() {
+        let gray = FastColor::parse("#808080");
+        assert_eq!(gray.lighten(12.0).to_hex_string(), "#9f9f9f");
+        assert_eq!(gray.darken(12.0).to_hex_string(), "#616161");
+        assert_eq!(FastColor::parse("#ffffff").lighten(50.0).to_hex_string(), "#ffffff");
+        assert_eq!(FastColor::parse("#000000").darken(50.0).to_hex_string(), "#000000");
     }
 }

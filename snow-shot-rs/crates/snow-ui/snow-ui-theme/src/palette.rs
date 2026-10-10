@@ -1,6 +1,6 @@
 //! 色板生成：移植自 `palette_generate.cpp` 与 `theme_color_utils.cpp` 的色阶映射。
 
-use crate::fast_color::{FastColor, HsvColor};
+use crate::fast_color::{FastColor, HsvColor, clamp, round_to_two};
 
 /// 色相步长。
 const HUE_STEP: i32 = 2;
@@ -34,17 +34,6 @@ const DARK_COLOR_MAP: [(usize, f64); 10] = [
     (2, 97.0),
     (1, 98.0),
 ];
-
-/// 钳制到 `[min, max]`。
-fn clamp(value: f64, min_value: f64, max_value: f64) -> f64 {
-    if value < min_value {
-        return min_value;
-    }
-    if value > max_value {
-        return max_value;
-    }
-    value
-}
 
 /// 第 `i` 阶的色相。
 fn get_hue(hsv: &HsvColor, i: i32, light: bool) -> f64 {
@@ -93,7 +82,7 @@ fn get_saturation(hsv: &HsvColor, i: i32, light: bool) -> f64 {
     if saturation < 0.06 {
         saturation = 0.06;
     }
-    (saturation * 100.0).round() / 100.0
+    round_to_two(saturation)
 }
 
 /// 第 `i` 阶的明度。
@@ -103,7 +92,7 @@ fn get_value(hsv: &HsvColor, i: i32, light: bool) -> f64 {
     } else {
         hsv.v - (BRIGHTNESS_STEP2 * i as f64)
     };
-    (clamp(value, 0.0, 1.0) * 100.0).round() / 100.0
+    round_to_two(clamp(value, 0.0, 1.0))
 }
 
 /// 生成 Ant Design 10 阶色板（十六进制字符串，小写）。

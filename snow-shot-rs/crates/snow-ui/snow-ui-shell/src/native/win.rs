@@ -184,14 +184,9 @@ pub(crate) fn cursor_pos() -> Result<PhysicalPoint, ShellError> {
     Ok(PhysicalPoint::new(p.x, p.y))
 }
 
-/// 切换置顶状态，不移动、不缩放、不激活。
-pub(crate) fn set_topmost(hwnd: isize, topmost: bool) -> Result<(), ShellError> {
+/// 改变窗口 Z 序位置（`after` 指定插到谁后面），不移动、不缩放、不激活。
+fn place_z(hwnd: isize, after: HWND, what: &str) -> Result<(), ShellError> {
     use windows::Win32::UI::WindowsAndMessaging::{SWP_NOMOVE, SWP_NOSIZE};
-    let after = if topmost {
-        HWND_TOPMOST
-    } else {
-        HWND_NOTOPMOST
-    };
     // SAFETY: 纯值参数。
     unsafe {
         SetWindowPos(
@@ -204,34 +199,30 @@ pub(crate) fn set_topmost(hwnd: isize, topmost: bool) -> Result<(), ShellError> 
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
         )
     }
-    .map_err(|e| platform_err("SetWindowPos(topmost)", e))
+    .map_err(|e| platform_err(what, e))
+}
+
+/// 切换置顶状态，不移动、不缩放、不激活。
+pub(crate) fn set_topmost(hwnd: isize, topmost: bool) -> Result<(), ShellError> {
+    let after = if topmost {
+        HWND_TOPMOST
+    } else {
+        HWND_NOTOPMOST
+    };
+    place_z(hwnd, after, "SetWindowPos(topmost)")
 }
 
 /// 把窗口提到所属层级（置顶层或普通层）的最上面，同时设置置顶状态；不移动、不缩放、不激活。
 ///
 /// 取消置顶必须显式用 `HWND_NOTOPMOST`（`HWND_TOP` 不会去掉置顶样式），之后再提到普通层顶部。
 pub(crate) fn bring_to_top(hwnd: isize, topmost: bool) -> Result<(), ShellError> {
-    use windows::Win32::UI::WindowsAndMessaging::{HWND_TOP, SWP_NOMOVE, SWP_NOSIZE};
-    let place = |after: HWND| {
-        // SAFETY: 纯值参数。
-        unsafe {
-            SetWindowPos(
-                to_hwnd(hwnd),
-                Some(after),
-                0,
-                0,
-                0,
-                0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-            )
-        }
-        .map_err(|e| platform_err("SetWindowPos(raise)", e))
-    };
+    use windows::Win32::UI::WindowsAndMessaging::HWND_TOP;
+    const WHAT: &str = "SetWindowPos(raise)";
     if topmost {
-        return place(HWND_TOPMOST);
+        return place_z(hwnd, HWND_TOPMOST, WHAT);
     }
-    place(HWND_NOTOPMOST)?;
-    place(HWND_TOP)
+    place_z(hwnd, HWND_NOTOPMOST, WHAT)?;
+    place_z(hwnd, HWND_TOP, WHAT)
 }
 
 /// 设置窗口是否从屏幕捕获中排除（`WDA_EXCLUDEFROMCAPTURE`，Windows 10 2004+）。

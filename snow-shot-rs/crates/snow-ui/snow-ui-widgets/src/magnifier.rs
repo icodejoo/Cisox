@@ -142,14 +142,7 @@ impl MagnifierGrid {
     /// assert_eq!(grid.center_pixel(), (0, 0, 0, 255));
     /// ```
     pub fn new_solid(dimension: usize, fill: (u8, u8, u8, u8)) -> Self {
-        let count = dimension * dimension;
-        let mut pixels = Vec::with_capacity(count * 4);
-        for _ in 0..count {
-            pixels.push(fill.0);
-            pixels.push(fill.1);
-            pixels.push(fill.2);
-            pixels.push(fill.3);
-        }
+        let pixels = [fill.0, fill.1, fill.2, fill.3].repeat(dimension * dimension);
         Self { dimension, pixels }
     }
 
@@ -165,21 +158,17 @@ impl MagnifierGrid {
     /// assert_eq!(grid.center_pixel(), (255, 128, 0, 255));
     /// ```
     pub fn center_pixel(&self) -> (u8, u8, u8, u8) {
-        if self.pixels.is_empty() || self.dimension == 0 {
-            return (0, 0, 0, 255);
+        let center = self.dimension / 2;
+        self.read_rgba(center, center).unwrap_or((0, 0, 0, 255))
+    }
+
+    /// 读取 `(col, row)` 的像素；越界或数据不足返回 `None`。
+    fn read_rgba(&self, col: usize, row: usize) -> Option<(u8, u8, u8, u8)> {
+        if col >= self.dimension || row >= self.dimension {
+            return None;
         }
-        let center_idx = (self.dimension / 2) * self.dimension + (self.dimension / 2);
-        let offset = center_idx * 4;
-        if offset + 3 < self.pixels.len() {
-            (
-                self.pixels[offset],
-                self.pixels[offset + 1],
-                self.pixels[offset + 2],
-                self.pixels[offset + 3],
-            )
-        } else {
-            (0, 0, 0, 255)
-        }
+        let px = self.pixels.get((row * self.dimension + col) * 4..)?.get(..4)?;
+        Some((px[0], px[1], px[2], px[3]))
     }
 
     /// 读取指定相对坐标 `(col, row)` 的像素。
@@ -191,20 +180,7 @@ impl MagnifierGrid {
     /// # 返回
     /// `(r, g, b, a)`。
     pub fn pixel_at(&self, col: usize, row: usize) -> (u8, u8, u8, u8) {
-        if col >= self.dimension || row >= self.dimension {
-            return (0, 0, 0, 0);
-        }
-        let idx = (row * self.dimension + col) * 4;
-        if idx + 3 < self.pixels.len() {
-            (
-                self.pixels[idx],
-                self.pixels[idx + 1],
-                self.pixels[idx + 2],
-                self.pixels[idx + 3],
-            )
-        } else {
-            (0, 0, 0, 0)
-        }
+        self.read_rgba(col, row).unwrap_or((0, 0, 0, 0))
     }
 }
 
@@ -483,5 +459,16 @@ mod tests {
         // 屏幕右下角翻转至左上
         let p2 = calculate_magnifier_placement(PhysicalPoint::new(1900, 1060), win, screen, 16);
         assert_eq!(p2, PhysicalPoint::new(1900 - 16 - 120, 1060 - 16 - 160));
+    }
+
+    /// 像素缓冲被截短时：中心像素回退黑色不透明，`pixel_at` 回退全透明，不 panic。
+    #[test]
+    fn truncated_grid_falls_back() {
+        let mut grid = MagnifierGrid::new_solid(3, (1, 2, 3, 4));
+        grid.pixels.truncate(4 * 4);
+        assert_eq!(grid.pixel_at(0, 0), (1, 2, 3, 4));
+        assert_eq!(grid.pixel_at(2, 2), (0, 0, 0, 0));
+        assert_eq!(grid.center_pixel(), (0, 0, 0, 255));
+        assert_eq!(MagnifierGrid::new_solid(0, (9, 9, 9, 9)).center_pixel(), (0, 0, 0, 255));
     }
 }

@@ -2,11 +2,12 @@
 //! 点击开 / 关菜单，菜单默认向上展开；开关状态由使用方持有（无状态组件）。
 
 use crate::text_measure::{ARROW_ICON_PX, FRAME_PADDING, ROW_ICON};
-use crate::toolbar::{COLOR_CURRENT_TEXT, Look, menu_check_slot};
+use crate::toolbar::{
+    COLOR_BAR_BG, COLOR_BAR_BORDER, COLOR_DIVIDER, Look, menu_row_content, with_tooltip,
+};
 use crate::toolbar_groups::{BAR_BORDER, ITEM_GAP, MENU_PADDING, MENU_ROW_HEIGHT, POPUP_OFFSET};
 use snow_ui_shell::geometry::{PhysicalPoint, PhysicalRect};
 use snow_ui_shell::ui::component::button::{Button, ButtonVariants};
-use snow_ui_shell::ui::component::tooltip::Tooltip;
 use snow_ui_shell::ui::component::{Icon, Sizable, Size as ComponentSize};
 use snow_ui_shell::ui::*;
 use std::rc::Rc;
@@ -15,14 +16,6 @@ use std::rc::Rc;
 pub const MENU_BUTTON_HEIGHT: f32 = 28.0;
 /// 分隔线占的高度（含上下留白）。
 const SEPARATOR_HEIGHT: f32 = 7.0;
-/// 悬停提示延迟。
-const TOOLTIP_DELAY_MS: u64 = 350;
-/// 背景色（与主工具栏一致）。
-const COLOR_BG: u32 = 0x1F1F1FE6;
-/// 边框色。
-const COLOR_BORDER: u32 = 0x00000080;
-/// 分隔线颜色。
-const COLOR_SEPARATOR: u32 = 0xFFFFFF33;
 /// 向上的小箭头图标（Lucide）。
 const ARROW_UP_ICON: &str = "icons/chevron-up.svg";
 
@@ -230,9 +223,9 @@ impl IconMenuButton {
             .p(px(MENU_PADDING))
             .when_some(self.outer_width, |m, w| m.w(px(w)))
             .rounded_md()
-            .bg(rgba(COLOR_BG))
+            .bg(rgba(COLOR_BAR_BG))
             .border_1()
-            .border_color(rgba(COLOR_BORDER))
+            .border_color(rgba(COLOR_BAR_BORDER))
             .shadow_lg()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation());
@@ -243,29 +236,10 @@ impl IconMenuButton {
                         .h(px(SEPARATOR_HEIGHT - ITEM_GAP))
                         .flex()
                         .items_center()
-                        .child(div().w_full().h(px(1.0)).bg(rgba(COLOR_SEPARATOR))),
+                        .child(div().w_full().h(px(1.0)).bg(rgba(COLOR_DIVIDER))),
                 );
             }
-            let content = div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap_2()
-                .w_full()
-                .px_2()
-                .text_sm()
-                .child(
-                    Icon::default()
-                        .path(entry.icon)
-                        .with_size(ComponentSize::Size(px(ROW_ICON))),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .when(entry.checked, |l| l.text_color(rgb(COLOR_CURRENT_TEXT)))
-                        .child(entry.label.clone()),
-                )
-                .child(menu_check_slot(entry.checked));
+            let content = menu_row_content(entry.icon, entry.label.clone(), entry.checked);
             let mut row = Button::new(SharedString::from(format!("{}-item-{}", self.id, entry.id)))
                 .custom(Look::Normal.variant(cx))
                 .with_size(ComponentSize::Size(px(ROW_ICON)))
@@ -326,25 +300,19 @@ impl RenderOnce for IconMenuButton {
             button = button.on_click(move |_, window, cx| handler(window, cx));
         }
         // 展开时不再显示提示；提示用原生 tooltip（覆盖窗没有 Root）
-        let tip = SharedString::from(self.tooltip.clone());
         let trigger: AnyElement = if self.open {
             button.into_any_element()
         } else {
-            div()
-                .id(SharedString::from(format!("{}-tip", self.id)))
-                .tooltip_show_delay(std::time::Duration::from_millis(TOOLTIP_DELAY_MS))
-                .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
-                .child(button)
-                .into_any_element()
+            with_tooltip(self.id.clone(), self.tooltip.clone(), button).into_any_element()
         };
         let frame = div()
             .flex()
             .items_center()
             .p(px(FRAME_PADDING))
             .rounded_md()
-            .bg(rgba(COLOR_BG))
+            .bg(rgba(COLOR_BAR_BG))
             .border(px(BAR_BORDER))
-            .border_color(rgba(COLOR_BORDER))
+            .border_color(rgba(COLOR_BAR_BORDER))
             .shadow_lg()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())

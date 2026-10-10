@@ -430,11 +430,10 @@ fn finalize_native_placement(
 ///
 /// 逻辑坐标与 GPUI 在 Windows 上的约定一致：原点 = 物理坐标 / 目标显示器缩放比。
 fn window_options(spec: &WindowSpec, placed: &ResolvedPlacement) -> WindowOptions {
-    let s = placed.monitor.scale.value();
-    let r = placed.rect;
+    let l = placed.monitor.scale.rect_to_logical(placed.rect);
     let bounds = Bounds {
-        origin: point(px(r.x as f32 / s), px(r.y as f32 / s)),
-        size: size(px(r.width as f32 / s), px(r.height as f32 / s)),
+        origin: point(px(l.x), px(l.y)),
+        size: size(px(l.width), px(l.height)),
     };
     let titlebar = spec.decorations.then(|| TitlebarOptions {
         title: Some(spec.title.clone().into()),
