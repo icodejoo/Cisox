@@ -117,6 +117,49 @@ pub fn default_app_data_directory() -> Option<PathBuf> {
     app_data_directory(Platform::current(), |name| std::env::var(name).ok())
 }
 
+/// 从给定的两个候选值挑出用户目录：先 `userprofile`，再 `home`，空值视为未设置。
+///
+/// # 参数
+/// - `userprofile`：`USERPROFILE` 的值
+/// - `home`：`HOME` 的值
+///
+/// # 返回
+/// 第一个非空值对应的路径；都缺失或为空时返回 `None`。
+///
+/// # 示例
+/// ```
+/// use std::ffi::OsString;
+/// use snow_config::paths::home_dir_from;
+///
+/// let dir = home_dir_from(None, Some(OsString::from("/home/u")));
+/// assert_eq!(dir, Some("/home/u".into()));
+/// ```
+pub fn home_dir_from(
+    userprofile: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+) -> Option<PathBuf> {
+    userprofile
+        .filter(|value| !value.is_empty())
+        .or_else(|| home.filter(|value| !value.is_empty()))
+        .map(PathBuf::from)
+}
+
+/// 读取当前用户目录（`USERPROFILE`，其次 `HOME`；兼容非 UTF-8，空值视为未设置）。
+///
+/// # 返回
+/// 用户目录；取不到时返回 `None`。
+///
+/// # 示例
+/// ```
+/// let _ = snow_config::paths::home_dir();
+/// ```
+pub fn home_dir() -> Option<PathBuf> {
+    home_dir_from(
+        std::env::var_os("USERPROFILE"),
+        std::env::var_os("HOME"),
+    )
+}
+
 /// 路径是否落在 upstream 的 `SnowShot` 目录下（任一组件忽略大小写等于 `SnowShot`）。
 ///
 /// # 示例
@@ -307,6 +350,18 @@ pub fn config_file_path(data_directory: &Path) -> PathBuf {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// `USERPROFILE` 优先于 `HOME`，空值被跳过。
+    #[test]
+    fn home_dir_from_prefers_userprofile_and_skips_empty() {
+        use std::ffi::OsString;
+        let os = |v: &str| Some(OsString::from(v));
+        assert_eq!(home_dir_from(os("a"), os("b")), Some(PathBuf::from("a")));
+        assert_eq!(home_dir_from(os(""), os("b")), Some(PathBuf::from("b")));
+        assert_eq!(home_dir_from(None, os("b")), Some(PathBuf::from("b")));
+        assert_eq!(home_dir_from(os(""), None), None);
+        assert_eq!(home_dir_from(None, None), None);
+    }
 
     /// 创建独立的临时目录。
     fn temp_dir(tag: &str) -> PathBuf {

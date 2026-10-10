@@ -18,7 +18,7 @@ pub use openai::{OpenAiCompatibleConfig, OpenAiEngine};
 pub use worker::{WorkerConfig, WorkerEngine};
 
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -816,9 +816,12 @@ impl TranslationService {
         if !misses.is_empty() {
             // 相同原文只翻译一次
             let mut unique: Vec<String> = Vec::new();
-            let mut seen: HashSet<&str> = HashSet::new();
+            // 原文 -> unique 下标，回填时 O(1) 取位置（严格字符串相等）
+            let mut position_of: HashMap<&str, usize> = HashMap::new();
             for &index in &misses {
-                if seen.insert(texts[index].as_str()) {
+                let text = texts[index].as_str();
+                if !position_of.contains_key(text) {
+                    position_of.insert(text, unique.len());
                     unique.push(texts[index].clone());
                 }
             }
@@ -831,7 +834,7 @@ impl TranslationService {
                 cache.put(key_of(source), target.clone());
             }
             for &index in &misses {
-                let position = unique.iter().position(|u| *u == texts[index]);
+                let position = position_of.get(texts[index].as_str()).copied();
                 results[index] = position.and_then(|p| translated.get(p).cloned());
             }
         }
@@ -1252,6 +1255,51 @@ mod tests {
             "只新增 x 与 y 两次调用"
         );
         assert_eq!(svc.current_engine_name(), Some("counting"));
+    }
+
+    /// 批量翻译边界：空输入、全重复、大小写/空白不同按严格相等各算一项、缓存部分命中。
+    #[test]
+    fn service_batch_dedup_edges() {
+        let svc = TranslationService::new();
+        let engine = Arc::new(CountingEngine {
+            calls: AtomicUsize::new(0),
+            id: "m1".into(),
+        });
+        svc.set_engine(Some(engine.clone()));
+        let strs = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+
+        // 空输入：不调后端，返回空
+        assert!(
+            svc.translate_batch(&[], Lang::En, Lang::ZhHans)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(engine.calls.load(Ordering::SeqCst), 0);
+
+        // 全重复：只调一次，结果逐项对应
+        let out = svc
+            .translate_batch(&strs(&["a", "a", "a"]), Lang::En, Lang::ZhHans)
+            .unwrap();
+        assert_eq!(out, ["T:a", "T:a", "T:a"]);
+        assert_eq!(engine.calls.load(Ordering::SeqCst), 1);
+
+        // 大小写/空白不同：严格相等才算同一项，各自单独翻译并保留各自原文
+        let out = svc
+            .translate_batch(&strs(&["B", "b", " b", "b ", "B"]), Lang::En, Lang::ZhHans)
+            .unwrap();
+        assert_eq!(out, ["T:B", "T:b", "T: b", "T:b ", "T:B"]);
+        assert_eq!(
+            engine.calls.load(Ordering::SeqCst),
+            1 + 4,
+            "B、b、' b'、'b ' 四个不同原文各调一次"
+        );
+
+        // 缓存部分命中：a、B 已缓存（key 会 trim），只有 c 走后端且重复项复用
+        let out = svc
+            .translate_batch(&strs(&["c", "a", "c", "B", "c"]), Lang::En, Lang::ZhHans)
+            .unwrap();
+        assert_eq!(out, ["T:c", "T:a", "T:c", "T:B", "T:c"]);
+        assert_eq!(engine.calls.load(Ordering::SeqCst), 6);
     }
 
     /// 换后端清空缓存；cache_id 不同的引擎互不串味。

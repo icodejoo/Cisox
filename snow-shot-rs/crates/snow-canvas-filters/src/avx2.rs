@@ -526,7 +526,6 @@ unsafe fn interpolate_masked_impl(
 }
 
 /// 灰度标量像素：亮度 = min(alpha, (54R+183G+19B+128)>>8)。
-#[allow(dead_code)]
 #[inline]
 fn grayscale_pixel(pixel: u32) -> u32 {
     let alpha = q_alpha(pixel);
@@ -536,7 +535,6 @@ fn grayscale_pixel(pixel: u32) -> u32 {
 }
 
 /// 反相标量像素：各通道 = alpha - 通道。
-#[allow(dead_code)]
 #[inline]
 fn inversion_pixel(pixel: u32) -> u32 {
     let alpha = q_alpha(pixel);

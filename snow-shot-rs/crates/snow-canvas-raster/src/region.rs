@@ -343,7 +343,7 @@ impl RegionMask {
             Transform::from_translate(-(left as f32), -(top as f32)),
             None,
         );
-        let before = self.alpha.clone();
+        let mut changed = false;
         for row in 0..h as usize {
             for col in 0..w as usize {
                 let coverage = u32::from(pixmap.data()[(row * w as usize + col) * CHANNELS + 3]);
@@ -352,15 +352,17 @@ impl RegionMask {
                 }
                 let index = (top as usize + row) * self.width as usize + left as usize + col;
                 let current = u32::from(self.alpha[index]);
-                self.alpha[index] = match op {
+                let next = match op {
                     // 并集：a + b·(1 − a)
                     RegionOp::Add => (current + coverage * (OPAQUE - current) / OPAQUE) as u8,
                     // 差集：a·(1 − b)
                     RegionOp::Subtract => (current * (OPAQUE - coverage) / OPAQUE) as u8,
                 };
+                changed |= next != self.alpha[index];
+                self.alpha[index] = next;
             }
         }
-        before != self.alpha
+        changed
     }
 
     /// 平移整个区域（越出蒙版的部分被裁掉）。

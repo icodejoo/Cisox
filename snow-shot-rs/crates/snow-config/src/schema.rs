@@ -116,12 +116,10 @@ pub(crate) fn entry(
 ///
 /// 用户目录取自 `USERPROFILE`（Windows）或 `HOME`。
 pub(crate) fn default_output_directory(kind: OutputDirKind) -> String {
-    let home = std::env::var("USERPROFILE")
-        .or_else(|_| std::env::var("HOME"))
-        .unwrap_or_default();
-    if home.is_empty() {
+    let Some(home) = crate::paths::home_dir() else {
         return String::new();
-    }
+    };
+    let home = home.to_string_lossy();
     let leaf = match kind {
         OutputDirKind::Videos => "Videos",
         OutputDirKind::Pictures => "Pictures",
@@ -199,6 +197,25 @@ pub fn is_extension_key(key: &str) -> bool {
 /// assert_eq!(entry.default, serde_json::json!(7));
 /// ```
 pub fn entry_for(key: &str) -> Option<&'static SchemaEntry> {
+    index_of(key).map(|position| &entries()[position])
+}
+
+/// 按键查条目在 `entries()` 里的下标（O(1)）。
+///
+/// # 参数
+/// - `key`：`"组/名"` 键
+///
+/// # 返回
+/// 下标；未知键返回 `None`。
+///
+/// # 示例
+/// ```
+/// use snow_config::schema::{entries, index_of};
+/// let position = index_of("capture_history/retention_days").unwrap();
+/// assert_eq!(entries()[position].key, "capture_history/retention_days");
+/// assert!(index_of("no/such_key").is_none());
+/// ```
+pub fn index_of(key: &str) -> Option<usize> {
     static INDEX: OnceLock<HashMap<&'static str, usize>> = OnceLock::new();
     let index = INDEX.get_or_init(|| {
         entries()
@@ -207,7 +224,7 @@ pub fn entry_for(key: &str) -> Option<&'static SchemaEntry> {
             .map(|(position, item)| (item.key, position))
             .collect()
     });
-    index.get(key).map(|position| &entries()[*position])
+    index.get(key).copied()
 }
 
 /// 键是否存在于 schema。
@@ -296,6 +313,15 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::collections::HashSet;
+
+    #[test]
+    fn index_of_matches_entry_for() {
+        for (position, item) in entries().iter().enumerate() {
+            assert_eq!(index_of(item.key), Some(position));
+            assert!(std::ptr::eq(entry_for(item.key).unwrap(), item));
+        }
+        assert_eq!(index_of("no/such_key"), None);
+    }
 
     /// 条目数、键唯一且恰含一个 `/`。
     #[test]

@@ -370,6 +370,31 @@ impl CaptureHistoryRepository {
         self.snapshot.records.clone()
     }
 
+    /// 借用全部记录（创建时间降序），不克隆；只读场景优先用它。
+    ///
+    /// # 返回
+    /// 记录切片，生命周期随仓储。
+    pub fn records_slice(&self) -> &[Record] {
+        &self.snapshot.records
+    }
+
+    /// 取 `[start, end)` 范围内的记录并克隆；越界自动钳制，起点大于终点返回空。
+    ///
+    /// # 参数
+    /// - `start`：起始下标（含）。
+    /// - `end`：结束下标（不含）。
+    ///
+    /// # 示例
+    /// ```ignore
+    /// let page = repo.records_range(0, 20);
+    /// ```
+    pub fn records_range(&self, start: usize, end: usize) -> Vec<Record> {
+        let all = &self.snapshot.records;
+        let end = end.min(all.len());
+        let start = start.min(end);
+        all[start..end].to_vec()
+    }
+
     /// 记录版本号：仅增删记录时递增，清理 payload 与策略变更不递增。
     pub fn revision(&self) -> u64 {
         self.revision

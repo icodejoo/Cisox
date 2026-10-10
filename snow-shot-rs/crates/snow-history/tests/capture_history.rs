@@ -657,3 +657,19 @@ fn repository_and_options_are_send() {
     assert_send::<CaptureHistoryRepository>();
     assert_send::<Options>();
 }
+
+/// 借用版与范围版记录读取：与 `records()` 一致，越界钳制（recordsSliceAndRange）。
+#[test]
+fn records_slice_and_range_match_records() {
+    let dir = TempDir::new("range");
+    let mut repo = CaptureHistoryRepository::open(dir.path(), options_at(NOW));
+    for i in 0..3 {
+        repo.publish(draft_at(NOW - i)).unwrap();
+    }
+    let all = repo.records();
+    assert_eq!(repo.records_slice(), all.as_slice());
+    assert_eq!(repo.records_range(1, 3), all[1..3].to_vec());
+    assert_eq!(repo.records_range(2, 99), all[2..].to_vec());
+    assert!(repo.records_range(5, 9).is_empty());
+    assert!(repo.records_range(2, 1).is_empty());
+}
