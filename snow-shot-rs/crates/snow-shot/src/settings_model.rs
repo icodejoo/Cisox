@@ -103,6 +103,29 @@ pub enum Control {
     ReadOnly(ReadOnlyReason),
 }
 
+impl Control {
+    /// 是否为可文本编辑的控件（文本框、颜色、整数、滑条、列表、JSON）。
+    ///
+    /// # 返回
+    /// 可进入文本编辑态为 `true`；开关、下拉、快捷键、只读等为 `false`。
+    ///
+    /// ```ignore
+    /// assert!(Control::Text.is_text_editable());
+    /// assert!(!Control::Switch.is_text_editable());
+    /// ```
+    pub fn is_text_editable(&self) -> bool {
+        matches!(
+            self,
+            Control::Text
+                | Control::Color
+                | Control::IntText
+                | Control::Slider(_)
+                | Control::ListText
+                | Control::JsonText
+        )
+    }
+}
+
 /// 一个设置分组：侧栏的一项。
 #[derive(Debug)]
 pub struct GroupInfo {
@@ -743,6 +766,20 @@ mod tests {
     use serde_json::json;
     use snow_config::schema::entry_for;
     use std::collections::HashSet;
+
+    /// 可文本编辑的控件判定覆盖各类控件。
+    #[test]
+    fn text_editable_controls() {
+        assert!(Control::Text.is_text_editable());
+        assert!(Control::Color.is_text_editable());
+        assert!(Control::IntText.is_text_editable());
+        assert!(Control::ListText.is_text_editable());
+        assert!(Control::JsonText.is_text_editable());
+        assert!(!Control::Switch.is_text_editable());
+        assert!(!Control::Choice(&["a", "b"]).is_text_editable());
+        assert!(!Control::MultiChoice(&["a"]).is_text_editable());
+        assert!(!Control::ReadOnly(ReadOnlyReason::Internal).is_text_editable());
+    }
 
     /// 取键的控件类型。
     fn control_of(key: &str) -> Control {

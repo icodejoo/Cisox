@@ -597,8 +597,7 @@ impl SettingsState {
             .entries
             .iter()
             .copied()
-            .filter(|i| !(itn_hidden && self.all_rows[*i].key == KEY_DICTATION_SENSEVOICE_ITN))
-            .filter(|i| !is_hidden_key(self.all_rows[*i].key))
+            .filter(|i| self.is_listed(*i, itn_hidden))
             .collect();
         self.move_online_model_after_local(&mut list);
         list
@@ -647,11 +646,18 @@ impl SettingsState {
         groups()[group]
             .entries
             .iter()
-            .filter(|i| {
-                let key = self.all_rows[**i].key;
-                !(itn_hidden && key == KEY_DICTATION_SENSEVOICE_ITN) && !is_hidden_key(key)
-            })
+            .filter(|i| self.is_listed(**i, itn_hidden))
             .count()
+    }
+
+    /// 条目是否应出现在列表里（排除被隐藏的 itn 开关与内部隐藏键）；分组与搜索共用此口径。
+    ///
+    /// # 参数
+    /// - `i`：`all_rows` 下标
+    /// - `itn_hidden`：itn 开关当前是否隐藏
+    fn is_listed(&self, i: usize, itn_hidden: bool) -> bool {
+        let key = self.all_rows[i].key;
+        !(itn_hidden && key == KEY_DICTATION_SENSEVOICE_ITN) && !is_hidden_key(key)
     }
 
     /// 语音转文字的 itn 开关当前是否应隐藏（只有选中 SenseVoice 才显示）。
@@ -695,8 +701,7 @@ impl SettingsState {
             let itn_hidden = self.itn_hidden();
             self.visible = base
                 .into_iter()
-                .filter(|i| !(itn_hidden && self.all_rows[*i].key == KEY_DICTATION_SENSEVOICE_ITN))
-                .filter(|i| !is_hidden_key(self.all_rows[*i].key))
+                .filter(|i| self.is_listed(*i, itn_hidden))
                 .filter(|i| self.all_rows[*i].haystack.contains(&query))
                 .collect();
             self.scope = Scope::Search;
@@ -746,8 +751,7 @@ impl SettingsState {
             }
             Err(message) => {
                 self.refresh_row(key);
-                self.set_row_error(key, Some(message.clone()));
-                self.set_status(StatusKind::Error, message.clone());
+                self.fail_row(key, message.clone());
             }
         }
         outcome
@@ -847,16 +851,7 @@ impl SettingsState {
         let Some(row) = self.row_by_key(key) else {
             return;
         };
-        let editable = matches!(
-            row.control,
-            Control::Text
-                | Control::Color
-                | Control::IntText
-                | Control::Slider(_)
-                | Control::ListText
-                | Control::JsonText
-        );
-        if !editable {
+        if !row.control.is_text_editable() {
             return;
         }
         let state = EditState {
@@ -956,8 +951,7 @@ impl SettingsState {
         match parse_input(control, text) {
             Err(error) => {
                 let message = describe_input_error(self.prefs.lang, &error);
-                self.set_row_error(key, Some(message.clone()));
-                self.set_status(StatusKind::Error, message);
+                self.fail_row(key, message);
                 false
             }
             Ok(value) => self.apply(key, value).is_ok(),
@@ -976,8 +970,7 @@ impl SettingsState {
         match parse_input(edit.control, edit.buffer.text()) {
             Err(error) => {
                 let message = describe_input_error(lang, &error);
-                self.set_row_error(key, Some(message.clone()));
-                self.set_status(StatusKind::Error, message);
+                self.fail_row(key, message);
             }
             Ok(value) => {
                 if self.apply(key, value).is_ok() {
@@ -1000,9 +993,7 @@ impl SettingsState {
             return;
         };
         if index.is_none() && max_items.is_some_and(|max| row.shortcuts.len() >= max) {
-            let message = list_full_text(self.prefs.lang);
-            self.set_row_error(key, Some(message.clone()));
-            self.set_status(StatusKind::Error, message);
+            self.fail_row(key, t(self.prefs.lang, Text::ListFull));
             return;
         }
         self.edit = None;
@@ -1021,9 +1012,7 @@ impl SettingsState {
         }
         let Some(text) = shortcut_from_keystroke(key, mods.ctrl, mods.alt, mods.shift, mods.win)
         else {
-            let message = unsupported_key_text(self.prefs.lang);
-            self.set_row_error(capture.key, Some(message.clone()));
-            self.set_status(StatusKind::Error, message);
+            self.fail_row(capture.key, t(self.prefs.lang, Text::UnsupportedKey));
             return;
         };
         if self
@@ -1051,8 +1040,7 @@ impl SettingsState {
     ) -> Result<(), String> {
         let lang = self.prefs.lang;
         let fail = |this: &mut Self, message: String| {
-            this.set_row_error(key, Some(message.clone()));
-            this.set_status(StatusKind::Error, message.clone());
+            this.fail_row(key, message.clone());
             Err(message)
         };
         if group_id_of(key) == GLOBAL_SHORTCUT_GROUP
@@ -1078,7 +1066,7 @@ impl SettingsState {
             _ => None,
         });
         if index.is_none() && max.is_some_and(|m| count >= m) {
-            return fail(self, list_full_text(lang));
+            return fail(self, t(lang, Text::ListFull));
         }
         self.apply(key, with_shortcut(&current, index, text))
             .map(|_| ())
@@ -1102,8 +1090,7 @@ impl SettingsState {
     /// - `message`：错误提示
     pub fn notify_reverted(&mut self, key: &'static str, message: String) {
         self.refresh_row(key);
-        self.set_row_error(key, Some(message.clone()));
-        self.set_status(StatusKind::Error, message);
+        self.fail_row(key, message);
     }
 
     /// 从配置存储重新读取某一行的值。
@@ -1129,6 +1116,16 @@ impl SettingsState {
         if let Some(row) = schema_index_of(key).and_then(|i| self.all_rows.get_mut(i)) {
             row.error = error;
         }
+    }
+
+    /// 同时设置行内错误与状态栏错误提示。
+    ///
+    /// # 参数
+    /// - `key`：出错的配置键
+    /// - `message`：错误文本
+    fn fail_row(&mut self, key: &str, message: String) {
+        self.set_row_error(key, Some(message.clone()));
+        self.set_status(StatusKind::Error, message);
     }
 
     /// 设置状态栏消息。
@@ -1179,16 +1176,6 @@ fn build_row(entry_index: usize, store: &ConfigStore) -> RowModel {
         error: None,
         haystack,
     }
-}
-
-/// “列表已满”提示。
-fn list_full_text(lang: Lang) -> String {
-    t(lang, Text::ListFull)
-}
-
-/// “不支持该按键”提示。
-fn unsupported_key_text(lang: Lang) -> String {
-    t(lang, Text::UnsupportedKey)
 }
 
 /// 只读原因的界面文案。
@@ -1283,6 +1270,23 @@ mod tests {
         let row = state.row_by_key(key).unwrap();
         assert_eq!(row.haystack, haystack);
         assert_eq!(row.error.as_deref(), Some("boom"));
+    }
+
+    /// `is_listed` 与分组可见列表口径一致；`fail_row` 同时设置行错误与状态栏。
+    #[test]
+    fn is_listed_and_fail_row() {
+        let (mut state, _, _) = fixture();
+        let i = schema_index_of("api_configuration/custom_models").unwrap();
+        assert!(!state.is_listed(i, false));
+        let itn = schema_index_of(KEY_DICTATION_SENSEVOICE_ITN).unwrap();
+        assert!(state.is_listed(itn, false));
+        assert!(!state.is_listed(itn, true));
+        let key = "dictation/mode";
+        state.fail_row(key, "bad".into());
+        assert_eq!(state.row_by_key(key).unwrap().error.as_deref(), Some("bad"));
+        let status = state.status.as_ref().unwrap();
+        assert_eq!(status.text, "bad");
+        assert!(matches!(status.kind, StatusKind::Error));
     }
 
     /// 全部分组计数与逐组计数一致。

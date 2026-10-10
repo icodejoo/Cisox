@@ -655,6 +655,17 @@ fn option_label(key: &str, option: &str, locale: &str) -> String {
     }
 }
 
+/// 把模型扫描结果转成设置页共用的选项类型（丢掉路径）。
+fn pick_to_model_options(options: Vec<model_pick::PickOption>) -> Vec<model_catalog::ModelOption> {
+    options
+        .into_iter()
+        .map(|o| model_catalog::ModelOption {
+            value: o.value,
+            label: o.label,
+        })
+        .collect()
+}
+
 /// 把候选列表转成下拉选项（保持顺序）。
 fn dropdown_items(key: &str, options: &[&'static str], locale: &str) -> Vec<DropdownItem> {
     options
@@ -709,6 +720,21 @@ const MCP_PANEL_LINES: usize = 1;
 
 /// 导出 / 导入说明区的文本行数（只有一行说明）。
 const TRANSFER_PANEL_LINES: usize = 1;
+
+/// 带顶部说明面板的分组：`(分组 id, 说明文本行数)`。
+const PANEL_GROUPS: [(&str, usize); 3] = [
+    (UPDATES_GROUP_ID, UPDATE_PANEL_LINES),
+    (TRANSFER_GROUP_ID, TRANSFER_PANEL_LINES),
+    (MCP_GROUP_ID, MCP_PANEL_LINES),
+];
+
+/// 分组顶部说明面板的文本行数；没有说明面板的分组返回 `None`。
+fn panel_lines(group_id: &str) -> Option<usize> {
+    PANEL_GROUPS
+        .iter()
+        .find(|(id, _)| *id == group_id)
+        .map(|(_, lines)| *lines)
+}
 
 impl SettingsView {
     /// 创建设置页并把键盘焦点交给它。
@@ -806,9 +832,37 @@ impl SettingsView {
         let locale = self.state.prefs().locale;
         let want = dropdown_value(options, current);
         let Some(existing) = self.dropdowns.get(key) else {
-            let items = SearchableVec::new(dropdown_items(key, options, locale));
             let index = dropdown_index(options, current).map(|row| IndexPath::default().row(row));
-            let state = cx.new(|cx| SelectState::new(items, index, window, cx));
+            let items = dropdown_items(key, options, locale);
+            self.new_select(key, items, index, locale, window, cx);
+            return;
+        };
+        let relabel = existing.locale != locale;
+        let state = existing.state.clone();
+        let items = relabel.then(|| dropdown_items(key, options, locale));
+        Self::sync_select(&state, items, want, None, window, cx);
+        if let Some(entry) = self.dropdowns.get_mut(key) {
+            entry.locale = locale;
+        }
+    }
+
+    /// 创建 `key` 的下拉选择器状态，订阅选中事件（走 [`SettingsAction::Change`] 写配置）并登记到 `dropdowns`。
+    ///
+    /// # 参数
+    /// - `key`：配置键
+    /// - `items`：候选项
+    /// - `index`：初始选中下标，`None` 为不选（显示占位文案）
+    /// - `locale`：标签所用语料语言
+    fn new_select(
+        &mut self,
+        key: &'static str,
+        items: Vec<DropdownItem>,
+        index: Option<IndexPath>,
+        locale: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let state = cx.new(|cx| SelectState::new(SearchableVec::new(items), index, window, cx));
             cx.subscribe_in(
                 &state,
                 window,
@@ -830,24 +884,36 @@ impl SettingsView {
                 },
             )
             .detach();
-            self.dropdowns.insert(key, Dropdown { state, locale });
-            return;
-        };
-        let relabel = existing.locale != locale;
-        let state = existing.state.clone();
+        self.dropdowns.insert(key, Dropdown { state, locale });
+    }
+
+    /// 把已存在的下拉同步到最新：有新候选项就整体替换；候选项变了或选中项被外部改动时纠正选中。
+    ///
+    /// # 参数
+    /// - `state`：下拉状态
+    /// - `items`：新候选项，`None` 表示候选项没变
+    /// - `want`：期望选中的值，`None` 为不选
+    /// - `index`：`want` 为 `None` 时用于清空选中的下标
+    fn sync_select(
+        state: &Entity<DropdownState>,
+        items: Option<Vec<DropdownItem>>,
+        want: Option<&'static str>,
+        index: Option<IndexPath>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let stale = state.read(cx).selected_value().copied() != want;
-        if relabel {
-            let items = SearchableVec::new(dropdown_items(key, options, locale));
-            state.update(cx, |select, cx| select.set_items(items, window, cx));
-        }
-        if relabel || stale {
-            state.update(cx, |select, cx| match want {
-                Some(value) => select.set_selected_value(&value, window, cx),
-                None => select.set_selected_index(None, window, cx),
+        let changed = items.is_some();
+        if let Some(items) = items {
+            state.update(cx, |select, cx| {
+                select.set_items(SearchableVec::new(items), window, cx)
             });
         }
-        if let Some(entry) = self.dropdowns.get_mut(key) {
-            entry.locale = locale;
+        if changed || stale {
+            state.update(cx, |select, cx| match want {
+                Some(value) => select.set_selected_value(&value, window, cx),
+                None => select.set_selected_index(index, window, cx),
+            });
         }
     }
 
@@ -1132,46 +1198,15 @@ impl SettingsView {
             .map(|row| IndexPath::default().row(row));
         let key = KEY_DICTATION_MODEL_ID;
         let Some(existing) = self.dropdowns.get(key) else {
-            let state = cx.new(|cx| SelectState::new(SearchableVec::new(items), index, window, cx));
-            cx.subscribe_in(
-                &state,
-                window,
-                move |this,
-                      _state,
-                      event: &SelectEvent<SearchableVec<DropdownItem>>,
-                      window,
-                      cx| {
-                    if let SelectEvent::Confirm(Some(value)) = event {
-                        this.act(
-                            SettingsAction::Change {
-                                key,
-                                value: json!(value),
-                            },
-                            window,
-                            cx,
-                        );
-                    }
-                },
-            )
-            .detach();
-            self.dropdowns.insert(key, Dropdown { state, locale });
+            self.new_select(key, items, index, locale, window, cx);
             self.model_signature = signature;
             return;
         };
         let state = existing.state.clone();
         let changed = self.model_signature != signature;
-        let stale = state.read(cx).selected_value().copied() != want;
+        Self::sync_select(&state, changed.then_some(items), want, index, window, cx);
         if changed {
-            state.update(cx, |select, cx| {
-                select.set_items(SearchableVec::new(items), window, cx)
-            });
             self.model_signature = signature;
-        }
-        if changed || stale {
-            state.update(cx, |select, cx| match want {
-                Some(value) => select.set_selected_value(&value, window, cx),
-                None => select.set_selected_index(index, window, cx),
-            });
         }
     }
 
@@ -1198,10 +1233,6 @@ impl SettingsView {
                 return custom_models_edit::pick_options(&self.custom_models(), vision_only);
             }
         };
-        let to_option = |o: model_pick::PickOption| model_catalog::ModelOption {
-            value: o.value,
-            label: o.label,
-        };
         match feature {
             Feature::Translate => self
                 .translate_models_dir()
@@ -1209,30 +1240,21 @@ impl SettingsView {
                 .unwrap_or_default(),
             Feature::Ocr => self
                 .catalog_dirs(feature)
-                .map(|d| model_pick::ocr_options(&d.read))
-                .unwrap_or_default()
-                .into_iter()
-                .map(to_option)
-                .collect(),
+                .map(|d| pick_to_model_options(model_pick::ocr_options(&d.read)))
+                .unwrap_or_default(),
             Feature::Table => {
                 let preferred = crate::table_assets::manifest()
                     .ok()
                     .and_then(|m| m.model_file().map(|f| f.name.clone()))
                     .unwrap_or_default();
                 self.catalog_dirs(feature)
-                    .map(|d| model_pick::table_options(&d.read, &preferred))
+                    .map(|d| pick_to_model_options(model_pick::table_options(&d.read, &preferred)))
                     .unwrap_or_default()
-                    .into_iter()
-                    .map(to_option)
-                    .collect()
             }
             Feature::Latex => self
                 .catalog_dirs(feature)
-                .map(|d| model_pick::latex_options(&d.read))
-                .unwrap_or_default()
-                .into_iter()
-                .map(to_option)
-                .collect(),
+                .map(|d| pick_to_model_options(model_pick::latex_options(&d.read)))
+                .unwrap_or_default(),
             Feature::Stt => Vec::new(),
         }
     }
@@ -1293,57 +1315,21 @@ impl SettingsView {
         if unchanged && self.dropdowns.contains_key(key) {
             // 选项与当前值都没变：只需在下拉选中项被外部改动时纠正
             let state = self.dropdowns[key].state.clone();
-            if state.read(cx).selected_value().copied() != want {
-                state.update(cx, |select, cx| match want {
-                    Some(value) => select.set_selected_value(&value, window, cx),
-                    None => select.set_selected_index(index, window, cx),
-                });
-            }
+            Self::sync_select(&state, None, want, index, window, cx);
             return;
         }
         let signature = (generation, current.to_owned());
         let items = cache.items.clone();
         let Some(existing) = self.dropdowns.get(key) else {
-            let state = cx.new(|cx| SelectState::new(SearchableVec::new(items), index, window, cx));
-            cx.subscribe_in(
-                &state,
-                window,
-                move |this,
-                      _state,
-                      event: &SelectEvent<SearchableVec<DropdownItem>>,
-                      window,
-                      cx| {
-                    if let SelectEvent::Confirm(Some(value)) = event {
-                        this.act(
-                            SettingsAction::Change {
-                                key,
-                                value: json!(value),
-                            },
-                            window,
-                            cx,
-                        );
-                    }
-                },
-            )
-            .detach();
-            self.dropdowns.insert(key, Dropdown { state, locale });
+            self.new_select(key, items, index, locale, window, cx);
             self.pick_signature.insert(key, signature);
             return;
         };
         let state = existing.state.clone();
         let changed = self.pick_signature.get(key) != Some(&signature);
-        let stale = state.read(cx).selected_value().copied() != want;
+        Self::sync_select(&state, changed.then_some(items), want, index, window, cx);
         if changed {
-            state.update(cx, |select, cx| {
-                select.set_items(SearchableVec::new(items), window, cx)
-            });
             self.pick_signature.insert(key, signature);
-        }
-        if changed || stale {
-            state.update(cx, |select, cx| match want {
-                Some(value) => select.set_selected_value(&value, window, cx),
-                None => select.set_selected_index(index, window, cx),
-            });
         }
     }
 
@@ -1352,7 +1338,7 @@ impl SettingsView {
         Button::new(("catalog-get", feature as usize))
             .small()
             .outline()
-            .label(crate::ocr_backend::i18n_for(self.state.prefs().locale).tr("model-select-get"))
+            .label(self.tr("model-select-get"))
             .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
                 this.catalog_open = Some(feature);
                 this.catalog_cache = None;
@@ -2056,12 +2042,7 @@ impl SettingsView {
                     Control::MultiChoice(options) => {
                         Ensure::Multi(row.key, options, row.value.clone())
                     }
-                    Control::Text
-                    | Control::IntText
-                    | Control::ListText
-                    | Control::JsonText
-                    | Control::Color
-                    | Control::Slider(_) => {
+                    control if control.is_text_editable() => {
                         Ensure::Text(row.key, edit_text(row.control, &row.value))
                     }
                     _ => Ensure::None,
@@ -2111,17 +2092,13 @@ impl SettingsView {
                 button
             }
         };
-        let backend_notice = if key == KEY_OCR_BACKEND {
-            OcrNotice::for_config_value(&row.value)
-        } else {
-            None
-        };
+        let backend_notice = (key == KEY_OCR_BACKEND)
+            .then(|| OcrNotice::for_config_value(&row.value))
+            .flatten();
         let route_note = route_hint(key, &row.value, self.state.prefs().locale);
-        let dictation_notice = if key == KEY_DICTATION_BACKEND {
-            dictation_backend_notice(&row.value, self.state.prefs().locale)
-        } else {
-            None
-        };
+        let dictation_notice = (key == KEY_DICTATION_BACKEND)
+            .then(|| dictation_backend_notice(&row.value, self.state.prefs().locale))
+            .flatten();
         let stt_note = self.stt_row_note(key, stt_inputs.as_ref());
         let audio_note = self
             .state
@@ -2311,19 +2288,11 @@ impl SettingsView {
             )
     }
 
-    /// 当前分组顶部说明区占的列表行数（翻译分组的 Hy-MT2 说明、语音分组的模型面板）；其它范围为 0。
+    /// 当前分组顶部说明区占的列表行数（更新、导出导入、MCP 三个说明面板；不含“获取模型”入口行）；其它范围为 0。
     fn header_len(&self) -> usize {
-        self.panel_header_len()
-    }
-
-    /// 当前分组原有说明面板占的列表行数（不含“获取模型”入口行）。
-    fn panel_header_len(&self) -> usize {
-        match self.current_group_id() {
-            Some(UPDATES_GROUP_ID) => hymt2_rows(UPDATE_PANEL_LINES).len(),
-            Some(TRANSFER_GROUP_ID) => hymt2_rows(TRANSFER_PANEL_LINES).len(),
-            Some(MCP_GROUP_ID) => hymt2_rows(MCP_PANEL_LINES).len(),
-            _ => 0,
-        }
+        self.current_group_id()
+            .and_then(panel_lines)
+            .map_or(0, |lines| hymt2_rows(lines).len())
     }
 
     /// 当前所在分组 id；搜索范围为 `None`。
@@ -2380,15 +2349,9 @@ impl SettingsView {
         }
     }
 
-    /// 渲染“检查更新”说明区的第 `row_index` 个定高行（当前版本行与按钮行）。
-    fn render_update_row(
-        &self,
-        row_index: usize,
-        p: &Palette,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let panel = update_panel(self.state.prefs().locale, &self.update_state);
-        let frame = div()
+    /// 说明面板的定高行外框（三个说明面板共用）。
+    fn panel_frame() -> Div {
+        div()
             .h(px(ROW_HEIGHT))
             .w_full()
             .px_4()
@@ -2397,22 +2360,78 @@ impl SettingsView {
             .flex_col()
             .overflow_hidden()
             .text_size(px(12.0))
-            .line_height(px(16.0));
-        let rows = hymt2_rows(UPDATE_PANEL_LINES);
-        let Some(row) = rows.get(row_index) else {
-            return frame.into_any_element();
-        };
-        match row {
-            Hymt2Row::Text { .. } => frame
-                .child(div().font_weight(FontWeight::BOLD).child(panel.title))
-                .child(
-                    div()
-                        .text_color(p.dim)
-                        .whitespace_nowrap()
-                        .child(panel.current_line),
-                )
-                .into_any_element(),
-            Hymt2Row::Actions => {
+            .line_height(px(16.0))
+    }
+
+    /// 说明面板里第 `row_index` 行的类型；`lines` 为说明文本行数，越界返回 `None`。
+    fn panel_row(lines: usize, row_index: usize) -> Option<Hymt2Row> {
+        hymt2_rows(lines).into_iter().nth(row_index)
+    }
+
+    /// 说明面板的提示文本（`(文案, 是否警示)`）；没有提示返回 `None`。
+    fn panel_notice(p: &Palette, notice: Option<(String, bool)>) -> Option<Div> {
+        notice.map(|(text, danger)| {
+            div()
+                .text_size(px(11.0))
+                .text_color(if danger { p.danger } else { p.dim })
+                .whitespace_nowrap()
+                .child(text)
+        })
+    }
+
+    /// 说明面板的文本行：粗体标题加一行灰色描述。
+    fn panel_text_row(
+        p: &Palette,
+        title: impl IntoElement,
+        description: impl IntoElement,
+    ) -> AnyElement {
+        Self::panel_frame()
+            .child(div().font_weight(FontWeight::BOLD).child(title))
+            .child(
+                div()
+                    .text_color(p.dim)
+                    .whitespace_nowrap()
+                    .child(description),
+            )
+            .into_any_element()
+    }
+
+    /// 说明面板的按钮行：左边是 `controls`，末尾跟提示文本，底部有分隔线。
+    fn panel_actions_row(
+        p: &Palette,
+        controls: Vec<AnyElement>,
+        notice: Option<(String, bool)>,
+    ) -> AnyElement {
+        Self::panel_frame()
+            .py_0()
+            .pt(px(2.0))
+            .border_b_1()
+            .border_color(p.border)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .children(controls)
+                    .children(Self::panel_notice(p, notice)),
+            )
+            .into_any_element()
+    }
+
+    /// 渲染“检查更新”说明区的第 `row_index` 个定高行（当前版本行与按钮行）。
+    fn render_update_row(
+        &self,
+        row_index: usize,
+        p: &Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let panel = update_panel(self.state.prefs().locale, &self.update_state);
+        match Self::panel_row(UPDATE_PANEL_LINES, row_index) {
+            None => Self::panel_frame().into_any_element(),
+            Some(Hymt2Row::Text { .. }) => {
+                Self::panel_text_row(p, panel.title, panel.current_line)
+            }
+            Some(Hymt2Row::Actions) => {
                 let running = matches!(
                     self.update_state,
                     UpdateUiState::Running | UpdateUiState::Downloading
@@ -2463,28 +2482,11 @@ impl SettingsView {
                     }
                     _ => None,
                 };
-                let notice = panel.notice.map(|(text, danger)| {
-                    div()
-                        .text_size(px(11.0))
-                        .text_color(if danger { p.danger } else { p.dim })
-                        .whitespace_nowrap()
-                        .child(text)
-                });
-                frame
-                    .py_0()
-                    .pt(px(2.0))
-                    .border_b_1()
-                    .border_color(p.border)
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_3()
-                            .child(button)
-                            .children(extra)
-                            .children(notice),
-                    )
-                    .into_any_element()
+                let controls = std::iter::once(button)
+                    .chain(extra)
+                    .map(IntoElement::into_any_element)
+                    .collect();
+                Self::panel_actions_row(p, controls, panel.notice)
             }
         }
     }
@@ -2492,31 +2494,10 @@ impl SettingsView {
     /// 渲染“MCP”说明区的第 `row_index` 个定高行（说明行与复制按钮行）。
     fn render_mcp_row(&self, row_index: usize, p: &Palette, cx: &mut Context<Self>) -> AnyElement {
         let panel = mcp_panel(self.state.prefs().locale, &self.mcp_state);
-        let frame = div()
-            .h(px(ROW_HEIGHT))
-            .w_full()
-            .px_4()
-            .py_1()
-            .flex()
-            .flex_col()
-            .overflow_hidden()
-            .text_size(px(12.0))
-            .line_height(px(16.0));
-        let rows = hymt2_rows(MCP_PANEL_LINES);
-        let Some(row) = rows.get(row_index) else {
-            return frame.into_any_element();
-        };
-        match row {
-            Hymt2Row::Text { .. } => frame
-                .child(div().font_weight(FontWeight::BOLD).child(panel.title))
-                .child(
-                    div()
-                        .text_color(p.dim)
-                        .whitespace_nowrap()
-                        .child(panel.description),
-                )
-                .into_any_element(),
-            Hymt2Row::Actions => {
+        match Self::panel_row(MCP_PANEL_LINES, row_index) {
+            None => Self::panel_frame().into_any_element(),
+            Some(Hymt2Row::Text { .. }) => Self::panel_text_row(p, panel.title, panel.description),
+            Some(Hymt2Row::Actions) => {
                 let mut button = Button::new("mcp-copy-config")
                     .small()
                     .label(panel.copy_label);
@@ -2534,27 +2515,7 @@ impl SettingsView {
                     }
                     None => button.disabled(true),
                 };
-                let notice = panel.notice.map(|(text, danger)| {
-                    div()
-                        .text_size(px(11.0))
-                        .text_color(if danger { p.danger } else { p.dim })
-                        .whitespace_nowrap()
-                        .child(text)
-                });
-                frame
-                    .py_0()
-                    .pt(px(2.0))
-                    .border_b_1()
-                    .border_color(p.border)
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_3()
-                            .child(button)
-                            .children(notice),
-                    )
-                    .into_any_element()
+                Self::panel_actions_row(p, vec![button.into_any_element()], panel.notice)
             }
         }
     }
@@ -2567,32 +2528,11 @@ impl SettingsView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let panel = transfer_panel(self.state.prefs().locale, &self.transfer_state);
-        let frame = div()
-            .h(px(ROW_HEIGHT))
-            .w_full()
-            .px_4()
-            .py_1()
-            .flex()
-            .flex_col()
-            .overflow_hidden()
-            .text_size(px(12.0))
-            .line_height(px(16.0));
-        let rows = hymt2_rows(TRANSFER_PANEL_LINES);
-        let Some(row) = rows.get(row_index) else {
-            return frame.into_any_element();
-        };
-        match row {
-            Hymt2Row::Text { .. } => frame
-                .child(div().font_weight(FontWeight::BOLD).child(panel.title))
-                .child(
-                    div()
-                        .text_color(p.dim)
-                        .whitespace_nowrap()
-                        .child(panel.description),
-                )
-                .into_any_element(),
-            Hymt2Row::Actions => {
-                let mut buttons = Vec::new();
+        match Self::panel_row(TRANSFER_PANEL_LINES, row_index) {
+            None => Self::panel_frame().into_any_element(),
+            Some(Hymt2Row::Text { .. }) => Self::panel_text_row(p, panel.title, panel.description),
+            Some(Hymt2Row::Actions) => {
+                let mut controls = Vec::new();
                 for (id, label, action) in [
                     (
                         "config-export",
@@ -2615,7 +2555,7 @@ impl SettingsView {
                         }
                         None => button.disabled(true),
                     };
-                    buttons.push(button);
+                    controls.push(button.into_any_element());
                 }
                 let include_keys = Checkbox::new("config-include-keys")
                     .label(SharedString::from(panel.include_keys_label))
@@ -2624,28 +2564,8 @@ impl SettingsView {
                         this.transfer_include_keys = *checked;
                         cx.notify();
                     }));
-                let notice = panel.notice.map(|(text, danger)| {
-                    div()
-                        .text_size(px(11.0))
-                        .text_color(if danger { p.danger } else { p.dim })
-                        .whitespace_nowrap()
-                        .child(text)
-                });
-                frame
-                    .py_0()
-                    .pt(px(2.0))
-                    .border_b_1()
-                    .border_color(p.border)
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_3()
-                            .children(buttons)
-                            .child(include_keys)
-                            .children(notice),
-                    )
-                    .into_any_element()
+                controls.push(include_keys.into_any_element());
+                Self::panel_actions_row(p, controls, panel.notice)
             }
         }
     }
@@ -3023,8 +2943,8 @@ impl SettingsView {
             .unwrap_or_default()
     }
 
-    /// 编辑页文案。
-    fn cm_tr(&self, id: &str) -> String {
+    /// 按当前界面语言取文案。
+    fn tr(&self, id: &str) -> String {
         crate::ocr_backend::i18n_for(self.state.prefs().locale).tr(id)
     }
 
@@ -3033,7 +2953,7 @@ impl SettingsView {
         Button::new(("custom-models-get", usize::from(vision_only)))
             .small()
             .outline()
-            .label(self.cm_tr("model-select-get"))
+            .label(self.tr("model-select-get"))
             .on_click(cx.listener(|this, _event: &ClickEvent, window, cx| {
                 this.open_custom_models_page(window, cx);
             }))
@@ -3092,7 +3012,7 @@ impl SettingsView {
                 self.flush_changes();
                 Ok(())
             }
-            Err(_) => Err(self.cm_tr(cm_text::SAVE_FAILED)),
+            Err(_) => Err(self.tr(cm_text::SAVE_FAILED)),
         }
     }
 
@@ -3106,7 +3026,7 @@ impl SettingsView {
         form.model = state.model.read(cx).value().to_string();
         let mut models = self.custom_models();
         let outcome = match custom_models_edit::build_model(&models, &form) {
-            Err(error) => Err(self.cm_tr(error.message_id())),
+            Err(error) => Err(self.tr(error.message_id())),
             Ok(model) => {
                 custom_models_edit::upsert(&mut models, model);
                 self.cm_write(&models)
@@ -3187,7 +3107,7 @@ impl SettingsView {
             div().flex().items_center().gap_3().child(
                 Button::new("cm-add")
                     .small()
-                    .label(self.cm_tr(cm_text::ADD))
+                    .label(self.tr(cm_text::ADD))
                     .on_click(cx.listener(|this, _event: &ClickEvent, window, cx| {
                         this.cm_open_form(None, window, cx);
                     })),
@@ -3198,7 +3118,7 @@ impl SettingsView {
         }
         if models.is_empty() {
             return page
-                .child(div().text_color(p.dim).child(self.cm_tr(cm_text::EMPTY)))
+                .child(div().text_color(p.dim).child(self.tr(cm_text::EMPTY)))
                 .into_any_element();
         }
         for (index, model) in models.iter().enumerate() {
@@ -3219,7 +3139,7 @@ impl SettingsView {
         let confirming = self.cm_confirm_delete.as_deref() == Some(model.id.as_str());
         let buttons = if confirming {
             let i18n = crate::ocr_backend::i18n_for(self.state.prefs().locale);
-            let (id_yes, id_no) = (id.clone(), id.clone());
+            let id_yes = id.clone();
             div()
                 .flex()
                 .items_center()
@@ -3243,7 +3163,6 @@ impl SettingsView {
                         .outline()
                         .label(i18n.tr(cm_text::CANCEL))
                         .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| {
-                            let _ = &id_no;
                             this.cm_confirm_delete = None;
                             cx.notify();
                         })),
@@ -3258,7 +3177,7 @@ impl SettingsView {
                     Button::new(("cm-edit", index))
                         .small()
                         .outline()
-                        .label(self.cm_tr(cm_text::EDIT))
+                        .label(self.tr(cm_text::EDIT))
                         .on_click(cx.listener(move |this, _e: &ClickEvent, window, cx| {
                             let found = this.custom_models().into_iter().find(|m| m.id == id_edit);
                             this.cm_open_form(found.as_ref(), window, cx);
@@ -3268,7 +3187,7 @@ impl SettingsView {
                     Button::new(("cm-copy", index))
                         .small()
                         .outline()
-                        .label(self.cm_tr(cm_text::COPY))
+                        .label(self.tr(cm_text::COPY))
                         .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| {
                             this.cm_copy(&id_copy, cx);
                         })),
@@ -3277,7 +3196,7 @@ impl SettingsView {
                     Button::new(("cm-del", index))
                         .small()
                         .outline()
-                        .label(self.cm_tr(cm_text::DELETE))
+                        .label(self.tr(cm_text::DELETE))
                         .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| {
                             this.cm_confirm_delete = Some(id_del.clone());
                             cx.notify();
@@ -3352,7 +3271,7 @@ impl SettingsView {
                 .child(column)
         };
         let vision = Checkbox::new("cm-vision")
-            .label(SharedString::from(self.cm_tr(cm_text::VISION)))
+            .label(SharedString::from(self.tr(cm_text::VISION)))
             .checked(state.form.supports_vision)
             .on_click(cx.listener(|this, checked: &bool, _window, cx| {
                 this.cm_set_vision(*checked, cx);
@@ -3365,23 +3284,23 @@ impl SettingsView {
             .flex()
             .flex_col()
             .gap_3()
-            .child(field(&self.cm_tr(cm_text::NAME), &state.name, None, false))
+            .child(field(&self.tr(cm_text::NAME), &state.name, None, false))
             .child(field(
-                &self.cm_tr(cm_text::URL),
+                &self.tr(cm_text::URL),
                 &state.base_url,
-                Some(self.cm_tr(cm_text::URL_HINT)),
+                Some(self.tr(cm_text::URL_HINT)),
                 false,
             ))
             .child(field(
-                &self.cm_tr(cm_text::KEY),
+                &self.tr(cm_text::KEY),
                 &state.api_key,
-                Some(self.cm_tr(cm_text::KEY_HINT)),
+                Some(self.tr(cm_text::KEY_HINT)),
                 true,
             ))
             .child(field(
-                &self.cm_tr(cm_text::MODEL),
+                &self.tr(cm_text::MODEL),
                 &state.model,
-                Some(self.cm_tr(cm_text::MODEL_HINT)),
+                Some(self.tr(cm_text::MODEL_HINT)),
                 false,
             ))
             .child(div().pl(px(CM_LABEL_WIDTH + 12.0)).child(vision))
@@ -3394,7 +3313,7 @@ impl SettingsView {
                     .child(
                         Button::new("cm-save")
                             .small()
-                            .label(self.cm_tr(cm_text::SAVE))
+                            .label(self.tr(cm_text::SAVE))
                             .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
                                 this.cm_save(cx);
                             })),
@@ -3403,7 +3322,7 @@ impl SettingsView {
                         Button::new("cm-cancel")
                             .small()
                             .outline()
-                            .label(self.cm_tr(cm_text::CANCEL))
+                            .label(self.tr(cm_text::CANCEL))
                             .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
                                 this.cm_form = None;
                                 cx.notify();
@@ -3885,5 +3804,22 @@ mod tests {
         assert_ne!(dark.bg, light.bg);
         assert_eq!(dark.accent, light.accent);
         assert_eq!(dark.accent, rgba(0x010203FF));
+    }
+
+    /// 说明面板分组表覆盖更新、导出导入、MCP 三个分组，行数口径一致，其它分组没有面板。
+    #[test]
+    fn panel_groups_table_covers_all_panels() {
+        assert_eq!(panel_lines(UPDATES_GROUP_ID), Some(UPDATE_PANEL_LINES));
+        assert_eq!(panel_lines(TRANSFER_GROUP_ID), Some(TRANSFER_PANEL_LINES));
+        assert_eq!(panel_lines(MCP_GROUP_ID), Some(MCP_PANEL_LINES));
+        assert_eq!(panel_lines("screenshot_ui"), None);
+        let ids: HashSet<&str> = PANEL_GROUPS.iter().map(|(id, _)| *id).collect();
+        assert_eq!(ids.len(), PANEL_GROUPS.len());
+        let last = hymt2_rows(UPDATE_PANEL_LINES).len() - 1;
+        assert!(matches!(
+            SettingsView::panel_row(UPDATE_PANEL_LINES, last),
+            Some(Hymt2Row::Actions)
+        ));
+        assert!(SettingsView::panel_row(UPDATE_PANEL_LINES, last + 1).is_none());
     }
 }
