@@ -3,23 +3,15 @@
 //! 样片由 `testclip` 现生成，放系统临时目录。需要硬件 H.264 MFT 的测试在没有硬件时直接跳过。
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
-
 use ffmpeg_next::format::Pixel;
 use snow_recorder_protocol::{EditOp, EditRequest, EngineKind, ExtractMode, ImageFormat};
 
 use super::reader::{MfSource, scan};
 use super::{MfSession, SystemEngine, has_hardware_h264};
 use crate::edit::source::VideoSource;
-use crate::edit::testclip::{self, Clip};
+use crate::edit::testclip::{self, Clip, no_scratch, quiet_ctl as ctl};
 use crate::edit::yuv::RgbConverter;
-use crate::edit::{EditEngine, FfmpegEngine, OpSupport, TaskCtl, execute};
-
-/// 静默的任务控制。
-fn ctl(cancelled: bool) -> TaskCtl {
-    TaskCtl::new(Arc::new(AtomicBool::new(cancelled)), Box::new(|_| {}))
-}
+use crate::edit::{EditEngine, FfmpegEngine, OpSupport, execute};
 
 /// 生成样片，返回（目录, 路径）。
 fn make(name: &str, clip: &Clip) -> (PathBuf, PathBuf) {
@@ -49,15 +41,6 @@ fn diff(a: &[u8], b: &[u8]) -> (f64, i32) {
         max = max.max(d);
     }
     (sum as f64 / a.len() as f64, max)
-}
-
-/// 目录里没有残留的中间目录。
-fn no_scratch(dir: &Path) -> bool {
-    std::fs::read_dir(dir).unwrap().flatten().all(|e| {
-        !e.file_name()
-            .to_string_lossy()
-            .starts_with(".snow-recording-")
-    })
 }
 
 /// 探测：与 FFmpeg 引擎对同一样片的尺寸、帧数、关键帧数一致，时长和帧率在容差内。

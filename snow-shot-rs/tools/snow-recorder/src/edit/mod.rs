@@ -25,7 +25,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use snow_recorder_protocol::{EditOp, EditRequest, EngineKind, Event, ImageFormat, ProbeInfo};
+use snow_recorder_protocol::{
+    EditOp, EditRequest, EngineKind, Event, ImageFormat, ProbeInfo, scratch_dir, scratch_file,
+};
 
 pub use system::SystemEngine;
 
@@ -96,6 +98,36 @@ impl fmt::Display for EditError {
 }
 
 impl std::error::Error for EditError {}
+
+/// 先写中间文件、成功后原子改名到 `output` 的统一外壳；无论成败都清掉中间目录。
+///
+/// # 参数
+/// - `output`：最终输出文件路径。
+/// - `work`：在中间文件路径上完成写入，返回输出帧数。
+///
+/// # 返回
+/// `work` 的返回值；改名失败返回错误。失败或取消时不留下中间文件。
+///
+/// # 示例
+/// ```ignore
+/// let n = run_via_scratch(output, |tmp| write_video(tmp))?;
+/// ```
+pub(crate) fn run_via_scratch(
+    output: &Path,
+    work: impl FnOnce(&Path) -> Result<u64, EditError>,
+) -> Result<u64, EditError> {
+    let pid = std::process::id();
+    let dir = scratch_dir(output, pid);
+    std::fs::create_dir_all(&dir).map_err(|e| EditError::new(format!("创建中间目录失败: {e}")))?;
+    let tmp = scratch_file(output, pid);
+    let result = work(&tmp).and_then(|n| {
+        std::fs::rename(&tmp, output)
+            .map_err(|e| EditError::new(format!("移动输出文件失败: {e}")))?;
+        Ok(n)
+    });
+    let _ = std::fs::remove_dir_all(&dir);
+    result
+}
 
 /// 任务控制：取消标志与限频进度上报。
 pub struct TaskCtl {
@@ -435,6 +467,26 @@ mod tests {
         assert_eq!(count.load(Ordering::SeqCst), 1);
         ctl.report(100, 100, "x");
         assert_eq!(count.load(Ordering::SeqCst), 2);
+    }
+
+    /// 中间文件外壳：成功时改名到位并清掉中间目录；失败时不留输出。
+    #[test]
+    fn run_via_scratch_publishes_or_cleans() {
+        let dir = testclip::temp_dir("via-scratch");
+        let out = dir.join("o.bin");
+        let n = run_via_scratch(&out, |tmp| {
+            std::fs::write(tmp, b"x").unwrap();
+            Ok(7)
+        })
+        .unwrap();
+        assert_eq!(n, 7);
+        assert_eq!(std::fs::read(&out).unwrap(), b"x");
+        assert!(testclip::no_scratch(&dir));
+        let bad = dir.join("bad.bin");
+        let err = run_via_scratch(&bad, |_| Err(EditError::new("boom"))).unwrap_err();
+        assert_eq!(err.to_string(), "boom");
+        assert!(!bad.exists() && testclip::no_scratch(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 取消标志生效。

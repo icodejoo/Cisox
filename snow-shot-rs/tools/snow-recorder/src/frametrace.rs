@@ -1226,9 +1226,7 @@ mod tests {
         let recs = t.collect();
         assert_eq!(recs.len(), 4);
         let text = t.render(&recs, 60, "x");
-        assert!(text.contains("# poll_trace=1
-") && text.contains("# poll_overflow=1
-"));
+        assert!(text.contains("# poll_trace=1\n") && text.contains("# poll_overflow=1\n"));
         let rows: Vec<Vec<&str>> = text.lines().skip_while(|l| !l.starts_with("mono_ns")).skip(1).map(|l| l.split(',').collect()).collect();
         assert!(rows.iter().all(|c| c.len() == CSV_HEADER.split(',').count()));
         let by_event = |name: &str| rows.iter().filter(|c| c[2] == name).collect::<Vec<_>>();

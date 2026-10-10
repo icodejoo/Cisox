@@ -162,6 +162,7 @@ pub fn rank_adapters(adapters: &[AdapterInfo], preference: EncoderPreference) ->
     let (usable, rest): (Vec<usize>, Vec<usize>) = (0..adapters.len()).partition(|&i| select_encoder(&adapters[i], preference).is_ok());
     usable.into_iter().chain(rest).collect()
 }
+
 /// 硬件编码模式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HardwareMode {

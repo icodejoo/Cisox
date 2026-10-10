@@ -7,16 +7,13 @@ use std::path::Path;
 
 use ffmpeg_next as ffmpeg;
 use ffmpeg_next::{Rational, format, media};
-use snow_recorder_protocol::{scratch_dir, scratch_file};
 
 use super::source::VideoSource;
-use super::transcode::rescale;
-use super::{EditError, TaskCtl};
+use super::transcode::{MICRO_TB, rescale};
+use super::{EditError, TaskCtl, run_via_scratch};
 
 /// 进度阶段名。
 const STAGE_TRIM: &str = "trim";
-/// 微秒时间基。
-const MICRO_TB: Rational = Rational(1, 1_000_000);
 
 /// 裁剪参数。
 pub struct TrimParams<'a> {
@@ -74,17 +71,7 @@ pub fn run(params: &TrimParams<'_>, ctl: &TaskCtl) -> Result<u64, EditError> {
     if params.end_ms <= params.start_ms {
         return Err(EditError::new("裁剪终点必须晚于起点"));
     }
-    let pid = std::process::id();
-    let dir = scratch_dir(params.output, pid);
-    std::fs::create_dir_all(&dir).map_err(|e| EditError::new(format!("创建中间目录失败: {e}")))?;
-    let tmp = scratch_file(params.output, pid);
-    let result = trim_to(params, ctl, &tmp).and_then(|n| {
-        std::fs::rename(&tmp, params.output)
-            .map_err(|e| EditError::new(format!("移动输出文件失败: {e}")))?;
-        Ok(n)
-    });
-    let _ = std::fs::remove_dir_all(&dir);
-    result
+    run_via_scratch(params.output, |tmp| trim_to(params, ctl, tmp))
 }
 
 /// 输入流到输出流的映射。
@@ -217,13 +204,7 @@ mod tests {
     use super::*;
     use crate::edit::testclip::{self, Clip};
     use snow_recorder_protocol::ProbeInfo;
-    use std::sync::Arc;
-    use std::sync::atomic::AtomicBool;
-
-    /// 静默的任务控制。
-    fn ctl(cancelled: bool) -> TaskCtl {
-        TaskCtl::new(Arc::new(AtomicBool::new(cancelled)), Box::new(|_| {}))
-    }
+    use crate::edit::testclip::{no_scratch, quiet_ctl as ctl};
 
     /// 探测文件。
     fn probe(path: &Path) -> ProbeInfo {
@@ -320,16 +301,7 @@ mod tests {
         let err = run(&params(&input, &output, 0, 500), &ctl(true)).unwrap_err();
         assert!(err.is_cancelled());
         assert!(!output.exists());
-        let leftovers = std::fs::read_dir(&dir)
-            .unwrap()
-            .flatten()
-            .filter(|e| {
-                e.file_name()
-                    .to_string_lossy()
-                    .starts_with(".snow-recording-")
-            })
-            .count();
-        assert_eq!(leftovers, 0);
+        assert!(no_scratch(&dir));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -32,8 +32,8 @@ pub const DEFAULT_POOL_CAPACITY: usize = 12;
 pub const QSV_ASYNC_DEPTH: u32 = 2;
 /// QSV 默认预设。
 pub const QSV_PRESET: &str = "veryfast";
-/// 关键帧间隔（秒）。
-const GOP_SECONDS: u32 = 2;
+/// 关键帧间隔（秒）；Media Foundation 路径共用。
+pub(crate) const GOP_SECONDS: u32 = 2;
 /// NV12 纹理宽高对齐。
 pub const SURFACE_ALIGN: u32 = 16;
 
@@ -53,6 +53,7 @@ impl Buf {
 
     /// 新增一份引用。
     fn reference(&self) -> HwResult<*mut AVBufferRef> {
+        // SAFETY: self.0 是持有中的有效 AVBufferRef，ref 只增加引用计数。
         let r = unsafe { av_buffer_ref(self.0) };
         if r.is_null() { Err("av_buffer_ref 失败".into()) } else { Ok(r) }
     }
@@ -61,6 +62,7 @@ impl Buf {
 impl Drop for Buf {
     /// 释放引用。
     fn drop(&mut self) {
+        // SAFETY: self.0 由 `Buf::new` 保证非空且只在此处释放一次，unref 后指针被置空。
         unsafe { av_buffer_unref(&mut self.0) };
     }
 }
@@ -181,6 +183,7 @@ impl HwContext {
         if require_encoder && ffmpeg::encoder::find_by_name(codec_name).is_none() {
             return Err(format!("FFmpeg 没有编进 {codec_name}"));
         }
+        // SAFETY: 只分配未初始化的设备上下文，空指针由 `Buf::new` 拒绝。
         let device_ref = Buf::new(unsafe { av_hwdevice_ctx_alloc(AVHWDeviceType::AV_HWDEVICE_TYPE_D3D11VA) }, "hwdevice")?;
         // SAFETY: device_ref 刚分配且未初始化；字段按 FFmpeg 约定填写后再 init。
         unsafe {
@@ -196,6 +199,7 @@ impl HwContext {
             (*d3d).unlock = Some(unlock_device);
             check(av_hwdevice_ctx_init(device_ref.0), "hwdevice init")?;
         }
+        // SAFETY: device_ref 已初始化；只分配未初始化的帧池上下文，空指针由 `Buf::new` 拒绝。
         let native = Buf::new(unsafe { av_hwframe_ctx_alloc(device_ref.0) }, "hwframes")?;
         // SAFETY: native 刚分配，填写后 init。
         unsafe {

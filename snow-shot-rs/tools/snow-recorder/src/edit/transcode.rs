@@ -9,11 +9,11 @@ use ffmpeg_next as ffmpeg;
 use ffmpeg_next::format::Pixel;
 use ffmpeg_next::software::scaling;
 use ffmpeg_next::{Dictionary, Rational, codec, encoder, format, frame, media, picture};
-use snow_recorder_protocol::{EditOp, ProbeInfo, scratch_dir, scratch_file};
+use snow_recorder_protocol::{EditOp, ProbeInfo};
 use snow_screen_recorder::{ExportFormat, scaled_output_dimensions};
 
 use super::source::{Decoded, VideoSource};
-use super::{EditError, TaskCtl};
+use super::{EditError, TaskCtl, run_via_scratch};
 
 /// 进度阶段名。
 const STAGE_TRANSCODE: &str = "transcode";
@@ -24,7 +24,7 @@ const X264_CRF: &str = "20";
 /// 关键帧间隔（秒）。
 const GOP_SECONDS: u32 = 2;
 /// 微秒时间基。
-const MICRO_TB: Rational = Rational(1, 1_000_000);
+pub(super) const MICRO_TB: Rational = Rational(1, 1_000_000);
 /// 输出视频流下标。
 const OUT_VIDEO: usize = 0;
 
@@ -332,17 +332,7 @@ pub fn rescale(value: i64, from: Rational, to: Rational) -> i64 {
 /// # 返回
 /// 输出视频帧数；取消返回 `cancelled`。失败或取消时不留下中间文件。
 pub fn run(params: &TranscodeParams<'_>, ctl: &TaskCtl) -> Result<u64, EditError> {
-    let pid = std::process::id();
-    let dir = scratch_dir(params.output, pid);
-    std::fs::create_dir_all(&dir).map_err(|e| EditError::new(format!("创建中间目录失败: {e}")))?;
-    let tmp = scratch_file(params.output, pid);
-    let result = transcode_to(params, ctl, &tmp).and_then(|n| {
-        std::fs::rename(&tmp, params.output)
-            .map_err(|e| EditError::new(format!("移动输出文件失败: {e}")))?;
-        Ok(n)
-    });
-    let _ = std::fs::remove_dir_all(&dir);
-    result
+    run_via_scratch(params.output, |tmp| transcode_to(params, ctl, tmp))
 }
 
 /// 转码主体：写到中间文件。
@@ -459,13 +449,7 @@ fn transcode_to(params: &TranscodeParams<'_>, ctl: &TaskCtl, tmp: &Path) -> Resu
 mod tests {
     use super::*;
     use crate::edit::testclip::{self, Clip};
-    use std::sync::Arc;
-    use std::sync::atomic::AtomicBool;
-
-    /// 静默的任务控制。
-    fn ctl(cancelled: bool) -> TaskCtl {
-        TaskCtl::new(Arc::new(AtomicBool::new(cancelled)), Box::new(|_| {}))
-    }
+    use crate::edit::testclip::{no_scratch, quiet_ctl as ctl};
 
     /// 探测输出文件。
     fn probe(path: &Path) -> ProbeInfo {
@@ -478,15 +462,6 @@ mod tests {
         let path = dir.join("in.mp4");
         testclip::make_clip(&path, clip).unwrap();
         (dir, path)
-    }
-
-    /// 目录里没有残留的中间目录。
-    fn no_scratch(dir: &Path) -> bool {
-        std::fs::read_dir(dir).unwrap().flatten().all(|e| {
-            !e.file_name()
-                .to_string_lossy()
-                .starts_with(".snow-recording-")
-        })
     }
 
     /// 构造重编码参数。

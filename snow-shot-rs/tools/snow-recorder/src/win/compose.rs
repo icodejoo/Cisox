@@ -41,6 +41,8 @@ pub struct GpuComposer {
     shapes: HashMap<u64, CursorShape>,
     /// 光标贴图缓存。
     textures: HashMap<u64, Texture>,
+    /// 每帧图层暂存（复用容量，避免每帧分配）。
+    layers: Vec<VpLayer>,
     /// 贴图插入顺序（淘汰用）。
     order: VecDeque<u64>,
 }
@@ -66,6 +68,7 @@ impl GpuComposer {
             out_size,
             shapes: HashMap::new(),
             textures: HashMap::new(),
+            layers: Vec::new(),
             order: VecDeque::new(),
         })
     }
@@ -135,24 +138,23 @@ impl FrameComposer for GpuComposer {
 
     /// 桌面 + 光标一次 Blt 合成到表面；栅栏保证与采集复制、采集复用之间的顺序。
     fn compose(&mut self, frame: &GpuFrame, cursor: Option<&AttachedCursorSample>, surface: &mut Surface) -> Result<(), String> {
-        let mut layers = match &frame.tiles {
+        let mut layers = std::mem::take(&mut self.layers);
+        layers.clear();
+        match &frame.tiles {
             // 跨屏：每块显示器一层，目标矩形带偏移；空洞由视频处理器的黑色背景填充
-            Some(tiles) => tiles
-                .iter()
-                .map(|tile| VpLayer {
-                    texture: tile.slot.texture_b().clone(),
-                    source: Rect::full((tile.rect.width, tile.rect.height)),
-                    destination: tile_destination(tile.rect, self.src_size, self.out_size),
-                    alpha: false,
-                })
-                .collect(),
-            None => vec![VpLayer {
+            Some(tiles) => layers.extend(tiles.iter().map(|tile| VpLayer {
+                texture: tile.slot.texture_b().clone(),
+                source: Rect::full((tile.rect.width, tile.rect.height)),
+                destination: tile_destination(tile.rect, self.src_size, self.out_size),
+                alpha: false,
+            })),
+            None => layers.push(VpLayer {
                 texture: frame.slot.texture_b().clone(),
                 source: Rect::full(self.src_size),
                 destination: Rect::full(self.out_size),
                 alpha: false,
-            }],
-        };
+            }),
+        }
         if let Some(sample) = cursor
             && let Some(shape) = self.resolve_shape(sample)
             && let Some((source, destination)) = cursor_geometry(sample, &shape, self.src_size, self.out_size)
@@ -165,31 +167,21 @@ impl FrameComposer for GpuComposer {
         // 每个槽各自等采集复制完（跨屏时有多个槽）
         // SAFETY: 持有设备锁；栅栏与纹理都属于设备 B（或其共享视图）。
         unsafe {
-            match &frame.tiles {
-                Some(tiles) => {
-                    for tile in tiles.iter() {
-                        self.context4.Wait(tile.slot.fence_b(), tile.slot.value()).map_err(|e| fail("栅栏等待失败", e))?;
-                    }
-                }
-                None => self.context4.Wait(frame.slot.fence_b(), frame.slot.value()).map_err(|e| fail("栅栏等待失败", e))?,
+            for slot in frame.slots() {
+                self.context4.Wait(slot.fence_b(), slot.value()).map_err(|e| fail("栅栏等待失败", e))?;
             }
         }
-        self.blitter.blit(&layers, surface.texture(), surface.slice())?;
+        let blit = self.blitter.blit(&layers, surface.texture(), surface.slice());
+        // 图层持有的纹理引用随即释放，暂存容量留给下一帧
+        layers.clear();
+        self.layers = layers;
+        blit?;
         // SAFETY: 同上；Signal 排在 Blt 之后，采集复用该槽前会等它。
         unsafe {
-            match &frame.tiles {
-                Some(tiles) => {
-                    for tile in tiles.iter() {
-                        let value = tile.slot.value();
-                        self.context4.Signal(tile.slot.fence_b(), value + 1).map_err(|e| fail("栅栏 Signal 失败", e))?;
-                        tile.slot.set_value(value + 1);
-                    }
-                }
-                None => {
-                    let value = frame.slot.value();
-                    self.context4.Signal(frame.slot.fence_b(), value + 1).map_err(|e| fail("栅栏 Signal 失败", e))?;
-                    frame.slot.set_value(value + 1);
-                }
+            for slot in frame.slots() {
+                let value = slot.value();
+                self.context4.Signal(slot.fence_b(), value + 1).map_err(|e| fail("栅栏 Signal 失败", e))?;
+                slot.set_value(value + 1);
             }
             self.device.context().Flush();
         }
@@ -201,4 +193,3 @@ impl FrameComposer for GpuComposer {
         self.hw.outstanding()
     }
 }
-

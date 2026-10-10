@@ -12,7 +12,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use snow_cursor::{AttachedCursorSample, CursorProjector, CursorSampler, CursorShape, CursorShapeState, CursorTargetInfo};
+use snow_cursor::AttachedCursorSample;
 use snow_d3d11::SharedDevice;
 use windows::Win32::Graphics::Direct3D11::*;
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
@@ -26,8 +26,8 @@ use crate::geom::{Rect, scale_coordinate};
 use crate::pipeline::{CaptureDiag, CaptureFault, CaptureSource, CaptureStats, Captured};
 use crate::timeline::QpcAnchor;
 use crate::win::dda::{
-    COMPOSE_GPU_PRIORITY, DIAG_LIMIT, ENV_CAPTURE_GPU_PRIORITY, ENV_COMPOSE_GPU_PRIORITY, FrameGuard, GpuFrame, POLL_SLEEP, POOL_SIZE, SharedSlot, Tile,
-    classify_poll, copy_into_slot, create_slot, env_priority, list_adapters, set_gpu_priority,
+    CursorTracker, FrameGuard, GpuFrame, POLL_SLEEP, POOL_SIZE, SharedSlot, Tile, classify_poll, configure_gpu_priorities, copy_into_slot, create_slot,
+    flush_device, free_slot, list_adapters, present_time, push_sample,
 };
 
 /// 一个显示器输出的几何与归属（规划用，不含 COM 对象）。
@@ -169,6 +169,11 @@ pub fn check_streams(tiles: usize, max_streams: u32) -> Result<(), String> {
     Ok(())
 }
 
+/// 输出序号转追踪表的来源列（超过 255 取饱和值）。
+fn source_id(index: usize) -> u8 {
+    u8::try_from(index).unwrap_or(u8::MAX)
+}
+
 /// 一路输出的采集单元。
 struct SpanOutput {
     /// 输出（重建复制用）。
@@ -199,12 +204,8 @@ pub struct SpanCapture {
     lost: Option<usize>,
     /// 选区（虚拟桌面坐标）。
     region: (i32, i32, u32, u32),
-    /// 光标采样器。
-    sampler: CursorSampler,
-    /// 光标投影器。
-    projector: CursorProjector,
-    /// 最近见过的光标形状（`Cached` 状态补全用）。
-    retained_shape: Option<CursorShape>,
+    /// 光标跟踪。
+    cursor: CursorTracker,
     /// 最近一张带桌面内容的帧（光标单独移动时复用）。
     latest: Option<Captured<GpuFrame>>,
     /// QPC 锚点。
@@ -256,10 +257,7 @@ impl SpanCapture {
         let base: IDXGIAdapter = adapters[plan.adapter].0.cast().map_err(|e| e.to_string())?;
         let compose = SharedDevice::create(&base).map_err(|e| format!("创建合成设备失败: {e:#}"))?;
         let device = SharedDevice::create(&base).map_err(|e| format!("创建采集设备失败: {e:#}"))?;
-        set_gpu_priority(&compose, env_priority(ENV_COMPOSE_GPU_PRIORITY).unwrap_or(COMPOSE_GPU_PRIORITY));
-        if let Some(priority) = env_priority(ENV_CAPTURE_GPU_PRIORITY) {
-            set_gpu_priority(&device, priority);
-        }
+        configure_gpu_priorities(&compose, &device);
         let mut outputs = Vec::with_capacity(plan.parts.len());
         for (n, part) in plan.parts.iter().enumerate() {
             let output: IDXGIOutput1 = handles[part.output].cast().map_err(|e| format!("显示器 {n} 不支持桌面复制: {e}"))?;
@@ -284,9 +282,7 @@ impl SpanCapture {
             next_output: 0,
             lost: None,
             region,
-            sampler: CursorSampler::new().map_err(|e| format!("光标采样器不可用: {e}"))?,
-            projector: CursorProjector::new(),
-            retained_shape: None,
+            cursor: CursorTracker::new()?,
             latest: None,
             anchor,
             stats: CaptureStats::default(),
@@ -306,33 +302,14 @@ impl SpanCapture {
 
     /// 采样并投影当前光标（逻辑同单屏采集器；失败返回 `None`）。
     fn sample_cursor(&mut self) -> Option<AttachedCursorSample> {
-        let snapshot = self.sampler.sample().ok()?;
-        if let Some(shape) = snapshot.shape.shape() {
-            self.retained_shape = Some(shape.clone());
-        }
-        let target = CursorTargetInfo { origin_x: self.region.0, origin_y: self.region.1, width: self.region.2, height: self.region.3 };
-        let mut cursor = self.projector.project(&target, snapshot);
-        if let Some(shape) = self.retained_shape.as_ref().filter(|s| cursor.shape.shape_id() == Some(s.shape_id)) {
-            cursor.shape = CursorShapeState::Embedded(shape.clone());
-        }
-        Some(cursor)
-    }
-
-    /// 把设备 A 上已记录的命令提交给 GPU；`timed` 为真时返回等设备锁的耗时，否则不读时钟、返回零。
-    fn flush(&self, timed: bool) -> Duration {
-        let lock_started = timed.then(Instant::now);
-        let _lock = self.device.lock();
-        let waited = lock_started.map_or(Duration::ZERO, |s| s.elapsed());
-        // SAFETY: 持有设备锁；Flush 只提交已记录的命令。
-        unsafe { self.device.context().Flush() };
-        waited
+        self.cursor.sample(self.region)
     }
 
     /// 释放第 `index` 路已取得的桌面帧；逐调用追踪开启时记录这次 `ReleaseFrame` 的时刻与耗时。
     fn release_frame(&mut self, index: usize, guard: FrameGuard<'_>) {
         let started = self.trace.poll_mark();
         drop(guard);
-        self.trace.release(u8::try_from(index).unwrap_or(u8::MAX), started);
+        self.trace.release(source_id(index), started);
     }
 
     /// 处理第 `index` 路输出刚取到的一次更新：复制进该路的空闲槽，并和其余各路的最近一块组成一帧。
@@ -340,7 +317,7 @@ impl SpanCapture {
         let captured_at = Instant::now();
         let duplication = self.outputs[index].duplication.clone();
         let guard = FrameGuard(&duplication);
-        let src = u8::try_from(index).unwrap_or(u8::MAX);
+        let src = source_id(index);
         if !want {
             self.trace.acquire(src, captured_at, None, info.AccumulatedFrames, 0, code::ACQ_UNWANTED);
             self.release_frame(index, guard);
@@ -363,10 +340,10 @@ impl SpanCapture {
             return Err(CaptureFault::Other(format!("显示器 {index} 桌面格式 {:?} 不是 BGRA8（HDR 走软件路径）", desc.Format)));
         }
         let copy_started = Instant::now();
-        let Some(slot) = self.outputs[index].slots.iter().find(|s| Arc::strong_count(s) == 1).cloned() else {
+        let Some(slot) = free_slot(&self.outputs[index].slots) else {
             self.stats.pool_drops += 1;
             if self.trace.enabled() {
-                let present = self.anchor.map_or(captured_at, |a| a.to_instant(info.LastPresentTime).min(captured_at));
+                let present = present_time(self.anchor, info.LastPresentTime, captured_at);
                 self.trace.acquire(src, captured_at, Some(present), info.AccumulatedFrames, 0, code::ACQ_POOL_DROP);
             }
             self.release_frame(index, guard);
@@ -374,9 +351,7 @@ impl SpanCapture {
         };
         let traced = self.trace.enabled();
         let lock_wait = copy_into_slot(&self.device, &self.context4, &slot, &source, &self.outputs[index].crop, traced)?;
-        if self.copy_ms.len() < DIAG_LIMIT {
-            self.copy_ms.push(copy_started.elapsed().as_secs_f32() * 1000.0);
-        }
+        push_sample(&mut self.copy_ms, copy_started.elapsed());
         if traced {
             self.trace.iter_add(IterStage::Copy, copy_started.elapsed());
             self.trace.iter_add(IterStage::Lock, lock_wait);
@@ -384,18 +359,15 @@ impl SpanCapture {
         // 复制一记录完就立刻释放桌面帧，光标采样与 Flush 都放到释放之后
         self.release_frame(index, guard);
         let flush_started = self.trace.mark();
-        let flush_wait = self.flush(traced);
+        let flush_wait = flush_device(&self.device, traced);
         self.trace.iter_since(IterStage::Copy, flush_started);
         self.trace.iter_add(IterStage::Lock, flush_wait);
         self.outputs[index].current = Some(slot);
         let tiles: Arc<[Tile]> = self.outputs.iter().filter_map(|o| o.current.as_ref().map(|slot| Tile { slot: Arc::clone(slot), rect: o.rect })).collect();
         let cursor = self.sample_cursor();
-        let present = match self.anchor {
-            Some(a) => a.to_instant(info.LastPresentTime),
-            None => captured_at,
-        };
+        let present = present_time(self.anchor, info.LastPresentTime, captured_at);
         let frame = GpuFrame { slot: Arc::clone(&tiles[0].slot), tiles: Some(tiles) };
-        let captured = Captured { frame, cursor, present: present.min(captured_at), captured_at, fresh: true, id: self.stats.frames + 1 };
+        let captured = Captured { frame, cursor, present, captured_at, fresh: true, id: self.stats.frames + 1 };
         self.trace.acquire(src, captured_at, Some(captured.present), info.AccumulatedFrames, captured.id, code::ACQ_FRESH);
         self.stats.frames += 1;
         self.latest = Some(captured.clone());
@@ -411,10 +383,8 @@ impl SpanCapture {
         loop {
             let now = Instant::now();
             self.trace.iter_begin(now, u8::MAX);
-            if let Some(prev) = self.last_acquire.replace(now)
-                && self.acquire_gap_ms.len() < DIAG_LIMIT
-            {
-                self.acquire_gap_ms.push(now.saturating_duration_since(prev).as_secs_f32() * 1000.0);
+            if let Some(prev) = self.last_acquire.replace(now) {
+                push_sample(&mut self.acquire_gap_ms, now.saturating_duration_since(prev));
             }
             for step in 0..count {
                 let index = (self.next_output + step) % count;
@@ -428,7 +398,7 @@ impl SpanCapture {
                     self.trace.iter_add(IterStage::Acquire, took);
                     if self.trace.poll_enabled() {
                         let (outcome, sample) = classify_poll(&call, &info, self.anchor, started + took);
-                        self.trace.poll(u8::try_from(index).unwrap_or(u8::MAX), started, took, outcome, sample);
+                        self.trace.poll(source_id(index), started, took, outcome, sample);
                     }
                 }
                 match call {
@@ -439,7 +409,7 @@ impl SpanCapture {
                     Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT => {}
                     Err(e) if e.code() == DXGI_ERROR_ACCESS_LOST => {
                         self.lost = Some(index);
-                        self.trace.lost(u8::try_from(index).unwrap_or(u8::MAX));
+                        self.trace.lost(source_id(index));
                         return Err(CaptureFault::Lost);
                     }
                     Err(e) => return Err(CaptureFault::Other(format!("显示器 {index} AcquireNextFrame 失败: {e}"))),
@@ -604,6 +574,13 @@ mod tests {
         assert_eq!(left.x as u32 + left.width, right.x as u32);
         assert_eq!(right.x as u32 + right.width, out.0);
         assert_eq!(left.x, 0);
+    }
+
+    /// 来源列：超过 255 的输出序号取饱和值。
+    #[test]
+    fn source_id_saturates() {
+        assert_eq!(source_id(3), 3);
+        assert_eq!(source_id(1000), u8::MAX);
     }
 
     /// 输入流检查：每块一层加光标一层；不够时给出回落文案。

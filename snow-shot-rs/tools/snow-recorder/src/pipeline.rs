@@ -317,12 +317,6 @@ struct CaptureShared {
     coalesced: AtomicU64,
 }
 
-/// 合成线程的返回。
-struct ComposeOutcome {
-    /// 合成线程侧统计。
-    report: PipelineReport,
-}
-
 /// 运行中的流水线（与具体实现无关的句柄）。
 pub struct Running {
     /// 控制通道。
@@ -332,7 +326,7 @@ pub struct Running {
     /// 采集线程（返回诊断样本）。
     capture: Option<JoinHandle<CaptureDiag>>,
     /// 合成线程。
-    compose: Option<JoinHandle<Result<ComposeOutcome, String>>>,
+    compose: Option<JoinHandle<Result<PipelineReport, String>>>,
     /// 编码线程。
     encode: Option<JoinHandle<Result<EncoderStats, String>>>,
     /// 后端名。
@@ -497,7 +491,7 @@ fn wait_until_next_slot<C: CaptureSource, P, S>(c: &ComposeContext<C, P, S>, pau
 }
 
 /// 合成线程主循环。
-fn compose_loop<C, P, S>(mut c: ComposeContext<C, P, S>) -> Result<ComposeOutcome, String>
+fn compose_loop<C, P, S>(mut c: ComposeContext<C, P, S>) -> Result<PipelineReport, String>
 where
     C: CaptureSource,
     P: FrameComposer<Frame = C::Frame, Surface = S>,
@@ -508,6 +502,8 @@ where
     let mut stop_at: Option<Instant> = None;
     let mut canceled = false;
     let mut failure: Option<String> = None;
+    // 每轮复用的采集消息暂存（避免热路径上每轮分配）
+    let mut messages: Vec<CaptureMsg<C::Frame>> = Vec::new();
     'main: loop {
         while let Ok(cmd) = c.control.try_recv() {
             match cmd {
@@ -540,11 +536,11 @@ where
                 break;
             }
         };
-        let mut messages: Vec<CaptureMsg<C::Frame>> = first.into_iter().collect();
+        messages.extend(first);
         while let Ok(m) = c.capture.try_recv() {
             messages.push(m);
         }
-        for message in messages {
+        for message in messages.drain(..) {
             match message {
                 CaptureMsg::Frame(frame) => absorb_frame(&mut c, *frame, paused),
                 CaptureMsg::Fault(e) => {
@@ -602,7 +598,7 @@ where
     }
     let end = end.unwrap_or(1).max(c.last_slot.map_or(1, |l| l + 1));
     c.frames.send(EncodeMsg::Finish(i64::try_from(end).unwrap_or(i64::MAX))).map_err(|_| "编码线程已退出".to_string())?;
-    Ok(ComposeOutcome { report })
+    Ok(report)
 }
 
 /// 吸收一次采集：更新最近帧与光标；有新桌面内容的帧进入待输出队列。
@@ -865,7 +861,7 @@ impl Running {
         let encode = self.encode.take().ok_or("录制已结束")?.join().map_err(|_| "编码线程崩溃".to_string())?;
         // 各线程都已退出，追踪缓冲已并入全局记录（未开启追踪时什么也不做）
         frametrace::finish(self.fps, &self.backend);
-        let mut report = compose?.report;
+        let mut report = compose?;
         let stats = encode?;
         report.encoder_frames = stats.frames;
         report.send_ms = Samples(stats.send_ms);

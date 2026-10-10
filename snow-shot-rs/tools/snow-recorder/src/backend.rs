@@ -151,7 +151,7 @@ pub fn plan_attempts(request: &StartRequest, partial: &std::path::Path, mode: Ha
                     let output = spec.output.clone();
                     match crate::win::assemble::start_hardware(&spec) {
                         Ok(running) => {
-                            let name = running_name(&running);
+                            let name = running.backend_name().to_string();
                             Ok(Box::new(PipelineBackend { running, output, name }) as Box<dyn RecordingBackend>)
                         }
                         Err(e) => {
@@ -171,12 +171,6 @@ pub fn plan_attempts(request: &StartRequest, partial: &std::path::Path, mode: Ha
         Box::new(move || soft::start_software(&request, partial, upstream_gpu)),
     ));
     attempts
-}
-
-/// 取运行中流水线的后端名（流水线自己保存了装配时给的名字）。
-#[cfg(windows)]
-fn running_name(running: &Running) -> String {
-    running.backend_name().to_string()
 }
 
 /// 由请求构造 Windows 硬件装配参数（输出尺寸按产品上限缩放，环境变量可调编码参数）。

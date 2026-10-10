@@ -17,7 +17,7 @@ const SWS_CS_BT709: i32 = 1;
 /// swscale 色彩矩阵编号：ITU-R BT.601（同 `SWS_CS_ITU601`）。
 const SWS_CS_BT601: i32 = 5;
 /// 标注缺失时，高度不小于该值按 BT.709、否则按 BT.601。
-const HD_MIN_HEIGHT: u32 = 720;
+pub(crate) const HD_MIN_HEIGHT: u32 = 720;
 /// swscale 的 16.16 定点单位 1.0。
 const FIXED_ONE: i32 = 1 << 16;
 

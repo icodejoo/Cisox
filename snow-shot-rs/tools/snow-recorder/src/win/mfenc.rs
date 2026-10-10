@@ -25,15 +25,13 @@ use windows::core::{GUID, IUnknown, Interface, PCWSTR, implement};
 use crate::audio::{AudioSink, CHANNELS, SAMPLE_RATE};
 use crate::frametrace::{self, Tracer};
 use crate::pipeline::{EncoderStats, VideoEncoder};
-use crate::win::hwenc::{HwContext, HwResult, STAT_SAMPLE_LIMIT, Surface};
+use crate::win::hwenc::{GOP_SECONDS, HwContext, HwResult, STAT_SAMPLE_LIMIT, Surface};
 
 /// 100ns 时间单位每秒的数量。
 const HNS_PER_SECOND: i64 = 10_000_000;
 /// 平均码率系数：每像素每帧的比特数（1080p60 约 15Mbps）。类桌面合成内容上，0.12 的 PSNR/SSIM 与 NVENC qp24 相当
 /// （45.5dB/0.988），但码率约为其 1.5~1.7 倍；NVENC qp18（47dB）约需 0.24。实测数据见实验台账。
 const BITS_PER_PIXEL: f64 = 0.12;
-/// 关键帧间隔（秒）。
-const GOP_SECONDS: u32 = 2;
 /// 环境变量：MF 恒定质量（1..=100，仅在 MFT 读回确认接受时生效；缺省/其它值用平均码率）。
 /// NVIDIA MFT 不接受，其他厂商未验证，所以默认不开。
 pub const ENV_MF_QUALITY: &str = "SNOW_RECORDER_MF_QUALITY";
@@ -337,12 +335,20 @@ fn init_com() {
     }
 }
 
-/// 读取激活对象的友好名称。
-fn friendly_name(activate: &IMFActivate) -> String {
+/// 路径转 NUL 结尾的 UTF-16（Win32 宽字符串参数用）。
+///
+/// # 参数
+/// - `path`：路径。
+pub(crate) fn wide_path(path: &std::path::Path) -> Vec<u16> {
+    path.to_string_lossy().encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// 读取属性存储（MFT 本体或激活对象）里的友好名称，读不到返回 `(未知)`。
+fn friendly_name(attrs: &IMFAttributes) -> String {
     let mut buf = [0u16; 256];
     let mut len = 0u32;
     // SAFETY: buf 足够大，len 是有效输出指针。
-    match unsafe { activate.GetString(&MFT_FRIENDLY_NAME_Attribute, &mut buf, Some(&mut len)) } {
+    match unsafe { attrs.GetString(&MFT_FRIENDLY_NAME_Attribute, &mut buf, Some(&mut len)) } {
         Ok(()) => String::from_utf16_lossy(&buf[..(len as usize).min(buf.len())]),
         Err(_) => "(未知)".into(),
     }
@@ -410,14 +416,7 @@ pub(crate) fn verify_hardware_transform(writer: &IMFSinkWriter, stream: u32) -> 
         // 硬件 MFT 带 `MFT_ENUM_HARDWARE_URL_Attribute`；微软软件 MFT 没有
         // SAFETY: 只读取属性长度。
         return if unsafe { attrs.GetStringLength(&MFT_ENUM_HARDWARE_URL_Attribute) }.is_ok() {
-            let mut buf = [0u16; 256];
-            let mut len = 0u32;
-            // SAFETY: buf 足够大。
-            let name = match unsafe { attrs.GetString(&MFT_FRIENDLY_NAME_Attribute, &mut buf, Some(&mut len)) } {
-                Ok(()) => String::from_utf16_lossy(&buf[..(len as usize).min(buf.len())]),
-                Err(_) => "(未知)".into(),
-            };
-            Ok((name, transform))
+            Ok((friendly_name(&attrs), transform))
         } else {
             Err("SinkWriter 选中的是软件 H.264 编码 MFT，拒绝使用".into())
         };
@@ -473,7 +472,7 @@ impl MfEncoder {
             attrs.SetUINT32(&MF_SINK_WRITER_DISABLE_THROTTLING, 1).map_err(|e| e.to_string())?;
             attrs.SetUnknown(&MF_SINK_WRITER_D3D_MANAGER, &manager).map_err(|e| e.to_string())?;
 
-            let wide: Vec<u16> = path.to_string_lossy().encode_utf16().chain(std::iter::once(0)).collect();
+            let wide = wide_path(path);
             let writer = MFCreateSinkWriterFromURL(PCWSTR(wide.as_ptr()), None, &attrs).map_err(|e| fail("创建 SinkWriter", e))?;
 
             let common = |media: &IMFMediaType, subtype: &GUID| -> Result<(), String> {
@@ -564,12 +563,12 @@ impl MfEncoder {
             init_com();
             self.com_ready = true;
         }
-        let texture: ID3D11Texture2D = surface.texture().clone();
+        let texture = surface.texture();
         let slice = surface.slice();
         let sent = Instant::now();
         // SAFETY: 纹理有效；表面挂在样本上，样本被释放前纹理不会被复用。
         unsafe {
-            let buffer = MFCreateDXGISurfaceBuffer(&ID3D11Texture2D::IID, &texture, slice, false).map_err(|e| fail("包装 DXGI 缓冲", e))?;
+            let buffer = MFCreateDXGISurfaceBuffer(&ID3D11Texture2D::IID, texture, slice, false).map_err(|e| fail("包装 DXGI 缓冲", e))?;
             buffer.SetCurrentLength(self.frame_bytes).map_err(|e| e.to_string())?;
             let sample = MFCreateSample().map_err(|e| e.to_string())?;
             sample.AddBuffer(&buffer).map_err(|e| e.to_string())?;
@@ -631,6 +630,13 @@ impl VideoEncoder for MfEncoder {
 mod tests {
     use super::*;
 
+    /// 宽字符路径：以 NUL 结尾，非 ASCII 字符按 UTF-16 展开。
+    #[test]
+    fn wide_path_is_nul_terminated_utf16() {
+        assert_eq!(wide_path(std::path::Path::new("a.mp4")), vec![97, 46, 109, 112, 52, 0]);
+        assert_eq!(wide_path(std::path::Path::new("录")), vec![0x5f55, 0]);
+    }
+
     /// 打包：高 32 位在前，低 32 位在后。
     #[test]
     fn pack_pair_puts_high_first() {
@@ -655,7 +661,7 @@ mod tests {
             (|| -> Result<Result<String, String>, String> {
                 MFStartup(MF_VERSION, MFSTARTUP_FULL).map_err(|e| e.to_string())?;
                 let path = std::env::temp_dir().join("snow-mf-soft-check.mp4");
-                let wide: Vec<u16> = path.to_string_lossy().encode_utf16().chain(std::iter::once(0)).collect();
+                let wide = wide_path(&path);
                 let writer = MFCreateSinkWriterFromURL(PCWSTR(wide.as_ptr()), None, None).map_err(|e| e.to_string())?;
                 let media = |subtype: &GUID| -> Result<IMFMediaType, String> {
                     let m = MFCreateMediaType().map_err(|e| e.to_string())?;

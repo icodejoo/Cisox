@@ -283,12 +283,11 @@ pub(crate) fn publish(scratch: &Path, out_dir: &Path) -> Result<(), EditError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::edit::testclip::{self, Clip};
-    use std::sync::atomic::AtomicBool;
+    use crate::edit::testclip::{self, Clip, no_scratch};
 
     /// 构造一个静默的任务控制。
     fn quiet_ctl() -> TaskCtl {
-        TaskCtl::new(Arc::new(AtomicBool::new(false)), Box::new(|_| {}))
+        testclip::quiet_ctl(false)
     }
 
     /// 构造探测信息。
@@ -484,16 +483,7 @@ mod tests {
         .unwrap();
         assert_eq!(n, u64::from(clip.frames.div_ceil(clip.gop)));
         // 中间目录已清理
-        let leftovers = std::fs::read_dir(&dir)
-            .unwrap()
-            .flatten()
-            .filter(|e| {
-                e.file_name()
-                    .to_string_lossy()
-                    .starts_with(".snow-recording-")
-            })
-            .count();
-        assert_eq!(leftovers, 0);
+        assert!(no_scratch(&dir));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -503,8 +493,7 @@ mod tests {
         let dir = testclip::temp_dir("extract-cancel");
         let input = dir.join("in.mp4");
         testclip::make_clip(&input, &Clip::default()).unwrap();
-        let flag = Arc::new(AtomicBool::new(true));
-        let ctl = TaskCtl::new(flag, Box::new(|_| {}));
+        let ctl = testclip::quiet_ctl(true);
         let out = dir.join("out");
         let err = run(
             &ExtractParams {
@@ -519,16 +508,7 @@ mod tests {
         .unwrap_err();
         assert!(err.is_cancelled());
         assert!(!out.exists());
-        let leftovers = std::fs::read_dir(&dir)
-            .unwrap()
-            .flatten()
-            .filter(|e| {
-                e.file_name()
-                    .to_string_lossy()
-                    .starts_with(".snow-recording-")
-            })
-            .count();
-        assert_eq!(leftovers, 0);
+        assert!(no_scratch(&dir));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

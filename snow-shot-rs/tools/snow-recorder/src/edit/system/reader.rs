@@ -13,7 +13,9 @@ use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
 use windows::core::{GUID, Interface, PCWSTR};
 
 use super::{mf_err, mf_init_err};
+use crate::edit::yuv::HD_MIN_HEIGHT;
 use crate::edit::EditError;
+use crate::win::mfenc::wide_path;
 
 /// 每毫秒的 hns 数。
 pub const HNS_PER_MS: i64 = 10_000;
@@ -21,8 +23,6 @@ pub const HNS_PER_MS: i64 = 10_000;
 const FORWARD_LIMIT_MS: i64 = 2000;
 /// 流下标枚举上限，防止异常文件无限循环。
 const MAX_STREAMS: u32 = 64;
-/// 色彩矩阵标注缺失时，高度不小于该值按 BT.709、否则按 BT.601。
-const HD_MIN_HEIGHT: u32 = 720;
 
 /// hns 换算成毫秒（四舍五入）。
 ///
@@ -91,12 +91,7 @@ impl ReadOut {
 /// # 返回
 /// 读取器；打不开返回可回落的错误。
 pub fn open_reader(path: &Path, processing: Processing) -> Result<IMFSourceReader, EditError> {
-    let wide: Vec<u16> = path
-        .as_os_str()
-        .to_string_lossy()
-        .encode_utf16()
-        .chain(Some(0))
-        .collect();
+    let wide = wide_path(path);
     // SAFETY: 局部有效值；wide 以 0 结尾，调用期间存活。
     unsafe {
         let mut attrs = None;

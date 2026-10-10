@@ -58,6 +58,29 @@ impl Default for Clip {
     }
 }
 
+/// 静默的任务控制（不输出进度）。
+///
+/// # 参数
+/// - `cancelled`：为 true 时任务一开始就处于已取消状态。
+pub fn quiet_ctl(cancelled: bool) -> super::TaskCtl {
+    super::TaskCtl::new(
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(cancelled)),
+        Box::new(|_| {}),
+    )
+}
+
+/// 目录里没有残留的 `.snow-recording-*` 中间目录。
+///
+/// # 参数
+/// - `dir`：被检查的目录。
+pub fn no_scratch(dir: &Path) -> bool {
+    std::fs::read_dir(dir).unwrap().flatten().all(|e| {
+        !e.file_name()
+            .to_string_lossy()
+            .starts_with(".snow-recording-")
+    })
+}
+
 /// 在系统临时目录下建一个干净的测试目录。
 ///
 /// # 参数

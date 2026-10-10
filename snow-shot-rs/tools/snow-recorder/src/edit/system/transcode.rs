@@ -8,7 +8,7 @@
 use std::path::Path;
 
 use ffmpeg_next::Rational;
-use snow_recorder_protocol::{EditOp, ProbeInfo, scratch_dir, scratch_file};
+use snow_recorder_protocol::{EditOp, ProbeInfo};
 use windows::Win32::Foundation::RECT;
 use windows::Win32::Media::MediaFoundation::*;
 use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance};
@@ -19,8 +19,10 @@ use super::reader::{
 };
 use super::{MfSession, mf_err, mf_init_err};
 use crate::edit::transcode::{FpsGrid, Target, plan_target};
-use crate::edit::{EditError, TaskCtl};
-use crate::win::mfenc::{configured_bpp, pack_pair, target_bitrate, verify_hardware_transform};
+use crate::edit::{EditError, TaskCtl, run_via_scratch};
+use crate::win::mfenc::{
+    configured_bpp, pack_pair, target_bitrate, verify_hardware_transform, wide_path,
+};
 
 /// 进度阶段名。
 const STAGE_TRANSCODE: &str = "transcode";
@@ -45,17 +47,7 @@ const HNS_TIME_BASE: Rational = Rational(1, 10_000_000);
 /// # 返回
 /// 写出的视频帧数；取消返回 `cancelled`。失败或取消时不留下中间文件。
 pub fn run(input: &Path, output: &Path, op: EditOp, ctl: &TaskCtl) -> Result<u64, EditError> {
-    let pid = std::process::id();
-    let dir = scratch_dir(output, pid);
-    std::fs::create_dir_all(&dir).map_err(|e| EditError::new(format!("创建中间目录失败: {e}")))?;
-    let tmp = scratch_file(output, pid);
-    let result = transcode_to(input, &tmp, op, ctl).and_then(|n| {
-        std::fs::rename(&tmp, output)
-            .map_err(|e| EditError::new(format!("移动输出文件失败: {e}")))?;
-        Ok(n)
-    });
-    let _ = std::fs::remove_dir_all(&dir);
-    result
+    run_via_scratch(output, |tmp| transcode_to(input, tmp, op, ctl))
 }
 
 /// 给媒体类型补齐色彩标注（缺失的按限幅 BT.709 填，与录制侧一致）。
@@ -79,12 +71,7 @@ fn ensure_color(media: &IMFMediaType) -> Result<(), EditError> {
 
 /// 创建 SinkWriter（硬件变换开；节流保持默认开启，离线转码要靠它限制输入积压的内存）。
 fn open_writer(path: &Path) -> Result<IMFSinkWriter, EditError> {
-    let wide: Vec<u16> = path
-        .as_os_str()
-        .to_string_lossy()
-        .encode_utf16()
-        .chain(Some(0))
-        .collect();
+    let wide = wide_path(path);
     // SAFETY: 局部有效值；wide 以 0 结尾，调用期间存活。
     unsafe {
         let mut attrs = None;
@@ -401,6 +388,10 @@ fn transcode_to(input: &Path, tmp: &Path, op: EditOp, ctl: &TaskCtl) -> Result<u
     let mut grid = target.fps.map(|f| FpsGrid::new(f, HNS_TIME_BASE));
     let frame_hns = HNS_PER_SECOND * i64::from(rate_den) / i64::from(rate_num);
     let total = info.frames;
+    // 进度上报：消费数封顶到 total - 1，完成那一次由收尾单独发
+    let report = |consumed: u64| {
+        ctl.report(consumed.min(total.saturating_sub(1)), total, STAGE_TRANSCODE);
+    };
     let (mut consumed, mut written) = (0u64, 0u64);
     let mut base: Option<i64> = None;
     let (mut video_done, mut audio_done) = (false, pipe.streams.audio.is_none());
@@ -448,11 +439,7 @@ fn transcode_to(input: &Path, tmp: &Path, op: EditOp, ctl: &TaskCtl) -> Result<u
                     Some(g) => match g.pick(rel + HNS_ROUNDING) {
                         Some(slot) => (slot * HNS_PER_SECOND / i64::from(rate_num), frame_hns),
                         None => {
-                            ctl.report(
-                                consumed.min(total.saturating_sub(1)),
-                                total,
-                                STAGE_TRANSCODE,
-                            );
+                            report(consumed);
                             continue;
                         }
                     },
@@ -468,11 +455,7 @@ fn transcode_to(input: &Path, tmp: &Path, op: EditOp, ctl: &TaskCtl) -> Result<u
                     .WriteSample(pipe.out_video, &sample)
                     .map_err(|e| mf_err("写入视频样本失败", e))?;
                 written += 1;
-                ctl.report(
-                    consumed.min(total.saturating_sub(1)),
-                    total,
-                    STAGE_TRANSCODE,
-                );
+                report(consumed);
             } else if let Some(idx) = pipe.out_audio {
                 let time = (out.time - base.unwrap_or(0)).max(0);
                 sample

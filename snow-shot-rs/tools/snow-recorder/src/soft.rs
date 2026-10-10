@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 
 use snow_recorder_protocol::StartRequest;
-use snow_screen_recorder::{DirectRecordingSession, ScreenRecorderError};
+use snow_screen_recorder::DirectRecordingSession;
 
 use crate::backend::{BackendReport, RecordingBackend};
 use crate::{plan, settings};
@@ -21,11 +21,6 @@ const ENV_ASYNC: &str = "SNOW_RECORDER_ASYNC";
 const DEFAULT_CONV_THREADS: u8 = 2;
 /// 默认是否异步编码。
 const DEFAULT_ASYNC: bool = true;
-
-/// 把上游错误转成单行原因文本。
-fn describe(error: &ScreenRecorderError) -> String {
-    format!("{error}")
-}
 
 /// 解析软编调优：`(转换线程数, 是否异步编码)`。
 ///
@@ -52,11 +47,11 @@ pub fn resolve_tuning(upstream_gpu: bool, conv: Option<&str>, asynchronous: Opti
 fn tune_session(session: &mut DirectRecordingSession, upstream_gpu: bool) -> Result<(), String> {
     let (threads, asynchronous) = resolve_tuning(upstream_gpu, std::env::var(ENV_CONV_THREADS).ok().as_deref(), std::env::var(ENV_ASYNC).ok().as_deref());
     if let Some(n) = std::env::var(ENV_ENCODE_THREADS).ok().and_then(|v| v.parse::<u8>().ok()).filter(|n| (1..=16).contains(n)) {
-        session.set_encode_threads(n).map_err(|e| describe(&e))?;
+        session.set_encode_threads(n).map_err(|e| e.to_string())?;
     }
-    session.set_bench_encoding(threads, false).map_err(|e| describe(&e))?;
-    session.set_bench_async_encoding(asynchronous).map_err(|e| describe(&e))?;
-    session.set_bench_automatic_policies(true).map_err(|e| describe(&e))
+    session.set_bench_encoding(threads, false).map_err(|e| e.to_string())?;
+    session.set_bench_async_encoding(asynchronous).map_err(|e| e.to_string())?;
+    session.set_bench_automatic_policies(true).map_err(|e| e.to_string())
 }
 
 /// 上游会话适配器。
@@ -75,17 +70,17 @@ impl RecordingBackend for SoftBackend {
 
     /// 暂停。
     fn pause(&self) -> Result<(), String> {
-        self.session.pause().map_err(|e| describe(&e))
+        self.session.pause().map_err(|e| e.to_string())
     }
 
     /// 恢复。
     fn resume(&self) -> Result<(), String> {
-        self.session.resume().map_err(|e| describe(&e))
+        self.session.resume().map_err(|e| e.to_string())
     }
 
     /// 停止并收尾。
     fn stop(self: Box<Self>) -> Result<BackendReport, String> {
-        let report = self.session.stop().map_err(|e| describe(&e))?;
+        let report = self.session.stop().map_err(|e| e.to_string())?;
         Ok(BackendReport {
             frames: report.encoded_frames,
             dropped: report.dropped_capture_frames,
@@ -114,9 +109,9 @@ pub fn start_software(request: &StartRequest, partial: PathBuf, upstream_gpu: bo
         config.preset = p;
     }
     config.validate()?;
-    let mut session = DirectRecordingSession::create(config).map_err(|e| describe(&e))?;
+    let mut session = DirectRecordingSession::create(config).map_err(|e| e.to_string())?;
     tune_session(&mut session, upstream_gpu)?;
-    session.start().map_err(|e| describe(&e))?;
+    session.start().map_err(|e| e.to_string())?;
     Ok(Box::new(SoftBackend { session, name: if upstream_gpu { "upstream-gpu" } else { "software-x264" } }))
 }
 

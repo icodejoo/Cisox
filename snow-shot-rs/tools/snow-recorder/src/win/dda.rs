@@ -21,7 +21,8 @@ use windows::Win32::Graphics::Direct3D11::*;
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO, DXGI_SHARED_RESOURCE_READ,
-    DXGI_SHARED_RESOURCE_WRITE, IDXGIAdapter, IDXGIAdapter1, IDXGIFactory1, IDXGIOutput, IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource, IDXGIResource1,
+    DXGI_SHARED_RESOURCE_WRITE, IDXGIAdapter, IDXGIAdapter1, IDXGIDevice, IDXGIFactory1, IDXGIOutput, IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource,
+    IDXGIResource1,
 };
 use windows::core::{Interface, PCWSTR};
 
@@ -102,6 +103,14 @@ impl GpuFrame {
     pub fn single(slot: Arc<SharedSlot>) -> Self {
         Self { slot, tiles: None }
     }
+
+    /// 帧涉及的全部共享槽：跨屏时按块顺序逐个给出，单屏只有 `slot` 一个（不分配内存）。
+    ///
+    /// # 返回
+    /// 槽的引用迭代器，顺序即栅栏等待/Signal 的顺序。
+    pub fn slots(&self) -> impl Iterator<Item = &Arc<SharedSlot>> {
+        self.tiles.iter().flat_map(|tiles| tiles.iter().map(|tile| &tile.slot)).chain(self.tiles.is_none().then_some(&self.slot))
+    }
 }
 
 /// 采集使用的设备对：A 给采集，B 给合成与编码。
@@ -176,9 +185,105 @@ pub(crate) fn env_priority(name: &str) -> Option<i32> {
 
 /// 设置设备的 GPU 线程优先级；失败忽略（只是少一层保护）。
 pub(crate) fn set_gpu_priority(device: &SharedDevice, priority: i32) {
-    if let Ok(dxgi) = device.device().cast::<windows::Win32::Graphics::Dxgi::IDXGIDevice>() {
+    if let Ok(dxgi) = device.device().cast::<IDXGIDevice>() {
         // SAFETY: 只设置设备的调度优先级。
         let _ = unsafe { dxgi.SetGPUThreadPriority(priority) };
+    }
+}
+
+/// 按环境变量给合成设备与采集设备设置 GPU 线程优先级（合成缺省最低，采集缺省不设置）。
+///
+/// # 参数
+/// - `compose`：合成与编码设备 B。
+/// - `capture`：采集设备 A。
+pub(crate) fn configure_gpu_priorities(compose: &SharedDevice, capture: &SharedDevice) {
+    set_gpu_priority(compose, env_priority(ENV_COMPOSE_GPU_PRIORITY).unwrap_or(COMPOSE_GPU_PRIORITY));
+    if let Some(priority) = env_priority(ENV_CAPTURE_GPU_PRIORITY) {
+        set_gpu_priority(capture, priority);
+    }
+}
+
+/// 把设备上已记录的命令提交给 GPU；`timed` 为真时返回等设备锁的耗时，否则不读时钟、返回零。
+pub(crate) fn flush_device(device: &SharedDevice, timed: bool) -> Duration {
+    let lock_started = timed.then(Instant::now);
+    let _lock = device.lock();
+    let waited = lock_started.map_or(Duration::ZERO, |s| s.elapsed());
+    // SAFETY: 持有设备锁；Flush 只提交已记录的命令。
+    unsafe { device.context().Flush() };
+    waited
+}
+
+/// 在池里找一个只剩池自己持有的槽（所有帧持有者都已释放）。
+///
+/// # 参数
+/// - `pool`：槽池。
+///
+/// # 返回
+/// 空闲槽的克隆；池满返回 `None`（调用方丢帧）。
+///
+/// # 示例
+/// ```ignore
+/// let slot = free_slot(&pool).ok_or("池满")?;
+/// ```
+pub(crate) fn free_slot<T>(pool: &[Arc<T>]) -> Option<Arc<T>> {
+    pool.iter().find(|s| Arc::strong_count(s) == 1).cloned()
+}
+
+/// 把呈现时间戳换算成 `Instant`（无锚点取 `captured_at`），且不晚于 `captured_at`。
+///
+/// # 参数
+/// - `anchor`：QPC 锚点。
+/// - `last_present`：DXGI 帧信息里的 `LastPresentTime`。
+/// - `captured_at`：取到帧的时刻。
+pub(crate) fn present_time(anchor: Option<QpcAnchor>, last_present: i64, captured_at: Instant) -> Instant {
+    anchor.map_or(captured_at, |a| a.to_instant(last_present).min(captured_at))
+}
+
+/// 往诊断样本里追加一条耗时（毫秒）；已达 [`DIAG_LIMIT`] 则丢弃，避免长录制无限增长。
+///
+/// # 参数
+/// - `samples`：样本缓冲。
+/// - `elapsed`：耗时。
+pub(crate) fn push_sample(samples: &mut Vec<f32>, elapsed: Duration) {
+    if samples.len() < DIAG_LIMIT {
+        samples.push(elapsed.as_secs_f32() * 1000.0);
+    }
+}
+
+/// 光标跟踪：采样系统光标并投影到选区坐标，补全 `Cached` 形状（单屏与跨屏采集共用）。
+pub(crate) struct CursorTracker {
+    /// 光标采样器。
+    sampler: CursorSampler,
+    /// 光标投影器。
+    projector: CursorProjector,
+    /// 最近见过的光标形状（`Cached` 状态补全用）。
+    retained_shape: Option<CursorShape>,
+}
+
+impl CursorTracker {
+    /// 创建跟踪器；系统光标采样器不可用返回原因。
+    pub(crate) fn new() -> Result<Self, String> {
+        Ok(Self { sampler: CursorSampler::new().map_err(|e| format!("光标采样器不可用: {e}"))?, projector: CursorProjector::new(), retained_shape: None })
+    }
+
+    /// 采样并投影当前光标。
+    ///
+    /// # 参数
+    /// - `region`：选区 `(x, y, 宽, 高)`（虚拟桌面坐标）。
+    ///
+    /// # 返回
+    /// 选区坐标下的光标；采样失败返回 `None`。
+    pub(crate) fn sample(&mut self, region: (i32, i32, u32, u32)) -> Option<AttachedCursorSample> {
+        let snapshot = self.sampler.sample().ok()?;
+        if let Some(shape) = snapshot.shape.shape() {
+            self.retained_shape = Some(shape.clone());
+        }
+        let target = CursorTargetInfo { origin_x: region.0, origin_y: region.1, width: region.2, height: region.3 };
+        let mut cursor = self.projector.project(&target, snapshot);
+        if let Some(shape) = self.retained_shape.as_ref().filter(|s| cursor.shape.shape_id() == Some(s.shape_id)) {
+            cursor.shape = CursorShapeState::Embedded(shape.clone());
+        }
+        Some(cursor)
     }
 }
 
@@ -257,12 +362,8 @@ pub struct DdaCapture {
     region: (i32, i32, u32, u32),
     /// 选区在显示器内的裁剪框。
     crop: D3D11_BOX,
-    /// 光标采样器。
-    sampler: CursorSampler,
-    /// 光标投影器。
-    projector: CursorProjector,
-    /// 最近见过的光标形状（`Cached` 状态补全用）。
-    retained_shape: Option<CursorShape>,
+    /// 光标跟踪。
+    cursor: CursorTracker,
     /// 最近一张带桌面内容的帧（光标单独移动时复用）。
     latest: Option<Captured<GpuFrame>>,
     /// QPC 锚点（换算呈现时间）。
@@ -288,7 +389,7 @@ impl DdaCapture {
     pub fn enable_wgc(&mut self) -> Result<(), String> {
         // SAFETY: 只读取输出描述。
         let monitor = unsafe { self.output.GetDesc() }.map_err(|e| e.to_string())?.Monitor;
-        let dxgi: windows::Win32::Graphics::Dxgi::IDXGIDevice = self.device.device().cast().map_err(|e| e.to_string())?;
+        let dxgi: IDXGIDevice = self.device.device().cast().map_err(|e| e.to_string())?;
         self.wgc = Some(crate::win::wgc::WgcSource::start(&dxgi, monitor)?);
         Ok(())
     }
@@ -300,16 +401,14 @@ impl DdaCapture {
         if !want {
             return Ok(None);
         }
-        let Some(slot) = self.slots.iter().find(|s| Arc::strong_count(s) == 1).cloned() else {
+        let Some(slot) = free_slot(&self.slots) else {
             self.stats.pool_drops += 1;
             return Ok(None);
         };
         let copy_started = Instant::now();
         self.copy_into(&slot, &source, false)?;
-        if self.copy_ms.len() < DIAG_LIMIT {
-            self.copy_ms.push(copy_started.elapsed().as_secs_f32() * 1000.0);
-        }
-        self.flush(false);
+        push_sample(&mut self.copy_ms, copy_started.elapsed());
+        flush_device(&self.device, false);
         // 复制命令已提交，帧可以归还帧池（GPU 侧顺序由驱动保证）
         drop(frame);
         let cursor = self.sample_cursor();
@@ -379,10 +478,7 @@ impl DdaCapture {
             compose,
         };
         let output1: IDXGIOutput1 = output.cast().map_err(|e| format!("显示器不支持桌面复制: {e}"))?;
-        set_gpu_priority(&pair.compose, env_priority(ENV_COMPOSE_GPU_PRIORITY).unwrap_or(COMPOSE_GPU_PRIORITY));
-        if let Some(priority) = env_priority(ENV_CAPTURE_GPU_PRIORITY) {
-            set_gpu_priority(&pair.capture, priority);
-        }
+        configure_gpu_priorities(&pair.compose, &pair.capture);
         let capture = Self::build(pair.capture, &pair.compose, output1, region, origin, anchor)?;
         Ok((capture, pair.compose))
     }
@@ -410,9 +506,7 @@ impl DdaCapture {
             slots,
             region,
             crop: D3D11_BOX { left, top, front: 0, right: left + region.2, bottom: top + region.3, back: 1 },
-            sampler: CursorSampler::new().map_err(|e| format!("光标采样器不可用: {e}"))?,
-            projector: CursorProjector::new(),
-            retained_shape: None,
+            cursor: CursorTracker::new()?,
             latest: None,
             anchor,
             stats: CaptureStats::default(),
@@ -427,34 +521,12 @@ impl DdaCapture {
 
     /// 采样并投影当前光标（失败返回 `None`）。
     fn sample_cursor(&mut self) -> Option<AttachedCursorSample> {
-        let snapshot = self.sampler.sample().ok()?;
-        if let Some(shape) = snapshot.shape.shape() {
-            self.retained_shape = Some(shape.clone());
-        }
-        let target = CursorTargetInfo { origin_x: self.region.0, origin_y: self.region.1, width: self.region.2, height: self.region.3 };
-        let mut cursor = self.projector.project(&target, snapshot);
-        if let Some(shape) = self.retained_shape.as_ref().filter(|s| cursor.shape.shape_id() == Some(s.shape_id)) {
-            cursor.shape = CursorShapeState::Embedded(shape.clone());
-        }
-        Some(cursor)
+        self.cursor.sample(self.region)
     }
 
     /// DXGI 呈现时刻换算成 `Instant`（只在追踪开启时用，口径与取帧路径一致）。
     fn present_instant(&self, info: &DXGI_OUTDUPL_FRAME_INFO, captured_at: Instant) -> Instant {
-        match self.anchor {
-            Some(a) => a.to_instant(info.LastPresentTime).min(captured_at),
-            None => captured_at,
-        }
-    }
-
-    /// 把设备 A 上已记录的命令提交给 GPU；`timed` 为真时返回等设备锁的耗时，否则不读时钟、返回零。
-    fn flush(&self, timed: bool) -> Duration {
-        let lock_started = timed.then(Instant::now);
-        let _lock = self.device.lock();
-        let waited = lock_started.map_or(Duration::ZERO, |s| s.elapsed());
-        // SAFETY: 持有设备锁；Flush 只提交已记录的命令。
-        unsafe { self.device.context().Flush() };
-        waited
+        present_time(self.anchor, info.LastPresentTime, captured_at)
     }
 
     /// 在设备 A 上把桌面选区复制进共享槽；`timed` 含义同 [`copy_into_slot`]。
@@ -554,10 +626,8 @@ impl DdaCapture {
         loop {
             let now = Instant::now();
             self.trace.iter_begin(now, 0);
-            if let Some(prev) = self.last_acquire.replace(now)
-                && self.acquire_gap_ms.len() < DIAG_LIMIT
-            {
-                self.acquire_gap_ms.push(now.saturating_duration_since(prev).as_secs_f32() * 1000.0);
+            if let Some(prev) = self.last_acquire.replace(now) {
+                push_sample(&mut self.acquire_gap_ms, now.saturating_duration_since(prev));
             }
             // SAFETY: 输出指针指向局部变量。
             let call = unsafe { self.duplication.AcquireNextFrame(0, &mut info, &mut resource) };
@@ -568,8 +638,8 @@ impl DdaCapture {
                 self.trace.poll(0, now, took_dur, outcome, sample);
             }
             let took = took_dur.as_secs_f32() * 1000.0;
-            if took > 1.0 && self.slow_acquire_ms.len() < DIAG_LIMIT {
-                self.slow_acquire_ms.push(took);
+            if took > 1.0 {
+                push_sample(&mut self.slow_acquire_ms, took_dur);
             }
             match call {
                 Ok(()) => break,
@@ -613,7 +683,7 @@ impl DdaCapture {
             return Err(CaptureFault::Other(format!("桌面格式 {:?} 不是 BGRA8（HDR 走软件路径）", desc.Format)));
         }
         let copy_started = Instant::now();
-        let Some(slot) = self.slots.iter().find(|s| Arc::strong_count(s) == 1).cloned() else {
+        let Some(slot) = free_slot(&self.slots) else {
             self.stats.pool_drops += 1;
             if self.trace.enabled() {
                 let present = self.present_instant(&info, captured_at);
@@ -624,9 +694,7 @@ impl DdaCapture {
         };
         let traced = self.trace.enabled();
         let lock_wait = self.copy_into(&slot, &source, traced)?;
-        if self.copy_ms.len() < DIAG_LIMIT {
-            self.copy_ms.push(copy_started.elapsed().as_secs_f32() * 1000.0);
-        }
+        push_sample(&mut self.copy_ms, copy_started.elapsed());
         if traced {
             self.trace.iter_add(IterStage::Copy, copy_started.elapsed());
             self.trace.iter_add(IterStage::Lock, lock_wait);
@@ -634,15 +702,12 @@ impl DdaCapture {
         // 复制一记录完就立刻释放桌面帧（持有越久，下一次呈现越容易被 DXGI 合并），光标采样与 Flush 都放到释放之后
         self.release_frame(guard);
         let flush_started = self.trace.mark();
-        let flush_wait = self.flush(traced);
+        let flush_wait = flush_device(&self.device, traced);
         self.trace.iter_since(IterStage::Copy, flush_started);
         self.trace.iter_add(IterStage::Lock, flush_wait);
         let cursor = self.sample_cursor();
-        let present = match self.anchor {
-            Some(a) => a.to_instant(info.LastPresentTime),
-            None => captured_at,
-        };
-        let captured = Captured { frame: GpuFrame::single(slot), cursor, present: present.min(captured_at), captured_at, fresh: true, id: self.stats.frames + 1 };
+        let present = present_time(self.anchor, info.LastPresentTime, captured_at);
+        let captured = Captured { frame: GpuFrame::single(slot), cursor, present, captured_at, fresh: true, id: self.stats.frames + 1 };
         self.trace.acquire(0, captured_at, Some(captured.present), info.AccumulatedFrames, captured.id, code::ACQ_FRESH);
         self.stats.frames += 1;
         self.latest = Some(captured.clone());
@@ -691,6 +756,36 @@ mod tests {
     use crate::geom::Rect;
     use crate::win::vp::{VideoBlitter, VpLayer};
     use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_NV12;
+
+    /// 空闲槽查找：只剩池自己持有的才算空闲；全被占用返回 `None`。
+    #[test]
+    fn free_slot_skips_held_entries() {
+        let pool = vec![Arc::new(1u8), Arc::new(2u8)];
+        let held = Arc::clone(&pool[0]);
+        assert_eq!(free_slot(&pool).as_deref(), Some(&2));
+        let held2 = Arc::clone(&pool[1]);
+        assert!(free_slot(&pool).is_none());
+        drop((held, held2));
+        assert_eq!(free_slot(&pool).as_deref(), Some(&1));
+    }
+
+    /// 诊断样本：毫秒换算正确，达到上限后不再增长。
+    #[test]
+    fn push_sample_converts_and_caps() {
+        let mut v = Vec::new();
+        push_sample(&mut v, Duration::from_micros(2500));
+        assert!((v[0] - 2.5).abs() < 1e-3);
+        v.resize(DIAG_LIMIT, 0.0);
+        push_sample(&mut v, Duration::from_millis(1));
+        assert_eq!(v.len(), DIAG_LIMIT);
+    }
+
+    /// 呈现时间：无锚点取取帧时刻。
+    #[test]
+    fn present_time_without_anchor_is_capture_time() {
+        let now = Instant::now();
+        assert_eq!(present_time(None, 123, now), now);
+    }
 
     /// 选区必须完整落在显示器内。
     #[test]

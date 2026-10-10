@@ -17,7 +17,7 @@ use snow_audio_recorder::{
 };
 use snow_recorder_protocol::{AUDIO_VOLUME_DEFAULT, AudioRequest, AudioSource, AudioStatus, Event};
 
-use crate::timeline::Timeline;
+use crate::timeline::{NANOS_PER_SEC, Timeline};
 
 /// 采样率（Hz）。
 pub const SAMPLE_RATE: u32 = 48_000;
@@ -80,7 +80,7 @@ fn lane(source: AudioSource) -> usize {
 
 /// 时长换算成 48k 帧数（向下取整）。
 pub fn frames_from_duration(duration: Duration) -> u64 {
-    u64::try_from(duration.as_nanos() * u128::from(SAMPLE_RATE) / 1_000_000_000).unwrap_or(u64::MAX)
+    u64::try_from(duration.as_nanos() * u128::from(SAMPLE_RATE) / u128::from(NANOS_PER_SEC)).unwrap_or(u64::MAX)
 }
 
 /// 单声道上混为交错立体声（左右相同），追加到 `out`。

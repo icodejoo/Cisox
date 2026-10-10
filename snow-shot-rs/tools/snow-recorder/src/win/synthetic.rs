@@ -23,6 +23,8 @@ use crate::win::dda::{GpuFrame, SharedSlot, copy_into_slot, create_device_pair, 
 const SLOTS: usize = 10;
 /// 噪声内容的变体数（轮流复制，避免被缓存优化掉）。
 const VARIANTS: usize = 4;
+/// 环境变量：画质对照时保留参考像素与成品的目录。
+const ENV_SYNTH_KEEP: &str = "SNOW_RECORDER_SYNTH_KEEP";
 
 /// 合成采集源：按固定节拍产出"呈现时间恰好等距"的帧。
 pub struct SyntheticCapture {
@@ -131,7 +133,7 @@ impl SyntheticCapture {
                 noise((size.0 * size.1 * 4) as usize, 0x9E37_79B9_7F4A_7C15 ^ (i as u64 + 1))
             };
             // 画质对照用：把各变体原始像素按序追加到参考文件（ffmpeg 据此重建参考序列）
-            if let Ok(dir) = std::env::var("SNOW_RECORDER_SYNTH_KEEP") {
+            if let Ok(dir) = std::env::var(ENV_SYNTH_KEEP) {
                 use std::io::Write;
                 let path = std::path::Path::new(&dir).join(format!("ref-{}x{}.bgra", size.0, size.1));
                 let mut file = std::fs::OpenOptions::new().create(true).append(i > 0).write(true).truncate(i == 0).open(path).map_err(|e| e.to_string())?;
@@ -284,7 +286,7 @@ mod tests {
         let codec = select_encoder(&adapter, preference)?;
         let capture = SyntheticCapture::new(a, &b, size, fps, cursor)?;
         let use_mf = std::env::var("SNOW_RECORDER_SYNTH_ENCODER").as_deref() == Ok("mf");
-        let keep = std::env::var("SNOW_RECORDER_SYNTH_KEEP").ok();
+        let keep = std::env::var(ENV_SYNTH_KEEP).ok();
         let hw = Arc::new(if use_mf {
             HwContext::with_align(b.clone(), out, MF_POOL_CAPACITY, codec, 2, false)?
         } else {

@@ -15,7 +15,7 @@ use snow_screen_recorder::{
 /// 环境变量：覆盖 x264 预设（ultrafast 到 placebo，与协议 `preset` 令牌同一套名字）。
 pub const ENV_PRESET: &str = "SNOW_RECORDER_PRESET";
 
-/// 解析预设名；未知或空返回 `None`（沿用默认 VeryFast）。
+/// 解析预设名；未知或空返回 `None`（沿用默认 SuperFast）。
 ///
 /// # 参数
 /// - `text`：预设名。
