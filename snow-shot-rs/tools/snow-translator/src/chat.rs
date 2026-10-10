@@ -16,8 +16,8 @@ use ort::value::{DynValue, Tensor, TensorElementType, ValueType};
 use tokenizers::Tokenizer;
 
 use crate::engine::{
-    DEFAULT_MAX_NEW_TOKENS, EngineError, TranslateOptions, build_session, decode_err, empty_kv,
-    init_runtime, json_i64, kv_dims, load_tokenizer, read_json_opt,
+    DEFAULT_MAX_NEW_TOKENS, EngineError, TranslateOptions, build_session, decode_err,
+    fill_empty_past, init_runtime, json_i64, kv_dims, load_tokenizer, read_json_opt,
 };
 use crate::manifest::{
     FILE_MODEL, FILE_TOKENIZER, HUNYUAN_DEFAULT_REPETITION_PENALTY, Manifest, PromptSpec,
@@ -303,12 +303,13 @@ struct ChatSession {
 impl ChatSession {
     /// 把 KV 重置为序列维 0 的空张量（新一轮生成）。
     fn reset_past(&mut self) -> Result<(), EngineError> {
-        self.past.clear();
-        for _ in &self.past_names {
-            self.past
-                .push(empty_kv(1, self.kv_heads, self.kv_head_dim).map_err(|e| decode_err(&e))?);
-        }
-        Ok(())
+        fill_empty_past(
+            &mut self.past,
+            self.past_names.len(),
+            1,
+            self.kv_heads,
+            self.kv_head_dim,
+        )
     }
 }
 

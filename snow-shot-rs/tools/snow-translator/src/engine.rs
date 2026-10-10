@@ -17,7 +17,9 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use ort::ep;
-use ort::session::{RunOptions, Session, SessionInputValue, builder::GraphOptimizationLevel};
+use ort::session::{
+    RunOptions, Session, SessionInputValue, SessionOutputs, builder::GraphOptimizationLevel,
+};
 use ort::value::{DynValue, Tensor, TensorRef, ValueType};
 use serde_json::Value;
 use tokenizers::Tokenizer;
@@ -638,6 +640,110 @@ pub(crate) fn decode_err(e: &dyn fmt::Display) -> EngineError {
 /// 解码器一次运行的输入表（名字 + 张量，借用或持有）。
 type DecoderInputs<'a> = Vec<(Cow<'a, str>, SessionInputValue<'a>)>;
 
+/// 编码器侧的借用视图：解码循环里每步不变的 mask 与隐层。
+struct EncoderView<'a> {
+    /// 交叉注意力 mask，`[rows, src_len]` 全 1。
+    mask: &'a [i64],
+    /// 展平的编码器隐层，`[rows, src_len, hidden_dim]`。
+    hidden: &'a [f32],
+    /// batch 行数（贪心 1，束搜索为束宽）。
+    rows: usize,
+    /// 源序列长度。
+    src_len: usize,
+    /// 隐层维度。
+    hidden_dim: usize,
+}
+
+/// 把 `past` 清空并重新填成 `count` 个序列维为 0 的空 KV 张量。
+pub(crate) fn fill_empty_past(
+    past: &mut Vec<DynValue>,
+    count: usize,
+    batch: usize,
+    heads: usize,
+    head_dim: usize,
+) -> Result<(), EngineError> {
+    past.clear();
+    past.reserve(count);
+    for _ in 0..count {
+        past.push(empty_kv(batch, heads, head_dim).map_err(|e| decode_err(&e))?);
+    }
+    Ok(())
+}
+
+/// 组装一步解码器输入：当前 token、交叉注意力 mask/隐层（借用）、cache 开关与全部 past。
+fn decoder_inputs<'a>(
+    cur: &[i64],
+    enc: &EncoderView<'a>,
+    use_cache: bool,
+    past_names: &'a [String],
+    past: &'a [DynValue],
+) -> Result<DecoderInputs<'a>, EngineError> {
+    let cur_ids =
+        Tensor::from_array(([enc.rows, 1usize], cur.to_vec())).map_err(|e| decode_err(&e))?;
+    let enc_mask = TensorRef::from_array_view(([enc.rows, enc.src_len], enc.mask))
+        .map_err(|e| decode_err(&e))?;
+    let flag = Tensor::from_array(([1usize], vec![use_cache])).map_err(|e| decode_err(&e))?;
+    let hidden_view =
+        TensorRef::from_array_view(([enc.rows, enc.src_len, enc.hidden_dim], enc.hidden))
+            .map_err(|e| decode_err(&e))?;
+    let mut inputs: DecoderInputs<'a> = vec![
+        ("input_ids".into(), cur_ids.into()),
+        ("encoder_attention_mask".into(), enc_mask.into()),
+        ("encoder_hidden_states".into(), hidden_view.into()),
+        ("use_cache_branch".into(), flag.into()),
+    ];
+    for (name, value) in past_names.iter().zip(past.iter()) {
+        inputs.push((name.as_str().into(), value.into()));
+    }
+    Ok(inputs)
+}
+
+/// 取 `logits` 输出：校验非空且至少含 `rows` 行，返回整块数据与词表大小。
+fn step_logits<'o>(
+    outputs: &'o SessionOutputs<'_>,
+    rows: usize,
+) -> Result<(&'o [f32], usize), EngineError> {
+    let (shape, logits) = outputs["logits"]
+        .try_extract_tensor::<f32>()
+        .map_err(|e| decode_err(&e))?;
+    let vocab = *shape.last().unwrap_or(&0) as usize;
+    if vocab == 0 || logits.len() < vocab * rows {
+        return Err(EngineError::new(
+            ErrorKind::DecodeFailed,
+            "decoder returned empty logits",
+        ));
+    }
+    Ok((logits, vocab))
+}
+
+/// 把本步 `present.*` 搬回 `past`：交叉注意力 KV 只在首步采用；
+/// 自注意力 KV 直接采用，`reorder` 给出父束下标时先按其重排 batch 维。
+fn store_present(
+    past_names: &[String],
+    past: &mut [DynValue],
+    outputs: &mut SessionOutputs<'_>,
+    step: usize,
+    reorder: Option<&[usize]>,
+) -> Result<(), EngineError> {
+    for (name, slot) in past_names.iter().zip(past.iter_mut()) {
+        let present = name.replacen("past_key_values.", "present.", 1);
+        let Some(v) = outputs.remove(&present) else {
+            continue;
+        };
+        if name.contains(".encoder.") {
+            if step == 0 {
+                *slot = v;
+            }
+            continue;
+        }
+        *slot = match reorder {
+            None => v,
+            Some(parents) => reorder_kv(&v, parents).map_err(|m| decode_err(&m))?,
+        };
+    }
+    Ok(())
+}
+
 impl Engine {
     /// 加载模型并做自检。
     ///
@@ -991,13 +1097,21 @@ impl Engine {
         drop(hidden1);
         let mask = vec![1i64; src_len * width];
 
-        let mut past: Vec<DynValue> = Vec::with_capacity(self.past_names.len());
-        for _ in &self.past_names {
-            past.push(
-                empty_kv(width, self.kv_heads as usize, self.kv_head_dim as usize)
-                    .map_err(|e| decode_err(&e))?,
-            );
-        }
+        let mut past: Vec<DynValue> = Vec::new();
+        fill_empty_past(
+            &mut past,
+            self.past_names.len(),
+            width,
+            self.kv_heads as usize,
+            self.kv_head_dim as usize,
+        )?;
+        let enc = EncoderView {
+            mask: &mask,
+            hidden: &hidden,
+            rows: width,
+            src_len,
+            hidden_dim,
+        };
 
         let gp = &self.gen_params;
         let forced = self.m2m.as_ref().map(|c| c.forced_first);
@@ -1012,24 +1126,7 @@ impl Engine {
         // 每条存活束的下一步输入 token；不足 width 的行用第 0 行补齐
         let mut current: Vec<i64> = vec![gp.start; width];
         for step in 0..max_new {
-            let cur_ids = Tensor::from_array(([width, 1usize], current.clone()))
-                .map_err(|e| decode_err(&e))?;
-            let enc_mask = TensorRef::from_array_view(([width, src_len], mask.as_slice()))
-                .map_err(|e| decode_err(&e))?;
-            let flag =
-                Tensor::from_array(([1usize], vec![step > 0])).map_err(|e| decode_err(&e))?;
-            let hidden_view =
-                TensorRef::from_array_view(([width, src_len, hidden_dim], hidden.as_slice()))
-                    .map_err(|e| decode_err(&e))?;
-            let mut inputs: DecoderInputs<'_> = vec![
-                ("input_ids".into(), cur_ids.into()),
-                ("encoder_attention_mask".into(), enc_mask.into()),
-                ("encoder_hidden_states".into(), hidden_view.into()),
-                ("use_cache_branch".into(), flag.into()),
-            ];
-            for (name, value) in self.past_names.iter().zip(past.iter()) {
-                inputs.push((name.as_str().into(), value.into()));
-            }
+            let inputs = decoder_inputs(&current, &enc, step > 0, &self.past_names, &past)?;
             let mut outputs = self.decoder.run(inputs).map_err(|e| decode_err(&e))?;
 
             let cands: Vec<Vec<Candidate>> = if let (0, Some(tok)) = (step, forced) {
@@ -1037,16 +1134,7 @@ impl Engine {
                 forced_candidates(search.alive_len(), tok)
             } else {
                 let block_eos = (step < min_len).then_some(gp.eos as u32);
-                let (shape, logits) = outputs["logits"]
-                    .try_extract_tensor::<f32>()
-                    .map_err(|e| decode_err(&e))?;
-                let vocab = *shape.last().unwrap_or(&0) as usize;
-                if vocab == 0 || logits.len() < vocab * width {
-                    return Err(EngineError::new(
-                        ErrorKind::DecodeFailed,
-                        "decoder returned empty logits",
-                    ));
-                }
+                let (logits, vocab) = step_logits(&outputs, width)?;
                 // 每行取最后一个位置（序列长度恒为 1）
                 let row_stride = logits.len() / width;
                 (0..search.alive_len())
@@ -1072,24 +1160,8 @@ impl Engine {
             current.resize(width, current[0]);
 
             let identity = parents_full.iter().enumerate().all(|(i, &p)| i == p);
-            for (name, slot) in self.past_names.iter().zip(past.iter_mut()) {
-                let present = name.replacen("past_key_values.", "present.", 1);
-                let Some(v) = outputs.remove(&present) else {
-                    continue;
-                };
-                if name.contains(".encoder.") {
-                    // 交叉注意力 KV 各束相同，只在首步采用
-                    if step == 0 {
-                        *slot = v;
-                    }
-                    continue;
-                }
-                *slot = if identity {
-                    v
-                } else {
-                    reorder_kv(&v, &parents_full).map_err(|m| decode_err(&m))?
-                };
-            }
+            let reorder = (!identity).then_some(parents_full.as_slice());
+            store_present(&self.past_names, &mut past, &mut outputs, step, reorder)?;
         }
         Ok(search.best())
     }
@@ -1101,13 +1173,21 @@ impl Engine {
         let (hidden, hidden_dim) = self.run_encoder(input_ids)?;
 
         // 初始 past：序列维为 0 的空张量
-        let mut past: Vec<DynValue> = Vec::with_capacity(self.past_names.len());
-        for _ in &self.past_names {
-            past.push(
-                empty_kv(1, self.kv_heads as usize, self.kv_head_dim as usize)
-                    .map_err(|e| decode_err(&e))?,
-            );
-        }
+        let mut past: Vec<DynValue> = Vec::new();
+        fill_empty_past(
+            &mut past,
+            self.past_names.len(),
+            1,
+            self.kv_heads as usize,
+            self.kv_head_dim as usize,
+        )?;
+        let enc = EncoderView {
+            mask: &mask,
+            hidden: &hidden,
+            rows: 1,
+            src_len,
+            hidden_dim,
+        };
 
         let gp = &self.gen_params;
         let forced = self.m2m.as_ref().map(|c| c.forced_first);
@@ -1118,42 +1198,14 @@ impl Engine {
         let mut generated: Vec<u32> = Vec::new();
         let mut current = gp.start;
         for step in 0..max_new {
-            let use_cache = step > 0;
-            let cur_ids =
-                Tensor::from_array(([1usize, 1], vec![current])).map_err(|e| decode_err(&e))?;
-            let enc_mask = TensorRef::from_array_view(([1usize, src_len], mask.as_slice()))
-                .map_err(|e| decode_err(&e))?;
-            let flag =
-                Tensor::from_array(([1usize], vec![use_cache])).map_err(|e| decode_err(&e))?;
-            let hidden_view =
-                TensorRef::from_array_view(([1usize, src_len, hidden_dim], hidden.as_slice()))
-                    .map_err(|e| decode_err(&e))?;
-
-            let mut inputs: DecoderInputs<'_> = vec![
-                ("input_ids".into(), cur_ids.into()),
-                ("encoder_attention_mask".into(), enc_mask.into()),
-                ("encoder_hidden_states".into(), hidden_view.into()),
-                ("use_cache_branch".into(), flag.into()),
-            ];
-            for (name, value) in self.past_names.iter().zip(past.iter()) {
-                inputs.push((name.as_str().into(), value.into()));
-            }
+            let inputs = decoder_inputs(&[current], &enc, step > 0, &self.past_names, &past)?;
 
             let mut outputs = self.decoder.run(inputs).map_err(|e| decode_err(&e))?;
             let next = if let (0, Some(tok)) = (step, forced) {
                 // 首个生成位强制为目标语言码
                 tok as i64
             } else {
-                let (shape, logits) = outputs["logits"]
-                    .try_extract_tensor::<f32>()
-                    .map_err(|e| decode_err(&e))?;
-                let vocab = *shape.last().unwrap_or(&0) as usize;
-                if vocab == 0 || logits.len() < vocab {
-                    return Err(EngineError::new(
-                        ErrorKind::DecodeFailed,
-                        "decoder returned empty logits",
-                    ));
-                }
+                let (logits, vocab) = step_logits(&outputs, 1)?;
                 let last = &logits[logits.len() - vocab..];
                 let banned = if step < min_len {
                     &banned_no_eos
@@ -1168,14 +1220,7 @@ impl Engine {
                 break;
             }
             // 更新 KV：编码器侧 KV 只在第一步采用
-            for (name, slot) in self.past_names.iter().zip(past.iter_mut()) {
-                let present = name.replacen("past_key_values.", "present.", 1);
-                if let Some(v) = outputs.remove(&present)
-                    && (step == 0 || !name.contains(".encoder."))
-                {
-                    *slot = v;
-                }
-            }
+            store_present(&self.past_names, &mut past, &mut outputs, step, None)?;
             generated.push(next as u32);
             if trim_tail_repeat(&mut generated) {
                 break;
