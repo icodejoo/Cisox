@@ -93,6 +93,21 @@ fn drain<R: Read + Send + 'static>(mut pipe: R) -> std::thread::JoinHandle<Vec<u
     })
 }
 
+/// 把 f32 切片按小端展开成字节（一次预分配，避免逐元素迭代器开销）。
+///
+/// # 参数
+/// - `values`：待展开的浮点切片。
+///
+/// # 返回
+/// 长度为 `values.len() * 4` 的小端字节序列。
+fn f32s_to_le_bytes(values: &[f32]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(values.len() * 4);
+    for v in values {
+        bytes.extend_from_slice(&v.to_le_bytes());
+    }
+    bytes
+}
+
 /// stderr 末尾文本。
 fn tail_text(bytes: &[u8]) -> String {
     let start = bytes.len().saturating_sub(STDERR_TAIL);
@@ -114,7 +129,7 @@ impl StructureRunner for ProcessRunner {
             .spawn()
             .map_err(|e| TableError::Spawn(e.to_string()))?;
         let stdin = child.stdin.take();
-        let bytes: Vec<u8> = tensor.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let bytes = f32s_to_le_bytes(tensor);
         let writer = std::thread::spawn(move || {
             if let Some(mut pipe) = stdin {
                 let _ = pipe.write_all(&bytes);
@@ -400,5 +415,14 @@ mod tests {
         let texts = recognize_table(&runner, w, h, &rgba, &ocr).expect("真实识别");
         println!("{}", texts.markdown);
         assert!(texts.tsv.lines().count() >= 2, "{}", texts.tsv);
+    }
+
+    /// 字节展开与旧的逐元素 flat_map 实现逐字节一致。
+    #[test]
+    fn f32s_to_le_bytes_matches_flat_map() {
+        let values = [0.0f32, -0.0, 1.5, -2.25, f32::MAX, f32::MIN_POSITIVE, f32::INFINITY];
+        let old: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+        assert_eq!(f32s_to_le_bytes(&values), old);
+        assert!(f32s_to_le_bytes(&[]).is_empty());
     }
 }

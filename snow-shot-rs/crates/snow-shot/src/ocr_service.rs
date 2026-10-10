@@ -9,7 +9,7 @@ use crate::ocr_assets::{
     resolve_assets,
 };
 use crate::ocr_client::{OcrError, OcrWorker, SessionConfig, Timeouts};
-use image::{RgbaImage, imageops};
+use image::{ImageBuffer, Rgba, imageops};
 use serde_json::Value;
 use snow_config::document::ConfigDocument;
 use snow_ocr_protocol::{MAX_PIXELS, OcrLine};
@@ -367,9 +367,12 @@ impl OcrService {
         let (image, scale) = if (sw, sh) == (width, height) {
             (rgba, (1.0, 1.0))
         } else {
-            let source = RgbaImage::from_raw(width, height, rgba.to_vec()).ok_or_else(|| {
-                OcrError::InvalidImage("could not build the source image for scaling".to_string())
-            })?;
+            let source =
+                ImageBuffer::<Rgba<u8>, &[u8]>::from_raw(width, height, rgba).ok_or_else(|| {
+                    OcrError::InvalidImage(
+                        "could not build the source image for scaling".to_string(),
+                    )
+                })?;
             scaled = imageops::resize(&source, sw, sh, imageops::FilterType::Triangle).into_raw();
             (
                 scaled.as_slice(),
@@ -492,10 +495,13 @@ fn spawn_idle_monitor(inner: Arc<Mutex<Inner>>, idle_timeout: Duration) {
                     return;
                 }
                 Some(_) if guard.last_used.elapsed() >= idle_timeout => {
-                    if let Some(mut worker) = guard.worker.take() {
+                    // 持锁只取出 worker，放锁后再 shutdown，避免等待退出期间阻塞新请求。
+                    let worker = guard.worker.take();
+                    guard.monitor_running = false;
+                    drop(guard);
+                    if let Some(mut worker) = worker {
                         worker.shutdown();
                     }
-                    guard.monitor_running = false;
                     return;
                 }
                 Some(_) => {}
@@ -555,10 +561,7 @@ mod tests {
 
     /// 唯一临时目录。
     fn temp_root(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("snow-ocr-svc-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("建目录");
-        dir
+        crate::test_util::unique_temp_dir("snow-ocr-svc", tag)
     }
 
     /// 伪造齐全的资产（运行时 + small 模型），返回根目录。

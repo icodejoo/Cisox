@@ -5,7 +5,7 @@
 //! 最长边缩放到 488 → BGR 通道归一化 → 右下补零到 488x488；结构输出按词表逐步 argmax，
 //! `<td` / `<td></td>` 步对应一个单元格框；文字框按 IoU（相同则按距离）归入单元格。
 
-use image::{RgbaImage, imageops};
+use image::{ImageBuffer, Rgba, imageops};
 use serde::Deserialize;
 
 /// 模型输入边长。
@@ -67,7 +67,7 @@ pub fn prepare_input(width: u32, height: u32, rgba: &[u8]) -> Option<PreparedInp
     let scale = MODEL_SIDE as f32 / width.max(height) as f32;
     let resized_w = ((width as f32 * scale) as u32).clamp(1, MODEL_SIDE as u32);
     let resized_h = ((height as f32 * scale) as u32).clamp(1, MODEL_SIDE as u32);
-    let source = RgbaImage::from_raw(width, height, rgba.to_vec())?;
+    let source = ImageBuffer::<Rgba<u8>, &[u8]>::from_raw(width, height, rgba)?;
     let resized = imageops::resize(
         &source,
         resized_w,
@@ -564,6 +564,7 @@ pub fn assemble_table(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use image::RgbaImage;
 
     /// 构造词表文本（与官方模型元数据同形：无 `<td>`、末尾没有 `<td></td>`）。
     fn character() -> String {
@@ -868,5 +869,17 @@ mod tests {
         let json = br#"{"character":"<tr>","outputs":[{"name":"a","shape":[1,1,8],"data":[0.0]}]}"#;
         assert_eq!(parse_worker_output(json).expect("可解析").outputs.len(), 1);
         assert!(parse_worker_output(b"nope").is_err());
+    }
+
+    /// 借用缩放与拷贝缩放的像素必须逐字节一致。
+    #[test]
+    fn borrowed_resize_matches_owned_copy() {
+        let (w, h) = (7u32, 5u32);
+        let rgba: Vec<u8> = (0..w * h * 4).map(|i| (i * 31 % 251) as u8).collect();
+        let owned = RgbaImage::from_raw(w, h, rgba.clone()).unwrap();
+        let borrowed = ImageBuffer::<Rgba<u8>, &[u8]>::from_raw(w, h, rgba.as_slice()).unwrap();
+        let a = imageops::resize(&owned, 3, 2, imageops::FilterType::Triangle);
+        let b = imageops::resize(&borrowed, 3, 2, imageops::FilterType::Triangle);
+        assert_eq!(a.as_raw(), b.as_raw());
     }
 }

@@ -306,20 +306,11 @@ pub fn exceeds_drag_threshold(
 /// 路径里的一层矩形序列（底图物理坐标，自深到浅）。
 pub type PickRects = Vec<PhysicalRect>;
 
-/// 两个矩形求交；无交集返回 `None`。
-fn intersect(a: PhysicalRect, b: PhysicalRect) -> Option<PhysicalRect> {
-    let left = a.x.max(b.x);
-    let top = a.y.max(b.y);
-    let right = a.right().min(b.right());
-    let bottom = a.bottom().min(b.bottom());
-    (right > left && bottom > top).then(|| PhysicalRect::new(left, top, right - left, bottom - top))
-}
-
 /// 把命中路径裁到可选范围，丢掉小于最小尺寸的层，并合并相邻重复层。
 fn bounded_path(path: &[PhysicalRect], bounds: PhysicalRect, min_size: i32) -> PickRects {
     let mut out: PickRects = Vec::with_capacity(path.len());
     for rect in path {
-        let Some(b) = intersect(*rect, bounds) else {
+        let Some(b) = rect.intersect(&bounds) else {
             continue;
         };
         if b.width < min_size || b.height < min_size || out.last() == Some(&b) {

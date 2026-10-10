@@ -6,7 +6,7 @@
 
 use crate::ocr_client::OcrError;
 use crate::ocr_service::{OcrRequestConfig, OcrResult, OcrService, OcrTextBox};
-use image::{RgbaImage, imageops};
+use image::{ImageBuffer, Rgba, imageops};
 use serde_json::Value;
 use snow_config::document::ConfigDocument;
 use snow_config::extensions::{
@@ -305,12 +305,13 @@ impl OcrEngine for SystemOcr {
         let output = match fitted {
             None => win_ocr::recognize(input.width, input.height, input.rgba, None),
             Some((sw, sh)) => {
-                let source = RgbaImage::from_raw(input.width, input.height, input.rgba.to_vec())
-                    .ok_or_else(|| {
-                        OcrError::InvalidImage(
-                            "could not build the source image for scaling".to_string(),
-                        )
-                    })?;
+                let source =
+                    ImageBuffer::<Rgba<u8>, &[u8]>::from_raw(input.width, input.height, input.rgba)
+                        .ok_or_else(|| {
+                            OcrError::InvalidImage(
+                                "could not build the source image for scaling".to_string(),
+                            )
+                        })?;
                 let small = imageops::resize(&source, sw, sh, imageops::FilterType::Triangle);
                 win_ocr::recognize(sw, sh, small.as_raw(), None)
             }
