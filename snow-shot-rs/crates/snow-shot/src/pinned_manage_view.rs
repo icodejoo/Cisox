@@ -69,13 +69,37 @@ pub struct PinManageView {
     /// 缩略图。
     thumbs: ThumbCache,
     /// 底部提示（错误）。
-    notice: Option<String>,
+    notice: NoticeBar,
     /// 新分组名输入框。
     name_input: Entity<TextareaState>,
     /// 本地时区偏移（秒）。
     offset_secs: i64,
     /// 列表滚动句柄。
     scroll: UniformListScrollHandle,
+}
+
+/// 底部失败提示：只保留最近一条，新操作开始或切换分组时清除。
+#[derive(Debug, Default, PartialEq, Eq)]
+struct NoticeBar {
+    /// 当前提示文字；`None` 表示没有。
+    text: Option<String>,
+}
+
+impl NoticeBar {
+    /// 显示一条提示（覆盖旧的）。
+    fn set(&mut self, text: String) {
+        self.text = Some(text);
+    }
+
+    /// 清除提示。
+    fn clear(&mut self) {
+        self.text = None;
+    }
+
+    /// 当前提示文字。
+    fn text(&self) -> Option<&str> {
+        self.text.as_deref()
+    }
 }
 
 impl PinManageView {
@@ -124,7 +148,7 @@ impl PinManageView {
                 rows,
                 open_ids,
                 thumbs: ThumbCache::default(),
-                notice: None,
+                notice: NoticeBar::default(),
                 name_input: name_input.clone(),
                 offset_secs: local_offset_secs(),
                 scroll: UniformListScrollHandle::new(),
@@ -164,7 +188,8 @@ impl PinManageView {
     /// - `error`：失败原因。
     pub fn show_error(&mut self, error: String, cx: &mut Context<Self>) {
         let i18n = crate::ocr_backend::i18n_for(self.prefs.locale);
-        self.notice = Some(i18n.tr_with("pinmgr-notice-failed", &Args::new().arg(1, error)));
+        self.notice
+            .set(i18n.tr_with("pinmgr-notice-failed", &Args::new().arg(1, error)));
         cx.notify();
     }
 
@@ -202,8 +227,16 @@ impl PinManageView {
         }
     }
 
+    /// 发起一次操作：先清掉上一次的失败提示，再交给主线程处理（结果出错会重新显示）。
+    fn dispatch(&mut self, event: UiEvent, cx: &mut Context<Self>) {
+        self.notice.clear();
+        self.inbox.push(event);
+        cx.notify();
+    }
+
     /// 切换分组筛选。
     fn set_filter(&mut self, filter: GroupFilter, cx: &mut Context<Self>) {
+        self.notice.clear();
         self.filter = filter;
         self.rows = build_rows(&self.shared, &self.open_ids, &self.filter);
         self.after_rows_change();
@@ -216,7 +249,7 @@ impl PinManageView {
         if name.is_empty() {
             return;
         }
-        self.inbox.push(UiEvent::PinGroupCreateNamed { name });
+        self.dispatch(UiEvent::PinGroupCreateNamed { name }, cx);
     }
 
     /// 缩略图或占位文字，装进定宽定高的框。
@@ -271,8 +304,8 @@ impl PinManageView {
         )
         .on_confirm(move |_window, app| {
             let id = delete_id.clone();
-            entity.update(app, |this, _| {
-                this.inbox.push(UiEvent::PinManageDelete { id })
+            entity.update(app, |this, cx| {
+                this.dispatch(UiEvent::PinManageDelete { id }, cx)
             });
         });
         div()
@@ -317,10 +350,13 @@ impl PinManageView {
                             .with_size(ComponentSize::Small)
                             .label(i18n.tr("pinmgr-action-show"))
                             .disabled(row.open)
-                            .on_click(cx.listener(move |this, _e: &ClickEvent, _w, _cx| {
-                                this.inbox.push(UiEvent::PinManageShow {
-                                    id: show_id.clone(),
-                                });
+                            .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| {
+                                this.dispatch(
+                                    UiEvent::PinManageShow {
+                                        id: show_id.clone(),
+                                    },
+                                    cx,
+                                );
                             })),
                     )
                     .child(delete),
@@ -383,7 +419,9 @@ impl PinManageView {
         .on_confirm({
             let entity = entity.clone();
             move |_window, app| {
-                entity.update(app, |this, _| this.inbox.push(UiEvent::PinManageDeleteAll));
+                entity.update(app, |this, cx| {
+                    this.dispatch(UiEvent::PinManageDeleteAll, cx)
+                });
             }
         });
         let mut actions = div()
@@ -405,8 +443,8 @@ impl PinManageView {
                 Button::new("pinmgr-delete-empty")
                     .with_size(ComponentSize::Small)
                     .label(i18n.tr("pinmgr-action-delete-empty"))
-                    .on_click(cx.listener(|this, _e: &ClickEvent, _w, _cx| {
-                        this.inbox.push(UiEvent::PinGroupDeleteEmpty);
+                    .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
+                        this.dispatch(UiEvent::PinGroupDeleteEmpty, cx);
                     })),
             );
         if let GroupFilter::Group(group_id) = &self.filter
@@ -427,8 +465,8 @@ impl PinManageView {
                 )
                 .on_confirm(move |_window, app| {
                     let id = group_id.clone();
-                    entity.update(app, |this, _| {
-                        this.inbox.push(UiEvent::PinGroupDelete { id })
+                    entity.update(app, |this, cx| {
+                        this.dispatch(UiEvent::PinGroupDelete { id }, cx)
                     });
                 }),
             );
@@ -534,7 +572,7 @@ impl Render for PinManageView {
                     .flex_1()
                     .text_size(px(SMALL_SIZE))
                     .text_color(p.danger)
-                    .child(self.notice.clone().unwrap_or_default()),
+                    .child(self.notice.text().unwrap_or_default().to_string()),
             )
             .child(
                 div()
@@ -558,5 +596,23 @@ impl Render for PinManageView {
                     .child(body),
             )
             .child(footer)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 新提示覆盖旧提示；清除后为空，重复清除无副作用。
+    #[test]
+    fn notice_set_replace_clear() {
+        let mut bar = NoticeBar::default();
+        assert_eq!(bar.text(), None);
+        bar.set("a".into());
+        bar.set("b".into());
+        assert_eq!(bar.text(), Some("b"));
+        bar.clear();
+        bar.clear();
+        assert_eq!(bar.text(), None);
     }
 }
