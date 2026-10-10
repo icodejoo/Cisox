@@ -131,14 +131,8 @@ pub fn foreground_window() -> Option<isize> {
 /// if let Some((x, y, w, h)) = foreground_window_rect() { println!("{x},{y} {w}x{h}"); }
 /// ```
 pub fn foreground_window_rect() -> Option<(i32, i32, i32, i32)> {
-    #[cfg(windows)]
-    {
-        win::foreground_rect()
-    }
-    #[cfg(not(windows))]
-    {
-        None
-    }
+    // 与 `window_rect::foreground_window_rect` 同一套取法，这里只把宽高换成有符号整数
+    crate::window_rect::foreground_window_rect().map(|(x, y, w, h)| (x, y, w as i32, h as i32))
 }
 
 #[cfg(windows)]
@@ -149,11 +143,7 @@ mod win {
         KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, SendInput, VIRTUAL_KEY, VK_CONTROL, VK_LWIN, VK_MENU,
         VK_RWIN, VK_SHIFT,
     };
-    use windows::Win32::Foundation::RECT;
-    use windows::Win32::Graphics::Dwm::{DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute};
-    use windows::Win32::UI::WindowsAndMessaging::{
-        GA_ROOT, GetAncestor, GetForegroundWindow, GetWindowRect, IsIconic,
-    };
+    use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
 
     /// `GetAsyncKeyState` 返回值的“当前按下”位。
     const KEY_DOWN_MASK: u16 = 0x8000;
@@ -212,35 +202,6 @@ mod win {
         // SAFETY: 只读查询前台窗口。
         let hwnd = unsafe { GetForegroundWindow() };
         (!hwnd.0.is_null()).then_some(hwnd.0 as isize)
-    }
-
-    /// 前台顶层窗口的可见外框；优先取 DWM 扩展边界（排除阴影），失败退回 `GetWindowRect`。
-    pub(super) fn foreground_rect() -> Option<(i32, i32, i32, i32)> {
-        // SAFETY: 只读查询前台窗口及其矩形，句柄只在本函数内使用。
-        unsafe {
-            let hwnd = GetForegroundWindow();
-            if hwnd.0.is_null() {
-                return None;
-            }
-            let root = GetAncestor(hwnd, GA_ROOT);
-            let target = if root.0.is_null() { hwnd } else { root };
-            if IsIconic(target).as_bool() {
-                return None;
-            }
-            let mut rect = RECT::default();
-            let dwm_ok = DwmGetWindowAttribute(
-                target,
-                DWMWA_EXTENDED_FRAME_BOUNDS,
-                &mut rect as *mut RECT as *mut _,
-                std::mem::size_of::<RECT>() as u32,
-            )
-            .is_ok();
-            if !dwm_ok && GetWindowRect(target, &mut rect).is_err() {
-                return None;
-            }
-            let (w, h) = (rect.right - rect.left, rect.bottom - rect.top);
-            (w > 0 && h > 0).then_some((rect.left, rect.top, w, h))
-        }
     }
 }
 

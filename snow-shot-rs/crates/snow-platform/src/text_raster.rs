@@ -142,19 +142,21 @@ pub fn list_font_families() -> Vec<String> {
 #[cfg(windows)]
 mod imp {
     use super::{MAX_BITMAP_SIDE, TextBitmap, TextMetrics};
+    use crate::gdi::{GdiObject, MemDc, ScreenDc};
     use windows::Win32::Foundation::{COLORREF, LPARAM, RECT};
     use windows::Win32::Graphics::Gdi::{
         ANTIALIASED_QUALITY, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLACKNESS, CLIP_DEFAULT_PRECIS,
-        CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW, DEFAULT_CHARSET, DIB_RGB_COLORS,
-        DT_CALCRECT, DT_EXPANDTABS, DT_LEFT, DT_NOPREFIX, DT_TOP, DeleteDC, DeleteObject,
-        DrawTextW, EnumFontFamiliesExW, FF_DONTCARE, FW_BOLD, FW_NORMAL, GetDC, GetDIBits, HDC,
-        HFONT, LOGFONTW, OUT_DEFAULT_PRECIS, PatBlt, ReleaseDC, SelectObject, SetBkMode,
-        SetTextColor, TEXTMETRICW, TRANSPARENT,
+        CreateCompatibleBitmap, CreateFontW, DEFAULT_CHARSET, DIB_RGB_COLORS, DT_CALCRECT,
+        DT_EXPANDTABS, DT_LEFT, DT_NOPREFIX, DT_TOP, DrawTextW, EnumFontFamiliesExW, FF_DONTCARE,
+        FW_BOLD, FW_NORMAL, GetDIBits, HDC, LOGFONTW, OUT_DEFAULT_PRECIS, PatBlt, SelectObject,
+        SetBkMode, SetTextColor, TEXTMETRICW, TRANSPARENT,
     };
     use windows::core::PCWSTR;
 
     /// 每像素字节数。
     const BYTES_PER_PIXEL: usize = 4;
+    /// 光栅化时创建 DC / 位图 / 字体失败的统一错误说明。
+    const GDI_OBJECT_ERROR: &str = "创建 GDI 对象失败";
     /// 文本绘制标志：左上对齐、展开制表符、不解析 `&`。
     const DRAW_FLAGS: windows::Win32::Graphics::Gdi::DRAW_TEXT_FORMAT =
         windows::Win32::Graphics::Gdi::DRAW_TEXT_FORMAT(
@@ -163,7 +165,7 @@ mod imp {
 
     /// 转成以 0 结尾的 UTF-16。
     fn wide(text: &str) -> Vec<u16> {
-        text.encode_utf16().chain(std::iter::once(0)).collect()
+        crate::file_dialog::to_wide(text)
     }
 
     /// 字体枚举回调：把字体族名追加到 `lparam` 指向的向量。
@@ -183,30 +185,28 @@ mod imp {
     /// 枚举全部字体族名（未去重）。
     pub fn list_families() -> Vec<String> {
         let mut names: Vec<String> = Vec::new();
-        // SAFETY: DC 在本函数内获取并释放；回调只在枚举期间访问 names。
+        let Some(screen) = ScreenDc::acquire() else {
+            return names;
+        };
+        let filter = LOGFONTW {
+            lfCharSet: DEFAULT_CHARSET,
+            ..Default::default()
+        };
+        // SAFETY: DC 由守卫持有到函数结束；回调只在枚举期间访问 names。
         unsafe {
-            let screen = GetDC(None);
-            if screen.0.is_null() {
-                return names;
-            }
-            let filter = LOGFONTW {
-                lfCharSet: DEFAULT_CHARSET,
-                ..Default::default()
-            };
             EnumFontFamiliesExW(
-                screen,
+                screen.hdc(),
                 &filter,
                 Some(collect_family),
                 LPARAM(&mut names as *mut Vec<String> as isize),
                 0,
             );
-            let _ = ReleaseDC(None, screen);
         }
         names
     }
 
     /// 创建 GDI 字体。
-    unsafe fn make_font(family: &str, px: f32, bold: bool) -> Result<HFONT, String> {
+    unsafe fn make_font(family: &str, px: f32, bold: bool) -> Result<GdiObject, String> {
         let name = wide(family);
         // SAFETY: name 以 0 结尾且在调用期间存活。
         let font = unsafe {
@@ -227,11 +227,7 @@ mod imp {
                 PCWSTR(name.as_ptr()),
             )
         };
-        if font.0.is_null() {
-            Err("创建字体失败".into())
-        } else {
-            Ok(font)
-        }
+        GdiObject::new(font).ok_or_else(|| "创建字体失败".to_string())
     }
 
     /// 在内存 DC 上测量文本包围尺寸。
@@ -246,38 +242,22 @@ mod imp {
     /// 测量文本（含字体创建与释放）。
     pub fn measure(text: &str, family: &str, px: f32, bold: bool) -> Result<TextMetrics, String> {
         let probe: &str = if text.is_empty() { " " } else { text };
-        // SAFETY: 全部 GDI 对象在本函数内创建并释放。
-        unsafe {
-            let screen = GetDC(None);
-            if screen.0.is_null() {
-                return Err("获取屏幕 DC 失败".into());
-            }
-            let hdc = CreateCompatibleDC(Some(screen));
-            let font = make_font(family, px, bold);
-            let result = match (&font, hdc.0.is_null()) {
-                (Ok(font), false) => {
-                    let old = SelectObject(hdc, (*font).into());
-                    let units: Vec<u16> = probe.encode_utf16().collect();
-                    let (w, h) = measure_with(hdc, &units);
-                    SelectObject(hdc, old);
-                    let width = if text.is_empty() { 0 } else { w.max(0) as u32 };
-                    Ok(TextMetrics {
-                        width,
-                        height: h.max(1) as u32,
-                    })
-                }
-                (Err(e), _) => Err(e.clone()),
-                _ => Err("创建内存 DC 失败".into()),
-            };
-            if let Ok(font) = font {
-                let _ = DeleteObject(font.into());
-            }
-            if !hdc.0.is_null() {
-                let _ = DeleteDC(hdc);
-            }
-            let _ = ReleaseDC(None, screen);
-            result
-        }
+        let screen = ScreenDc::acquire().ok_or("获取屏幕 DC 失败")?;
+        // SAFETY: GDI 对象都由守卫持有（先建字体再建 DC，释放顺序相反），选入的字体在测量后换出。
+        let (w, h) = unsafe {
+            let font = make_font(family, px, bold)?;
+            let mem = MemDc::compatible_with(&screen).ok_or("创建内存 DC 失败")?;
+            let old = SelectObject(mem.hdc(), font.handle());
+            let units: Vec<u16> = probe.encode_utf16().collect();
+            let size = measure_with(mem.hdc(), &units);
+            SelectObject(mem.hdc(), old);
+            size
+        };
+        let width = if text.is_empty() { 0 } else { w.max(0) as u32 };
+        Ok(TextMetrics {
+            width,
+            height: h.max(1) as u32,
+        })
     }
 
     /// 光栅化文本为覆盖率位图。
@@ -294,81 +274,61 @@ mod imp {
         if w > MAX_BITMAP_SIDE || h > MAX_BITMAP_SIDE {
             return Err(format!("文本位图过大: {w}x{h}"));
         }
-        // SAFETY: 全部 GDI 对象在本函数内创建并释放，缓冲长度与 GetDIBits 请求一致。
+        let screen = ScreenDc::acquire().ok_or("获取屏幕 DC 失败")?;
+        // SAFETY: 全部 GDI 对象由守卫持有；位图与字体在读回像素前已从 DC 换出，缓冲长度与 GetDIBits 请求一致。
         unsafe {
-            let screen = GetDC(None);
-            if screen.0.is_null() {
-                return Err("获取屏幕 DC 失败".into());
-            }
-            let hdc = CreateCompatibleDC(Some(screen));
-            let bitmap = CreateCompatibleBitmap(screen, w as i32, h as i32);
-            let font = make_font(family, px, bold);
-            let mut out: Result<TextBitmap, String> = Err("创建 GDI 对象失败".into());
-            if !hdc.0.is_null()
-                && !bitmap.0.is_null()
-                && let Ok(font_handle) = &font
-            {
-                let old_bitmap = SelectObject(hdc, bitmap.into());
-                let old_font = SelectObject(hdc, (*font_handle).into());
-                let _ = PatBlt(hdc, 0, 0, w as i32, h as i32, BLACKNESS);
-                SetBkMode(hdc, TRANSPARENT);
-                SetTextColor(hdc, COLORREF(0x00FF_FFFF));
-                let mut buf: Vec<u16> = text.encode_utf16().collect();
-                let mut rect = RECT {
-                    left: 0,
-                    top: 0,
-                    right: w as i32,
-                    bottom: h as i32,
-                };
-                DrawTextW(hdc, &mut buf, &mut rect, DRAW_FLAGS);
-                SelectObject(hdc, old_font);
-                SelectObject(hdc, old_bitmap);
+            let mem = MemDc::compatible_with(&screen).ok_or(GDI_OBJECT_ERROR)?;
+            let bitmap_handle = CreateCompatibleBitmap(screen.hdc(), w as i32, h as i32);
+            let bitmap = GdiObject::new(bitmap_handle).ok_or(GDI_OBJECT_ERROR)?;
+            let font = make_font(family, px, bold).map_err(|_| GDI_OBJECT_ERROR)?;
+            let old_bitmap = SelectObject(mem.hdc(), bitmap.handle());
+            let old_font = SelectObject(mem.hdc(), font.handle());
+            let _ = PatBlt(mem.hdc(), 0, 0, w as i32, h as i32, BLACKNESS);
+            SetBkMode(mem.hdc(), TRANSPARENT);
+            SetTextColor(mem.hdc(), COLORREF(0x00FF_FFFF));
+            let mut buf: Vec<u16> = text.encode_utf16().collect();
+            let mut rect = RECT {
+                left: 0,
+                top: 0,
+                right: w as i32,
+                bottom: h as i32,
+            };
+            DrawTextW(mem.hdc(), &mut buf, &mut rect, DRAW_FLAGS);
+            SelectObject(mem.hdc(), old_font);
+            SelectObject(mem.hdc(), old_bitmap);
 
-                let mut bmi = BITMAPINFO {
-                    bmiHeader: BITMAPINFOHEADER {
-                        biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-                        biWidth: w as i32,
-                        biHeight: -(h as i32),
-                        biPlanes: 1,
-                        biBitCount: 32,
-                        biCompression: BI_RGB.0,
-                        ..Default::default()
-                    },
+            let mut bmi = BITMAPINFO {
+                bmiHeader: BITMAPINFOHEADER {
+                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: w as i32,
+                    biHeight: -(h as i32),
+                    biPlanes: 1,
+                    biBitCount: 32,
+                    biCompression: BI_RGB.0,
                     ..Default::default()
-                };
-                let mut pixels = vec![0u8; w as usize * h as usize * BYTES_PER_PIXEL];
-                let lines = GetDIBits(
-                    screen,
-                    bitmap,
-                    0,
-                    h,
-                    Some(pixels.as_mut_ptr() as _),
-                    &mut bmi,
-                    DIB_RGB_COLORS,
-                );
-                if lines == h as i32 {
-                    // 灰度抗锯齿下三个通道相同，取绿色通道作为覆盖率
-                    let coverage = pixels.chunks_exact(BYTES_PER_PIXEL).map(|p| p[1]).collect();
-                    out = Ok(TextBitmap {
-                        width: w,
-                        height: h,
-                        coverage,
-                    });
-                } else {
-                    out = Err("读取文本位图失败".into());
-                }
+                },
+                ..Default::default()
+            };
+            let mut pixels = vec![0u8; w as usize * h as usize * BYTES_PER_PIXEL];
+            let lines = GetDIBits(
+                screen.hdc(),
+                bitmap_handle,
+                0,
+                h,
+                Some(pixels.as_mut_ptr() as _),
+                &mut bmi,
+                DIB_RGB_COLORS,
+            );
+            if lines != h as i32 {
+                return Err("读取文本位图失败".into());
             }
-            if let Ok(font_handle) = font {
-                let _ = DeleteObject(font_handle.into());
-            }
-            if !bitmap.0.is_null() {
-                let _ = DeleteObject(bitmap.into());
-            }
-            if !hdc.0.is_null() {
-                let _ = DeleteDC(hdc);
-            }
-            let _ = ReleaseDC(None, screen);
-            out
+            // 灰度抗锯齿下三个通道相同，取绿色通道作为覆盖率
+            let coverage = pixels.chunks_exact(BYTES_PER_PIXEL).map(|p| p[1]).collect();
+            Ok(TextBitmap {
+                width: w,
+                height: h,
+                coverage,
+            })
         }
     }
 }

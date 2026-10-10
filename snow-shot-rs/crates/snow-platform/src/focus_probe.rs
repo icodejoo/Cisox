@@ -68,15 +68,13 @@ pub fn read_focus() -> FocusReading {
 #[cfg(windows)]
 mod win {
     use super::{FocusReading, UiaElement};
+    use crate::com::ComGuard;
     use windows::Win32::Foundation::{CloseHandle, HANDLE};
     use windows::Win32::Security::{
         GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, TOKEN_MANDATORY_LABEL,
         TOKEN_QUERY, TokenIntegrityLevel,
     };
-    use windows::Win32::System::Com::{
-        CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx,
-        CoUninitialize,
-    };
+    use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance};
     use windows::Win32::System::Threading::{
         GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
     };
@@ -144,30 +142,10 @@ mod win {
         Some(theirs? > ours?)
     }
 
-    /// 线程级 COM 初始化守卫：本线程初始化成功才在退出时反初始化。
-    struct ComGuard(bool);
-
-    impl ComGuard {
-        /// 以多线程套间初始化 COM；线程已是别的套间模式时不强改（也不反初始化）。
-        fn init() -> Self {
-            // SAFETY: 标准的线程级 COM 初始化。
-            Self(unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.is_ok())
-        }
-    }
-
-    impl Drop for ComGuard {
-        /// 配对反初始化。
-        fn drop(&mut self) {
-            if self.0 {
-                // SAFETY: 与成功的 CoInitializeEx 配对。
-                unsafe { CoUninitialize() };
-            }
-        }
-    }
-
     /// 读 UIA 焦点元素。
     fn read_uia() -> Result<Option<UiaElement>, String> {
-        let _com = ComGuard::init();
+        // 线程已是别的套间模式时不强改：守卫取不到也照常调用 UIA
+        let _com = ComGuard::init(COINIT_MULTITHREADED).ok();
         // SAFETY: 进程内 UIA 对象，COM 已初始化。
         let automation: IUIAutomation =
             unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) }

@@ -23,8 +23,6 @@ pub const DUMP_EXTENSION: &str = "dmp";
 pub const SUMMARY_EXTENSION: &str = "txt";
 /// 默认保留的崩溃报告份数。
 pub const DEFAULT_MAX_REPORTS: usize = 10;
-/// 一天的秒数。
-const SECONDS_PER_DAY: u64 = 86_400;
 /// 无名线程的显示名。
 const UNNAMED_THREAD: &str = "<unnamed>";
 
@@ -160,22 +158,10 @@ pub fn dump_supported() -> bool {
 /// assert_eq!(snow_platform::crash::format_timestamp(0), "19700101T000000Z");
 /// ```
 pub fn format_timestamp(unix_secs: u64) -> String {
-    let days = (unix_secs / SECONDS_PER_DAY) as i64;
-    let rem = unix_secs % SECONDS_PER_DAY;
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = yoe + era * 400 + i64::from(month <= 2);
+    let t = crate::local_time::from_unix_utc(unix_secs);
     format!(
-        "{year:04}{month:02}{day:02}T{:02}{:02}{:02}Z",
-        rem / 3600,
-        rem % 3600 / 60,
-        rem % 60
+        "{:04}{:02}{:02}T{:02}{:02}{:02}Z",
+        t.year, t.month, t.day, t.hour, t.minute, t.second
     )
 }
 
@@ -308,6 +294,14 @@ pub fn write_report(
     Ok(CrashReportFiles { summary, dump })
 }
 
+/// 当前线程名；无名线程用 [`UNNAMED_THREAD`]。
+fn current_thread_name() -> String {
+    std::thread::current()
+        .name()
+        .unwrap_or(UNNAMED_THREAD)
+        .to_string()
+}
+
 /// 当前 Unix 秒。
 fn now_secs() -> u64 {
     crate::unix_time::unix_secs()
@@ -336,10 +330,7 @@ fn handle_panic(info: &PanicHookInfo<'_>) {
                 .location()
                 .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column())),
         },
-        thread_name: std::thread::current()
-            .name()
-            .unwrap_or(UNNAMED_THREAD)
-            .to_string(),
+        thread_name: current_thread_name(),
         backtrace: Backtrace::force_capture().to_string(),
     };
     #[cfg(windows)]

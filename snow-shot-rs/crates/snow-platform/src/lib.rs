@@ -5,11 +5,15 @@
 pub mod atomic_file;
 pub mod capture;
 pub mod clipboard;
+#[cfg(windows)]
+mod com;
 pub mod console;
 pub mod crash;
 pub mod dib;
 pub mod file_dialog;
 pub mod focus_probe;
+#[cfg(windows)]
+mod gdi;
 pub mod global_mouse;
 pub mod local_time;
 pub mod menu;

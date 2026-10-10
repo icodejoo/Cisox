@@ -166,7 +166,7 @@ fn build_drop_files(paths: &[std::path::PathBuf]) -> Option<Vec<u8>> {
     out.extend_from_slice(&0u32.to_le_bytes()); // fNC
     out.extend_from_slice(&1u32.to_le_bytes()); // fWide
     for path in paths {
-        for unit in path.as_os_str().to_string_lossy().encode_utf16().chain(std::iter::once(0)) {
+        for unit in crate::file_dialog::to_wide(&path.as_os_str().to_string_lossy()) {
             out.extend_from_slice(&unit.to_le_bytes());
         }
     }
@@ -209,10 +209,26 @@ const DIB_HEADER_SIZE: usize = 40;
 const BYTES_PER_PIXEL: usize = 4;
 
 /// 计算 RGBA 缓冲的期望字节数；乘法溢出时返回 `None`。
-fn expected_rgba_len(width: u32, height: u32) -> Option<usize> {
+pub(crate) fn expected_rgba_len(width: u32, height: u32) -> Option<usize> {
     (width as usize)
         .checked_mul(height as usize)?
         .checked_mul(BYTES_PER_PIXEL)
+}
+
+/// 把 RGBA 像素按行自底向上、逐像素转成 BGRA 追加到 `out`（DIB 的像素排布）。
+///
+/// `width` 为 0 时不追加；`rgba` 长度须为一整行字节数的整数倍，多出的尾部不足一行的字节被忽略。
+#[cfg_attr(not(windows), allow(dead_code))]
+fn append_bgra_bottom_up(out: &mut Vec<u8>, rgba: &[u8], width: u32) {
+    let row_stride = width as usize * BYTES_PER_PIXEL;
+    if row_stride == 0 {
+        return;
+    }
+    for row in rgba.chunks_exact(row_stride).rev() {
+        for px in row.chunks_exact(BYTES_PER_PIXEL) {
+            out.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
+        }
+    }
 }
 
 /// 由 RGBA 像素构造 CF_DIB 数据（BITMAPINFOHEADER + 自底向上的 BGRA 像素）。
@@ -224,7 +240,6 @@ fn build_dib(width: u32, height: u32, rgba: &[u8]) -> Option<Vec<u8>> {
     let size_image = u32::try_from(image_size).ok()?;
     let width_i32 = i32::try_from(width).ok()?;
     let height_i32 = i32::try_from(height).ok()?;
-    let row_stride = width as usize * BYTES_PER_PIXEL;
     let mut out = Vec::with_capacity(DIB_HEADER_SIZE.checked_add(image_size)?);
     out.extend_from_slice(&(DIB_HEADER_SIZE as u32).to_le_bytes());
     out.extend_from_slice(&width_i32.to_le_bytes());
@@ -235,13 +250,7 @@ fn build_dib(width: u32, height: u32, rgba: &[u8]) -> Option<Vec<u8>> {
     out.extend_from_slice(&0u32.to_le_bytes()); // BI_RGB
     out.extend_from_slice(&size_image.to_le_bytes());
     out.extend_from_slice(&[0u8; 16]); // 分辨率与调色板字段
-    if row_stride > 0 {
-        for row in rgba.chunks_exact(row_stride).rev() {
-            for px in row.chunks_exact(BYTES_PER_PIXEL) {
-                out.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
-            }
-        }
-    }
+    append_bgra_bottom_up(&mut out, rgba, width);
     Some(out)
 }
 
@@ -258,7 +267,6 @@ fn build_dibv5(width: u32, height: u32, rgba: &[u8]) -> Option<Vec<u8>> {
     let size_image = u32::try_from(image_size).ok()?;
     let width_i32 = i32::try_from(width).ok()?;
     let height_i32 = i32::try_from(height).ok()?;
-    let row_stride = width as usize * BYTES_PER_PIXEL;
     let mut out = Vec::with_capacity(DIBV5_HEADER_SIZE.checked_add(image_size)?);
     out.extend_from_slice(&(DIBV5_HEADER_SIZE as u32).to_le_bytes());
     out.extend_from_slice(&width_i32.to_le_bytes());
@@ -277,13 +285,7 @@ fn build_dibv5(width: u32, height: u32, rgba: &[u8]) -> Option<Vec<u8>> {
     out.extend_from_slice(&[0u8; 12]); // 三个伽马
     out.extend_from_slice(&4u32.to_le_bytes()); // LCS_GM_IMAGES
     out.extend_from_slice(&[0u8; 12]); // 配置文件偏移 / 大小 / 保留
-    if row_stride > 0 {
-        for row in rgba.chunks_exact(row_stride).rev() {
-            for px in row.chunks_exact(BYTES_PER_PIXEL) {
-                out.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
-            }
-        }
-    }
+    append_bgra_bottom_up(&mut out, rgba, width);
     Some(out)
 }
 
@@ -319,6 +321,7 @@ mod win32_clipboard {
     impl GlobalBlock {
         /// 分配并写入字节，写入完成后已解锁。
         fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
+            // SAFETY: 分配的块至少 `bytes.len()` 字节，锁定期间只做一次非重叠拷贝；块由守卫负责释放。
             unsafe {
                 let handle = GlobalAlloc(GMEM_MOVEABLE, bytes.len().max(1))
                     .map_err(|e| format!("GlobalAlloc 失败: {e}"))?;
@@ -333,6 +336,11 @@ mod win32_clipboard {
             }
         }
 
+        /// 当前持有的句柄（尚未转交系统）。
+        fn handle(&self) -> HGLOBAL {
+            self.0.expect("句柄已转交")
+        }
+
         /// 转交所有权给系统（`SetClipboardData` 成功后调用），此后 Drop 不再释放。
         fn release_ownership(&mut self) -> HGLOBAL {
             self.0.take().expect("句柄已转交")
@@ -343,6 +351,7 @@ mod win32_clipboard {
         /// 未转交时释放全局内存。
         fn drop(&mut self) {
             if let Some(handle) = self.0.take() {
+                // SAFETY: 句柄由 GlobalAlloc 分配且尚未转交给系统。
                 unsafe {
                     let _ = GlobalFree(Some(handle));
                 }
@@ -350,11 +359,25 @@ mod win32_clipboard {
         }
     }
 
-    /// 带重试地打开剪贴板。
-    fn open_clipboard_with_retry() -> Result<(), String> {
+    /// 已打开剪贴板的 RAII 守卫：Drop 时关闭剪贴板。
+    struct ClipboardGuard;
+
+    impl Drop for ClipboardGuard {
+        /// 关闭剪贴板。
+        fn drop(&mut self) {
+            // SAFETY: 守卫只在 `OpenClipboard` 成功后构造，这里与之配对关闭。
+            unsafe {
+                let _ = CloseClipboard();
+            }
+        }
+    }
+
+    /// 带重试地打开剪贴板，成功返回关闭用的守卫。
+    fn open_clipboard_with_retry() -> Result<ClipboardGuard, String> {
         for attempt in 0..OPEN_ATTEMPTS {
+            // SAFETY: 传空窗口句柄，与当前任务关联。
             if unsafe { OpenClipboard(None) }.is_ok() {
-                return Ok(());
+                return Ok(ClipboardGuard);
             }
             if attempt + 1 < OPEN_ATTEMPTS {
                 std::thread::sleep(Duration::from_millis(OPEN_RETRY_MS));
@@ -365,21 +388,7 @@ mod win32_clipboard {
 
     /// 数据已备好后写入剪贴板：打开、清空、设置；失败时释放句柄。
     fn set_clipboard(format: u32, bytes: &[u8], label: &str) -> Result<(), String> {
-        let mut block = GlobalBlock::from_bytes(bytes)?;
-        open_clipboard_with_retry()?;
-        let result = unsafe {
-            let _ = EmptyClipboard();
-            let handle = block.0.expect("句柄有效");
-            let set = SetClipboardData(format, Some(HANDLE(handle.0)));
-            if set.is_ok() {
-                block.release_ownership();
-            }
-            let _ = CloseClipboard();
-            set
-        };
-        result
-            .map(|_| ())
-            .map_err(|_| format!("SetClipboardData {label} 失败"))
+        set_clipboard_multi(&[(format, bytes, label)])
     }
 
     /// 一次性写入多种格式：打开、清空、依次设置；任一失败返回错误（已设置的格式保留）。
@@ -388,22 +397,20 @@ mod win32_clipboard {
         for (_, bytes, _) in items {
             blocks.push(GlobalBlock::from_bytes(bytes)?);
         }
-        open_clipboard_with_retry()?;
-        let mut outcome = Ok(());
+        // 守卫晚于 blocks 创建：先关剪贴板，再释放未转交的内存块
+        let _clipboard = open_clipboard_with_retry()?;
+        // SAFETY: 剪贴板已打开；仅在 SetClipboardData 成功后才把句柄所有权交给系统。
         unsafe {
             let _ = EmptyClipboard();
             for ((format, _, label), block) in items.iter().zip(blocks.iter_mut()) {
-                let handle = block.0.expect("句柄有效");
-                if SetClipboardData(*format, Some(HANDLE(handle.0))).is_ok() {
-                    block.release_ownership();
-                } else {
-                    outcome = Err(format!("SetClipboardData {label} 失败"));
-                    break;
+                let handle = block.handle();
+                if SetClipboardData(*format, Some(HANDLE(handle.0))).is_err() {
+                    return Err(format!("SetClipboardData {label} 失败"));
                 }
+                block.release_ownership();
             }
-            let _ = CloseClipboard();
         }
-        outcome
+        Ok(())
     }
 
     /// 将带透明通道的图像以 CF_DIBV5 + PNG 写入 Win32 剪贴板。
@@ -429,16 +436,14 @@ mod win32_clipboard {
 
     /// 读取剪贴板里的 CF_DIB 原始字节；没有该格式返回 `None`。
     pub fn read_dib_win32() -> Result<Option<Vec<u8>>, String> {
-        open_clipboard_with_retry()?;
-        // SAFETY: 剪贴板已在上面打开，读取完成后立即关闭。
+        let _clipboard = open_clipboard_with_retry()?;
+        // SAFETY: 剪贴板已在上面打开，守卫在函数返回时关闭。
         unsafe {
-            let out = if IsClipboardFormatAvailable(CF_DIB).is_ok() {
+            if IsClipboardFormatAvailable(CF_DIB).is_ok() {
                 read_global_bytes(CF_DIB)
             } else {
                 Ok(None)
-            };
-            let _ = CloseClipboard();
-            out
+            }
         }
     }
 
@@ -473,9 +478,8 @@ mod win32_clipboard {
 
     /// 将文本以 CF_UNICODETEXT 写入 Win32 剪贴板。
     pub fn copy_text_win32(text: &str) -> Result<(), String> {
-        let bytes: Vec<u8> = text
-            .encode_utf16()
-            .chain(std::iter::once(0))
+        let bytes: Vec<u8> = crate::file_dialog::to_wide(text)
+            .into_iter()
             .flat_map(u16::to_le_bytes)
             .collect();
         set_clipboard(CF_UNICODETEXT, &bytes, "CF_UNICODETEXT")
@@ -494,14 +498,13 @@ mod win32_clipboard {
             let png = vec![137u8, 80, 78, 71, 1, 2, 3, 4];
             copy_image_with_png_win32(2, 1, &rgba, &png).unwrap();
             let png_format = unsafe { RegisterClipboardFormatW(windows::core::w!("PNG")) };
-            open_clipboard_with_retry().unwrap();
+            let _clipboard = open_clipboard_with_retry().unwrap();
             let (has_v5, has_png, png_back) = unsafe {
                 let has_v5 = IsClipboardFormatAvailable(CF_DIBV5).is_ok();
                 let has_png = IsClipboardFormatAvailable(png_format).is_ok();
                 let back = has_png
                     .then(|| read_global_bytes(png_format).ok().flatten())
                     .flatten();
-                let _ = CloseClipboard();
                 (has_v5, has_png, back)
             };
             assert!(has_v5 && has_png);
@@ -591,6 +594,17 @@ mod tests {
         assert_eq!(&px[4..8], &[3, 2, 1, 9]);
         assert_eq!(&px[8..12], &[0, 0, 255, 255]);
         assert_eq!(&px[12..16], &[0, 255, 0, 128]);
+    }
+
+    /// 像素追加：行序倒置并转 BGRA；宽度为 0 时不追加；不足一行的尾部被忽略。
+    #[test]
+    fn append_bgra_bottom_up_orders_rows_and_ignores_tail() {
+        let mut out = vec![9u8];
+        append_bgra_bottom_up(&mut out, &[1, 2, 3, 4, 5, 6, 7, 8, 99], 1);
+        assert_eq!(out, vec![9, 7, 6, 5, 8, 3, 2, 1, 4]);
+        let mut empty = Vec::new();
+        append_bgra_bottom_up(&mut empty, &[1, 2, 3, 4], 0);
+        assert!(empty.is_empty());
     }
 
     /// DIB 头正确，像素被翻转行序并转为 BGRA。

@@ -62,14 +62,7 @@ impl CapturedScreen {
     /// assert_eq!(&rgba[0..4], &[10, 20, 30, 255]);
     /// ```
     pub fn to_rgba(&self) -> Vec<u8> {
-        let mut out = self.data.clone();
-        for chunk in out.chunks_exact_mut(4) {
-            let b = chunk[0];
-            let r = chunk[2];
-            chunk[0] = r;
-            chunk[2] = b;
-        }
-        out
+        swap_red_blue(&self.data)
     }
 
     /// 提取选区内的局部子图像。
@@ -118,6 +111,21 @@ impl CapturedScreen {
     }
 }
 
+/// 交换每个 4 字节像素的第 0 与第 2 通道（BGRA 与 RGBA 互转），多余尾部字节原样保留。
+///
+/// # 参数
+/// - `pixels`：4 字节一像素的缓冲。
+///
+/// # 返回
+/// 交换后的新缓冲。
+pub(crate) fn swap_red_blue(pixels: &[u8]) -> Vec<u8> {
+    let mut out = pixels.to_vec();
+    for px in out.chunks_exact_mut(CAPTURE_BYTES_PER_PIXEL) {
+        px.swap(0, 2);
+    }
+    out
+}
+
 /// 执行屏幕捕获。
 ///
 /// 若传入 `region`，则截取指定物理矩形区域；若为 `None`，则截取主显示器或全虚拟桌面。
@@ -151,7 +159,6 @@ pub fn capture_display(region: Option<(i32, i32, u32, u32)>) -> Result<CapturedS
 #[cfg_attr(not(windows), allow(dead_code))]
 const MAX_CAPTURE_EDGE: i32 = 32768;
 /// 每像素字节数。
-#[cfg_attr(not(windows), allow(dead_code))]
 const CAPTURE_BYTES_PER_PIXEL: usize = 4;
 
 /// 校验采集尺寸并计算缓冲字节数；非正、超上限或乘法溢出时返回 `None`。
@@ -176,10 +183,10 @@ fn force_opaque(data: &mut [u8]) {
 #[cfg(windows)]
 mod win32_capture {
     use super::{CapturedScreen, capture_byte_len, force_opaque};
+    use crate::gdi::{GdiObject, MemDc, ScreenDc};
     use windows::Win32::Graphics::Gdi::{
         BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CAPTUREBLT, CreateCompatibleBitmap,
-        CreateCompatibleDC, DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, GetDIBits, ReleaseDC,
-        SRCCOPY, SelectObject,
+        DIB_RGB_COLORS, GetDIBits, SRCCOPY, SelectObject,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         GetSystemMetrics, SM_CXSCREEN, SM_CXVIRTUALSCREEN, SM_CYSCREEN, SM_CYVIRTUALSCREEN,
@@ -218,29 +225,16 @@ mod win32_capture {
                 return Err("屏幕捕获尺寸非法".into());
             };
 
-            let hdc_screen = GetDC(None);
-            if hdc_screen.0.is_null() {
-                return Err("获取桌面屏幕 DC 失败".into());
-            }
+            let screen = ScreenDc::acquire().ok_or("获取桌面屏幕 DC 失败")?;
+            let mem = MemDc::compatible_with(&screen).ok_or("创建兼容内存 DC 失败")?;
+            let hbitmap = CreateCompatibleBitmap(screen.hdc(), width, height);
+            let _bitmap = GdiObject::new(hbitmap).ok_or("创建兼容位图失败")?;
 
-            let hdc_mem = CreateCompatibleDC(Some(hdc_screen));
-            if hdc_mem.0.is_null() {
-                let _ = ReleaseDC(None, hdc_screen);
-                return Err("创建兼容内存 DC 失败".into());
-            }
-
-            let hbitmap = CreateCompatibleBitmap(hdc_screen, width, height);
-            if hbitmap.0.is_null() {
-                let _ = DeleteDC(hdc_mem);
-                let _ = ReleaseDC(None, hdc_screen);
-                return Err("创建兼容位图失败".into());
-            }
-
-            let old_obj = SelectObject(hdc_mem, hbitmap.into());
+            let old_obj = SelectObject(mem.hdc(), hbitmap.into());
 
             // 执行截屏拷贝（包含 CAPTUREBLT 以捕捉半透明与分层窗口）
             let rop = SRCCOPY | CAPTUREBLT;
-            let bitblt_ok = BitBlt(hdc_mem, 0, 0, width, height, Some(hdc_screen), x, y, rop);
+            let bitblt_ok = BitBlt(mem.hdc(), 0, 0, width, height, Some(screen.hdc()), x, y, rop);
 
             let mut bmi = BITMAPINFO {
                 bmiHeader: BITMAPINFOHEADER {
@@ -262,10 +256,10 @@ mod win32_capture {
             let mut data = vec![0u8; byte_len];
 
             // GetDIBits 要求位图不得选入任何 DC：先还原再读取；BitBlt 失败则不必读取
-            SelectObject(hdc_mem, old_obj);
+            SelectObject(mem.hdc(), old_obj);
             let lines = if bitblt_ok.is_ok() {
                 GetDIBits(
-                    hdc_screen,
+                    screen.hdc(),
                     hbitmap,
                     0,
                     height as u32,
@@ -276,11 +270,6 @@ mod win32_capture {
             } else {
                 0
             };
-
-            // 清理 GDI 对象
-            let _ = DeleteObject(hbitmap.into());
-            let _ = DeleteDC(hdc_mem);
-            let _ = ReleaseDC(None, hdc_screen);
 
             if bitblt_ok.is_err() || lines != height {
                 return Err("读取屏幕位图像素失败".into());

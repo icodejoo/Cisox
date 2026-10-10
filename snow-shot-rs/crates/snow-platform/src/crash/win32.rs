@@ -14,7 +14,7 @@ use windows::Win32::System::Threading::{
     GetCurrentProcess, GetCurrentProcessId, GetCurrentThreadId,
 };
 
-use super::{CONFIG, CrashInfo, CrashKind, HANDLING, UNNAMED_THREAD, now_secs, write_report};
+use super::{CONFIG, CrashInfo, CrashKind, HANDLING, current_thread_name, now_secs, write_report};
 use std::backtrace::Backtrace;
 
 /// 过滤器返回值：处理完毕，直接终止进程（不弹系统崩溃对话框）。
@@ -77,10 +77,7 @@ unsafe extern "system" fn top_level_filter(info: *const EXCEPTION_POINTERS) -> i
         };
         let crash = CrashInfo {
             kind: CrashKind::Exception { code, address },
-            thread_name: std::thread::current()
-                .name()
-                .unwrap_or(UNNAMED_THREAD)
-                .to_string(),
+            thread_name: current_thread_name(),
             backtrace: Backtrace::force_capture().to_string(),
         };
         let _ = write_report(

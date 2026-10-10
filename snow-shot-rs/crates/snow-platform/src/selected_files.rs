@@ -21,11 +21,11 @@ pub fn foreground_selected_files() -> Vec<PathBuf> {
 
 #[cfg(windows)]
 mod imp {
+    use crate::com::ComGuard;
     use std::path::PathBuf;
     use windows::Win32::Foundation::{HWND, LPARAM};
     use windows::Win32::System::Com::{
-        CLSCTX_LOCAL_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree,
-        CoUninitialize, IDispatch,
+        CLSCTX_LOCAL_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoTaskMemFree, IDispatch,
     };
     use windows::Win32::System::Variant::{VARIANT, VT_I4};
     use windows::Win32::UI::Shell::{
@@ -121,16 +121,6 @@ mod imp {
         Some(paths)
     }
 
-    /// 配对 `CoInitializeEx` / `CoUninitialize` 的守卫。
-    struct ComGuard;
-
-    impl Drop for ComGuard {
-        fn drop(&mut self) {
-            // SAFETY: 与成功的 CoInitializeEx 配对。
-            unsafe { CoUninitialize() };
-        }
-    }
-
     /// Windows 实现。
     pub fn foreground_selected_files() -> Vec<PathBuf> {
         // SAFETY: 无前置条件。
@@ -147,11 +137,10 @@ mod imp {
             return Vec::new();
         };
         let tab = visible_child(window, "ShellTabWindowClass");
-        // SAFETY: 初始化当前线程的 COM；配对的 CoUninitialize 由 ComGuard 释放。
-        if unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_err() {
+        // 初始化当前线程的 COM；配对的反初始化由守卫释放
+        let Ok(_com) = ComGuard::init(COINIT_APARTMENTTHREADED) else {
             return Vec::new();
-        }
-        let _guard = ComGuard;
+        };
         // SAFETY: COM 调用。
         let created: windows::core::Result<IShellWindows> =
             unsafe { CoCreateInstance(&ShellWindows, None, CLSCTX_LOCAL_SERVER) };

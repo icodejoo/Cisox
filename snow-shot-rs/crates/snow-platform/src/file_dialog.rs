@@ -112,8 +112,8 @@ pub fn show_open_dialog(request: &OpenDialogRequest) -> Result<Option<PathBuf>, 
 
 #[cfg(windows)]
 mod imp {
-    use super::{OpenDialogRequest, SaveDialogChoice, SaveDialogRequest, clamp_filter_index, to_wide};
-    use std::path::PathBuf;
+    use super::{FileFilter, OpenDialogRequest, SaveDialogChoice, SaveDialogRequest, clamp_filter_index, to_wide};
+    use std::path::{Path, PathBuf};
     use windows::Win32::Foundation::{HWND, RPC_E_CHANGED_MODE};
     use windows::Win32::System::Com::{
         CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
@@ -121,67 +121,112 @@ mod imp {
     };
     use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
     use windows::Win32::UI::Shell::{
-        FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM, FOS_OVERWRITEPROMPT, FOS_PATHMUSTEXIST,
-        FileOpenDialog, FileSaveDialog, IFileOpenDialog, IFileSaveDialog, IShellItem, SHCreateItemFromParsingName, SIGDN_FILESYSPATH,
+        FILEOPENDIALOGOPTIONS, FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM, FOS_OVERWRITEPROMPT,
+        FOS_PATHMUSTEXIST, FileOpenDialog, FileSaveDialog, IFileDialog, IFileOpenDialog,
+        IFileSaveDialog, IShellItem, SHCreateItemFromParsingName, SIGDN_FILESYSPATH,
     };
     use windows::core::PCWSTR;
 
     /// 用户取消对话框时系统返回的 HRESULT（`HRESULT_FROM_WIN32(ERROR_CANCELLED)`）。
     const HRESULT_CANCELLED: i32 = 0x8007_04C7_u32 as i32;
 
-    /// 显示“打开文件”对话框（Windows 实现）。
-    pub fn show_open(request: &OpenDialogRequest) -> Result<Option<PathBuf>, String> {
-        // SAFETY: 标准的线程级 COM 初始化；线程已是别的套间模式时忽略（不反初始化）。
+    /// 初始化当前线程的 COM（单线程套间）；线程已是别的套间模式时忽略（不反初始化）。
+    fn init_com() -> Result<(), String> {
+        // SAFETY: 标准的线程级 COM 初始化。
         let init = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
         if init.is_err() && init != RPC_E_CHANGED_MODE {
             return Err(format!("初始化 COM 失败: {init:?}"));
         }
-        // SAFETY: COM 已初始化，创建进程内的系统对话框对象。
-        let dialog: IFileOpenDialog =
-            unsafe { CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER) }
-                .map_err(|e| format!("创建打开对话框失败: {e}"))?;
-        let title = to_wide(&request.title);
-        let specs_text: Vec<(Vec<u16>, Vec<u16>)> = request
-            .filters
-            .iter()
-            .map(|f| (to_wide(&f.label), to_wide(&f.pattern)))
-            .collect();
-        let specs: Vec<COMDLG_FILTERSPEC> = specs_text
-            .iter()
-            .map(|(label, pattern)| COMDLG_FILTERSPEC {
-                pszName: PCWSTR(label.as_ptr()),
-                pszSpec: PCWSTR(pattern.as_ptr()),
-            })
-            .collect();
-        // SAFETY: dialog 有效；所有指针指向本函数内存活的缓冲。
+        Ok(())
+    }
+
+    /// 过滤项的宽字符缓冲与对应的 `COMDLG_FILTERSPEC` 数组；须活到对话框关闭之后。
+    struct FilterSpecs {
+        /// 持有 `specs` 里指针指向的缓冲（`Vec` 堆内存不随结构体移动）。
+        _text: Vec<(Vec<u16>, Vec<u16>)>,
+        /// 传给系统的描述数组。
+        specs: Vec<COMDLG_FILTERSPEC>,
+    }
+
+    impl FilterSpecs {
+        /// 由过滤项列表构造。
+        fn new(filters: &[FileFilter]) -> Self {
+            let text: Vec<(Vec<u16>, Vec<u16>)> = filters
+                .iter()
+                .map(|f| (to_wide(&f.label), to_wide(&f.pattern)))
+                .collect();
+            let specs = text
+                .iter()
+                .map(|(label, pattern)| COMDLG_FILTERSPEC {
+                    pszName: PCWSTR(label.as_ptr()),
+                    pszSpec: PCWSTR(pattern.as_ptr()),
+                })
+                .collect();
+            Self { _text: text, specs }
+        }
+    }
+
+    /// 标题的宽字符缓冲；空标题返回 `None`（保持系统默认）。
+    fn title_buffer(title: &str) -> Option<Vec<u16>> {
+        (!title.is_empty()).then(|| to_wide(title))
+    }
+
+    /// 配置打开 / 保存对话框共有的部分：选项、标题、过滤项与初始目录。
+    ///
+    /// # Safety
+    /// `title` 与 `filters` 里的缓冲必须在对话框关闭前保持有效。
+    unsafe fn configure(
+        dialog: &IFileDialog,
+        extra_options: FILEOPENDIALOGOPTIONS,
+        title: Option<&[u16]>,
+        filters: &FilterSpecs,
+        filter_index: usize,
+        initial_dir: Option<&Path>,
+    ) -> Result<(), String> {
+        // SAFETY: dialog 有效；所有指针指向调用方仍存活的缓冲。
         unsafe {
             let options = dialog.GetOptions().map_err(|e| e.to_string())?;
             dialog
-                .SetOptions(options | FOS_FORCEFILESYSTEM | FOS_FILEMUSTEXIST | FOS_PATHMUSTEXIST)
+                .SetOptions(options | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST | extra_options)
                 .map_err(|e| e.to_string())?;
-            if !request.title.is_empty() {
-                dialog
-                    .SetTitle(PCWSTR(title.as_ptr()))
-                    .map_err(|e| e.to_string())?;
+            if let Some(title) = title {
+                dialog.SetTitle(PCWSTR(title.as_ptr())).map_err(|e| e.to_string())?;
             }
-            if !specs.is_empty() {
-                dialog.SetFileTypes(&specs).map_err(|e| e.to_string())?;
-                dialog.SetFileTypeIndex(1).map_err(|e| e.to_string())?;
+            if !filters.specs.is_empty() {
+                dialog.SetFileTypes(&filters.specs).map_err(|e| e.to_string())?;
+                let index = clamp_filter_index(filter_index, filters.specs.len()) as u32 + 1;
+                dialog.SetFileTypeIndex(index).map_err(|e| e.to_string())?;
             }
-            if let Some(dir) = request.initial_dir.as_ref().filter(|d| d.is_dir()) {
+            if let Some(dir) = initial_dir.filter(|d| d.is_dir()) {
                 let wide = to_wide(&dir.to_string_lossy());
+                // 目录不可解析时放弃预设，让系统用默认位置
                 if let Ok(item) =
                     SHCreateItemFromParsingName::<_, _, IShellItem>(PCWSTR(wide.as_ptr()), None)
                 {
                     let _ = dialog.SetFolder(&item);
                 }
             }
-            let owner = HWND(request.owner.unwrap_or(0) as *mut core::ffi::c_void);
+        }
+        Ok(())
+    }
+
+    /// 弹出对话框并取回所选的文件系统路径；用户取消返回 `Ok(None)`。
+    ///
+    /// # Safety
+    /// 传给 `dialog` 的所有缓冲必须在本函数返回前保持有效。
+    unsafe fn show_and_pick(
+        dialog: &IFileDialog,
+        owner: Option<isize>,
+        failure_label: &str,
+    ) -> Result<Option<PathBuf>, String> {
+        let owner = HWND(owner.unwrap_or(0) as *mut core::ffi::c_void);
+        // SAFETY: dialog 有效；返回的显示名由我们用 CoTaskMemFree 释放。
+        unsafe {
             if let Err(e) = dialog.Show(Some(owner)) {
                 return if e.code().0 == HRESULT_CANCELLED {
                     Ok(None)
                 } else {
-                    Err(format!("打开对话框失败: {e}"))
+                    Err(format!("{failure_label}: {e}"))
                 };
             }
             let item = dialog.GetResult().map_err(|e| e.to_string())?;
@@ -194,79 +239,59 @@ mod imp {
         }
     }
 
+    /// 显示“打开文件”对话框（Windows 实现）。
+    pub fn show_open(request: &OpenDialogRequest) -> Result<Option<PathBuf>, String> {
+        init_com()?;
+        // SAFETY: COM 已初始化，创建进程内的系统对话框对象。
+        let dialog: IFileOpenDialog =
+            unsafe { CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER) }
+                .map_err(|e| format!("创建打开对话框失败: {e}"))?;
+        // 以下缓冲都要活到 Show 返回之后
+        let title = title_buffer(&request.title);
+        let filters = FilterSpecs::new(&request.filters);
+        // SAFETY: 缓冲在本函数内存活到对话框关闭。
+        unsafe {
+            configure(
+                &dialog,
+                FOS_FILEMUSTEXIST,
+                title.as_deref(),
+                &filters,
+                0,
+                request.initial_dir.as_deref(),
+            )?;
+            show_and_pick(&dialog, request.owner, "打开对话框失败")
+        }
+    }
+
     /// 显示对话框（Windows 实现）。
     pub fn show(request: &SaveDialogRequest) -> Result<Option<SaveDialogChoice>, String> {
-        // SAFETY: 标准的线程级 COM 初始化；线程已是别的套间模式时忽略（不反初始化）。
-        let init = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
-        if init.is_err() && init != RPC_E_CHANGED_MODE {
-            return Err(format!("初始化 COM 失败: {init:?}"));
-        }
+        init_com()?;
         // SAFETY: COM 已初始化，创建进程内的系统对话框对象。
         let dialog: IFileSaveDialog =
             unsafe { CoCreateInstance(&FileSaveDialog, None, CLSCTX_INPROC_SERVER) }
                 .map_err(|e| format!("创建保存对话框失败: {e}"))?;
-
-        // 以下宽字符缓冲都要活到 Show 返回之后
-        let title = to_wide(&request.title);
-        let name = to_wide(&request.file_name);
-        let specs_text: Vec<(Vec<u16>, Vec<u16>)> = request
-            .filters
-            .iter()
-            .map(|f| (to_wide(&f.label), to_wide(&f.pattern)))
-            .collect();
-        let specs: Vec<COMDLG_FILTERSPEC> = specs_text
-            .iter()
-            .map(|(label, pattern)| COMDLG_FILTERSPEC {
-                pszName: PCWSTR(label.as_ptr()),
-                pszSpec: PCWSTR(pattern.as_ptr()),
-            })
-            .collect();
-
-        // SAFETY: dialog 有效；所有指针指向本函数内存活的缓冲。
+        // 以下缓冲都要活到 Show 返回之后
+        let title = title_buffer(&request.title);
+        let name = title_buffer(&request.file_name);
+        let filters = FilterSpecs::new(&request.filters);
+        // SAFETY: 缓冲在本函数内存活到对话框关闭。
         unsafe {
-            let options = dialog.GetOptions().map_err(|e| e.to_string())?;
-            dialog
-                .SetOptions(options | FOS_OVERWRITEPROMPT | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST)
-                .map_err(|e| e.to_string())?;
-            if !request.title.is_empty() {
-                dialog
-                    .SetTitle(PCWSTR(title.as_ptr()))
-                    .map_err(|e| e.to_string())?;
-            }
-            if !specs.is_empty() {
-                dialog.SetFileTypes(&specs).map_err(|e| e.to_string())?;
-                let index = clamp_filter_index(request.filter_index, specs.len()) as u32 + 1;
-                dialog.SetFileTypeIndex(index).map_err(|e| e.to_string())?;
-            }
-            if !request.file_name.is_empty() {
+            configure(
+                &dialog,
+                FOS_OVERWRITEPROMPT,
+                title.as_deref(),
+                &filters,
+                request.filter_index,
+                request.initial_dir.as_deref(),
+            )?;
+            if let Some(name) = &name {
                 dialog
                     .SetFileName(PCWSTR(name.as_ptr()))
                     .map_err(|e| e.to_string())?;
             }
-            if let Some(dir) = request.initial_dir.as_ref().filter(|d| d.is_dir()) {
-                let wide = to_wide(&dir.to_string_lossy());
-                // 目录不可解析时放弃预设，让系统用默认位置
-                if let Ok(item) =
-                    SHCreateItemFromParsingName::<_, _, IShellItem>(PCWSTR(wide.as_ptr()), None)
-                {
-                    let _ = dialog.SetFolder(&item);
-                }
-            }
-            let owner = HWND(request.owner.unwrap_or(0) as *mut core::ffi::c_void);
-            if let Err(e) = dialog.Show(Some(owner)) {
-                return if e.code().0 == HRESULT_CANCELLED {
-                    Ok(None)
-                } else {
-                    Err(format!("保存对话框失败: {e}"))
-                };
-            }
-            let item = dialog.GetResult().map_err(|e| e.to_string())?;
-            let raw = item
-                .GetDisplayName(SIGDN_FILESYSPATH)
-                .map_err(|e| e.to_string())?;
-            let path = raw.to_string().map_err(|e| e.to_string());
-            CoTaskMemFree(Some(raw.0 as *const core::ffi::c_void));
-            let path = PathBuf::from(path?);
+            let Some(path) = show_and_pick(&dialog, request.owner, "保存对话框失败")? else {
+                return Ok(None);
+            };
             let filter_index = dialog
                 .GetFileTypeIndex()
                 .map(|i| (i as usize).saturating_sub(1))

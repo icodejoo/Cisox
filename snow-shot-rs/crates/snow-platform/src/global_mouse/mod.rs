@@ -93,6 +93,12 @@ mod imp {
         injected && !ACCEPT_INJECTED.load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// 当前进程主模块的实例句柄（安装钩子用）；取不到时退回空句柄。
+    fn module_instance() -> HINSTANCE {
+        // SAFETY: 无前置条件。
+        unsafe { GetModuleHandleW(None) }.map(|m| HINSTANCE(m.0)).unwrap_or_default()
+    }
+
     /// 让钩子线程重新评估是否需要鼠标钩子的私有消息。
     const WM_REFRESH: u32 = WM_APP + 0x61;
     /// 让钩子线程取消进行中手势的私有消息。
@@ -209,10 +215,8 @@ mod imp {
 
     /// 钩子线程主体：装键盘钩子、跑消息循环、退出时卸载。
     fn run_thread(handler: Arc<dyn Fn(DragEvent) + Send + Sync>, ready: std::sync::mpsc::Sender<Result<u32, String>>) {
-        // SAFETY: 无前置条件。
-        let hmod = unsafe { GetModuleHandleW(None) }.map(|m| HINSTANCE(m.0)).unwrap_or_default();
         // SAFETY: 回调是本模块的 `extern "system"` 函数；hmod 为本进程模块。
-        let keyboard = unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_proc), Some(hmod), 0) };
+        let keyboard = unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_proc), Some(module_instance()), 0) };
         let keyboard = match keyboard {
             Ok(h) => h,
             Err(e) => {
@@ -277,10 +281,8 @@ mod imp {
         let needed = state.mouse_hook_needed();
         match (needed, state.mouse_hook) {
             (true, None) => {
-                // SAFETY: 回调是本模块的 `extern "system"` 函数。
-                let hmod = unsafe { GetModuleHandleW(None) }.map(|m| HINSTANCE(m.0)).unwrap_or_default();
-                // SAFETY: 同上。
-                match unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), Some(hmod), 0) } {
+                // SAFETY: 回调是本模块的 `extern "system"` 函数；hmod 为本进程模块。
+                match unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), Some(module_instance()), 0) } {
                     Ok(h) => state.mouse_hook = Some(h.0 as isize),
                     Err(e) => tracing::warn!(error = %e, "安装鼠标钩子失败"),
                 }
@@ -396,8 +398,11 @@ mod imp {
                         let mut guard = lock();
                         match guard.as_mut() {
                             Some(state) => {
-                                let bindings = state.bindings.clone();
-                                let outcome = state.gesture.handle(input, &bindings);
+                                // 分字段借用，免得每个鼠标事件都克隆整份绑定表
+                                let outcome = {
+                                    let State { bindings, gesture, .. } = &mut *state;
+                                    gesture.handle(input, bindings)
+                                };
                                 let win = matches!(outcome.event, Some(DragEvent::Begin { .. })) && state.modifiers().win;
                                 (outcome, win)
                             }

@@ -131,10 +131,7 @@ pub fn recognize(
 
 /// 校验尺寸与像素长度一致且非空。
 fn check_dimensions(width: u32, height: u32, len: usize) -> Result<(), WinOcrError> {
-    let expected = (width as usize)
-        .checked_mul(height as usize)
-        .and_then(|p| p.checked_mul(4));
-    if width == 0 || height == 0 || expected != Some(len) {
+    if width == 0 || height == 0 || crate::clipboard::expected_rgba_len(width, height) != Some(len) {
         return Err(WinOcrError::InvalidImage(format!(
             "{width}x{height} does not match pixel length {len}"
         )));
@@ -147,11 +144,7 @@ fn check_dimensions(width: u32, height: u32, len: usize) -> Result<(), WinOcrErr
 /// # 参数
 /// - `rgba`：RGBA 像素，长度应为 4 的倍数（多余尾部字节原样保留）。
 pub fn rgba_to_bgra(rgba: &[u8]) -> Vec<u8> {
-    let mut out = rgba.to_vec();
-    for px in out.chunks_exact_mut(4) {
-        px.swap(0, 2);
-    }
-    out
+    crate::capture::swap_red_blue(rgba)
 }
 
 /// 字符是否属于 CJK 类（表意文字、假名、谚文、CJK 标点与全角形式）。

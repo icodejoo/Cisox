@@ -114,29 +114,42 @@ mod imp {
         unsafe { SetPriorityClass(GetCurrentProcess(), class) }.map_err(|e| format!("SetPriorityClass: {e}"))
     }
 
-    /// 打开 `Run` 子键；`write` 决定访问权限。
-    fn open_run_key(write: bool) -> Result<HKEY, String> {
-        let mut key = HKEY::default();
-        let access = if write { KEY_SET_VALUE | KEY_READ } else { KEY_READ };
-        let path = HSTRING::from(RUN_KEY);
-        // SAFETY: path 是以 0 结尾的宽字符串，key 是有效输出位置。
-        let status = unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, PCWSTR(path.as_ptr()), None, access, &mut key) };
-        if status.is_err() {
-            return Err(format!("打开 Run 注册表项失败: {status:?}"));
+    /// 已打开的 `Run` 子键，Drop 时关闭。
+    struct RunKey(HKEY);
+
+    impl RunKey {
+        /// 打开 `Run` 子键；`write` 决定访问权限。
+        fn open(write: bool) -> Result<Self, String> {
+            let mut key = HKEY::default();
+            let access = if write { KEY_SET_VALUE | KEY_READ } else { KEY_READ };
+            let path = HSTRING::from(RUN_KEY);
+            // SAFETY: path 是以 0 结尾的宽字符串，key 是有效输出位置。
+            let status = unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, PCWSTR(path.as_ptr()), None, access, &mut key) };
+            if status.is_err() {
+                return Err(format!("打开 Run 注册表项失败: {status:?}"));
+            }
+            Ok(Self(key))
         }
-        Ok(key)
+    }
+
+    impl Drop for RunKey {
+        /// 关闭子键。
+        fn drop(&mut self) {
+            // SAFETY: 子键由 `RegOpenKeyExW` 成功打开，只关闭一次。
+            let _ = unsafe { RegCloseKey(self.0) };
+        }
     }
 
     /// 写入或删除自启值。
     pub fn set_auto_start(name: &str, exe: &Path, enabled: bool) -> Result<(), String> {
-        let key = open_run_key(true)?;
+        let key = RunKey::open(true)?;
         let value_name = HSTRING::from(name);
-        let result = if enabled {
-            let command: Vec<u16> = run_command(exe).encode_utf16().chain(std::iter::once(0)).collect();
+        if enabled {
+            let command: Vec<u16> = crate::file_dialog::to_wide(&run_command(exe));
             // SAFETY: command 是 UTF-16 缓冲，字节长度按其长度计算；key 已打开且有写权限。
             let status = unsafe {
                 RegSetValueExW(
-                    key,
+                    key.0,
                     PCWSTR(value_name.as_ptr()),
                     None,
                     REG_SZ,
@@ -146,28 +159,23 @@ mod imp {
             if status.is_err() { Err(format!("写入自启项失败: {status:?}")) } else { Ok(()) }
         } else {
             // SAFETY: key 已打开且有写权限。
-            let status = unsafe { RegDeleteValueW(key, PCWSTR(value_name.as_ptr())) };
+            let status = unsafe { RegDeleteValueW(key.0, PCWSTR(value_name.as_ptr())) };
             if status.is_err() && status != ERROR_FILE_NOT_FOUND {
                 Err(format!("删除自启项失败: {status:?}"))
             } else {
                 Ok(())
             }
-        };
-        // SAFETY: key 由上面成功打开。
-        let _ = unsafe { RegCloseKey(key) };
-        result
+        }
     }
 
     /// 自启值是否存在。
     pub fn is_auto_start_enabled(name: &str) -> bool {
-        let Ok(key) = open_run_key(false) else {
+        let Ok(key) = RunKey::open(false) else {
             return false;
         };
         let value_name = HSTRING::from(name);
         // SAFETY: key 已打开；只查询是否存在，不取数据。
-        let status = unsafe { RegQueryValueExW(key, PCWSTR(value_name.as_ptr()), None, None, None, None) };
-        // SAFETY: key 由上面成功打开。
-        let _ = unsafe { RegCloseKey(key) };
+        let status = unsafe { RegQueryValueExW(key.0, PCWSTR(value_name.as_ptr()), None, None, None, None) };
         status.is_ok()
     }
 }
