@@ -6,7 +6,6 @@
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 /// 为避开已有 ID 最多尝试的次数（v4 UUID 碰撞概率可忽略，仅作死循环保护）。
 const MAX_UNIQUE_ATTEMPTS: usize = 64;
@@ -26,9 +25,7 @@ static SEED_COUNTER: AtomicU64 = AtomicU64::new(0);
 fn random_u64() -> u64 {
     let mut hasher = RandomState::new().build_hasher();
     hasher.write_u64(SEED_COUNTER.fetch_add(1, Ordering::Relaxed));
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos());
+    let nanos = snow_platform::unix_time::unix_nanos();
     hasher.write_u128(nanos);
     hasher.finish()
 }

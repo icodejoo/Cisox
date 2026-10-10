@@ -5,8 +5,9 @@
 
 use crate::document::{Compatibility, ConfigDocument, SetError};
 use serde_json::Value;
+use snow_platform::atomic_file::atomic_write;
 use std::fs;
-use std::io::{self, Write};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -160,17 +161,7 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
         fs::create_dir_all(parent)?;
     }
-    let temporary = path.with_extension("json.tmp");
-    let result = (|| {
-        let mut file = fs::File::create(&temporary)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        fs::rename(&temporary, path)
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    result
+    atomic_write(path, bytes)
 }
 
 /// 生成损坏备份路径：`<config>.corrupt.<yyyyMMddTHHmmssmmmZ>.json`，重名则追加序号。

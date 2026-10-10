@@ -158,11 +158,6 @@ mod win {
         }
     }
 
-    /// 把文本转成以 0 结尾的 UTF-16。
-    fn to_wide(text: &str) -> Vec<u16> {
-        text.encode_utf16().chain(std::iter::once(0)).collect()
-    }
-
     /// 创建菜单、弹出并返回选择结果。
     pub(super) fn show(
         owner: isize,
@@ -189,7 +184,7 @@ mod win {
                         if !item.enabled {
                             flags |= MF_GRAYED;
                         }
-                        let text = to_wide(&item.label);
+                        let text = crate::file_dialog::to_wide(&item.label);
                         AppendMenuW(menu.0, flags, item.id as usize, PCWSTR(text.as_ptr()))
                             .map_err(|e| format!("AppendMenuW 失败: {e}"))?;
                     }

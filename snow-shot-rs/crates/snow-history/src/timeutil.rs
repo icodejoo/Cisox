@@ -1,6 +1,5 @@
 //! 极简 UTC 时间工具：解析 `Qt::ISODateWithMs` 文本，避免引入时间库。
 
-use std::time::{SystemTime, UNIX_EPOCH};
 
 /// 一天的毫秒数。
 pub const MILLIS_PER_DAY: i64 = 86_400_000;
@@ -107,9 +106,7 @@ pub fn format_iso_utc_ms(ms: i64) -> String {
 
 /// 当前 UTC 毫秒时间戳。
 pub fn now_utc_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
+    snow_platform::unix_time::unix_millis()
 }
 
 #[cfg(test)]

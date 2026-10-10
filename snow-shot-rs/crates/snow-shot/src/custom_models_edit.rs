@@ -12,7 +12,6 @@ use snow_config::custom_models::{
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 /// 自定义 AI 模型列表所在的配置键（与转换引导共用同一个常量）。
 pub use crate::conversion_guide::KEY_CUSTOM_MODELS;
@@ -104,9 +103,7 @@ impl FormError {
 /// ```
 pub fn new_model_id() -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos() as u64);
+    let nanos = snow_platform::unix_time::unix_nanos() as u64;
     let mut bytes = [0u8; 16];
     for chunk in bytes.chunks_mut(8) {
         let mut hasher = RandomState::new().build_hasher();

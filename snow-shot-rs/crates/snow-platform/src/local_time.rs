@@ -45,10 +45,7 @@ pub fn now() -> LocalDateTime {
 /// 读取当前本地时间（非 Windows：UTC）。
 #[cfg(not(windows))]
 pub fn now() -> LocalDateTime {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or_default();
+    let secs = crate::unix_time::unix_secs();
     from_unix_utc(secs)
 }
 

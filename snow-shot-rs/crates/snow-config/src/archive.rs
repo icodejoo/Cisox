@@ -10,10 +10,10 @@ use crate::normalize::normalize;
 use crate::schema::{SCHEMA_VERSION_KEY, contains, current_version, parse_integer_version};
 use crate::store::civil_from_days;
 use serde_json::{Map, Value, json};
+use snow_platform::atomic_file::atomic_write;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
-use std::io::Write;
 use std::path::Path;
 
 /// 归档格式标记。
@@ -211,23 +211,11 @@ pub fn write_archive_bytes(
 /// - `bytes`：[`write_archive_bytes`] 的结果
 pub fn write_archive_file(path: &Path, bytes: &[u8]) -> Result<(), ArchiveError> {
     let io = |e: std::io::Error| ArchiveError::Io(e.to_string());
-    let name = path.file_name().ok_or(ArchiveError::Invalid)?;
+    path.file_name().ok_or(ArchiveError::Invalid)?;
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         fs::create_dir_all(parent).map_err(io)?;
     }
-    let temporary = path.with_file_name(format!(".{}.part", name.to_string_lossy()));
-    let result = (|| {
-        let mut file = fs::File::create(&temporary)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        drop(file);
-        fs::rename(&temporary, path)
-    })();
-    if let Err(e) = result {
-        let _ = fs::remove_file(&temporary);
-        return Err(io(e));
-    }
-    Ok(())
+    atomic_write(path, bytes).map_err(io)
 }
 
 /// 读取并校验归档文件。
@@ -363,10 +351,8 @@ pub fn pin_startup_keys(contents: &mut ArchiveContents, current: &BTreeMap<Strin
 
 /// 当前 UTC 时间的 ISO 8601 文本（毫秒），如 `2026-01-01T00:00:00.000Z`。
 pub fn iso_utc_now() -> String {
-    let since = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    iso_utc(since.as_secs(), since.subsec_millis())
+    let ms = snow_platform::unix_time::unix_millis().max(0) as u64;
+    iso_utc(ms / 1000, (ms % 1000) as u32)
 }
 
 /// 把 Unix 秒与毫秒格式化为 ISO 8601（UTC）。

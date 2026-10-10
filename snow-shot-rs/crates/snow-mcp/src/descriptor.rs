@@ -6,12 +6,12 @@ use serde_json::{Value, json};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use snow_platform::atomic_file::atomic_write;
+
 /// 描述符所在子目录名。
 pub const DESCRIPTOR_DIR: &str = "mcp";
 /// 描述符文件名。
 pub const DESCRIPTOR_FILE: &str = "descriptor.json";
-/// 写入时的临时文件名（写完再改名，避免读到半截）。
-const DESCRIPTOR_TEMP_FILE: &str = "descriptor.json.tmp";
 
 /// 描述符内容。
 pub struct Descriptor<'a> {
@@ -53,12 +53,8 @@ pub fn write(data_root: &Path, descriptor: &Descriptor<'_>) -> Result<PathBuf, S
         "generation": descriptor.generation,
         "scopes": descriptor.scopes.iter().map(|s| s.name()).collect::<Vec<_>>(),
     });
-    let temp = dir.join(DESCRIPTOR_TEMP_FILE);
-    fs::write(&temp, body.to_string()).map_err(|e| format!("写描述符失败: {e}"))?;
-    fs::rename(&temp, &path).map_err(|e| {
-        let _ = fs::remove_file(&temp);
-        format!("替换描述符失败: {e}")
-    })?;
+    atomic_write(&path, body.to_string().as_bytes())
+        .map_err(|e| format!("写描述符失败: {e}"))?;
     Ok(path)
 }
 

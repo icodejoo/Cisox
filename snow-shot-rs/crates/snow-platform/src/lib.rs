@@ -2,6 +2,7 @@
 //!
 //! 所属阶段：P1。当前为最小骨架，占位实现为可运行的降级态。
 
+pub mod atomic_file;
 pub mod capture;
 pub mod clipboard;
 pub mod console;
@@ -22,6 +23,7 @@ pub mod system_integration;
 pub mod text_inject;
 pub mod text_raster;
 pub mod tray;
+pub mod unix_time;
 pub mod win_ocr;
 pub mod window_rect;
 

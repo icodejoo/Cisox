@@ -6844,6 +6844,7 @@ version = "0.1.0"
 dependencies = [
  "snow-capability",
  "snow-draw-engine-core",
+ "snow-platform",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
@@ -6887,6 +6888,7 @@ dependencies = [
  "serde_json",
  "snow-app-core",
  "snow-net",
+ "snow-platform",
 ]
 
 [[package]]
@@ -6970,6 +6972,7 @@ dependencies = [
  "serde",
  "serde_json",
  "snow-config",
+ "snow-platform",
 ]
 
 [[package]]
@@ -7082,6 +7085,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "snow-net",
  "tracing",
 ]
 

@@ -3,8 +3,8 @@
 //! 对照 C++ `writeFile`（QSaveFile）、`containedPath`、`safeFileName`。
 
 use std::fs;
-use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::io;
+use std::path::Path;
 
 /// 原子写：先写同目录临时文件并落盘，再改名覆盖目标；失败时清掉临时文件。
 ///
@@ -21,20 +21,7 @@ use std::path::{Path, PathBuf};
 /// assert_eq!(std::fs::read(&file).unwrap(), b"{}");
 /// ```
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let mut temporary = path.as_os_str().to_owned();
-    temporary.push(".tmp");
-    let temporary = PathBuf::from(temporary);
-    let result = (|| {
-        let mut file = fs::File::create(&temporary)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        drop(file);
-        fs::rename(&temporary, path)
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    result
+    snow_platform::atomic_file::atomic_write(path, bytes)
 }
 
 /// 比较两个已规范化路径是否相同；Windows 下忽略大小写。

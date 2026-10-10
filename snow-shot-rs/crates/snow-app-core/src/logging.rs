@@ -6,7 +6,6 @@
 use std::fmt;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use tracing::Subscriber;
 use tracing_appender::non_blocking::WorkerGuard;
@@ -199,9 +198,7 @@ pub fn prune_expired_logs(dir: &Path, today: i64, retention_days: usize) -> usiz
 
 /// 当前 UTC 日期（自 1970 起的天数），与滚动文件名所用的日期一致。
 fn today_utc() -> i64 {
-    let seconds = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
+    let seconds = snow_platform::unix_time::unix_secs();
     (seconds / SECONDS_PER_DAY) as i64
 }
 

@@ -11,7 +11,6 @@ use std::panic::PanicHookInfo;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(windows)]
 mod win32;
@@ -311,9 +310,7 @@ pub fn write_report(
 
 /// 当前 Unix 秒。
 fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
+    crate::unix_time::unix_secs()
 }
 
 /// 从 panic 信息提取消息文本。

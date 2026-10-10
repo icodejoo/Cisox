@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+snow-net = { path = "../snow-net" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"

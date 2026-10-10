@@ -361,10 +361,7 @@ pub fn resolve_save_directory(
 
 /// 读取当前用户目录（`USERPROFILE`，其次 `HOME`）。
 pub fn home_directory() -> Option<PathBuf> {
-    std::env::var_os("USERPROFILE")
-        .or_else(|| std::env::var_os("HOME"))
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
+    snow_config::paths::home_dir()
 }
 
 /// 配置的输出格式是否被支持；不支持时调用方应改用 PNG 并记日志。
@@ -497,17 +494,8 @@ pub fn encode_png_with_level(
 /// # 返回
 /// 成功为 `Ok(())`，失败返回系统错误说明。
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let mut temp_name = path
-        .file_name()
-        .map(|n| n.to_os_string())
-        .unwrap_or_default();
-    temp_name.push(format!(".{}.tmp", std::process::id()));
-    let temp = path.with_file_name(temp_name);
-    let result = std::fs::write(&temp, bytes).and_then(|()| std::fs::rename(&temp, path));
-    if let Err(e) = result {
-        let _ = std::fs::remove_file(&temp);
-        return Err(format!("{}: {e}", path.display()));
-    }
+    snow_platform::atomic_file::atomic_write(path, bytes)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
     Ok(())
 }
 
