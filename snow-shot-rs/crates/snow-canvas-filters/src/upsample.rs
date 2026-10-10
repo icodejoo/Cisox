@@ -98,69 +98,6 @@ fn expand_row(line: &[u32], samples: &[AxisSample], expanded: &mut [u32]) {
     }
 }
 
-/// 整图双线性上采样核心（常量权重 255）。
-fn upsample_bilinear_impl(
-    source: ImageRef,
-    destination: &mut ImageMut,
-    factor: i32,
-    use_avx2: bool,
-) -> bool {
-    let x_samples = prepare_axis_samples(0, destination.width, source.width, factor);
-    let y_samples = prepare_axis_samples(0, destination.height, source.height, factor);
-    let width = destination.width as usize;
-    let mut executed = false;
-    let mut first_expanded = vec![0u32; width];
-    let mut second_expanded = vec![0u32; width];
-    let mut first_source_row = -1;
-    let mut second_source_row = -1;
-    let row_of = |row: i32| {
-        let offset = (row as usize) * source.stride;
-        &source.data[offset..offset + source.width as usize]
-    };
-    for y in 0..destination.height {
-        let vertical = y_samples[y as usize];
-        if vertical.first == second_source_row {
-            std::mem::swap(&mut first_expanded, &mut second_expanded);
-            first_source_row = second_source_row;
-            second_source_row = -1;
-        }
-        if vertical.first != first_source_row {
-            expand_row(row_of(vertical.first), &x_samples, &mut first_expanded);
-            first_source_row = vertical.first;
-        }
-        if vertical.second != first_source_row && vertical.second != second_source_row {
-            expand_row(row_of(vertical.second), &x_samples, &mut second_expanded);
-            second_source_row = vertical.second;
-        }
-        let line0 = &first_expanded;
-        let line1 = if vertical.second == first_source_row {
-            &first_expanded
-        } else {
-            &second_expanded
-        };
-        let offset = (y as usize) * destination.stride;
-        let output = &mut destination.data[offset..offset + width];
-        let mut x = 0;
-        if use_avx2 {
-            x = interpolate_and_blend_constant_avx2(
-                line0,
-                line1,
-                output,
-                destination.width,
-                vertical.weight,
-                255,
-            );
-            if x > 0 {
-                executed = true;
-            }
-        }
-        for i in x as usize..width {
-            output[i] = interpolate_pixel(line0[i], line1[i], vertical.weight);
-        }
-    }
-    executed
-}
-
 /// 双线性上采样（整图）。
 ///
 /// 参数：`source` 为缩小图；`destination` 为整图；`factor` 为缩小倍数（`<=1` 为逐行拷贝）；
@@ -183,10 +120,18 @@ pub(crate) fn upsample_bilinear(
         }
         return false;
     }
-    upsample_bilinear_impl(
+    // 整图上采样就是“无遮罩、常量权重 255、目标与源区域都取整幅”的合成上采样
+    let full = Rect::new(0, 0, destination.width, destination.height);
+    upsample_bilinear_composited_impl(
         source,
         destination,
+        None,
+        0,
+        0,
+        full,
+        full,
         normalize_factor(factor, false),
+        255,
         use_avx2,
     )
 }
@@ -328,4 +273,53 @@ pub(crate) fn upsample_bilinear_composited(
         constant_mix,
         use_avx2,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::image::OwnedImage;
+
+    /// 生成确定性的缩小图。
+    fn small_image(w: i32, h: i32) -> OwnedImage {
+        let mut img = OwnedImage::new(w, h);
+        for (i, p) in img.data.iter_mut().enumerate() {
+            let v = (i as u32 * 37 + 11) & 0xff;
+            *p = 0xff00_0000 | (v << 16) | ((v ^ 0x5a) << 8) | (v / 2);
+        }
+        img
+    }
+
+    /// 纯色缩小图上采样后仍是同一颜色。
+    #[test]
+    fn constant_image_stays_constant() {
+        let mut small = OwnedImage::new(5, 4);
+        small.data.fill(0xff10_2030);
+        let mut big = OwnedImage::new(19, 15);
+        upsample_bilinear(small.as_ref(), &mut big.as_mut(), 4, false);
+        assert!(big.data.iter().all(|&p| p == 0xff10_2030));
+    }
+
+    /// 倍数不大于 1 时逐行拷贝。
+    #[test]
+    fn factor_one_copies() {
+        let small = small_image(9, 3);
+        let mut big = OwnedImage::new(9, 3);
+        assert!(!upsample_bilinear(small.as_ref(), &mut big.as_mut(), 1, true));
+        assert_eq!(big, small);
+    }
+
+    /// AVX2 与标量整图上采样逐字节一致（宽度不是 8 的倍数，覆盖尾部）。
+    #[test]
+    fn avx2_matches_scalar() {
+        let small = small_image(11, 7);
+        for factor in [2, 4, 8, 16, 32, 64] {
+            let (w, h) = (11 * factor - 3, 7 * factor - 2);
+            let mut fast = OwnedImage::new(w, h);
+            let mut slow = OwnedImage::new(w, h);
+            upsample_bilinear(small.as_ref(), &mut fast.as_mut(), factor, true);
+            upsample_bilinear(small.as_ref(), &mut slow.as_mut(), factor, false);
+            assert_eq!(fast, slow, "factor {factor}");
+        }
+    }
 }

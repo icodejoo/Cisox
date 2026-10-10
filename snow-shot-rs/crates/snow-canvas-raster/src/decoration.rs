@@ -409,16 +409,19 @@ pub fn watermark_physical(font_size: f64, gap: f64, scale: f64) -> (f64, f64) {
     (px, gap_px)
 }
 
+/// 取定长字节缓冲的前 `len` 个字节（超长按缓冲长度截断）转 UTF-8，非法字节按替换符处理。
+fn lossy_prefix(buffer: &[u8], len: usize) -> String {
+    String::from_utf8_lossy(&buffer[..len.min(buffer.len())]).into_owned()
+}
+
 /// 水印文本（UTF-8，按 `text_len` 截断；非法字节丢弃）。
 fn watermark_text(w: &DisplayWatermarkConfig) -> String {
-    let len = usize::from(w.text_len).min(w.text.len());
-    String::from_utf8_lossy(&w.text[..len]).into_owned()
+    lossy_prefix(&w.text, usize::from(w.text_len))
 }
 
 /// 水印字体族（空串表示默认字体）。
 fn watermark_family(w: &DisplayWatermarkConfig) -> String {
-    let len = usize::from(w.font_family_len).min(w.font_family.len());
-    String::from_utf8_lossy(&w.font_family[..len]).into_owned()
+    lossy_prefix(&w.font_family, usize::from(w.font_family_len))
 }
 
 /// 水印有效 alpha（0..=1）：`color.a * clamp(opacity) / 255`。
@@ -680,5 +683,19 @@ fn draw_watermark(
     };
     if let Some(rect) = Rect::from_xywh(0.0, 0.0, target.width() as f32, target.height() as f32) {
         target.fill_rect(rect, &paint, Transform::identity(), None);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 按长度截断；长度超过缓冲时按缓冲截断；非法字节变替换符。
+    #[test]
+    fn lossy_prefix_truncates_and_tolerates_bad_bytes() {
+        assert_eq!(lossy_prefix(b"hello", 3), "hel");
+        assert_eq!(lossy_prefix(b"hi", 99), "hi");
+        assert_eq!(lossy_prefix(b"hi", 0), "");
+        assert_eq!(lossy_prefix(&[b'a', 0xff], 2), "a\u{fffd}");
     }
 }

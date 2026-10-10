@@ -10,10 +10,10 @@ use crate::avx2::{
     invert_rect_avx2, is_avx2_available,
 };
 use crate::image::{AlphaRef, ImageMut, ImageRef, Rect};
-use crate::params::{FILTER_GRAYSCALE, Parameters};
+use crate::params::{FILTER_GRAYSCALE, FILTER_INVERT, Parameters};
 use crate::pixel::{
-    blend_premultiplied, combine_coverage, normalized_strength, q_alpha, q_blue, q_green, q_red,
-    q_rgba, q_round,
+    blend_premultiplied, combine_coverage, grayscale_pixel, inversion_pixel, normalized_strength,
+    q_alpha, q_blue, q_green, q_red, q_rgba, q_round,
 };
 use std::cmp::{max, min};
 
@@ -78,23 +78,31 @@ fn collect_mosaic_samples(
 /// 灰度/反相的单像素变换（其余类型原样返回）。
 #[inline]
 fn transformed_color(pixel: u32, filter_type: u32) -> u32 {
-    let alpha = q_alpha(pixel);
-    if filter_type == 2 {
-        let luminance = min(
-            alpha,
-            (q_red(pixel) * 54 + q_green(pixel) * 183 + q_blue(pixel) * 19 + 128) >> 8,
-        );
-        return q_rgba(luminance, luminance, luminance, alpha);
+    match filter_type {
+        FILTER_GRAYSCALE => grayscale_pixel(pixel),
+        FILTER_INVERT => inversion_pixel(pixel),
+        _ => pixel,
     }
-    if filter_type == 3 {
-        return q_rgba(
-            alpha - q_red(pixel),
-            alpha - q_green(pixel),
-            alpha - q_blue(pixel),
-            alpha,
-        );
+}
+
+/// 按权重把 `to` 混入 `current`：权重不小于 255 时直接取 `to`，否则做预乘混合。
+#[inline]
+fn mix_pixel(current: u32, to: u32, mix: i32) -> u32 {
+    if mix >= 255 {
+        to
+    } else {
+        blend_premultiplied(current, to, mix)
     }
-    pixel
+}
+
+/// 矩形的 `(左, 上, 右, 下)`，右/下为开区间末端（AVX2 内核的参数形式）。
+fn exclusive_edges(pixels: Rect) -> (i32, i32, i32, i32) {
+    (
+        pixels.left(),
+        pixels.top(),
+        pixels.right() + 1,
+        pixels.bottom() + 1,
+    )
 }
 
 /// 浮雕采样半径（像素）。
@@ -124,6 +132,11 @@ impl EmbossResponse {
                 (0.5 + strength * delta as f64 / (3.0 * 255.0)).clamp(0.0, 1.0);
         }
         Self { gray }
+    }
+
+    /// 按滤镜参数构建查表（强度先归一化再乘浮雕缩放系数）。
+    fn for_parameters(parameters: &Parameters) -> Self {
+        Self::new(normalized_strength(parameters.strength) * EMBOSS_STRENGTH_SCALE)
     }
 
     /// 由负/正方向采样像素与中心 alpha 计算浮雕像素。
@@ -188,8 +201,7 @@ pub fn emboss_rect(
         return;
     }
     let sampling_radius = emboss_sampling_radius(parameters);
-    let response =
-        EmbossResponse::new(normalized_strength(parameters.strength) * EMBOSS_STRENGTH_SCALE);
+    let response = EmbossResponse::for_parameters(parameters);
     for local_y in 0..pixels.h {
         let y = pixels.top() + local_y;
         let row = EmbossRow::new(source, y, sampling_radius);
@@ -197,11 +209,7 @@ pub fn emboss_rect(
         let line = &mut destination.data[(y as usize * stride)..];
         for x in pixels.left()..=pixels.right() {
             let embossed = row.pixel(x, &response);
-            line[x as usize] = if constant_mix >= 255 {
-                embossed
-            } else {
-                blend_premultiplied(line[x as usize], embossed, constant_mix)
-            };
+            line[x as usize] = mix_pixel(line[x as usize], embossed, constant_mix);
         }
     }
 }
@@ -225,8 +233,7 @@ pub fn emboss_masked_rect(
         return;
     }
     let sampling_radius = emboss_sampling_radius(parameters);
-    let response =
-        EmbossResponse::new(normalized_strength(parameters.strength) * EMBOSS_STRENGTH_SCALE);
+    let response = EmbossResponse::for_parameters(parameters);
     for local_y in 0..pixels.h {
         let y = pixels.top() + local_y;
         let row = EmbossRow::new(source, y, sampling_radius);
@@ -239,11 +246,7 @@ pub fn emboss_masked_rect(
                 continue;
             }
             let embossed = row.pixel(x, &response);
-            line[x as usize] = if mix == 255 {
-                embossed
-            } else {
-                blend_premultiplied(line[x as usize], embossed, mix)
-            };
+            line[x as usize] = mix_pixel(line[x as usize], embossed, mix);
         }
     }
 }
@@ -384,12 +387,7 @@ pub fn color_effect(image: &mut ImageMut, filter_type: u32, mix: i32, force_scal
         let line = &mut image.data[(y as usize * stride)..];
         for x in 0..width as usize {
             let pixel = line[x];
-            let transformed = transformed_color(pixel, filter_type);
-            line[x] = if mix == 255 {
-                transformed
-            } else {
-                blend_premultiplied(pixel, transformed, mix)
-            };
+            line[x] = mix_pixel(pixel, transformed_color(pixel, filter_type), mix);
         }
     }
     false
@@ -412,12 +410,7 @@ pub fn color_effect_rect(
         return false;
     }
     if !force_scalar && is_avx2_available() {
-        let (l, t, r, b) = (
-            pixels.left(),
-            pixels.top(),
-            pixels.right() + 1,
-            pixels.bottom() + 1,
-        );
+        let (l, t, r, b) = exclusive_edges(pixels);
         let executed = if filter_type == FILTER_GRAYSCALE {
             grayscale_rect_avx2(source, destination, l, t, r, b, mix)
         } else {
@@ -433,11 +426,7 @@ pub fn color_effect_rect(
         let line = &mut destination.data[(y as usize * destination.stride)..];
         for x in pixels.left()..=pixels.right() {
             let transformed = transformed_color(source_line[x as usize], filter_type);
-            line[x as usize] = if mix == 255 {
-                transformed
-            } else {
-                blend_premultiplied(line[x as usize], transformed, mix)
-            };
+            line[x as usize] = mix_pixel(line[x as usize], transformed, mix);
         }
     }
     false
@@ -464,12 +453,7 @@ pub fn color_masked(
         return false;
     }
     if !force_scalar && is_avx2_available() {
-        let (l, t, r, b) = (
-            pixels.left(),
-            pixels.top(),
-            pixels.right() + 1,
-            pixels.bottom() + 1,
-        );
+        let (l, t, r, b) = exclusive_edges(pixels);
         let executed = if filter_type == FILTER_GRAYSCALE {
             grayscale_masked_avx2(
                 source,
@@ -515,11 +499,7 @@ pub fn color_masked(
                 continue;
             }
             let to = transformed_color(source_line[x as usize], filter_type);
-            line[x as usize] = if mix == 255 {
-                to
-            } else {
-                blend_premultiplied(line[x as usize], to, mix)
-            };
+            line[x as usize] = mix_pixel(line[x as usize], to, mix);
         }
     }
     false
@@ -552,5 +532,36 @@ pub fn blend_over_source(filtered: &mut ImageMut, source: ImageRef, opacity: f64
                 alpha,
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::params::FILTER_MOSAIC;
+
+    /// 权重 255 直接取目标；0 保持原值；其余走预乘混合。
+    #[test]
+    fn mix_pixel_endpoints() {
+        let (a, b) = (0x8040_2010, 0xff10_2030);
+        assert_eq!(mix_pixel(a, b, 255), b);
+        assert_eq!(mix_pixel(a, b, 300), b);
+        assert_eq!(mix_pixel(a, b, 0), a);
+        assert_eq!(mix_pixel(a, b, 100), blend_premultiplied(a, b, 100));
+    }
+
+    /// 灰度/反相按类型分派，其余类型原样返回。
+    #[test]
+    fn transformed_color_dispatch() {
+        let p = 0xff10_2030;
+        assert_eq!(transformed_color(p, FILTER_GRAYSCALE), grayscale_pixel(p));
+        assert_eq!(transformed_color(p, FILTER_INVERT), inversion_pixel(p));
+        assert_eq!(transformed_color(p, FILTER_MOSAIC), p);
+    }
+
+    /// 右/下边界取开区间末端。
+    #[test]
+    fn exclusive_edges_are_open_ended() {
+        assert_eq!(exclusive_edges(Rect::new(2, 3, 4, 5)), (2, 3, 6, 8));
     }
 }

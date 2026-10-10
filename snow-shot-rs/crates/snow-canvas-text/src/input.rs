@@ -55,7 +55,9 @@ pub enum EditKeyOutcome {
 /// assert_eq!(d.text(), "a\n");
 /// ```
 pub fn apply_edit_key(draft: &mut TextDraft, key: &str, shift: bool, control: bool) -> EditKeyOutcome {
-    let handled = match (key, control) {
+    // 各分支返回的“是否有变化”不影响结果：即使内容没变（例如光标已在边界）也算已处理，
+    // 避免按键冒泡触发外层快捷键
+    let _ = match (key, control) {
         ("escape", _) => return EditKeyOutcome::Cancel,
         ("enter", false) if !shift => return EditKeyOutcome::Commit,
         ("enter", false) => draft.insert_text("\n"),
@@ -71,8 +73,6 @@ pub fn apply_edit_key(draft: &mut TextDraft, key: &str, shift: bool, control: bo
         ("y", true) => draft.redo(),
         _ => return EditKeyOutcome::Ignored,
     };
-    // 即使内容没变（例如光标已在边界）也算已处理，避免按键冒泡触发外层快捷键
-    let _ = handled;
     EditKeyOutcome::Handled
 }
 

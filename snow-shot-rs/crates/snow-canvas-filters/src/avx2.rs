@@ -4,6 +4,8 @@
 //! 由调用方回退到标量实现。
 
 use crate::image::{AlphaRef, ImageMut, ImageRef};
+#[cfg(target_arch = "x86_64")]
+use crate::pixel::{grayscale_pixel, inversion_pixel};
 use crate::pixel::{blend_premultiplied, q_alpha, q_blue, q_green, q_red, q_rgba};
 
 #[cfg(target_arch = "x86_64")]
@@ -523,27 +525,6 @@ unsafe fn interpolate_masked_impl(
         }
         processed
     }
-}
-
-/// 灰度标量像素：亮度 = min(alpha, (54R+183G+19B+128)>>8)。
-#[inline]
-fn grayscale_pixel(pixel: u32) -> u32 {
-    let alpha = q_alpha(pixel);
-    let luminance =
-        alpha.min((q_red(pixel) * 54 + q_green(pixel) * 183 + q_blue(pixel) * 19 + 128) >> 8);
-    q_rgba(luminance, luminance, luminance, alpha)
-}
-
-/// 反相标量像素：各通道 = alpha - 通道。
-#[inline]
-fn inversion_pixel(pixel: u32) -> u32 {
-    let alpha = q_alpha(pixel);
-    q_rgba(
-        alpha - q_red(pixel),
-        alpha - q_green(pixel),
-        alpha - q_blue(pixel),
-        alpha,
-    )
 }
 
 /// 灰度向量版（8 像素）。

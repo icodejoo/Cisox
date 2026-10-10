@@ -54,9 +54,8 @@ pub fn sampling_radius_pixels(parameters: &Parameters) -> i32 {
 /// 示例：`apply(&mut img.as_mut(), &params, &ExecutionOptions::default());`
 pub fn apply(image: &mut ImageMut, parameters: &Parameters, options: &ExecutionOptions) {
     let t = parameters.filter_type;
-    if (t == FILTER_GRAYSCALE || t == FILTER_INVERT)
-        && normalized_strength_mix(parameters.strength) == 0
-    {
+    let strength_mix = normalized_strength_mix(parameters.strength);
+    if is_color_effect(t) && strength_mix == 0 {
         return;
     }
     match t {
@@ -65,12 +64,7 @@ pub fn apply(image: &mut ImageMut, parameters: &Parameters, options: &ExecutionO
             blur(image, parameters, options.force_scalar);
         }
         FILTER_GRAYSCALE | FILTER_INVERT => {
-            color_effect(
-                image,
-                t,
-                normalized_strength_mix(parameters.strength),
-                options.force_scalar,
-            );
+            color_effect(image, t, strength_mix, options.force_scalar);
         }
         FILTER_EMBOSS => {
             // 浮雕需读取邻域，先拷贝出独立的源缓冲
@@ -81,11 +75,29 @@ pub fn apply(image: &mut ImageMut, parameters: &Parameters, options: &ExecutionO
                 height: image.height,
                 stride: image.stride,
             };
-            let rect = Rect::new(0, 0, image.width, image.height);
+            let rect = full_rect(image);
             emboss_rect(source, image, rect, parameters, 255);
         }
         _ => {}
     }
+}
+
+/// 是否为颜色效果（灰度 / 反相，强度决定混合权重）。
+fn is_color_effect(filter_type: u32) -> bool {
+    filter_type == FILTER_GRAYSCALE || filter_type == FILTER_INVERT
+}
+
+/// `apply_rect` / `apply_region` 支持的滤镜类型（马赛克不在内）。
+fn supports_destination_rect(filter_type: u32) -> bool {
+    matches!(
+        filter_type,
+        FILTER_BLUR | FILTER_GRAYSCALE | FILTER_INVERT | FILTER_EMBOSS
+    )
+}
+
+/// 目标图的整幅矩形。
+fn full_rect(image: &ImageMut) -> Rect {
+    Rect::new(0, 0, image.width, image.height)
 }
 
 /// 源与目标尺寸是否一致。
@@ -114,8 +126,7 @@ pub fn apply_masked(
     if !same_size(&source, destination) {
         return false;
     }
-    let pixels =
-        destination_pixels.intersected(&Rect::new(0, 0, destination.width, destination.height));
+    let pixels = destination_pixels.intersected(&full_rect(destination));
     if pixels.is_empty() {
         return true;
     }
@@ -123,7 +134,7 @@ pub fn apply_masked(
         return false;
     }
     let t = parameters.filter_type;
-    let color_effect_type = t == FILTER_GRAYSCALE || t == FILTER_INVERT;
+    let color_effect_type = is_color_effect(t);
     let strength_mix = if color_effect_type {
         normalized_strength_mix(parameters.strength)
     } else {
@@ -200,17 +211,12 @@ pub fn apply_rect(
     options: &ExecutionOptions,
 ) -> bool {
     let t = parameters.filter_type;
-    let supported = matches!(
-        t,
-        FILTER_BLUR | FILTER_GRAYSCALE | FILTER_INVERT | FILTER_EMBOSS
-    );
-    if !supported || !same_size(&source, destination) {
+    if !supports_destination_rect(t) || !same_size(&source, destination) {
         return false;
     }
-    let pixels =
-        destination_pixels.intersected(&Rect::new(0, 0, destination.width, destination.height));
+    let pixels = destination_pixels.intersected(&full_rect(destination));
     let mut mix = q_round(opacity * 255.0).clamp(0, 255);
-    if t == FILTER_GRAYSCALE || t == FILTER_INVERT {
+    if is_color_effect(t) {
         mix = combine_coverage(mix, normalized_strength_mix(parameters.strength));
     }
     if pixels.is_empty() || mix == 0 {
@@ -253,14 +259,10 @@ pub fn apply_region(
     options: &ExecutionOptions,
 ) -> bool {
     let t = parameters.filter_type;
-    let supported = matches!(
-        t,
-        FILTER_BLUR | FILTER_GRAYSCALE | FILTER_INVERT | FILTER_EMBOSS
-    );
-    if !supported || !same_size(&source, destination) {
+    if !supports_destination_rect(t) || !same_size(&source, destination) {
         return false;
     }
-    let bounds = Rect::new(0, 0, destination.width, destination.height);
+    let bounds = full_rect(destination);
     let pixels: Vec<Rect> = destination_region
         .iter()
         .map(|r| r.intersected(&bounds))
@@ -269,7 +271,7 @@ pub fn apply_region(
     if pixels.is_empty() {
         return true;
     }
-    let color_mix = if t == FILTER_GRAYSCALE || t == FILTER_INVERT {
+    let color_mix = if is_color_effect(t) {
         normalized_strength_mix(parameters.strength)
     } else {
         255
@@ -308,5 +310,27 @@ pub fn apply_region(
             }
             true
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::image::OwnedImage;
+
+    /// 颜色效果只含灰度与反相；矩形/区域入口不支持马赛克。
+    #[test]
+    fn filter_type_classification() {
+        assert!(is_color_effect(FILTER_GRAYSCALE) && is_color_effect(FILTER_INVERT));
+        assert!(!is_color_effect(FILTER_BLUR) && !is_color_effect(FILTER_MOSAIC));
+        assert!(supports_destination_rect(FILTER_EMBOSS) && supports_destination_rect(FILTER_BLUR));
+        assert!(!supports_destination_rect(FILTER_MOSAIC));
+    }
+
+    /// 整幅矩形取图像宽高。
+    #[test]
+    fn full_rect_covers_image() {
+        let mut img = OwnedImage::new(5, 3);
+        assert_eq!(full_rect(&img.as_mut()), Rect::new(0, 0, 5, 3));
     }
 }

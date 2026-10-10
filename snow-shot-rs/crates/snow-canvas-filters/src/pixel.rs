@@ -66,16 +66,34 @@ pub fn combine_coverage(first: i32, second: i32) -> i32 {
     (first * second + 127) / 255
 }
 
-/// 强度归一化到 [0,1]：NaN 视为 1，±inf 分别取 0/1。
+/// 灰度标量像素：亮度 = min(alpha, (54R+183G+19B+128)>>8)，保持 alpha。
+#[inline]
+pub(crate) fn grayscale_pixel(pixel: u32) -> u32 {
+    let alpha = q_alpha(pixel);
+    let luminance =
+        alpha.min((q_red(pixel) * 54 + q_green(pixel) * 183 + q_blue(pixel) * 19 + 128) >> 8);
+    q_rgba(luminance, luminance, luminance, alpha)
+}
+
+/// 反相标量像素：各颜色通道 = alpha - 通道，保持 alpha。
+#[inline]
+pub(crate) fn inversion_pixel(pixel: u32) -> u32 {
+    let alpha = q_alpha(pixel);
+    q_rgba(
+        alpha - q_red(pixel),
+        alpha - q_green(pixel),
+        alpha - q_blue(pixel),
+        alpha,
+    )
+}
+
+/// 强度归一化到 [0,1]：NaN 视为 1，±inf 由 clamp 分别取 0/1。
 pub fn normalized_strength(strength: f64) -> f64 {
-    let s = if strength.is_nan() {
+    if strength.is_nan() {
         1.0
-    } else if !strength.is_finite() {
-        if strength < 0.0 { 0.0 } else { 1.0 }
     } else {
-        strength
-    };
-    s.clamp(0.0, 1.0)
+        strength.clamp(0.0, 1.0)
+    }
 }
 
 /// 强度转 0..=255 的混合权重。
@@ -113,6 +131,17 @@ mod tests {
         let (a, b) = (0x8040_2010, 0xff10_2030);
         assert_eq!(blend_premultiplied(a, b, 0), a);
         assert_eq!(blend_premultiplied(a, b, 255), b);
+    }
+
+    /// 灰度取亮度并受 alpha 约束；反相为 alpha 减通道；两者都保持 alpha。
+    #[test]
+    fn scalar_color_pixels() {
+        // 预乘红色：亮度 (255*54+128)>>8 = 54
+        assert_eq!(grayscale_pixel(0xffff_0000), 0xff36_3636);
+        // 亮度被 alpha 钳住
+        assert_eq!(grayscale_pixel(0x0200_ffff), 0x0202_0202);
+        assert_eq!(inversion_pixel(0xff10_2030), 0xffef_dfcf);
+        assert_eq!(inversion_pixel(0x0000_0000), 0);
     }
 
     /// combine_coverage 端点。

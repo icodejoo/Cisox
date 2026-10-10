@@ -344,9 +344,10 @@ impl RegionMask {
             None,
         );
         let mut changed = false;
+        let drawn = pixmap.data();
         for row in 0..h as usize {
             for col in 0..w as usize {
-                let coverage = u32::from(pixmap.data()[(row * w as usize + col) * CHANNELS + 3]);
+                let coverage = u32::from(drawn[(row * w as usize + col) * CHANNELS + 3]);
                 if coverage == 0 {
                     continue;
                 }

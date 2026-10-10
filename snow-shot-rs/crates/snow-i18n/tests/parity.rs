@@ -1,10 +1,12 @@
 //! 对照测试（约定 7）：真实 `.ts` 的 Qt 渲染结果 与 转换后 Fluent 渲染结果逐条一致。
 
+mod common;
+
 use snow_i18n::convert::{convert_catalog, identity_catalog, message_id};
 use snow_i18n::ts::{TsCatalog, TsStatus, parse_ts};
 use snow_i18n::{Args, I18n};
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// 旧版产品名，Qt 原文里的字面量。
 const LEGACY: &str = "Snow Shot";
@@ -12,29 +14,9 @@ const LEGACY: &str = "Snow Shot";
 /// 复数测试取值。
 const PLURAL_SAMPLES: [i64; 5] = [0, 1, 2, 5, 1234];
 
-/// 仓库根目录。
-fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..")
-}
-
 /// 收集并解析全部真实 `.ts`。
 fn load_all() -> Vec<(String, TsCatalog)> {
-    let mut files = Vec::new();
-    let dirs = [
-        repo_root().join("snow_shot/i18n"),
-        repo_root().join("ant_design_qt/packages/ant_design_qt/i18n"),
-    ];
-    for d in dirs {
-        walk(&d, &mut files);
-    }
-    // 繁体已不支持：忽略上游 zh_TW 的 .ts。
-    files.retain(|f| !f.to_string_lossy().ends_with("_zh_TW.ts"));
-    assert!(
-        files.len() >= 20,
-        "应至少找到 20 个 .ts，实际 {}",
-        files.len()
-    );
-    files
+    common::legacy_ts_files()
         .into_iter()
         .map(|f| {
             let text = std::fs::read_to_string(&f).unwrap();
@@ -42,18 +24,6 @@ fn load_all() -> Vec<(String, TsCatalog)> {
             (name, parse_ts(&text).unwrap())
         })
         .collect()
-}
-
-/// 递归找 `.ts`。
-fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
-    for e in std::fs::read_dir(dir).unwrap() {
-        let p = e.unwrap().path();
-        if p.is_dir() {
-            walk(&p, out);
-        } else if p.extension().is_some_and(|x| x == "ts") {
-            out.push(p);
-        }
-    }
 }
 
 /// 生成第 i 个位置参数的测试值。

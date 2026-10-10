@@ -157,6 +157,19 @@ mod tests {
         assert_eq!(draft.display_text(), "Hello你好");
     }
 
+    /// 无预编辑时 IME 上屏替换当前选区；空草稿与 `with_text("")` 等价。
+    #[test]
+    fn draft_ime_commit_replaces_selection() {
+        let mut draft = TextDraft::with_text("abcdef");
+        draft.set_cursor(1, false);
+        draft.set_cursor(4, true);
+        draft.ime_replace_text(None, "X");
+        assert_eq!(draft.text(), "aXef");
+        assert_eq!(draft.cursor(), 2);
+        assert_eq!(TextDraft::new().text(), TextDraft::with_text("").text());
+        assert_eq!(TextDraft::new().cursor(), 0);
+    }
+
     /// 测试文本样式属性限制与字号梯阶。
     #[test]
     fn text_style_and_steps() {

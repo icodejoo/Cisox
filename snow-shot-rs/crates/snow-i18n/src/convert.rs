@@ -148,11 +148,16 @@ struct ValueInfo {
     args: BTreeSet<String>,
 }
 
+/// 是否为需要走字面量转义的控制字符（C0 控制符与 DEL）。
+fn is_control_char(c: char) -> bool {
+    (c as u32) < 0x20 || c == '\u{7f}'
+}
+
 /// 生成字符串字面量表达式 `{ "..." }`。
 fn literal(s: &str) -> String {
     let mut out = String::from("{ \"");
     for c in s.chars() {
-        if (c as u32) < 0x20 || c == '\u{7f}' {
+        if is_control_char(c) {
             out.push_str(&format!("\\u{:04x}", c as u32));
         } else {
             out.push(c);
@@ -166,10 +171,10 @@ fn literal(s: &str) -> String {
 fn escape_text(s: &str) -> String {
     let mut out = String::new();
     for c in s.chars() {
-        match c {
-            '{' | '}' => out.push_str(&literal(&c.to_string())),
-            c if (c as u32) < 0x20 || c == '\u{7f}' => out.push_str(&literal(&c.to_string())),
-            c => out.push(c),
+        if c == '{' || c == '}' || is_control_char(c) {
+            out.push_str(&literal(&c.to_string()));
+        } else {
+            out.push(c);
         }
     }
     out
@@ -408,12 +413,6 @@ fn convert_message(
         }
     };
     let mismatch = src_info.args != info.args;
-    let (converted, plural, product, with_args) = (
-        1,
-        usize::from(m.numerus),
-        info.product,
-        usize::from(!info.args.is_empty()),
-    );
     let comment_src: String = m
         .source
         .chars()
@@ -432,10 +431,10 @@ fn convert_message(
             source: m.source.clone(),
         });
     }
-    out.stats.converted += converted;
-    out.stats.plural += plural;
-    out.stats.product_replaced += product;
-    out.stats.with_args += with_args;
+    out.stats.converted += 1;
+    out.stats.plural += usize::from(m.numerus);
+    out.stats.product_replaced += info.product;
+    out.stats.with_args += usize::from(!info.args.is_empty());
     Some(text)
 }
 
@@ -586,6 +585,13 @@ mod tests {
             "{}",
             o.ftl
         );
+    }
+
+    /// 控制字符判定：C0 与 DEL 为真，普通字符与空格为假。
+    #[test]
+    fn control_char_rule() {
+        assert!(is_control_char('\n') && is_control_char('\u{1f}') && is_control_char('\u{7f}'));
+        assert!(!is_control_char(' ') && !is_control_char('a') && !is_control_char('中'));
     }
 
     /// 未完成条目应被跳过并记录。

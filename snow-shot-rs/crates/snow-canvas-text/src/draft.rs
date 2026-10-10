@@ -67,18 +67,7 @@ impl TextDraft {
     /// assert_eq!(draft.text(), "");
     /// ```
     pub fn new() -> Self {
-        Self {
-            text: String::new(),
-            cursor: 0,
-            anchor: 0,
-            preedit_text: String::new(),
-            preedit_start: 0,
-            preedit_replacement_len: 0,
-            preedit_cursor: 0,
-            undo_stack: Vec::new(),
-            redo_stack: Vec::new(),
-            max_undo_depth: Self::DEFAULT_MAX_UNDO,
-        }
+        Self::with_text(String::new())
     }
 
     /// 使用初始文本创建文本草稿，并将光标置于末尾。
@@ -136,12 +125,11 @@ impl TextDraft {
         if self.preedit_text.is_empty() {
             return self.text.clone();
         }
-        let start = self.preedit_start.min(self.text.len());
-        let replace_len = self.preedit_replacement_len.min(self.text.len() - start);
+        let replaced = self.preedit_replaced_range();
         let mut result = String::with_capacity(self.text.len() + self.preedit_text.len());
-        result.push_str(&self.text[..start]);
+        result.push_str(&self.text[..replaced.start]);
         result.push_str(&self.preedit_text);
-        result.push_str(&self.text[start + replace_len..]);
+        result.push_str(&self.text[replaced.end..]);
         result
     }
 
@@ -171,17 +159,6 @@ impl TextDraft {
         }
         let start = self.preedit_start.min(self.text.len());
         (start + self.preedit_cursor).min(self.display_text().len())
-    }
-
-    /// 获取显示合成文本下的选区锚点字节偏移。
-    ///
-    /// # 返回
-    /// 在 `display_text` 字符串中的字节偏移。
-    pub fn display_anchor(&self) -> usize {
-        if self.preedit_text.is_empty() {
-            return self.anchor;
-        }
-        self.display_cursor()
     }
 
     /// 获取当前选区范围（以较小索引为起点，较大为终点）。
@@ -505,38 +482,7 @@ impl TextDraft {
     /// # 返回
     /// 对应的 UTF-8 字节偏移。
     pub fn from_utf16(&self, offset_utf16: usize) -> usize {
-        let mut u16_count = 0;
-        let mut u8_offset = 0;
-        for ch in self.text.chars() {
-            if u16_count >= offset_utf16 {
-                break;
-            }
-            u16_count += ch.len_utf16();
-            u8_offset += ch.len_utf8();
-        }
-        u8_offset
-    }
-
-    /// 区间 UTF-8 转 UTF-16。
-    ///
-    /// # 参数
-    /// - `range`：UTF-8 字节区间。
-    ///
-    /// # 返回
-    /// UTF-16 单元区间。
-    pub fn range_to_utf16(&self, range: &Range<usize>) -> Range<usize> {
-        self.to_utf16(range.start)..self.to_utf16(range.end)
-    }
-
-    /// 区间 UTF-16 转 UTF-8。
-    ///
-    /// # 参数
-    /// - `range`：UTF-16 单元区间。
-    ///
-    /// # 返回
-    /// UTF-8 字节区间。
-    pub fn range_from_utf16(&self, range: &Range<usize>) -> Range<usize> {
-        self.from_utf16(range.start)..self.from_utf16(range.end)
+        offset_from_utf16_in_str(&self.text, offset_utf16)
     }
 
     /// 显示文本（含预编辑）中的 UTF-8 字节偏移转 UTF-16 单元偏移。
@@ -611,9 +557,9 @@ impl TextDraft {
         if !self.has_preedit() {
             return s..e;
         }
-        let start = self.preedit_start.min(self.text.len());
+        let replaced_range = self.preedit_replaced_range();
+        let (start, replaced) = (replaced_range.start, replaced_range.len());
         let preedit_len = self.preedit_text.len();
-        let replaced = self.preedit_replacement_len.min(self.text.len() - start);
         let after = |p: usize| p - preedit_len + replaced;
         let map_start = if s <= start {
             s
@@ -638,21 +584,7 @@ impl TextDraft {
     /// - `range_utf16`：可选的替换目标区间（UTF-16，显示文本坐标）。
     /// - `text`：提交替换的文本。
     pub fn ime_replace_text(&mut self, range_utf16: Option<Range<usize>>, text: &str) {
-        let range = range_utf16
-            .as_ref()
-            .map(|r| self.committed_range_from_display_utf16(r))
-            .or_else(|| {
-                if !self.preedit_text.is_empty() {
-                    let start = self.preedit_start.min(self.text.len());
-                    let len = self.preedit_replacement_len.min(self.text.len() - start);
-                    Some(start..start + len)
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_else(|| self.selection_range());
-
-        let range = self.clamp_range(range);
+        let range = self.clamp_range(self.ime_target_range(range_utf16.as_ref()));
         let normalized = normalize_newlines(text);
         if self.text[range.clone()] != normalized {
             self.record_undo();
@@ -676,19 +608,7 @@ impl TextDraft {
         text: &str,
         new_sel_utf16: Option<Range<usize>>,
     ) {
-        let target_range = range_utf16
-            .as_ref()
-            .map(|r| self.committed_range_from_display_utf16(r))
-            .or_else(|| {
-                if !self.preedit_text.is_empty() {
-                    let start = self.preedit_start.min(self.text.len());
-                    let len = self.preedit_replacement_len.min(self.text.len() - start);
-                    Some(start..start + len)
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_else(|| self.selection_range());
+        let target_range = self.ime_target_range(range_utf16.as_ref());
 
         if text.is_empty() {
             self.clear_preedit();
@@ -714,11 +634,23 @@ impl TextDraft {
 
     /// 将字节索引吸附到合法字符起始边界。
     fn snap_to_char_boundary(&self, index: usize) -> usize {
-        let mut idx = index.min(self.text.len());
-        while idx > 0 && !self.text.is_char_boundary(idx) {
-            idx -= 1;
-        }
-        idx
+        floor_char_boundary(&self.text, index)
+    }
+
+    /// 预编辑在已提交文本里将替换掉的字节区间（起点与长度都夹进文本范围）。
+    fn preedit_replaced_range(&self) -> Range<usize> {
+        let start = self.preedit_start.min(self.text.len());
+        let len = self.preedit_replacement_len.min(self.text.len() - start);
+        start..start + len
+    }
+
+    /// IME 替换的目标区间（已提交文本字节坐标）：优先用系统给的 UTF-16 区间，
+    /// 其次是正在进行的预编辑被替换区，最后才是当前选区。
+    fn ime_target_range(&self, range_utf16: Option<&Range<usize>>) -> Range<usize> {
+        range_utf16
+            .map(|r| self.committed_range_from_display_utf16(r))
+            .or_else(|| self.has_preedit().then(|| self.preedit_replaced_range()))
+            .unwrap_or_else(|| self.selection_range())
     }
 
     /// 计算前一个字形团边界。

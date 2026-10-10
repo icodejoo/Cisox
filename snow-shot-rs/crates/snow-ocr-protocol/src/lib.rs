@@ -236,30 +236,36 @@ fn read_string(payload: &mut &[u8]) -> Result<String, ProtocolError> {
     String::from_utf8(bytes.to_vec()).map_err(|_| ProtocolError::InvalidUtf8)
 }
 
+/// 取出定长数组。
+fn read_array<const N: usize>(payload: &mut &[u8]) -> Result<[u8; N], ProtocolError> {
+    let mut arr = [0u8; N];
+    arr.copy_from_slice(take(payload, N)?);
+    Ok(arr)
+}
+
 /// 读取 u8。
 fn read_u8(payload: &mut &[u8]) -> Result<u8, ProtocolError> {
-    take(payload, 1)?.first().copied().ok_or(ProtocolError::Truncated)
+    Ok(read_array::<1>(payload)?[0])
+}
+
+/// 读取 u16。
+fn read_u16(payload: &mut &[u8]) -> Result<u16, ProtocolError> {
+    Ok(u16::from_le_bytes(read_array(payload)?))
 }
 
 /// 读取 u32。
 fn read_u32(payload: &mut &[u8]) -> Result<u32, ProtocolError> {
-    let mut arr = [0u8; 4];
-    arr.copy_from_slice(take(payload, 4)?);
-    Ok(u32::from_le_bytes(arr))
+    Ok(u32::from_le_bytes(read_array(payload)?))
 }
 
 /// 读取 u64。
 fn read_u64(payload: &mut &[u8]) -> Result<u64, ProtocolError> {
-    let mut arr = [0u8; 8];
-    arr.copy_from_slice(take(payload, 8)?);
-    Ok(u64::from_le_bytes(arr))
+    Ok(u64::from_le_bytes(read_array(payload)?))
 }
 
 /// 读取 f32。
 fn read_f32(payload: &mut &[u8]) -> Result<f32, ProtocolError> {
-    let mut arr = [0u8; 4];
-    arr.copy_from_slice(take(payload, 4)?);
-    Ok(f32::from_le_bytes(arr))
+    Ok(f32::from_le_bytes(read_array(payload)?))
 }
 
 /// 要求载荷已被完全消费。
@@ -350,15 +356,11 @@ impl<R: std::io::Read> FrameReader<R> {
         self.read_exact_retrying(&mut rest)?;
 
         let mut p: &[u8] = &rest;
-        let mut ver = [0u8; 2];
-        ver.copy_from_slice(take(&mut p, 2)?);
-        let version = u16::from_le_bytes(ver);
+        let version = read_u16(&mut p)?;
         if version != VERSION {
             return Err(ProtocolError::BadVersion(version));
         }
-        let mut kb = [0u8; 2];
-        kb.copy_from_slice(take(&mut p, 2)?);
-        let kind_val = u16::from_le_bytes(kb);
+        let kind_val = read_u16(&mut p)?;
         let kind = Kind::from_u16(kind_val).ok_or(ProtocolError::BadKind(kind_val))?;
         let id = read_u64(&mut p)?;
         let payload_len = read_u32(&mut p)? as usize;

@@ -123,6 +123,10 @@ const START_HARDWARE_KEY: &str = "hw";
 const START_PRESET_KEY: &str = "preset";
 /// START 前缀令牌：动图是否循环播放（`0` 只播一遍）。
 const START_LOOP_KEY: &str = "loop";
+/// 错误文案：缺少 path 字段。
+const MSG_PATH_MISSING: &str = "字段 path 缺失";
+/// 错误文案：缺少 input/output 字段。
+const MSG_IO_MISSING: &str = "字段 input/output 缺失";
 /// 预设名最大长度（过长视为非法）。
 const PRESET_NAME_MAX: usize = 16;
 /// 输出尺寸上限的边长上限（防御畸形输入）。
@@ -834,9 +838,14 @@ pub fn single_line(text: &str) -> String {
     text.replace(['\r', '\n'], " ")
 }
 
+/// 路径转单行文本（换行替换为空格）。
+fn line_path(path: &Path) -> String {
+    single_line(&path.to_string_lossy())
+}
+
 /// 路径转单行文本，并去掉会破坏输入/输出分隔的制表符。
 fn path_text(path: &Path) -> String {
-    single_line(&path.to_string_lossy()).replace(PATH_SEP, " ")
+    line_path(path).replace(PATH_SEP, " ")
 }
 
 /// 解析一个数值字段。
@@ -1020,7 +1029,7 @@ impl Command {
                 r.format.as_str(),
                 r.fps,
                 u8::from(r.show_cursor),
-                single_line(&r.output.to_string_lossy()),
+                line_path(&r.output),
             ),
             Self::Pause => CMD_PAUSE.to_string(),
             Self::Resume => CMD_RESUME.to_string(),
@@ -1034,7 +1043,7 @@ impl Command {
                 path_text(&r.output),
             ),
             Self::Probe { input } => {
-                format!("{CMD_PROBE} {}", single_line(&input.to_string_lossy()))
+                format!("{CMD_PROBE} {}", line_path(input))
             }
         }
     }
@@ -1106,10 +1115,10 @@ impl Command {
                 };
                 let op = EditOp::parse_token(it.next().unwrap_or(""))?;
                 let Some((input, output)) = it.next().and_then(|p| p.split_once(PATH_SEP)) else {
-                    return err("字段 input/output 缺失");
+                    return err(MSG_IO_MISSING);
                 };
                 if input.is_empty() || output.is_empty() {
-                    return err("字段 input/output 缺失");
+                    return err(MSG_IO_MISSING);
                 }
                 Ok(Self::Edit(EditRequest {
                     engine,
@@ -1156,7 +1165,7 @@ impl Event {
                 dropped,
             } => format!(
                 "{EVT_FINISHED} {frames} {dropped} {}",
-                single_line(&path.to_string_lossy())
+                line_path(path)
             ),
             Self::Error { reason } => format!("{EVT_ERROR} {}", single_line(reason)),
             Self::EditProgress { done, total, stage } => {
@@ -1172,7 +1181,7 @@ impl Event {
             } => format!(
                 "{EVT_EDIT_FINISHED} {frames} {} {}",
                 engine.as_str(),
-                single_line(&path.to_string_lossy())
+                line_path(path)
             ),
             Self::ProbeResult(p) => format!(
                 "{EVT_PROBE_RESULT} {} {} {} {} {} {}",
@@ -1219,7 +1228,7 @@ impl Event {
                 let frames = number(it.next(), "frames")?;
                 let dropped = number(it.next(), "dropped")?;
                 let Some(path) = it.next().filter(|p| !p.is_empty()) else {
-                    return err("字段 path 缺失");
+                    return err(MSG_PATH_MISSING);
                 };
                 Ok(Self::Finished {
                     path: PathBuf::from(path),
@@ -1249,7 +1258,7 @@ impl Event {
                     return err("字段 engine 缺失或不是具体引擎");
                 };
                 let Some(path) = it.next().filter(|p| !p.is_empty()) else {
-                    return err("字段 path 缺失");
+                    return err(MSG_PATH_MISSING);
                 };
                 Ok(Self::EditFinished {
                     path: PathBuf::from(path),

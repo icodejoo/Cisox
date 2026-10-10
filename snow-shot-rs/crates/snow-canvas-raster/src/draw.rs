@@ -804,6 +804,11 @@ fn extend(b: &mut Option<[f64; 4]>, p: [f64; 2]) {
     }
 }
 
+/// 把包围盒四边各外扩 `pad`；`None` 原样返回。
+fn pad_bounds(b: Option<[f64; 4]>, pad: f64) -> Option<[f64; 4]> {
+    b.map(|v| [v[0] - pad, v[1] - pad, v[2] + pad, v[3] + pad])
+}
+
 /// 按旋转矩形求外接包围盒。
 fn rotated_rect_bounds(cx: f64, cy: f64, w: f64, h: f64, rotation: f64, pad: f64) -> [f64; 4] {
     let (sin, cos) = rotation.sin_cos();
@@ -833,8 +838,7 @@ pub(crate) fn item_canvas_bounds(item: &SceneDisplayItem) -> Option<[f64; 4]> {
                 for p in f.points.iter() {
                     extend(&mut b, *p);
                 }
-                let pad = f.stroke_width.max(0.0) + 1.0;
-                b.map(|v| [v[0] - pad, v[1] - pad, v[2] + pad, v[3] + pad])
+                pad_bounds(b, f.stroke_width.max(0.0) + 1.0)
             } else {
                 Some(rotated_rect_bounds(
                     f.center_x, f.center_y, f.width, f.height, f.rotation, 1.0,
@@ -881,8 +885,7 @@ pub(crate) fn item_canvas_bounds(item: &SceneDisplayItem) -> Option<[f64; 4]> {
                     reach = reach.max(prim.diameter.max(0.0) / 2.0);
                 }
             }
-            let pad = a.stroke_width.max(0.0) * 1.5 + reach + 1.0;
-            b.map(|v| [v[0] - pad, v[1] - pad, v[2] + pad, v[3] + pad])
+            pad_bounds(b, a.stroke_width.max(0.0) * 1.5 + reach + 1.0)
         }
         SceneDisplayItem::SerialNumber(s) => {
             let side = s.diameter + s.stroke_width.max(0.0) * 2.0;
@@ -898,9 +901,23 @@ pub(crate) fn item_canvas_bounds(item: &SceneDisplayItem) -> Option<[f64; 4]> {
                 extend(&mut b, [c.baseline_start_x, c.baseline_start_y]);
                 extend(&mut b, [c.baseline_end_x, c.baseline_end_y]);
             }
-            let pad = c.stroke_width.max(0.0) + 1.0;
-            b.map(|v| [v[0] - pad, v[1] - pad, v[2] + pad, v[3] + pad])
+            pad_bounds(b, c.stroke_width.max(0.0) + 1.0)
         }
         SceneDisplayItem::Stroke | SceneDisplayItem::Image => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 外扩四边；空包围盒保持为空。
+    #[test]
+    fn pad_bounds_expands_all_sides() {
+        assert_eq!(
+            pad_bounds(Some([1.0, 2.0, 3.0, 4.0]), 0.5),
+            Some([0.5, 1.5, 3.5, 4.5])
+        );
+        assert_eq!(pad_bounds(None, 9.0), None);
     }
 }

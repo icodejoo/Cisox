@@ -88,29 +88,25 @@ fn image_bytes(image: &OwnedImage) -> Vec<u8> {
 struct Tokens<'a>(std::str::SplitWhitespace<'a>);
 
 impl Tokens<'_> {
-    /// 取下一个整数。
-    fn i(&mut self) -> i32 {
+    /// 取下一个令牌并解析成 `T`。
+    fn parse<T: std::str::FromStr>(&mut self) -> T {
         self.0
             .next()
             .expect("缺少令牌")
             .parse()
-            .expect("整数解析失败")
+            .unwrap_or_else(|_| panic!("令牌解析失败"))
+    }
+    /// 取下一个整数。
+    fn i(&mut self) -> i32 {
+        self.parse()
     }
     /// 取下一个无符号整数。
     fn u(&mut self) -> u32 {
-        self.0
-            .next()
-            .expect("缺少令牌")
-            .parse()
-            .expect("整数解析失败")
+        self.parse()
     }
     /// 取下一个浮点数。
     fn f(&mut self) -> f64 {
-        self.0
-            .next()
-            .expect("缺少令牌")
-            .parse()
-            .expect("浮点解析失败")
+        self.parse()
     }
     /// 读 "type strength block sigma radius dpr ox oy fs"。
     fn params(&mut self) -> (Parameters, ExecutionOptions) {
