@@ -160,8 +160,6 @@ const TEXT_HINT_TEXT: &str = "overlay-hint-text";
 const RECORD_HINT_TEXT: &str = "overlay-hint-record";
 /// 文字输入框的行高倍率。
 const TEXT_LINE_HEIGHT: f32 = 1.25;
-/// 尚未接入的工具栏动作（普通截图模式下已全部接入，故为空）。
-const DISABLED_TOOLBAR_ACTIONS: [ToolbarAction; 0] = [];
 /// 录屏选区模式下置灰的动作（只保留“录屏”与“取消”）。
 const RECORD_MODE_DISABLED_ACTIONS: [ToolbarAction; 8] = [
     ToolbarAction::Pin,
@@ -929,7 +927,7 @@ pub trait OutputSink {
     /// # 参数
     /// - `region`：选区（覆盖窗底图坐标，原点为该显示器左上角）。
     fn start_recording(&mut self, _region: PhysicalRect) -> Result<(), String> {
-        Err("recording is not wired up".to_string())
+        Err(ERR_RECORDING_NOT_WIRED.to_string())
     }
 
     /// 把选区（含标注合成结果）贴到屏幕上；默认不支持。
@@ -945,7 +943,7 @@ pub trait OutputSink {
         _height: u32,
         _rgba: Vec<u8>,
     ) -> Result<(), String> {
-        Err("pinning is not wired up".to_string())
+        Err(ERR_PINNING_NOT_WIRED.to_string())
     }
 
     /// 对选区图像发起文字识别（异步：结果稍后经 [`ScreenshotOverlayView::finish_ocr`] 回来）；默认不支持。
@@ -961,12 +959,12 @@ pub trait OutputSink {
         _height: u32,
         _rgba: Vec<u8>,
     ) -> Result<(), String> {
-        Err("text recognition is not wired up".to_string())
+        Err(ERR_OCR_NOT_WIRED.to_string())
     }
 
     /// 触发 OCR 组件下载（异步）；默认不支持。
     fn start_ocr_download(&mut self) -> Result<(), String> {
-        Err("OCR download is not wired up".to_string())
+        Err(ERR_OCR_DOWNLOAD_NOT_WIRED.to_string())
     }
 
     /// 对选区图像发起表格识别（异步：结果稍后经 [`ScreenshotOverlayView::finish_ocr`] 回来）；默认不支持。
@@ -982,12 +980,12 @@ pub trait OutputSink {
         _height: u32,
         _rgba: Vec<u8>,
     ) -> Result<(), String> {
-        Err("table recognition is not wired up".to_string())
+        Err(ERR_TABLE_NOT_WIRED.to_string())
     }
 
     /// 触发表格识别组件下载（异步）；默认不支持。
     fn start_table_download(&mut self) -> Result<(), String> {
-        Err("table download is not wired up".to_string())
+        Err(ERR_TABLE_DOWNLOAD_NOT_WIRED.to_string())
     }
 
     /// 对选区图像发起公式识别（异步：结果稍后经 [`ScreenshotOverlayView::finish_ocr`] 回来）；默认不支持。
@@ -1003,12 +1001,12 @@ pub trait OutputSink {
         _height: u32,
         _rgba: Vec<u8>,
     ) -> Result<(), String> {
-        Err("formula recognition is not wired up".to_string())
+        Err(ERR_LATEX_NOT_WIRED.to_string())
     }
 
     /// 触发公式识别所需的 onnxruntime 运行时下载（异步）；默认不支持。
     fn start_latex_download(&mut self) -> Result<(), String> {
-        Err("formula runtime download is not wired up".to_string())
+        Err(ERR_LATEX_DOWNLOAD_NOT_WIRED.to_string())
     }
 
     /// 打开文字识别结果窗（图片 + 文字块 + 可编辑全文）；默认不支持。
@@ -1019,7 +1017,7 @@ pub trait OutputSink {
         &mut self,
         _data: crate::recognition_view::RecognitionData,
     ) -> Result<(), String> {
-        Err("the recognition window is not wired up".to_string())
+        Err(ERR_RECOGNITION_WINDOW_NOT_WIRED.to_string())
     }
 
     /// 对选区图像发起“识别 + 翻译”（异步：结果稍后经 [`ScreenshotOverlayView::finish_translate`] 回来）；默认不支持。
@@ -1035,12 +1033,12 @@ pub trait OutputSink {
         _height: u32,
         _rgba: Vec<u8>,
     ) -> Result<(), String> {
-        Err("text translation is not wired up".to_string())
+        Err(ERR_TRANSLATE_NOT_WIRED.to_string())
     }
 
     /// 触发 onnxruntime 运行时下载（异步）；默认不支持。
     fn start_translate_download(&mut self) -> Result<(), String> {
-        Err("translation runtime download is not wired up".to_string())
+        Err(ERR_TRANSLATE_DOWNLOAD_NOT_WIRED.to_string())
     }
 
     /// 以选区（底图物理坐标）启动长截图；默认不支持。
@@ -1048,7 +1046,109 @@ pub trait OutputSink {
     /// # 参数
     /// - `region`：选区（覆盖窗底图坐标，原点为该显示器左上角）。
     fn start_scroll_capture(&mut self, _region: PhysicalRect) -> Result<(), String> {
-        Err("scrolling capture is not wired up".to_string())
+        Err(ERR_SCROLL_NOT_WIRED.to_string())
+    }
+}
+
+/// “录屏”回调未接入时的报错文案。
+const ERR_RECORDING_NOT_WIRED: &str = "recording is not wired up";
+/// “贴图”回调未接入时的报错文案。
+const ERR_PINNING_NOT_WIRED: &str = "pinning is not wired up";
+/// “文字识别”回调未接入时的报错文案。
+const ERR_OCR_NOT_WIRED: &str = "text recognition is not wired up";
+/// “OCR 组件下载”回调未接入时的报错文案。
+const ERR_OCR_DOWNLOAD_NOT_WIRED: &str = "OCR download is not wired up";
+/// “表格识别”回调未接入时的报错文案。
+const ERR_TABLE_NOT_WIRED: &str = "table recognition is not wired up";
+/// “表格组件下载”回调未接入时的报错文案。
+const ERR_TABLE_DOWNLOAD_NOT_WIRED: &str = "table download is not wired up";
+/// “公式识别”回调未接入时的报错文案。
+const ERR_LATEX_NOT_WIRED: &str = "formula recognition is not wired up";
+/// “公式运行时下载”回调未接入时的报错文案。
+const ERR_LATEX_DOWNLOAD_NOT_WIRED: &str = "formula runtime download is not wired up";
+/// “识别结果窗”回调未接入时的报错文案。
+const ERR_RECOGNITION_WINDOW_NOT_WIRED: &str = "the recognition window is not wired up";
+/// “文字翻译”回调未接入时的报错文案。
+const ERR_TRANSLATE_NOT_WIRED: &str = "text translation is not wired up";
+/// “翻译运行时下载”回调未接入时的报错文案。
+const ERR_TRANSLATE_DOWNLOAD_NOT_WIRED: &str = "translation runtime download is not wired up";
+/// “长截图”回调未接入时的报错文案。
+const ERR_SCROLL_NOT_WIRED: &str = "scrolling capture is not wired up";
+
+/// 调用可选回调：已接入则执行 `run`，否则返回 `not_wired` 报错。
+///
+/// # 参数
+/// - `callback`：输出通道上的可选回调。
+/// - `not_wired`：未接入时的报错文案。
+/// - `run`：拿到回调后的调用动作。
+///
+/// ```ignore
+/// invoke_callback(&self.on_record, ERR_RECORDING_NOT_WIRED, |cb| cb(region))
+/// ```
+fn invoke_callback<F: ?Sized>(
+    callback: &Option<Box<F>>,
+    not_wired: &str,
+    run: impl FnOnce(&F),
+) -> Result<(), String> {
+    match callback {
+        Some(callback) => {
+            run(callback);
+            Ok(())
+        }
+        None => Err(not_wired.to_string()),
+    }
+}
+
+/// 写入一项配置并落盘；写入或落盘失败只记 warn（各自用调用方给的文案），不向上传。
+///
+/// # 参数
+/// - `store`：配置存储。
+/// - `key`：配置键。
+/// - `value`：新值。
+/// - `set_failed`：写入失败时的日志文案。
+/// - `flush_failed`：落盘失败时的日志文案。
+fn set_and_flush_warn(
+    store: &mut ConfigStore,
+    key: &str,
+    value: serde_json::Value,
+    set_failed: &str,
+    flush_failed: &str,
+) {
+    if let Err(e) = store.set_value(key, value) {
+        tracing::warn!(key, error = %e, "{set_failed}");
+    } else if let Err(e) = store.flush() {
+        tracing::warn!(key, error = %e, "{flush_failed}");
+    }
+}
+
+/// 选区识别的类型：决定走哪条输出通道、模式标志与日志文案。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecognitionKind {
+    /// 文字识别。
+    Ocr,
+    /// 表格识别。
+    Table,
+    /// 公式识别。
+    Latex,
+}
+
+impl RecognitionKind {
+    /// 提交成功时的日志文案。
+    fn submitted_log(self) -> &'static str {
+        match self {
+            Self::Ocr => "已提交文字识别",
+            Self::Table => "已提交表格识别",
+            Self::Latex => "已提交公式识别",
+        }
+    }
+
+    /// 提交失败时的日志文案。
+    fn failed_log(self) -> &'static str {
+        match self {
+            Self::Ocr => "提交文字识别失败",
+            Self::Table => "提交表格识别失败",
+            Self::Latex => "提交公式识别失败",
+        }
     }
 }
 
@@ -1397,13 +1497,9 @@ impl OutputSink for SystemOutput {
 
     /// 触发录屏回调；未设置回调时报错。
     fn start_recording(&mut self, region: PhysicalRect) -> Result<(), String> {
-        match &self.on_record {
-            Some(callback) => {
-                callback(region);
-                Ok(())
-            }
-            None => Err("recording is not wired up".to_string()),
-        }
+        invoke_callback(&self.on_record, ERR_RECORDING_NOT_WIRED, |callback| {
+            callback(region)
+        })
     }
 
     /// 触发贴图回调；未设置回调时报错。
@@ -1414,14 +1510,10 @@ impl OutputSink for SystemOutput {
         height: u32,
         rgba: Vec<u8>,
     ) -> Result<(), String> {
-        match &self.on_pin {
-            Some(callback) => {
-                self.note_history(HistorySource::Pinned, width, height, &rgba);
-                callback(region, width, height, rgba);
-                Ok(())
-            }
-            None => Err("pinning is not wired up".to_string()),
-        }
+        invoke_callback(&self.on_pin, ERR_PINNING_NOT_WIRED, |callback| {
+            self.note_history(HistorySource::Pinned, width, height, &rgba);
+            callback(region, width, height, rgba);
+        })
     }
 
     /// 触发文字识别回调；未设置回调时报错。
@@ -1432,13 +1524,9 @@ impl OutputSink for SystemOutput {
         height: u32,
         rgba: Vec<u8>,
     ) -> Result<(), String> {
-        match &self.on_ocr {
-            Some(callback) => {
-                callback(serial, width, height, rgba);
-                Ok(())
-            }
-            None => Err("text recognition is not wired up".to_string()),
-        }
+        invoke_callback(&self.on_ocr, ERR_OCR_NOT_WIRED, |callback| {
+            callback(serial, width, height, rgba)
+        })
     }
 
     /// 触发打开识别结果窗回调；未设置回调时报错。
@@ -1446,24 +1534,20 @@ impl OutputSink for SystemOutput {
         &mut self,
         data: crate::recognition_view::RecognitionData,
     ) -> Result<(), String> {
-        match &self.on_recognition_window {
-            Some(callback) => {
-                callback(data);
-                Ok(())
-            }
-            None => Err("the recognition window is not wired up".to_string()),
-        }
+        invoke_callback(
+            &self.on_recognition_window,
+            ERR_RECOGNITION_WINDOW_NOT_WIRED,
+            |callback| callback(data),
+        )
     }
 
     /// 触发 OCR 组件下载回调；未设置回调时报错。
     fn start_ocr_download(&mut self) -> Result<(), String> {
-        match &self.on_ocr_download {
-            Some(callback) => {
-                callback();
-                Ok(())
-            }
-            None => Err("OCR download is not wired up".to_string()),
-        }
+        invoke_callback(
+            &self.on_ocr_download,
+            ERR_OCR_DOWNLOAD_NOT_WIRED,
+            |callback| callback(),
+        )
     }
 
     /// 触发表格识别回调；未设置回调时报错。
@@ -1474,24 +1558,18 @@ impl OutputSink for SystemOutput {
         height: u32,
         rgba: Vec<u8>,
     ) -> Result<(), String> {
-        match &self.on_table {
-            Some(callback) => {
-                callback(serial, width, height, rgba);
-                Ok(())
-            }
-            None => Err("table recognition is not wired up".to_string()),
-        }
+        invoke_callback(&self.on_table, ERR_TABLE_NOT_WIRED, |callback| {
+            callback(serial, width, height, rgba)
+        })
     }
 
     /// 触发表格识别组件下载回调；未设置回调时报错。
     fn start_table_download(&mut self) -> Result<(), String> {
-        match &self.on_table_download {
-            Some(callback) => {
-                callback();
-                Ok(())
-            }
-            None => Err("table download is not wired up".to_string()),
-        }
+        invoke_callback(
+            &self.on_table_download,
+            ERR_TABLE_DOWNLOAD_NOT_WIRED,
+            |callback| callback(),
+        )
     }
 
     /// 触发公式识别回调；未设置回调时报错。
@@ -1502,24 +1580,18 @@ impl OutputSink for SystemOutput {
         height: u32,
         rgba: Vec<u8>,
     ) -> Result<(), String> {
-        match &self.on_latex {
-            Some(callback) => {
-                callback(serial, width, height, rgba);
-                Ok(())
-            }
-            None => Err("formula recognition is not wired up".to_string()),
-        }
+        invoke_callback(&self.on_latex, ERR_LATEX_NOT_WIRED, |callback| {
+            callback(serial, width, height, rgba)
+        })
     }
 
     /// 触发公式识别运行时下载回调；未设置回调时报错。
     fn start_latex_download(&mut self) -> Result<(), String> {
-        match &self.on_latex_download {
-            Some(callback) => {
-                callback();
-                Ok(())
-            }
-            None => Err("formula runtime download is not wired up".to_string()),
-        }
+        invoke_callback(
+            &self.on_latex_download,
+            ERR_LATEX_DOWNLOAD_NOT_WIRED,
+            |callback| callback(),
+        )
     }
 
     /// 触发文字翻译回调；未设置回调时报错。
@@ -1530,35 +1602,25 @@ impl OutputSink for SystemOutput {
         height: u32,
         rgba: Vec<u8>,
     ) -> Result<(), String> {
-        match &self.on_translate {
-            Some(callback) => {
-                callback(serial, width, height, rgba);
-                Ok(())
-            }
-            None => Err("text translation is not wired up".to_string()),
-        }
+        invoke_callback(&self.on_translate, ERR_TRANSLATE_NOT_WIRED, |callback| {
+            callback(serial, width, height, rgba)
+        })
     }
 
     /// 触发翻译运行时下载回调；未设置回调时报错。
     fn start_translate_download(&mut self) -> Result<(), String> {
-        match &self.on_translate_download {
-            Some(callback) => {
-                callback();
-                Ok(())
-            }
-            None => Err("translation runtime download is not wired up".to_string()),
-        }
+        invoke_callback(
+            &self.on_translate_download,
+            ERR_TRANSLATE_DOWNLOAD_NOT_WIRED,
+            |callback| callback(),
+        )
     }
 
     /// 触发长截图回调；未设置回调时报错。
     fn start_scroll_capture(&mut self, region: PhysicalRect) -> Result<(), String> {
-        match &self.on_scroll {
-            Some(callback) => {
-                callback(region);
-                Ok(())
-            }
-            None => Err("scrolling capture is not wired up".to_string()),
-        }
+        invoke_callback(&self.on_scroll, ERR_SCROLL_NOT_WIRED, |callback| {
+            callback(region)
+        })
     }
 }
 
@@ -2058,14 +2120,13 @@ impl ScreenshotOverlayView {
             return;
         };
         let mut store = config.borrow_mut();
-        if let Err(e) = store.set_value(SELECTION_TARGET_KEY, serde_json::json!(target.as_config()))
-        {
-            tracing::warn!(error = %e, "写入选区目标配置失败");
-            return;
-        }
-        if let Err(e) = store.flush() {
-            tracing::warn!(error = %e, "选区目标落盘失败");
-        }
+        set_and_flush_warn(
+            &mut store,
+            SELECTION_TARGET_KEY,
+            serde_json::json!(target.as_config()),
+            "写入选区目标配置失败",
+            "选区目标落盘失败",
+        );
     }
 
     /// 拖拽阈值（物理像素，随缩放比放大）。
@@ -2570,13 +2631,12 @@ impl ScreenshotOverlayView {
                     }
                 ) =>
             {
-                if self.latex_mode {
-                    self.start_latex_download();
-                } else if self.table_mode {
-                    self.start_table_download();
-                } else {
-                    self.start_ocr_download();
-                }
+                let result = match (self.latex_mode, self.table_mode) {
+                    (true, _) => self.output.start_latex_download(),
+                    (false, true) => self.output.start_table_download(),
+                    (false, false) => self.output.start_ocr_download(),
+                };
+                self.begin_download(result);
                 OverlayOutcome::Stay
             }
             ("enter", _) if self.record_mode => self.start_recording_and_close(),
@@ -2693,9 +2753,9 @@ impl ScreenshotOverlayView {
             OverlayKeyAction::QrCodeRecognition if selecting_mode => OverlayOutcome::Stay,
             OverlayKeyAction::QrCodeRecognition => self.recognize_qr_code(),
             OverlayKeyAction::TableRecognition if selecting_mode => OverlayOutcome::Stay,
-            OverlayKeyAction::TableRecognition => self.start_table(),
+            OverlayKeyAction::TableRecognition => self.begin_recognition(RecognitionKind::Table),
             OverlayKeyAction::LatexRecognition if selecting_mode => OverlayOutcome::Stay,
-            OverlayKeyAction::LatexRecognition => self.start_latex(),
+            OverlayKeyAction::LatexRecognition => self.begin_recognition(RecognitionKind::Latex),
             OverlayKeyAction::Unimplemented(config_key) => {
                 self.show_not_implemented(config_key);
                 OverlayOutcome::Stay
@@ -2776,10 +2836,10 @@ impl ScreenshotOverlayView {
             ToolbarAction::Save => self.save_selection_and_close(),
             ToolbarAction::Record => self.start_recording_and_close(),
             ToolbarAction::Pin => self.pin_selection_and_close(),
-            ToolbarAction::Ocr => self.start_ocr(),
+            ToolbarAction::Ocr => self.begin_recognition(RecognitionKind::Ocr),
             ToolbarAction::Translate => self.start_translate(),
-            ToolbarAction::Table => self.start_table(),
-            ToolbarAction::Latex => self.start_latex(),
+            ToolbarAction::Table => self.begin_recognition(RecognitionKind::Table),
+            ToolbarAction::Latex => self.begin_recognition(RecognitionKind::Latex),
             ToolbarAction::ScrollCapture => self.start_scroll_capture_and_close(),
             ToolbarAction::Cancel => OverlayOutcome::Close,
             ToolbarAction::Undo => {
@@ -2856,13 +2916,13 @@ impl ScreenshotOverlayView {
         if store.value(LAST_TOOL_KEY).as_str() == Some(id) {
             return;
         }
-        if let Err(e) = store.set_value(LAST_TOOL_KEY, serde_json::json!(id)) {
-            tracing::warn!(error = %e, "记住上次工具失败");
-            return;
-        }
-        if let Err(e) = store.flush() {
-            tracing::warn!(error = %e, "上次工具落盘失败");
-        }
+        set_and_flush_warn(
+            &mut store,
+            LAST_TOOL_KEY,
+            serde_json::json!(id),
+            "记住上次工具失败",
+            "上次工具落盘失败",
+        );
     }
 
     /// 注入样式持久化所用的配置存储与界面语言，并读取已保存的各工具样式。
@@ -2989,11 +3049,13 @@ impl ScreenshotOverlayView {
         };
         if let Some(config) = self.config_handle() {
             let mut store = config.borrow_mut();
-            if let Err(e) = store.set_value(COORDINATE_MODE_KEY, serde_json::json!(value)) {
-                tracing::warn!(error = %e, "写入坐标显示模式失败");
-            } else if let Err(e) = store.flush() {
-                tracing::warn!(error = %e, "坐标显示模式落盘失败");
-            }
+            set_and_flush_warn(
+                &mut store,
+                COORDINATE_MODE_KEY,
+                serde_json::json!(value),
+                "写入坐标显示模式失败",
+                "坐标显示模式落盘失败",
+            );
         }
     }
 
@@ -3104,23 +3166,17 @@ impl ScreenshotOverlayView {
                 label: self.i18n.tr(c.text_id()).into(),
             })
             .collect();
-        let sets = [
-            (StyleSelectKind::Width, self.width_items(&WIDTH_PRESETS)),
-            (StyleSelectKind::FontSize, self.width_items(&FONT_PRESETS)),
-            (StyleSelectKind::Arrowhead, arrow_items),
-            (
-                StyleSelectKind::FilterKind,
-                AutoFilterKind::ALL
-                    .iter()
-                    .map(|k| StyleItem {
-                        value: k.id().to_string(),
-                        label: self.i18n.tr(k.text_id()).into(),
-                    })
-                    .collect(),
-            ),
-        ];
-        let mut made: Vec<Entity<StyleSelect>> = Vec::new();
-        for (kind, items) in sets {
+        let filter_items: Vec<StyleItem> = AutoFilterKind::ALL
+            .iter()
+            .map(|k| StyleItem {
+                value: k.id().to_string(),
+                label: self.i18n.tr(k.text_id()).into(),
+            })
+            .collect();
+        let width_items = self.width_items(&WIDTH_PRESETS);
+        let font_items = self.width_items(&FONT_PRESETS);
+        // 创建一个下拉并订阅它的选中事件
+        let mut mk = |kind: StyleSelectKind, items: Vec<StyleItem>| {
             let state = cx.new(|cx| SelectState::new(SearchableVec::new(items), None, window, cx));
             cx.subscribe_in(
                 &state,
@@ -3132,19 +3188,14 @@ impl ScreenshotOverlayView {
                 },
             )
             .detach();
-            made.push(state);
-        }
-        let mut made = made.into_iter();
-        if let (Some(width), Some(font), Some(arrowhead), Some(filter)) =
-            (made.next(), made.next(), made.next(), made.next())
-        {
-            self.style_ui = Some(StyleUi {
-                width,
-                font,
-                arrowhead,
-                filter,
-            });
-        }
+            state
+        };
+        self.style_ui = Some(StyleUi {
+            width: mk(StyleSelectKind::Width, width_items),
+            font: mk(StyleSelectKind::FontSize, font_items),
+            arrowhead: mk(StyleSelectKind::Arrowhead, arrow_items),
+            filter: mk(StyleSelectKind::FilterKind, filter_items),
+        });
         self.sync_style_selects(window, cx);
     }
 
@@ -3377,22 +3428,8 @@ impl ScreenshotOverlayView {
         let fields = style_fields(tool);
         let style = self.styles.style(tool);
         let i18n = self.i18n;
-        let label = move |id: &str| {
-            div()
-                .text_xs()
-                .text_color(rgba(STYLE_LABEL_COLOR))
-                .child(i18n.tr(id))
-        };
-        let select = |state: &Entity<StyleSelect>| {
-            div()
-                .w(px(STYLE_SELECT_WIDTH))
-                .h(px(STYLE_SELECT_HEIGHT))
-                .child(
-                    Select::new(state)
-                        .with_size(ComponentSize::Small)
-                        .menu_max_h(px(STYLE_SELECT_MENU_MAX_HEIGHT)),
-                )
-        };
+        let label = move |id: &str| panel_label(i18n, id);
+        let select = panel_select;
         let mut panel = div()
             .absolute()
             .top(px(origin.1 as f32))
@@ -3466,13 +3503,14 @@ impl ScreenshotOverlayView {
     /// - `toolbar`：工具栏左上角（逻辑像素）。
     /// - `screen`：屏幕逻辑尺寸。
     fn style_panel_origin(&self, toolbar: (i32, i32), screen: (i32, i32)) -> Option<(i32, i32)> {
-        if self.active_panel_size().is_none() || self.record_mode || self.scroll_mode {
+        let size = self.active_panel_size()?;
+        if self.record_mode || self.scroll_mode {
             return None;
         }
         Some(panel_placement(
             toolbar,
             self.toolbar_size().1,
-            self.active_panel_size().unwrap_or(STYLE_PANEL_SIZE),
+            size,
             screen,
             STYLE_PANEL_GAP,
         ))
@@ -3687,9 +3725,7 @@ impl ScreenshotOverlayView {
         self.decoration_prepared = None;
         self.decoration_loaded = false;
         self.text_edit = None;
-        for (_, sprite) in self.tile_sprites.drain() {
-            self.pending_drops.push(sprite.image);
-        }
+        self.drain_tile_sprites();
         let (w, h) = self.frame.size();
         if self.annotations.is_some() {
             self.annotations = AnnotationLayer::new(w, h, self.scale).ok();
@@ -3923,16 +3959,13 @@ impl ScreenshotOverlayView {
             return;
         };
         let mut store = config.borrow_mut();
-        if let Err(e) = store.set_value(
+        set_and_flush_warn(
+            &mut store,
             REGION_TYPE_KEY,
             serde_json::json!(self.region_type.as_config()),
-        ) {
-            tracing::warn!(error = %e, "写入选区形状配置失败");
-            return;
-        }
-        if let Err(e) = store.flush() {
-            tracing::warn!(error = %e, "选区形状落盘失败");
-        }
+            "写入选区形状配置失败",
+            "选区形状落盘失败",
+        );
     }
 
     /// 自定义区域输入时按下鼠标：开始 / 继续草稿；双击折线 / 曲线则闭合完成。
@@ -4176,6 +4209,13 @@ impl ScreenshotOverlayView {
         })
     }
 
+    /// 把全部分块图移入待释放队列（下一帧统一丢弃）。
+    fn drain_tile_sprites(&mut self) {
+        for (_, sprite) in self.tile_sprites.drain() {
+            self.pending_drops.push(sprite.image);
+        }
+    }
+
     /// 清掉与旧底图 / 标注绑定的瞬态：标注拖动、文字输入、悬停层级与分块图。
     fn clear_view_transients(&mut self) {
         self.annotating = false;
@@ -4186,9 +4226,7 @@ impl ScreenshotOverlayView {
         self.text_edit = None;
         self.pick.clear();
         self.click_window = None;
-        for (_, sprite) in self.tile_sprites.drain() {
-            self.pending_drops.push(sprite.image);
-        }
+        self.drain_tile_sprites();
     }
 
     /// 应用一条历史现场；第一次离开当前截图时把它暂存起来。
@@ -4338,13 +4376,13 @@ impl ScreenshotOverlayView {
         };
         let desktop = rect.translate(self.canvas_origin.x, self.canvas_origin.y);
         let value = encode(desktop, self.scale, style);
-        if let Err(e) = store.set_value(PREVIOUS_SELECTION_KEY, value) {
-            tracing::warn!(error = %e, "写入上一次选区失败");
-            return;
-        }
-        if let Err(e) = store.flush() {
-            tracing::warn!(error = %e, "上一次选区落盘失败");
-        }
+        set_and_flush_warn(
+            &mut store,
+            PREVIOUS_SELECTION_KEY,
+            value,
+            "写入上一次选区失败",
+            "上一次选区落盘失败",
+        );
     }
 
     /// 选中上一次导出时保存的选区（空闲或已有选区时可用，替换当前选区）。
@@ -4389,12 +4427,7 @@ impl ScreenshotOverlayView {
 
     /// 复制选区到剪贴板；成功后关闭覆盖窗，失败保留窗口并提示。
     fn copy_selection_and_close(&mut self) -> OverlayOutcome {
-        if !self.has_committed_selection() {
-            self.status_message = Some(self.i18n.tr("overlay-msg-select-area-first"));
-            return OverlayOutcome::Stay;
-        }
-        let Some((w, h, rgba)) = self.selection_image() else {
-            self.status_message = Some(self.i18n.tr("overlay-msg-selection-invalid"));
+        let Some((w, h, rgba)) = self.committed_selection_image() else {
             return OverlayOutcome::Stay;
         };
         self.remember_selection();
@@ -4449,12 +4482,7 @@ impl ScreenshotOverlayView {
         request: Option<&SaveRequest>,
         quick: bool,
     ) -> OverlayOutcome {
-        if !self.has_committed_selection() {
-            self.status_message = Some(self.i18n.tr("overlay-msg-select-area-first"));
-            return OverlayOutcome::Stay;
-        }
-        let Some((w, h, rgba)) = self.selection_image() else {
-            self.status_message = Some(self.i18n.tr("overlay-msg-selection-invalid"));
+        let Some((w, h, rgba)) = self.committed_selection_image() else {
             return OverlayOutcome::Stay;
         };
         self.remember_selection();
@@ -4516,19 +4544,14 @@ impl ScreenshotOverlayView {
 
     /// 把选区（含标注合成结果）贴到屏幕原位；成功后关闭覆盖窗，失败保留窗口并提示。
     fn pin_selection_and_close(&mut self) -> OverlayOutcome {
-        if !self.has_committed_selection() {
-            self.status_message = Some(self.i18n.tr("overlay-msg-select-area-first"));
+        if !self.require_committed_selection() {
             return OverlayOutcome::Stay;
         }
-        let Some(rect) = self
-            .current_selection()
-            .and_then(|r| self.screen_bounds.intersect(&r))
-        else {
+        let Some(rect) = self.selection_on_screen() else {
             self.status_message = Some(self.i18n.tr("overlay-msg-selection-invalid"));
             return OverlayOutcome::Stay;
         };
-        let Some((w, h, rgba)) = self.selection_image() else {
-            self.status_message = Some(self.i18n.tr("overlay-msg-selection-invalid"));
+        let Some((w, h, rgba)) = self.selection_image_or_notice() else {
             return OverlayOutcome::Stay;
         };
         self.remember_selection();
@@ -4550,37 +4573,30 @@ impl ScreenshotOverlayView {
         }
     }
 
-    /// 对选区（含标注合成结果）发起文字识别；识别在后台进行，结果经 [`Self::finish_ocr`] 回来。
-    fn start_ocr(&mut self) -> OverlayOutcome {
-        if !self.has_committed_selection() {
-            self.status_message = Some(self.i18n.tr("overlay-msg-select-area-first"));
-            return OverlayOutcome::Stay;
-        }
-        if self.ocr.is_busy() || self.translate.is_busy() {
-            return OverlayOutcome::Stay;
-        }
-        if self.translate.is_visible() {
-            self.dismiss_translate();
-        }
-        let Some((w, h, rgba)) = self.selection_image() else {
-            self.status_message = Some(self.i18n.tr("overlay-msg-selection-invalid"));
+    /// 对选区（含标注合成结果）发起文字 / 表格 / 公式识别；识别在后台进行，结果经 [`Self::finish_ocr`] 回来。
+    ///
+    /// # 参数
+    /// - `kind`：识别类型，决定表格 / 公式模式标志、提交的通道与日志文案。
+    fn begin_recognition(&mut self, kind: RecognitionKind) -> OverlayOutcome {
+        let Some((w, h, rgba)) = self.recognition_prelude(false) else {
             return OverlayOutcome::Stay;
         };
         self.ocr_serial += 1;
-        self.table_mode = false;
-        self.latex_mode = false;
-        match self.output.start_ocr(self.ocr_serial, w, h, rgba) {
+        self.table_mode = kind == RecognitionKind::Table;
+        self.latex_mode = kind == RecognitionKind::Latex;
+        let serial = self.ocr_serial;
+        let result = match kind {
+            RecognitionKind::Ocr => self.output.start_ocr(serial, w, h, rgba),
+            RecognitionKind::Table => self.output.start_table(serial, w, h, rgba),
+            RecognitionKind::Latex => self.output.start_latex(serial, w, h, rgba),
+        };
+        match result {
             Ok(()) => {
-                tracing::info!(
-                    serial = self.ocr_serial,
-                    width = w,
-                    height = h,
-                    "已提交文字识别"
-                );
+                tracing::info!(serial, width = w, height = h, "{}", kind.submitted_log());
                 self.set_ocr_state(OcrUiState::Running);
             }
             Err(e) => {
-                tracing::error!(error = %e, "提交文字识别失败");
+                tracing::error!(error = %e, "{}", kind.failed_log());
                 self.set_ocr_state(OcrUiState::Failed {
                     message: self.i18n.tr_with(
                         "overlay-msg-ocr-unavailable",
@@ -4593,111 +4609,68 @@ impl ScreenshotOverlayView {
         OverlayOutcome::Stay
     }
 
-    /// 对选区（含标注合成结果）发起表格识别；识别在后台进行，结果经 [`Self::finish_ocr`] 回来。
-    fn start_table(&mut self) -> OverlayOutcome {
-        if !self.has_committed_selection() {
-            self.status_message = Some(self.i18n.tr("overlay-msg-select-area-first"));
-            return OverlayOutcome::Stay;
+    /// 识别 / 翻译共用的前置检查：要有已确认选区、没有进行中的识别或翻译，并收掉对方的结果面板。
+    ///
+    /// # 参数
+    /// - `for_translate`：为真时给翻译用（收掉 OCR 面板），否则给识别用（收掉翻译面板）。
+    ///
+    /// # 返回
+    /// 选区图像 `(宽, 高, RGBA)`；条件不满足时返回 `None`（需要提示的已写入状态条）。
+    fn recognition_prelude(&mut self, for_translate: bool) -> Option<(u32, u32, Vec<u8>)> {
+        if !self.require_committed_selection() {
+            return None;
         }
         if self.ocr.is_busy() || self.translate.is_busy() {
-            return OverlayOutcome::Stay;
+            return None;
         }
-        if self.translate.is_visible() {
+        if for_translate {
+            if self.ocr.is_visible() {
+                self.dismiss_ocr();
+            }
+        } else if self.translate.is_visible() {
             self.dismiss_translate();
         }
-        let Some((w, h, rgba)) = self.selection_image() else {
+        self.selection_image_or_notice()
+    }
+
+    /// 要求已有确认的选区；没有时在状态条提示“先框选”。
+    fn require_committed_selection(&mut self) -> bool {
+        if self.has_committed_selection() {
+            return true;
+        }
+        self.status_message = Some(self.i18n.tr("overlay-msg-select-area-first"));
+        false
+    }
+
+    /// 取选区图像；失败时在状态条提示“选区无效”。
+    fn selection_image_or_notice(&mut self) -> Option<(u32, u32, Vec<u8>)> {
+        let image = self.selection_image();
+        if image.is_none() {
             self.status_message = Some(self.i18n.tr("overlay-msg-selection-invalid"));
-            return OverlayOutcome::Stay;
-        };
-        self.ocr_serial += 1;
-        self.table_mode = true;
-        self.latex_mode = false;
-        match self.output.start_table(self.ocr_serial, w, h, rgba) {
-            Ok(()) => {
-                tracing::info!(
-                    serial = self.ocr_serial,
-                    width = w,
-                    height = h,
-                    "已提交表格识别"
-                );
-                self.set_ocr_state(OcrUiState::Running);
-            }
-            Err(e) => {
-                tracing::error!(error = %e, "提交表格识别失败");
-                self.set_ocr_state(OcrUiState::Failed {
-                    message: self.i18n.tr_with(
-                        "overlay-msg-ocr-unavailable",
-                        &Args::new().arg(1, e.to_string()),
-                    ),
-                    can_download: false,
-                });
-            }
         }
-        OverlayOutcome::Stay
+        image
     }
 
-    /// 对选区（含标注合成结果）发起公式识别；识别在后台进行，结果经 [`Self::finish_ocr`] 回来。
-    fn start_latex(&mut self) -> OverlayOutcome {
-        if !self.has_committed_selection() {
-            self.status_message = Some(self.i18n.tr("overlay-msg-select-area-first"));
-            return OverlayOutcome::Stay;
+    /// 复制 / 保存共用：要求有确认选区并取其图像，失败时已写好状态条提示。
+    fn committed_selection_image(&mut self) -> Option<(u32, u32, Vec<u8>)> {
+        if !self.require_committed_selection() {
+            return None;
         }
-        if self.ocr.is_busy() || self.translate.is_busy() {
-            return OverlayOutcome::Stay;
-        }
-        if self.translate.is_visible() {
-            self.dismiss_translate();
-        }
-        let Some((w, h, rgba)) = self.selection_image() else {
-            self.status_message = Some(self.i18n.tr("overlay-msg-selection-invalid"));
-            return OverlayOutcome::Stay;
-        };
-        self.ocr_serial += 1;
-        self.table_mode = false;
-        self.latex_mode = true;
-        match self.output.start_latex(self.ocr_serial, w, h, rgba) {
-            Ok(()) => {
-                tracing::info!(
-                    serial = self.ocr_serial,
-                    width = w,
-                    height = h,
-                    "已提交公式识别"
-                );
-                self.set_ocr_state(OcrUiState::Running);
-            }
-            Err(e) => {
-                tracing::error!(error = %e, "提交公式识别失败");
-                self.set_ocr_state(OcrUiState::Failed {
-                    message: self.i18n.tr_with(
-                        "overlay-msg-ocr-unavailable",
-                        &Args::new().arg(1, e.to_string()),
-                    ),
-                    can_download: false,
-                });
-            }
-        }
-        OverlayOutcome::Stay
+        self.selection_image_or_notice()
     }
 
-    /// 触发公式识别所需的 onnxruntime 运行时下载（仅缺运行时可用）。
-    fn start_latex_download(&mut self) {
-        match self.output.start_latex_download() {
-            Ok(()) => self.set_ocr_state(OcrUiState::Downloading(
-                self.i18n.tr("overlay-msg-ocr-download-preparing"),
-            )),
-            Err(e) => self.set_ocr_state(OcrUiState::Failed {
-                message: self.i18n.tr_with(
-                    "overlay-msg-ocr-download-start-failed",
-                    &Args::new().arg(1, e.to_string()),
-                ),
-                can_download: false,
-            }),
-        }
+    /// 当前选区与本屏边界的交集；没有选区或完全在屏外时为 `None`。
+    fn selection_on_screen(&self) -> Option<PhysicalRect> {
+        self.current_selection()
+            .and_then(|r| self.screen_bounds.intersect(&r))
     }
 
-    /// 触发表格识别组件下载（仅缺组件时可用）。
-    fn start_table_download(&mut self) {
-        match self.output.start_table_download() {
+    /// 发起一次组件 / 运行时下载后的状态切换：成功进入“准备下载”，失败给出启动失败提示。
+    ///
+    /// # 参数
+    /// - `result`：输出通道触发下载的结果。
+    fn begin_download(&mut self, result: Result<(), String>) {
+        match result {
             Ok(()) => self.set_ocr_state(OcrUiState::Downloading(
                 self.i18n.tr("overlay-msg-ocr-download-preparing"),
             )),
@@ -4742,18 +4715,7 @@ impl ScreenshotOverlayView {
 
     /// 对选区做二维码识别：同步解码，成功则复制内容并复用文字结果面板展示，找不到码给出提示。
     fn recognize_qr_code(&mut self) -> OverlayOutcome {
-        if !self.has_committed_selection() {
-            self.status_message = Some(self.i18n.tr("overlay-msg-select-area-first"));
-            return OverlayOutcome::Stay;
-        }
-        if self.ocr.is_busy() || self.translate.is_busy() {
-            return OverlayOutcome::Stay;
-        }
-        if self.translate.is_visible() {
-            self.dismiss_translate();
-        }
-        let Some((w, h, rgba)) = self.selection_image() else {
-            self.status_message = Some(self.i18n.tr("overlay-msg-selection-invalid"));
+        let Some((w, h, rgba)) = self.recognition_prelude(false) else {
             return OverlayOutcome::Stay;
         };
         self.table_mode = false;
@@ -4911,22 +4873,6 @@ impl ScreenshotOverlayView {
         outcome
     }
 
-    /// 触发 OCR 组件下载（仅缺资产时可用）。
-    fn start_ocr_download(&mut self) {
-        match self.output.start_ocr_download() {
-            Ok(()) => self.set_ocr_state(OcrUiState::Downloading(
-                self.i18n.tr("overlay-msg-ocr-download-preparing"),
-            )),
-            Err(e) => self.set_ocr_state(OcrUiState::Failed {
-                message: self.i18n.tr_with(
-                    "overlay-msg-ocr-download-start-failed",
-                    &Args::new().arg(1, e.to_string()),
-                ),
-                can_download: false,
-            }),
-        }
-    }
-
     /// 更新下载进度文案。
     ///
     /// # 参数
@@ -4967,18 +4913,7 @@ impl ScreenshotOverlayView {
 
     /// 对选区（含标注合成结果）发起“识别 + 翻译”；在后台进行，结果经 [`Self::finish_translate`] 回来。
     fn start_translate(&mut self) -> OverlayOutcome {
-        if !self.has_committed_selection() {
-            self.status_message = Some(self.i18n.tr("overlay-msg-select-area-first"));
-            return OverlayOutcome::Stay;
-        }
-        if self.translate.is_busy() || self.ocr.is_busy() {
-            return OverlayOutcome::Stay;
-        }
-        if self.ocr.is_visible() {
-            self.dismiss_ocr();
-        }
-        let Some((w, h, rgba)) = self.selection_image() else {
-            self.status_message = Some(self.i18n.tr("overlay-msg-selection-invalid"));
+        let Some((w, h, rgba)) = self.recognition_prelude(true) else {
             return OverlayOutcome::Stay;
         };
         self.translate_serial += 1;
@@ -5263,6 +5198,31 @@ impl ScreenshotOverlayView {
         self.run_click_action(self.middle_click_action)
     }
 
+    /// 尺寸标签元素：贴在 `top_left`（逻辑像素）左上方，贴近上沿时落到内侧。
+    ///
+    /// # 参数
+    /// - `top_left`：矩形左上角（逻辑像素）。
+    /// - `rect`：要标注尺寸的物理矩形。
+    fn size_label_div(&self, top_left: (f32, f32), rect: PhysicalRect) -> Div {
+        let (x, y) = top_left;
+        let label_top = if y >= LABEL_OFFSET {
+            y - LABEL_OFFSET
+        } else {
+            y + 4.0
+        };
+        div()
+            .absolute()
+            .top(px(label_top))
+            .left(px(x.max(4.0)))
+            .px_2()
+            .py_0p5()
+            .rounded_xs()
+            .bg(rgba(LABEL_BG_COLOR))
+            .text_color(rgba(0xFFFFFFFF))
+            .text_xs()
+            .child(self.size_label(rect))
+    }
+
     /// 选区尺寸标签文字：按配置用物理或逻辑像素。
     fn size_label(&self, rect: PhysicalRect) -> String {
         if self.logical_size_label {
@@ -5382,10 +5342,7 @@ impl ScreenshotOverlayView {
             self.status_message = Some(self.i18n.tr("overlay-msg-select-scroll-first"));
             return OverlayOutcome::Stay;
         }
-        let Some(rect) = self
-            .current_selection()
-            .and_then(|r| self.screen_bounds.intersect(&r))
-        else {
+        let Some(rect) = self.selection_on_screen() else {
             self.status_message = Some(self.i18n.tr("overlay-msg-selection-invalid"));
             return OverlayOutcome::Stay;
         };
@@ -5969,16 +5926,21 @@ impl ScreenshotOverlayView {
         }
     }
 
+    /// 鼠标所在的逻辑像素点（物理光标坐标按缩放换算）。
+    fn cursor_logical_point(&self) -> PhysicalPoint {
+        let cursor = logical_rect(
+            PhysicalRect::new(self.cursor_pos.x, self.cursor_pos.y, 1, 1),
+            self.scale,
+        );
+        PhysicalPoint::new(cursor.x, cursor.y)
+    }
+
     /// 鼠标是否在选区菜单按钮范围内（用于避免放大镜遮挡按钮）。
     fn cursor_over_region_bar(&self) -> bool {
         let Some(rect) = self.region_bar_rect else {
             return false;
         };
-        let cursor = logical_rect(
-            PhysicalRect::new(self.cursor_pos.x, self.cursor_pos.y, 1, 1),
-            self.scale,
-        );
-        rect.contains(PhysicalPoint::new(cursor.x, cursor.y))
+        rect.contains(self.cursor_logical_point())
     }
 
     /// 鼠标是否在样式面板范围内（用于避免放大镜遮挡面板）。
@@ -5986,15 +5948,8 @@ impl ScreenshotOverlayView {
         let Some(pos) = panel_pos else {
             return false;
         };
-        let cursor = logical_rect(
-            PhysicalRect::new(self.cursor_pos.x, self.cursor_pos.y, 1, 1),
-            self.scale,
-        );
-        {
-            let size = self.active_panel_size().unwrap_or(STYLE_PANEL_SIZE);
-            PhysicalRect::new(pos.x, pos.y, size.0, size.1)
-        }
-        .contains(PhysicalPoint::new(cursor.x, cursor.y))
+        let size = self.active_panel_size().unwrap_or(STYLE_PANEL_SIZE);
+        PhysicalRect::new(pos.x, pos.y, size.0, size.1).contains(self.cursor_logical_point())
     }
 
     /// 主工具栏的逻辑尺寸（宽, 高）；录屏 / 长图模式隐藏标注工具组，所以更窄。
@@ -6011,10 +5966,6 @@ impl ScreenshotOverlayView {
         let Some(pos) = toolbar_pos else {
             return false;
         };
-        let cursor = logical_rect(
-            PhysicalRect::new(self.cursor_pos.x, self.cursor_pos.y, 1, 1),
-            self.scale,
-        );
         let (width, height) = self.toolbar_size();
         let extra = if menu_open {
             max_menu_height().ceil() as i32 + TOOLBAR_MENU_GAP
@@ -6022,8 +5973,32 @@ impl ScreenshotOverlayView {
             0
         };
         PhysicalRect::new(pos.x, pos.y - extra, width, height + extra * 2)
-            .contains(PhysicalPoint::new(cursor.x, cursor.y))
+            .contains(self.cursor_logical_point())
     }
+}
+
+/// 面板里的文字标签。
+///
+/// # 参数
+/// - `i18n`：翻译器。
+/// - `id`：消息 id。
+fn panel_label(i18n: &I18n, id: &str) -> Div {
+    div()
+        .text_xs()
+        .text_color(rgba(STYLE_LABEL_COLOR))
+        .child(i18n.tr(id))
+}
+
+/// 面板里的下拉框（固定宽高与菜单最大高度）。
+fn panel_select(state: &Entity<StyleSelect>) -> Div {
+    div()
+        .w(px(STYLE_SELECT_WIDTH))
+        .h(px(STYLE_SELECT_HEIGHT))
+        .child(
+            Select::new(state)
+                .with_size(ComponentSize::Small)
+                .menu_max_h(px(STYLE_SELECT_MENU_MAX_HEIGHT)),
+        )
 }
 
 /// 聚光灯 / 水印设置面板：控件创建、同步、编辑与持久化。
@@ -6077,16 +6052,31 @@ impl ScreenshotOverlayView {
         self.decoration_prepared = Some(self.tool);
     }
 
-    /// 让覆盖窗预览跟随取色器的临时预览色（悬停调色板 / 手输十六进制），不写配置。
-    fn follow_color_preview(&mut self, cx: &mut Context<Self>) {
-        let watermark = self.tool == AnnotationTool::Watermark;
-        let Some(ui) = &self.decoration_ui else {
-            return;
-        };
-        let picker = if watermark {
+    /// 当前装饰工具（水印 / 聚光灯）在标注层里的颜色；没有标注层返回 `None`。
+    fn decoration_color(&self) -> Option<ColorRgba8> {
+        let layer = self.annotations.as_ref()?;
+        Some(if self.tool == AnnotationTool::Watermark {
+            layer.watermark_config().color
+        } else {
+            layer.spotlight_config().color
+        })
+    }
+
+    /// 当前装饰工具对应的取色器状态；控件未创建返回 `None`。
+    fn decoration_picker(&self) -> Option<&Entity<ColorPickerState>> {
+        let ui = self.decoration_ui.as_ref()?;
+        Some(if self.tool == AnnotationTool::Watermark {
             &ui.wm_color
         } else {
             &ui.sp_color
+        })
+    }
+
+    /// 让覆盖窗预览跟随取色器的临时预览色（悬停调色板 / 手输十六进制），不写配置。
+    fn follow_color_preview(&mut self, cx: &mut Context<Self>) {
+        let watermark = self.tool == AnnotationTool::Watermark;
+        let Some(picker) = self.decoration_picker() else {
+            return;
         };
         let (value, preview) = {
             let state = picker.read(cx);
@@ -6096,13 +6086,8 @@ impl ScreenshotOverlayView {
             let rgba = c.to_rgb();
             color_from_unit([rgba.r, rgba.g, rgba.b, rgba.a])
         };
-        let Some(layer) = &self.annotations else {
+        let Some(current) = self.decoration_color() else {
             return;
-        };
-        let current = if watermark {
-            layer.watermark_config().color
-        } else {
-            layer.spotlight_config().color
         };
         let apply = color_preview_step(
             &mut self.decoration_color_preview,
@@ -6456,8 +6441,6 @@ impl ScreenshotOverlayView {
         match kind {
             DecorationSelectKind::WatermarkFamily => {
                 self.edit_watermark(WatermarkEdit::FontFamily(value.to_owned()));
-                cx.notify();
-                return;
             }
             DecorationSelectKind::WatermarkTemplate => {
                 if let Some(ui) = &self.decoration_ui {
@@ -6465,31 +6448,27 @@ impl ScreenshotOverlayView {
                         .update(cx, |s, cx| s.set_value(value, window, cx));
                 }
                 self.apply_watermark_template(value.to_owned());
-                cx.notify();
-                return;
             }
-            _ => {}
-        }
-        let Ok(number) = value.parse::<f64>() else {
-            return;
-        };
-        match kind {
             DecorationSelectKind::SpotlightOpacity => {
-                self.edit_spotlight(SpotlightEdit::Opacity(number / 100.0));
+                let Ok(n) = value.parse::<f64>() else { return };
+                self.edit_spotlight(SpotlightEdit::Opacity(n / 100.0));
             }
             DecorationSelectKind::WatermarkFont => {
-                self.edit_watermark(WatermarkEdit::FontSize(number));
+                let Ok(n) = value.parse::<f64>() else { return };
+                self.edit_watermark(WatermarkEdit::FontSize(n));
             }
             DecorationSelectKind::WatermarkOpacity => {
-                self.edit_watermark(WatermarkEdit::Opacity(number / 100.0));
+                let Ok(n) = value.parse::<f64>() else { return };
+                self.edit_watermark(WatermarkEdit::Opacity(n / 100.0));
             }
             DecorationSelectKind::WatermarkAngle => {
-                self.edit_watermark(WatermarkEdit::Angle(number));
+                let Ok(n) = value.parse::<f64>() else { return };
+                self.edit_watermark(WatermarkEdit::Angle(n));
             }
             DecorationSelectKind::WatermarkGap => {
-                self.edit_watermark(WatermarkEdit::Gap(number));
+                let Ok(n) = value.parse::<f64>() else { return };
+                self.edit_watermark(WatermarkEdit::Gap(n));
             }
-            DecorationSelectKind::WatermarkFamily | DecorationSelectKind::WatermarkTemplate => {}
         }
         cx.notify();
     }
@@ -6570,11 +6549,13 @@ impl ScreenshotOverlayView {
             return;
         };
         let mut store = config.borrow_mut();
-        if let Err(e) = store.set_value(key, value) {
-            tracing::warn!(key, error = %e, "写入装饰样式配置失败");
-        } else if let Err(e) = store.flush() {
-            tracing::warn!(key, error = %e, "装饰样式落盘失败");
-        }
+        set_and_flush_warn(
+            &mut store,
+            key,
+            value,
+            "写入装饰样式配置失败",
+            "装饰样式落盘失败",
+        );
     }
 
     /// 聚光灯 / 水印设置面板：颜色色块、水印文字与档位下拉，点击不穿透到选区。
@@ -6582,33 +6563,13 @@ impl ScreenshotOverlayView {
     /// # 参数
     /// - `origin`：面板左上角（逻辑像素）。
     fn render_decoration_panel(&self, origin: (i32, i32), cx: &mut Context<Self>) -> Div {
-        let watermark = self.tool == AnnotationTool::Watermark;
         let size = self.active_panel_size().unwrap_or(WATERMARK_PANEL_SIZE);
         let i18n = self.i18n;
-        let label = move |id: &str| {
-            div()
-                .text_xs()
-                .text_color(rgba(STYLE_LABEL_COLOR))
-                .child(i18n.tr(id))
-        };
-        let select = |state: &Entity<StyleSelect>| {
-            div()
-                .w(px(STYLE_SELECT_WIDTH))
-                .h(px(STYLE_SELECT_HEIGHT))
-                .child(
-                    Select::new(state)
-                        .with_size(ComponentSize::Small)
-                        .menu_max_h(px(STYLE_SELECT_MENU_MAX_HEIGHT)),
-                )
-        };
-        let current_rgb = self.annotations.as_ref().map_or([0, 0, 0], |layer| {
-            let c = if watermark {
-                layer.watermark_config().color
-            } else {
-                layer.spotlight_config().color
-            };
-            [c.r, c.g, c.b]
-        });
+        let label = move |id: &str| panel_label(i18n, id);
+        let select = panel_select;
+        let current_rgb = self
+            .decoration_color()
+            .map_or([0, 0, 0], |c| [c.r, c.g, c.b]);
         let mut swatches = div().flex().flex_row().items_center().gap_1();
         for (index, color) in PALETTE.iter().copied().enumerate() {
             let channels = [color[0], color[1], color[2]];
@@ -6654,13 +6615,10 @@ impl ScreenshotOverlayView {
         let Some(ui) = &self.decoration_ui else {
             return panel;
         };
-        let picker = if watermark {
-            &ui.wm_color
-        } else {
-            &ui.sp_color
-        };
-        panel = panel.child(ColorPicker::new(picker).with_size(ComponentSize::Small));
-        if watermark {
+        if let Some(picker) = self.decoration_picker() {
+            panel = panel.child(ColorPicker::new(picker).with_size(ComponentSize::Small));
+        }
+        if self.tool == AnnotationTool::Watermark {
             panel = panel
                 .child(label("annot-deco-text"))
                 .child(
@@ -6915,24 +6873,7 @@ impl ScreenshotOverlayView {
                     .border_2()
                     .border_color(rgb(ACCENT_COLOR)),
             );
-            let label_top = if wy >= LABEL_OFFSET {
-                wy - LABEL_OFFSET
-            } else {
-                wy + 4.0
-            };
-            root = root.child(
-                div()
-                    .absolute()
-                    .top(px(label_top))
-                    .left(px(wx.max(4.0)))
-                    .px_2()
-                    .py_0p5()
-                    .rounded_xs()
-                    .bg(rgba(LABEL_BG_COLOR))
-                    .text_color(rgba(0xFFFFFFFF))
-                    .text_xs()
-                    .child(self.size_label(w)),
-            );
+            root = root.child(self.size_label_div((wx, wy), w));
         }
 
         let mut toolbar_pos: Option<PhysicalPoint> = None;
@@ -7022,24 +6963,7 @@ impl ScreenshotOverlayView {
             }
 
             // 尺寸标签（选区左上方，贴近上沿时落到选区内侧）
-            let label_top = if sy >= LABEL_OFFSET {
-                sy - LABEL_OFFSET
-            } else {
-                sy + 4.0
-            };
-            root = root.child(
-                div()
-                    .absolute()
-                    .top(px(label_top))
-                    .left(px(sx.max(4.0)))
-                    .px_2()
-                    .py_0p5()
-                    .rounded_xs()
-                    .bg(rgba(LABEL_BG_COLOR))
-                    .text_color(rgba(0xFFFFFFFF))
-                    .text_xs()
-                    .child(self.size_label(s)),
-            );
+            root = root.child(self.size_label_div((sx, sy), s));
 
             // 浮动工具栏（选区确定后展示；标注工具未实现所以隐藏，贴图 / OCR / 翻译置灰）
             if matches!(self.state, SelectionState::Selected { .. }) && anchor_here {
@@ -7084,7 +7008,7 @@ impl ScreenshotOverlayView {
                     } else if self.scroll_mode {
                         &SCROLL_MODE_DISABLED_ACTIONS[..]
                     } else {
-                        &DISABLED_TOOLBAR_ACTIONS[..]
+                        &[]
                     })
                     .on_tool_change(move |tool, window, app| {
                         tool_entity.update(app, |this, cx| this.on_tool_selected(tool, window, cx));
@@ -7458,6 +7382,9 @@ mod tests {
     use std::cell::RefCell;
     use std::rc::Rc;
 
+    /// 识别类请求记录 `(序号, 宽, 高, RGBA)`。
+    type Request = (u64, u32, u32, Vec<u8>);
+
     /// 记录到的输出动作。
     #[derive(Debug, Default)]
     struct Recorded {
@@ -7474,19 +7401,19 @@ mod tests {
         /// 贴图 `(选区, 宽, 高, RGBA)`。
         pins: Vec<(PhysicalRect, u32, u32, Vec<u8>)>,
         /// 文字识别请求 `(序号, 宽, 高, RGBA)`。
-        ocrs: Vec<(u64, u32, u32, Vec<u8>)>,
+        ocrs: Vec<Request>,
         /// OCR 下载请求次数。
         ocr_downloads: u32,
         /// 表格识别请求 `(序号, 宽, 高, RGBA)`。
-        tables: Vec<(u64, u32, u32, Vec<u8>)>,
+        tables: Vec<Request>,
         /// 表格识别组件下载请求次数。
         table_downloads: u32,
         /// 公式识别请求 `(序号, 宽, 高, RGBA)`。
-        latexes: Vec<(u64, u32, u32, Vec<u8>)>,
+        latexes: Vec<Request>,
         /// 公式识别运行时下载请求次数。
         latex_downloads: u32,
         /// 文字翻译请求 `(序号, 宽, 高, RGBA)`。
-        translates: Vec<(u64, u32, u32, Vec<u8>)>,
+        translates: Vec<Request>,
         /// 翻译运行时下载请求次数。
         translate_downloads: u32,
         /// 长截图选区。
@@ -7505,44 +7432,61 @@ mod tests {
         fail: bool,
     }
 
+    /// 模拟失败时返回的错误文案。
+    const FAIL_MSG: &str = "boom";
+
+    impl RecordingSink {
+        /// 失败开关检查：`fail` 为真时返回错误。
+        fn gate(&self) -> Result<(), String> {
+            if self.fail {
+                Err(FAIL_MSG.into())
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    /// 造一个记录型输出通道及其共享记录。
+    ///
+    /// # 参数
+    /// - `fail`：为真时所有输出操作返回错误。
+    fn recording_sink(fail: bool) -> (Box<dyn OutputSink>, Rc<RefCell<Recorded>>) {
+        let rec = Rc::new(RefCell::new(Recorded::default()));
+        let sink = RecordingSink {
+            rec: Rc::clone(&rec),
+            fail,
+        };
+        (Box::new(sink), rec)
+    }
+
     impl OutputSink for RecordingSink {
         /// 记录复制的图像。
         fn copy_image(&mut self, w: u32, h: u32, rgba: &[u8]) -> Result<(), String> {
-            if self.fail {
-                return Err("boom".into());
-            }
+            self.gate()?;
             self.rec.borrow_mut().images.push((w, h, rgba.to_vec()));
             Ok(())
         }
         /// 记录复制的文本。
         fn copy_text(&mut self, text: &str) -> Result<(), String> {
-            if self.fail {
-                return Err("boom".into());
-            }
+            self.gate()?;
             self.rec.borrow_mut().texts.push(text.to_string());
             Ok(())
         }
         /// 记录打开的链接。
         fn open_url(&mut self, url: &str) -> Result<(), String> {
-            if self.fail {
-                return Err("boom".into());
-            }
+            self.gate()?;
             self.rec.borrow_mut().urls.push(url.to_string());
             Ok(())
         }
         /// 记录保存动作。
         fn save_image(&mut self, w: u32, h: u32, _rgba: &[u8]) -> Result<PathBuf, String> {
-            if self.fail {
-                return Err("boom".into());
-            }
+            self.gate()?;
             self.rec.borrow_mut().saved.push((w, h));
             Ok(PathBuf::from("mock.png"))
         }
         /// 记录录屏选区。
         fn start_recording(&mut self, region: PhysicalRect) -> Result<(), String> {
-            if self.fail {
-                return Err("boom".into());
-            }
+            self.gate()?;
             self.rec.borrow_mut().records.push(region);
             Ok(())
         }
@@ -7554,17 +7498,13 @@ mod tests {
             h: u32,
             rgba: Vec<u8>,
         ) -> Result<(), String> {
-            if self.fail {
-                return Err("boom".into());
-            }
+            self.gate()?;
             self.rec.borrow_mut().pins.push((region, w, h, rgba));
             Ok(())
         }
         /// 记录文字识别请求。
         fn start_ocr(&mut self, serial: u64, w: u32, h: u32, rgba: Vec<u8>) -> Result<(), String> {
-            if self.fail {
-                return Err("boom".into());
-            }
+            self.gate()?;
             self.rec.borrow_mut().ocrs.push((serial, w, h, rgba));
             Ok(())
         }
@@ -7576,17 +7516,13 @@ mod tests {
             h: u32,
             rgba: Vec<u8>,
         ) -> Result<(), String> {
-            if self.fail {
-                return Err("boom".into());
-            }
+            self.gate()?;
             self.rec.borrow_mut().tables.push((serial, w, h, rgba));
             Ok(())
         }
         /// 记录表格识别组件下载请求。
         fn start_table_download(&mut self) -> Result<(), String> {
-            if self.fail {
-                return Err("boom".into());
-            }
+            self.gate()?;
             self.rec.borrow_mut().table_downloads += 1;
             Ok(())
         }
@@ -7598,17 +7534,13 @@ mod tests {
             h: u32,
             rgba: Vec<u8>,
         ) -> Result<(), String> {
-            if self.fail {
-                return Err("boom".into());
-            }
+            self.gate()?;
             self.rec.borrow_mut().latexes.push((serial, w, h, rgba));
             Ok(())
         }
         /// 记录公式识别运行时下载请求。
         fn start_latex_download(&mut self) -> Result<(), String> {
-            if self.fail {
-                return Err("boom".into());
-            }
+            self.gate()?;
             self.rec.borrow_mut().latex_downloads += 1;
             Ok(())
         }
@@ -7617,9 +7549,7 @@ mod tests {
             &mut self,
             data: crate::recognition_view::RecognitionData,
         ) -> Result<(), String> {
-            if self.fail {
-                return Err("boom".into());
-            }
+            self.gate()?;
             let mut rec = self.rec.borrow_mut();
             rec.recognition_windows += 1;
             rec.recognition_translations
@@ -7628,9 +7558,7 @@ mod tests {
         }
         /// 记录 OCR 下载请求。
         fn start_ocr_download(&mut self) -> Result<(), String> {
-            if self.fail {
-                return Err("boom".into());
-            }
+            self.gate()?;
             self.rec.borrow_mut().ocr_downloads += 1;
             Ok(())
         }
@@ -7642,25 +7570,19 @@ mod tests {
             h: u32,
             rgba: Vec<u8>,
         ) -> Result<(), String> {
-            if self.fail {
-                return Err("boom".into());
-            }
+            self.gate()?;
             self.rec.borrow_mut().translates.push((serial, w, h, rgba));
             Ok(())
         }
         /// 记录翻译运行时下载请求。
         fn start_translate_download(&mut self) -> Result<(), String> {
-            if self.fail {
-                return Err("boom".into());
-            }
+            self.gate()?;
             self.rec.borrow_mut().translate_downloads += 1;
             Ok(())
         }
         /// 记录长截图请求。
         fn start_scroll_capture(&mut self, region: PhysicalRect) -> Result<(), String> {
-            if self.fail {
-                return Err("boom".into());
-            }
+            self.gate()?;
             self.rec.borrow_mut().scrolls.push(region);
             Ok(())
         }
@@ -7685,13 +7607,8 @@ mod tests {
             data,
         })
         .unwrap();
-        let rec = Rc::new(RefCell::new(Recorded::default()));
-        let sink = RecordingSink {
-            rec: Rc::clone(&rec),
-            fail,
-        };
-        let view =
-            ScreenshotOverlayView::new(frame, scale, PhysicalPoint::new(0, 0), Box::new(sink));
+        let (sink, rec) = recording_sink(fail);
+        let view = ScreenshotOverlayView::new(frame, scale, PhysicalPoint::new(0, 0), sink);
         (view, rec)
     }
 
@@ -8052,6 +7969,16 @@ mod tests {
         view.handle_mouse_up(PhysicalPoint::new(x, y));
     }
 
+    /// 在 `(x, y)` 双击一次（按下 + 松开，点击数为 2）。
+    fn double_click_at(view: &mut ScreenshotOverlayView, x: i32, y: i32) {
+        click_at(view, x, y, 2);
+    }
+
+    /// 按一下无修饰键的按键，返回处理结果。
+    fn press(view: &mut ScreenshotOverlayView, key: &str) -> OverlayOutcome {
+        view.handle_key(key, false, false)
+    }
+
     /// 带指定选区形状的 200x150 视图。
     fn region_view(region_type: RegionType) -> (ScreenshotOverlayView, Rc<RefCell<Recorded>>) {
         let (mut view, rec) = view_with(200, 150, 1.0, false);
@@ -8064,8 +7991,7 @@ mod tests {
         click_at(view, 20, 20, 1);
         click_at(view, 100, 20, 1);
         click_at(view, 60, 100, 1);
-        view.handle_mouse_down(PhysicalPoint::new(60, 100), 2);
-        view.handle_mouse_up(PhysicalPoint::new(60, 100));
+        double_click_at(view, 60, 100);
     }
 
     /// 折线：逐点单击、双击闭合后得到自定义区域，选区是它的外接矩形。
@@ -8077,7 +8003,7 @@ mod tests {
         assert_eq!(view.state, SelectionState::Idle, "还在画");
         assert!(view.region_draft.is_some());
         click_at(&mut view, 60, 100, 1);
-        view.handle_mouse_down(PhysicalPoint::new(60, 100), 2);
+        double_click_at(&mut view, 60, 100);
         let SelectionState::Selected { rect } = view.state else {
             panic!("应已确认选区: {:?}", view.state);
         };
@@ -8316,13 +8242,8 @@ mod tests {
             },
         ])
         .unwrap();
-        let rec = Rc::new(RefCell::new(Recorded::default()));
-        let sink = RecordingSink {
-            rec: Rc::clone(&rec),
-            fail: false,
-        };
-        let view =
-            ScreenshotOverlayView::new_multi(frames, 1.0, PhysicalPoint::new(0, 0), Box::new(sink));
+        let (sink, rec) = recording_sink(false);
+        let view = ScreenshotOverlayView::new_multi(frames, 1.0, PhysicalPoint::new(0, 0), sink);
         (view, rec)
     }
 
@@ -8801,10 +8722,7 @@ mod tests {
     fn enter_copies_cropped_rgba() {
         let (mut view, rec) = view_with(100, 80, 1.0, false);
         drag(&mut view, (10, 20), (29, 39));
-        assert_eq!(
-            view.handle_key("enter", false, false),
-            OverlayOutcome::Close
-        );
+        assert_eq!(press(&mut view, "enter"), OverlayOutcome::Close);
         let r = rec.borrow();
         let (w, h, rgba) = &r.images[0];
         assert_eq!((*w, *h), (20, 20));
@@ -8817,7 +8735,7 @@ mod tests {
     #[test]
     fn copy_and_save_need_selection() {
         let (mut view, rec) = view_with(100, 80, 1.0, false);
-        assert_eq!(view.handle_key("enter", false, false), OverlayOutcome::Stay);
+        assert_eq!(press(&mut view, "enter"), OverlayOutcome::Stay);
         assert_eq!(view.apply_action(ToolbarAction::Copy), OverlayOutcome::Stay);
         assert_eq!(view.apply_action(ToolbarAction::Save), OverlayOutcome::Stay);
         assert!(view.status_message.is_some());
@@ -8918,7 +8836,7 @@ mod tests {
     fn output_failure_keeps_window() {
         let (mut view, _) = view_with(100, 80, 1.0, true);
         drag(&mut view, (5, 5), (44, 34));
-        assert_eq!(view.handle_key("enter", false, false), OverlayOutcome::Stay);
+        assert_eq!(press(&mut view, "enter"), OverlayOutcome::Stay);
         assert!(
             view.status_message
                 .as_deref()
@@ -8942,8 +8860,7 @@ mod tests {
     /// 双击 / 中键的动作跟随配置；颜色与尺寸单位配置也被读取。
     #[test]
     fn click_actions_and_colors_follow_config() {
-        let dir = std::env::temp_dir().join(format!("snow-click-cfg-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_util::unique_temp_dir("snow-click-cfg", "t");
         let mut store = ConfigStore::open(dir.join("config.json"));
         store
             .set_value(DOUBLE_CLICK_ACTION_KEY, serde_json::json!("none"))
@@ -8990,8 +8907,7 @@ mod tests {
     /// 取色格式、放大镜显示模式与调整选区方式跟随配置。
     #[test]
     fn picker_and_resize_settings_follow_config() {
-        let dir = std::env::temp_dir().join(format!("snow-picker-cfg-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_util::unique_temp_dir("snow-picker-cfg", "t");
         let mut store = ConfigStore::open(dir.join("config.json"));
         store
             .set_value(COLOR_FORMAT_KEY, serde_json::json!("hex_without_hash"))
@@ -9193,7 +9109,7 @@ mod tests {
         let (mut view, rec) = view_with(255, 200, 1.0, false);
         view.set_record_mode(true);
         assert_eq!(
-            view.handle_key("enter", false, false),
+            press(&mut view, "enter"),
             OverlayOutcome::Stay,
             "无选区先提示"
         );
@@ -9201,10 +9117,7 @@ mod tests {
         assert_eq!(view.handle_key("c", true, false), OverlayOutcome::Stay);
         assert_eq!(view.handle_key("s", true, false), OverlayOutcome::Stay);
         assert!(rec.borrow().images.is_empty() && rec.borrow().saved.is_empty());
-        assert_eq!(
-            view.handle_key("enter", false, false),
-            OverlayOutcome::Close
-        );
+        assert_eq!(press(&mut view, "enter"), OverlayOutcome::Close);
         assert_eq!(
             rec.borrow().records,
             vec![PhysicalRect::new(50, 50, 101, 71)]
@@ -9291,10 +9204,7 @@ mod tests {
         drag(&mut view, (20, 20), (219, 149));
         view.select_tool(AnnotationTool::Rectangle);
         annotate(&mut view, (60, 50), (160, 110));
-        assert_eq!(
-            view.handle_key("enter", false, false),
-            OverlayOutcome::Close
-        );
+        assert_eq!(press(&mut view, "enter"), OverlayOutcome::Close);
         let r = rec.borrow();
         let (w, h, rgba) = &r.images[0];
         assert_eq!((*w, *h), (200, 130));
@@ -9314,7 +9224,7 @@ mod tests {
         drag(&mut view, (40, 40), (139, 119));
         view.select_tool(AnnotationTool::Rectangle);
         annotate(&mut view, (60, 60), (290, 190));
-        view.handle_key("enter", false, false);
+        press(&mut view, "enter");
         let r = rec.borrow();
         let (w, h, rgba) = &r.images[0];
         assert_eq!((*w, *h), (100, 80));
@@ -9559,10 +9469,7 @@ mod tests {
                 .as_deref()
                 .is_some_and(|s| s.contains("copied"))
         );
-        assert_eq!(
-            view.handle_key("enter", false, false),
-            OverlayOutcome::Close
-        );
+        assert_eq!(press(&mut view, "enter"), OverlayOutcome::Close);
         assert_eq!(rec.borrow().texts.len(), 2);
 
         let (mut view, _) = view_with(100, 80, 1.0, false);
@@ -9782,10 +9689,7 @@ mod tests {
                 .as_deref()
                 .is_some_and(|s| s.contains("copied"))
         );
-        assert_eq!(
-            view.handle_key("enter", false, false),
-            OverlayOutcome::Close
-        );
+        assert_eq!(press(&mut view, "enter"), OverlayOutcome::Close);
         assert_eq!(rec.borrow().texts.len(), 2);
 
         // Esc：先退出 OCR 界面，再按一次才关闭
@@ -9834,8 +9738,8 @@ mod tests {
         );
     }
 
-    /// 构造一个底图为二维码样本、还没有选区的视图。
-    fn view_with_qr_unselected() -> (ScreenshotOverlayView, Rc<RefCell<Recorded>>) {
+    /// 构造一个底图为二维码样本、还没有选区的视图；`fail` 控制输出通道是否失败。
+    fn qr_view(fail: bool) -> (ScreenshotOverlayView, Rc<RefCell<Recorded>>) {
         let (w, h, data) = crate::qr_decode::test_support::render_sample(6, 4);
         let frame = FrozenFrame::from_captured(CapturedScreen {
             width: w,
@@ -9843,31 +9747,20 @@ mod tests {
             data,
         })
         .unwrap();
-        let rec = Rc::new(RefCell::new(Recorded::default()));
-        let sink = RecordingSink {
-            rec: Rc::clone(&rec),
-            fail: false,
-        };
-        let view = ScreenshotOverlayView::new(frame, 1.0, PhysicalPoint::new(0, 0), Box::new(sink));
+        let (sink, rec) = recording_sink(fail);
+        let view = ScreenshotOverlayView::new(frame, 1.0, PhysicalPoint::new(0, 0), sink);
         (view, rec)
+    }
+
+    /// 构造一个底图为二维码样本、还没有选区的视图。
+    fn view_with_qr_unselected() -> (ScreenshotOverlayView, Rc<RefCell<Recorded>>) {
+        qr_view(false)
     }
 
     /// 构造一个底图为二维码样本的视图，并拖出覆盖整张码的选区。
     fn view_with_qr(fail: bool) -> (ScreenshotOverlayView, Rc<RefCell<Recorded>>) {
-        let (w, h, data) = crate::qr_decode::test_support::render_sample(6, 4);
-        let frame = FrozenFrame::from_captured(CapturedScreen {
-            width: w,
-            height: h,
-            data,
-        })
-        .unwrap();
-        let rec = Rc::new(RefCell::new(Recorded::default()));
-        let sink = RecordingSink {
-            rec: Rc::clone(&rec),
-            fail,
-        };
-        let mut view =
-            ScreenshotOverlayView::new(frame, 1.0, PhysicalPoint::new(0, 0), Box::new(sink));
+        let (mut view, rec) = qr_view(fail);
+        let (w, h) = view.frame.size();
         drag(&mut view, (2, 2), (w as i32 - 2, h as i32 - 2));
         (view, rec)
     }
@@ -9893,16 +9786,13 @@ mod tests {
         let (mut view, rec) = view_with_qr(false);
         view.recognize_qr_code();
         // 复制成功后再让输出通道失败：直接换成会失败的通道
-        let fail_rec = Rc::new(RefCell::new(Recorded::default()));
-        view.output = Box::new(RecordingSink {
-            rec: Rc::clone(&fail_rec),
-            fail: true,
-        });
+        let (fail_sink, fail_rec) = recording_sink(true);
+        view.output = fail_sink;
         assert_eq!(view.handle_key("o", false, false), OverlayOutcome::Stay);
         assert!(
             view.status_message
                 .as_deref()
-                .is_some_and(|s| s.contains("boom"))
+                .is_some_and(|s| s.contains(FAIL_MSG))
         );
         assert!(view.qr_link.is_some());
         assert!(rec.borrow().urls.is_empty() && fail_rec.borrow().urls.is_empty());
@@ -10238,7 +10128,7 @@ mod tests {
     fn scroll_mode_enter_starts_scroll_capture() {
         let (mut view, rec) = view_with(100, 80, 1.0, false);
         view.set_scroll_mode(true);
-        assert_eq!(view.handle_key("enter", false, false), OverlayOutcome::Stay);
+        assert_eq!(press(&mut view, "enter"), OverlayOutcome::Stay);
         assert!(
             view.status_message
                 .as_deref()
@@ -10248,10 +10138,7 @@ mod tests {
         assert_eq!(view.handle_key("c", true, false), OverlayOutcome::Stay);
         assert_eq!(view.handle_key("s", true, false), OverlayOutcome::Stay);
         assert!(rec.borrow().images.is_empty() && rec.borrow().saved.is_empty());
-        assert_eq!(
-            view.handle_key("enter", false, false),
-            OverlayOutcome::Close
-        );
+        assert_eq!(press(&mut view, "enter"), OverlayOutcome::Close);
         assert_eq!(rec.borrow().scrolls, vec![PhysicalRect::new(5, 5, 40, 30)]);
         let (mut view, _) = view_with(100, 80, 1.0, false);
         view.set_scroll_mode(true);
@@ -10272,10 +10159,7 @@ mod tests {
             s.width = 6;
         });
         annotate(&mut view, (60, 50), (160, 110));
-        assert_eq!(
-            view.handle_key("enter", false, false),
-            OverlayOutcome::Close
-        );
+        assert_eq!(press(&mut view, "enter"), OverlayOutcome::Close);
         let r = rec.borrow();
         let (w, _, rgba) = &r.images[0];
         let o = ((60 * *w + 40) * 4) as usize;
@@ -10302,7 +10186,7 @@ mod tests {
             [0x16, 0x77, 0xFF, 0xFF]
         );
         annotate(&mut view, (40, 80), (180, 80));
-        view.handle_key("enter", false, false);
+        press(&mut view, "enter");
         let r = rec.borrow();
         let (w, _, rgba) = &r.images[0];
         // 直线在底图 y=80 -> 裁切图 y=60，取 x=100 -> 80
@@ -10560,9 +10444,7 @@ mod tests {
 
     /// 建一个带配置的视图：键值对写入临时配置后注入。
     fn view_with_config(tag: &str, entries: &[(&str, serde_json::Value)]) -> ScreenshotOverlayView {
-        let dir = std::env::temp_dir().join(format!("snow-ovl-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_util::unique_temp_dir("snow-ovl", tag);
         let mut store = ConfigStore::open(dir.join("config.json"));
         for (key, value) in entries {
             store.set_value(key, value.clone()).unwrap();
@@ -10688,10 +10570,7 @@ mod tests {
                 .is_some_and(|s| s.contains("Enter"))
         );
         // Enter 复制并关闭
-        assert_eq!(
-            view.handle_key("enter", false, false),
-            OverlayOutcome::Close
-        );
+        assert_eq!(press(&mut view, "enter"), OverlayOutcome::Close);
         assert_eq!(rec.borrow().texts, vec![sample.to_string()]);
         // 关闭开关：同样的操作不弹面板
         let (mut off, _) = view_with_qr_unselected();
@@ -10769,9 +10648,7 @@ mod tests {
     /// 记住上次工具：开启后选工具会写入配置，下一次会话恢复；关闭时既不写也不恢复。
     #[test]
     fn remember_last_tool_persists_and_restores() {
-        let dir = std::env::temp_dir().join(format!("snow-last-tool-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_util::unique_temp_dir("snow-last-tool", "t");
         let path = dir.join("config.json");
         let open = |remember: bool| {
             let mut store = ConfigStore::open(&path);
@@ -10934,5 +10811,87 @@ mod tests {
         view.record_mode = false;
         view.scroll_mode = true;
         assert_eq!(view.toolbar_size().0, record_w);
+    }
+
+    /// 选区与屏幕求交：没有选区为 None，有选区得到与选区一致的矩形。
+    #[test]
+    fn selection_on_screen_follows_selection() {
+        let (mut view, _) = view_with(100, 80, 1.0, false);
+        assert!(view.selection_on_screen().is_none());
+        drag(&mut view, (10, 10), (49, 39));
+        assert_eq!(view.selection_on_screen(), view.current_selection());
+        assert!(view.selection_on_screen().is_some());
+    }
+
+    /// 下载触发后的状态切换：成功进入“准备下载”，失败进入不可再下载的失败态。
+    #[test]
+    fn begin_download_switches_ocr_state() {
+        let (mut view, _) = view_with(100, 80, 1.0, false);
+        view.begin_download(Ok(()));
+        assert!(matches!(view.ocr_state(), OcrUiState::Downloading(_)));
+        view.begin_download(Err("boom".into()));
+        assert!(matches!(
+            view.ocr_state(),
+            OcrUiState::Failed {
+                can_download: false,
+                ..
+            }
+        ));
+    }
+
+    /// 表格 / 公式 / 文字识别各自设置模式标志，且互斥。
+    #[test]
+    fn begin_recognition_sets_mode_flags() {
+        let (mut view, _) = view_with(100, 80, 1.0, false);
+        drag(&mut view, (5, 5), (44, 34));
+        view.begin_recognition(RecognitionKind::Table);
+        assert!(view.table_mode && !view.latex_mode);
+        view.dismiss_ocr();
+        view.begin_recognition(RecognitionKind::Latex);
+        assert!(!view.table_mode && view.latex_mode);
+        view.dismiss_ocr();
+        view.begin_recognition(RecognitionKind::Ocr);
+        assert!(!view.table_mode && !view.latex_mode);
+    }
+
+    /// 没有选区时识别前置检查提示“先框选”并返回 None。
+    #[test]
+    fn recognition_prelude_requires_selection() {
+        let (mut view, _) = view_with(100, 80, 1.0, false);
+        assert!(view.recognition_prelude(false).is_none());
+        assert!(view.status_message.is_some());
+    }
+
+    /// 可选回调：已接入则调用，未接入返回给定报错。
+    #[test]
+    fn invoke_callback_reports_unwired() {
+        let hits = Rc::new(RefCell::new(0));
+        let none: Option<Box<dyn Fn()>> = None;
+        assert_eq!(
+            invoke_callback(&none, "unwired", |cb| cb()),
+            Err("unwired".to_string())
+        );
+        let counter = Rc::clone(&hits);
+        let some: Option<Box<dyn Fn()>> = Some(Box::new(move || *counter.borrow_mut() += 1));
+        assert_eq!(invoke_callback(&some, "unwired", |cb| cb()), Ok(()));
+        assert_eq!(*hits.borrow(), 1);
+    }
+
+    /// 写入并落盘：值写进了磁盘文件，重新打开仍能读到。
+    #[test]
+    fn set_and_flush_warn_persists_value() {
+        let dir = crate::test_util::unique_temp_dir("snow-ovl-flush", "t");
+        let path = dir.join("config.json");
+        let mut store = ConfigStore::open(&path);
+        set_and_flush_warn(
+            &mut store,
+            LAST_TOOL_KEY,
+            serde_json::json!("arrow"),
+            "set",
+            "flush",
+        );
+        let reopened = ConfigStore::open(&path);
+        assert_eq!(reopened.value(LAST_TOOL_KEY).as_str(), Some("arrow"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
