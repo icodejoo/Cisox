@@ -432,12 +432,12 @@ mod backend {
     use super::*;
     use crate::dispatch::Dispatcher;
     use crate::native::{self, LoopWaker};
+    use crate::service_thread::ServiceThread;
     use global_hotkey::hotkey::{Code, HotKey, Modifiers as GhMods};
     use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
     use snow_app_core::command::CommandSource;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::AtomicBool;
     use std::sync::mpsc::{Receiver, Sender, channel};
-    use std::thread::JoinHandle;
 
     /// 进程内只允许一个热键服务（global-hotkey 的事件通道是进程级单例）。
     static RUNNING: AtomicBool = AtomicBool::new(false);
@@ -458,10 +458,8 @@ mod backend {
     pub(super) struct Inner {
         /// 控制通道。
         ctl: Sender<Ctl>,
-        /// 消息循环唤醒器。
-        waker: LoopWaker,
-        /// 后台线程。
-        join: Option<JoinHandle<()>>,
+        /// 后台服务线程；丢弃时通知退出、join 并释放单例标记。
+        thread: ServiceThread<LoopWaker>,
     }
 
     /// 转成 global-hotkey 的热键类型。
@@ -572,56 +570,35 @@ mod backend {
     impl Inner {
         /// 启动后台线程并等待其就绪。
         pub(super) fn start(dispatcher: Dispatcher) -> Result<Self, ShellError> {
-            if RUNNING.swap(true, Ordering::SeqCst) {
-                return Err(ShellError::AlreadyRunning("HotkeyService"));
-            }
             let (ctl_tx, ctl_rx) = channel::<Ctl>();
-            let (ready_tx, ready_rx) = channel::<Result<LoopWaker, ShellError>>();
-            let spawned = std::thread::Builder::new()
-                .name("shell-hotkey".into())
-                .spawn(move || {
-                    let manager = match GlobalHotKeyManager::new() {
-                        Ok(m) => m,
-                        Err(e) => {
-                            let _ = ready_tx.send(Err(ShellError::Platform(format!(
-                                "创建热键管理器失败: {e}"
-                            ))));
-                            return;
-                        }
-                    };
+            let notify_tx = ctl_tx.clone();
+            let thread = ServiceThread::spawn(
+                &RUNNING,
+                "HotkeyService",
+                "shell-hotkey",
+                "创建热键线程失败",
+                move || {
+                    let manager = GlobalHotKeyManager::new()
+                        .map_err(|e| ShellError::Platform(format!("创建热键管理器失败: {e}")))?;
                     let waker = native::current_thread_waker();
-                    let mut worker = Worker {
+                    let worker = Worker {
                         manager,
                         table: HotkeyTable::default(),
                         by_platform_id: HashMap::new(),
                         dispatcher,
                     };
-                    let _ = ready_tx.send(Ok(waker));
-                    native::run_message_loop(|| worker.tick(&ctl_rx));
-                });
-            let join = match spawned {
-                Ok(j) => j,
-                Err(e) => {
-                    RUNNING.store(false, Ordering::SeqCst);
-                    return Err(ShellError::Platform(format!("创建热键线程失败: {e}")));
-                }
-            };
-            match ready_rx.recv() {
-                Ok(Ok(waker)) => Ok(Self {
-                    ctl: ctl_tx,
-                    waker,
-                    join: Some(join),
-                }),
-                Ok(Err(e)) => {
-                    let _ = join.join();
-                    RUNNING.store(false, Ordering::SeqCst);
-                    Err(e)
-                }
-                Err(_) => {
-                    RUNNING.store(false, Ordering::SeqCst);
-                    Err(ShellError::ServiceClosed)
-                }
-            }
+                    Ok((worker, waker))
+                },
+                move |mut worker: Worker| native::run_message_loop(|| worker.tick(&ctl_rx)),
+                move |waker: &LoopWaker| {
+                    let _ = notify_tx.send(Ctl::Shutdown);
+                    waker.wake();
+                },
+            )?;
+            Ok(Self {
+                ctl: ctl_tx,
+                thread,
+            })
         }
 
         /// 发送请求并等待应答。
@@ -630,7 +607,7 @@ mod backend {
             self.ctl
                 .send(make(tx))
                 .map_err(|_| ShellError::ServiceClosed)?;
-            self.waker.wake();
+            self.thread.ready().wake();
             rx.recv().map_err(|_| ShellError::ServiceClosed)
         }
 
@@ -647,18 +624,6 @@ mod backend {
         /// 列表。
         pub(super) fn list(&self) -> Result<Vec<(HotkeyHandle, Hotkey)>, ShellError> {
             self.call(Ctl::List)
-        }
-    }
-
-    impl Drop for Inner {
-        /// 停止后台线程并释放单例标记。
-        fn drop(&mut self) {
-            let _ = self.ctl.send(Ctl::Shutdown);
-            self.waker.wake();
-            if let Some(j) = self.join.take() {
-                let _ = j.join();
-            }
-            RUNNING.store(false, Ordering::SeqCst);
         }
     }
 

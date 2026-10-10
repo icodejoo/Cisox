@@ -175,10 +175,10 @@ mod backend {
     use super::*;
     use crate::dispatch::Dispatcher;
     use crate::native::{self, LoopWaker};
+    use crate::service_thread::ServiceThread;
     use snow_app_core::command::CommandSource;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::AtomicBool;
     use std::sync::mpsc::{Receiver, Sender, channel};
-    use std::thread::JoinHandle;
     use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
     use tray_icon::{
         Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent,
@@ -203,10 +203,8 @@ mod backend {
     pub(super) struct Inner {
         /// 控制通道。
         ctl: Sender<Ctl>,
-        /// 唤醒器。
-        waker: LoopWaker,
-        /// 后台线程。
-        join: Option<JoinHandle<()>>,
+        /// 后台服务线程；丢弃时通知退出、join 并释放单例标记（托盘图标随线程退出移除）。
+        thread: ServiceThread<LoopWaker>,
         /// 自定义信号接收端。
         signals: Receiver<String>,
     }
@@ -370,25 +368,19 @@ mod backend {
     impl Inner {
         /// 启动后台线程并等待托盘创建完成。
         pub(super) fn start(spec: TraySpec, dispatcher: Dispatcher) -> Result<Self, ShellError> {
-            if RUNNING.swap(true, Ordering::SeqCst) {
-                return Err(ShellError::AlreadyRunning("TrayService"));
-            }
             let (ctl_tx, ctl_rx) = channel::<Ctl>();
             let (sig_tx, sig_rx) = channel::<String>();
-            let (ready_tx, ready_rx) = channel::<Result<LoopWaker, ShellError>>();
-            let spawned = std::thread::Builder::new()
-                .name("shell-tray".into())
-                .spawn(move || {
+            let notify_tx = ctl_tx.clone();
+            let thread = ServiceThread::spawn(
+                &RUNNING,
+                "TrayService",
+                "shell-tray",
+                "创建托盘线程失败",
+                move || {
                     let (plan, actions) = TrayActions::plan(&spec.menu);
-                    let (tray, menu) = match build_tray(&spec, &plan) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            let _ = ready_tx.send(Err(e));
-                            return;
-                        }
-                    };
+                    let (tray, menu) = build_tray(&spec, &plan)?;
                     let waker = native::current_thread_waker();
-                    let mut worker = Worker {
+                    let worker = Worker {
                         tray,
                         menu,
                         actions,
@@ -399,33 +391,19 @@ mod backend {
                         signals: sig_tx,
                         sink: None,
                     };
-                    let _ = ready_tx.send(Ok(waker));
-                    native::run_message_loop(|| worker.tick(&ctl_rx));
-                });
-            let join = match spawned {
-                Ok(j) => j,
-                Err(e) => {
-                    RUNNING.store(false, Ordering::SeqCst);
-                    return Err(ShellError::Platform(format!("创建托盘线程失败: {e}")));
-                }
-            };
-            match ready_rx.recv() {
-                Ok(Ok(waker)) => Ok(Self {
-                    ctl: ctl_tx,
-                    waker,
-                    join: Some(join),
-                    signals: sig_rx,
-                }),
-                Ok(Err(e)) => {
-                    let _ = join.join();
-                    RUNNING.store(false, Ordering::SeqCst);
-                    Err(e)
-                }
-                Err(_) => {
-                    RUNNING.store(false, Ordering::SeqCst);
-                    Err(ShellError::ServiceClosed)
-                }
-            }
+                    Ok((worker, waker))
+                },
+                move |mut worker: Worker| native::run_message_loop(|| worker.tick(&ctl_rx)),
+                move |waker: &LoopWaker| {
+                    let _ = notify_tx.send(Ctl::Shutdown);
+                    waker.wake();
+                },
+            )?;
+            Ok(Self {
+                ctl: ctl_tx,
+                thread,
+                signals: sig_rx,
+            })
         }
 
         /// 更新悬停提示。
@@ -433,7 +411,7 @@ mod backend {
             self.ctl
                 .send(Ctl::SetTooltip(text))
                 .map_err(|_| ShellError::ServiceClosed)?;
-            self.waker.wake();
+            self.thread.ready().wake();
             Ok(())
         }
 
@@ -442,7 +420,7 @@ mod backend {
             self.ctl
                 .send(Ctl::SetMenu(entries))
                 .map_err(|_| ShellError::ServiceClosed)?;
-            self.waker.wake();
+            self.thread.ready().wake();
             Ok(())
         }
 
@@ -451,25 +429,13 @@ mod backend {
             self.ctl
                 .send(Ctl::SetSignalSink(sink))
                 .map_err(|_| ShellError::ServiceClosed)?;
-            self.waker.wake();
+            self.thread.ready().wake();
             Ok(())
         }
 
         /// 信号接收端。
         pub(super) fn signals(&self) -> &Receiver<String> {
             &self.signals
-        }
-    }
-
-    impl Drop for Inner {
-        /// 停止后台线程（托盘图标随线程退出移除）并释放单例标记。
-        fn drop(&mut self) {
-            let _ = self.ctl.send(Ctl::Shutdown);
-            self.waker.wake();
-            if let Some(j) = self.join.take() {
-                let _ = j.join();
-            }
-            RUNNING.store(false, Ordering::SeqCst);
         }
     }
 }

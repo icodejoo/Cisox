@@ -23,6 +23,8 @@ mod native;
 pub mod overlay;
 pub mod pinned_geometry;
 pub mod selection;
+#[cfg(any(windows, test))]
+mod service_thread;
 pub mod tray;
 pub mod ui;
 pub mod window;
