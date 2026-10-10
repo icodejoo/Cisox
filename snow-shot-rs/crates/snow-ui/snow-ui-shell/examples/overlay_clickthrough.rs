@@ -16,6 +16,8 @@
 //!
 //! 日志：`%TEMP%\snow-shell-overlay-verify.log`，末行为 `VERDICT PASS|FAIL`。
 
+mod common;
+
 use snow_capability::CapabilityRegistry;
 use snow_ui_shell::geometry::{LogicalSize, PhysicalRect, Region};
 use snow_ui_shell::monitor::MonitorTarget;
@@ -25,7 +27,6 @@ use snow_ui_shell::ui::{
     Styled, Window, div, px, rgb, rgba,
 };
 use snow_ui_shell::window::WindowSpec;
-use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -59,14 +60,7 @@ struct Stats {
 impl Stats {
     /// 写日志并同步打印。
     fn log(&self, line: &str) {
-        println!("{line}");
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.log_path)
-        {
-            let _ = writeln!(f, "{line}");
-        }
+        common::log(&self.log_path, line);
     }
 
     /// 记录一次点击并按落点归类。
@@ -175,8 +169,7 @@ impl Render for OverlayView {
 }
 
 fn main() {
-    let log_path = std::env::temp_dir().join("snow-shell-overlay-verify.log");
-    let _ = std::fs::remove_file(&log_path);
+    let log_path = common::fresh_log_path("snow-shell-overlay-verify.log");
     let stats: Shared = Arc::new(Mutex::new(Stats {
         log_path,
         ..Stats::default()

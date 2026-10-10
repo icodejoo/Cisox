@@ -60,6 +60,11 @@ fn make_image(w: i32, h: i32, seed: u32) -> OwnedImage {
     image
 }
 
+/// 生成目标图像：种子偏移固定常量，与 C++ 侧一致。
+fn make_destination(w: i32, h: i32, seed: u32) -> OwnedImage {
+    make_image(w, h, seed.wrapping_add(1_000_003))
+}
+
 /// 生成 Alpha8 遮罩（行距按 4 字节对齐）。
 fn make_mask(w: i32, h: i32, seed: u32) -> (Vec<u8>, usize) {
     let stride = ((w as usize) + 3) & !3;
@@ -107,6 +112,10 @@ impl Tokens<'_> {
     /// 取下一个浮点数。
     fn f(&mut self) -> f64 {
         self.parse()
+    }
+    /// 取下一个矩形（x y w h）。
+    fn rect(&mut self) -> Rect {
+        Rect::new(self.i(), self.i(), self.i(), self.i())
     }
     /// 读 "type strength block sigma radius dpr ox oy fs"。
     fn params(&mut self) -> (Parameters, ExecutionOptions) {
@@ -166,10 +175,10 @@ fn run_case(line: &str) -> (String, Outcome) {
         "masked" => {
             let (w, h, seed, mask_seed) = (t.i(), t.i(), t.u(), t.u());
             let (mx, my, mw, mh) = (t.i(), t.i(), t.i(), t.i());
-            let rect = Rect::new(t.i(), t.i(), t.i(), t.i());
+            let rect = t.rect();
             let (p, o) = t.params();
             let source = make_image(w, h, seed);
-            let mut destination = make_image(w, h, seed.wrapping_add(1_000_003));
+            let mut destination = make_destination(w, h, seed);
             let (mask_data, stride) = make_mask(mw, mh, mask_seed);
             let mask = AlphaRef {
                 data: &mask_data,
@@ -192,11 +201,11 @@ fn run_case(line: &str) -> (String, Outcome) {
         }
         "rect" => {
             let (w, h, seed) = (t.i(), t.i(), t.u());
-            let rect = Rect::new(t.i(), t.i(), t.i(), t.i());
+            let rect = t.rect();
             let opacity = t.f();
             let (p, o) = t.params();
             let source = make_image(w, h, seed);
-            let mut destination = make_image(w, h, seed.wrapping_add(1_000_003));
+            let mut destination = make_destination(w, h, seed);
             let ok = apply_rect(
                 source.as_ref(),
                 &mut destination.as_mut(),
@@ -210,12 +219,10 @@ fn run_case(line: &str) -> (String, Outcome) {
         }
         "region" => {
             let (w, h, seed, n) = (t.i(), t.i(), t.u(), t.i());
-            let rects: Vec<Rect> = (0..n)
-                .map(|_| Rect::new(t.i(), t.i(), t.i(), t.i()))
-                .collect();
+            let rects: Vec<Rect> = (0..n).map(|_| t.rect()).collect();
             let (p, o) = t.params();
             let source = make_image(w, h, seed);
-            let mut destination = make_image(w, h, seed.wrapping_add(1_000_003));
+            let mut destination = make_destination(w, h, seed);
             let ok = apply_region(source.as_ref(), &mut destination.as_mut(), &rects, &p, &o);
             out.push(ok as u8);
             out.extend(image_bytes(&destination));

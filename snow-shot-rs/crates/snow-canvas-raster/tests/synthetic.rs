@@ -3,15 +3,18 @@
 //! 注意：缺少可独立运行的 C++ 黄金样本，这里以“几何解析可预期的像素”和
 //! “增量结果 == 整幅重绘结果”作为回归基线。
 
+mod common;
+
 use std::sync::Arc;
+
+use common::{frame, identity_frame, raster64, rgba_at};
 
 use snow_canvas_raster::{
     CanvasRasterizer, DeferredKind, RasterConfig, RasterError, RasterOutput, TileKey,
     TinySkiaRasterizer,
 };
 use snow_draw_engine_core::{
-    Camera, ColorRgba8, CornerRadii, PathCommand, PathGeometry, Point, SurfaceSize,
-    arrow::StrokeStyle,
+    ColorRgba8, CornerRadii, PathCommand, PathGeometry, arrow::StrokeStyle,
 };
 use snow_draw_engine_display::{
     ArrowDisplayItem, ArrowheadDisplayDashMode, ArrowheadDisplayFillMode,
@@ -39,29 +42,6 @@ const NONE: ColorRgba8 = ColorRgba8 {
     b: 0,
     a: 0,
 };
-
-/// 构造帧视图：相机居中于 surface 中心时，画布坐标等于视图坐标。
-fn frame(w: u32, h: u32, zoom: f64, center: (f64, f64)) -> FrameView {
-    FrameView {
-        surface: SurfaceSize {
-            width: w,
-            height: h,
-        },
-        camera: Camera {
-            center: Point {
-                x: center.0,
-                y: center.1,
-            },
-            zoom,
-        },
-        clear_color: ColorRgba8::default(),
-    }
-}
-
-/// 画布==视图的 1:1 帧。
-fn identity_frame(w: u32, h: u32) -> FrameView {
-    frame(w, h, 1.0, (f64::from(w) / 2.0, f64::from(h) / 2.0))
-}
 
 /// 构造 reset 补丁：整幅场景 + 整幅脏区。
 fn reset_patch(
@@ -130,8 +110,35 @@ fn solid_rect(cx: f64, cy: f64, w: f64, h: f64, fill: ColorRgba8) -> RectangleDi
 /// 读取画布像素。
 fn px(r: &TinySkiaRasterizer, x: u32, y: u32) -> [u8; 4] {
     let (w, _, data) = r.canvas_rgba().expect("画布应已创建");
-    let o = (y as usize * w as usize + x as usize) * 4;
-    [data[o], data[o + 1], data[o + 2], data[o + 3]]
+    rgba_at(data, w as usize, x as usize, y as usize)
+}
+
+/// 以 reset 补丁把 `items` 整幅渲染到 `w x h` 的 1:1 视图（revision 固定为 1）。
+fn render(
+    r: &mut TinySkiaRasterizer,
+    w: u32,
+    h: u32,
+    items: Vec<SceneDisplayItem>,
+) -> RasterOutput {
+    r.apply_patch(&reset_patch(identity_frame(w, h), 1, items))
+        .unwrap()
+}
+
+/// 描边（无填充）的箭头头部图元。
+fn head(
+    kind: ArrowheadDisplayPrimitiveKind,
+    points: Vec<[f64; 2]>,
+    center: [f64; 2],
+    diameter: f64,
+) -> ArrowheadDisplayPrimitive {
+    ArrowheadDisplayPrimitive {
+        kind,
+        points,
+        center,
+        diameter,
+        fill_mode: ArrowheadDisplayFillMode::Stroke,
+        dash_mode: ArrowheadDisplayDashMode::Solid,
+    }
 }
 
 /// 直线箭头元素（含分块几何与命令）。
@@ -150,14 +157,6 @@ fn line_arrow(from: [f64; 2], to: [f64; 2], stroke: ColorRgba8, width: f64) -> A
     }
 }
 
-/// 用 64px 分块、1x 的光栅化器。
-fn raster64() -> TinySkiaRasterizer {
-    TinySkiaRasterizer::new(RasterConfig {
-        tile_size: 64,
-        device_pixel_ratio: 1.0,
-    })
-}
-
 /// 收集输出块的键集合。
 fn keys(out: &RasterOutput) -> Vec<TileKey> {
     let mut k: Vec<TileKey> = out.tiles.iter().map(|t| t.key).collect();
@@ -170,9 +169,7 @@ fn keys(out: &RasterOutput) -> Vec<TileKey> {
 fn solid_rectangle_fill() {
     let mut r = raster64();
     let item = SceneDisplayItem::Rectangle(solid_rect(100.0, 100.0, 40.0, 20.0, RED));
-    let out = r
-        .apply_patch(&reset_patch(identity_frame(200, 200), 1, vec![item]))
-        .unwrap();
+    let out = render(&mut r, 200, 200, vec![item]);
     assert_eq!(px(&r, 100, 100), [255, 0, 0, 255]);
     assert_eq!(px(&r, 81, 91), [255, 0, 0, 255]);
     assert_eq!(px(&r, 118, 108), [255, 0, 0, 255]);
@@ -197,8 +194,7 @@ fn stroked_rectangle_outline() {
         stroke_width: 4.0,
         ..RectangleDisplayItem::default()
     });
-    r.apply_patch(&reset_patch(identity_frame(200, 200), 1, vec![item]))
-        .unwrap();
+    render(&mut r, 200, 200, vec![item]);
     // 左边线中心 x=70，宽 4 => 68..72。
     assert_eq!(px(&r, 70, 100), [0, 0, 255, 255]);
     assert_eq!(px(&r, 100, 80), [0, 0, 255, 255]);
@@ -216,8 +212,7 @@ fn rounded_rectangle_corner_cut() {
         corner_radii: CornerRadii::splat(20.0),
         ..solid_rect(100.0, 100.0, 80.0, 80.0, RED)
     });
-    r.apply_patch(&reset_patch(identity_frame(200, 200), 1, vec![item]))
-        .unwrap();
+    render(&mut r, 200, 200, vec![item]);
     assert_eq!(px(&r, 100, 100), [255, 0, 0, 255]);
     assert_eq!(px(&r, 100, 61), [255, 0, 0, 255]);
     assert_eq!(px(&r, 61, 61)[3], 0);
@@ -235,12 +230,7 @@ fn ellipse_and_diamond() {
         shape: DisplayRectangleShape::Diamond,
         ..solid_rect(150.0, 50.0, 60.0, 40.0, BLUE)
     });
-    r.apply_patch(&reset_patch(
-        identity_frame(200, 100),
-        1,
-        vec![ellipse, diamond],
-    ))
-    .unwrap();
+    render(&mut r, 200, 100, vec![ellipse, diamond]);
     assert_eq!(px(&r, 50, 50), [255, 0, 0, 255]);
     assert_eq!(px(&r, 21, 31)[3], 0); // 椭圆外接矩形角落
     assert_eq!(px(&r, 150, 50), [0, 0, 255, 255]);
@@ -255,8 +245,7 @@ fn rotated_rectangle() {
         rotation: std::f64::consts::FRAC_PI_2,
         ..solid_rect(100.0, 100.0, 80.0, 20.0, RED)
     });
-    r.apply_patch(&reset_patch(identity_frame(200, 200), 1, vec![item]))
-        .unwrap();
+    render(&mut r, 200, 200, vec![item]);
     assert_eq!(px(&r, 100, 65), [255, 0, 0, 255]);
     assert_eq!(px(&r, 65, 100)[3], 0);
 }
@@ -266,8 +255,7 @@ fn rotated_rectangle() {
 fn solid_arrow_line_and_round_cap() {
     let mut r = raster64();
     let arrow = SceneDisplayItem::Arrow(line_arrow([20.0, 50.0], [180.0, 50.0], RED, 8.0));
-    r.apply_patch(&reset_patch(identity_frame(200, 100), 1, vec![arrow]))
-        .unwrap();
+    render(&mut r, 200, 100, vec![arrow]);
     assert_eq!(px(&r, 100, 50), [255, 0, 0, 255]);
     assert_eq!(px(&r, 100, 53), [255, 0, 0, 255]);
     assert_eq!(px(&r, 100, 56)[3], 0);
@@ -281,12 +269,7 @@ fn dashed_arrow_pattern() {
     let mut r = raster64();
     let mut a = line_arrow([10.0, 50.0], [190.0, 50.0], RED, 6.0);
     a.stroke_style = StrokeStyle::Dashed;
-    r.apply_patch(&reset_patch(
-        identity_frame(200, 100),
-        1,
-        vec![SceneDisplayItem::Arrow(a)],
-    ))
-    .unwrap();
+    render(&mut r, 200, 100, vec![SceneDisplayItem::Arrow(a)]);
     // 线宽 6：第一段 dash 覆盖路径 0..24（x=10..34），间隙 24..36（x=34..46），线帽各外延 3。
     assert_eq!(px(&r, 22, 50), [255, 0, 0, 255]);
     assert_eq!(px(&r, 40, 50)[3], 0);
@@ -300,12 +283,7 @@ fn freedraw_dotted_pattern() {
     let mut a = line_arrow([10.0, 50.0], [190.0, 50.0], RED, 6.0);
     a.is_free_draw = true;
     a.stroke_style = StrokeStyle::Dotted;
-    r.apply_patch(&reset_patch(
-        identity_frame(200, 100),
-        1,
-        vec![SceneDisplayItem::Arrow(a)],
-    ))
-    .unwrap();
+    render(&mut r, 200, 100, vec![SceneDisplayItem::Arrow(a)]);
     // 圆点中心在 10, 22, 34...；中点 16 处应透明。
     assert_eq!(px(&r, 10, 50), [255, 0, 0, 255]);
     assert_eq!(px(&r, 22, 50), [255, 0, 0, 255]);
@@ -317,20 +295,13 @@ fn freedraw_dotted_pattern() {
 fn arrowhead_polygon_primitive() {
     let mut r = raster64();
     let mut a = line_arrow([20.0, 50.0], [120.0, 50.0], RED, 4.0);
-    a.arrowhead_primitives = vec![ArrowheadDisplayPrimitive {
-        kind: ArrowheadDisplayPrimitiveKind::Polygon,
-        points: vec![[120.0, 50.0], [100.0, 40.0], [100.0, 60.0]],
-        center: [0.0, 0.0],
-        diameter: 0.0,
-        fill_mode: ArrowheadDisplayFillMode::Stroke,
-        dash_mode: ArrowheadDisplayDashMode::Solid,
-    }];
-    r.apply_patch(&reset_patch(
-        identity_frame(200, 100),
-        1,
-        vec![SceneDisplayItem::Arrow(a)],
-    ))
-    .unwrap();
+    a.arrowhead_primitives = vec![head(
+        ArrowheadDisplayPrimitiveKind::Polygon,
+        vec![[120.0, 50.0], [100.0, 40.0], [100.0, 60.0]],
+        [0.0, 0.0],
+        0.0,
+    )];
+    render(&mut r, 200, 100, vec![SceneDisplayItem::Arrow(a)]);
     assert_eq!(px(&r, 108, 47), [255, 0, 0, 255]); // 三角内部、离开轴线
     assert_eq!(px(&r, 105, 30)[3], 0);
 }
@@ -340,20 +311,13 @@ fn arrowhead_polygon_primitive() {
 fn arrowhead_circle_primitive() {
     let mut r = raster64();
     let mut a = line_arrow([20.0, 50.0], [100.0, 50.0], RED, 2.0);
-    a.arrowhead_primitives = vec![ArrowheadDisplayPrimitive {
-        kind: ArrowheadDisplayPrimitiveKind::Circle,
-        points: Vec::new(),
-        center: [100.0, 50.0],
-        diameter: 20.0,
-        fill_mode: ArrowheadDisplayFillMode::Stroke,
-        dash_mode: ArrowheadDisplayDashMode::Solid,
-    }];
-    r.apply_patch(&reset_patch(
-        identity_frame(200, 100),
-        1,
-        vec![SceneDisplayItem::Arrow(a)],
-    ))
-    .unwrap();
+    a.arrowhead_primitives = vec![head(
+        ArrowheadDisplayPrimitiveKind::Circle,
+        Vec::new(),
+        [100.0, 50.0],
+        20.0,
+    )];
+    render(&mut r, 200, 100, vec![SceneDisplayItem::Arrow(a)]);
     assert_eq!(px(&r, 100, 42), [255, 0, 0, 255]);
     assert_eq!(px(&r, 100, 30)[3], 0);
 }
@@ -381,12 +345,7 @@ fn serial_number_shapes() {
         number: 2,
         ..SerialNumberDisplayItem::default()
     });
-    r.apply_patch(&reset_patch(
-        identity_frame(200, 100),
-        1,
-        vec![solid, outlined],
-    ))
-    .unwrap();
+    render(&mut r, 200, 100, vec![solid, outlined]);
     assert_eq!(px(&r, 40, 40), [255, 0, 0, 255]);
     assert_eq!(px(&r, 120, 40)[3], 0);
     assert_eq!(px(&r, 120, 20), [0, 0, 255, 255]); // 轮廓圆顶端
@@ -401,12 +360,7 @@ fn overlap_draw_order_and_opacity() {
         opacity: 0.5,
         ..solid_rect(110.0, 110.0, 60.0, 60.0, BLUE)
     });
-    r.apply_patch(&reset_patch(
-        identity_frame(200, 200),
-        1,
-        vec![below, above],
-    ))
-    .unwrap();
+    render(&mut r, 200, 200, vec![below, above]);
     assert_eq!(px(&r, 60, 60), [255, 0, 0, 255]);
     let only_blue = px(&r, 130, 130); // 只有蓝色半透明（预乘）
     assert!(only_blue[0] == 0 && (i32::from(only_blue[2]) - 128).abs() <= 2);
@@ -425,8 +379,7 @@ fn hatch_fill_partial_coverage() {
         stroke_width: 4.0,
         ..solid_rect(50.0, 50.0, 80.0, 80.0, RED)
     });
-    r.apply_patch(&reset_patch(identity_frame(100, 100), 1, vec![item]))
-        .unwrap();
+    render(&mut r, 100, 100, vec![item]);
     let (w, _, data) = r.canvas_rgba().unwrap();
     let mut opaque = 0;
     let mut empty = 0;
@@ -569,9 +522,7 @@ fn device_pixel_ratio_2x() {
         stroke_width: 2.0,
         ..solid_rect(50.0, 50.0, 40.0, 20.0, RED)
     });
-    let out = r
-        .apply_patch(&reset_patch(identity_frame(100, 100), 1, vec![item]))
-        .unwrap();
+    let out = render(&mut r, 100, 100, vec![item]);
     assert_eq!(out.surface_size, (200, 200));
     // 逻辑矩形 30..70 × 40..60 => 物理 60..140 × 80..120；描边逻辑 2 => 物理 4（58..62）。
     assert_eq!(px(&r, 100, 100), [255, 0, 0, 255]);
@@ -600,8 +551,7 @@ fn camera_zoom_and_pan() {
 fn camera_change_triggers_full_redraw() {
     let mut r = raster64();
     let item = SceneDisplayItem::Rectangle(solid_rect(50.0, 50.0, 20.0, 20.0, RED));
-    r.apply_patch(&reset_patch(identity_frame(100, 100), 1, vec![item]))
-        .unwrap();
+    render(&mut r, 100, 100, vec![item]);
     let shifted = frame(100, 100, 1.0, (0.0, 0.0));
     let out = r
         .apply_patch(&delta_patch(
@@ -627,12 +577,7 @@ fn camera_change_triggers_full_redraw() {
 fn surface_shrink_releases_outside_tiles() {
     let mut r = raster64();
     let item = SceneDisplayItem::Rectangle(solid_rect(200.0, 200.0, 20.0, 20.0, RED));
-    r.apply_patch(&reset_patch(
-        identity_frame(256, 256),
-        1,
-        vec![item.clone()],
-    ))
-    .unwrap();
+    render(&mut r, 256, 256, vec![item.clone()]);
     let mut small = reset_patch(identity_frame(128, 128), 2, vec![item]);
     small.scene.base_revision = 1;
     let out = r.apply_patch(&small).unwrap();
@@ -671,13 +616,7 @@ fn text_and_filter_are_deferred() {
         height: 20.0,
         ..FilterDisplayItem::default()
     });
-    let out = r
-        .apply_patch(&reset_patch(
-            identity_frame(200, 100),
-            1,
-            vec![text, filter],
-        ))
-        .unwrap();
+    let out = render(&mut r, 200, 100, vec![text, filter]);
     assert!(out.tiles.is_empty(), "占位不应产生像素");
     let kinds: Vec<DeferredKind> = out.deferred.iter().map(|d| d.kind).collect();
     assert_eq!(kinds, vec![DeferredKind::Text, DeferredKind::Filter]);
@@ -742,14 +681,12 @@ fn config_is_normalized() {
 fn composite_scene() -> Vec<SceneDisplayItem> {
     let mut arrow = line_arrow([20.0, 20.0], [180.0, 100.0], RED, 6.0);
     arrow.stroke_style = StrokeStyle::Dashed;
-    arrow.arrowhead_primitives = vec![ArrowheadDisplayPrimitive {
-        kind: ArrowheadDisplayPrimitiveKind::Polygon,
-        points: vec![[180.0, 100.0], [160.0, 96.0], [166.0, 112.0]],
-        center: [0.0, 0.0],
-        diameter: 0.0,
-        fill_mode: ArrowheadDisplayFillMode::Stroke,
-        dash_mode: ArrowheadDisplayDashMode::Solid,
-    }];
+    arrow.arrowhead_primitives = vec![head(
+        ArrowheadDisplayPrimitiveKind::Polygon,
+        vec![[180.0, 100.0], [160.0, 96.0], [166.0, 112.0]],
+        [0.0, 0.0],
+        0.0,
+    )];
     vec![
         SceneDisplayItem::Rectangle(RectangleDisplayItem {
             stroke: BLUE,
@@ -777,13 +714,17 @@ fn composite_scene() -> Vec<SceneDisplayItem> {
     ]
 }
 
+/// 渲染固定复合场景（200x130）后的光栅化器。
+fn composite_raster() -> TinySkiaRasterizer {
+    let mut r = raster64();
+    render(&mut r, 200, 130, composite_scene());
+    r
+}
+
 /// 回归基线：固定复合场景的画布 FNV-1a 校验和（缺 C++ 黄金样本时的替代基线）。
 #[test]
 fn golden_hash_composite_scene() {
-    let mut r = raster64();
-    r.apply_patch(&reset_patch(identity_frame(200, 130), 1, composite_scene()))
-        .unwrap();
-    let hash = r
+    let hash = composite_raster()
         .canvas_rgba()
         .unwrap()
         .2
@@ -801,9 +742,7 @@ fn dump_composite_png() {
     let Ok(dir) = std::env::var("SNOW_RASTER_DUMP_DIR") else {
         return;
     };
-    let mut r = raster64();
-    r.apply_patch(&reset_patch(identity_frame(200, 130), 1, composite_scene()))
-        .unwrap();
+    let r = composite_raster();
     let (w, h, data) = r.canvas_rgba().unwrap();
     let pixmap =
         tiny_skia::Pixmap::from_vec(data.to_vec(), tiny_skia::IntSize::from_wh(w, h).unwrap())

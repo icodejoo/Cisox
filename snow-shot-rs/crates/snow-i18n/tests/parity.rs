@@ -16,13 +16,9 @@ const PLURAL_SAMPLES: [i64; 5] = [0, 1, 2, 5, 1234];
 
 /// 收集并解析全部真实 `.ts`。
 fn load_all() -> Vec<(String, TsCatalog)> {
-    common::legacy_ts_files()
+    common::legacy_ts_sources()
         .into_iter()
-        .map(|f| {
-            let text = std::fs::read_to_string(&f).unwrap();
-            let name = f.file_name().unwrap().to_string_lossy().to_string();
-            (name, parse_ts(&text).unwrap())
-        })
+        .map(|(name, text)| (name, parse_ts(&text).unwrap()))
         .collect()
 }
 
@@ -78,11 +74,16 @@ fn qt_form(forms: &[String], n: i64) -> &str {
     }
 }
 
+/// `.ts` 的语言码（`zh_CN`）转 Fluent 语言标签（`zh-CN`）。
+fn lang_tag(c: &TsCatalog) -> String {
+    c.language.replace('_', "-")
+}
+
 /// 按语言把目录转成 ftl 资源，返回（语言→资源文本列表）。
 fn build_resources(cats: &[(String, TsCatalog)]) -> BTreeMap<String, Vec<String>> {
     let mut map: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for (_, c) in cats {
-        map.entry(c.language.replace('_', "-"))
+        map.entry(lang_tag(c))
             .or_default()
             .push(convert_catalog(c).ftl);
     }
@@ -98,10 +99,7 @@ fn all_real_messages_match_qt() {
     for (lang, texts) in &res {
         let pairs: Vec<(&str, &str)> = texts.iter().map(|t| (lang.as_str(), t.as_str())).collect();
         let i18n = I18n::from_resources(lang, lang, LEGACY, &pairs).unwrap();
-        for (file, c) in cats
-            .iter()
-            .filter(|(_, c)| c.language.replace('_', "-") == *lang)
-        {
+        for (file, c) in cats.iter().filter(|(_, c)| lang_tag(c) == *lang) {
             for ctx in &c.contexts {
                 for m in ctx
                     .messages
@@ -237,9 +235,7 @@ fn committed_locales_are_fresh_and_embedded_loads() {
             module.clone(),
             modules.get(&module).copied().unwrap_or(false) || c.language == "en_US",
         );
-        let path = root
-            .join(c.language.replace('_', "-"))
-            .join(format!("{module}.ftl"));
+        let path = root.join(lang_tag(c)).join(format!("{module}.ftl"));
         let disk =
             std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("缺少 {}", path.display()));
         assert_eq!(

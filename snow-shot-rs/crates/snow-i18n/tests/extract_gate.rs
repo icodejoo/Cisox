@@ -29,6 +29,12 @@ fn fixture(tag: &str, code: &str) -> PathBuf {
     root
 }
 
+/// 取夹具的 locales 与源码目录（字符串形式，便于直接传参）。
+fn loc_src(root: &Path) -> (String, String) {
+    let s = |d: &str| root.join(d).to_str().unwrap().to_owned();
+    (s("loc"), s("src"))
+}
+
 /// 运行工具。
 fn run(args: &[&str]) -> Output {
     Command::new(TOOL).args(args).output().unwrap()
@@ -43,14 +49,8 @@ fn out(o: &Output) -> String {
 #[test]
 fn extract_passes_and_reports_orphans() {
     let root = fixture("ok", "fn f(i: &I) { let _ = t!(i, \"have\"); }");
-    let (loc, src) = (root.join("loc"), root.join("src"));
-    let o = run(&[
-        "extract",
-        src.to_str().unwrap(),
-        "--locales",
-        loc.to_str().unwrap(),
-        "--strict-refs",
-    ]);
+    let (l, s) = loc_src(&root);
+    let o = run(&["extract", &s, "--locales", &l, "--strict-refs"]);
     assert!(o.status.success(), "{}", out(&o));
     assert!(out(&o).contains("孤儿）1 个"), "{}", out(&o));
 }
@@ -59,12 +59,11 @@ fn extract_passes_and_reports_orphans() {
 #[test]
 fn extract_fails_on_missing_when_strict() {
     let root = fixture("miss", "fn f(i: &I) {\n let _ = i.tr(\"nope\");\n}");
-    let (loc, src) = (root.join("loc"), root.join("src"));
-    let (l, s) = (loc.to_str().unwrap(), src.to_str().unwrap());
-    let strict = run(&["extract", s, "--locales", l, "--strict-refs"]);
+    let (l, s) = loc_src(&root);
+    let strict = run(&["extract", &s, "--locales", &l, "--strict-refs"]);
     assert_eq!(strict.status.code(), Some(1));
     assert!(out(&strict).contains("a.rs:2") && out(&strict).contains("nope"));
-    assert!(run(&["extract", s, "--locales", l]).status.success());
+    assert!(run(&["extract", &s, "--locales", &l]).status.success());
 }
 
 /// `--exclude` 可排除路径。
@@ -72,12 +71,12 @@ fn extract_fails_on_missing_when_strict() {
 fn exclude_skips_paths() {
     let root = fixture("excl", "fn f(i: &I) { i.tr(\"nope\"); }");
     write(&root.join("src/b.rs"), "fn g(i: &I) { i.tr(\"have\"); }");
-    let (loc, src) = (root.join("loc"), root.join("src"));
+    let (l, s) = loc_src(&root);
     let o = run(&[
         "extract",
-        src.to_str().unwrap(),
+        &s,
         "--locales",
-        loc.to_str().unwrap(),
+        &l,
         "--exclude",
         "a.rs",
         "--strict-refs",
@@ -89,32 +88,31 @@ fn exclude_skips_paths() {
 #[test]
 fn check_gate() {
     let root = fixture("check", "fn f(i: &I) { i.tr(\"nope\"); }");
-    let (loc, src) = (root.join("loc"), root.join("src"));
-    let (l, s) = (loc.to_str().unwrap(), src.to_str().unwrap());
-    assert!(run(&["check", l]).status.success());
+    let (l, s) = loc_src(&root);
+    assert!(run(&["check", &l]).status.success());
     assert_eq!(
-        run(&["check", l, "--src", s, "--strict-refs"])
+        run(&["check", &l, "--src", &s, "--strict-refs"])
             .status
             .code(),
         Some(1)
     );
-    assert_eq!(run(&["check", l, "--strict-refs"]).status.code(), Some(2));
+    assert_eq!(run(&["check", &l, "--strict-refs"]).status.code(), Some(2));
     // 语言间 id 不一致仍失败
-    write(&loc.join("zh-CN/m.ftl"), "have = 甲\n");
-    assert_eq!(run(&["check", l]).status.code(), Some(1));
+    write(&root.join("loc/zh-CN/m.ftl"), "have = 甲\n");
+    assert_eq!(run(&["check", &l]).status.code(), Some(1));
 }
 
 /// 源码路径不存在时报错（退出码 2），不再空转通过。
 #[test]
 fn extract_fails_when_source_path_missing() {
     let root = fixture("nopath", "fn f() {}");
-    let loc = root.join("loc");
+    let (l, _) = loc_src(&root);
     let missing = root.join("no-such-dir");
     let o = run(&[
         "extract",
         missing.to_str().unwrap(),
         "--locales",
-        loc.to_str().unwrap(),
+        &l,
         "--strict-refs",
     ]);
     assert_eq!(o.status.code(), Some(2));
@@ -124,14 +122,10 @@ fn extract_fails_when_source_path_missing() {
 #[test]
 fn extract_fails_when_no_rs_files() {
     let root = fixture("norsfiles", "fn f() {}");
-    let (loc, empty) = (root.join("loc"), root.join("empty"));
+    let (l, _) = loc_src(&root);
+    let empty = root.join("empty");
     std::fs::create_dir_all(&empty).unwrap();
-    let o = run(&[
-        "extract",
-        empty.to_str().unwrap(),
-        "--locales",
-        loc.to_str().unwrap(),
-    ]);
+    let o = run(&["extract", empty.to_str().unwrap(), "--locales", &l]);
     assert_eq!(o.status.code(), Some(2));
 }
 
@@ -139,15 +133,14 @@ fn extract_fails_when_no_rs_files() {
 #[test]
 fn min_refs_is_enforced() {
     let root = fixture("minrefs", "fn f(i: &I) { let _ = t!(i, \"have\"); }");
-    let (loc, src) = (root.join("loc"), root.join("src"));
-    let (l, s) = (loc.to_str().unwrap(), src.to_str().unwrap());
+    let (l, s) = loc_src(&root);
     assert!(
-        run(&["extract", s, "--locales", l, "--min-refs", "1"])
+        run(&["extract", &s, "--locales", &l, "--min-refs", "1"])
             .status
             .success()
     );
     assert_eq!(
-        run(&["extract", s, "--locales", l, "--min-refs", "2"])
+        run(&["extract", &s, "--locales", &l, "--min-refs", "2"])
             .status
             .code(),
         Some(1)

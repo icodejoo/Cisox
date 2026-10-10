@@ -37,9 +37,7 @@ fn crash_at(point: CrashPoint) -> Options {
 
 /// 磁盘上某记录目录内文件大小。
 fn file_len(root: &Path, id: &str, name: &str) -> i64 {
-    fs::metadata(records_dir(root).join(id).join(name))
-        .unwrap()
-        .len() as i64
+    fs::metadata(record_file(root, id, name)).unwrap().len() as i64
 }
 
 /// 发布后 manifest、字节记账与重开恢复（publicationAndRecovery）。
@@ -93,14 +91,10 @@ fn publication_and_recovery() {
 #[test]
 fn trusted_startup_and_explicit_clear() {
     let dir = TempDir::new("trusted");
-    let record = {
-        let mut repo = CaptureHistoryRepository::open(dir.path(), Options::default());
-        repo.publish(draft_at(now_utc_ms())).unwrap()
-    };
+    let record =
+        seed_records(dir.path(), Options::default(), vec![draft_at(now_utc_ms())]).remove(0);
     fs::write(
-        records_dir(dir.path())
-            .join(&record.id)
-            .join("canvas_history.json"),
+        record_file(dir.path(), &record.id, "canvas_history.json"),
         b"not-json",
     )
     .unwrap();
@@ -154,10 +148,7 @@ fn policy_boundaries_and_disabled_preservation() {
 #[test]
 fn traversal_manifest_is_rejected() {
     let dir = TempDir::new("traversal");
-    {
-        let mut repo = CaptureHistoryRepository::open(dir.path(), Options::default());
-        repo.publish(draft_at(NOW)).unwrap();
-    }
+    seed_records(dir.path(), Options::default(), vec![draft_at(NOW)]);
     let mut index = read_index(dir.path());
     index["records"][0]["displays"][0]["image_file"] = json!("../outside.png");
     write_index(dir.path(), &index);
@@ -170,10 +161,7 @@ fn traversal_manifest_is_rejected() {
 #[test]
 fn index_failure_preserves_files_until_clear() {
     let dir = TempDir::new("brokenindex");
-    {
-        let mut repo = CaptureHistoryRepository::open(dir.path(), Options::default());
-        repo.publish(draft_at(now_utc_ms())).unwrap();
-    }
+    seed_records(dir.path(), Options::default(), vec![draft_at(now_utc_ms())]);
     let names = record_dir_names(dir.path());
     fs::write(index_path(dir.path()), b"broken index").unwrap();
     let mut repo = CaptureHistoryRepository::open(dir.path(), Options::default());
@@ -217,10 +205,7 @@ fn failed_commit_preserves_published_history() {
 #[test]
 fn pending_deletion_resumes_without_scanning_orphans() {
     let dir = TempDir::new("pending");
-    let record = {
-        let mut repo = CaptureHistoryRepository::open(dir.path(), Options::default());
-        repo.publish(draft_at(NOW)).unwrap()
-    };
+    let record = seed_records(dir.path(), Options::default(), vec![draft_at(NOW)]).remove(0);
     let mut index = read_index(dir.path());
     index["records"] = json!([]);
     index["pending_deletions"] = json!([{"id": record.id, "bytes": record.total_record_size}]);
@@ -246,12 +231,8 @@ fn startup_expires_age_but_does_not_enforce_capacity() {
     let dir = TempDir::new("startup");
     let mut options = options_at(NOW);
     options.policy.retention_days = 365;
-    {
-        let mut writer = CaptureHistoryRepository::open(dir.path(), options.clone());
-        for date in [NOW - 8 * MILLIS_PER_DAY, NOW - 7 * MILLIS_PER_DAY, NOW] {
-            writer.publish(draft_at(date)).unwrap();
-        }
-    }
+    let dates = [NOW - 8 * MILLIS_PER_DAY, NOW - 7 * MILLIS_PER_DAY, NOW];
+    seed_records(dir.path(), options.clone(), dates.map(draft_at).to_vec());
     options.policy.retention_days = 7;
     options.policy.max_entries = 1;
     let mut repo = CaptureHistoryRepository::open(dir.path(), options.clone());
@@ -384,10 +365,7 @@ fn revision_checked_mutations() {
 #[test]
 fn legacy_v1_index_is_readable_and_upgraded() {
     let dir = TempDir::new("legacy");
-    {
-        let mut repo = CaptureHistoryRepository::open(dir.path(), options_at(NOW));
-        repo.publish(draft_at(NOW)).unwrap();
-    }
+    seed_records(dir.path(), options_at(NOW), vec![draft_at(NOW)]);
     let mut index = read_index(dir.path());
     index["format_version"] = json!(1);
     write_index(dir.path(), &index);
@@ -401,10 +379,7 @@ fn legacy_v1_index_is_readable_and_upgraded() {
 #[test]
 fn unknown_index_version_is_rejected() {
     let dir = TempDir::new("version");
-    {
-        let mut repo = CaptureHistoryRepository::open(dir.path(), options_at(NOW));
-        repo.publish(draft_at(NOW)).unwrap();
-    }
+    seed_records(dir.path(), options_at(NOW), vec![draft_at(NOW)]);
     let mut index = read_index(dir.path());
     index["format_version"] = json!(3);
     write_index(dir.path(), &index);
@@ -456,9 +431,7 @@ fn tampered_canvas_is_removed_on_read() {
     let mut repo = CaptureHistoryRepository::open(dir.path(), options_at(NOW));
     let record = repo.publish(draft_at(NOW)).unwrap();
     fs::write(
-        records_dir(dir.path())
-            .join(&record.id)
-            .join("canvas_history.json"),
+        record_file(dir.path(), &record.id, "canvas_history.json"),
         b"{}",
     )
     .unwrap();
@@ -563,12 +536,9 @@ fn crash_during_capacity_eviction() {
     ] {
         let dir = TempDir::new("crashevict");
         let old = draft_at(NOW - 1000);
-        {
-            let mut options = options_at(NOW);
-            options.policy.max_entries = 1;
-            let mut repo = CaptureHistoryRepository::open(dir.path(), options);
-            repo.publish(old.clone()).unwrap();
-        }
+        let mut options = options_at(NOW);
+        options.policy.max_entries = 1;
+        seed_records(dir.path(), options, vec![old.clone()]);
         let newer = draft_at(NOW);
         {
             let mut options = crash_at(point);
@@ -594,11 +564,12 @@ fn crash_during_capacity_eviction() {
 #[test]
 fn crash_during_remove_many() {
     let dir = TempDir::new("crashremove");
-    let (keep, drop_id) = {
-        let mut repo = CaptureHistoryRepository::open(dir.path(), options_at(NOW));
-        let keep = repo.publish(draft_at(NOW)).unwrap().id;
-        (keep, repo.publish(draft_at(NOW - 1000)).unwrap().id)
-    };
+    let seeded = seed_records(
+        dir.path(),
+        options_at(NOW),
+        vec![draft_at(NOW), draft_at(NOW - 1000)],
+    );
+    let (keep, drop_id) = (seeded[0].id.clone(), seeded[1].id.clone());
     {
         let mut repo =
             CaptureHistoryRepository::open(dir.path(), crash_at(CrashPoint::AfterPayloadRemoved));
@@ -623,13 +594,12 @@ fn crash_during_remove_many() {
 #[test]
 fn crash_after_pending_commit_before_delete() {
     let dir = TempDir::new("crashpending");
-    let (keep, gone) = {
-        let mut repo = CaptureHistoryRepository::open(dir.path(), options_at(NOW));
-        (
-            repo.publish(draft_at(NOW)).unwrap(),
-            repo.publish(draft_at(NOW - 1000)).unwrap(),
-        )
-    };
+    let mut seeded = seed_records(
+        dir.path(),
+        options_at(NOW),
+        vec![draft_at(NOW), draft_at(NOW - 1000)],
+    );
+    let (gone, keep) = (seeded.pop().unwrap(), seeded.pop().unwrap());
     let mut index = read_index(dir.path());
     index["records"] = json!([index["records"][0].clone()]);
     index["pending_deletions"] = json!([{"id": gone.id, "bytes": gone.total_record_size}]);

@@ -110,6 +110,11 @@ fn fnv1a(data: &[u8]) -> u64 {
     })
 }
 
+/// 位图是否含至少一个非全透明像素。
+fn has_visible_pixels(b: &snow_ui_icons::IconBitmap) -> bool {
+    b.data.chunks_exact(4).any(|p| p[3] > 0)
+}
+
 /// 资源数量、名称集合、字节内容都应与 ant_design_qt 原目录一致。
 #[test]
 fn resources_match_source_dirs() {
@@ -153,11 +158,7 @@ fn every_icon_renders_visible_pixels() {
                 .render(&IconRef::new(theme, name), &IconRequest::square(24, 1.0))
                 .unwrap();
             assert!(!b.is_fallback, "{}/{name}", theme.dir());
-            assert!(
-                b.data.chunks_exact(4).any(|p| p[3] > 0),
-                "{}/{name} 全透明",
-                theme.dir()
-            );
+            assert!(has_visible_pixels(&b), "{}/{name} 全透明", theme.dir());
         }
     }
 }
@@ -170,7 +171,7 @@ fn missing_icon_falls_back() {
     assert!(!icon.exists());
     let b = r.render(&icon, &IconRequest::square(24, 1.0)).unwrap();
     assert!(b.is_fallback);
-    assert!(b.data.chunks_exact(4).any(|p| p[3] > 0));
+    assert!(has_visible_pixels(&b));
     assert!(IconRef::from_path("bogus/setting").is_none());
     assert_eq!(
         IconRef::from_path("filled/camera").unwrap().theme,
@@ -394,7 +395,7 @@ fn regression_baselines() {
     for c in baseline_cases() {
         let (h, b) = run_baseline(&c);
         assert!(!b.is_fallback, "{}", c.0);
-        assert!(b.data.chunks_exact(4).any(|p| p[3] > 0), "{}", c.0);
+        assert!(has_visible_pixels(&b), "{}", c.0);
         assert_eq!(
             h,
             BASELINE_HASHES.iter().find(|(p, _)| *p == c.0).unwrap().1,

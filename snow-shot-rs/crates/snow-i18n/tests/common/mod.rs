@@ -42,3 +42,14 @@ pub fn legacy_ts_files() -> Vec<PathBuf> {
     );
     files
 }
+
+/// 读取全部真实 `.ts`，返回 `(文件名, 原文)`（顺序同 [`legacy_ts_files`]）。
+pub fn legacy_ts_sources() -> Vec<(String, String)> {
+    legacy_ts_files()
+        .into_iter()
+        .map(|f| {
+            let name = f.file_name().unwrap().to_string_lossy().to_string();
+            (name, std::fs::read_to_string(&f).unwrap())
+        })
+        .collect()
+}

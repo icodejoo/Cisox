@@ -11,9 +11,7 @@ const SNAPSHOT: &str = "tests/fixtures/ts_snapshot.txt";
 /// 生成全部真实 `.ts` 的调试串（按路径排序）。
 fn dump_all() -> String {
     let mut out = String::new();
-    for f in common::legacy_ts_files() {
-        let name = f.file_name().unwrap().to_string_lossy().to_string();
-        let text = std::fs::read_to_string(&f).unwrap();
+    for (name, text) in common::legacy_ts_sources() {
         out.push_str(&format!("== {name}\n{:#?}\n", parse_ts(&text).unwrap()));
     }
     out

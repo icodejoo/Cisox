@@ -15,6 +15,9 @@
 //! 通过条件为 Hotkey/Cancel 与 Tray/Undo 各 >=1 次，末行 `VERDICT PASS|FAIL`。
 //! 禁止用脚本模拟按键；自检模式不触发热键，只验证注册链路。
 
+mod common;
+
+use common::log;
 use snow_app_core::bus::{CommandBus, CommandOutcome};
 use snow_app_core::command::{AppCommand, CommandKind, CommandSource};
 use snow_capability::CapabilityRegistry;
@@ -22,7 +25,6 @@ use snow_ui_shell::dispatch::Dispatcher;
 use snow_ui_shell::error::ShellError;
 use snow_ui_shell::hotkey::{Hotkey, HotkeyBinding, HotkeyService};
 use snow_ui_shell::tray::{TrayAction, TrayIconImage, TrayMenuEntry, TrayService, TraySpec};
-use std::io::Write;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -33,18 +35,6 @@ const DEMO_HOTKEY: &str = "Ctrl+Alt+Shift+F9";
 const AUTO_QUIT_SECS: u64 = 60;
 /// 托盘“退出”菜单发出的信号名。
 const SIGNAL_QUIT: &str = "quit";
-
-/// 写日志并打印。
-fn log(path: &std::path::Path, line: &str) {
-    println!("{line}");
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-    {
-        let _ = writeln!(f, "{line}");
-    }
-}
 
 /// 构造演示托盘描述。
 fn demo_tray_spec() -> Result<TraySpec, ShellError> {
@@ -142,8 +132,7 @@ fn selfcheck(caps: &CapabilityRegistry) -> bool {
 
 /// 手动验证：返回是否通过。
 fn manual(caps: &CapabilityRegistry) -> bool {
-    let path = std::env::temp_dir().join("snow-shell-tray-hotkey.log");
-    let _ = std::fs::remove_file(&path);
+    let path = common::fresh_log_path("snow-shell-tray-hotkey.log");
     let hotkey_hits = Arc::new(AtomicUsize::new(0));
     let tray_hits = Arc::new(AtomicUsize::new(0));
     let bus = CommandBus::new();

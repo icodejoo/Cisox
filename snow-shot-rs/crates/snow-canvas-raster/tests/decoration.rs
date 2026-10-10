@@ -1,8 +1,11 @@
 //! 装饰层（聚光灯 / 水印）的确定性离屏测试：洞内外像素、标注保留、增量与整屏一致、水印几何与覆盖量。
 
+mod common;
+
+use common::{identity_frame, raster64, rgba_at};
 use snow_canvas_raster::decoration::{CoverageBitmap, DecorationLayer, RegionRect};
-use snow_canvas_raster::{CanvasRasterizer, RasterConfig, RasterError, TinySkiaRasterizer};
-use snow_draw_engine_core::{Camera, ColorRgba8, Point, SurfaceSize};
+use snow_canvas_raster::{CanvasRasterizer, RasterError};
+use snow_draw_engine_core::ColorRgba8;
 use snow_draw_engine_display::{
     DecorationPatch, DecorationView, DirtyRegion, DisplaySpotlightConfig, DisplaySpotlightCutout,
     DisplayWatermarkConfig, FrameView, ReplaceRangeOp, ViewportPatch,
@@ -23,24 +26,6 @@ const WHITE: ColorRgba8 = ColorRgba8 {
     b: 255,
     a: 255,
 };
-
-/// 构造相机居中的帧视图（画布坐标等于视图坐标）。
-fn frame(w: u32, h: u32) -> FrameView {
-    FrameView {
-        surface: SurfaceSize {
-            width: w,
-            height: h,
-        },
-        camera: Camera {
-            center: Point {
-                x: f64::from(w) / 2.0,
-                y: f64::from(h) / 2.0,
-            },
-            zoom: 1.0,
-        },
-        clear_color: ColorRgba8::default(),
-    }
-}
 
 /// 假文字光栅化：固定实心块 + 四周留白，与文本内容无关，保证确定性。
 fn fake_text(_: &str, _: &str, _: f32) -> Option<CoverageBitmap> {
@@ -119,16 +104,10 @@ fn layer_with(view: DecorationView, cutouts: Vec<DisplaySpotlightCutout>) -> Dec
     layer
 }
 
-/// 取 RGBA 缓冲里 `(x, y)` 像素（缓冲左上角为 `origin`，宽为 `w`）。
-fn px(buf: &[u8], w: i32, origin: (i32, i32), x: i32, y: i32) -> [u8; 4] {
-    let o = (((y - origin.1) * w + (x - origin.0)) * 4) as usize;
-    [buf[o], buf[o + 1], buf[o + 2], buf[o + 3]]
-}
-
 /// 渲染整个 `w x h` 画布（单个区域）。
 fn render_all(layer: &mut DecorationLayer, w: u32, h: u32, dpr: f64) -> Option<Vec<u8>> {
     layer.render_region(
-        &frame(w, h),
+        &identity_frame(w, h),
         dpr,
         [
             0,
@@ -162,11 +141,12 @@ fn render_tiles_into(
             for x in rect[0]..rect[2] {
                 let o = ((y * cw + x) * 4) as usize;
                 let px = match &tile {
-                    Some(t) => {
-                        let to =
-                            (((y - rect[1]) * (rect[2] - rect[0]) + (x - rect[0])) * 4) as usize;
-                        [t[to], t[to + 1], t[to + 2], t[to + 3]]
-                    }
+                    Some(t) => rgba_at(
+                        t,
+                        (rect[2] - rect[0]) as usize,
+                        (x - rect[0]) as usize,
+                        (y - rect[1]) as usize,
+                    ),
                     None => [0; 4],
                 };
                 canvas[o..o + 4].copy_from_slice(&px);
@@ -200,7 +180,7 @@ fn spotlight_without_cutouts_fills_solid() {
     };
     let mut layer = layer_with(view, vec![]);
     let buf = render_all(&mut layer, 64, 48, 1.0).unwrap();
-    let first = px(&buf, 64, (0, 0), 0, 0);
+    let first = rgba_at(&buf, 64, 0, 0);
     assert_eq!(first, [128, 128, 128, 128]);
     assert!(buf.chunks_exact(4).all(|p| p == first));
 }
@@ -215,20 +195,12 @@ fn spotlight_hole_inside_and_outside_pixels() {
     // 洞 [44,84) x [36,60)
     let mut layer = layer_with(view, vec![cutout(64.0, 48.0, 40.0, 24.0, 0.0)]);
     let buf = render_all(&mut layer, 128, 96, 1.0).unwrap();
-    assert_eq!(px(&buf, 128, (0, 0), 64, 48), [0, 0, 0, 0], "洞心");
-    assert_eq!(px(&buf, 128, (0, 0), 44, 36), [0, 0, 0, 0], "洞左上角内侧");
-    assert_eq!(px(&buf, 128, (0, 0), 83, 59), [0, 0, 0, 0], "洞右下角内侧");
-    assert_eq!(
-        px(&buf, 128, (0, 0), 43, 48),
-        WHITE.into_array(),
-        "洞左外侧"
-    );
-    assert_eq!(
-        px(&buf, 128, (0, 0), 84, 48),
-        WHITE.into_array(),
-        "洞右外侧"
-    );
-    assert_eq!(px(&buf, 128, (0, 0), 5, 5), WHITE.into_array(), "远处");
+    assert_eq!(rgba_at(&buf, 128, 64, 48), [0, 0, 0, 0], "洞心");
+    assert_eq!(rgba_at(&buf, 128, 44, 36), [0, 0, 0, 0], "洞左上角内侧");
+    assert_eq!(rgba_at(&buf, 128, 83, 59), [0, 0, 0, 0], "洞右下角内侧");
+    assert_eq!(rgba_at(&buf, 128, 43, 48), WHITE.into_array(), "洞左外侧");
+    assert_eq!(rgba_at(&buf, 128, 84, 48), WHITE.into_array(), "洞右外侧");
+    assert_eq!(rgba_at(&buf, 128, 5, 5), WHITE.into_array(), "远处");
 }
 
 /// 旋转 90 度的洞：宽高对调。
@@ -243,8 +215,8 @@ fn spotlight_rotated_hole() {
         vec![cutout(64.0, 48.0, 40.0, 10.0, std::f64::consts::FRAC_PI_2)],
     );
     let buf = render_all(&mut layer, 128, 96, 1.0).unwrap();
-    assert_eq!(px(&buf, 128, (0, 0), 64, 48 - 15)[3], 0, "竖向在洞内");
-    assert_eq!(px(&buf, 128, (0, 0), 64 + 15, 48)[3], 255, "横向在洞外");
+    assert_eq!(rgba_at(&buf, 128, 64, 48 - 15)[3], 0, "竖向在洞内");
+    assert_eq!(rgba_at(&buf, 128, 64 + 15, 48)[3], 255, "横向在洞外");
 }
 
 /// 多个重叠洞取并集：重叠区仍是透明，且边缘处不会比单洞更不透明。
@@ -262,10 +234,10 @@ fn spotlight_overlapping_holes_are_union() {
         ],
     );
     let buf = render_all(&mut layer, 128, 96, 1.0).unwrap();
-    assert_eq!(px(&buf, 128, (0, 0), 60, 48)[3], 0, "重叠区");
-    assert_eq!(px(&buf, 128, (0, 0), 35, 48)[3], 0, "左洞独占区");
-    assert_eq!(px(&buf, 128, (0, 0), 85, 48)[3], 0, "右洞独占区");
-    assert_eq!(px(&buf, 128, (0, 0), 20, 48)[3], 255, "两洞之外");
+    assert_eq!(rgba_at(&buf, 128, 60, 48)[3], 0, "重叠区");
+    assert_eq!(rgba_at(&buf, 128, 35, 48)[3], 0, "左洞独占区");
+    assert_eq!(rgba_at(&buf, 128, 85, 48)[3], 0, "右洞独占区");
+    assert_eq!(rgba_at(&buf, 128, 20, 48)[3], 255, "两洞之外");
 }
 
 /// 停用、不透明度为 0、颜色全透明时，聚光灯与整个装饰层都不出像素。
@@ -306,9 +278,9 @@ fn annotation_inside_hole_is_preserved() {
     let deco = render_all(&mut layer, 128, 96, 1.0).unwrap();
     let red = [255u8, 0, 0, 255];
     let mut inside = red;
-    over(&mut inside, px(&deco, 128, (0, 0), 64, 48));
+    over(&mut inside, rgba_at(&deco, 128, 64, 48));
     let mut outside = red;
-    over(&mut outside, px(&deco, 128, (0, 0), 10, 10));
+    over(&mut outside, rgba_at(&deco, 128, 10, 10));
     assert_eq!(inside, red, "洞内标注原样保留");
     // 50% alpha 在 8 位预乘里取整为 127 或 128
     assert!(
@@ -331,7 +303,7 @@ fn assert_tiles_equal_whole(dpr: f64, tolerance: u8) {
 /// 同上，可选只开聚光灯或只开水印，便于定位差异来源。
 fn assert_tiles_equal_whole_with(dpr: f64, tolerance: u8, name: &str, spot: bool, mark: bool) {
     let (w, h) = (300_u32, 270_u32);
-    let f = frame(w, h);
+    let f = identity_frame(w, h);
     let view = DecorationView {
         spotlight: spotlight(WHITE, 0.6, spot),
         watermark: watermark(if mark { "W" } else { "" }, 30.0, 20.0, 0.5),
@@ -378,7 +350,7 @@ fn tiled_render_matches_whole_render() {
 #[test]
 fn incremental_dirty_redraw_equals_full_redraw() {
     let (w, h) = (300_i32, 270_i32);
-    let f = frame(w as u32, h as u32);
+    let f = identity_frame(w as u32, h as u32);
     let view = DecorationView {
         spotlight: spotlight(WHITE, 0.6, true),
         watermark: watermark("W", 30.0, 20.0, 0.5),
@@ -476,7 +448,7 @@ fn watermark_logical_scale_converts_font_and_gap() {
             seen.push(px);
             fake_text(t, f, px)
         };
-        let out = layer.render_region(&frame(300, 300), 1.0, [0, 0, 300, 300], &mut text);
+        let out = layer.render_region(&identity_frame(300, 300), 1.0, [0, 0, 300, 300], &mut text);
         assert!(out.is_some());
         assert_eq!(seen, vec![want_px as f32], "scale {scale}");
         let g = layer.watermark_geometry().unwrap();
@@ -504,15 +476,15 @@ fn watermark_anchor_and_stagger_unrotated() {
     let mut layer = layer_with(view, vec![]);
     let buf = render_all(&mut layer, 200, 200, 1.0).unwrap();
     // 锚点 (100, 100)：墨迹块 [100,112) x [100,106)
-    assert_eq!(px(&buf, 200, (0, 0), 100, 100), [255, 255, 255, 255]);
-    assert_eq!(px(&buf, 200, (0, 0), 111, 105), [255, 255, 255, 255]);
-    assert_eq!(px(&buf, 200, (0, 0), 112, 100)[3], 0);
-    assert_eq!(px(&buf, 200, (0, 0), 99, 100)[3], 0);
+    assert_eq!(rgba_at(&buf, 200, 100, 100), [255, 255, 255, 255]);
+    assert_eq!(rgba_at(&buf, 200, 111, 105), [255, 255, 255, 255]);
+    assert_eq!(rgba_at(&buf, 200, 112, 100)[3], 0);
+    assert_eq!(rgba_at(&buf, 200, 99, 100)[3], 0);
     // 同一行下一个单元：+step_x (32)
-    assert_eq!(px(&buf, 200, (0, 0), 132, 100)[3], 255);
+    assert_eq!(rgba_at(&buf, 200, 132, 100)[3], 255);
     // 下一行（+26）错开半步长 16
-    assert_eq!(px(&buf, 200, (0, 0), 116, 126)[3], 255);
-    assert_eq!(px(&buf, 200, (0, 0), 100, 126)[3], 0);
+    assert_eq!(rgba_at(&buf, 200, 116, 126)[3], 255);
+    assert_eq!(rgba_at(&buf, 200, 100, 126)[3], 0);
 }
 
 /// 旋转中心为渲染区中心：旋转 90 度（顺时针）后局部 (6, 3) 落在锚点左下方。
@@ -525,13 +497,9 @@ fn watermark_rotation_about_center() {
     let mut layer = layer_with(view, vec![]);
     let buf = render_all(&mut layer, 200, 200, 1.0).unwrap();
     // 局部 (x, y) -> 设备 (100 - y, 100 + x)
-    assert_eq!(px(&buf, 200, (0, 0), 97, 106)[3], 255, "局部 (6,3)");
-    assert_eq!(
-        px(&buf, 200, (0, 0), 100 - 1, 100 + 11)[3],
-        255,
-        "局部 (11,1)"
-    );
-    assert_eq!(px(&buf, 200, (0, 0), 103, 106)[3], 0, "锚点右侧不是墨迹");
+    assert_eq!(rgba_at(&buf, 200, 97, 106)[3], 255, "局部 (6,3)");
+    assert_eq!(rgba_at(&buf, 200, 100 - 1, 100 + 11)[3], 255, "局部 (11,1)");
+    assert_eq!(rgba_at(&buf, 200, 103, 106)[3], 0, "锚点右侧不是墨迹");
 }
 
 /// 水印覆盖量：总 alpha 约等于「面积 x 墨迹占单元比例 x 有效 alpha」，旋转后守恒。
@@ -546,7 +514,12 @@ fn watermark_total_coverage_matches_density() {
         // 取画布中央 160x160（旋转后边角仍被平铺覆盖）
         let (w, h) = (400_u32, 400_u32);
         let buf = layer
-            .render_region(&frame(w, h), 1.0, [120, 120, 280, 280], &mut fake_text)
+            .render_region(
+                &identity_frame(w, h),
+                1.0,
+                [120, 120, 280, 280],
+                &mut fake_text,
+            )
             .unwrap();
         let sum: f64 = buf.chunks_exact(4).map(|p| f64::from(p[3]) / 255.0).sum();
         let (sx, sy) = (f64::from(INK_W) + 20.0, f64::from(INK_H) + 20.0);
@@ -583,15 +556,11 @@ fn watermark_early_exit_and_layering() {
     let mut layer = layer_with(view, vec![cutout(100.0, 100.0, 80.0, 80.0, 0.0)]);
     let buf = render_all(&mut layer, 200, 200, 1.0).unwrap();
     assert_eq!(
-        px(&buf, 200, (0, 0), 100, 100),
+        rgba_at(&buf, 200, 100, 100),
         [255, 255, 255, 255],
         "洞内水印墨迹"
     );
-    assert_eq!(
-        px(&buf, 200, (0, 0), 100, 112)[3],
-        0,
-        "洞内无墨迹处保持透明"
-    );
+    assert_eq!(rgba_at(&buf, 200, 100, 112)[3], 0, "洞内无墨迹处保持透明");
 }
 
 /// 水印单元超限：不 panic，降级为不画并标记 degraded；缩小间距后恢复。
@@ -603,7 +572,7 @@ fn oversized_watermark_cell_degrades_without_panic() {
     };
     let mut layer = layer_with(view, vec![]);
     // DPR 8 时间距 1600 像素，单元边长 > 4096
-    let out = layer.render_region(&frame(64, 64), 8.0, [0, 0, 64, 64], &mut fake_text);
+    let out = layer.render_region(&identity_frame(64, 64), 8.0, [0, 0, 64, 64], &mut fake_text);
     assert!(out.is_none());
     assert!(layer.watermark_degraded());
     assert!(layer.watermark_geometry().is_none());
@@ -669,14 +638,11 @@ fn rasterizer_reports_decoration_dirty_tiles() {
     };
     let (w, h) = (256_u32, 256_u32);
     let mut full = ViewportPatch {
-        frame_view: frame(w, h),
+        frame_view: identity_frame(w, h),
         ..ViewportPatch::default()
     };
     full.decoration = reset_patch(1, view, vec![cutout(128.0, 128.0, 40.0, 40.0, 0.0)]);
-    let mut raster = TinySkiaRasterizer::new(RasterConfig {
-        tile_size: 64,
-        device_pixel_ratio: 1.0,
-    });
+    let mut raster = raster64();
     let out = raster.apply_patch(&full).unwrap();
     assert!(out.full_redraw);
     assert_eq!(out.touched_tiles.len(), 16);
@@ -689,7 +655,7 @@ fn rasterizer_reports_decoration_dirty_tiles() {
 
     // 增量：只动一个脏区
     let mut inc = ViewportPatch {
-        frame_view: frame(w, h),
+        frame_view: identity_frame(w, h),
         ..ViewportPatch::default()
     };
     inc.scene = snow_draw_engine_display::LayerPatch {

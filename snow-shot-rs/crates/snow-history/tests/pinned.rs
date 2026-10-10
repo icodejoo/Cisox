@@ -6,7 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use common::{TempDir, new_uuid};
+use common::{TempDir, new_uuid, read_json, write_json};
 use serde_json::{Map, Value, json};
 use snow_history::pinned::{
     MAX_PAYLOAD_BYTES, PinCrashPoint, PinError, PinGroup, PinImage, PinOptions, PinPayload,
@@ -48,7 +48,25 @@ fn manifest_path(root: &Path) -> PathBuf {
 
 /// 读取清单。
 fn read_manifest(root: &Path) -> Value {
-    serde_json::from_slice(&fs::read(manifest_path(root)).unwrap()).unwrap()
+    read_json(&manifest_path(root))
+}
+
+/// 覆盖写清单。
+fn write_manifest(root: &Path, value: &Value) {
+    write_json(&manifest_path(root), value);
+}
+
+/// 以默认选项打开贴图仓储。
+fn open_store(root: &Path) -> PinnedStore {
+    PinnedStore::open(root, PinOptions::default())
+}
+
+/// 写入一条图片型贴图并立即落盘。
+fn pin_image(store: &mut PinnedStore, id: &str, payload: PinPayload) {
+    store
+        .upsert(record(id, "image_data"), Some(payload))
+        .unwrap();
+    store.flush().unwrap();
 }
 
 /// 提交后 payload 从磁盘提供，重开后仍一致（committedPayloadsAreServedFromDisk）。
@@ -58,7 +76,7 @@ fn committed_payloads_are_served_from_disk() {
     let id = new_uuid();
     let original = payload(5);
     {
-        let mut store = PinnedStore::open(dir.path(), PinOptions::default());
+        let mut store = open_store(dir.path());
         store
             .upsert(record(&id, "image_data"), Some(original.clone()))
             .unwrap();
@@ -72,7 +90,7 @@ fn committed_payloads_are_served_from_disk() {
             original.canvas_session
         );
     }
-    let restored = PinnedStore::open(dir.path(), PinOptions::default());
+    let restored = open_store(dir.path());
     assert_eq!(restored.record_ids(), vec![id.clone()]);
     assert_eq!(restored.load_payload(&id).unwrap().unwrap(), original);
     assert_eq!(read_manifest(dir.path())["format_version"], 2);
@@ -84,16 +102,13 @@ fn missing_optional_payload_does_not_hide_restorable_image() {
     let dir = TempDir::new("pin-missing");
     let id = new_uuid();
     {
-        let mut store = PinnedStore::open(dir.path(), PinOptions::default());
-        store
-            .upsert(record(&id, "image_data"), Some(payload(8)))
-            .unwrap();
-        store.flush().unwrap();
+        let mut store = open_store(dir.path());
+        pin_image(&mut store, &id, payload(8));
         fs::remove_file(pin_dir(dir.path(), &id).join("recognition_results.bin")).unwrap();
         let loaded = store.load_payload(&id).unwrap().unwrap();
         assert!(loaded.recognition_results.is_empty() && !loaded.canvas_session.is_empty());
     }
-    let mut reopened = PinnedStore::open(dir.path(), PinOptions::default());
+    let mut reopened = open_store(dir.path());
     let loaded = reopened.load_payload(&id).unwrap().unwrap();
     assert!(loaded.image.is_some() && loaded.recognition_results.is_empty());
     let mut updated = record(&id, "image_data");
@@ -112,7 +127,7 @@ fn missing_optional_payload_does_not_hide_restorable_image() {
 fn metadata_only_updates_do_not_rewrite_committed_payloads() {
     let dir = TempDir::new("pin-meta");
     let id = new_uuid();
-    let mut store = PinnedStore::open(dir.path(), PinOptions::default());
+    let mut store = open_store(dir.path());
     let first = payload(9);
     store
         .upsert(record(&id, "image_data"), Some(first.clone()))
@@ -137,11 +152,8 @@ fn metadata_only_updates_do_not_rewrite_committed_payloads() {
 fn changed_payloads_recommit() {
     let dir = TempDir::new("pin-changed");
     let id = new_uuid();
-    let mut store = PinnedStore::open(dir.path(), PinOptions::default());
-    store
-        .upsert(record(&id, "image_data"), Some(payload(1)))
-        .unwrap();
-    store.flush().unwrap();
+    let mut store = open_store(dir.path());
+    pin_image(&mut store, &id, payload(1));
     let before = store.preview_source_revision(&id).unwrap();
     let second = payload(2);
     store
@@ -168,11 +180,8 @@ fn changed_payloads_recommit() {
 fn obsolete_payload_files_are_pruned() {
     let dir = TempDir::new("pin-prune");
     let id = new_uuid();
-    let mut store = PinnedStore::open(dir.path(), PinOptions::default());
-    store
-        .upsert(record(&id, "image_data"), Some(payload(3)))
-        .unwrap();
-    store.flush().unwrap();
+    let mut store = open_store(dir.path());
+    pin_image(&mut store, &id, payload(3));
     let mut reduced = payload(3);
     reduced.canvas_session.clear();
     reduced.original_html.clear();
@@ -192,11 +201,8 @@ fn obsolete_payload_files_are_pruned() {
 fn removed_records_prune_their_payloads() {
     let dir = TempDir::new("pin-remove");
     let id = new_uuid();
-    let mut store = PinnedStore::open(dir.path(), PinOptions::default());
-    store
-        .upsert(record(&id, "image_data"), Some(payload(3)))
-        .unwrap();
-    store.flush().unwrap();
+    let mut store = open_store(dir.path());
+    pin_image(&mut store, &id, payload(3));
     assert!(store.remove(&id));
     store.flush().unwrap();
     assert!(store.load_payload(&id).unwrap().is_none());
@@ -221,14 +227,11 @@ fn unsupported_or_malformed_manifest_is_discarded_and_preserved() {
         let dir = TempDir::new("pin-version");
         let id = new_uuid();
         {
-            let mut store = PinnedStore::open(dir.path(), PinOptions::default());
-            store
-                .upsert(record(&id, "image_data"), Some(payload(1)))
-                .unwrap();
-            store.flush().unwrap();
+            let mut store = open_store(dir.path());
+            pin_image(&mut store, &id, payload(1));
         }
         fs::write(manifest_path(dir.path()), &content).unwrap();
-        let store = PinnedStore::open(dir.path(), PinOptions::default());
+        let store = open_store(dir.path());
         assert!(store.record_ids().is_empty() && !store.last_error().is_empty());
         let backups: Vec<_> = fs::read_dir(dir.path().join("pinned_windows_v2"))
             .unwrap()
@@ -250,23 +253,13 @@ fn manifest_version_accepts_integral_double() {
     let dir = TempDir::new("pin-double");
     let id = new_uuid();
     {
-        let mut store = PinnedStore::open(dir.path(), PinOptions::default());
-        store
-            .upsert(record(&id, "image_data"), Some(payload(1)))
-            .unwrap();
-        store.flush().unwrap();
+        let mut store = open_store(dir.path());
+        pin_image(&mut store, &id, payload(1));
     }
     let mut manifest = read_manifest(dir.path());
     manifest["format_version"] = json!(2.0);
-    fs::write(
-        manifest_path(dir.path()),
-        serde_json::to_vec(&manifest).unwrap(),
-    )
-    .unwrap();
-    assert_eq!(
-        PinnedStore::open(dir.path(), PinOptions::default()).record_ids(),
-        vec![id]
-    );
+    write_manifest(dir.path(), &manifest);
+    assert_eq!(open_store(dir.path()).record_ids(), vec![id]);
 }
 
 /// 清单里的路径穿越、非法 ID、未知分组、未知来源的记录被逐条丢弃，其余保留。
@@ -275,7 +268,7 @@ fn hostile_manifest_records_are_skipped() {
     let dir = TempDir::new("pin-hostile");
     let (good, traversal, missing_image) = (new_uuid(), new_uuid(), new_uuid());
     {
-        let mut store = PinnedStore::open(dir.path(), PinOptions::default());
+        let mut store = open_store(dir.path());
         for id in [&good, &traversal, &missing_image] {
             store
                 .upsert(record(id, "image_data"), Some(payload(1)))
@@ -304,12 +297,8 @@ fn hostile_manifest_records_are_skipped() {
     let mut wrong_directory = records[0].clone();
     wrong_directory["payloads"]["directory"] = json!("elsewhere");
     records.extend([bad_id, bad_group, bad_kind, wrong_directory]);
-    fs::write(
-        manifest_path(dir.path()),
-        serde_json::to_vec(&manifest).unwrap(),
-    )
-    .unwrap();
-    let store = PinnedStore::open(dir.path(), PinOptions::default());
+    write_manifest(dir.path(), &manifest);
+    let store = open_store(dir.path());
     // 穿越的 canvas_session 被判非法 -> 丢弃；图片缺失 -> 丢弃；good 保留。
     assert_eq!(store.record_ids(), vec![good]);
     assert_eq!(store.skipped_records(), 6);
@@ -321,14 +310,11 @@ fn missing_optional_reference_is_dropped_on_load() {
     let dir = TempDir::new("pin-drop");
     let id = new_uuid();
     {
-        let mut store = PinnedStore::open(dir.path(), PinOptions::default());
-        store
-            .upsert(record(&id, "image_data"), Some(payload(1)))
-            .unwrap();
-        store.flush().unwrap();
+        let mut store = open_store(dir.path());
+        pin_image(&mut store, &id, payload(1));
     }
     fs::remove_file(pin_dir(dir.path(), &id).join("original.txt")).unwrap();
-    let store = PinnedStore::open(dir.path(), PinOptions::default());
+    let store = open_store(dir.path());
     assert!(
         !store.record(&id).unwrap()["payloads"]
             .as_object()
@@ -342,7 +328,7 @@ fn missing_optional_reference_is_dropped_on_load() {
 fn payload_size_limits() {
     let dir = TempDir::new("pin-size");
     let id = new_uuid();
-    let mut store = PinnedStore::open(dir.path(), PinOptions::default());
+    let mut store = open_store(dir.path());
     let mut over = payload(1);
     over.canvas_session = vec![b'x'; MAX_PAYLOAD_BYTES + 1];
     assert!(matches!(
@@ -369,7 +355,7 @@ fn payload_size_limits() {
         vec![b'x'; MAX_PAYLOAD_BYTES + 1],
     )
     .unwrap();
-    let reopened = PinnedStore::open(dir.path(), PinOptions::default());
+    let reopened = open_store(dir.path());
     assert!(reopened.load_payload(&id).is_err());
 }
 
@@ -377,7 +363,7 @@ fn payload_size_limits() {
 #[test]
 fn invalid_upserts_are_rejected() {
     let dir = TempDir::new("pin-invalid");
-    let mut store = PinnedStore::open(dir.path(), PinOptions::default());
+    let mut store = open_store(dir.path());
     let id = new_uuid();
     assert!(store.upsert(record(&id, "image_data"), None).is_err());
     assert!(
@@ -429,7 +415,7 @@ fn invalid_upserts_are_rejected() {
         )
         .unwrap();
     store.flush().unwrap();
-    let reopened = PinnedStore::open(dir.path(), PinOptions::default());
+    let reopened = open_store(dir.path());
     assert_eq!(reopened.load_payload(&text_id).unwrap().unwrap(), text_only);
     assert_eq!(
         reopened.load_payload(&file_id).unwrap().unwrap(),
@@ -441,7 +427,7 @@ fn invalid_upserts_are_rejected() {
 #[test]
 fn groups_are_sanitized() {
     let dir = TempDir::new("pin-groups");
-    let mut store = PinnedStore::open(dir.path(), PinOptions::default());
+    let mut store = open_store(dir.path());
     let keep = new_uuid();
     let mut groups = vec![
         PinGroup {
@@ -491,7 +477,7 @@ fn groups_are_sanitized() {
     assert_eq!(store.groups().len(), 128);
     assert_eq!(store.active_group_id(), "default");
     store.flush().unwrap();
-    let reopened = PinnedStore::open(dir.path(), PinOptions::default());
+    let reopened = open_store(dir.path());
     assert_eq!(reopened.groups().len(), 128);
     assert!(!reopened.groups()[0].name.is_empty() && reopened.groups()[0].built_in);
 }
@@ -512,7 +498,7 @@ fn read_only_and_upstream_are_refused() {
             .is_err()
     );
     let upstream = Path::new(r"Z:\definitely-missing\SnowShot\snow_shot");
-    let mut refused = PinnedStore::open(upstream, PinOptions::default());
+    let mut refused = open_store(upstream);
     assert!(!refused.last_error().is_empty() && refused.flush().is_err());
     assert!(!upstream.exists());
 }
@@ -531,7 +517,7 @@ fn crash_after_payloads_written() {
     let dir = TempDir::new("pin-crash1");
     let (old, new) = (new_uuid(), new_uuid());
     {
-        let mut store = PinnedStore::open(dir.path(), PinOptions::default());
+        let mut store = open_store(dir.path());
         store
             .upsert(record(&old, "image_data"), Some(payload(1)))
             .unwrap();
@@ -548,7 +534,7 @@ fn crash_after_payloads_written() {
             Err(PinError::Crashed(PinCrashPoint::AfterPayloadsWritten))
         );
     }
-    let mut store = PinnedStore::open(dir.path(), PinOptions::default());
+    let mut store = open_store(dir.path());
     assert_eq!(store.record_ids(), vec![old.clone()]);
     assert_eq!(store.load_payload(&old).unwrap().unwrap(), payload(1));
     assert!(pin_dir(dir.path(), &new).exists());
@@ -562,7 +548,7 @@ fn crash_after_manifest_committed() {
     let dir = TempDir::new("pin-crash2");
     let (keep, gone) = (new_uuid(), new_uuid());
     {
-        let mut store = PinnedStore::open(dir.path(), PinOptions::default());
+        let mut store = open_store(dir.path());
         store
             .upsert(record(&keep, "image_data"), Some(payload(1)))
             .unwrap();
@@ -585,7 +571,7 @@ fn crash_after_manifest_committed() {
             Err(PinError::Crashed(PinCrashPoint::AfterManifestCommitted))
         );
     }
-    let mut store = PinnedStore::open(dir.path(), PinOptions::default());
+    let mut store = open_store(dir.path());
     assert_eq!(store.record_ids(), vec![keep.clone()]);
     assert_eq!(
         store.load_payload(&keep).unwrap().unwrap().canvas_session,
@@ -605,7 +591,7 @@ fn crash_after_manifest_committed() {
 fn failed_manifest_write_is_retried() {
     let dir = TempDir::new("pin-retry");
     let id = new_uuid();
-    let mut store = PinnedStore::open(dir.path(), PinOptions::default());
+    let mut store = open_store(dir.path());
     store
         .upsert(record(&id, "image_data"), Some(payload(1)))
         .unwrap();
@@ -614,7 +600,7 @@ fn failed_manifest_write_is_retried() {
     fs::remove_dir(manifest_path(dir.path())).unwrap();
     store.flush().unwrap();
     assert!(!store.is_dirty() && store.last_error().is_empty());
-    let reopened = PinnedStore::open(dir.path(), PinOptions::default());
+    let reopened = open_store(dir.path());
     assert_eq!(reopened.load_payload(&id).unwrap().unwrap(), payload(1));
 }
 
@@ -623,7 +609,7 @@ fn failed_manifest_write_is_retried() {
 fn trailing_dot_upstream_is_refused() {
     let dir = TempDir::new("pin-dot");
     let path = dir.path().join("SnowShot ").join("snow_shot");
-    let store = PinnedStore::open(&path, PinOptions::default());
+    let store = open_store(&path);
     assert!(!store.last_error().is_empty());
     assert!(!dir.path().join("SnowShot ").exists());
 }
@@ -640,7 +626,7 @@ fn store_and_options_are_send() {
 #[test]
 fn reserved_image_file_name_is_rejected() {
     let dir = TempDir::new("pin-reserved");
-    let mut store = PinnedStore::open(dir.path(), PinOptions::default());
+    let mut store = open_store(dir.path());
     let mut p = payload(1);
     p.image.as_mut().unwrap().file_name = "canvas_session.bin".into();
     assert!(

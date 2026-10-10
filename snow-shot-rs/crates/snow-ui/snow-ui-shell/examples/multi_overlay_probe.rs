@@ -19,6 +19,8 @@
 //!
 //! 日志：`%TEMP%\snow-multi-overlay-probe.log`，末行为 `VERDICT A|B|INCONCLUSIVE`。
 
+mod common;
+
 use snow_ui_shell::geometry::PhysicalPoint;
 use snow_ui_shell::monitor::{MonitorInfo, MonitorTarget};
 use snow_ui_shell::overlay::cursor_screen_position;
@@ -27,7 +29,6 @@ use snow_ui_shell::ui::{
     MouseMoveEvent, MouseUpEvent, Render, Styled, Window, div, rgba,
 };
 use snow_ui_shell::window::WindowSpec;
-use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -83,14 +84,7 @@ struct Probe {
 impl Probe {
     /// 写日志并同步打印。
     fn log(&self, line: &str) {
-        println!("{line}");
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.log_path)
-        {
-            let _ = writeln!(f, "{line}");
-        }
+        common::log(&self.log_path, line);
     }
 
     /// 记录一次窗口事件。
@@ -227,8 +221,7 @@ fn analyze(probe: &Probe, round: u32, start: usize, other: usize) -> (usize, usi
 }
 
 fn main() {
-    let log_path = std::env::temp_dir().join("snow-multi-overlay-probe.log");
-    let _ = std::fs::remove_file(&log_path);
+    let log_path = common::fresh_log_path("snow-multi-overlay-probe.log");
     let probe: Shared = Arc::new(Mutex::new(Probe {
         log_path,
         ..Probe::default()

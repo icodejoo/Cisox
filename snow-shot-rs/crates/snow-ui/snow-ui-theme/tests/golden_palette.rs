@@ -3,11 +3,11 @@
 //! 黄金样本由 MSVC 编译基线目录中的 `fast_color_lite.cpp` + `palette_generate.cpp` 生成，
 //! 所有比较均为**精确相等**（整数通道/十六进制字符串，无浮点容差）。
 
+mod common;
+
+use common::{DARK_MAP, GOLDEN, LIGHT_MAP};
 use snow_ui_theme::fast_color::FastColor;
 use snow_ui_theme::palette::{generate_palette, map_palette};
-
-/// C++ 黄金样本全文。
-const GOLDEN: &str = include_str!("golden/palette_golden.txt");
 
 /// 取出以 `prefix ` 开头的行，并去掉前缀后按空白切分。
 fn rows(prefix: &str) -> Vec<Vec<&'static str>> {
@@ -113,11 +113,9 @@ fn map_palette_tables() {
     let dark = map_palette(&colors, true);
     assert_eq!(light[0], "");
     assert_eq!(dark[0], "");
-    let light_idx = [0, 1, 2, 3, 4, 5, 6, 4, 5, 6];
-    let dark_idx = [0, 1, 2, 3, 6, 5, 4, 6, 5, 4];
     for slot in 1..=10 {
-        assert_eq!(light[slot], format!("c{}", light_idx[slot - 1]));
-        assert_eq!(dark[slot], format!("c{}", dark_idx[slot - 1]));
+        assert_eq!(light[slot], format!("c{}", LIGHT_MAP[slot - 1]));
+        assert_eq!(dark[slot], format!("c{}", DARK_MAP[slot - 1]));
     }
     assert!(
         map_palette(&colors[..6], false)

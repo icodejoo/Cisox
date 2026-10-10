@@ -6,8 +6,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::{Value, json};
-use snow_history::capture_history::{DraftDisplay, DraftImage, HistoryDraft};
-use snow_history::index::{Rect, Selection};
+use snow_history::capture_history::{
+    CaptureHistoryRepository, DraftDisplay, DraftImage, HistoryDraft, Options,
+};
+use snow_history::index::{Record, Rect, Selection};
 
 /// 自动清理的临时目录。
 pub struct TempDir(pub PathBuf);
@@ -102,14 +104,38 @@ pub fn index_path(root: &Path) -> PathBuf {
     root.join("capture_history").join("index.json")
 }
 
+/// 某记录目录下的文件路径。
+pub fn record_file(root: &Path, id: &str, name: &str) -> PathBuf {
+    records_dir(root).join(id).join(name)
+}
+
+/// 读取并解析 JSON 文件。
+pub fn read_json(path: &Path) -> Value {
+    serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
+}
+
+/// 覆盖写 JSON 文件。
+pub fn write_json(path: &Path, value: &Value) {
+    fs::write(path, serde_json::to_vec(value).unwrap()).unwrap();
+}
+
 /// 读取并解析 `index.json`。
 pub fn read_index(root: &Path) -> Value {
-    serde_json::from_slice(&fs::read(index_path(root)).unwrap()).unwrap()
+    read_json(&index_path(root))
 }
 
 /// 覆盖写 `index.json`。
 pub fn write_index(root: &Path, value: &Value) {
-    fs::write(index_path(root), serde_json::to_vec(value).unwrap()).unwrap();
+    write_json(&index_path(root), value);
+}
+
+/// 开一个仓储依次发布 `drafts` 后关闭（落盘），返回已发布的记录。
+pub fn seed_records(root: &Path, options: Options, drafts: Vec<HistoryDraft>) -> Vec<Record> {
+    let mut repo = CaptureHistoryRepository::open(root, options);
+    drafts
+        .into_iter()
+        .map(|draft| repo.publish(draft).unwrap())
+        .collect()
 }
 
 /// 列出 `records` 下的子目录名（排序）。

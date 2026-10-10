@@ -4,16 +4,11 @@
 //! 色阶类令牌用黄金色板（golden_dump 输出）按 C++ 映射表逐值核对，
 //! 透明度类令牌按 Qt6 语义（16 位通道，8 位读取为 `>>8`）手工推导。
 
+mod common;
+
+use common::{DARK_MAP, GOLDEN, LIGHT_MAP};
 use snow_ui_theme::color::Color;
 use snow_ui_theme::tokens::*;
-
-/// C++ 黄金样本全文。
-const GOLDEN: &str = include_str!("golden/palette_golden.txt");
-
-/// 亮色映射：色阶号 1..=10 对应 10 阶色板下标（theme_color_utils.cpp `toMappedDefault`）。
-const LIGHT_MAP: [usize; 10] = [0, 1, 2, 3, 4, 5, 6, 4, 5, 6];
-/// 暗色映射（`toMappedDark`）。
-const DARK_MAP: [usize; 10] = [0, 1, 2, 3, 6, 5, 4, 6, 5, 4];
 
 /// 取黄金色板行（`base` + `mode` = light/dark）。
 fn golden(base: &str, mode: &str) -> Vec<String> {

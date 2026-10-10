@@ -29,59 +29,47 @@ fn image(w: i32, h: i32) -> OwnedImage {
 fn bench_4k() {
     let (w, h) = (3840, 2160);
     let base = image(w, h);
+    // 只改滤镜类型、其余取默认的参数构造器。
+    let of = |filter_type| Parameters {
+        filter_type,
+        ..Parameters::default()
+    };
     let items: [(&str, Parameters); 7] = [
         (
             "mosaic_b16",
             Parameters {
-                filter_type: FILTER_MOSAIC,
                 logical_block_size: 16.0,
-                ..Parameters::default()
+                ..of(FILTER_MOSAIC)
             },
         ),
         (
             "blur_s2",
             Parameters {
-                filter_type: FILTER_BLUR,
                 logical_sigma: 2.0,
-                ..Parameters::default()
+                ..of(FILTER_BLUR)
             },
         ),
         (
             "blur_s8",
             Parameters {
-                filter_type: FILTER_BLUR,
                 logical_sigma: 8.0,
-                ..Parameters::default()
+                ..of(FILTER_BLUR)
             },
         ),
         (
             "blur_s32",
             Parameters {
-                filter_type: FILTER_BLUR,
                 logical_sigma: 32.0,
-                ..Parameters::default()
+                ..of(FILTER_BLUR)
             },
         ),
-        (
-            "grayscale",
-            Parameters {
-                filter_type: FILTER_GRAYSCALE,
-                ..Parameters::default()
-            },
-        ),
-        (
-            "invert",
-            Parameters {
-                filter_type: FILTER_INVERT,
-                ..Parameters::default()
-            },
-        ),
+        ("grayscale", of(FILTER_GRAYSCALE)),
+        ("invert", of(FILTER_INVERT)),
         (
             "emboss_r1",
             Parameters {
-                filter_type: FILTER_EMBOSS,
                 logical_sampling_radius: 1.0,
-                ..Parameters::default()
+                ..of(FILTER_EMBOSS)
             },
         ),
     ];
