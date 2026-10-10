@@ -462,12 +462,24 @@ impl ModelManifest {
     /// # 返回
     /// 具体源语言；模型不支持时返回 `None`。
     pub fn resolve_source(&self, src: Lang, tgt: Lang) -> Option<Lang> {
-        let pairs = self.supported_pairs();
-        if src == Lang::Auto {
-            return pairs.iter().find(|(_, t)| *t == tgt).map(|(s, _)| *s);
-        }
-        pairs.contains(&(src, tgt)).then_some(src)
+        resolve_in_pairs(&self.supported_pairs(), src, tgt)
     }
+}
+
+/// 在语言对表里解析源语言：`Auto` 取第一个目标匹配的源语言，否则要求表里含 `(src, tgt)`。
+///
+/// # 参数
+/// - `pairs`：支持的 `(源, 目标)` 语言对。
+/// - `src`：源语言（可为 `Auto`）。
+/// - `tgt`：目标语言。
+///
+/// # 返回
+/// 具体源语言；不支持时返回 `None`。
+pub(crate) fn resolve_in_pairs(pairs: &[(Lang, Lang)], src: Lang, tgt: Lang) -> Option<Lang> {
+    if src == Lang::Auto {
+        return pairs.iter().find(|(_, t)| *t == tgt).map(|(s, _)| *s);
+    }
+    pairs.contains(&(src, tgt)).then_some(src)
 }
 
 /// 扫描到的一个模型：清单与所在目录。
@@ -847,6 +859,23 @@ impl TranslationService {
 
 #[cfg(test)]
 mod tests {
+    /// `resolve_in_pairs`：Auto 取第一个目标匹配的源，显式要求语言对存在，不支持返回 None。
+    #[test]
+    fn resolve_in_pairs_rules() {
+        let pairs = [(Lang::En, Lang::ZhHans), (Lang::Ja, Lang::ZhHans)];
+        assert_eq!(
+            resolve_in_pairs(&pairs, Lang::Auto, Lang::ZhHans),
+            Some(Lang::En)
+        );
+        assert_eq!(
+            resolve_in_pairs(&pairs, Lang::Ja, Lang::ZhHans),
+            Some(Lang::Ja)
+        );
+        assert_eq!(resolve_in_pairs(&pairs, Lang::Ja, Lang::En), None);
+        assert_eq!(resolve_in_pairs(&pairs, Lang::Auto, Lang::En), None);
+        assert_eq!(resolve_in_pairs(&[], Lang::Auto, Lang::En), None);
+    }
+
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 

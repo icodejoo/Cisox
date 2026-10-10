@@ -96,7 +96,9 @@ impl Timeouts {
             .request_per_char
             .checked_mul(u32::try_from(chars).unwrap_or(u32::MAX))
             .unwrap_or(self.request_max);
-        self.request_base.saturating_add(extra).min(self.request_max)
+        self.request_base
+            .saturating_add(extra)
+            .min(self.request_max)
     }
 }
 
@@ -185,14 +187,17 @@ impl WorkerLauncher for ProcessLauncher {
         let mut child = command.spawn().map_err(|e| {
             TranslateError::WorkerUnavailable(format!("无法启动 {}: {e}", config.exe.display()))
         })?;
-        let (stdin, stdout, stderr) = match (child.stdin.take(), child.stdout.take(), child.stderr.take()) {
-            (Some(i), Some(o), Some(e)) => (i, o, e),
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(TranslateError::WorkerUnavailable("无法接管子进程管道".into()));
-            }
-        };
+        let (stdin, stdout, stderr) =
+            match (child.stdin.take(), child.stdout.take(), child.stderr.take()) {
+                (Some(i), Some(o), Some(e)) => (i, o, e),
+                _ => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(TranslateError::WorkerUnavailable(
+                        "无法接管子进程管道".into(),
+                    ));
+                }
+            };
         let (tx, rx) = mpsc::channel::<String>();
         thread::Builder::new()
             .name("snow-translate-stdout".into())
@@ -237,7 +242,10 @@ impl WorkerLauncher for ProcessLauncher {
 /// ```
 pub fn read_line_bounded(reader: &mut impl BufRead, limit: usize) -> io::Result<Option<String>> {
     let mut buf = Vec::new();
-    let read = reader.by_ref().take(limit as u64 + 1).read_until(b'\n', &mut buf)?;
+    let read = reader
+        .by_ref()
+        .take(limit as u64 + 1)
+        .read_until(b'\n', &mut buf)?;
     if read == 0 {
         return Ok(None);
     }
@@ -247,7 +255,10 @@ pub fn read_line_bounded(reader: &mut impl BufRead, limit: usize) -> io::Result<
         let mut sink = Vec::new();
         loop {
             sink.clear();
-            let n = reader.by_ref().take(64 * 1024).read_until(b'\n', &mut sink)?;
+            let n = reader
+                .by_ref()
+                .take(64 * 1024)
+                .read_until(b'\n', &mut sink)?;
             if n == 0 || sink.last() == Some(&b'\n') {
                 break;
             }
@@ -327,7 +338,12 @@ impl Transport for ProcessTransport {
             }
         };
         thread::sleep(EXIT_POLL);
-        let tail = self.stderr_tail.lock().unwrap_or_else(PoisonError::into_inner).trim().to_string();
+        let tail = self
+            .stderr_tail
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .trim()
+            .to_string();
         match (status, tail.is_empty()) {
             (Some(s), true) => s,
             (Some(s), false) => format!("{s}; stderr: {tail}"),
@@ -476,14 +492,26 @@ impl WorkerEngine {
         let mut inner = lock(&self.shared.inner);
         let session = inner.session.as_mut()?;
         let pid = session.pid;
-        session.transport.send(&encode_command(&Command::Ping).ok()?).ok()?;
+        session
+            .transport
+            .send(&encode_command(&Command::Ping).ok()?)
+            .ok()?;
         let deadline = Instant::now() + PING_TIMEOUT;
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
             match session.transport.recv(remaining) {
                 Recv::Line(line) => {
-                    if let Ok(Event::Pong { mem_bytes, peak_bytes, .. }) = decode_event(&line) {
-                        return Some(MemorySnapshot { pid, mem_bytes, peak_bytes });
+                    if let Ok(Event::Pong {
+                        mem_bytes,
+                        peak_bytes,
+                        ..
+                    }) = decode_event(&line)
+                    {
+                        return Some(MemorySnapshot {
+                            pid,
+                            mem_bytes,
+                            peak_bytes,
+                        });
                     }
                 }
                 Recv::Timeout | Recv::Closed => return None,
@@ -582,14 +610,22 @@ impl Shared {
     fn start_session(&self) -> Result<Session, TranslateError> {
         let transport = self.launcher.launch(&self.config)?;
         self.launches.fetch_add(1, Ordering::SeqCst);
-        let mut session = Session { transport, loaded: None, pid: 0 };
-        let ready = self.wait_event(&mut session, self.config.timeouts.ready, |event| match event {
-            Event::Ready { protocol, pid } if protocol == PROTOCOL_VERSION => Some(Ok(pid)),
-            Event::Ready { protocol, .. } => Some(Err(TranslateError::WorkerUnavailable(format!(
-                "翻译组件协议版本不符（组件 {protocol}，主程序 {PROTOCOL_VERSION}）"
-            )))),
-            _ => None,
-        });
+        let mut session = Session {
+            transport,
+            loaded: None,
+            pid: 0,
+        };
+        let ready = self.wait_event(
+            &mut session,
+            self.config.timeouts.ready,
+            |event| match event {
+                Event::Ready { protocol, pid } if protocol == PROTOCOL_VERSION => Some(Ok(pid)),
+                Event::Ready { protocol, .. } => Some(Err(TranslateError::WorkerUnavailable(
+                    format!("翻译组件协议版本不符（组件 {protocol}，主程序 {PROTOCOL_VERSION}）"),
+                ))),
+                _ => None,
+            },
+        );
         match ready {
             Ok(pid) => {
                 session.pid = pid;
@@ -608,7 +644,12 @@ impl Shared {
     }
 
     /// 确保已加载所需语言对（换语言对会让 worker 重新加载）。
-    fn ensure_loaded(&self, session: &mut Session, src: Lang, tgt: Lang) -> Result<(), TranslateError> {
+    fn ensure_loaded(
+        &self,
+        session: &mut Session,
+        src: Lang,
+        tgt: Lang,
+    ) -> Result<(), TranslateError> {
         if session.loaded == Some((src, tgt)) {
             return Ok(());
         }
@@ -624,11 +665,15 @@ impl Shared {
             .send(&line)
             .map_err(|e| TranslateError::WorkerDied(format!("发送加载命令失败: {e}")))?;
         let outcome = self.wait_event(session, self.config.timeouts.load, |event| match event {
-            Event::Loaded { load_ms, mem_bytes, .. } => {
+            Event::Loaded {
+                load_ms, mem_bytes, ..
+            } => {
                 tracing::info!(load_ms, mem_bytes, "翻译模型已加载");
                 Some(Ok(()))
             }
-            Event::Error { kind, message, .. } => Some(Err(map_worker_error(kind, message, src, tgt))),
+            Event::Error { kind, message, .. } => {
+                Some(Err(map_worker_error(kind, message, src, tgt)))
+            }
             _ => None,
         });
         if outcome.is_ok() {
@@ -663,9 +708,15 @@ impl Shared {
             Event::Result { id: got, texts, .. } if got == id => Some(if texts.len() == expected {
                 Ok(texts)
             } else {
-                Err(TranslateError::Inference("worker 返回的译文条数不符".into()))
+                Err(TranslateError::Inference(
+                    "worker 返回的译文条数不符".into(),
+                ))
             }),
-            Event::Error { id: got, kind, message } if got.is_none() || got == Some(id) => {
+            Event::Error {
+                id: got,
+                kind,
+                message,
+            } if got.is_none() || got == Some(id) => {
                 Some(Err(map_worker_error(kind, message, src, tgt)))
             }
             // 其它编号的结果是过期应答，忽略
@@ -751,7 +802,8 @@ fn chunk_texts(texts: &[String], limit: usize) -> Result<Vec<Vec<String>>, Trans
                 text.len()
             )));
         }
-        if !current.is_empty() && (size + text.len() > limit || current.len() >= MAX_REQUEST_TEXTS) {
+        if !current.is_empty() && (size + text.len() > limit || current.len() >= MAX_REQUEST_TEXTS)
+        {
             chunks.push(std::mem::take(&mut current));
             size = 0;
         }
@@ -768,25 +820,27 @@ fn chunk_texts(texts: &[String], limit: usize) -> Result<Vec<Vec<String>>, Trans
 fn spawn_idle_monitor(shared: Arc<Shared>) {
     let idle = shared.config.idle_timeout;
     let tick = (idle / 4).clamp(MONITOR_MIN_TICK, MONITOR_MAX_TICK);
-    let spawned = thread::Builder::new().name("snow-translate-idle".into()).spawn({
-        let shared = Arc::clone(&shared);
-        move || {
-            loop {
-                thread::sleep(tick);
-                let mut inner = lock(&shared.inner);
-                if inner.session.is_none() {
-                    inner.monitor_running = false;
-                    return;
-                }
-                if inner.last_used.elapsed() >= idle {
-                    tracing::info!("翻译 worker 空闲超时，卸载");
-                    shared.unload_session(&mut inner);
-                    inner.monitor_running = false;
-                    return;
+    let spawned = thread::Builder::new()
+        .name("snow-translate-idle".into())
+        .spawn({
+            let shared = Arc::clone(&shared);
+            move || {
+                loop {
+                    thread::sleep(tick);
+                    let mut inner = lock(&shared.inner);
+                    if inner.session.is_none() {
+                        inner.monitor_running = false;
+                        return;
+                    }
+                    if inner.last_used.elapsed() >= idle {
+                        tracing::info!("翻译 worker 空闲超时，卸载");
+                        shared.unload_session(&mut inner);
+                        inner.monitor_running = false;
+                        return;
+                    }
                 }
             }
-        }
-    });
+        });
     if let Err(e) = spawned {
         tracing::warn!(error = %e, "无法创建空闲监视线程，worker 将常驻直到下次关闭");
         lock(&shared.inner).monitor_running = false;
@@ -804,14 +858,17 @@ impl TranslationEngine for WorkerEngine {
     /// 批量翻译：空白文本原样返回不占用 worker；其余分块串行发给 worker。
     ///
     /// 复用中的 worker 中途死亡时自动重启并重试一次；卡死（超时）不重试，直接报错并复位。
-    fn translate_batch(&self, texts: &[String], src: Lang, tgt: Lang) -> Result<Vec<String>, TranslateError> {
-        let resolved = if src == Lang::Auto {
-            self.shared.config.pairs.iter().find(|(_, t)| *t == tgt).map(|(s, _)| *s)
-        } else {
-            self.shared.config.pairs.contains(&(src, tgt)).then_some(src)
-        }
-        .ok_or(TranslateError::UnsupportedLanguagePair(src, tgt))?;
-        let work: Vec<usize> = (0..texts.len()).filter(|&i| !texts[i].trim().is_empty()).collect();
+    fn translate_batch(
+        &self,
+        texts: &[String],
+        src: Lang,
+        tgt: Lang,
+    ) -> Result<Vec<String>, TranslateError> {
+        let resolved = crate::resolve_in_pairs(&self.shared.config.pairs, src, tgt)
+            .ok_or(TranslateError::UnsupportedLanguagePair(src, tgt))?;
+        let work: Vec<usize> = (0..texts.len())
+            .filter(|&i| !texts[i].trim().is_empty())
+            .collect();
         let mut results: Vec<String> = texts.to_vec();
         if work.is_empty() {
             return Ok(results);
@@ -833,7 +890,9 @@ impl TranslationEngine for WorkerEngine {
         inner.last_used = Instant::now();
         let translated = translated?;
         if translated.len() != work.len() {
-            return Err(TranslateError::Inference("worker 返回的译文条数不符".into()));
+            return Err(TranslateError::Inference(
+                "worker 返回的译文条数不符".into(),
+            ));
         }
         for (slot, text) in work.iter().zip(translated) {
             results[*slot] = text;
@@ -857,7 +916,10 @@ impl TranslationEngine for WorkerEngine {
 
     /// 缓存标识：模型 ID + 束宽（换模型或束宽后不复用旧译文）。
     fn cache_id(&self) -> String {
-        format!("nmt:{}:b{}", self.shared.config.model_id, self.shared.config.num_beams)
+        format!(
+            "nmt:{}:b{}",
+            self.shared.config.model_id, self.shared.config.num_beams
+        )
     }
 }
 
@@ -987,8 +1049,13 @@ mod tests {
             if self.silent.load(Ordering::SeqCst) {
                 // 什么都不发
             } else if self.send_ready.load(Ordering::SeqCst) {
-                let ready = Event::Ready { protocol: self.protocol.load(Ordering::SeqCst), pid: 4242 };
-                state.queue.push_back(serde_json::to_string(&ready).unwrap());
+                let ready = Event::Ready {
+                    protocol: self.protocol.load(Ordering::SeqCst),
+                    pid: 4242,
+                };
+                state
+                    .queue
+                    .push_back(serde_json::to_string(&ready).unwrap());
             } else {
                 state.closed = true;
             }
@@ -1006,15 +1073,36 @@ mod tests {
     /// 正常脚本：Load → Loaded；Translate → 每条加 `T:` 前缀；Ping → Pong；Unload → 退出。
     fn normal() -> Script {
         Arc::new(|command, state| match command {
-            Command::Load { .. } => push(state, &Event::Loaded { model_id: "fake".into(), load_ms: 1, mem_bytes: 10 }),
+            Command::Load { .. } => push(
+                state,
+                &Event::Loaded {
+                    model_id: "fake".into(),
+                    load_ms: 1,
+                    mem_bytes: 10,
+                },
+            ),
             Command::Translate { id, texts, .. } => {
                 if state.hang {
                     return;
                 }
                 let out = texts.iter().map(|t| format!("T:{t}")).collect();
-                push(state, &Event::Result { id: *id, texts: out, elapsed_ms: 1 });
+                push(
+                    state,
+                    &Event::Result {
+                        id: *id,
+                        texts: out,
+                        elapsed_ms: 1,
+                    },
+                );
             }
-            Command::Ping => push(state, &Event::Pong { loaded: true, mem_bytes: 5, peak_bytes: 9 }),
+            Command::Ping => push(
+                state,
+                &Event::Pong {
+                    loaded: true,
+                    mem_bytes: 5,
+                    peak_bytes: 9,
+                },
+            ),
             Command::Unload => {
                 state.unloaded = true;
                 push(state, &Event::Unloaded);
@@ -1062,13 +1150,34 @@ mod tests {
         let (engine, launcher) = engine_with(vec![normal()], config());
         assert_eq!(launcher.launches(), 0);
         assert!(!engine.is_running());
-        assert_eq!(engine.translate("Hello", Lang::En, Lang::ZhHans).unwrap(), "T:Hello");
-        assert_eq!(engine.translate("Bye", Lang::En, Lang::ZhHans).unwrap(), "T:Bye");
+        assert_eq!(
+            engine.translate("Hello", Lang::En, Lang::ZhHans).unwrap(),
+            "T:Hello"
+        );
+        assert_eq!(
+            engine.translate("Bye", Lang::En, Lang::ZhHans).unwrap(),
+            "T:Bye"
+        );
         assert_eq!(launcher.launches(), 1);
         let commands = sent(&launcher, 0);
-        assert!(matches!(commands[0], Command::Load { ref src, ref tgt, trim_after_request: Some(true), .. } if src == "en" && tgt == "zh-CN"));
-        assert_eq!(commands.iter().filter(|c| matches!(c, Command::Load { .. })).count(), 1);
-        assert!(matches!(commands[1], Command::Translate { id: 1, num_beams: Some(4), .. }));
+        assert!(
+            matches!(commands[0], Command::Load { ref src, ref tgt, trim_after_request: Some(true), .. } if src == "en" && tgt == "zh-CN")
+        );
+        assert_eq!(
+            commands
+                .iter()
+                .filter(|c| matches!(c, Command::Load { .. }))
+                .count(),
+            1
+        );
+        assert!(matches!(
+            commands[1],
+            Command::Translate {
+                id: 1,
+                num_beams: Some(4),
+                ..
+            }
+        ));
         assert!(matches!(commands[2], Command::Translate { id: 2, .. }));
         assert!(engine.is_running());
     }
@@ -1086,7 +1195,10 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(loads, [("en".into(), "zh-CN".into()), ("en".into(), "zh-TW".into())]);
+        assert_eq!(
+            loads,
+            [("en".into(), "zh-CN".into()), ("en".into(), "zh-TW".into())]
+        );
     }
 
     /// 不支持的语言对在拉起前就被拒绝；空白与空批量不占用 worker。
@@ -1095,14 +1207,32 @@ mod tests {
         let (engine, launcher) = engine_with(vec![normal()], config());
         assert_eq!(
             engine.translate("x", Lang::ZhHans, Lang::En),
-            Err(TranslateError::UnsupportedLanguagePair(Lang::ZhHans, Lang::En))
+            Err(TranslateError::UnsupportedLanguagePair(
+                Lang::ZhHans,
+                Lang::En
+            ))
         );
-        assert!(engine.translate_batch(&[], Lang::En, Lang::ZhHans).unwrap().is_empty());
+        assert!(
+            engine
+                .translate_batch(&[], Lang::En, Lang::ZhHans)
+                .unwrap()
+                .is_empty()
+        );
         let blanks = vec!["  ".to_string(), String::new()];
-        assert_eq!(engine.translate_batch(&blanks, Lang::En, Lang::ZhHans).unwrap(), blanks);
+        assert_eq!(
+            engine
+                .translate_batch(&blanks, Lang::En, Lang::ZhHans)
+                .unwrap(),
+            blanks
+        );
         assert_eq!(launcher.launches(), 0);
         let mixed = vec!["a".to_string(), " ".to_string(), "b".to_string()];
-        assert_eq!(engine.translate_batch(&mixed, Lang::En, Lang::ZhHans).unwrap(), ["T:a", " ", "T:b"]);
+        assert_eq!(
+            engine
+                .translate_batch(&mixed, Lang::En, Lang::ZhHans)
+                .unwrap(),
+            ["T:a", " ", "T:b"]
+        );
         assert_eq!(launcher.launches(), 1);
     }
 
@@ -1135,13 +1265,26 @@ mod tests {
     #[test]
     fn reused_worker_crash_restarts_once() {
         let crashing: Script = Arc::new(|command, state| match command {
-            Command::Load { .. } => push(state, &Event::Loaded { model_id: "f".into(), load_ms: 1, mem_bytes: 1 }),
+            Command::Load { .. } => push(
+                state,
+                &Event::Loaded {
+                    model_id: "f".into(),
+                    load_ms: 1,
+                    mem_bytes: 1,
+                },
+            ),
             Command::Translate { texts, .. } if texts[0] == "boom" => state.closed = true,
             other => normal()(other, state),
         });
         let (engine, launcher) = engine_with(vec![crashing, normal()], config());
-        assert_eq!(engine.translate("ok", Lang::En, Lang::ZhHans).unwrap(), "T:ok");
-        assert_eq!(engine.translate("boom", Lang::En, Lang::ZhHans).unwrap(), "T:boom");
+        assert_eq!(
+            engine.translate("ok", Lang::En, Lang::ZhHans).unwrap(),
+            "T:ok"
+        );
+        assert_eq!(
+            engine.translate("boom", Lang::En, Lang::ZhHans).unwrap(),
+            "T:boom"
+        );
         assert_eq!(launcher.launches(), 2);
         assert!(launcher.state(0).lock().unwrap().terminated);
     }
@@ -1156,7 +1299,10 @@ mod tests {
         });
         let (engine, launcher) = engine_with(vec![dying], config());
         let err = engine.translate("x", Lang::En, Lang::ZhHans).unwrap_err();
-        assert!(matches!(&err, TranslateError::WorkerDied(m) if m.contains("fake exit")), "{err:?}");
+        assert!(
+            matches!(&err, TranslateError::WorkerDied(m) if m.contains("fake exit")),
+            "{err:?}"
+        );
         assert_eq!(launcher.launches(), 1);
         assert!(!engine.is_running());
     }
@@ -1165,17 +1311,30 @@ mod tests {
     #[test]
     fn hang_times_out_kills_and_recovers() {
         let hanging: Script = Arc::new(|command, state| match command {
-            Command::Load { .. } => push(state, &Event::Loaded { model_id: "f".into(), load_ms: 1, mem_bytes: 1 }),
+            Command::Load { .. } => push(
+                state,
+                &Event::Loaded {
+                    model_id: "f".into(),
+                    load_ms: 1,
+                    mem_bytes: 1,
+                },
+            ),
             Command::Translate { .. } => {}
             other => normal()(other, state),
         });
         let (engine, launcher) = engine_with(vec![hanging, normal()], config());
         let started = Instant::now();
-        assert_eq!(engine.translate("x", Lang::En, Lang::ZhHans), Err(TranslateError::Timeout));
+        assert_eq!(
+            engine.translate("x", Lang::En, Lang::ZhHans),
+            Err(TranslateError::Timeout)
+        );
         assert!(started.elapsed() < Duration::from_secs(3));
         assert!(launcher.state(0).lock().unwrap().terminated);
         assert!(!engine.is_running());
-        assert_eq!(engine.translate("y", Lang::En, Lang::ZhHans).unwrap(), "T:y");
+        assert_eq!(
+            engine.translate("y", Lang::En, Lang::ZhHans).unwrap(),
+            "T:y"
+        );
         assert_eq!(launcher.launches(), 2);
     }
 
@@ -1184,7 +1343,14 @@ mod tests {
     fn runtime_missing_is_mapped_and_cleaned_up() {
         let script: Script = Arc::new(|command, state| {
             if matches!(command, Command::Load { .. }) {
-                push(state, &Event::Error { id: None, kind: ErrorKind::RuntimeMissing, message: "no dll".into() });
+                push(
+                    state,
+                    &Event::Error {
+                        id: None,
+                        kind: ErrorKind::RuntimeMissing,
+                        message: "no dll".into(),
+                    },
+                );
             }
         });
         let (engine, launcher) = engine_with(vec![script], config());
@@ -1207,7 +1373,14 @@ mod tests {
         ] {
             let script: Script = Arc::new(move |command, state| {
                 if matches!(command, Command::Load { .. }) {
-                    push(state, &Event::Error { id: None, kind, message: "m".into() });
+                    push(
+                        state,
+                        &Event::Error {
+                            id: None,
+                            kind,
+                            message: "m".into(),
+                        },
+                    );
                 }
             });
             let (engine, _) = engine_with(vec![script], config());
@@ -1225,14 +1398,27 @@ mod tests {
     fn decode_failure_keeps_worker_alive() {
         let script: Script = Arc::new(|command, state| match command {
             Command::Translate { id, texts, .. } if texts[0] == "bad" => {
-                push(state, &Event::Error { id: Some(*id), kind: ErrorKind::DecodeFailed, message: "oops".into() });
+                push(
+                    state,
+                    &Event::Error {
+                        id: Some(*id),
+                        kind: ErrorKind::DecodeFailed,
+                        message: "oops".into(),
+                    },
+                );
             }
             other => normal()(other, state),
         });
         let (engine, launcher) = engine_with(vec![script], config());
-        assert!(matches!(engine.translate("bad", Lang::En, Lang::ZhHans), Err(TranslateError::Inference(_))));
+        assert!(matches!(
+            engine.translate("bad", Lang::En, Lang::ZhHans),
+            Err(TranslateError::Inference(_))
+        ));
         assert!(engine.is_running());
-        assert_eq!(engine.translate("good", Lang::En, Lang::ZhHans).unwrap(), "T:good");
+        assert_eq!(
+            engine.translate("good", Lang::En, Lang::ZhHans).unwrap(),
+            "T:good"
+        );
         assert_eq!(launcher.launches(), 1);
     }
 
@@ -1240,7 +1426,9 @@ mod tests {
     #[test]
     fn handshake_failures() {
         let (engine, launcher) = engine_with(vec![normal()], config());
-        launcher.protocol.store(PROTOCOL_VERSION + 1, Ordering::SeqCst);
+        launcher
+            .protocol
+            .store(PROTOCOL_VERSION + 1, Ordering::SeqCst);
         assert!(matches!(
             engine.translate("x", Lang::En, Lang::ZhHans),
             Err(TranslateError::WorkerUnavailable(m)) if m.contains("协议版本")
@@ -1248,7 +1436,10 @@ mod tests {
         assert!(launcher.state(0).lock().unwrap().terminated);
         launcher.protocol.store(PROTOCOL_VERSION, Ordering::SeqCst);
         launcher.send_ready.store(false, Ordering::SeqCst);
-        assert!(matches!(engine.translate("x", Lang::En, Lang::ZhHans), Err(TranslateError::WorkerDied(_))));
+        assert!(matches!(
+            engine.translate("x", Lang::En, Lang::ZhHans),
+            Err(TranslateError::WorkerDied(_))
+        ));
     }
 
     /// 启动后一直不发 ready：超时报 WorkerUnavailable 并强杀。
@@ -1257,7 +1448,10 @@ mod tests {
         let (engine, launcher) = engine_with(vec![normal()], config());
         launcher.silent.store(true, Ordering::SeqCst);
         let err = engine.translate("x", Lang::En, Lang::ZhHans).unwrap_err();
-        assert!(matches!(&err, TranslateError::WorkerUnavailable(m) if m.contains("ready")), "{err:?}");
+        assert!(
+            matches!(&err, TranslateError::WorkerUnavailable(m) if m.contains("ready")),
+            "{err:?}"
+        );
         assert!(launcher.state(0).lock().unwrap().terminated);
         assert!(!engine.is_running());
     }
@@ -1267,14 +1461,31 @@ mod tests {
     fn stale_results_are_ignored() {
         let script: Script = Arc::new(|command, state| match command {
             Command::Translate { id, texts, .. } => {
-                push(state, &Event::Result { id: id + 100, texts: vec!["stale".into()], elapsed_ms: 1 });
+                push(
+                    state,
+                    &Event::Result {
+                        id: id + 100,
+                        texts: vec!["stale".into()],
+                        elapsed_ms: 1,
+                    },
+                );
                 let out = texts.iter().map(|t| format!("T:{t}")).collect();
-                push(state, &Event::Result { id: *id, texts: out, elapsed_ms: 1 });
+                push(
+                    state,
+                    &Event::Result {
+                        id: *id,
+                        texts: out,
+                        elapsed_ms: 1,
+                    },
+                );
             }
             other => normal()(other, state),
         });
         let (engine, _) = engine_with(vec![script], config());
-        assert_eq!(engine.translate("a", Lang::En, Lang::ZhHans).unwrap(), "T:a");
+        assert_eq!(
+            engine.translate("a", Lang::En, Lang::ZhHans).unwrap(),
+            "T:a"
+        );
     }
 
     /// 杂行（非 JSON）被忽略，不影响握手与翻译。
@@ -1285,18 +1496,31 @@ mod tests {
             normal()(command, state);
         });
         let (engine, _) = engine_with(vec![script], config());
-        assert_eq!(engine.translate("a", Lang::En, Lang::ZhHans).unwrap(), "T:a");
+        assert_eq!(
+            engine.translate("a", Lang::En, Lang::ZhHans).unwrap(),
+            "T:a"
+        );
     }
 
     /// 译文条数不符视为推理错误。
     #[test]
     fn wrong_result_count_is_an_error() {
         let script: Script = Arc::new(|command, state| match command {
-            Command::Translate { id, .. } => push(state, &Event::Result { id: *id, texts: vec![], elapsed_ms: 1 }),
+            Command::Translate { id, .. } => push(
+                state,
+                &Event::Result {
+                    id: *id,
+                    texts: vec![],
+                    elapsed_ms: 1,
+                },
+            ),
             other => normal()(other, state),
         });
         let (engine, _) = engine_with(vec![script], config());
-        assert!(matches!(engine.translate("a", Lang::En, Lang::ZhHans), Err(TranslateError::Inference(_))));
+        assert!(matches!(
+            engine.translate("a", Lang::En, Lang::ZhHans),
+            Err(TranslateError::Inference(_))
+        ));
     }
 
     /// 空闲超时后自动卸载（发 unload、进程退出）；再次翻译会重新拉起。
@@ -1313,7 +1537,10 @@ mod tests {
         }
         assert!(!engine.is_running(), "空闲后应卸载");
         assert!(launcher.state(0).lock().unwrap().unloaded);
-        assert_eq!(engine.translate("b", Lang::En, Lang::ZhHans).unwrap(), "T:b");
+        assert_eq!(
+            engine.translate("b", Lang::En, Lang::ZhHans).unwrap(),
+            "T:b"
+        );
         assert_eq!(launcher.launches(), 2);
     }
 
@@ -1356,7 +1583,11 @@ mod tests {
         engine.translate("a", Lang::En, Lang::ZhHans).unwrap();
         assert_eq!(
             engine.memory_snapshot(),
-            Some(MemorySnapshot { pid: 4242, mem_bytes: 5, peak_bytes: 9 })
+            Some(MemorySnapshot {
+                pid: 4242,
+                mem_bytes: 5,
+                peak_bytes: 9
+            })
         );
     }
 
@@ -1366,7 +1597,9 @@ mod tests {
         let big = "x".repeat(150_000);
         let texts = vec![big.clone(), big.clone(), "tail".to_string()];
         let (engine, launcher) = engine_with(vec![normal()], config());
-        let out = engine.translate_batch(&texts, Lang::En, Lang::ZhHans).unwrap();
+        let out = engine
+            .translate_batch(&texts, Lang::En, Lang::ZhHans)
+            .unwrap();
         assert_eq!(out.len(), 3);
         assert_eq!(out[2], "T:tail");
         let translates = sent(&launcher, 0)
@@ -1384,16 +1617,24 @@ mod tests {
     /// 条数上限：超过 [`MAX_REQUEST_TEXTS`] 条时即使字节很少也分块。
     #[test]
     fn chunk_texts_respects_item_limit() {
-        let texts: Vec<String> = (0..(MAX_REQUEST_TEXTS * 2 + 3)).map(|i| i.to_string()).collect();
+        let texts: Vec<String> = (0..(MAX_REQUEST_TEXTS * 2 + 3))
+            .map(|i| i.to_string())
+            .collect();
         let chunks = chunk_texts(&texts, MAX_REQUEST_BYTES).unwrap();
-        assert_eq!(chunks.iter().map(Vec::len).collect::<Vec<_>>(), [MAX_REQUEST_TEXTS, MAX_REQUEST_TEXTS, 3]);
+        assert_eq!(
+            chunks.iter().map(Vec::len).collect::<Vec<_>>(),
+            [MAX_REQUEST_TEXTS, MAX_REQUEST_TEXTS, 3]
+        );
         assert_eq!(chunks.concat(), texts);
     }
 
     /// 分块函数本身：顺序保持、边界正确。
     #[test]
     fn chunk_texts_boundaries() {
-        let texts: Vec<String> = ["aaaa", "bbbb", "cc", "dddddd"].iter().map(|s| s.to_string()).collect();
+        let texts: Vec<String> = ["aaaa", "bbbb", "cc", "dddddd"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         let chunks = chunk_texts(&texts, 8).unwrap();
         assert_eq!(chunks, vec![vec!["aaaa", "bbbb"], vec!["cc", "dddddd"]]);
         let exact = chunk_texts(&["12345678".to_string(), "1".to_string()], 8).unwrap();
@@ -1426,14 +1667,26 @@ mod tests {
     #[test]
     fn bounded_line_reader() {
         let mut input = io::Cursor::new(b"one\r\ntwo\n".to_vec());
-        assert_eq!(read_line_bounded(&mut input, 16).unwrap(), Some("one".into()));
-        assert_eq!(read_line_bounded(&mut input, 16).unwrap(), Some("two".into()));
+        assert_eq!(
+            read_line_bounded(&mut input, 16).unwrap(),
+            Some("one".into())
+        );
+        assert_eq!(
+            read_line_bounded(&mut input, 16).unwrap(),
+            Some("two".into())
+        );
         assert_eq!(read_line_bounded(&mut input, 16).unwrap(), None);
         let mut long = io::Cursor::new(format!("{}\nok\n", "z".repeat(100)).into_bytes());
-        assert_eq!(read_line_bounded(&mut long, 16).unwrap(), Some(String::new()));
+        assert_eq!(
+            read_line_bounded(&mut long, 16).unwrap(),
+            Some(String::new())
+        );
         assert_eq!(read_line_bounded(&mut long, 16).unwrap(), Some("ok".into()));
         let mut tail = io::Cursor::new(b"no newline".to_vec());
-        assert_eq!(read_line_bounded(&mut tail, 64).unwrap(), Some("no newline".into()));
+        assert_eq!(
+            read_line_bounded(&mut tail, 64).unwrap(),
+            Some("no newline".into())
+        );
     }
 
     /// 可执行文件不存在：明确报“未找到翻译组件”，不 panic。
@@ -1443,14 +1696,19 @@ mod tests {
         cfg.exe = PathBuf::from("Z:/definitely/missing/snow-translator.exe");
         let engine = WorkerEngine::new(cfg);
         let err = engine.translate("x", Lang::En, Lang::ZhHans).unwrap_err();
-        assert!(matches!(&err, TranslateError::WorkerUnavailable(m) if m.contains("未找到翻译组件")), "{err:?}");
+        assert!(
+            matches!(&err, TranslateError::WorkerUnavailable(m) if m.contains("未找到翻译组件")),
+            "{err:?}"
+        );
     }
 
     /// 真实进程：拉起一个不会说协议的进程（cmd.exe），ready 超时后报错并回收，不挂死。
     #[cfg(windows)]
     #[test]
     fn real_process_without_ready_times_out() {
-        let system_root = std::env::var_os("SystemRoot").map(PathBuf::from).unwrap_or_default();
+        let system_root = std::env::var_os("SystemRoot")
+            .map(PathBuf::from)
+            .unwrap_or_default();
         let cmd = system_root.join("System32").join("cmd.exe");
         if !cmd.is_file() {
             return;
@@ -1461,7 +1719,10 @@ mod tests {
         let engine = WorkerEngine::new(cfg);
         let started = Instant::now();
         let err = engine.translate("x", Lang::En, Lang::ZhHans).unwrap_err();
-        assert!(matches!(&err, TranslateError::WorkerUnavailable(m) if m.contains("ready")), "{err:?}");
+        assert!(
+            matches!(&err, TranslateError::WorkerUnavailable(m) if m.contains("ready")),
+            "{err:?}"
+        );
         assert!(started.elapsed() < Duration::from_secs(5));
         assert!(!engine.is_running());
     }
@@ -1476,7 +1737,9 @@ mod tests {
             std::env::var_os("SNOW_TRANSLATOR_TEST_MODEL_DIR"),
             std::env::var_os(ENV_ORT_DYLIB),
         ) else {
-            eprintln!("跳过：未设置 SNOW_TRANSLATOR_EXE / SNOW_TRANSLATOR_TEST_MODEL_DIR / SNOW_ORT_DYLIB");
+            eprintln!(
+                "跳过：未设置 SNOW_TRANSLATOR_EXE / SNOW_TRANSLATOR_TEST_MODEL_DIR / SNOW_ORT_DYLIB"
+            );
             return;
         };
         let mut cfg = config();
@@ -1487,9 +1750,16 @@ mod tests {
         cfg.idle_timeout = Duration::from_millis(800);
         let engine = WorkerEngine::new(cfg);
         let out = engine
-            .translate("Where is the nearest train station?", Lang::En, Lang::ZhHans)
+            .translate(
+                "Where is the nearest train station?",
+                Lang::En,
+                Lang::ZhHans,
+            )
             .expect("翻译");
-        assert!(out.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)), "{out}");
+        assert!(
+            out.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)),
+            "{out}"
+        );
         let snapshot = engine.memory_snapshot().expect("内存快照");
         assert!(snapshot.mem_bytes > 50 * 1024 * 1024);
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -1497,7 +1767,9 @@ mod tests {
             thread::sleep(Duration::from_millis(100));
         }
         assert!(!engine.is_running(), "空闲后 worker 应已卸载");
-        let again = engine.translate("Thank you.", Lang::En, Lang::ZhHans).expect("重新拉起后翻译");
+        let again = engine
+            .translate("Thank you.", Lang::En, Lang::ZhHans)
+            .expect("重新拉起后翻译");
         assert!(!again.is_empty());
         assert_eq!(engine.launch_count(), 2);
     }

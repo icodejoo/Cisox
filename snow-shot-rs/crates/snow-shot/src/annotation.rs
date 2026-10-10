@@ -94,6 +94,43 @@ pub struct BaseView<'a> {
     pub bgra: &'a [u8],
 }
 
+impl<'a> BaseView<'a> {
+    /// 由宽高与 BGRA 缓冲构造底图视图（不校验长度）。
+    ///
+    /// # 参数
+    /// - `width` / `height`：物理尺寸。
+    /// - `bgra`：BGRA 像素，长度应为 `width * height * 4`。
+    ///
+    /// ```
+    /// use snow_shot::annotation::BaseView;
+    /// let data = vec![0u8; 2 * 2 * 4];
+    /// let view = BaseView::new(2, 2, &data);
+    /// assert_eq!((view.width, view.height), (2, 2));
+    /// ```
+    pub fn new(width: u32, height: u32, bgra: &'a [u8]) -> Self {
+        Self {
+            width,
+            height,
+            bgra,
+        }
+    }
+}
+
+/// 把设备像素比清洗成可用值：非有限或非正数一律取 1.0。
+///
+/// # 参数
+/// - `dpr`：原始设备像素比。
+///
+/// # 返回
+/// 合法的 `f64` 像素比。
+fn sanitize_dpr(dpr: f32) -> f64 {
+    if dpr.is_finite() && dpr > 0.0 {
+        f64::from(dpr)
+    } else {
+        1.0
+    }
+}
+
 /// 一个待上传的预览脏块（预乘 BGRA，与 GPUI 图像格式一致）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TileImage {
@@ -151,11 +188,7 @@ impl AnnotationStyle {
     /// assert_eq!(AnnotationStyle::for_dpr(2.0).stroke_width, 6.0);
     /// ```
     pub fn for_dpr(dpr: f32) -> Self {
-        let dpr = if dpr.is_finite() && dpr > 0.0 {
-            f64::from(dpr)
-        } else {
-            1.0
-        };
+        let dpr = sanitize_dpr(dpr);
         Self {
             color: DEFAULT_COLOR,
             stroke_width: (DEFAULT_STROKE_LOGICAL * dpr).round().max(1.0),
@@ -889,11 +922,7 @@ impl AnnotationLayer {
                 },
             )
             .map_err(|e| format!("设置相机失败: {e:?}"))?;
-        let layer_dpr = if dpr.is_finite() && dpr > 0.0 {
-            f64::from(dpr)
-        } else {
-            1.0
-        };
+        let layer_dpr = sanitize_dpr(dpr);
         Ok(Self {
             engine,
             viewport,
@@ -1084,7 +1113,7 @@ impl AnnotationLayer {
                 self.apply_filter_overrides(tool, &FilterOverrides::default())?;
             }
             AnnotationTool::AutoFilter => {
-                self.apply_filter_style(self.auto_filter_kind == AutoFilterKind::Blur)?;
+                self.apply_filter_style(self.auto_filter_kind)?;
             }
             _ => {}
         }
@@ -1092,11 +1121,10 @@ impl AnnotationLayer {
     }
 
     /// 把马赛克 / 模糊的默认样式下发给引擎（自动滤镜之后铺的滤镜用它）。
-    fn apply_filter_style(&mut self, blur: bool) -> Result<(), String> {
-        let tool = if blur {
-            AnnotationTool::Blur
-        } else {
-            AnnotationTool::Mosaic
+    fn apply_filter_style(&mut self, kind: AutoFilterKind) -> Result<(), String> {
+        let tool = match kind {
+            AutoFilterKind::Blur => AnnotationTool::Blur,
+            AutoFilterKind::Mosaic => AnnotationTool::Mosaic,
         };
         self.apply_filter_overrides(tool, &FilterOverrides::default())
     }
@@ -1124,7 +1152,7 @@ impl AnnotationLayer {
     pub fn set_auto_filter_kind(&mut self, kind: AutoFilterKind) -> Result<(), String> {
         self.auto_filter_kind = kind;
         if self.tool == AnnotationTool::AutoFilter {
-            self.apply_filter_style(kind == AutoFilterKind::Blur)?;
+            self.apply_filter_style(kind)?;
         }
         Ok(())
     }
@@ -1336,17 +1364,12 @@ impl AnnotationLayer {
         self.sync(base)
     }
 
-    /// 文字元素的字体族（默认字体）。
-    fn font_family(&self) -> &'static str {
-        DEFAULT_FONT_FAMILY
-    }
-
     /// 测量文本占用尺寸（物理像素）。
     ///
     /// # 参数
     /// - `text`：文本（`\n` 分行）。
     pub fn measure_text(&self, text: &str) -> Result<(u32, u32), String> {
-        text_raster::measure_text(text, self.font_family(), self.style.font_px as f32, false)
+        text_raster::measure_text(text, DEFAULT_FONT_FAMILY, self.style.font_px as f32, false)
             .map(|m| (m.width, m.height))
     }
 
@@ -1741,11 +1764,7 @@ mod tests {
         let mut layer = AnnotationLayer::new(64, 64, 1.0).unwrap();
         layer.set_tool(AnnotationTool::Rectangle).unwrap();
         let small = gradient(8, 8);
-        let bad = BaseView {
-            width: 8,
-            height: 8,
-            bgra: &small,
-        };
+        let bad = BaseView::new(8, 8, &small);
         assert!(layer.pointer_down(1.0, 1.0, bad).is_err());
     }
 
@@ -1754,11 +1773,7 @@ mod tests {
     fn rectangle_draws_outline() {
         let (w, h) = (400, 300);
         let data = gradient(w, h);
-        let base = BaseView {
-            width: w,
-            height: h,
-            bgra: &data,
-        };
+        let base = BaseView::new(w, h, &data);
         let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
         layer.set_tool(AnnotationTool::Rectangle).unwrap();
         drag(&mut layer, base, (50.0, 40.0), (250.0, 200.0));
@@ -1782,11 +1797,7 @@ mod tests {
     fn ellipse_draws_curve_not_corners() {
         let (w, h) = (400, 300);
         let data = gradient(w, h);
-        let base = BaseView {
-            width: w,
-            height: h,
-            bgra: &data,
-        };
+        let base = BaseView::new(w, h, &data);
         let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
         layer.set_tool(AnnotationTool::Ellipse).unwrap();
         drag(&mut layer, base, (100.0, 60.0), (300.0, 240.0));
@@ -1808,11 +1819,7 @@ mod tests {
         ] {
             let (w, h) = (300, 200);
             let data = gradient(w, h);
-            let base = BaseView {
-                width: w,
-                height: h,
-                bgra: &data,
-            };
+            let base = BaseView::new(w, h, &data);
             let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
             layer.set_tool(tool).unwrap();
             drag(&mut layer, base, (30.0, 30.0), (250.0, 150.0));
@@ -1832,11 +1839,7 @@ mod tests {
     fn drag_updates_are_partial_tiles() {
         let (w, h) = (1920, 1080);
         let data = gradient(w, h);
-        let base = BaseView {
-            width: w,
-            height: h,
-            bgra: &data,
-        };
+        let base = BaseView::new(w, h, &data);
         let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
         layer.set_tool(AnnotationTool::Arrow).unwrap();
         let updates = drag(&mut layer, base, (100.0, 100.0), (400.0, 260.0));
@@ -1855,11 +1858,7 @@ mod tests {
     fn undo_redo_roundtrip() {
         let (w, h) = (200, 150);
         let data = gradient(w, h);
-        let base = BaseView {
-            width: w,
-            height: h,
-            bgra: &data,
-        };
+        let base = BaseView::new(w, h, &data);
         let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
         layer.set_tool(AnnotationTool::Rectangle).unwrap();
         drag(&mut layer, base, (20.0, 20.0), (120.0, 100.0));
@@ -1890,11 +1889,7 @@ mod tests {
     fn history_json_round_trip_keeps_items_and_undo() {
         let (w, h) = (200, 150);
         let data = gradient(w, h);
-        let base = BaseView {
-            width: w,
-            height: h,
-            bgra: &data,
-        };
+        let base = BaseView::new(w, h, &data);
         let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
         layer.set_tool(AnnotationTool::Rectangle).unwrap();
         drag(&mut layer, base, (20.0, 20.0), (120.0, 100.0));
@@ -1925,11 +1920,7 @@ mod tests {
     fn mosaic_pixelates_region_only() {
         let (w, h) = (300, 200);
         let data = gradient(w, h);
-        let base = BaseView {
-            width: w,
-            height: h,
-            bgra: &data,
-        };
+        let base = BaseView::new(w, h, &data);
         let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
         layer.set_tool(AnnotationTool::Mosaic).unwrap();
         drag(&mut layer, base, (50.0, 40.0), (200.0, 150.0));
@@ -2007,11 +1998,7 @@ mod tests {
     fn auto_filter_click_fills_region_and_toggles() {
         let (w, h) = (300, 200);
         let data = gradient(w, h);
-        let base = BaseView {
-            width: w,
-            height: h,
-            bgra: &data,
-        };
+        let base = BaseView::new(w, h, &data);
         let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
         assert_eq!(
             engine_tool(AnnotationTool::AutoFilter),
@@ -2068,11 +2055,7 @@ mod tests {
     fn auto_filter_hits_follow_point_and_drag() {
         let (w, h) = (300, 200);
         let data = gradient(w, h);
-        let base = BaseView {
-            width: w,
-            height: h,
-            bgra: &data,
-        };
+        let base = BaseView::new(w, h, &data);
         let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
         assert!(layer.auto_filter_hits(None, (120.0, 90.0)).is_empty());
         layer.set_tool(AnnotationTool::AutoFilter).unwrap();
@@ -2112,11 +2095,7 @@ mod tests {
                 data.extend_from_slice(&[v, v, v, 255]);
             }
         }
-        let base = BaseView {
-            width: w,
-            height: h,
-            bgra: &data,
-        };
+        let base = BaseView::new(w, h, &data);
         let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
         layer.set_tool(AnnotationTool::Blur).unwrap();
         drag(&mut layer, base, (40.0, 30.0), (240.0, 170.0));
@@ -2141,11 +2120,7 @@ mod tests {
     fn text_commit_and_export() {
         let (w, h) = (400, 200);
         let data = vec![255u8; (w * h * 4) as usize];
-        let base = BaseView {
-            width: w,
-            height: h,
-            bgra: &data,
-        };
+        let base = BaseView::new(w, h, &data);
         let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
         layer.set_tool(AnnotationTool::Text).unwrap();
         assert!(
@@ -2187,11 +2162,7 @@ mod tests {
     fn export_crop_matches_full_composite() {
         let (w, h) = (500, 400);
         let data = gradient(w, h);
-        let base = BaseView {
-            width: w,
-            height: h,
-            bgra: &data,
-        };
+        let base = BaseView::new(w, h, &data);
         let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
         layer.set_tool(AnnotationTool::Rectangle).unwrap();
         drag(&mut layer, base, (60.0, 50.0), (300.0, 260.0));
@@ -2223,11 +2194,7 @@ mod tests {
     fn preview_tiles_equal_export() {
         let (w, h) = (700, 500);
         let data = gradient(w, h);
-        let base = BaseView {
-            width: w,
-            height: h,
-            bgra: &data,
-        };
+        let base = BaseView::new(w, h, &data);
         let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
         let mut canvas: HashMap<TileKey, TileImage> = HashMap::new();
         let apply = |u: LayerUpdate, canvas: &mut HashMap<TileKey, TileImage>| {
@@ -2284,11 +2251,7 @@ mod tests {
     fn watermark_scales_with_dpr() {
         let (w, h) = (600, 420);
         let data = gradient(w, h);
-        let base = BaseView {
-            width: w,
-            height: h,
-            bgra: &data,
-        };
+        let base = BaseView::new(w, h, &data);
         let mut ink_widths = Vec::new();
         for dpr in [1.0f32, 1.25, 1.5] {
             let mut layer = AnnotationLayer::new(w, h, dpr).unwrap();
@@ -2322,11 +2285,7 @@ mod tests {
     fn decoration_preview_equals_export() {
         let (w, h) = (600, 420);
         let data = gradient(w, h);
-        let base = BaseView {
-            width: w,
-            height: h,
-            bgra: &data,
-        };
+        let base = BaseView::new(w, h, &data);
         let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
         let mut canvas: HashMap<TileKey, TileImage> = HashMap::new();
         let apply = |u: LayerUpdate, canvas: &mut HashMap<TileKey, TileImage>| {
@@ -2406,11 +2365,7 @@ mod tests {
     fn watermark_field_edits_each_emit_tiles() {
         let (w, h) = (300, 200);
         let data = gradient(w, h);
-        let base = BaseView {
-            width: w,
-            height: h,
-            bgra: &data,
-        };
+        let base = BaseView::new(w, h, &data);
         let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
         layer.set_tool(AnnotationTool::Watermark).unwrap();
         let mut wm = layer.watermark_config();
@@ -2437,11 +2392,7 @@ mod tests {
     fn spotlight_style_edits_emit_tiles() {
         let (w, h) = (300, 200);
         let data = gradient(w, h);
-        let base = BaseView {
-            width: w,
-            height: h,
-            bgra: &data,
-        };
+        let base = BaseView::new(w, h, &data);
         let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
         layer.set_tool(AnnotationTool::Spotlight).unwrap();
         drag(&mut layer, base, (50.0, 50.0), (200.0, 150.0));
@@ -2474,11 +2425,7 @@ mod tests {
     fn unchanged_tiles_are_not_reemitted() {
         let (w, h) = (800, 600);
         let data = gradient(w, h);
-        let base = BaseView {
-            width: w,
-            height: h,
-            bgra: &data,
-        };
+        let base = BaseView::new(w, h, &data);
         let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
         layer.set_tool(AnnotationTool::Arrow).unwrap();
         layer.pointer_down(100.0, 100.0, base).unwrap();
@@ -2548,11 +2495,7 @@ mod tests {
     fn decoration_style_single_sync_matches_two_step() {
         let (w, h) = (700, 500);
         let data = gradient(w, h);
-        let base = BaseView {
-            width: w,
-            height: h,
-            bgra: &data,
-        };
+        let base = BaseView::new(w, h, &data);
         let build = || {
             let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
             layer.set_tool(AnnotationTool::Spotlight).unwrap();
@@ -2618,11 +2561,7 @@ mod tests {
     fn pointer_ignored_without_drawing_tool() {
         let (w, h) = (100, 100);
         let data = gradient(w, h);
-        let base = BaseView {
-            width: w,
-            height: h,
-            bgra: &data,
-        };
+        let base = BaseView::new(w, h, &data);
         let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
         assert!(layer.pointer_down(10.0, 10.0, base).unwrap().is_empty());
         assert!(!layer.is_drawing());
@@ -2683,11 +2622,7 @@ mod tests {
     fn decoration_config_accessors_round_trip() {
         let (w, h) = (80, 60);
         let data = white(w, h);
-        let base = BaseView {
-            width: w,
-            height: h,
-            bgra: &data,
-        };
+        let base = BaseView::new(w, h, &data);
         let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
         let mut wm = layer.watermark_config();
         wm.text = "Hi".into();
@@ -2706,11 +2641,7 @@ mod tests {
     fn eraser_removes_a_drawn_line_and_undo_restores_it() {
         let (w, h) = (300, 200);
         let data = white(w, h);
-        let base = BaseView {
-            width: w,
-            height: h,
-            bgra: &data,
-        };
+        let base = BaseView::new(w, h, &data);
         let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
         layer.set_tool(AnnotationTool::Line).unwrap();
         drag(&mut layer, base, (40.0, 100.0), (240.0, 100.0));
@@ -2727,11 +2658,7 @@ mod tests {
     fn select_tool_moves_a_drawn_line() {
         let (w, h) = (300, 200);
         let data = white(w, h);
-        let base = BaseView {
-            width: w,
-            height: h,
-            bgra: &data,
-        };
+        let base = BaseView::new(w, h, &data);
         let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
         layer.set_tool(AnnotationTool::Line).unwrap();
         drag(&mut layer, base, (40.0, 60.0), (240.0, 60.0));
@@ -2753,11 +2680,7 @@ mod tests {
     fn style_color_and_width_apply_to_next_drawing() {
         let (w, h) = (300, 200);
         let data = white(w, h);
-        let base = BaseView {
-            width: w,
-            height: h,
-            bgra: &data,
-        };
+        let base = BaseView::new(w, h, &data);
         let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
         layer.set_tool(AnnotationTool::Line).unwrap();
         let mut style = default_style(AnnotationTool::Line);
@@ -2782,11 +2705,7 @@ mod tests {
     fn style_width_scales_with_dpr() {
         let (w, h) = (300, 200);
         let data = white(w, h);
-        let base = BaseView {
-            width: w,
-            height: h,
-            bgra: &data,
-        };
+        let base = BaseView::new(w, h, &data);
         let mut layer = AnnotationLayer::new(w, h, 2.0).unwrap();
         layer.set_tool(AnnotationTool::Line).unwrap();
         let mut style = default_style(AnnotationTool::Line);
@@ -2808,11 +2727,7 @@ mod tests {
     fn rectangle_fill_toggle() {
         let (w, h) = (300, 200);
         let data = white(w, h);
-        let base = BaseView {
-            width: w,
-            height: h,
-            bgra: &data,
-        };
+        let base = BaseView::new(w, h, &data);
         let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
         layer.set_tool(AnnotationTool::Rectangle).unwrap();
         let mut style = default_style(AnnotationTool::Rectangle);
@@ -2834,11 +2749,7 @@ mod tests {
     fn arrowhead_none_draws_fewer_pixels() {
         let (w, h) = (300, 200);
         let data = white(w, h);
-        let base = BaseView {
-            width: w,
-            height: h,
-            bgra: &data,
-        };
+        let base = BaseView::new(w, h, &data);
         let count = |head: ArrowheadChoice| {
             let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
             layer.set_tool(AnnotationTool::Arrow).unwrap();
@@ -2865,11 +2776,7 @@ mod tests {
     fn highlighter_draws_translucent_stroke() {
         let (w, h) = (300, 200);
         let data = gradient(w, h);
-        let base = BaseView {
-            width: w,
-            height: h,
-            bgra: &data,
-        };
+        let base = BaseView::new(w, h, &data);
         let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
         layer.set_tool(AnnotationTool::Highlighter).unwrap();
         layer
@@ -2900,11 +2807,7 @@ mod tests {
     fn counter_places_numbered_balls() {
         let (w, h) = (300, 200);
         let data = white(w, h);
-        let base = BaseView {
-            width: w,
-            height: h,
-            bgra: &data,
-        };
+        let base = BaseView::new(w, h, &data);
         let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
         layer.set_tool(AnnotationTool::Counter).unwrap();
         let mut style = default_style(AnnotationTool::Counter);
@@ -2948,11 +2851,7 @@ mod tests {
     fn text_style_affects_committed_text() {
         let (w, h) = (400, 200);
         let data = white(w, h);
-        let base = BaseView {
-            width: w,
-            height: h,
-            bgra: &data,
-        };
+        let base = BaseView::new(w, h, &data);
         let measure = |font: u32| {
             let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
             layer.set_tool(AnnotationTool::Text).unwrap();
@@ -2987,11 +2886,7 @@ mod tests {
     fn style_for_filter_tools_is_noop() {
         let (w, h) = (100, 100);
         let data = white(w, h);
-        let base = BaseView {
-            width: w,
-            height: h,
-            bgra: &data,
-        };
+        let base = BaseView::new(w, h, &data);
         let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
         let update = layer
             .apply_style(
@@ -3040,11 +2935,7 @@ mod tests {
     fn mosaic_strength_override_changes_output() {
         let (w, h) = (300, 200);
         let data = gradient(w, h);
-        let base = BaseView {
-            width: w,
-            height: h,
-            bgra: &data,
-        };
+        let base = BaseView::new(w, h, &data);
         let export = |strength: Option<f64>| {
             let mut layer = AnnotationLayer::new(w, h, 1.0).unwrap();
             layer.set_tool(AnnotationTool::Mosaic).unwrap();
@@ -3064,5 +2955,23 @@ mod tests {
                 .2
         };
         assert_ne!(export(Some(0.1)), export(None));
+    }
+
+    /// `BaseView::new` 原样保存宽高与缓冲。
+    #[test]
+    fn base_view_new_keeps_fields() {
+        let data = vec![7u8; 3 * 2 * 4];
+        let view = BaseView::new(3, 2, &data);
+        assert_eq!((view.width, view.height), (3, 2));
+        assert_eq!(view.bgra.len(), data.len());
+    }
+
+    /// 非法 dpr（零、负、NaN、无穷）一律取 1.0，合法值原样保留。
+    #[test]
+    fn sanitize_dpr_falls_back_to_one() {
+        for bad in [0.0f32, -1.0, f32::NAN, f32::INFINITY] {
+            assert_eq!(sanitize_dpr(bad), 1.0);
+        }
+        assert_eq!(sanitize_dpr(2.0), 2.0);
     }
 }

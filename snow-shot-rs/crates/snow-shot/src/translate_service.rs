@@ -315,7 +315,7 @@ fn no_model_message(dir: &Path, issues: &[ManifestIssue]) -> String {
 }
 
 /// 模型包的展示名：清单里的 `display_name`，缺省用 id。
-fn model_label(model: &ScannedModel) -> String {
+pub(crate) fn model_label(model: &ScannedModel) -> String {
     if model.manifest.display_name.trim().is_empty() {
         model.manifest.id.clone()
     } else {

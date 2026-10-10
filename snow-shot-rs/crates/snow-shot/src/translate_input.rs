@@ -39,11 +39,7 @@ pub fn installed_packs(models: &[ScannedModel]) -> Vec<PackChoice> {
         .iter()
         .map(|m| PackChoice {
             id: m.manifest.id.clone(),
-            label: if m.manifest.display_name.trim().is_empty() {
-                m.manifest.id.clone()
-            } else {
-                m.manifest.display_name.clone()
-            },
+            label: crate::translate_service::model_label(m),
         })
         .collect();
     packs.sort_by(|a, b| a.id.cmp(&b.id));

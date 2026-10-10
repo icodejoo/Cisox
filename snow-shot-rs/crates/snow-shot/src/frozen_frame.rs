@@ -115,11 +115,20 @@ impl FrozenFrame {
     /// assert_eq!(view.bgra.len(), (view.width * view.height * 4) as usize);
     /// ```
     pub fn base_view(&self) -> crate::annotation::BaseView<'_> {
-        crate::annotation::BaseView {
-            width: self.width,
-            height: self.height,
-            bgra: self.pixels(),
-        }
+        crate::annotation::BaseView::new(self.width, self.height, self.pixels())
+    }
+
+    /// 整幅底图转成不透明 RGBA（等价于裁剪整个 `bounds()`）。
+    ///
+    /// # 返回
+    /// `(宽, 高, RGBA 字节)`；空图返回 `None`。
+    ///
+    /// ```ignore
+    /// let (w, h, rgba) = frame.to_rgba().unwrap();
+    /// assert_eq!(rgba.len(), (w * h * 4) as usize);
+    /// ```
+    pub fn to_rgba(&self) -> Option<(u32, u32, Vec<u8>)> {
+        self.crop_rgba(self.bounds())
     }
 
     /// 读取单个像素，返回 `(r, g, b, a)`；越界返回 `None`。
@@ -290,5 +299,13 @@ mod tests {
         let b = f.image();
         assert!(Arc::ptr_eq(&a, &b));
         assert_eq!(a.as_bytes(0).map(<[u8]>::len), Some(4 * 4 * 4));
+    }
+
+    /// `to_rgba` 与裁剪整幅 `bounds()` 一致。
+    #[test]
+    fn to_rgba_matches_full_crop() {
+        let f = gradient_frame(8, 6);
+        assert_eq!(f.to_rgba(), f.crop_rgba(f.bounds()));
+        assert_eq!(f.to_rgba().unwrap().0, 8);
     }
 }

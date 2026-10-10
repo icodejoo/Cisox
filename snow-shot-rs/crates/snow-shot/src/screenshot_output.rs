@@ -13,7 +13,7 @@ use image::codecs::png::PngEncoder;
 use image::{ExtendedColorType, ImageEncoder};
 use serde_json::Value;
 use snow_app_core::command::{
-    CompressionLevel, DirectCaptureRequest, DirectOutput, PdfPageSize, SaveRequest,
+    CompressionLevel, DirectCaptureRequest, DirectOutput, Format, PdfPageSize, SaveRequest,
 };
 use snow_config::document::ConfigDocument;
 use snow_config::store::ConfigStore;
@@ -310,23 +310,50 @@ pub struct ExportOverrides {
 impl ExportOverrides {
     /// 取自保存请求；不支持的格式（jxl / avif）视为未指定。
     pub fn from_save_request(request: &SaveRequest) -> Self {
-        Self {
-            format: request.format.and_then(ExportFormat::from_command),
-            quality: request.quality.map(|q| q.min(u32::from(QUALITY_MAX)) as u8),
-            compression: request.compression_level,
-            pdf_page: request.pdf_page_size,
-            pdf_title: request.pdf_title.clone(),
-        }
+        Self::from_parts(
+            request.format,
+            request.quality,
+            request.compression_level,
+            request.pdf_page_size,
+            request.pdf_title.clone(),
+        )
     }
 
     /// 取自直接截图请求。
     pub fn from_direct(request: &DirectCaptureRequest) -> Self {
+        Self::from_parts(
+            request.format,
+            request.quality,
+            request.compression_level,
+            request.pdf_page_size,
+            request.pdf_title.clone(),
+        )
+    }
+
+    /// 由请求里的五个原始字段构造；质量钳到上限，不支持的格式视为未指定。
+    ///
+    /// # 参数
+    /// - `format`：命令层格式。
+    /// - `quality`：质量（超过上限按上限）。
+    /// - `compression`：压缩级别。
+    /// - `pdf_page`：PDF 页面尺寸。
+    /// - `pdf_title`：PDF 标题。
+    ///
+    /// # 返回
+    /// 覆盖项。
+    fn from_parts(
+        format: Option<Format>,
+        quality: Option<u32>,
+        compression: Option<CompressionLevel>,
+        pdf_page: Option<PdfPageSize>,
+        pdf_title: Option<String>,
+    ) -> Self {
         Self {
-            format: request.format.and_then(ExportFormat::from_command),
-            quality: request.quality.map(|q| q.min(u32::from(QUALITY_MAX)) as u8),
-            compression: request.compression_level,
-            pdf_page: request.pdf_page_size,
-            pdf_title: request.pdf_title.clone(),
+            format: format.and_then(ExportFormat::from_command),
+            quality: quality.map(|q| q.min(u32::from(QUALITY_MAX)) as u8),
+            compression,
+            pdf_page,
+            pdf_title,
         }
     }
 }
@@ -749,6 +776,27 @@ pub fn format_for_choice(path: &str, filter_index: usize) -> ExportFormat {
         .unwrap_or(ExportFormat::Png)
 }
 
+/// 决定写入指定路径时的格式：显式覆盖优先，其次取路径扩展名，最后回退默认格式。
+///
+/// # 参数
+/// - `path`：目标文件路径。
+/// - `overrides`：本次覆盖项。
+/// - `default`：配置里的默认格式。
+///
+/// # 返回
+/// 最终格式。
+fn format_from_path(
+    path: &str,
+    overrides: &ExportOverrides,
+    default: ExportFormat,
+) -> ExportFormat {
+    let from_path = Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .and_then(ExportFormat::from_extension);
+    overrides.format.or(from_path).unwrap_or(default)
+}
+
 /// 记住这次手动保存的目录与格式（只在变化时写盘）。
 ///
 /// # 参数
@@ -849,15 +897,7 @@ impl ManualSaveJob {
         let settings = &self.settings;
         match &self.mode {
             SaveMode::Path(path) => {
-                let from_path = Path::new(path)
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .and_then(ExportFormat::from_extension);
-                let format = self
-                    .overrides
-                    .format
-                    .or(from_path)
-                    .unwrap_or(settings.format);
+                let format = format_from_path(path, &self.overrides, settings.format);
                 let encode = settings.encode_settings(&self.overrides, "", self.now);
                 let saved = save_to_path(path, format, width, height, rgba, &encode)
                     .map_err(|e| e.manual_message(locale))?;
@@ -991,11 +1031,7 @@ pub fn export_direct(
                 .filter(|p| !p.is_empty());
             let saved = match path {
                 Some(path) if request.automatic_path != Some(true) => {
-                    let from_path = Path::new(path)
-                        .extension()
-                        .and_then(|e| e.to_str())
-                        .and_then(ExportFormat::from_extension);
-                    let format = overrides.format.or(from_path).unwrap_or(settings.format);
+                    let format = format_from_path(path, &overrides, settings.format);
                     let encode = settings.encode_settings(&overrides, "", now);
                     save_to_path(path, format, width, height, rgba, &encode)?
                 }
@@ -1787,5 +1823,50 @@ mod tests {
             .is_err()
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `from_parts`：质量钳到上限，不支持的格式视为未指定，其余字段原样带入。
+    #[test]
+    fn export_overrides_from_parts_maps_fields() {
+        let o = ExportOverrides::from_parts(
+            Some(Format::Avif),
+            Some(u32::MAX),
+            Some(CompressionLevel::Low),
+            Some(PdfPageSize::ImageSize),
+            Some("t".into()),
+        );
+        assert_eq!(o.format, None);
+        assert_eq!(o.quality, Some(QUALITY_MAX));
+        assert_eq!(o.compression, Some(CompressionLevel::Low));
+        assert_eq!(o.pdf_page, Some(PdfPageSize::ImageSize));
+        assert_eq!(o.pdf_title.as_deref(), Some("t"));
+        let png = ExportOverrides::from_parts(Some(Format::Bmp), None, None, None, None);
+        assert_eq!(png.format, Some(ExportFormat::Bmp));
+    }
+
+    /// `format_from_path`：覆盖 > 扩展名 > 默认。
+    #[test]
+    fn format_from_path_priority() {
+        let none = ExportOverrides::default();
+        assert_eq!(
+            format_from_path("a.bmp", &none, ExportFormat::Png),
+            ExportFormat::Bmp
+        );
+        assert_eq!(
+            format_from_path("a.unknown", &none, ExportFormat::Jpeg),
+            ExportFormat::Jpeg
+        );
+        assert_eq!(
+            format_from_path("noext", &none, ExportFormat::Png),
+            ExportFormat::Png
+        );
+        let forced = ExportOverrides {
+            format: Some(ExportFormat::Jpeg),
+            ..ExportOverrides::default()
+        };
+        assert_eq!(
+            format_from_path("a.bmp", &forced, ExportFormat::Png),
+            ExportFormat::Jpeg
+        );
     }
 }

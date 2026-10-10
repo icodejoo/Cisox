@@ -5,7 +5,20 @@
 pub const MILLIS_PER_DAY: i64 = 86_400_000;
 
 /// 公历日期换算为自 1970-01-01 起的天数（Howard Hinnant 算法）。
-fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+///
+/// # 参数
+/// - `year` / `month` / `day`：公历年、月（1-12）、日（1-31）。
+///
+/// # 返回
+/// 自 1970-01-01 起的天数（之前为负）。
+///
+/// # 示例
+/// ```
+/// use snow_history::timeutil::days_from_civil;
+/// assert_eq!(days_from_civil(1970, 1, 1), 0);
+/// assert_eq!(days_from_civil(2000, 3, 1), 11_017);
+/// ```
+pub fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     let year = year - i64::from(month <= 2);
     let era = year.div_euclid(400);
     let year_of_era = year.rem_euclid(400);

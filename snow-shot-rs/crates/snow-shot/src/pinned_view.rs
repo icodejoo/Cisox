@@ -146,16 +146,20 @@ pub fn thumbnail_rect(normal: PhysicalRect, scale: f32, cursor: PhysicalPoint) -
     )
 }
 
-/// 菜单里可选的标注工具（顺序即菜单顺序）。
-const MENU_TOOLS: [(AnnotationTool, &str); 8] = [
-    (AnnotationTool::Rectangle, "pinned-tool-rectangle"),
-    (AnnotationTool::Ellipse, "pinned-tool-ellipse"),
-    (AnnotationTool::Arrow, "pinned-tool-arrow"),
-    (AnnotationTool::Line, "pinned-tool-line"),
-    (AnnotationTool::Pencil, "pinned-tool-pencil"),
-    (AnnotationTool::Text, "pinned-tool-text"),
-    (AnnotationTool::Mosaic, "pinned-tool-mosaic"),
-    (AnnotationTool::Blur, "pinned-tool-blur"),
+/// 菜单里可选的标注工具（顺序即菜单顺序）：`(工具, 菜单文案 ftl id, 自动化脚本名)`。
+const MENU_TOOLS: [(AnnotationTool, &str, &str); 8] = [
+    (
+        AnnotationTool::Rectangle,
+        "pinned-tool-rectangle",
+        "rectangle",
+    ),
+    (AnnotationTool::Ellipse, "pinned-tool-ellipse", "ellipse"),
+    (AnnotationTool::Arrow, "pinned-tool-arrow", "arrow"),
+    (AnnotationTool::Line, "pinned-tool-line", "line"),
+    (AnnotationTool::Pencil, "pinned-tool-pencil", "pencil"),
+    (AnnotationTool::Text, "pinned-tool-text", "text"),
+    (AnnotationTool::Mosaic, "pinned-tool-mosaic", "mosaic"),
+    (AnnotationTool::Blur, "pinned-tool-blur", "blur"),
 ];
 
 /// 创建贴图视图所需的参数。
@@ -302,18 +306,8 @@ pub fn parse_handle(name: &str) -> Option<PinnedDragHandle> {
 pub fn parse_tool(name: &str) -> Option<AnnotationTool> {
     MENU_TOOLS
         .iter()
-        .zip([
-            "rectangle",
-            "ellipse",
-            "arrow",
-            "line",
-            "pencil",
-            "text",
-            "mosaic",
-            "blur",
-        ])
-        .find(|(_, key)| *key == name)
-        .map(|((tool, _), _)| *tool)
+        .find(|(_, _, key)| *key == name)
+        .map(|(tool, _, _)| *tool)
 }
 
 /// 贴图窗口视图。
@@ -765,9 +759,8 @@ impl PinnedWindowView {
     /// 还原 100% 缩放，保持窗口中心不动。
     pub fn reset_zoom(&mut self, cx: &mut Context<Self>) {
         let (w, h) = self.image_size();
-        let cx_pos = self.bounds.x + self.bounds.width / 2;
-        let cy_pos = self.bounds.y + self.bounds.height / 2;
-        let rect = PhysicalRect::new(cx_pos - w / 2, cy_pos - h / 2, w, h);
+        let center = self.bounds.center();
+        let rect = PhysicalRect::new(center.x - w / 2, center.y - h / 2, w, h);
         self.zoom = 1.0;
         self.set_bounds(rect, cx);
         self.geometry_changed(cx);
@@ -863,7 +856,7 @@ impl PinnedWindowView {
             Some(layer) if layer.item_count() > 0 => {
                 layer.export_rgba([0, 0, w as i32, h as i32], self.frame.base_view())
             }
-            _ => self.frame.crop_rgba(self.frame.bounds()),
+            _ => self.frame.to_rgba(),
         }
     }
 
@@ -895,7 +888,7 @@ impl PinnedWindowView {
 
     /// 复制不含标注的原图到剪贴板。
     pub fn copy_original(&mut self, cx: &mut Context<Self>) {
-        let Some((w, h, rgba)) = self.frame.crop_rgba(self.frame.bounds()) else {
+        let Some((w, h, rgba)) = self.frame.to_rgba() else {
             self.say("pinned-msg-export-failed-copy", cx);
             return;
         };
@@ -961,6 +954,15 @@ impl PinnedWindowView {
         self.annotating = false;
         self.pending_annotation_point = None;
         cx.notify();
+    }
+
+    /// 开关二次标注模式：编辑中则退出，否则按窗口缩放进入。
+    fn toggle_editing(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.editing {
+            self.end_editing(window, cx);
+        } else {
+            self.begin_editing(window.scale_factor(), cx);
+        }
     }
 
     /// 选择标注工具（再次选择同一工具不取消，避免菜单点击误操作）。
@@ -1196,9 +1198,7 @@ impl PinnedWindowView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(handle) = &self.focus_handle {
-            window.focus(handle, cx);
-        }
+        self.refocus_root(window, cx);
         self.request_raise(cx);
         let tool_active = self.editing && self.tool != AnnotationTool::None;
         // 点击输入框以外：先提交正在输入的文字
@@ -1322,7 +1322,7 @@ impl PinnedWindowView {
         let (can_undo, can_redo) = self.history_state();
         let mut entries = Vec::new();
         if self.editing {
-            for (i, (tool, label)) in MENU_TOOLS.iter().enumerate() {
+            for (i, (tool, label, _)) in MENU_TOOLS.iter().enumerate() {
                 entries.push(MenuEntry::Item(
                     MenuItem::new(
                         MENU_TOOL_BASE + i as u32,
@@ -1398,13 +1398,7 @@ impl PinnedWindowView {
                 let next = !self.topmost;
                 self.set_topmost(next, cx);
             }
-            MENU_ANNOTATE => {
-                if self.editing {
-                    self.end_editing(window, cx);
-                } else {
-                    self.begin_editing(window.scale_factor(), cx);
-                }
-            }
+            MENU_ANNOTATE => self.toggle_editing(window, cx),
             MENU_RESET_ZOOM => self.reset_zoom(cx),
             MENU_THUMBNAIL => self.toggle_thumbnail(window, cx),
             MENU_RECOGNIZE => self.toggle_text_recognition(cx),
@@ -1428,7 +1422,7 @@ impl PinnedWindowView {
             other => {
                 let index = other.checked_sub(MENU_TOOL_BASE).map(|i| i as usize);
                 match index.and_then(|i| MENU_TOOLS.get(i)) {
-                    Some((tool, _)) => self.select_tool(*tool, cx),
+                    Some((tool, _, _)) => self.select_tool(*tool, cx),
                     None => tracing::warn!(id = other, "未知的贴图菜单项"),
                 }
             }
@@ -1662,10 +1656,7 @@ impl PinnedWindowView {
         let Ok(cursor) = cursor_screen_position() else {
             return false;
         };
-        let inside = |r: PhysicalRect| {
-            cursor.x >= r.x && cursor.x < r.right() && cursor.y >= r.y && cursor.y < r.bottom()
-        };
-        if inside(self.bounds) || inside(state.handle) {
+        if self.bounds.contains(cursor) || state.handle.contains(cursor) {
             return false;
         }
         state.revealed = false;
@@ -1788,13 +1779,7 @@ impl PinnedWindowView {
             PinKeyAction::CopyToClipboard => self.copy_to_clipboard(cx),
             PinKeyAction::CopyOriginal => self.copy_original(cx),
             PinKeyAction::SaveAsFile => self.save_to_file(cx),
-            PinKeyAction::DrawingMode => {
-                if self.editing {
-                    self.end_editing(window, cx);
-                } else {
-                    self.begin_editing(window.scale_factor(), cx);
-                }
-            }
+            PinKeyAction::DrawingMode => self.toggle_editing(window, cx),
             PinKeyAction::CloseWindow => {
                 if self.editing {
                     self.end_editing(window, cx);
@@ -1872,11 +1857,7 @@ impl PinnedWindowView {
         tracing::info!(id = %self.id, ?op, "贴图自动化操作");
         match op {
             PinOp::Wheel { steps, ctrl } => {
-                let center = PhysicalPoint::new(
-                    self.bounds.x + self.bounds.width / 2,
-                    self.bounds.y + self.bounds.height / 2,
-                );
-                self.wheel(*steps, *ctrl, center, cx);
+                self.wheel(*steps, *ctrl, self.bounds.center(), cx);
             }
             PinOp::Drag { handle, dx, dy } => match parse_handle(handle) {
                 Some(h) => {
@@ -2542,5 +2523,18 @@ second"
                 ctrl: false
             }
         );
+    }
+
+    /// 菜单工具表：每个工具都能被脚本名解析回来，且三列互不重复。
+    #[test]
+    fn menu_tools_table_is_consistent() {
+        for (tool, ftl, name) in MENU_TOOLS {
+            assert_eq!(parse_tool(name), Some(tool));
+            assert_eq!(ftl, format!("pinned-tool-{name}"));
+        }
+        let mut names: Vec<_> = MENU_TOOLS.iter().map(|t| t.2).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), MENU_TOOLS.len());
     }
 }

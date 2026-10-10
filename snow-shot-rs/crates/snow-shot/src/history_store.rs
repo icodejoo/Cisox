@@ -12,7 +12,7 @@ use snow_history::capture_history::{
 };
 use snow_history::index::{Point, Record, Rect, Selection};
 use snow_history::pin_id::new_uuid_v4;
-use snow_history::timeutil::{format_iso_utc_ms, now_utc_ms, parse_iso_utc_ms};
+use snow_history::timeutil::{days_from_civil, format_iso_utc_ms, now_utc_ms, parse_iso_utc_ms};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
@@ -497,15 +497,13 @@ pub fn local_offset_secs() -> i64 {
     (diff as f64 / OFFSET_ROUND_SECS as f64).round() as i64 * OFFSET_ROUND_SECS
 }
 
-/// 公历日期换算为自 1970-01-01 起的天数。
-fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
-    let y = if month <= 2 { year - 1 } else { year };
-    let era = y.div_euclid(400);
-    let yoe = y.rem_euclid(400);
-    let mp = (month + 9) % 12;
-    let doy = (153 * mp + 2) / 5 + day - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146_097 + doe - 719_468
+/// 需要时跑一次仓储维护（清理过期记录）；失败只记警告。
+fn maintain(repo: &mut CaptureHistoryRepository) {
+    if repo.needs_maintenance()
+        && let Err(e) = repo.maintenance()
+    {
+        tracing::warn!(error = %e, "截图历史维护失败");
+    }
 }
 
 /// 缩略图（BGRA，可直接装入 GPUI 图像资源）。
@@ -519,6 +517,13 @@ pub struct Thumbnail {
     pub bgra: Vec<u8>,
 }
 
+/// 把 PNG 字节解码为 RGBA8 图像；失败返回错误说明。
+fn decode_png_rgba8(png: &[u8]) -> Result<image::RgbaImage, String> {
+    image::load_from_memory_with_format(png, image::ImageFormat::Png)
+        .map_err(|e| format!("解码历史图片失败: {e}"))
+        .map(|img| img.into_rgba8())
+}
+
 /// 把 PNG 字节解码并缩放成不超过 `max_edge` 的缩略图（不放大）。
 ///
 /// # 参数
@@ -528,9 +533,7 @@ pub struct Thumbnail {
 /// # 返回
 /// 缩略图；解码失败返回错误说明。
 pub fn make_thumbnail(png: &[u8], max_edge: u32) -> Result<Thumbnail, String> {
-    let rgba = image::load_from_memory_with_format(png, image::ImageFormat::Png)
-        .map_err(|e| format!("解码历史图片失败: {e}"))?
-        .into_rgba8();
+    let rgba = decode_png_rgba8(png)?;
     let (w, h) = rgba.dimensions();
     let longest = w.max(h).max(1);
     let small = if longest > max_edge {
@@ -556,9 +559,7 @@ pub fn make_thumbnail(png: &[u8], max_edge: u32) -> Result<Thumbnail, String> {
 /// # 返回
 /// `(宽, 高, RGBA)`；解码失败返回错误说明。
 pub fn decode_rgba(png: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
-    let rgba = image::load_from_memory_with_format(png, image::ImageFormat::Png)
-        .map_err(|e| format!("解码历史图片失败: {e}"))?
-        .into_rgba8();
+    let rgba = decode_png_rgba8(png)?;
     let (w, h) = rgba.dimensions();
     Ok((w, h, rgba.into_raw()))
 }
@@ -618,6 +619,13 @@ impl HistoryStore {
         f(&mut repo)
     }
 
+    /// 以注入的时钟发布一份草稿。
+    fn publish(&self, draft: HistoryDraft, now_ms: i64) -> Result<Record, String> {
+        self.with_repo(Some(Arc::new(move || now_ms)), |repo| {
+            repo.publish(draft).map_err(|e| e.to_string())
+        })
+    }
+
     /// 写入一条历史（按策略淘汰超限旧记录）。
     ///
     /// # 参数
@@ -635,9 +643,7 @@ impl HistoryStore {
         now_ms: i64,
     ) -> Result<Record, String> {
         let draft = build_draft(source, width, height, rgba, now_ms)?;
-        self.with_repo(Some(Arc::new(move || now_ms)), |repo| {
-            repo.publish(draft).map_err(|e| e.to_string())
-        })
+        self.publish(draft, now_ms)
     }
 
     /// 写入一条带完整现场的历史（整帧底图 + 选区 + 标注 + 结果图）。
@@ -656,9 +662,7 @@ impl HistoryStore {
         now_ms: i64,
     ) -> Result<Record, String> {
         let draft = build_snapshot_draft(source, snapshot, now_ms)?;
-        self.with_repo(Some(Arc::new(move || now_ms)), |repo| {
-            repo.publish(draft).map_err(|e| e.to_string())
-        })
+        self.publish(draft, now_ms)
     }
 
     /// 读取一页记录；同时顺带清理已过期记录。
@@ -668,11 +672,7 @@ impl HistoryStore {
     /// - `page_size`：每页条数。
     pub fn list_page(&self, page: usize, page_size: usize) -> HistoryPage {
         self.with_repo(None, |repo| {
-            if repo.needs_maintenance()
-                && let Err(e) = repo.maintenance()
-            {
-                tracing::warn!(error = %e, "截图历史维护失败");
-            }
+            maintain(repo);
             let total = repo.records_slice().len();
             let (page, start, end, page_count) = paginate(total, page, page_size);
             HistoryPage {
@@ -705,11 +705,7 @@ impl HistoryStore {
     /// 全部记录（新的在前），顺带清理已过期记录；翻页导航按这个顺序走。
     pub fn records(&self) -> Vec<Record> {
         self.with_repo(None, |repo| {
-            if repo.needs_maintenance()
-                && let Err(e) = repo.maintenance()
-            {
-                tracing::warn!(error = %e, "截图历史维护失败");
-            }
+            maintain(repo);
             repo.records()
         })
     }
@@ -1476,5 +1472,17 @@ mod tests {
         let a = build_snapshot_draft(HistorySource::Saved, &base, base_ms()).unwrap();
         let b = build_snapshot_draft(HistorySource::Saved, &shared, base_ms()).unwrap();
         assert_eq!(a.displays[0].image.png, b.displays[0].image.png);
+    }
+
+    /// PNG 解码助手：合法 PNG 还原像素，垃圾数据返回统一错误文案。
+    #[test]
+    fn decode_png_rgba8_roundtrip_and_error() {
+        let rgba = [10u8, 20, 30, 255, 40, 50, 60, 255];
+        let png = encode_png(2, 1, &rgba).unwrap();
+        let img = decode_png_rgba8(&png).unwrap();
+        assert_eq!(img.dimensions(), (2, 1));
+        assert_eq!(img.into_raw(), rgba);
+        let err = decode_png_rgba8(b"junk").unwrap_err();
+        assert!(err.contains("解码历史图片失败"));
     }
 }
