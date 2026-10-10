@@ -140,6 +140,7 @@ pub fn safe_file_name(name: &str) -> bool {
 pub fn safe_user_file_name(name: &str) -> bool {
     safe_file_name(name) && !RESERVED_FILE_NAMES.contains(&name.to_ascii_lowercase().as_str())
 }
+
 #[cfg(test)]
 mod tests {
     use super::safe_user_file_name;

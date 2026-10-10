@@ -6,6 +6,7 @@
 use crate::document::{Compatibility, ConfigDocument, SetError};
 use serde_json::Value;
 use snow_platform::atomic_file::atomic_write;
+use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -133,7 +134,7 @@ impl ConfigStore {
     /// 版本过新、只读或写盘失败时返回 `Err`，此时内存与磁盘都保持原样。
     pub fn import_snapshot(
         &mut self,
-        values: &std::collections::BTreeMap<String, Value>,
+        values: &BTreeMap<String, Value>,
         schema_version: i32,
     ) -> Result<(), ImportError> {
         let mut staged = self.document.clone();
@@ -156,8 +157,8 @@ pub enum ImportError {
     Io(io::Error),
 }
 
-/// 原子写文件：同目录临时文件写完并落盘后改名覆盖，失败时清理临时文件。
-fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+/// 原子写文件：必要时先建父目录，再用同目录临时文件写完并落盘后改名覆盖，失败时清理临时文件。
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
         fs::create_dir_all(parent)?;
     }
@@ -219,21 +220,28 @@ fn cleanup_corrupt_backups(config: &Path) {
 /// 把时间格式化为 `yyyyMMddTHHmmssmmmZ`（UTC，毫秒），与 C++ `yyyyMMdd'T'HHmmsszzz'Z'` 一致。
 fn utc_timestamp(time: SystemTime) -> String {
     let since_epoch = time.duration_since(UNIX_EPOCH).unwrap_or_default();
-    let seconds = since_epoch.as_secs();
     let millis = since_epoch.subsec_millis();
+    let (year, month, day, hour, minute, second) = utc_fields(since_epoch.as_secs());
+    format!("{year:04}{month:02}{day:02}T{hour:02}{minute:02}{second:02}{millis:03}Z")
+}
+
+/// 把 Unix 秒拆成 UTC 的 `(年, 月, 日, 时, 分, 秒)`。
+pub(crate) fn utc_fields(seconds: u64) -> (i64, i64, i64, u64, u64, u64) {
     let days = i64::try_from(seconds / SECONDS_PER_DAY).unwrap_or(0);
     let second_of_day = seconds % SECONDS_PER_DAY;
     let (year, month, day) = civil_from_days(days);
-    format!(
-        "{year:04}{month:02}{day:02}T{:02}{:02}{:02}{millis:03}Z",
+    (
+        year,
+        month,
+        day,
         second_of_day / 3600,
         second_of_day % 3600 / 60,
-        second_of_day % 60
+        second_of_day % 60,
     )
 }
 
 /// 由自 1970-01-01 起的天数换算公历日期（Howard Hinnant 算法），返回 `(年, 月, 日)`。
-pub(crate) fn civil_from_days(days: i64) -> (i64, i64, i64) {
+fn civil_from_days(days: i64) -> (i64, i64, i64) {
     let shifted = days + 719_468;
     let era = shifted.div_euclid(146_097);
     let day_of_era = shifted.rem_euclid(146_097);
@@ -254,20 +262,8 @@ pub(crate) fn civil_from_days(days: i64) -> (i64, i64, i64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_util::temp_dir;
     use serde_json::json;
-
-    /// 创建测试专用临时目录（进程 ID + 计数，避免并发冲突），返回路径。
-    fn temp_dir(tag: &str) -> PathBuf {
-        use std::sync::atomic::{AtomicU32, Ordering};
-        static COUNTER: AtomicU32 = AtomicU32::new(0);
-        let dir = std::env::temp_dir().join(format!(
-            "snow-config-test-{}-{tag}-{}",
-            std::process::id(),
-            COUNTER.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::create_dir_all(&dir).unwrap();
-        dir
-    }
 
     /// 缺失文件：打开为默认值，flush 后写出并可重新读回；重开后不再脏。
     #[test]
@@ -371,7 +367,7 @@ mod tests {
         store.flush().unwrap();
         let original = fs::read(&path).unwrap();
 
-        let mut values = std::collections::BTreeMap::new();
+        let mut values = BTreeMap::new();
         values.insert("screenshot/image_quality".to_string(), json!(90));
         let future = crate::schema::current_version() + 1;
         assert!(store.import_snapshot(&values, future).is_err());

@@ -185,6 +185,19 @@ struct Signature {
     recognition: u64,
 }
 
+impl Signature {
+    /// 影响预览图的字段子集（不含样式、画布会话、识别结果）。
+    fn preview_key(&self) -> (u64, u64, u64, u64, u8) {
+        (
+            self.image,
+            self.file_name,
+            self.html,
+            self.text,
+            self.kind_tag,
+        )
+    }
+}
+
 /// 对字节取哈希；空输入固定为 0（对照 `payloadHash`）。
 fn hash_bytes(bytes: &[u8]) -> u64 {
     if bytes.is_empty() {
@@ -544,16 +557,8 @@ impl PinnedStore {
         if let Some(payload) = payload {
             let next_signature = signature(kind, &payload);
             if existing.is_none() || stored.signature != next_signature {
-                let old = stored.signature;
                 preview_changed = preview_changed
-                    || (old.image, old.file_name, old.html, old.text, old.kind_tag)
-                        != (
-                            next_signature.image,
-                            next_signature.file_name,
-                            next_signature.html,
-                            next_signature.text,
-                            next_signature.kind_tag,
-                        );
+                    || stored.signature.preview_key() != next_signature.preview_key();
                 stored.descriptor = descriptor_for(&id, &payload);
                 stored.signature = next_signature;
                 stored.resident = Some(payload);
@@ -566,11 +571,12 @@ impl PinnedStore {
         manifest.remove("payloads");
         let previous_revision = stored.record.get("preview_source_revision").cloned();
         stored.record = manifest;
-        let revision = if preview_changed || previous_revision.is_none() {
-            self.next_preview_revision += 1;
-            json!(self.next_preview_revision.to_string())
-        } else {
-            previous_revision.unwrap_or_default()
+        let revision = match previous_revision {
+            Some(previous) if !preview_changed => previous,
+            _ => {
+                self.next_preview_revision += 1;
+                json!(self.next_preview_revision.to_string())
+            }
         };
         stored
             .record
@@ -635,17 +641,6 @@ impl PinnedStore {
                 bytes,
             });
         }
-        let text = |key: &str| -> Result<String, PinError> {
-            match name_of(key) {
-                Some(n) if safe_file_name(n) => Ok(String::from_utf8_lossy(&read_blob(
-                    &self.root,
-                    &dir.join(n),
-                    MAX_PAYLOAD_BYTES,
-                )?)
-                .into_owned()),
-                _ => Ok(String::new()),
-            }
-        };
         let blob = |key: &str| -> Result<Vec<u8>, PinError> {
             match name_of(key) {
                 Some(n) if safe_file_name(n) => {
@@ -653,6 +648,9 @@ impl PinnedStore {
                 }
                 _ => Ok(Vec::new()),
             }
+        };
+        let text = |key: &str| -> Result<String, PinError> {
+            Ok(String::from_utf8_lossy(&blob(key)?).into_owned())
         };
         payload.original_html = text("html")?;
         payload.original_text = text("text")?;

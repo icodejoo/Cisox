@@ -5,7 +5,7 @@
 //! 的语义由 [`crate::document`] 统一实现。
 
 use crate::custom_models::normalize_custom_models;
-use crate::schema::{SchemaEntry, ValueKind, entry_for};
+use crate::schema::{CUSTOM_MODELS_KEY, SchemaEntry, ValueKind, entry_for};
 use crate::selection::{normalize_presets, normalize_selection};
 use crate::shortcut::normalize_shortcuts;
 use crate::templates::{
@@ -74,14 +74,9 @@ const LANGUAGE_TAG_LEN: std::ops::RangeInclusive<usize> = 2..=3;
 /// 语言后续子标签长度范围。
 const LANGUAGE_SUBTAG_LEN: std::ops::RangeInclusive<usize> = 2..=8;
 
-/// 仅当值为字符串时返回。
-fn string_of(value: &Value) -> Option<&str> {
-    value.as_str()
-}
-
 /// 代理：`none` / `system` / `http|https|socks5|socks5h://地址`，其余无效；空串规整为 `none`。
 fn normalize_proxy(value: &Value) -> Normalization {
-    let Some(original) = string_of(value) else {
+    let Some(original) = value.as_str() else {
         return Normalization::invalid();
     };
     match snow_net::validate_proxy(original) {
@@ -95,7 +90,7 @@ fn normalize_proxy(value: &Value) -> Normalization {
 
 /// 主题：去空白、转小写后必须是 system/light/dark。
 fn normalize_theme(value: &Value) -> Normalization {
-    let Some(original) = string_of(value) else {
+    let Some(original) = value.as_str() else {
         return Normalization::invalid();
     };
     let normalized = trimmed(original).to_lowercase();
@@ -155,7 +150,7 @@ fn canonical_locale(text: &str) -> String {
 /// 不再接受 `system`（已取消“跟随系统”选项）与繁体（`zh_TW` / `zh_HK` / `zh_MO` / `zh_Hant`），
 /// 旧配置里的这些值加载时按“没有已保存值”回落为默认空串。
 fn normalize_language(value: &Value) -> Normalization {
-    let Some(original) = string_of(value) else {
+    let Some(original) = value.as_str() else {
         return Normalization::invalid();
     };
     let mut normalized = trimmed(original).to_string();
@@ -164,26 +159,25 @@ fn normalize_language(value: &Value) -> Normalization {
     }
     if eq_ignore_case(&normalized, LANGUAGE_SYSTEM) {
         return Normalization::invalid();
+    }
+    normalized = normalized.replace('-', "_");
+    if eq_ignore_case(&normalized, "en") {
+        normalized = LANGUAGE_EN_US.to_string();
     } else {
-        normalized = normalized.replace('-', "_");
-        if eq_ignore_case(&normalized, "en") {
-            normalized = LANGUAGE_EN_US.to_string();
-        } else {
-            let mut segments = normalized.split('_');
-            let head = segments.next().unwrap_or_default();
-            let head_ok = LANGUAGE_TAG_LEN.contains(&head.len())
-                && head.chars().all(|c| c.is_ascii_alphabetic());
-            let rest_ok = segments.all(|segment| {
-                LANGUAGE_SUBTAG_LEN.contains(&segment.len())
-                    && segment.chars().all(|c| c.is_ascii_alphanumeric())
-            });
-            if !head_ok || !rest_ok {
-                return Normalization::invalid();
-            }
-            normalized = canonical_locale(&normalized);
-            if UNSUPPORTED_TRADITIONAL.contains(&normalized.as_str()) {
-                return Normalization::invalid();
-            }
+        let mut segments = normalized.split('_');
+        let head = segments.next().unwrap_or_default();
+        let head_ok =
+            LANGUAGE_TAG_LEN.contains(&head.len()) && head.chars().all(|c| c.is_ascii_alphabetic());
+        let rest_ok = segments.all(|segment| {
+            LANGUAGE_SUBTAG_LEN.contains(&segment.len())
+                && segment.chars().all(|c| c.is_ascii_alphanumeric())
+        });
+        if !head_ok || !rest_ok {
+            return Normalization::invalid();
+        }
+        normalized = canonical_locale(&normalized);
+        if UNSUPPORTED_TRADITIONAL.contains(&normalized.as_str()) {
+            return Normalization::invalid();
         }
     }
     let changed = normalized != original;
@@ -245,19 +239,22 @@ fn normalize_tray_menu_options(entry: &SchemaEntry, value: &Value) -> Normalizat
     normalized
 }
 
-/// 值必须是给定集合中的整数。
-fn normalize_allowed_integer(value: &Value, allowed: &[i32]) -> Normalization {
+/// 值必须是 i32 内整数且满足 `accept`；输出规整为整数（`30.0` 写成 `30`）。
+fn normalize_integer_if(value: &Value, accept: impl Fn(i32) -> bool) -> Normalization {
     match as_integer(value) {
-        Some(number) if allowed.contains(&number) => {
-            Normalization::ok(int_value(i64::from(number)), false)
-        }
+        Some(number) if accept(number) => Normalization::ok(int_value(i64::from(number)), false),
         _ => Normalization::invalid(),
     }
 }
 
+/// 值必须是给定集合中的整数。
+fn normalize_allowed_integer(value: &Value, allowed: &[i32]) -> Normalization {
+    normalize_integer_if(value, |number| allowed.contains(&number))
+}
+
 /// `#AARRGGBB`：去空白转大写后必须恰为 `#` + 8 位十六进制。
 fn normalize_rgba_color(value: &Value) -> Normalization {
-    let Some(original) = string_of(value) else {
+    let Some(original) = value.as_str() else {
         return Normalization::invalid();
     };
     let normalized = trimmed(original).to_uppercase();
@@ -275,7 +272,7 @@ fn normalize_rgba_color(value: &Value) -> Normalization {
 
 /// 文件名格式：去空白后非空，且不含 `\ / : * ? " < > |`。
 fn normalize_filename_format(value: &Value) -> Normalization {
-    let Some(original) = string_of(value) else {
+    let Some(original) = value.as_str() else {
         return Normalization::invalid();
     };
     let normalized = trimmed(original);
@@ -288,7 +285,7 @@ fn normalize_filename_format(value: &Value) -> Normalization {
 
 /// 翻译语言：去空白后大小写不敏感命中白名单，输出规范拼写。
 fn normalize_translation_language(entry: &SchemaEntry, value: &Value) -> Normalization {
-    let Some(original) = string_of(value) else {
+    let Some(original) = value.as_str() else {
         return Normalization::invalid();
     };
     let trimmed_value = trimmed(original);
@@ -363,12 +360,7 @@ fn normalize_global_mouse_combination(value: &Value) -> Normalization {
 
 /// 整数范围：必须是 i32 内整数且落在 `[min, max]`。
 fn normalize_integer_range(value: &Value, min: i32, max: i32) -> Normalization {
-    match as_integer(value) {
-        Some(number) if (min..=max).contains(&number) => {
-            Normalization::ok(int_value(i64::from(number)), false)
-        }
-        _ => Normalization::invalid(),
-    }
+    normalize_integer_if(value, |number| (min..=max).contains(&number))
 }
 
 /// 类型精确匹配（布尔/对象）：类型对即合法，值不变。
@@ -404,7 +396,7 @@ pub fn normalize(key: &str, value: &Value) -> Normalization {
         return Normalization::invalid();
     };
     match key {
-        "api_configuration/custom_models" => return normalize_custom_models(value),
+        CUSTOM_MODELS_KEY => return normalize_custom_models(value),
         "interface/theme_mode" => return normalize_theme(value),
         "network/proxy" => return normalize_proxy(value),
         "interface/language" => return normalize_language(value),
@@ -477,7 +469,7 @@ pub fn normalize(key: &str, value: &Value) -> Normalization {
             },
         },
         ValueKind::String => {
-            let Some(original) = string_of(value) else {
+            let Some(original) = value.as_str() else {
                 return Normalization::invalid();
             };
             let normalized = trimmed(original);

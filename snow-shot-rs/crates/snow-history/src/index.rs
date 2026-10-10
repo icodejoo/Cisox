@@ -19,6 +19,14 @@ pub const MAX_DISPLAYS: usize = 32;
 pub const CANVAS_FILE: &str = "canvas_history.json";
 /// 截图结果图片文件名。
 pub const RESULT_FILE: &str = "capture_result.png";
+/// 合法的记录 `source` 取值（对照 C++ `sourceText`）。
+pub const SOURCES: [&str; 5] = [
+    "copied_to_clipboard",
+    "saved_to_file",
+    "pinned_to_screen",
+    "current_monitor",
+    "focused_window",
+];
 
 // 范围边界常量
 /// 1 MiB 字节数
@@ -520,13 +528,6 @@ fn parse_image(w: i64, h: i64, bytes: i64, pixels: &mut i64) -> Result<(), Strin
 
 /// 内存校验单条 record 的有效范围与逻辑结构。
 pub fn validate_record(r: &Record) -> Result<(), String> {
-    const SOURCES: [&str; 5] = [
-        "copied_to_clipboard",
-        "saved_to_file",
-        "pinned_to_screen",
-        "current_monitor",
-        "focused_window",
-    ];
     if !is_valid_uuid(&r.id) {
         return Err("id 不是合法 UUID".into());
     }

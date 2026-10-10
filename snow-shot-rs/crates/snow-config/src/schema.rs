@@ -39,6 +39,9 @@ pub(crate) fn default_video_filename_format() -> String {
 /// 版本号所在键。
 pub const SCHEMA_VERSION_KEY: &str = "storage/schema_version";
 
+/// 自定义 AI 模型列表所在键。
+pub(crate) const CUSTOM_MODELS_KEY: &str = "api_configuration/custom_models";
+
 /// 值类型（C++ `ConfigurationValueKind`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValueKind {
@@ -180,7 +183,7 @@ pub fn core_entries() -> &'static [SchemaEntry] {
 /// assert!(!snow_config::schema::is_extension_key("screenshot_translation/model"));
 /// ```
 pub fn is_extension_key(key: &str) -> bool {
-    entries()[CORE_ENTRY_COUNT..].iter().any(|item| item.key == key)
+    index_of(key).is_some_and(|position| position >= CORE_ENTRY_COUNT)
 }
 
 /// 按键查找条目。
@@ -244,8 +247,8 @@ pub fn default_value(key: &str) -> Value {
 
 /// 当前 schema 版本（取自 `storage/schema_version` 的默认值，即 3）。
 pub fn current_version() -> i32 {
-    default_value(SCHEMA_VERSION_KEY)
-        .as_i64()
+    entry_for(SCHEMA_VERSION_KEY)
+        .and_then(|item| item.default.as_i64())
         .and_then(|v| i32::try_from(v).ok())
         .unwrap_or(0)
 }
@@ -273,13 +276,11 @@ pub fn insert_path(root: &mut Map<String, Value>, path: &str, value: Value) {
     if name.contains('/') {
         return;
     }
-    let slot = root
-        .entry(group.to_string())
-        .or_insert_with(|| Value::Object(Map::new()));
-    if !slot.is_object() {
-        *slot = Value::Object(Map::new());
+    // 分组已存在且是对象时不再为键名分配
+    if !root.get(group).is_some_and(Value::is_object) {
+        root.insert(group.to_string(), Value::Object(Map::new()));
     }
-    if let Value::Object(group_map) = slot {
+    if let Some(Value::Object(group_map)) = root.get_mut(group) {
         group_map.insert(name.to_string(), value);
     }
 }

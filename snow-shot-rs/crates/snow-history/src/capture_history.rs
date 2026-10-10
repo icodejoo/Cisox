@@ -30,14 +30,6 @@ const INDEX_FILE: &str = "index.json";
 const TEMP_PREFIX: &str = ".tmp-";
 /// 读盘失败统一原因。
 const READ_FAILED: &str = "Unable to read a capture-history payload";
-/// 合法的 `source` 取值（对照 C++ `sourceText`）。
-const SOURCES: [&str; 5] = [
-    "copied_to_clipboard",
-    "saved_to_file",
-    "pinned_to_screen",
-    "current_monitor",
-    "focused_window",
-];
 
 /// 截图历史策略。
 #[derive(Debug, Clone, PartialEq)]
@@ -766,10 +758,11 @@ impl CaptureHistoryRepository {
     }
 
     /// 原子提交索引，成功后才让快照生效；失败不改动任何内存状态。
-    fn commit(&mut self, next: Snapshot, records_changed: bool) -> Result<(), HistoryError> {
+    fn commit(&mut self, mut next: Snapshot, records_changed: bool) -> Result<(), HistoryError> {
+        // 序列化期间临时借走记录列表，省掉一次整份 clone，写完再还回。
         let document = HistoryIndex {
             format_version: index::INDEX_VERSION,
-            records: next.records.clone(),
+            records: std::mem::take(&mut next.records),
             pending_deletions: next
                 .pending
                 .iter()
@@ -781,7 +774,9 @@ impl CaptureHistoryRepository {
                 .collect(),
             extra: self.root_extra.clone(),
         };
-        let written = index::save_index(&document).ok().filter(|bytes| {
+        let serialized = index::save_index(&document);
+        next.records = document.records;
+        let written = serialized.ok().filter(|bytes| {
             fs::create_dir_all(&self.root).is_ok()
                 && contained_path(&self.config_dir, &self.root)
                 && write_atomic(&self.index_path, bytes).is_ok()
@@ -795,13 +790,18 @@ impl CaptureHistoryRepository {
         Ok(())
     }
 
+    /// 年龄淘汰的截止时刻（毫秒）：早于它的记录过期。
+    fn retention_cutoff(&self) -> i64 {
+        (self.options.clock)() - i64::from(self.options.policy.retention_days) * MILLIS_PER_DAY
+    }
+
     /// 是否存在早于保留期的记录。
     fn has_expired(&self) -> bool {
         let policy = &self.options.policy;
         if !policy.enabled || policy.keep_permanently {
             return false;
         }
-        let cutoff = (self.options.clock)() - i64::from(policy.retention_days) * MILLIS_PER_DAY;
+        let cutoff = self.retention_cutoff();
         self.snapshot.records.iter().any(|r| created_ms(r) < cutoff)
     }
 
@@ -811,7 +811,7 @@ impl CaptureHistoryRepository {
         if !policy.enabled || policy.keep_permanently {
             return;
         }
-        let cutoff = (self.options.clock)() - i64::from(policy.retention_days) * MILLIS_PER_DAY;
+        let cutoff = self.retention_cutoff();
         let mut bytes: i64 = next.records.iter().map(|r| r.total_record_size).sum();
         let mut count = next.records.len();
         let mut victims: HashSet<String> = HashSet::new();
@@ -884,7 +884,7 @@ impl CaptureHistoryRepository {
             || !valid_canvas(&draft.canvas_history)
             || draft.displays.is_empty()
             || draft.displays.len() > index::MAX_DISPLAYS
-            || !SOURCES.contains(&draft.source.as_str())
+            || !index::SOURCES.contains(&draft.source.as_str())
         {
             return None;
         }

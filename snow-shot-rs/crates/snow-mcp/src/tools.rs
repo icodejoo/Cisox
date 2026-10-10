@@ -228,8 +228,8 @@ fn settings_get(ctx: &ToolContext<'_>, args: &Value) -> Result<Value, ToolError>
         if !selected {
             continue;
         }
-        let sensitive = SENSITIVE_KEY_PARTS.iter().any(|part| k.contains(part));
-        values.insert(k, if sensitive { json!(REDACTED) } else { v });
+        let value = if is_sensitive(&k) { json!(REDACTED) } else { v };
+        values.insert(k, value);
     }
     if let Some(want) = key
         && values.is_empty()

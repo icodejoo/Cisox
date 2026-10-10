@@ -54,8 +54,8 @@ impl fmt::Debug for Token {
     }
 }
 
-/// 字节转小写十六进制。
-fn hex(bytes: &[u8]) -> String {
+/// 字节转小写十六进制（令牌与代数标识共用）。
+pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
@@ -130,6 +130,13 @@ mod tests {
         assert!(!t.matches(&secret[1..]));
         assert!(!t.matches(&format!("{}0", &secret[..secret.len() - 1])));
         assert!(!format!("{t:?}").contains(&secret));
+    }
+
+    /// 十六进制按字节补零、全小写。
+    #[test]
+    fn hex_is_zero_padded_lowercase() {
+        assert_eq!(hex(&[0x00, 0x0a, 0xff]), "000aff");
+        assert_eq!(hex(&[]), "");
     }
 
     /// 退避翻倍、封顶、成功后清零。

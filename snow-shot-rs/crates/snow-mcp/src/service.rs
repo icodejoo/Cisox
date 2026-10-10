@@ -2,7 +2,7 @@
 //!
 //! 只有启动后才占用线程与管道；丢弃即断开连接、关闭管道并删除描述符，不留后台线程。
 
-use crate::auth::{AuthGate, Token};
+use crate::auth::{AuthGate, Token, hex};
 use crate::descriptor::{self, Descriptor};
 use crate::registry::{Registry, Scope};
 use crate::session::{Session, Shared};
@@ -72,7 +72,7 @@ impl McpService {
         let token = Token::generate_system()?;
         let mut gen_bytes = [0u8; GENERATION_BYTES];
         snow_platform::random::fill_random(&mut gen_bytes)?;
-        let generation: String = gen_bytes.iter().map(|b| format!("{b:02x}")).collect();
+        let generation = hex(&gen_bytes);
         let pipe_name = match config.pipe_name {
             Some(name) => name,
             None => pipe_name_for(PIPE_APP_ID)?,

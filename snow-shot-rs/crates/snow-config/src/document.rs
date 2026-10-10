@@ -7,16 +7,15 @@
 use crate::custom_models::{custom_ai_models_from_json, custom_ai_models_to_json};
 use crate::normalize::normalize;
 use crate::schema::{
-    SCHEMA_VERSION_KEY, complete_default_document, current_version, default_value, entries,
-    insert_path, parse_integer_version, value_at_path,
+    CUSTOM_MODELS_KEY, SCHEMA_VERSION_KEY, complete_default_document, current_version,
+    default_value, entries, insert_path, parse_integer_version, value_at_path,
 };
 use crate::value::{int_value, json_eq};
 use serde_json::{Map, Value};
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt::Write;
 
-/// 自定义模型键。
-const CUSTOM_MODELS_KEY: &str = "api_configuration/custom_models";
 /// 托盘菜单键。
 const TRAY_MENU_KEY: &str = "tray/menu_options";
 /// 贴图销毁快捷键键（v3 迁移对象）。
@@ -31,6 +30,9 @@ const PREVIOUS_DESTROY_SHORTCUT: &str = "Ctrl+Esc";
 const DESTROY_SHORTCUT_MIGRATION_VERSION: i32 = 3;
 /// JSON 缩进（Qt Indented 格式）。
 const INDENT: &str = "    ";
+/// 自定义模型有非法项被丢弃时的提示（不含配置内容）。
+const CUSTOM_MODELS_REPAIRED_MESSAGE: &str =
+    "Some custom AI model configurations are invalid and were ignored";
 
 /// 文档兼容性状态（C++ `ConfigurationCompatibility`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -136,29 +138,29 @@ fn materialize(
             }
             continue;
         };
-        let mut raw = stored.clone();
+        let mut raw = Cow::Borrowed(stored);
         // 仅升级“未改动的旧默认托盘菜单”，用户自定义顺序保持不变
         if item.key == TRAY_MENU_KEY
             && mutate_document
             && !overlay.contains_key(RESTORE_SHORTCUT_KEY)
         {
-            let previous_default: Vec<Value> = item
+            let previous_default: Vec<&Value> = item
                 .default
                 .as_array()
                 .map(Vec::as_slice)
                 .unwrap_or_default()
                 .iter()
                 .filter(|entry| entry.as_str() != Some(RESTORE_TRAY_ITEM))
-                .cloned()
                 .collect();
             if raw.as_array().is_some_and(|array| {
-                json_eq(
-                    &Value::Array(previous_default.clone()),
-                    &Value::Array(array.clone()),
-                )
+                array.len() == previous_default.len()
+                    && array
+                        .iter()
+                        .zip(&previous_default)
+                        .all(|(stored, previous)| json_eq(stored, previous))
             }) {
-                raw = item.default.clone();
-                insert_path(&mut result.document, item.key, raw.clone());
+                raw = Cow::Owned(item.default.clone());
+                insert_path(&mut result.document, item.key, item.default.clone());
                 result.dirty = true;
             }
         }
@@ -173,7 +175,7 @@ fn materialize(
             );
             let stored_normalized = normalize(item.key, &raw);
             if stored_normalized.valid && json_eq(&stored_normalized.value, &previous.value) {
-                raw = item.default.clone();
+                raw = Cow::Owned(item.default.clone());
                 migrated_destroy_shortcut = true;
             }
         }
@@ -232,6 +234,14 @@ fn materialize(
     result
 }
 
+/// 由全部 schema 默认值构成的两级文档（根非对象时退化为空表，实际不会发生）。
+fn default_document_map() -> Map<String, Value> {
+    match complete_default_document() {
+        Value::Object(map) => map,
+        _ => Map::new(),
+    }
+}
+
 /// 从两级文档提取 schema 已知键的覆盖值（跳过版本键）。
 fn overlay_from_document(document: &Map<String, Value>) -> BTreeMap<String, Value> {
     entries()
@@ -284,10 +294,7 @@ impl ConfigDocument {
             .iter()
             .map(|item| (item.key.to_string(), item.default.clone()))
             .collect();
-        let mut document = match complete_default_document() {
-            Value::Object(map) => map,
-            _ => Map::new(),
-        };
+        let mut document = default_document_map();
         let mut compatibility = Compatibility::Current;
         let mut dirty = bytes.is_none();
         let mut last_error = String::new();
@@ -322,7 +329,7 @@ impl ConfigDocument {
                             document = materialized.document;
                             dirty = materialized.dirty;
                             if materialized.custom_models_repaired {
-                                last_error = "Some custom AI model configurations are invalid and were ignored".to_string();
+                                last_error = CUSTOM_MODELS_REPAIRED_MESSAGE.to_string();
                             }
                         }
                     }
@@ -349,10 +356,78 @@ impl ConfigDocument {
     /// # 参数
     /// - `key`：`"组/名"` 键
     pub fn value(&self, key: &str) -> Value {
-        self.values
-            .get(key)
-            .cloned()
-            .unwrap_or_else(|| default_value(key))
+        self.get(key).cloned().unwrap_or_else(|| default_value(key))
+    }
+
+    /// 按引用读取键的当前值（不克隆，设置页热路径用）；未知键返回 `None`。
+    ///
+    /// # 参数
+    /// - `key`：`"组/名"` 键
+    ///
+    /// # 示例
+    /// ```
+    /// use snow_config::document::ConfigDocument;
+    ///
+    /// let doc = ConfigDocument::from_bytes(None);
+    /// assert!(doc.get("capture_history/retention_days").is_some());
+    /// assert!(doc.get("no/such_key").is_none());
+    /// ```
+    pub fn get(&self, key: &str) -> Option<&Value> {
+        self.values.get(key)
+    }
+
+    /// 读取布尔键；未知键或类型不符时返回 `default`。
+    ///
+    /// # 参数
+    /// - `key`：`"组/名"` 键
+    /// - `default`：取不到布尔值时的回退
+    ///
+    /// # 示例
+    /// ```
+    /// use snow_config::document::ConfigDocument;
+    ///
+    /// let doc = ConfigDocument::from_bytes(None);
+    /// assert!(!doc.bool_or("mcp/enabled", true));
+    /// assert!(doc.bool_or("no/such_key", true));
+    /// ```
+    pub fn bool_or(&self, key: &str, default: bool) -> bool {
+        self.get(key).and_then(Value::as_bool).unwrap_or(default)
+    }
+
+    /// 读取整数键；未知键或不是整数时返回 `default`。
+    ///
+    /// # 参数
+    /// - `key`：`"组/名"` 键
+    /// - `default`：取不到整数时的回退
+    ///
+    /// # 示例
+    /// ```
+    /// use snow_config::document::ConfigDocument;
+    ///
+    /// let doc = ConfigDocument::from_bytes(None);
+    /// assert_eq!(doc.int_or("capture_history/retention_days", 0), 7);
+    /// assert_eq!(doc.int_or("no/such_key", -1), -1);
+    /// ```
+    pub fn int_or(&self, key: &str, default: i64) -> i64 {
+        self.get(key).and_then(Value::as_i64).unwrap_or(default)
+    }
+
+    /// 读取字符串键（借用，不分配）；未知键或不是字符串时返回 `default`。
+    ///
+    /// # 参数
+    /// - `key`：`"组/名"` 键
+    /// - `default`：取不到字符串时的回退
+    ///
+    /// # 示例
+    /// ```
+    /// use snow_config::document::ConfigDocument;
+    ///
+    /// let doc = ConfigDocument::from_bytes(None);
+    /// assert_eq!(doc.str_or("capture_history/compression_level", ""), "medium");
+    /// assert_eq!(doc.str_or("no/such_key", "x"), "x");
+    /// ```
+    pub fn str_or<'a>(&'a self, key: &str, default: &'a str) -> &'a str {
+        self.get(key).and_then(Value::as_str).unwrap_or(default)
     }
 
     /// 全部扁平键值的只读视图。
@@ -454,19 +529,15 @@ impl ConfigDocument {
         if !self.is_writable() {
             return Err(SetError::ReadOnly);
         }
-        let base = match complete_default_document() {
-            Value::Object(map) => map,
-            _ => Map::new(),
-        };
         let materialized = materialize(
             values,
-            base,
+            default_document_map(),
             version,
             Compatibility::Current,
             OverlayPolicy::ReplaceAll,
         );
         self.last_error = if materialized.custom_models_repaired {
-            "Some custom AI model configurations are invalid and were ignored".to_string()
+            CUSTOM_MODELS_REPAIRED_MESSAGE.to_string()
         } else {
             String::new()
         };
@@ -490,7 +561,7 @@ impl ConfigDocument {
     /// ```
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut text = String::new();
-        write_qt_json(&Value::Object(self.document.clone()), 0, &mut text);
+        write_qt_object(&self.document, 0, &mut text);
         text.push('\n');
         text.into_bytes()
     }
@@ -554,19 +625,22 @@ fn write_qt_json(value: &Value, depth: usize, out: &mut String) {
             out.push_str(&INDENT.repeat(depth));
             out.push(']');
         }
-        Value::Object(map) => {
-            out.push_str("{\n");
-            for (index, (key, item)) in map.iter().enumerate() {
-                out.push_str(&INDENT.repeat(depth + 1));
-                write_json_string(key, out);
-                out.push_str(": ");
-                write_qt_json(item, depth + 1, out);
-                out.push_str(if index + 1 < map.len() { ",\n" } else { "\n" });
-            }
-            out.push_str(&INDENT.repeat(depth));
-            out.push('}');
-        }
+        Value::Object(map) => write_qt_object(map, depth, out),
     }
+}
+
+/// 以 Qt 排版写出 JSON 对象（整份文档直接序列化，免去为包一层 `Value` 而整份克隆）。
+fn write_qt_object(map: &Map<String, Value>, depth: usize, out: &mut String) {
+    out.push_str("{\n");
+    for (index, (key, item)) in map.iter().enumerate() {
+        out.push_str(&INDENT.repeat(depth + 1));
+        write_json_string(key, out);
+        out.push_str(": ");
+        write_qt_json(item, depth + 1, out);
+        out.push_str(if index + 1 < map.len() { ",\n" } else { "\n" });
+    }
+    out.push_str(&INDENT.repeat(depth));
+    out.push('}');
 }
 
 #[cfg(test)]
@@ -920,6 +994,26 @@ mod tests {
             doc.value("screenshot_ui/cursor_guide_line_color"),
             json!("#ABCDEF80")
         );
+    }
+
+    /// 类型化读取：命中返回已修复值，未知键或类型不符回退到传入默认。
+    #[test]
+    fn typed_getters_fall_back() {
+        let mut doc = ConfigDocument::from_bytes(None);
+        doc.set_value("mcp/enabled", json!(true)).unwrap();
+        assert!(doc.bool_or("mcp/enabled", false));
+        assert!(doc.bool_or("no/such_key", true) && !doc.bool_or("no/such_key", false));
+        // 类型不符：字符串键按布尔读、布尔键按整数读都回退
+        assert!(doc.bool_or("capture_history/compression_level", true));
+        assert_eq!(doc.int_or("mcp/enabled", 9), 9);
+        assert_eq!(doc.int_or("capture_history/retention_days", 0), 7);
+        assert_eq!(
+            doc.str_or("capture_history/compression_level", ""),
+            "medium"
+        );
+        assert_eq!(doc.str_or("capture_history/retention_days", "d"), "d");
+        assert_eq!(doc.get("mcp/enabled"), Some(&json!(true)));
+        assert_eq!(doc.get("no/such_key"), None);
     }
 
     /// 快照导入：缺失键补默认、非法值回退、版本过新拒绝。

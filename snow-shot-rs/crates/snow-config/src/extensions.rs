@@ -220,117 +220,70 @@ pub const DEFAULT_MAX_RESIDENT: i32 = 1;
 /// 最大同时常驻包数上限。
 pub const MAX_MAX_RESIDENT: i32 = 4;
 
-/// 返回全部扩展条目（追加在原 238 项之后）。
+/// 无白名单的字符串条目。
+fn text_entry(key: &'static str, default: &str) -> SchemaEntry {
+    entry(key, json!(default), ValueKind::String, None, &[], None)
+}
+
+/// 带白名单的字符串条目。
+fn choice_entry(key: &'static str, default: &str, allowed: &'static [&'static str]) -> SchemaEntry {
+    entry(key, json!(default), ValueKind::String, None, allowed, None)
+}
+
+/// 布尔条目。
+fn flag_entry(key: &'static str, default: bool) -> SchemaEntry {
+    entry(key, json!(default), ValueKind::Boolean, None, &[], None)
+}
+
+/// 带范围的整数条目。
+fn int_entry(key: &'static str, default: i32, min: i32, max: i32, step: i32) -> SchemaEntry {
+    let range = IntRange { min, max, step };
+    entry(
+        key,
+        json!(default),
+        ValueKind::Integer,
+        Some(range),
+        &[],
+        None,
+    )
+}
+
+/// 默认不绑定的热键列表条目（最多 2 个绑定）。
+fn hotkey_entry(key: &'static str) -> SchemaEntry {
+    entry(key, json!([]), ValueKind::StringList, None, &[], Some(2))
+}
+
+/// 返回全部扩展条目（追加在原 238 项之后，顺序不可调整）。
 pub(crate) fn extension_entries() -> Vec<SchemaEntry> {
     vec![
-        entry(
-            KEY_TRANSLATION_BACKEND,
-            json!(BACKEND_LOCAL),
-            ValueKind::String,
-            None,
-            BACKEND_VALUES,
-            None,
-        ),
-        entry(
-            KEY_LOCAL_MODELS_DIR,
-            json!(""),
-            ValueKind::String,
-            None,
-            &[],
-            None,
-        ),
-        entry(
-            KEY_LOCAL_MODEL_ID,
-            json!(""),
-            ValueKind::String,
-            None,
-            &[],
-            None,
-        ),
-        entry(
+        choice_entry(KEY_TRANSLATION_BACKEND, BACKEND_LOCAL, BACKEND_VALUES),
+        text_entry(KEY_LOCAL_MODELS_DIR, ""),
+        text_entry(KEY_LOCAL_MODEL_ID, ""),
+        int_entry(
             KEY_LOCAL_IDLE_SECONDS,
-            json!(DEFAULT_IDLE_SECONDS),
-            ValueKind::Integer,
-            Some(IntRange {
-                min: MIN_IDLE_SECONDS,
-                max: MAX_IDLE_SECONDS,
-                step: IDLE_SECONDS_STEP,
-            }),
-            &[],
-            None,
+            DEFAULT_IDLE_SECONDS,
+            MIN_IDLE_SECONDS,
+            MAX_IDLE_SECONDS,
+            IDLE_SECONDS_STEP,
         ),
-        entry(
-            KEY_LOCAL_NUM_BEAMS,
-            json!(DEFAULT_NUM_BEAMS),
-            ValueKind::Integer,
-            Some(IntRange {
-                min: 1,
-                max: MAX_NUM_BEAMS,
-                step: 1,
-            }),
-            &[],
-            None,
-        ),
-        entry(
-            KEY_LOCAL_LOW_MEMORY,
-            json!(false),
-            ValueKind::Boolean,
-            None,
-            &[],
-            None,
-        ),
-        entry(
+        int_entry(KEY_LOCAL_NUM_BEAMS, DEFAULT_NUM_BEAMS, 1, MAX_NUM_BEAMS, 1),
+        flag_entry(KEY_LOCAL_LOW_MEMORY, false),
+        choice_entry(
             KEY_LOCAL_ROUTE_MODE,
-            json!(ROUTE_SPECIALIZED_FIRST),
-            ValueKind::String,
-            None,
+            ROUTE_SPECIALIZED_FIRST,
             ROUTE_MODE_VALUES,
-            None,
         ),
-        entry(
+        int_entry(
             KEY_LOCAL_MAX_RESIDENT,
-            json!(DEFAULT_MAX_RESIDENT),
-            ValueKind::Integer,
-            Some(IntRange {
-                min: DEFAULT_MAX_RESIDENT,
-                max: MAX_MAX_RESIDENT,
-                step: 1,
-            }),
-            &[],
-            None,
+            DEFAULT_MAX_RESIDENT,
+            DEFAULT_MAX_RESIDENT,
+            MAX_MAX_RESIDENT,
+            1,
         ),
-        entry(
-            KEY_PAGE_AUTO_TRANSLATE,
-            json!(false),
-            ValueKind::Boolean,
-            None,
-            &[],
-            None,
-        ),
-        entry(
-            KEY_LATEX_MODEL_DIR,
-            json!(""),
-            ValueKind::String,
-            None,
-            &[],
-            None,
-        ),
-        entry(
-            KEY_LATEX_MODEL,
-            json!(""),
-            ValueKind::String,
-            None,
-            &[],
-            None,
-        ),
-        entry(
-            KEY_TABLE_MODEL,
-            json!(""),
-            ValueKind::String,
-            None,
-            &[],
-            None,
-        ),
+        flag_entry(KEY_PAGE_AUTO_TRANSLATE, false),
+        text_entry(KEY_LATEX_MODEL_DIR, ""),
+        text_entry(KEY_LATEX_MODEL, ""),
+        text_entry(KEY_TABLE_MODEL, ""),
         entry(
             KEY_LATEX_SHORTCUT,
             json!([{"portable": "Ctrl+L"}]),
@@ -339,182 +292,63 @@ pub(crate) fn extension_entries() -> Vec<SchemaEntry> {
             &[],
             Some(2),
         ),
-        entry(
-            KEY_UPDATE_MANIFEST_URL,
-            json!(""),
-            ValueKind::String,
-            None,
-            &[],
-            None,
-        ),
-        entry(
-            KEY_OCR_BACKEND,
-            json!(default_ocr_backend()),
-            ValueKind::String,
-            None,
-            OCR_BACKEND_VALUES,
-            None,
-        ),
-        entry(
-            KEY_TRANSLATE_INPUT_HOTKEY,
-            json!([]),
-            ValueKind::StringList,
-            None,
-            &[],
-            Some(2),
-        ),
-        entry(
-            KEY_DICTATION_TOGGLE_HOTKEY,
-            json!([]),
-            ValueKind::StringList,
-            None,
-            &[],
-            Some(2),
-        ),
-        entry(
-            KEY_DICTATION_HOLD_HOTKEY,
-            json!([]),
-            ValueKind::StringList,
-            None,
-            &[],
-            Some(2),
-        ),
-        entry(
+        text_entry(KEY_UPDATE_MANIFEST_URL, ""),
+        choice_entry(KEY_OCR_BACKEND, default_ocr_backend(), OCR_BACKEND_VALUES),
+        hotkey_entry(KEY_TRANSLATE_INPUT_HOTKEY),
+        hotkey_entry(KEY_DICTATION_TOGGLE_HOTKEY),
+        hotkey_entry(KEY_DICTATION_HOLD_HOTKEY),
+        choice_entry(
             KEY_DICTATION_BACKEND,
-            json!(DICTATION_BACKEND_LOCAL_MODEL),
-            ValueKind::String,
-            None,
+            DICTATION_BACKEND_LOCAL_MODEL,
             DICTATION_BACKEND_VALUES,
-            None,
         ),
-        entry(
+        choice_entry(
             KEY_DICTATION_TRIGGER_MODE,
-            json!(DICTATION_MODE_BOTH),
-            ValueKind::String,
-            None,
+            DICTATION_MODE_BOTH,
             DICTATION_MODE_VALUES,
-            None,
         ),
-        entry(
+        choice_entry(
             KEY_DICTATION_RECOGNITION_MODE,
-            json!(DICTATION_RECOGNITION_STREAMING),
-            ValueKind::String,
-            None,
+            DICTATION_RECOGNITION_STREAMING,
             DICTATION_RECOGNITION_VALUES,
-            None,
         ),
-        entry(
+        choice_entry(
             KEY_DICTATION_LANGUAGE_DIMENSION,
-            json!(DICTATION_DIMENSION_BILINGUAL),
-            ValueKind::String,
-            None,
+            DICTATION_DIMENSION_BILINGUAL,
             DICTATION_DIMENSION_VALUES,
-            None,
         ),
-        entry(
-            KEY_DICTATION_MODEL_ID,
-            json!(""),
-            ValueKind::String,
-            None,
-            &[],
-            None,
-        ),
-        entry(
-            KEY_DICTATION_SENSEVOICE_ITN,
-            json!(true),
-            ValueKind::Boolean,
-            None,
-            &[],
-            None,
-        ),
-        entry(
-            KEY_DICTATION_TRANSLATE_ENABLED,
-            json!(false),
-            ValueKind::Boolean,
-            None,
-            &[],
-            None,
-        ),
-        entry(
+        text_entry(KEY_DICTATION_MODEL_ID, ""),
+        flag_entry(KEY_DICTATION_SENSEVOICE_ITN, true),
+        flag_entry(KEY_DICTATION_TRANSLATE_ENABLED, false),
+        choice_entry(
             KEY_DICTATION_TRANSLATE_TARGET,
-            json!(DICTATION_TARGET_AUTO),
-            ValueKind::String,
-            None,
+            DICTATION_TARGET_AUTO,
             DICTATION_TARGET_VALUES,
-            None,
         ),
-        entry(
-            KEY_DICTATION_MODEL_DIR,
-            json!(""),
-            ValueKind::String,
-            None,
-            &[],
-            None,
-        ),
-        entry(
-            KEY_DICTATION_LANGUAGE,
-            json!(DEFAULT_DICTATION_LANGUAGE),
-            ValueKind::String,
-            None,
-            &[],
-            None,
-        ),
-        entry(
+        text_entry(KEY_DICTATION_MODEL_DIR, ""),
+        text_entry(KEY_DICTATION_LANGUAGE, DEFAULT_DICTATION_LANGUAGE),
+        int_entry(
             KEY_DICTATION_THREADS,
-            json!(DEFAULT_DICTATION_THREADS),
-            ValueKind::Integer,
-            Some(IntRange {
-                min: 1,
-                max: MAX_DICTATION_THREADS,
-                step: 1,
-            }),
-            &[],
-            None,
+            DEFAULT_DICTATION_THREADS,
+            1,
+            MAX_DICTATION_THREADS,
+            1,
         ),
-        entry(
+        choice_entry(
             KEY_DICTATION_OUTPUT_MODE,
-            json!(DICTATION_OUTPUT_AUTO),
-            ValueKind::String,
-            None,
+            DICTATION_OUTPUT_AUTO,
             DICTATION_OUTPUT_VALUES,
-            None,
         ),
-        entry(
-            KEY_DICTATION_TYPE_WITH_OVERLAY,
-            json!(false),
-            ValueKind::Boolean,
-            None,
-            &[],
-            None,
-        ),
-        entry(
+        flag_entry(KEY_DICTATION_TYPE_WITH_OVERLAY, false),
+        int_entry(
             KEY_DICTATION_MAX_SECONDS,
-            json!(DEFAULT_DICTATION_MAX_SECONDS),
-            ValueKind::Integer,
-            Some(IntRange {
-                min: 0,
-                max: MAX_DICTATION_MAX_SECONDS,
-                step: DICTATION_MAX_SECONDS_STEP,
-            }),
-            &[],
-            None,
+            DEFAULT_DICTATION_MAX_SECONDS,
+            0,
+            MAX_DICTATION_MAX_SECONDS,
+            DICTATION_MAX_SECONDS_STEP,
         ),
-        entry(
-            KEY_MCP_ALLOW_CAPTURE,
-            json!(true),
-            ValueKind::Boolean,
-            None,
-            &[],
-            None,
-        ),
-        entry(
-            KEY_MCP_ALLOW_CONTROL,
-            json!(false),
-            ValueKind::Boolean,
-            None,
-            &[],
-            None,
-        ),
+        flag_entry(KEY_MCP_ALLOW_CAPTURE, true),
+        flag_entry(KEY_MCP_ALLOW_CONTROL, false),
     ]
 }
 

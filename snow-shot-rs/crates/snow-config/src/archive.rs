@@ -7,10 +7,11 @@
 //! [`ArchiveError::UnsupportedCompression`]。
 
 use crate::normalize::normalize;
-use crate::schema::{SCHEMA_VERSION_KEY, contains, current_version, parse_integer_version};
-use crate::store::civil_from_days;
+use crate::schema::{
+    CUSTOM_MODELS_KEY, SCHEMA_VERSION_KEY, contains, current_version, parse_integer_version,
+};
+use crate::store::{utc_fields, write_atomic};
 use serde_json::{Map, Value, json};
-use snow_platform::atomic_file::atomic_write;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
@@ -30,8 +31,6 @@ const MAX_ENTRIES: usize = 16;
 const MAX_MANIFEST_BYTES: usize = 64 * 1024;
 /// 配置条目大小上限（字节）。
 const MAX_CONFIG_BYTES: usize = 8 * 1024 * 1024;
-/// 自定义 AI 模型的配置键。
-const CUSTOM_MODELS_KEY: &str = "api_configuration/custom_models";
 /// 模型记录里的 id 字段。
 const MODEL_ID_FIELD: &str = "id";
 /// 模型记录里的密钥字段。
@@ -210,12 +209,8 @@ pub fn write_archive_bytes(
 /// - `path`：目标归档路径（父目录不存在时创建）
 /// - `bytes`：[`write_archive_bytes`] 的结果
 pub fn write_archive_file(path: &Path, bytes: &[u8]) -> Result<(), ArchiveError> {
-    let io = |e: std::io::Error| ArchiveError::Io(e.to_string());
     path.file_name().ok_or(ArchiveError::Invalid)?;
-    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-        fs::create_dir_all(parent).map_err(io)?;
-    }
-    atomic_write(path, bytes).map_err(io)
+    write_atomic(path, bytes).map_err(|e| ArchiveError::Io(e.to_string()))
 }
 
 /// 读取并校验归档文件。
@@ -308,7 +303,7 @@ pub fn preserve_omitted_credentials(
     let existing = current
         .get(CUSTOM_MODELS_KEY)
         .and_then(Value::as_array)
-        .cloned()
+        .map(Vec::as_slice)
         .unwrap_or_default();
     let ids = &contents.redacted_credential_ids;
     let Some(Value::Array(models)) = contents.values.get_mut(CUSTOM_MODELS_KEY) else {
@@ -357,15 +352,8 @@ pub fn iso_utc_now() -> String {
 
 /// 把 Unix 秒与毫秒格式化为 ISO 8601（UTC）。
 fn iso_utc(seconds: u64, millis: u32) -> String {
-    let days = i64::try_from(seconds / 86_400).unwrap_or(0);
-    let rest = seconds % 86_400;
-    let (year, month, day) = civil_from_days(days);
-    format!(
-        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{millis:03}Z",
-        rest / 3600,
-        rest % 3600 / 60,
-        rest % 60
-    )
+    let (year, month, day, hour, minute, second) = utc_fields(seconds);
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{millis:03}Z")
 }
 
 /// 解析 JSON 对象字节。
@@ -572,6 +560,7 @@ fn parse_zip(data: &[u8]) -> Result<BTreeMap<String, Vec<u8>>, ArchiveError> {
 mod tests {
     use super::*;
     use crate::document::ConfigDocument;
+    use crate::test_util::temp_dir;
 
     /// 构造两个键 + 一个带密钥的模型的快照。
     fn sample() -> BTreeMap<String, Value> {
@@ -825,7 +814,7 @@ mod tests {
     /// 文件读写往返；写入失败不留临时文件；用临时目录，不碰上游数据目录。
     #[test]
     fn file_round_trip() {
-        let dir = std::env::temp_dir().join(format!("cisox-archive-test-{}", std::process::id()));
+        let dir = temp_dir("archive");
         let path = dir.join("sub").join("a.zip");
         let bytes = write_archive_bytes(&sample(), current_version(), "1", "t", false);
         write_archive_file(&path, &bytes).unwrap();

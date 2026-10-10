@@ -64,21 +64,6 @@ const QUICK_SAVE_ID: &str = "quick-save";
 /// LaTeX 公式识别功能标识符
 const LATEX_RECOGNITION_ID: &str = "latex-recognition";
 
-/// 绘图工具的内部标识符列表（`kDrawingToolIds`）。
-pub const DRAWING_TOOL_IDS: &[&str] = &[
-    ID_SHAPE,
-    ID_ARROW,
-    ID_LINE,
-    ID_FREE_DRAW,
-    ID_HIGHLIGHTER,
-    ID_SPOTLIGHT,
-    ID_TEXT,
-    ID_SERIAL_NUMBER,
-    ID_FILTER,
-    ID_ERASER,
-    ID_WATERMARK,
-];
-
 /// 绘图工具栏可用项（`kDrawingToolbarItemIds`，工具 + separator/undo/redo）。
 pub const DRAWING_TOOLBAR_ITEM_IDS: &[&str] = &[
     ID_SHAPE,
@@ -352,16 +337,13 @@ pub fn normalize_toolbar_layout(
         {
             positions = to_owned_positions(default_positions);
         }
-        let mut recognition_position: Option<usize> = None;
-        for anchor in [ID_BARCODE_RECOGNITION, ID_TABLE_RECOGNITION] {
-            if let Some(index) = positions
-                .iter()
-                .position(|group| group.iter().any(|id| id == anchor))
-            {
-                recognition_position = Some(index);
-                break;
-            }
-        }
+        let recognition_position = [ID_BARCODE_RECOGNITION, ID_TABLE_RECOGNITION]
+            .into_iter()
+            .find_map(|anchor| {
+                positions
+                    .iter()
+                    .position(|group| group.iter().any(|id| id == anchor))
+            });
         for id in [ID_CONVERT_TO_MARKDOWN, ID_CONVERT_TO_HTML] {
             if let Some(index) = recognition_position
                 && !positioned.contains(id)

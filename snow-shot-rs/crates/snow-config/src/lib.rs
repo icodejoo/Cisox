@@ -39,6 +39,25 @@ pub mod value;
 /// 本 crate 的阶段标记，用于骨架连通性测试。
 pub const PHASE: &str = "P1";
 
+/// 测试公用夹具（仅测试编译）。
+#[cfg(test)]
+pub(crate) mod test_util {
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// 创建本进程内唯一的临时目录（进程 ID + 计数，避免并发冲突），调用方负责清理。
+    pub(crate) fn temp_dir(tag: &str) -> PathBuf {
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "snow-config-test-{}-{tag}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

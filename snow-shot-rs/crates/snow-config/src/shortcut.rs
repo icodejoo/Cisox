@@ -58,19 +58,23 @@ fn is_word_char(c: char) -> bool {
 /// 在词边界上大小写不敏感地替换，从左到右、非重叠，等价于 C++ 的 `\b(?:a|b)\b` 替换。
 fn replace_words(text: &str, targets: &[&str], replacement: &str) -> String {
     let chars: Vec<char> = text.chars().collect();
+    // 目标词只展开一次，避免在逐字符扫描里反复分配
+    let targets: Vec<Vec<char>> = targets
+        .iter()
+        .map(|target| target.chars().collect())
+        .collect();
     let mut result = String::new();
     let mut i = 0;
     while i < chars.len() {
         let mut matched = false;
-        for target in targets {
-            let target_chars: Vec<char> = target.chars().collect();
+        for target_chars in &targets {
             let end = i + target_chars.len();
             if end > chars.len() {
                 continue;
             }
             let same = chars[i..end]
                 .iter()
-                .zip(&target_chars)
+                .zip(target_chars)
                 .all(|(a, b)| a.eq_ignore_ascii_case(b));
             let left_ok = i == 0 || !is_word_char(chars[i - 1]);
             let right_ok = end == chars.len() || !is_word_char(chars[end]);

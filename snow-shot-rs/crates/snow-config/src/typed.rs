@@ -4,7 +4,6 @@
 
 use crate::document::ConfigDocument;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 /// 历史分组名：截图历史。
 pub const CAPTURE_HISTORY_GROUP: &str = "capture_history";
@@ -46,10 +45,10 @@ impl HistoryPolicy {
     /// - `document`：已加载的配置文档
     /// - `group`：`capture_history` 或 `pinned_history`
     pub fn from_document(document: &ConfigDocument, group: &str) -> Self {
-        let read = |name: &str| document.value(&format!("{group}/{name}"));
-        let integer = |name: &str| read(name).as_i64().unwrap_or_default();
-        let text = |name: &str| read(name).as_str().unwrap_or_default().to_string();
-        let flag = |name: &str| matches!(read(name), Value::Bool(true));
+        let key = |name: &str| format!("{group}/{name}");
+        let integer = |name: &str| document.int_or(&key(name), 0);
+        let text = |name: &str| document.str_or(&key(name), "").to_string();
+        let flag = |name: &str| document.bool_or(&key(name), false);
         Self {
             enabled: flag("enabled"),
             keep_permanently: flag("keep_permanently"),

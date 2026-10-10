@@ -349,7 +349,7 @@ pub fn config_file_path(data_directory: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU32, Ordering};
+    use crate::test_util::temp_dir;
 
     /// `USERPROFILE` 优先于 `HOME`，空值被跳过。
     #[test]
@@ -361,18 +361,6 @@ mod tests {
         assert_eq!(home_dir_from(None, os("b")), Some(PathBuf::from("b")));
         assert_eq!(home_dir_from(os(""), None), None);
         assert_eq!(home_dir_from(None, None), None);
-    }
-
-    /// 创建独立的临时目录。
-    fn temp_dir(tag: &str) -> PathBuf {
-        static COUNTER: AtomicU32 = AtomicU32::new(0);
-        let dir = std::env::temp_dir().join(format!(
-            "snow-config-paths-{}-{tag}-{}",
-            std::process::id(),
-            COUNTER.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::create_dir_all(&dir).unwrap();
-        dir
     }
 
     /// 三平台数据根与 T1/T2 取值表一致，且绝不含 upstream 目录名。

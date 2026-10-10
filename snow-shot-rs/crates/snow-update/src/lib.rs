@@ -79,7 +79,9 @@ pub enum UpdateStatus {
 /// # 返回
 /// 可用于下载的地址；空串返回 [`UpdateConfigError::NotConfigured`]，协议不支持返回 `InvalidUrl`。
 ///
-/// ```ignore
+/// ```
+/// use snow_update::{UpdateConfigError, resolve_manifest_url};
+///
 /// assert_eq!(resolve_manifest_url(""), Err(UpdateConfigError::NotConfigured));
 /// ```
 pub fn resolve_manifest_url(raw: &str) -> Result<String, UpdateConfigError> {
@@ -97,7 +99,9 @@ pub fn resolve_manifest_url(raw: &str) -> Result<String, UpdateConfigError> {
 /// # 返回
 /// 清单；超长、非 JSON 对象、缺 `version` 或版本号非法时返回对应错误。
 ///
-/// ```ignore
+/// ```
+/// use snow_update::parse_manifest;
+///
 /// let m = parse_manifest(r#"{"version":"1.2.0","url":"https://a.b"}"#).unwrap();
 /// assert_eq!(m.version, "1.2.0");
 /// ```
@@ -166,7 +170,9 @@ fn parse_version(raw: &str) -> Option<(Vec<u64>, bool)> {
 /// # 返回
 /// `a` 相对 `b` 的顺序；任一无法解析返回 `None`。
 ///
-/// ```ignore
+/// ```
+/// use snow_update::compare_versions;
+///
 /// assert_eq!(compare_versions("1.2.0", "1.10"), Some(std::cmp::Ordering::Less));
 /// ```
 pub fn compare_versions(a: &str, b: &str) -> Option<Ordering> {
@@ -191,8 +197,11 @@ pub fn compare_versions(a: &str, b: &str) -> Option<Ordering> {
 /// # 返回
 /// 有新版本时为 `Available`，否则 `UpToDate`；清单非法或当前版本无法解析时返回错误。
 ///
-/// ```ignore
+/// ```
+/// use snow_update::{UpdateStatus, check_manifest};
+///
 /// let status = check_manifest("1.0.0", r#"{"version":"1.1.0"}"#).unwrap();
+/// assert!(matches!(status, UpdateStatus::Available(_)));
 /// ```
 pub fn check_manifest(current: &str, manifest_text: &str) -> Result<UpdateStatus, ManifestError> {
     let manifest = parse_manifest(manifest_text)?;
@@ -223,7 +232,9 @@ impl UpdateMode {
     /// # 参数
     /// - `raw`：`updates/mode` 配置值。
     ///
-    /// ```ignore
+    /// ```
+    /// use snow_update::UpdateMode;
+    ///
     /// assert_eq!(UpdateMode::parse("manual"), UpdateMode::Manual);
     /// ```
     pub fn parse(raw: &str) -> Self {
@@ -251,7 +262,9 @@ impl UpdateMode {
 /// # 返回
 /// 策略允许且距上次已满间隔（或系统时钟回拨、没有记录）时为真。
 ///
-/// ```ignore
+/// ```
+/// use snow_update::{UpdateMode, should_auto_check};
+///
 /// assert!(should_auto_check(UpdateMode::Check, None, 1000, 60));
 /// ```
 pub fn should_auto_check(
