@@ -6,7 +6,7 @@
 use crate::extensions::extension_entries;
 use crate::schema_table::raw_entries;
 use crate::shortcut::{shortcut_bindings_from_json, shortcut_bindings_to_json};
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 use snow_app_core::PRODUCT_NAME;
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -113,6 +113,63 @@ pub(crate) fn entry(
         allowed,
         max_items,
     }
+}
+
+/// 布尔条目。
+///
+/// # 参数
+/// - `key`：`"组/名"` 键
+/// - `default`：默认值
+pub(crate) fn boolean(key: &'static str, default: bool) -> SchemaEntry {
+    entry(key, json!(default), ValueKind::Boolean, None, &[], None)
+}
+
+/// 不带范围的整数条目。
+pub(crate) fn integer_free(key: &'static str, default: i32) -> SchemaEntry {
+    entry(key, json!(default), ValueKind::Integer, None, &[], None)
+}
+
+/// 带范围（含上下限与 UI 步长）的整数条目。
+pub(crate) fn integer(
+    key: &'static str,
+    default: i32,
+    min: i32,
+    max: i32,
+    step: i32,
+) -> SchemaEntry {
+    let range = IntRange { min, max, step };
+    entry(
+        key,
+        json!(default),
+        ValueKind::Integer,
+        Some(range),
+        &[],
+        None,
+    )
+}
+
+/// 无白名单的字符串条目。
+pub(crate) fn text(key: &'static str, default: &str) -> SchemaEntry {
+    entry(key, json!(default), ValueKind::String, None, &[], None)
+}
+
+/// 带白名单的字符串条目。
+pub(crate) fn choice(
+    key: &'static str,
+    default: &str,
+    allowed: &'static [&'static str],
+) -> SchemaEntry {
+    entry(key, json!(default), ValueKind::String, None, allowed, None)
+}
+
+/// 快捷键列表条目（原始阶段是字符串列表，最多 2 个绑定）。
+pub(crate) fn shortcuts(key: &'static str, default: Value) -> SchemaEntry {
+    entry(key, default, ValueKind::StringList, None, &[], Some(2))
+}
+
+/// 任意结构化 JSON 条目。
+pub(crate) fn structured(key: &'static str, default: Value) -> SchemaEntry {
+    entry(key, default, ValueKind::Structured, None, &[], None)
 }
 
 /// 计算默认输出目录：`<用户目录>/Videos|Pictures`，使用正斜杠（与 Qt 一致）；无法确定时回退 `Documents`。
@@ -322,6 +379,28 @@ mod tests {
             assert!(std::ptr::eq(entry_for(item.key).unwrap(), item));
         }
         assert_eq!(index_of("no/such_key"), None);
+    }
+
+    /// 构造器产出的字段与手写 `entry` 一致，并抽查几条真实条目。
+    #[test]
+    fn constructors_fill_fields() {
+        let flag = boolean("a/b", true);
+        assert_eq!((flag.kind, flag.default), (ValueKind::Boolean, json!(true)));
+        let number = integer("a/c", 5, 1, 9, 2);
+        assert_eq!(
+            number.range,
+            Some(IntRange {
+                min: 1,
+                max: 9,
+                step: 2
+            })
+        );
+        let pick = choice("a/d", "x", &["x", "y"]);
+        assert_eq!((pick.allowed, pick.max_items), (&["x", "y"][..], None));
+        assert_eq!(shortcuts("a/e", json!([])).max_items, Some(2));
+        assert_eq!(structured("a/f", Value::Null).kind, ValueKind::Structured);
+        let real = entry_for("capture_history/retention_days").unwrap();
+        assert_eq!(real.default, json!(7));
     }
 
     /// 条目数、键唯一且恰含一个 `/`。
