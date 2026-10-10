@@ -10,6 +10,7 @@
 
 pub mod extract;
 pub mod image;
+pub mod parallel;
 pub mod source;
 pub mod system;
 pub mod transcode;

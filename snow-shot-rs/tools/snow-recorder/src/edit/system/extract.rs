@@ -4,9 +4,7 @@
 //! 全部成功后再移入输出目录。无损 WebP 系统做不了，直接给出可回落的"不支持"错误。
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::sync_channel;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use snow_recorder_protocol::{ExtractMode, ImageFormat, scratch_dir};
 
@@ -14,6 +12,7 @@ use super::MfSession;
 use super::reader::{Frame, MfSource, hns_to_ms, scan};
 use crate::edit::extract::{encode_threads, frame_file_name, plan_frames, publish};
 use crate::edit::image::BgrWriter;
+use crate::edit::parallel::encode_parallel;
 use crate::edit::{EditError, TaskCtl};
 
 /// 进度阶段名。
@@ -79,78 +78,43 @@ fn encode_all(
 ) -> Result<u64, EditError> {
     let total = plan.len() as u64;
     let threads = encode_threads().min(plan.len()).max(1);
-    let failure: Mutex<Option<EditError>> = Mutex::new(None);
-    let stop = AtomicBool::new(false);
-    let done = AtomicU64::new(0);
-    let (tx, rx) = sync_channel::<Job>(threads * 2);
-    let rx = Arc::new(Mutex::new(rx));
-    let record_failure = |e: EditError| {
-        if let Ok(mut slot) = failure.lock() {
-            slot.get_or_insert(e);
-        }
-        stop.store(true, Ordering::SeqCst);
-    };
-    std::thread::scope(|scope| {
-        for _ in 0..threads {
-            let rx = Arc::clone(&rx);
-            let jpeg = params.format == ImageFormat::Jpeg;
-            let quality = params.quality;
-            let (done, record_failure) = (&done, &record_failure);
-            scope.spawn(move || {
-                let writer = match BgrWriter::new(jpeg, quality) {
-                    Ok(w) => w,
-                    Err(e) => return record_failure(e),
-                };
-                loop {
-                    let job = match rx.lock() {
-                        Ok(guard) => guard.recv(),
-                        Err(_) => return,
-                    };
-                    let Ok(job) = job else { return };
-                    let f = &job.frame;
-                    let stride = f.width as usize * 3;
-                    if let Err(e) = writer.write((f.width, f.height), stride, &f.bgr, &job.path) {
-                        return record_failure(e);
-                    }
-                    let n = done.fetch_add(1, Ordering::SeqCst) + 1;
-                    ctl.report(n, total, STAGE_EXTRACT);
-                }
-            });
-        }
-        drop(rx);
-        for (i, item) in plan.iter().enumerate() {
-            if ctl.is_cancelled() || stop.load(Ordering::SeqCst) {
-                break;
-            }
-            let decoded = match item.pts {
-                Some(p) => src.frame_at_hns(p),
-                None => src.frame_at_ms(item.ms),
-            };
-            let decoded = match decoded {
-                Ok(d) => d,
-                Err(e) => {
-                    record_failure(e);
+    let jpeg = params.format == ImageFormat::Jpeg;
+    let quality = params.quality;
+    encode_parallel(
+        threads,
+        total,
+        STAGE_EXTRACT,
+        ctl,
+        || BgrWriter::new(jpeg, quality),
+        |writer, job: Job| {
+            let f = &job.frame;
+            let stride = f.width as usize * 3;
+            writer.write((f.width, f.height), stride, &f.bgr, &job.path)
+        },
+        |feed| {
+            for (i, item) in plan.iter().enumerate() {
+                if feed.should_stop() {
                     break;
                 }
-            };
-            let path = scratch.join(frame_file_name(i, decoded.ms(), params.format));
-            if tx
-                .send(Job {
+                let decoded = match item.pts {
+                    Some(p) => src.frame_at_hns(p),
+                    None => src.frame_at_ms(item.ms),
+                };
+                let decoded = match decoded {
+                    Ok(d) => d,
+                    Err(e) => {
+                        feed.fail(e);
+                        break;
+                    }
+                };
+                let path = scratch.join(frame_file_name(i, decoded.ms(), params.format));
+                if !feed.send(Job {
                     frame: decoded,
                     path,
-                })
-                .is_err()
-            {
-                break;
+                }) {
+                    break;
+                }
             }
-        }
-        drop(tx);
-    });
-    if ctl.is_cancelled() {
-        return Err(EditError::cancelled());
-    }
-    if let Some(e) = failure.into_inner().ok().flatten() {
-        return Err(e);
-    }
-    Ok(done.load(Ordering::SeqCst))
+        },
+    )
 }
