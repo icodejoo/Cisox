@@ -462,7 +462,38 @@ impl ModelManifest {
     /// # 返回
     /// 具体源语言；模型不支持时返回 `None`。
     pub fn resolve_source(&self, src: Lang, tgt: Lang) -> Option<Lang> {
-        resolve_in_pairs(&self.supported_pairs(), src, tgt)
+        if tgt == Lang::Auto {
+            return None;
+        }
+        if self.pairs.is_empty() {
+            // 全排列：目标与（Auto 时第一个不同的）源都必须出现在 languages 里
+            let knows = |lang: Lang| {
+                self.languages
+                    .iter()
+                    .any(|c| Lang::from_code(c) == Some(lang))
+            };
+            if !knows(tgt) {
+                return None;
+            }
+            if src == Lang::Auto {
+                return self
+                    .languages
+                    .iter()
+                    .filter_map(|c| Lang::from_code(c))
+                    .find(|s| *s != tgt && *s != Lang::Auto);
+            }
+            return (src != tgt && knows(src)).then_some(src);
+        }
+        // 显式语言对：与 `supported_pairs` 同样过滤，但不构造去重 Vec（去重不影响首个匹配）
+        let mut valid = self.pairs.iter().filter_map(|(s, t)| {
+            let (s, t) = (Lang::from_code(s)?, Lang::from_code(t)?);
+            (s != t && s != Lang::Auto && t != Lang::Auto).then_some((s, t))
+        });
+        if src == Lang::Auto {
+            valid.find(|(_, t)| *t == tgt).map(|(s, _)| s)
+        } else {
+            valid.any(|pair| pair == (src, tgt)).then_some(src)
+        }
     }
 }
 
@@ -1014,6 +1045,57 @@ mod tests {
         manifest.id = "m".into();
         manifest.languages.clear();
         assert!(manifest.validate().is_err());
+    }
+
+    /// `resolve_source` 免分配实现与旧实现（基于 `supported_pairs` + `resolve_in_pairs`）逐项一致。
+    #[test]
+    fn resolve_source_matches_reference_impl() {
+        let build = |langs: &[&str], pairs: &[(&str, &str)]| {
+            let mut m: ModelManifest = serde_json::from_str(&manifest_text("m", "")).unwrap();
+            m.languages = langs.iter().map(|c| c.to_string()).collect();
+            m.pairs = pairs
+                .iter()
+                .map(|(a, b)| (a.to_string(), b.to_string()))
+                .collect();
+            m
+        };
+        let mut all = vec![Lang::Auto];
+        all.extend(
+            ["en", "zh-CN", "zh-TW", "ja", "ko", "fr", "de", "ru"]
+                .iter()
+                .filter_map(|c| Lang::from_code(c)),
+        );
+        let mut manifests = vec![
+            build(
+                &[],
+                &[
+                    ("en", "zh-CN"),
+                    ("en", "zh-CN"),
+                    ("ja", "zh-CN"),
+                    ("xx", "en"),
+                    ("en", "en"),
+                    ("zh-CN", "en"),
+                ],
+            ),
+            build(&["en", "zh-CN", "ja", "xx", "en"], &[]),
+            build(&["xx"], &[]),
+            build(&["en", "zh-CN"], &[("ja", "en")]),
+        ];
+        let mut empty = manifests[0].clone();
+        empty.pairs.clear();
+        empty.languages.clear();
+        manifests.push(empty);
+        for m in &manifests {
+            let cloned = m.clone();
+            for &s in &all {
+                for &t in &all {
+                    let want = resolve_in_pairs(&m.supported_pairs(), s, t);
+                    assert_eq!(m.resolve_source(s, t), want, "{s:?}->{t:?}");
+                    assert_eq!(cloned.resolve_source(s, t), want);
+                    assert_eq!(m.supports(s, t), want.is_some());
+                }
+            }
+        }
     }
 
     /// 语言对：pairs 优先；缺省取 languages 全排列；Auto 解析为具体源语言。
