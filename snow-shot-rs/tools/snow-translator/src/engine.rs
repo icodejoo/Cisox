@@ -10,13 +10,14 @@
 //! 编码器输入为 `[源语言码] + 词 + </s>`；解码器以 `</s>`（id 2）起步，第一个生成的 token 强制为目标语言码；
 //! 译文解码前剔除特殊符号与语言码。
 
+use std::borrow::Cow;
 use std::fmt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use ort::ep;
-use ort::session::{RunOptions, Session, builder::GraphOptimizationLevel};
+use ort::session::{RunOptions, Session, SessionInputValue, builder::GraphOptimizationLevel};
 use ort::value::{DynValue, Tensor, TensorRef, ValueType};
 use serde_json::Value;
 use tokenizers::Tokenizer;
@@ -42,8 +43,8 @@ const ENV_ORT_DYLIB_STD: &str = "ORT_DYLIB_PATH";
 const ORT_DYLIB_NAME: &str = "onnxruntime.dll";
 /// Metaspace 词首标记。
 const WORD_START_MARK: char = '\u{2581}';
-/// 缺省最大新生成 token 数。
-const DEFAULT_MAX_NEW_TOKENS: usize = 512;
+/// 缺省最大新生成 token 数（编解码族与对话族共用）。
+pub(crate) const DEFAULT_MAX_NEW_TOKENS: usize = 512;
 /// 自检用的样例句。
 const SELF_CHECK_TEXT: &str = "Hello world";
 /// 判定内存不足的错误信息关键词（小写比较）。
@@ -302,7 +303,7 @@ pub struct M2mConfig {
     pub forced_first: u32,
     /// 目标语言的 FLORES 码（如 `zho_Hans`），用于选择译文后处理。
     pub tgt_code: String,
-    /// 译文解码前剔除的 id：`<s>`、`<pad>`、`</s>`、`<unk>` 与全部语言码。
+    /// 译文解码前剔除的 id（升序去重）：`<s>`、`<pad>`、`</s>`、`<unk>` 与全部语言码。
     pub drop_ids: Vec<u32>,
 }
 
@@ -593,13 +594,49 @@ pub struct Engine {
 }
 
 /// 取 KV 输入的头数与每头维度（形如 `[-1, 8, -1, 64]`）。
-fn kv_dims(shape: &[i64]) -> Option<(i64, i64)> {
+pub(crate) fn kv_dims(shape: &[i64]) -> Option<(i64, i64)> {
     if shape.len() == 4 && shape[1] > 0 && shape[3] > 0 {
         Some((shape[1], shape[3]))
     } else {
         None
     }
 }
+
+/// 序列维为 0 的空 KV 张量（新一轮解码的初始 past）。
+///
+/// # 参数
+/// - `batch`：batch 维（束宽）。
+/// - `heads`/`head_dim`：KV 头数与每头维度。
+///
+/// # 返回
+/// 形状 `[batch, heads, 0, head_dim]` 的 f32 张量；创建失败返回 ORT 错误。
+///
+/// # 示例
+/// ```ignore
+/// let past = empty_kv(1, 8, 64)?;
+/// ```
+pub(crate) fn empty_kv(
+    batch: usize,
+    heads: usize,
+    head_dim: usize,
+) -> Result<DynValue, ort::Error> {
+    Tensor::<f32>::from_array(([batch, heads, 0, head_dim], Vec::<f32>::new()))
+        .map(Tensor::into_dyn)
+}
+
+/// 把推理期底层错误归为解码失败（内存不足优先）。
+///
+/// # 参数
+/// - `e`：底层错误。
+///
+/// # 返回
+/// `DecodeFailed` 或 `OutOfMemory` 的 [`EngineError`]。
+pub(crate) fn decode_err(e: &dyn fmt::Display) -> EngineError {
+    classify_error(&e.to_string(), ErrorKind::DecodeFailed)
+}
+
+/// 解码器一次运行的输入表（名字 + 张量，借用或持有）。
+type DecoderInputs<'a> = Vec<(Cow<'a, str>, SessionInputValue<'a>)>;
 
 impl Engine {
     /// 加载模型并做自检。
@@ -755,10 +792,7 @@ impl Engine {
         let mut opts = RunOptions::new()?;
         opts.set(ARENA_SHRINK_KEY, ARENA_SHRINK_VALUE)?;
         let hidden = vec![0f32; dim];
-        let mut inputs: Vec<(
-            std::borrow::Cow<'_, str>,
-            ort::session::SessionInputValue<'_>,
-        )> = vec![
+        let mut inputs: DecoderInputs<'_> = vec![
             (
                 "input_ids".into(),
                 Tensor::from_array(([1usize, 1], vec![self.gen_params.start]))?.into(),
@@ -777,10 +811,7 @@ impl Engine {
             ),
         ];
         for name in &self.past_names {
-            let empty = Tensor::<f32>::from_array((
-                [1usize, self.kv_heads as usize, 0, self.kv_head_dim as usize],
-                Vec::<f32>::new(),
-            ))?;
+            let empty = empty_kv(1, self.kv_heads as usize, self.kv_head_dim as usize)?;
             inputs.push((name.as_str().into(), empty.into()));
         }
         self.decoder.run_with_options(inputs, &opts)?;
@@ -899,7 +930,8 @@ impl Engine {
         Ok(pieces.join(joiner))
     }
 
-    /// 把生成的 id 还原成文本：M2M100 先剔除特殊符号与语言码，Marian 由分词器跳过特殊符号。
+    /// 把生成的 id 还原成文本：M2M100 先剔除特殊符号与语言码（`drop_ids` 已升序去重，二分查找），
+    /// Marian 由分词器跳过特殊符号。
     fn detokenize(&self, ids: &[u32]) -> Result<String, EngineError> {
         let fail = |e: tokenizers::Error| {
             EngineError::new(ErrorKind::DecodeFailed, format!("detokenize failed: {e}"))
@@ -909,7 +941,7 @@ impl Engine {
                 let kept: Vec<u32> = ids
                     .iter()
                     .copied()
-                    .filter(|id| !cfg.drop_ids.contains(id))
+                    .filter(|id| cfg.drop_ids.binary_search(id).is_err())
                     .collect();
                 self.tokenizer.decode(&kept, false).map_err(fail)
             }
@@ -919,28 +951,27 @@ impl Engine {
 
     /// 运行编码器，返回展平的 `hidden[src_len * hidden_dim]` 与隐层维度。
     fn run_encoder(&mut self, input_ids: &[u32]) -> Result<(Vec<f32>, usize), EngineError> {
-        let fail = |e: &dyn fmt::Display| classify_error(&e.to_string(), ErrorKind::DecodeFailed);
         let src_len = input_ids.len();
         let ids_i64: Vec<i64> = input_ids.iter().map(|&x| x as i64).collect();
         let mut enc_inputs: Vec<(&str, DynValue)> = vec![(
             "input_ids",
             Tensor::from_array(([1usize, src_len], ids_i64))
-                .map_err(|e| fail(&e))?
+                .map_err(|e| decode_err(&e))?
                 .into_dyn(),
         )];
         if self.encoder_takes_mask {
             enc_inputs.push((
                 "attention_mask",
                 Tensor::from_array(([1usize, src_len], vec![1i64; src_len]))
-                    .map_err(|e| fail(&e))?
+                    .map_err(|e| decode_err(&e))?
                     .into_dyn(),
             ));
         }
         let hidden: Vec<f32> = {
-            let outputs = self.encoder.run(enc_inputs).map_err(|e| fail(&e))?;
+            let outputs = self.encoder.run(enc_inputs).map_err(|e| decode_err(&e))?;
             let (_, data) = outputs[0]
                 .try_extract_tensor::<f32>()
-                .map_err(|e| fail(&e))?;
+                .map_err(|e| decode_err(&e))?;
             data.to_vec()
         };
         let hidden_dim = hidden.len() / src_len.max(1);
@@ -954,7 +985,6 @@ impl Engine {
         max_new: usize,
         width: usize,
     ) -> Result<Vec<u32>, EngineError> {
-        let fail = |e: &dyn fmt::Display| classify_error(&e.to_string(), ErrorKind::DecodeFailed);
         let src_len = input_ids.len();
         let (hidden1, hidden_dim) = self.run_encoder(input_ids)?;
         let hidden = hidden1.repeat(width);
@@ -963,12 +993,10 @@ impl Engine {
 
         let mut past: Vec<DynValue> = Vec::with_capacity(self.past_names.len());
         for _ in &self.past_names {
-            let empty = Tensor::<f32>::from_array((
-                [width, self.kv_heads as usize, 0, self.kv_head_dim as usize],
-                Vec::<f32>::new(),
-            ))
-            .map_err(|e| fail(&e))?;
-            past.push(empty.into_dyn());
+            past.push(
+                empty_kv(width, self.kv_heads as usize, self.kv_head_dim as usize)
+                    .map_err(|e| decode_err(&e))?,
+            );
         }
 
         let gp = &self.gen_params;
@@ -984,18 +1012,16 @@ impl Engine {
         // 每条存活束的下一步输入 token；不足 width 的行用第 0 行补齐
         let mut current: Vec<i64> = vec![gp.start; width];
         for step in 0..max_new {
-            let cur_ids =
-                Tensor::from_array(([width, 1usize], current.clone())).map_err(|e| fail(&e))?;
-            let enc_mask =
-                Tensor::from_array(([width, src_len], mask.clone())).map_err(|e| fail(&e))?;
-            let flag = Tensor::from_array(([1usize], vec![step > 0])).map_err(|e| fail(&e))?;
+            let cur_ids = Tensor::from_array(([width, 1usize], current.clone()))
+                .map_err(|e| decode_err(&e))?;
+            let enc_mask = TensorRef::from_array_view(([width, src_len], mask.as_slice()))
+                .map_err(|e| decode_err(&e))?;
+            let flag =
+                Tensor::from_array(([1usize], vec![step > 0])).map_err(|e| decode_err(&e))?;
             let hidden_view =
                 TensorRef::from_array_view(([width, src_len, hidden_dim], hidden.as_slice()))
-                    .map_err(|e| fail(&e))?;
-            let mut inputs: Vec<(
-                std::borrow::Cow<'_, str>,
-                ort::session::SessionInputValue<'_>,
-            )> = vec![
+                    .map_err(|e| decode_err(&e))?;
+            let mut inputs: DecoderInputs<'_> = vec![
                 ("input_ids".into(), cur_ids.into()),
                 ("encoder_attention_mask".into(), enc_mask.into()),
                 ("encoder_hidden_states".into(), hidden_view.into()),
@@ -1004,7 +1030,7 @@ impl Engine {
             for (name, value) in self.past_names.iter().zip(past.iter()) {
                 inputs.push((name.as_str().into(), value.into()));
             }
-            let mut outputs = self.decoder.run(inputs).map_err(|e| fail(&e))?;
+            let mut outputs = self.decoder.run(inputs).map_err(|e| decode_err(&e))?;
 
             let cands: Vec<Vec<Candidate>> = if let (0, Some(tok)) = (step, forced) {
                 // 首个生成位强制为目标语言码，本步 logits 不参与选择
@@ -1013,7 +1039,7 @@ impl Engine {
                 let block_eos = (step < min_len).then_some(gp.eos as u32);
                 let (shape, logits) = outputs["logits"]
                     .try_extract_tensor::<f32>()
-                    .map_err(|e| fail(&e))?;
+                    .map_err(|e| decode_err(&e))?;
                 let vocab = *shape.last().unwrap_or(&0) as usize;
                 if vocab == 0 || logits.len() < vocab * width {
                     return Err(EngineError::new(
@@ -1061,7 +1087,7 @@ impl Engine {
                 *slot = if identity {
                     v
                 } else {
-                    reorder_kv(&v, &parents_full).map_err(|m| fail(&m))?
+                    reorder_kv(&v, &parents_full).map_err(|m| decode_err(&m))?
                 };
             }
         }
@@ -1070,7 +1096,6 @@ impl Engine {
 
     /// 贪心生成：encoder 一次，decoder 循环直到 eos / 预算 / 退化重复。
     fn generate(&mut self, input_ids: &[u32], max_new: usize) -> Result<Vec<u32>, EngineError> {
-        let fail = |e: &dyn fmt::Display| classify_error(&e.to_string(), ErrorKind::DecodeFailed);
         let src_len = input_ids.len();
         let mask = vec![1i64; src_len];
         let (hidden, hidden_dim) = self.run_encoder(input_ids)?;
@@ -1078,33 +1103,33 @@ impl Engine {
         // 初始 past：序列维为 0 的空张量
         let mut past: Vec<DynValue> = Vec::with_capacity(self.past_names.len());
         for _ in &self.past_names {
-            let empty = Tensor::<f32>::from_array((
-                [1usize, self.kv_heads as usize, 0, self.kv_head_dim as usize],
-                Vec::<f32>::new(),
-            ))
-            .map_err(|e| fail(&e))?;
-            past.push(empty.into_dyn());
+            past.push(
+                empty_kv(1, self.kv_heads as usize, self.kv_head_dim as usize)
+                    .map_err(|e| decode_err(&e))?,
+            );
         }
 
         let gp = &self.gen_params;
         let forced = self.m2m.as_ref().map(|c| c.forced_first);
         let min_len = min_output_len(gp.min_length_ratio, src_len).min(max_new.saturating_sub(1));
+        // 最小长度内额外禁止结束符：不变量，提到循环外只建一次
+        let mut banned_no_eos = gp.banned.clone();
+        banned_no_eos.push(gp.eos);
         let mut generated: Vec<u32> = Vec::new();
         let mut current = gp.start;
         for step in 0..max_new {
             let use_cache = step > 0;
-            let cur_ids = Tensor::from_array(([1usize, 1], vec![current])).map_err(|e| fail(&e))?;
-            let enc_mask =
-                Tensor::from_array(([1usize, src_len], mask.clone())).map_err(|e| fail(&e))?;
-            let flag = Tensor::from_array(([1usize], vec![use_cache])).map_err(|e| fail(&e))?;
+            let cur_ids =
+                Tensor::from_array(([1usize, 1], vec![current])).map_err(|e| decode_err(&e))?;
+            let enc_mask = TensorRef::from_array_view(([1usize, src_len], mask.as_slice()))
+                .map_err(|e| decode_err(&e))?;
+            let flag =
+                Tensor::from_array(([1usize], vec![use_cache])).map_err(|e| decode_err(&e))?;
             let hidden_view =
                 TensorRef::from_array_view(([1usize, src_len, hidden_dim], hidden.as_slice()))
-                    .map_err(|e| fail(&e))?;
+                    .map_err(|e| decode_err(&e))?;
 
-            let mut inputs: Vec<(
-                std::borrow::Cow<'_, str>,
-                ort::session::SessionInputValue<'_>,
-            )> = vec![
+            let mut inputs: DecoderInputs<'_> = vec![
                 ("input_ids".into(), cur_ids.into()),
                 ("encoder_attention_mask".into(), enc_mask.into()),
                 ("encoder_hidden_states".into(), hidden_view.into()),
@@ -1114,14 +1139,14 @@ impl Engine {
                 inputs.push((name.as_str().into(), value.into()));
             }
 
-            let mut outputs = self.decoder.run(inputs).map_err(|e| fail(&e))?;
+            let mut outputs = self.decoder.run(inputs).map_err(|e| decode_err(&e))?;
             let next = if let (0, Some(tok)) = (step, forced) {
                 // 首个生成位强制为目标语言码
                 tok as i64
             } else {
                 let (shape, logits) = outputs["logits"]
                     .try_extract_tensor::<f32>()
-                    .map_err(|e| fail(&e))?;
+                    .map_err(|e| decode_err(&e))?;
                 let vocab = *shape.last().unwrap_or(&0) as usize;
                 if vocab == 0 || logits.len() < vocab {
                     return Err(EngineError::new(
@@ -1130,11 +1155,12 @@ impl Engine {
                     ));
                 }
                 let last = &logits[logits.len() - vocab..];
-                let mut banned = gp.banned.clone();
-                if step < min_len {
-                    banned.push(gp.eos);
-                }
-                argmax_masked(last, &banned).ok_or_else(|| {
+                let banned = if step < min_len {
+                    &banned_no_eos
+                } else {
+                    &gp.banned
+                };
+                argmax_masked(last, banned).ok_or_else(|| {
                     EngineError::new(ErrorKind::DecodeFailed, "no selectable token in logits")
                 })? as i64
             };
@@ -1392,6 +1418,13 @@ mod tests {
             resolve_beams(Some(MAX_BEAMS + 1), 1).unwrap_err().kind,
             ErrorKind::BadRequest
         );
+    }
+
+    /// 推理错误归类：普通错误为 DecodeFailed，内存不足关键词归 OutOfMemory。
+    #[test]
+    fn decode_err_classifies() {
+        assert_eq!(decode_err(&"shape mismatch").kind, ErrorKind::DecodeFailed);
+        assert_eq!(decode_err(&"std::bad_alloc").kind, ErrorKind::OutOfMemory);
     }
 
     /// 优化级别映射：0..=3 对应，越界按最高级。

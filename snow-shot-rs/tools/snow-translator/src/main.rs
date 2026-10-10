@@ -17,7 +17,7 @@ use protocol::{
     ErrorKind, Event, LineRead, MAX_LINE_BYTES, PROTOCOL_VERSION, parse_command, read_bounded_line,
     write_event,
 };
-use worker::{Outcome, Worker, load_engine};
+use worker::{Outcome, Worker, error_event, load_engine};
 
 /// 发送事件，管道断开时返回 `false`（宿主已走，直接退出）。
 fn send(out: &mut impl Write, event: &Event) -> bool {
@@ -46,12 +46,8 @@ fn main() {
             Ok(LineRead::Line(l)) => l,
             Ok(LineRead::Eof) | Err(_) => return,
             Ok(LineRead::TooLong) => {
-                let e = Event::Error {
-                    id: None,
-                    kind: ErrorKind::BadRequest,
-                    message: format!("line exceeds {MAX_LINE_BYTES} bytes"),
-                };
-                if !send(&mut out, &e) {
+                let msg = format!("line exceeds {MAX_LINE_BYTES} bytes");
+                if !send(&mut out, &error_event(None, ErrorKind::BadRequest, msg)) {
                     return;
                 }
                 continue;
@@ -63,11 +59,7 @@ fn main() {
         let outcome = match parse_command(&line) {
             Ok(cmd) => worker.handle(cmd),
             Err(message) => Outcome {
-                events: vec![Event::Error {
-                    id: None,
-                    kind: ErrorKind::BadRequest,
-                    message,
-                }],
+                events: vec![error_event(None, ErrorKind::BadRequest, message)],
                 exit: false,
             },
         };

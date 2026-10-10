@@ -119,9 +119,18 @@ fn convert_parens(chars: &[char]) -> Vec<char> {
     out
 }
 
+/// 是否全角收尾符（其前面的空白要被吃掉）。
+fn is_closer(c: char) -> bool {
+    c == FULL_RPAREN || CLOSERS.contains(&c)
+}
+
+/// 是否全角起首符（其后面的空白要被吃掉）。
+fn is_opener(c: char) -> bool {
+    c == FULL_LPAREN || OPENERS.contains(&c)
+}
+
 /// 去掉全角收尾符之前、全角起首符之后的空白（对应 Python 的两条 `re.sub`）。
 fn strip_punct_spaces(chars: &[char]) -> String {
-    let closers: Vec<char> = CLOSERS.iter().copied().chain([FULL_RPAREN]).collect();
     // 先吃“空白 + 收尾符”里的空白
     let mut first = String::with_capacity(chars.len());
     let mut i = 0;
@@ -131,7 +140,7 @@ fn strip_punct_spaces(chars: &[char]) -> String {
             while j < chars.len() && is_space(chars[j]) {
                 j += 1;
             }
-            if j < chars.len() && closers.contains(&chars[j]) {
+            if j < chars.len() && is_closer(chars[j]) {
                 i = j;
             } else {
                 first.extend(&chars[i..j]);
@@ -143,14 +152,13 @@ fn strip_punct_spaces(chars: &[char]) -> String {
         }
     }
     // 再吃“起首符 + 空白”里的空白
-    let openers: Vec<char> = OPENERS.iter().copied().chain([FULL_LPAREN]).collect();
     let mut out = String::with_capacity(first.len());
     let mut skipping = false;
     for c in first.chars() {
         if skipping && is_space(c) {
             continue;
         }
-        skipping = openers.contains(&c);
+        skipping = is_opener(c);
         out.push(c);
     }
     out
@@ -290,6 +298,14 @@ mod tests {
         assert_eq!(to_fullwidth("Hello, world.", "eng_Latn"), "Hello, world.");
         assert!(needs_fullwidth(TGT_ZHO_HANT) && !needs_fullwidth("fra_Latn"));
         assert_eq!(to_fullwidth("你好,", TGT_ZHO_HANT), "你好，");
+    }
+
+    /// 收尾符/起首符判定：全角括号并入各自表。
+    #[test]
+    fn closer_opener_membership() {
+        assert!(is_closer('，') && is_closer(FULL_RPAREN) && !is_closer(FULL_LPAREN));
+        assert!(is_opener('“') && is_opener(FULL_LPAREN) && !is_opener(FULL_RPAREN));
+        assert!(!is_closer('a') && !is_opener('a'));
     }
 
     /// 引号计数跨片段延续：前一片段开引号，后一片段的引号是闭引号。

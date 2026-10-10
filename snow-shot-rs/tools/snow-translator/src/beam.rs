@@ -34,7 +34,7 @@ pub enum Advance {
 ///
 /// # 示例
 /// ```ignore
-/// let mut bs = BeamSearch::new(4, 0, 1.0, 64);
+/// let mut bs = BeamSearch::new(4, 0, 1.0, 64, 3);
 /// // 每步：对每条存活束求 top-2*width 候选，交给 advance
 /// let adv = bs.advance(&cands);
 /// ```

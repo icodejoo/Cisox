@@ -80,10 +80,10 @@ pub fn load_engine(dir: &Path, src: &str, tgt: &str) -> Result<AnyEngine, Engine
     let manifest = Manifest::load(dir)?;
     if manifest.is_hunyuan_chat() {
         if !manifest.supports_pair(src, tgt) {
-            return Err(EngineError {
-                kind: ErrorKind::UnsupportedPair,
-                message: format!("model `{}` does not support {src} -> {tgt}", manifest.id),
-            });
+            return Err(EngineError::new(
+                ErrorKind::UnsupportedPair,
+                format!("model `{}` does not support {src} -> {tgt}", manifest.id),
+            ));
         }
         return ChatEngine::load(&manifest, dir, tgt).map(|e| AnyEngine::Chat(Box::new(e)));
     }
@@ -110,7 +110,7 @@ impl Outcome {
 }
 
 /// 构造错误事件。
-fn error_event(id: Option<u64>, kind: ErrorKind, message: impl Into<String>) -> Event {
+pub fn error_event(id: Option<u64>, kind: ErrorKind, message: impl Into<String>) -> Event {
     Event::Error {
         id,
         kind,

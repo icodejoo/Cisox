@@ -9,7 +9,6 @@
 //! KV 张量直接从输出搬回输入，不重新分配；重复惩罚在 argmax 里就地折算，不复制 logits。
 
 use std::borrow::Cow;
-use std::fmt;
 use std::path::Path;
 
 use ort::session::{Session, SessionInputValue};
@@ -17,8 +16,8 @@ use ort::value::{DynValue, Tensor, TensorElementType, ValueType};
 use tokenizers::Tokenizer;
 
 use crate::engine::{
-    EngineError, TranslateOptions, build_session, classify_error, init_runtime, json_i64,
-    load_tokenizer, read_json_opt,
+    DEFAULT_MAX_NEW_TOKENS, EngineError, TranslateOptions, build_session, decode_err, empty_kv,
+    init_runtime, json_i64, kv_dims, load_tokenizer, read_json_opt,
 };
 use crate::manifest::{
     FILE_MODEL, FILE_TOKENIZER, HUNYUAN_DEFAULT_REPETITION_PENALTY, Manifest, PromptSpec,
@@ -26,8 +25,6 @@ use crate::manifest::{
 use crate::protocol::ErrorKind;
 use crate::text::{Segment, join_translated, split_sentences};
 
-/// 缺省最大新生成 token 数。
-const DEFAULT_MAX_NEW_TOKENS: usize = 512;
 /// 模型输入名：词 id。
 const INPUT_IDS: &str = "input_ids";
 /// 模型输入名：注意力掩码。
@@ -131,12 +128,11 @@ pub fn greedy_decode(
     let mut seen: Vec<bool> = Vec::new();
     let mut past_len = 0usize;
     let mut feed: Vec<u32> = prompt.to_vec();
-    let mut pending: Vec<u32> = prompt.to_vec();
     for _ in 0..params.max_new {
         let logits = model.forward(&feed, past_len)?;
         if seen.len() < logits.len() {
             seen.resize(logits.len(), false);
-            for &id in &pending {
+            for &id in prompt {
                 mark_seen(&mut seen, id);
             }
         }
@@ -151,8 +147,6 @@ pub fn greedy_decode(
         mark_seen(&mut seen, next);
         feed.clear();
         feed.push(next);
-        // 只有首轮需要补记提示词的 seen，之后清空即可
-        pending.clear();
     }
     Ok(out)
 }
@@ -309,15 +303,10 @@ struct ChatSession {
 impl ChatSession {
     /// 把 KV 重置为序列维 0 的空张量（新一轮生成）。
     fn reset_past(&mut self) -> Result<(), EngineError> {
-        let fail = |e: &dyn fmt::Display| classify_error(&e.to_string(), ErrorKind::DecodeFailed);
         self.past.clear();
         for _ in &self.past_names {
-            let empty = Tensor::<f32>::from_array((
-                [1usize, self.kv_heads, 0, self.kv_head_dim],
-                Vec::<f32>::new(),
-            ))
-            .map_err(|e| fail(&e))?;
-            self.past.push(empty.into_dyn());
+            self.past
+                .push(empty_kv(1, self.kv_heads, self.kv_head_dim).map_err(|e| decode_err(&e))?);
         }
         Ok(())
     }
@@ -326,7 +315,6 @@ impl ChatSession {
 impl LogitsSource for ChatSession {
     /// 跑一步：喂新 token，回传 KV，返回最后位置 logits。
     fn forward(&mut self, ids: &[u32], past_len: usize) -> Result<&[f32], EngineError> {
-        let fail = |e: &dyn fmt::Display| classify_error(&e.to_string(), ErrorKind::DecodeFailed);
         if past_len == 0 {
             self.reset_past()?;
         }
@@ -336,13 +324,13 @@ impl LogitsSource for ChatSession {
             (
                 INPUT_IDS.into(),
                 Tensor::from_array(([1usize, n], ids_i64))
-                    .map_err(|e| fail(&e))?
+                    .map_err(|e| decode_err(&e))?
                     .into(),
             ),
             (
                 INPUT_MASK.into(),
                 Tensor::from_array(([1usize, past_len + n], vec![1i64; past_len + n]))
-                    .map_err(|e| fail(&e))?
+                    .map_err(|e| decode_err(&e))?
                     .into(),
             ),
         ];
@@ -351,17 +339,19 @@ impl LogitsSource for ChatSession {
             inputs.push((
                 INPUT_POSITIONS.into(),
                 Tensor::from_array(([1usize, n], pos))
-                    .map_err(|e| fail(&e))?
+                    .map_err(|e| decode_err(&e))?
                     .into(),
             ));
         }
         for (name, value) in self.past_names.iter().zip(self.past.iter()) {
             inputs.push((name.as_str().into(), value.into()));
         }
-        let mut outputs = self.session.run(inputs).map_err(|e| fail(&e))?;
+        let mut outputs = self.session.run(inputs).map_err(|e| decode_err(&e))?;
         {
             let logits = require_output(outputs.get(OUTPUT_LOGITS), OUTPUT_LOGITS)?;
-            let (shape, data) = logits.try_extract_tensor::<f32>().map_err(|e| fail(&e))?;
+            let (shape, data) = logits
+                .try_extract_tensor::<f32>()
+                .map_err(|e| decode_err(&e))?;
             let vocab = shape.last().copied().unwrap_or(0).max(0) as usize;
             if vocab == 0 || data.len() < vocab {
                 return Err(EngineError::new(
@@ -456,26 +446,17 @@ impl ChatEngine {
             .collect();
         let output_names: Vec<&str> = session.outputs().iter().map(|o| o.name()).collect();
         check_output_names(&output_names, &present_names)?;
-        let kv_ty = session
+        let first_past = session
             .inputs()
             .iter()
-            .find(|o| o.name().starts_with(PAST_PREFIX))
-            .and_then(|o| match o.dtype() {
-                ValueType::Tensor { ty, .. } => Some(*ty),
-                _ => None,
-            });
-        if let Some(ty) = kv_ty {
-            check_kv_dtype(ty)?;
+            .find(|o| o.name().starts_with(PAST_PREFIX));
+        if let Some(ValueType::Tensor { ty, .. }) = first_past.map(|o| o.dtype()) {
+            check_kv_dtype(*ty)?;
         }
-        let dims = session
-            .inputs()
-            .iter()
-            .find(|o| o.name().starts_with(PAST_PREFIX))
-            .and_then(|o| match o.dtype() {
-                ValueType::Tensor { shape, .. } if shape.len() == 4 => Some((shape[1], shape[3])),
-                _ => None,
-            })
-            .filter(|&(h, d)| h > 0 && d > 0);
+        let dims = first_past.and_then(|o| match o.dtype() {
+            ValueType::Tensor { shape, .. } => kv_dims(shape),
+            _ => None,
+        });
         let Some((kv_heads, kv_head_dim)) = dims else {
             return Err(EngineError::new(
                 ErrorKind::LoadFailed,

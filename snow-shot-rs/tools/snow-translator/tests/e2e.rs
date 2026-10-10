@@ -165,6 +165,25 @@ fn real_model_roundtrip() {
 const ENV_NLLB_DIR: &str = "SNOW_TRANSLATOR_NLLB_DIR";
 /// 评测机上的 NLLB 模型包目录。
 const DEFAULT_NLLB_DIR: &str = "E:/models/translate-eval/nllb600m-main14-ccm-int4-ext";
+/// 解析模型包目录：环境变量优先，否则用评测机缺省；缺 `model.json` 时打印跳过原因并返回 `None`。
+///
+/// # 参数
+/// - `env`：环境变量名。
+/// - `default`：缺省目录。
+///
+/// # 返回
+/// 正斜杠写法的目录字符串（可直接放进 JSON 命令）。
+fn pack_dir(env: &str, default: &str) -> Option<String> {
+    let dir = std::env::var_os(env)
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(default));
+    if !dir.join("model.json").is_file() {
+        eprintln!("skip: {} not found (set {env})", dir.display());
+        return None;
+    }
+    Some(dir.to_string_lossy().replace('\\', "/"))
+}
+
 /// 字节换算 MiB。
 const MIB: f64 = 1024.0 * 1024.0;
 
@@ -286,14 +305,9 @@ mod procmem {
 fn real_nllb_parity_and_memory() {
     use std::os::windows::io::AsRawHandle;
 
-    let dir = std::env::var_os(ENV_NLLB_DIR)
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from(DEFAULT_NLLB_DIR));
-    if !dir.join("model.json").is_file() {
-        eprintln!("skip: {} not found (set {ENV_NLLB_DIR})", dir.display());
+    let Some(dir) = pack_dir(ENV_NLLB_DIR, DEFAULT_NLLB_DIR) else {
         return;
-    }
-    let dir = dir.to_string_lossy().replace('\\', "/");
+    };
     let fixture: Value =
         serde_json::from_str(include_str!("fixtures/nllb_parity.json")).expect("parity fixture");
 
@@ -429,14 +443,9 @@ fn has_halfwidth_after_cjk(s: &str) -> bool {
 #[test]
 #[ignore = "需要 NLLB 模型包与评测结果目录；占用 CPU，机器安静时运行"]
 fn real_nllb_decode_config_check() {
-    let dir = std::env::var_os(ENV_NLLB_DIR)
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from(DEFAULT_NLLB_DIR));
-    if !dir.join("model.json").is_file() {
-        eprintln!("skip: {} not found (set {ENV_NLLB_DIR})", dir.display());
+    let Some(dir) = pack_dir(ENV_NLLB_DIR, DEFAULT_NLLB_DIR) else {
         return;
-    }
-    let dir = dir.to_string_lossy().replace('\\', "/");
+    };
     let (mut total, mut exact, mut short_rust, mut short_old, mut short_new_eval) = (0, 0, 0, 0, 0);
     for (pair, src, tgt) in [
         ("eng_Latn-zho_Hans", "en", "zh-CN"),
@@ -544,14 +553,9 @@ fn real_hymt2_parity_and_memory() {
         fn SetPriorityClass(process: isize, class: u32) -> i32;
     }
 
-    let dir = std::env::var_os(ENV_HYMT_DIR)
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from(DEFAULT_HYMT_DIR));
-    if !dir.join("model.json").is_file() {
-        eprintln!("skip: {} not found (set {ENV_HYMT_DIR})", dir.display());
+    let Some(dir) = pack_dir(ENV_HYMT_DIR, DEFAULT_HYMT_DIR) else {
         return;
-    }
-    let dir = dir.to_string_lossy().replace('\\', "/");
+    };
     let (mut total, mut exact) = (0, 0);
     for (pair, src, tgt) in HYMT_PAIRS {
         let Some((srcs, refs)) = read_hymt_ref(pair) else {
