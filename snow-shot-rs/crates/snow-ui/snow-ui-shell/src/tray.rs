@@ -1,505 +1,31 @@
-//! 托盘：与 gpui 无关的托盘描述、菜单动作映射与服务。
+//! 托盘：描述与后端在 `snow-shell-core`，这里重导出并绑定 `AppCommand` 与能力表。
 //!
 //! 菜单点击 / 托盘点击触发后：`TrayAction::Command` 以
 //! [`CommandSource::Tray`](snow_app_core::command::CommandSource::Tray) 送入命令总线；
 //! `TrayAction::Signal`（如“退出”“打开设置”这类不属于 `AppCommand` 的动作）通过
 //! [`TrayService::signals`] 交给应用主循环处理。
 
-use crate::error::ShellError;
+use crate::dispatch::Dispatcher;
+use crate::error::{ShellError, require_capability};
 use snow_app_core::command::AppCommand;
-use std::collections::HashMap;
+use snow_capability::{Capability, CapabilityRegistry};
+use snow_shell_core::tray::TrayService as CoreTrayService;
+pub use snow_shell_core::tray::{SignalSink, TrayIconImage};
 
-/// 托盘图标位图（RGBA8，行优先）。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TrayIconImage {
-    /// RGBA 像素。
-    rgba: Vec<u8>,
-    /// 宽（像素）。
-    width: u32,
-    /// 高（像素）。
-    height: u32,
-}
-
-impl TrayIconImage {
-    /// 由 RGBA 数据构造；长度必须等于 `width * height * 4` 且尺寸非零。
-    ///
-    /// # 参数
-    /// - `rgba`：像素数据。
-    /// - `width` / `height`：像素尺寸。
-    ///
-    /// # 返回
-    /// 图标，或 `InvalidArgument`。
-    ///
-    /// ```rust
-    /// use snow_ui_shell::tray::TrayIconImage;
-    /// assert!(TrayIconImage::new(vec![0; 16], 2, 2).is_ok());
-    /// assert!(TrayIconImage::new(vec![0; 15], 2, 2).is_err());
-    /// ```
-    pub fn new(rgba: Vec<u8>, width: u32, height: u32) -> Result<Self, ShellError> {
-        let expected = (width as usize)
-            .checked_mul(height as usize)
-            .and_then(|n| n.checked_mul(4));
-        if width == 0 || height == 0 || expected != Some(rgba.len()) {
-            return Err(ShellError::InvalidArgument(format!(
-                "托盘图标数据长度 {} 与尺寸 {width}x{height} 不符",
-                rgba.len()
-            )));
-        }
-        Ok(Self {
-            rgba,
-            width,
-            height,
-        })
-    }
-
-    /// 纯色方块图标（占位图标 / 验证程序用）。
-    ///
-    /// ```rust
-    /// use snow_ui_shell::tray::TrayIconImage;
-    /// let icon = TrayIconImage::solid(16, 16, [0, 120, 255, 255]).unwrap();
-    /// assert_eq!(icon.size(), (16, 16));
-    /// ```
-    pub fn solid(width: u32, height: u32, rgba: [u8; 4]) -> Result<Self, ShellError> {
-        let data = rgba
-            .iter()
-            .copied()
-            .cycle()
-            .take(width as usize * height as usize * 4)
-            .collect();
-        Self::new(data, width, height)
-    }
-
-    /// 像素尺寸 `(宽, 高)`。
-    pub fn size(&self) -> (u32, u32) {
-        (self.width, self.height)
-    }
-}
-
-/// 托盘触发的动作。
-#[derive(Debug, Clone, PartialEq)]
-pub enum TrayAction {
-    /// 派发命令到总线（来源 `Tray`）。
-    Command(AppCommand),
-    /// 应用自定义信号，经 [`TrayService::signals`] 取出。
-    Signal(String),
-}
+/// 托盘触发的动作：命令（派发到总线）或应用自定义信号。
+pub type TrayAction = snow_shell_core::tray::TrayAction<AppCommand>;
 
 /// 托盘菜单项。
-#[derive(Debug, Clone, PartialEq)]
-pub enum TrayMenuEntry {
-    /// 普通条目。
-    Item {
-        /// 显示文字（应已本地化）。
-        label: String,
-        /// 是否可点击。
-        enabled: bool,
-        /// 勾选状态，None 表示不带复选框（原生复选框菜单项不能同时显示图标）。
-        checked: Option<bool>,
-        /// 图标，None 表示无图标。
-        icon: Option<TrayIconImage>,
-        /// 点击动作。
-        action: TrayAction,
-    },
-    /// 分隔线。
-    Separator,
-}
+pub type TrayMenuEntry = snow_shell_core::tray::TrayMenuEntry<AppCommand>;
 
 /// 托盘描述。
-#[derive(Debug, Clone, PartialEq)]
-pub struct TraySpec {
-    /// 悬停提示。
-    pub tooltip: String,
-    /// 图标。
-    pub icon: TrayIconImage,
-    /// 右键菜单。
-    pub menu: Vec<TrayMenuEntry>,
-    /// 左键单击动作；设置后左键不再弹出菜单。
-    pub on_left_click: Option<TrayAction>,
-    /// 左键双击动作（Windows）。
-    pub on_double_click: Option<TrayAction>,
-    /// 中键单击动作。
-    pub on_middle_click: Option<TrayAction>,
-}
-
-/// 菜单构建计划中的一项（已分配稳定 id）。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum MenuPlan {
-    /// 条目：id、文字、是否可用、勾选状态、图标。
-    Item(String, String, bool, Option<bool>, Option<TrayIconImage>),
-    /// 分隔线。
-    Separator,
-}
-
-/// 菜单 id 到动作的映射（纯逻辑）。
-#[derive(Debug, Default)]
-pub(crate) struct TrayActions {
-    /// id → 动作。
-    map: HashMap<String, TrayAction>,
-}
-
-impl TrayActions {
-    /// 为菜单项分配 id（`tray.item.N`），返回构建计划与映射表。
-    pub(crate) fn plan(entries: &[TrayMenuEntry]) -> (Vec<MenuPlan>, TrayActions) {
-        let mut actions = TrayActions::default();
-        let plan = entries
-            .iter()
-            .enumerate()
-            .map(|(i, e)| match e {
-                TrayMenuEntry::Separator => MenuPlan::Separator,
-                TrayMenuEntry::Item {
-                    label,
-                    enabled,
-                    checked,
-                    icon,
-                    action,
-                } => {
-                    let id = format!("tray.item.{i}");
-                    actions.map.insert(id.clone(), action.clone());
-                    MenuPlan::Item(id, label.clone(), *enabled, *checked, icon.clone())
-                }
-            })
-            .collect();
-        (plan, actions)
-    }
-
-    /// 按菜单 id 取动作。
-    pub(crate) fn resolve(&self, id: &str) -> Option<&TrayAction> {
-        self.map.get(id)
-    }
-}
-
-#[cfg(windows)]
-mod backend {
-    //! Windows 后端：专用线程持有 `TrayIcon` 并泵消息。
-
-    use super::*;
-    use crate::dispatch::Dispatcher;
-    use crate::native::{self, LoopWaker};
-    use crate::service_thread::ServiceThread;
-    use snow_app_core::command::CommandSource;
-    use std::sync::atomic::AtomicBool;
-    use std::sync::mpsc::{Receiver, Sender, channel};
-    use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
-    use tray_icon::{
-        Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent,
-    };
-
-    /// 进程内只允许一个托盘服务（事件通道是进程级单例）。
-    static RUNNING: AtomicBool = AtomicBool::new(false);
-
-    /// 控制请求。
-    enum Ctl {
-        /// 更新悬停提示。
-        SetTooltip(String),
-        /// 设置信号出口（设置后信号不再进入 `signals()` 通道）。
-        SetSignalSink(SignalSink),
-        /// 整体替换右键菜单。
-        SetMenu(Vec<TrayMenuEntry>),
-        /// 停止线程。
-        Shutdown,
-    }
-
-    /// 后端句柄。
-    pub(super) struct Inner {
-        /// 控制通道。
-        ctl: Sender<Ctl>,
-        /// 后台服务线程；丢弃时通知退出、join 并释放单例标记（托盘图标随线程退出移除）。
-        thread: ServiceThread<LoopWaker>,
-        /// 自定义信号接收端。
-        signals: Receiver<String>,
-    }
-
-    /// 按构建计划创建菜单。
-    fn build_menu(plan: &[MenuPlan]) -> Result<Menu, ShellError> {
-        let plat =
-            |what: &str, e: &dyn std::fmt::Display| ShellError::Platform(format!("{what}: {e}"));
-        let menu = Menu::new();
-        for p in plan {
-            match p {
-                MenuPlan::Separator => menu
-                    .append(&PredefinedMenuItem::separator())
-                    .map_err(|e| plat("追加分隔线", &e))?,
-                MenuPlan::Item(id, label, enabled, checked, icon) => {
-                    let native_icon = if let Some(i) = icon {
-                        let (w, h) = i.size();
-                        Some(
-                            tray_icon::menu::Icon::from_rgba(i.rgba.clone(), w, h)
-                                .map_err(|e| plat("图标转换", &e))?,
-                        )
-                    } else {
-                        None
-                    };
-                    if let Some(c) = checked {
-                        let item = tray_icon::menu::CheckMenuItem::with_id(
-                            id.as_str(),
-                            label,
-                            *enabled,
-                            *c,
-                            None,
-                        );
-                        menu.append(&item).map_err(|e| plat("追加勾选菜单项", &e))?;
-                    } else if native_icon.is_some() {
-                        let item = tray_icon::menu::IconMenuItem::with_id(
-                            id.as_str(),
-                            label,
-                            *enabled,
-                            native_icon,
-                            None,
-                        );
-                        menu.append(&item).map_err(|e| plat("追加图标菜单项", &e))?;
-                    } else {
-                        let item = MenuItem::with_id(id.as_str(), label, *enabled, None);
-                        menu.append(&item).map_err(|e| plat("追加菜单项", &e))?;
-                    }
-                }
-            }
-        }
-        Ok(menu)
-    }
-
-    /// 在线程内创建托盘及其菜单。
-    fn build_tray(spec: &TraySpec, plan: &[MenuPlan]) -> Result<(TrayIcon, Menu), ShellError> {
-        let plat =
-            |what: &str, e: &dyn std::fmt::Display| ShellError::Platform(format!("{what}: {e}"));
-        let menu = build_menu(plan)?;
-        let (w, h) = spec.icon.size();
-        let icon = Icon::from_rgba(spec.icon.rgba.clone(), w, h).map_err(|e| plat("图标", &e))?;
-        let tray = TrayIconBuilder::new()
-            .with_menu(Box::new(menu.clone()))
-            .with_menu_on_left_click(spec.on_left_click.is_none())
-            .with_tooltip(&spec.tooltip)
-            .with_icon(icon)
-            .build()
-            .map_err(|e| plat("创建托盘", &e))?;
-        Ok((tray, menu))
-    }
-
-    /// 后台线程状态。
-    struct Worker {
-        /// 托盘对象（必须留在创建线程）。
-        tray: TrayIcon,
-        /// 菜单，随托盘存活。
-        menu: Menu,
-        /// 菜单动作表。
-        actions: TrayActions,
-        /// 左键动作。
-        on_left: Option<TrayAction>,
-        /// 双击动作。
-        on_double: Option<TrayAction>,
-        /// 中键单击动作。
-        on_middle: Option<TrayAction>,
-        /// 命令出口。
-        dispatcher: Dispatcher,
-        /// 信号发送端。
-        signals: Sender<String>,
-        /// 自定义信号出口；有值时优先于 `signals` 通道。
-        sink: Option<SignalSink>,
-    }
-
-    impl Worker {
-        /// 执行动作。
-        fn run(&self, action: &TrayAction) {
-            match action {
-                TrayAction::Command(cmd) => self.dispatcher.send(CommandSource::Tray, cmd.clone()),
-                TrayAction::Signal(s) => match &self.sink {
-                    Some(sink) => sink(s.clone()),
-                    None => {
-                        let _ = self.signals.send(s.clone());
-                    }
-                },
-            }
-        }
-
-        /// 处理控制请求与托盘/菜单事件；返回 `false` 表示退出。
-        fn tick(&mut self, ctl: &Receiver<Ctl>) -> bool {
-            while let Ok(req) = ctl.try_recv() {
-                match req {
-                    Ctl::SetTooltip(t) => {
-                        if let Err(e) = self.tray.set_tooltip(Some(t)) {
-                            tracing::warn!(%e, "更新托盘提示失败");
-                        }
-                    }
-                    Ctl::SetSignalSink(sink) => self.sink = Some(sink),
-                    Ctl::SetMenu(entries) => {
-                        let (plan, actions) = TrayActions::plan(&entries);
-                        match build_menu(&plan) {
-                            Ok(menu) => {
-                                self.tray.set_menu(Some(Box::new(menu.clone())));
-                                self.menu = menu;
-                                self.actions = actions;
-                            }
-                            Err(e) => tracing::warn!(%e, "更新托盘菜单失败"),
-                        }
-                    }
-                    Ctl::Shutdown => return false,
-                }
-            }
-            while let Ok(ev) = MenuEvent::receiver().try_recv() {
-                if let Some(action) = self.actions.resolve(&ev.id.0) {
-                    self.run(action);
-                }
-            }
-            while let Ok(ev) = TrayIconEvent::receiver().try_recv() {
-                let action = match ev {
-                    TrayIconEvent::Click {
-                        button: MouseButton::Left,
-                        button_state: MouseButtonState::Up,
-                        ..
-                    } => self.on_left.as_ref(),
-                    TrayIconEvent::DoubleClick {
-                        button: MouseButton::Left,
-                        ..
-                    } => self.on_double.as_ref(),
-                    TrayIconEvent::Click {
-                        button: MouseButton::Middle,
-                        button_state: MouseButtonState::Up,
-                        ..
-                    } => self.on_middle.as_ref(),
-                    _ => None,
-                };
-                if let Some(a) = action {
-                    self.run(a);
-                }
-            }
-            true
-        }
-    }
-
-    impl Inner {
-        /// 启动后台线程并等待托盘创建完成。
-        pub(super) fn start(spec: TraySpec, dispatcher: Dispatcher) -> Result<Self, ShellError> {
-            let (ctl_tx, ctl_rx) = channel::<Ctl>();
-            let (sig_tx, sig_rx) = channel::<String>();
-            let notify_tx = ctl_tx.clone();
-            let thread = ServiceThread::spawn(
-                &RUNNING,
-                "TrayService",
-                "shell-tray",
-                "创建托盘线程失败",
-                move || {
-                    let (plan, actions) = TrayActions::plan(&spec.menu);
-                    let (tray, menu) = build_tray(&spec, &plan)?;
-                    let waker = native::current_thread_waker();
-                    let worker = Worker {
-                        tray,
-                        menu,
-                        actions,
-                        on_left: spec.on_left_click,
-                        on_double: spec.on_double_click,
-                        on_middle: spec.on_middle_click,
-                        dispatcher,
-                        signals: sig_tx,
-                        sink: None,
-                    };
-                    Ok((worker, waker))
-                },
-                move |mut worker: Worker| native::run_message_loop(|| worker.tick(&ctl_rx)),
-                move |waker: &LoopWaker| {
-                    let _ = notify_tx.send(Ctl::Shutdown);
-                    waker.wake();
-                },
-            )?;
-            Ok(Self {
-                ctl: ctl_tx,
-                thread,
-                signals: sig_rx,
-            })
-        }
-
-        /// 更新悬停提示。
-        pub(super) fn set_tooltip(&self, text: String) -> Result<(), ShellError> {
-            self.ctl
-                .send(Ctl::SetTooltip(text))
-                .map_err(|_| ShellError::ServiceClosed)?;
-            self.thread.ready().wake();
-            Ok(())
-        }
-
-        /// 整体替换右键菜单。
-        pub(super) fn set_menu(&self, entries: Vec<TrayMenuEntry>) -> Result<(), ShellError> {
-            self.ctl
-                .send(Ctl::SetMenu(entries))
-                .map_err(|_| ShellError::ServiceClosed)?;
-            self.thread.ready().wake();
-            Ok(())
-        }
-
-        /// 设置信号出口。
-        pub(super) fn set_signal_sink(&self, sink: SignalSink) -> Result<(), ShellError> {
-            self.ctl
-                .send(Ctl::SetSignalSink(sink))
-                .map_err(|_| ShellError::ServiceClosed)?;
-            self.thread.ready().wake();
-            Ok(())
-        }
-
-        /// 信号接收端。
-        pub(super) fn signals(&self) -> &Receiver<String> {
-            &self.signals
-        }
-    }
-}
-
-#[cfg(not(windows))]
-mod backend {
-    //! 非 Windows 降级后端：不创建托盘。
-
-    use super::*;
-    use crate::dispatch::Dispatcher;
-    use snow_capability::{Capability, REASON_NOT_IMPLEMENTED};
-    use std::sync::mpsc::Receiver;
-
-    /// 降级后端句柄（`start` 恒失败，故不会被构造）。
-    #[allow(dead_code)]
-    pub(super) struct Inner {
-        /// 永不产生信号的接收端。
-        signals: Receiver<String>,
-    }
-
-    /// 构造统一的“未实现”错误。
-    fn unsupported() -> ShellError {
-        ShellError::Unsupported {
-            capability: Capability::Tray,
-            reason: REASON_NOT_IMPLEMENTED,
-        }
-    }
-
-    impl Inner {
-        /// 启动：不支持。
-        pub(super) fn start(_spec: TraySpec, _d: Dispatcher) -> Result<Self, ShellError> {
-            Err(unsupported())
-        }
-
-        /// 更新提示：不支持。
-        pub(super) fn set_tooltip(&self, _text: String) -> Result<(), ShellError> {
-            Err(unsupported())
-        }
-
-        /// 替换菜单：不支持。
-        pub(super) fn set_menu(&self, _entries: Vec<TrayMenuEntry>) -> Result<(), ShellError> {
-            Err(unsupported())
-        }
-
-        /// 设置信号出口：不支持。
-        pub(super) fn set_signal_sink(&self, _sink: SignalSink) -> Result<(), ShellError> {
-            Err(unsupported())
-        }
-
-        /// 信号接收端。
-        pub(super) fn signals(&self) -> &Receiver<String> {
-            &self.signals
-        }
-    }
-}
-
-/// 托盘自定义信号出口：在托盘线程上同步调用，只应做轻量转发（如投递到主线程收件箱）。
-pub type SignalSink = Box<dyn Fn(String) + Send + 'static>;
+pub type TraySpec = snow_shell_core::tray::TraySpec<AppCommand>;
 
 /// 托盘服务：后台线程持有系统托盘图标，菜单/点击按 [`TraySpec`] 派发动作。
 /// 丢弃即移除托盘图标。进程内只能启动一个实例。
 pub struct TrayService {
-    /// 平台后端。
-    inner: backend::Inner,
+    /// 后端服务（动作负载为 `AppCommand`）。
+    inner: CoreTrayService<AppCommand>,
 }
 
 impl TrayService {
@@ -536,19 +62,19 @@ impl TrayService {
     /// let _ = tray.signals().try_recv();
     /// ```
     pub fn start(
-        caps: &snow_capability::CapabilityRegistry,
+        caps: &CapabilityRegistry,
         spec: TraySpec,
-        dispatcher: crate::dispatch::Dispatcher,
+        dispatcher: Dispatcher,
     ) -> Result<Self, ShellError> {
-        crate::error::require_capability(caps, snow_capability::Capability::Tray)?;
+        require_capability(caps, Capability::Tray)?;
         Ok(Self {
-            inner: backend::Inner::start(spec, dispatcher)?,
+            inner: CoreTrayService::start(spec, dispatcher.to_core())?,
         })
     }
 
     /// 更新悬停提示文字。
     pub fn set_tooltip(&self, text: impl Into<String>) -> Result<(), ShellError> {
-        self.inner.set_tooltip(text.into())
+        self.inner.set_tooltip(text)
     }
 
     /// 整体替换右键菜单（例如界面语言切换后刷新文案）。
@@ -594,65 +120,11 @@ impl TrayService {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// 图标数据长度与尺寸校验。
-    #[test]
-    fn icon_validation() {
-        assert!(TrayIconImage::new(vec![0; 4 * 4 * 4], 4, 4).is_ok());
-        assert!(TrayIconImage::new(vec![0; 10], 4, 4).is_err());
-        assert!(TrayIconImage::new(vec![], 0, 0).is_err());
-        let solid = TrayIconImage::solid(2, 1, [1, 2, 3, 4]).unwrap();
-        assert_eq!(solid.rgba, vec![1, 2, 3, 4, 1, 2, 3, 4]);
-    }
-
-    /// 菜单计划：条目获得唯一 id，分隔线不占映射，id 可还原动作。
-    #[test]
-    fn menu_plan_assigns_ids() {
-        let entries = vec![
-            TrayMenuEntry::Item {
-                label: "取消".into(),
-                enabled: true,
-                checked: None,
-                icon: None,
-                action: TrayAction::Command(AppCommand::Cancel(Default::default())),
-            },
-            TrayMenuEntry::Separator,
-            TrayMenuEntry::Item {
-                label: "退出".into(),
-                enabled: false,
-                checked: Some(true),
-                icon: None,
-                action: TrayAction::Signal("quit".into()),
-            },
-        ];
-        let (plan, actions) = TrayActions::plan(&entries);
-        assert_eq!(plan.len(), 3);
-        assert_eq!(plan[1], MenuPlan::Separator);
-        let MenuPlan::Item(id0, _, en0, _, _) = &plan[0] else {
-            panic!("应为条目");
-        };
-        let MenuPlan::Item(id2, label2, en2, checked2, _) = &plan[2] else {
-            panic!("应为条目");
-        };
-        assert_ne!(id0, id2);
-        assert!(*en0 && !*en2);
-        assert_eq!(label2, "退出");
-        assert_eq!(*checked2, Some(true));
-        assert_eq!(
-            actions.resolve(id0),
-            Some(&TrayAction::Command(AppCommand::Cancel(Default::default())))
-        );
-        assert_eq!(
-            actions.resolve(id2),
-            Some(&TrayAction::Signal("quit".into()))
-        );
-        assert_eq!(actions.resolve("nope"), None);
-    }
+    use snow_capability::Platform;
 
     /// 能力不可用时启动降级为错误。
     #[test]
     fn start_degrades_when_capability_missing() {
-        use snow_capability::{CapabilityRegistry, Platform};
         let caps = CapabilityRegistry::for_platform(Platform::Linux);
         let spec = TraySpec {
             tooltip: String::new(),
@@ -662,10 +134,28 @@ mod tests {
             on_double_click: None,
             on_middle_click: None,
         };
-        let d = crate::dispatch::Dispatcher::from_fn(|_, _| {});
+        let d = Dispatcher::from_fn(|_, _| {});
         assert!(matches!(
             TrayService::start(&caps, spec, d),
             Err(ShellError::Unsupported { .. })
         ));
+    }
+
+    /// 别名保持原用法：命令动作携带 `AppCommand`，信号动作携带字符串。
+    #[test]
+    fn aliases_keep_variant_paths() {
+        let cmd = TrayAction::Command(AppCommand::PinSelection);
+        let sig = TrayAction::Signal("quit".into());
+        assert!(matches!(cmd, TrayAction::Command(AppCommand::PinSelection)));
+        assert!(matches!(sig, TrayAction::Signal(ref s) if s == "quit"));
+        let item = TrayMenuEntry::Item {
+            label: "x".into(),
+            enabled: true,
+            checked: None,
+            icon: None,
+            action: cmd,
+        };
+        assert!(matches!(item, TrayMenuEntry::Item { .. }));
+        assert!(matches!(TrayMenuEntry::Separator, TrayMenuEntry::Separator));
     }
 }

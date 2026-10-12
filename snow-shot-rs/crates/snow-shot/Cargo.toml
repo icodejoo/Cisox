@@ -22,6 +22,8 @@ snow-draw-engine-editor = { path = "../../../snow_draw_engine_qt/crates/snow-dra
 # 自动滤镜区域记录类型（仓库内 path 依赖，引擎已带入，Cargo.lock 无新第三方包）
 snow-draw-engine-document = { path = "../../../snow_draw_engine_qt/crates/snow-draw-engine-document" }
 snow-history = { path = "../snow-history" }
+# 托盘宿主协议：host/spec.json 快照的类型与编解码（阶段 1 只生成快照，不接运行时）
+snow-host-protocol = { path = "../snow-host-protocol" }
 snow-mcp = { path = "../snow-mcp" }
 snow-ocr-protocol = { path = "../snow-ocr-protocol" }
 snow-net = { path = "../snow-net" }

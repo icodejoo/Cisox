@@ -1,0 +1,13 @@
+[package]
+name = "snow-data-paths"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "数据根目录解析与产品常量（零依赖，托盘宿主与 UI 进程共用）"
+
+[lints]
+workspace = true
+
+# 零依赖：宿主进程的依赖闭包受 workspace-guard 约束，这里不得引入任何第三方 crate
+[dependencies]

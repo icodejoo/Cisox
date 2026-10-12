@@ -6843,6 +6843,7 @@ name = "snow-app-core"
 version = "0.1.0"
 dependencies = [
  "snow-capability",
+ "snow-data-paths",
  "snow-draw-engine-core",
  "snow-platform",
  "tracing",
@@ -6887,9 +6888,14 @@ dependencies = [
  "serde",
  "serde_json",
  "snow-app-core",
+ "snow-data-paths",
  "snow-net",
  "snow-platform",
 ]
+
+[[package]]
+name = "snow-data-paths"
+version = "0.1.0"
 
 [[package]]
 name = "snow-draw-engine"
@@ -6976,6 +6982,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "snow-host-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "snow-i18n"
 version = "0.1.0"
 dependencies = [
@@ -7028,6 +7042,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "snow-shell-core"
+version = "0.1.0"
+dependencies = [
+ "global-hotkey",
+ "tracing",
+ "tray-icon",
+ "windows 0.62.2",
+]
+
+[[package]]
 name = "snow-shot"
 version = "0.1.0"
 dependencies = [
@@ -7045,6 +7069,7 @@ dependencies = [
  "snow-draw-engine-document",
  "snow-draw-engine-editor",
  "snow-history",
+ "snow-host-protocol",
  "snow-i18n",
  "snow-mcp",
  "snow-net",
@@ -7122,15 +7147,14 @@ dependencies = [
 name = "snow-ui-shell"
 version = "0.1.0"
 dependencies = [
- "global-hotkey",
  "gpui-kit",
  "gpui-pre",
  "raw-window-handle",
  "snow-app-core",
  "snow-capability",
+ "snow-shell-core",
  "snow-ui-icons",
  "tracing",
- "tray-icon",
  "windows 0.62.2",
 ]
 

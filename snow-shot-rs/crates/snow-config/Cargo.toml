@@ -10,6 +10,8 @@ serde = { version = "1", features = ["derive"] }
 miniz_oxide = { version = "0.9", default-features = false, features = ["with-alloc"] }
 serde_json = "1"
 snow-app-core = { path = "../snow-app-core" }
+# 数据根解析（原 paths 模块已抽出，本 crate 重导出）
+snow-data-paths = { path = "../snow-data-paths" }
 snow-net = { path = "../snow-net" }
 snow-platform = { path = "../snow-platform" }
 

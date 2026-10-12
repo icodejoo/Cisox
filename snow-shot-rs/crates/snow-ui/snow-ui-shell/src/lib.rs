@@ -6,7 +6,9 @@
 //! # 模块分层
 //! - **与 gpui 无关**（上层可直接依赖）：[`geometry`]（坐标/DPI/区域）、[`monitor`]、
 //!   [`window`]（`WindowSpec`）、[`overlay`]（`SetWindowRgn` 点击穿透，ADR-2b）、
-//!   [`hotkey`]、[`tray`]、[`dispatch`]（出口为命令总线）、[`error`]。
+//!   [`hotkey`]、[`tray`]、[`dispatch`]（出口为命令总线）、[`error`]。其中热键 / 托盘后端、
+//!   `ShellError` 在无 gpui 的 `snow-shell-core`（托盘宿主共用），这里重导出并套
+//!   `AppCommand` / 能力表适配，原路径不变。
 //! - **gpui 门面**：[`ui`] 是唯一暴露 gpui 类型的模块，重导出精选子集并提供 `run` /
 //!   `ShellContext::open_window`。视图层 crate 只通过 `snow_ui_shell::ui` 使用 GPUI。
 //!
@@ -23,8 +25,6 @@ mod native;
 pub mod overlay;
 pub mod pinned_geometry;
 pub mod selection;
-#[cfg(any(windows, test))]
-mod service_thread;
 pub mod tray;
 pub mod ui;
 pub mod window;

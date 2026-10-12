@@ -43,6 +43,10 @@ pub mod fullscreen_gate;
 pub mod history_nav;
 pub mod history_store;
 pub mod history_view;
+pub mod hotkey_plan;
+// 阶段 1 只生成与校验快照，宿主进程（阶段 2）接入后去掉 allow
+#[cfg_attr(not(test), allow(dead_code))]
+pub mod host_spec;
 pub mod language_names;
 pub mod latex_assets;
 pub mod latex_ocr;

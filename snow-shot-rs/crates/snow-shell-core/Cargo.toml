@@ -1,0 +1,26 @@
+[package]
+name = "snow-shell-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "托盘与全局热键后端（与 gpui、命令总线无关，托盘宿主与 UI 进程共用）"
+
+[lints]
+workspace = true
+
+[dependencies]
+# 日志门面（不带 subscriber，宿主自己决定怎么落盘）
+tracing = "0.1"
+
+# 与 snow-ui-shell 同版本的 windows 绑定（0.62），避免重复编译；只开消息循环与弹出菜单主题要用的特性
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
+] }
+# 托盘 / 全局热键（P0 V4 已批准）；muda 经 tray_icon::menu 重导出使用，不单独声明
+tray-icon = "0.25.1"
+global-hotkey = "0.8.0"

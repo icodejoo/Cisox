@@ -1,6 +1,13 @@
 //! workspace 守卫：`gpui` 只允许出现在 snow-ui-shell（方案 ADR-1 / 约定 4）。
 //!
-//! 所属阶段：P1。`cargo test -p workspace-guard` 会扫描真实源码树。
+//! 两层检查：
+//! 1. 源码与 manifest 扫描（本文件）：`gpui::` / gpui 依赖声明只许出现在 snow-ui-shell。
+//! 2. 依赖闭包黑名单（[`closure`]）：托盘宿主及其共用 crate 的传递依赖里不得出现 gpui、
+//!    图形、异步运行时等（`docs/design/tray-host-split.md` §3），解析 `Cargo.lock`，不起 cargo 进程。
+//!
+//! 所属阶段：P1。`cargo test -p workspace-guard` 会扫描真实源码树与锁文件。
+
+pub mod closure;
 
 use std::fs;
 use std::path::{Path, PathBuf};

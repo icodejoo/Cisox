@@ -8,13 +8,13 @@
 
 use crate::capture_flow::{CaptureCollector, CapturePayload, pick_monitor, spawn_capture};
 use crate::desktop_frames::{DesktopFrames, MonitorFrame};
-use crate::dictation::config::DictationConfig;
 use crate::dictation::focus::Verdict;
 use crate::dictation::translate::TranslationOutcome;
 use crate::dictation::{DictationCommand, DictationHost};
 use crate::direct_capture::{DirectHistory, DirectResult, spawn_direct_capture};
 use crate::frozen_frame::FrozenFrame;
 use crate::history_nav::ThreadedHistoryProvider;
+use crate::hotkey_plan::{PlannedHotkey, dictation_plan, hotkey_plan, quick_action_plan};
 use crate::history_store::{
     HistoryRecorder, HistorySource, HistoryStore, Thumbnail, policy_from_document,
 };
@@ -36,7 +36,6 @@ use crate::quick_actions::{
     NOTICE_FULLSCREEN_GATE_ON, NOTICE_NO_SELECTED_TEXT, NOTICE_PIN_SELECTED_FILES,
     NOTICE_RESTORE_CLOSED, QUICK_ACTION_KEYS, QuickPlan, clip_to_monitor, delay_seconds,
     direct_output_plan_from, full_monitor_region, plan_for, recording_directory,
-    stays_registered_when_paused,
 };
 use crate::recording_flow::{
     ENV_RECORDING_AUTOTEST, RecordingHost, monitor_for_region, parse_autotest,
@@ -45,7 +44,6 @@ use crate::screenshot_output::{
     ExportSettings, configured_format, export_direct, home_directory, resolve_save_directory,
 };
 use crate::scroll_view::{ENV_SCROLL_AUTOTEST, ScrollHost, parse_scroll_autotest};
-use crate::settings_model::portable_to_hotkey_text;
 use crate::settings_model::{LANGUAGE_KEY, THEME_COLOR_KEY, THEME_MODE_KEY};
 use crate::settings_pages::{
     PageAction, TRANSLATION_PAGE_ENABLED_KEY, TranslateFactory, WindowEntry,
@@ -94,7 +92,7 @@ use snow_i18n::Args;
 use snow_platform::single_instance::IpcCommand;
 use snow_ui::shell::dispatch::Dispatcher;
 use snow_ui::shell::geometry::{LogicalSize, PhysicalPoint, PhysicalRect};
-use snow_ui::shell::hotkey::{Hotkey, HotkeyBinding, HotkeyHandle, HotkeyService};
+use snow_ui::shell::hotkey::{HotkeyBinding, HotkeyHandle, HotkeyService};
 use snow_ui::shell::inbox::MainThreadInbox;
 use snow_ui::shell::monitor::{MonitorInfo, MonitorTarget};
 use snow_ui::shell::overlay::cursor_screen_position;
@@ -1236,75 +1234,44 @@ impl HotkeyRegistration {
     pub fn describe_all(&self) -> String {
         describe_failures(self.failures.iter())
     }
-
-    /// 合并另一批结果。
-    fn merge(&mut self, other: HotkeyRegistration) {
-        self.handles.extend(other.handles);
-        self.failures.extend(other.failures);
-    }
 }
 
-/// 按配置键注册一类全局热键；单个失败只记日志并收集，不影响其余。
+/// 按计划逐条注册全局热键；单个失败只记日志并收集，不影响其余。
+///
+/// 计划由 [`crate::hotkey_plan`] 里的纯函数算出，这里只负责“注册”这一步。
 ///
 /// # 参数
-/// - `service`：热键服务。
-/// - `document`：配置文档。
-/// - `key`：热键配置键。
-/// - `label`：日志里的功能名。
-/// - `command`：热键按下时触发的命令。
+/// - `register`：注册单条绑定的函数（通常是 `|b| service.register(b)`；测试里可换成记录器）。
+/// - `plan`：热键计划。
 ///
 /// # 返回
 /// 成功句柄与失败列表。
-fn register_hotkeys(
-    service: &HotkeyService,
-    document: &ConfigDocument,
-    key: &'static str,
-    label: &str,
-    command: &AppCommand,
-) -> HotkeyRegistration {
-    register_hotkeys_with_release(service, document, key, label, command, None)
-}
-
-/// 同 `register_hotkeys`，并可指定热键松开时触发的命令（按住说话用）。
-///
-/// # 参数
-/// - `service`：热键服务。
-/// - `document`：配置文档。
-/// - `key`：热键配置键。
-/// - `label`：日志里的功能名。
-/// - `command`：热键按下时触发的命令。
-/// - `on_release`：热键松开时触发的命令，`None` 表示忽略松开。
-///
-/// # 返回
-/// 成功句柄与失败列表。
-fn register_hotkeys_with_release(
-    service: &HotkeyService,
-    document: &ConfigDocument,
-    key: &'static str,
-    label: &str,
-    command: &AppCommand,
-    on_release: Option<&AppCommand>,
+fn register_plan_with<E: std::fmt::Display>(
+    mut register: impl FnMut(HotkeyBinding) -> Result<HotkeyHandle, E>,
+    plan: &[PlannedHotkey],
 ) -> HotkeyRegistration {
     let mut result = HotkeyRegistration::default();
-    for text in shortcut_strings(&document.value(key)) {
-        let hotkey = match Hotkey::parse(&portable_to_hotkey_text(&text)) {
-            Ok(h) => h,
-            Err(e) => {
-                tracing::warn!(shortcut = %text, error = %e, feature = label, "热键格式无效，已跳过");
+    for planned in plan {
+        let label = planned.label;
+        let text = &planned.text;
+        let hotkey = match &planned.parsed {
+            Ok(h) => h.clone(),
+            Err(reason) => {
+                tracing::warn!(shortcut = %text, error = %reason, feature = label, "热键格式无效，已跳过");
                 result.failures.push(HotkeyFailure {
-                    config_key: key,
-                    shortcut: text,
-                    reason: e.to_string(),
+                    config_key: planned.config_key,
+                    shortcut: text.clone(),
+                    reason: reason.clone(),
                 });
                 continue;
             }
         };
         let binding = HotkeyBinding {
             hotkey,
-            command: command.clone(),
-            on_release: on_release.cloned(),
+            command: planned.command.clone(),
+            on_release: planned.on_release.clone(),
         };
-        match service.register(binding) {
+        match register(binding) {
             Ok(handle) => {
                 tracing::info!(shortcut = %text, feature = label, "全局热键已注册");
                 result.handles.push(handle);
@@ -1312,8 +1279,8 @@ fn register_hotkeys_with_release(
             Err(e) => {
                 tracing::warn!(shortcut = %text, error = %e, feature = label, "热键注册失败（可能被其它程序占用）");
                 result.failures.push(HotkeyFailure {
-                    config_key: key,
-                    shortcut: text,
+                    config_key: planned.config_key,
+                    shortcut: text.clone(),
                     reason: e.to_string(),
                 });
             }
@@ -1322,30 +1289,13 @@ fn register_hotkeys_with_release(
     result
 }
 
-/// 同构的“单键单命令”热键表：（配置键，日志功能名，按下时的命令）；覆盖截图、录屏、贴图剪贴板内容、输入框翻译四类。
-fn simple_hotkey_table() -> [(&'static str, &'static str, AppCommand); 4] {
-    [
-        (
-            SCREENSHOT_HOTKEY_CONFIG_KEY,
-            "screenshot",
-            AppCommand::Capture(CaptureRequest::default()),
-        ),
-        (
-            RECORDING_HOTKEY_CONFIG_KEY,
-            "recording",
-            AppCommand::StartRecording(RecordingRequest::default()),
-        ),
-        (
-            PIN_CLIPBOARD_HOTKEY_CONFIG_KEY,
-            "pin_clipboard",
-            AppCommand::PinSelection,
-        ),
-        (
-            TRANSLATE_INPUT_HOTKEY_CONFIG_KEY,
-            "translate_input",
-            AppCommand::OpenTranslateInput,
-        ),
-    ]
+/// 把一份热键计划注册到热键服务。
+///
+/// # 参数
+/// - `service`：热键服务。
+/// - `plan`：热键计划。
+fn register_plan(service: &HotkeyService, plan: &[PlannedHotkey]) -> HotkeyRegistration {
+    register_plan_with(|binding| service.register(binding), plan)
 }
 
 /// 按配置注册语音转文字的两个全局热键：切换式（按一下开始、再按一下结束）与按住说话（按下开始、松开结束）。
@@ -1362,28 +1312,7 @@ pub fn register_dictation_hotkeys(
     service: &HotkeyService,
     document: &ConfigDocument,
 ) -> HotkeyRegistration {
-    let trigger = DictationConfig::from_document(document).trigger;
-    let mut result = HotkeyRegistration::default();
-    if trigger.toggle_enabled() {
-        result.merge(register_hotkeys(
-            service,
-            document,
-            DICTATION_TOGGLE_HOTKEY_CONFIG_KEY,
-            "dictation_toggle",
-            &AppCommand::ToggleDictation,
-        ));
-    }
-    if trigger.hold_enabled() {
-        result.merge(register_hotkeys_with_release(
-            service,
-            document,
-            DICTATION_HOLD_HOTKEY_CONFIG_KEY,
-            "dictation_hold",
-            &AppCommand::StartDictation,
-            Some(&AppCommand::StopDictation),
-        ));
-    }
-    result
+    register_plan(service, &dictation_plan(document))
 }
 
 /// 按配置注册全部“快捷动作”热键（直接截图、延迟截图、打开设置、暂停热键等）；未绑定的不注册。
@@ -1400,20 +1329,7 @@ pub fn register_quick_action_hotkeys(
     document: &ConfigDocument,
     paused: bool,
 ) -> HotkeyRegistration {
-    let mut result = HotkeyRegistration::default();
-    for (key, action) in QUICK_ACTION_KEYS {
-        if paused && !stays_registered_when_paused(key) {
-            continue;
-        }
-        result.merge(register_hotkeys(
-            service,
-            document,
-            key,
-            "quick_action",
-            &AppCommand::QuickAction(*action),
-        ));
-    }
-    result
+    register_plan(service, &quick_action_plan(document, paused))
 }
 
 /// 注册全部已接线的全局热键（截图 + 录屏 + 贴图剪贴板内容 + 输入框翻译 + 语音转文字 + 快捷动作）。
@@ -1439,16 +1355,7 @@ pub fn register_all_hotkeys_gated(
     document: &ConfigDocument,
     paused: bool,
 ) -> HotkeyRegistration {
-    if paused {
-        return register_quick_action_hotkeys(service, document, true);
-    }
-    let mut result = HotkeyRegistration::default();
-    for (key, label, command) in &simple_hotkey_table() {
-        result.merge(register_hotkeys(service, document, key, label, command));
-    }
-    result.merge(register_dictation_hotkeys(service, document));
-    result.merge(register_quick_action_hotkeys(service, document, false));
-    result
+    register_plan(service, &hotkey_plan(document, paused))
 }
 
 /// 注销一批热键句柄（失败只记日志），并清空 `handles`。
@@ -5445,6 +5352,9 @@ pub fn start_services(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dictation::config::DictationConfig;
+    use crate::settings_model::portable_to_hotkey_text;
+    use snow_ui::shell::hotkey::Hotkey;
     use snow_app_core::command::CommandContext;
 
     /// 翻译自动化开关解析：空关闭、download 只下载、其它值下载后重试。
@@ -5964,22 +5874,60 @@ mod tests {
         );
     }
 
-    /// 同构热键表覆盖截图 / 录屏 / 贴图剪贴板 / 输入框翻译四类，键与功能名互不重复。
+    /// 按计划注册：成功收集句柄，格式无效与注册被拒的都进失败列表且不影响其余；
+    /// 对默认配置，经记录器注册的集合与计划逐项一致。
     #[test]
-    fn simple_hotkey_table_covers_four_kinds() {
-        let table = simple_hotkey_table();
-        let keys: Vec<_> = table.iter().map(|(k, _, _)| *k).collect();
-        assert_eq!(
-            keys,
-            [
-                SCREENSHOT_HOTKEY_CONFIG_KEY,
-                RECORDING_HOTKEY_CONFIG_KEY,
-                PIN_CLIPBOARD_HOTKEY_CONFIG_KEY,
-                TRANSLATE_INPUT_HOTKEY_CONFIG_KEY,
-            ]
+    fn register_plan_collects_handles_and_failures() {
+        use crate::hotkey_plan::{hotkey_plan, quick_action_plan};
+        let doc = ConfigDocument::from_bytes(None);
+        let plan = hotkey_plan(&doc, false);
+        let mut seen = Vec::new();
+        let ok = register_plan_with(
+            |b: HotkeyBinding| -> Result<HotkeyHandle, String> {
+                seen.push((b.hotkey.to_string(), b.command, b.on_release));
+                Ok(HotkeyHandle(seen.len() as u32))
+            },
+            &plan,
         );
-        let labels: std::collections::HashSet<_> = table.iter().map(|(_, l, _)| *l).collect();
-        assert_eq!(labels.len(), 4);
+        assert!(ok.failures.is_empty());
+        assert_eq!(ok.handles.len(), plan.len());
+        let want: Vec<_> = plan
+            .iter()
+            .map(|p| {
+                (
+                    p.parsed.as_ref().unwrap().to_string(),
+                    p.command.clone(),
+                    p.on_release.clone(),
+                )
+            })
+            .collect();
+        assert_eq!(seen, want);
+
+        // 一条格式无效、一条被系统拒绝、一条成功
+        let mut broken = plan[0].clone();
+        broken.parsed = Err("无法识别的键".into());
+        let mut denied = plan[0].clone();
+        denied.text = "F13".into();
+        denied.parsed = Ok(Hotkey::parse("F13").unwrap());
+        let fine = plan[0].clone();
+        let result = register_plan_with(
+            |b: HotkeyBinding| -> Result<HotkeyHandle, String> {
+                if b.hotkey.to_string() == "F13" {
+                    Err("已被占用".into())
+                } else {
+                    Ok(HotkeyHandle(7))
+                }
+            },
+            &[broken, denied, fine],
+        );
+        assert_eq!(result.handles, vec![HotkeyHandle(7)]);
+        assert_eq!(result.failures.len(), 2);
+        assert_eq!(result.failures[0].reason, "无法识别的键");
+        assert_eq!(result.failures[1].shortcut, "F13");
+        assert_eq!(result.failures[1].reason, "已被占用");
+        // 暂停时只注册暂停 / 恢复开关
+        let paused = quick_action_plan(&doc, true);
+        assert!(paused.len() <= 1);
     }
 
     /// 合成底图尺寸：未设置、非法、为 0 均视为未启用。

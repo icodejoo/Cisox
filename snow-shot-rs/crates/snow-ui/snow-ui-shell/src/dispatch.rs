@@ -2,8 +2,27 @@
 
 use snow_app_core::bus::CommandBus;
 use snow_app_core::command::{AppCommand, CommandContext, CommandSource};
+use snow_shell_core::dispatch::{ActionOrigin, Dispatcher as CoreDispatcher};
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex};
+
+/// 后端动作来源转命令来源。
+///
+/// # 参数
+/// - `origin`：`snow-shell-core` 后端上报的触发来源。
+///
+/// ```rust
+/// use snow_app_core::command::CommandSource;
+/// use snow_shell_core::dispatch::ActionOrigin;
+/// use snow_ui_shell::dispatch::source_of;
+/// assert_eq!(source_of(ActionOrigin::Tray), CommandSource::Tray);
+/// ```
+pub fn source_of(origin: ActionOrigin) -> CommandSource {
+    match origin {
+        ActionOrigin::Hotkey => CommandSource::Hotkey,
+        ActionOrigin::Tray => CommandSource::Tray,
+    }
+}
 
 /// 命令派发器，可克隆；事件线程调用 `send` 不会被 handler 耗时阻塞。
 #[derive(Clone)]
@@ -68,6 +87,21 @@ impl Dispatcher {
     pub fn send(&self, source: CommandSource, cmd: AppCommand) {
         (self.sink)(source, cmd);
     }
+
+    /// 转成 `snow-shell-core` 后端用的派发器：来源按 [`source_of`] 映射，负载就是 `AppCommand`。
+    ///
+    /// # 返回
+    /// 与本派发器共用同一出口的 core 派发器。
+    ///
+    /// ```rust
+    /// use snow_ui_shell::dispatch::Dispatcher;
+    /// let core = Dispatcher::from_fn(|_src, _cmd| {}).to_core();
+    /// core.send(snow_shell_core::dispatch::ActionOrigin::Hotkey, snow_app_core::command::AppCommand::Recapture);
+    /// ```
+    pub fn to_core(&self) -> CoreDispatcher<AppCommand> {
+        let sink = Arc::clone(&self.sink);
+        CoreDispatcher::from_fn(move |origin, cmd| sink(source_of(origin), cmd))
+    }
 }
 
 #[cfg(test)]
@@ -92,9 +126,30 @@ mod tests {
             }),
         );
         let d = Dispatcher::from_bus(bus);
-        d.send(CommandSource::Hotkey, AppCommand::Cancel(Default::default()));
+        d.send(
+            CommandSource::Hotkey,
+            AppCommand::Cancel(Default::default()),
+        );
         let got = rx.recv_timeout(Duration::from_secs(2)).unwrap();
         assert_eq!(got, (CommandSource::Hotkey, CommandKind::Cancel));
+    }
+
+    /// core 派发器把来源映射为命令来源，负载原样送达。
+    #[test]
+    fn core_dispatcher_maps_origin() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&seen);
+        let d = Dispatcher::from_fn(move |source, cmd| sink.lock().unwrap().push((source, cmd)));
+        let core = d.to_core();
+        core.send(ActionOrigin::Hotkey, AppCommand::Recapture);
+        core.send(ActionOrigin::Tray, AppCommand::PinSelection);
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![
+                (CommandSource::Hotkey, AppCommand::Recapture),
+                (CommandSource::Tray, AppCommand::PinSelection),
+            ]
+        );
     }
 
     /// 无 handler 时不 panic，后续命令仍可处理。

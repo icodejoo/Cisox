@@ -15,6 +15,8 @@ gpui-kit = "=0.7.0"
 # 命令总线与平台能力表：热键/托盘事件以 AppCommand 为出口
 snow-app-core = { path = "../../snow-app-core" }
 snow-capability = { path = "../../snow-capability" }
+# 托盘 / 热键后端（无 gpui 的那一半），本 crate 重导出并套 AppCommand 适配
+snow-shell-core = { path = "../../snow-shell-core" }
 # 图标资源：antd 单色层经应用资源源提供给 GPUI
 snow-ui-icons = { path = "../snow-ui-icons" }
 # 日志（与 snow-app-core 同族）
@@ -35,6 +37,3 @@ windows = { version = "0.62", features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
 ] }
-# 托盘 / 全局热键（P0 V4 已批准）；muda 经 tray_icon::menu 重导出使用，不单独声明
-tray-icon = "0.25.1"
-global-hotkey = "0.8.0"

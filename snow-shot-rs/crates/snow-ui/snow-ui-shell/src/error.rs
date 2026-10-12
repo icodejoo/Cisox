@@ -1,53 +1,13 @@
 //! 适配层统一错误类型（与 gpui 无关）。
+//!
+//! [`ShellError`] 本体在 `snow-shell-core`（托盘宿主也要用），这里重导出，并提供依赖能力表的
+//! 校验函数（能力表不进宿主的依赖闭包）。
 
 use snow_capability::{Capability, CapabilityRegistry, CapabilityStatus};
-use std::fmt;
+pub use snow_shell_core::error::ShellError;
 
 /// 能力探测/初始化失败时使用的原因文案 key。
 pub const REASON_INIT_FAILED: &str = "capability-reason-init-failed";
-
-/// 适配层错误。所有平台调用失败都走这里，不 panic。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ShellError {
-    /// 当前平台/环境不支持该能力（已按能力表降级）。
-    Unsupported {
-        /// 被拒绝的能力项。
-        capability: Capability,
-        /// 原因文案 key。
-        reason: &'static str,
-    },
-    /// 参数不合法（如空区域尺寸、找不到显示器）。
-    InvalidArgument(String),
-    /// 热键冲突：已被本进程或其他程序占用。
-    HotkeyConflict(String),
-    /// 热键字符串解析失败。
-    InvalidHotkey(String),
-    /// 系统调用失败。
-    Platform(String),
-    /// 后台服务已停止，无法再处理请求。
-    ServiceClosed,
-    /// 该服务在进程内只能启动一个实例。
-    AlreadyRunning(&'static str),
-}
-
-impl fmt::Display for ShellError {
-    /// 输出面向日志的错误描述。
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ShellError::Unsupported { capability, reason } => {
-                write!(f, "能力不可用: {} ({reason})", capability.id())
-            }
-            ShellError::InvalidArgument(msg) => write!(f, "参数无效: {msg}"),
-            ShellError::HotkeyConflict(msg) => write!(f, "热键冲突: {msg}"),
-            ShellError::InvalidHotkey(msg) => write!(f, "热键格式无效: {msg}"),
-            ShellError::Platform(msg) => write!(f, "系统调用失败: {msg}"),
-            ShellError::ServiceClosed => write!(f, "后台服务已停止"),
-            ShellError::AlreadyRunning(name) => write!(f, "服务已在运行: {name}"),
-        }
-    }
-}
-
-impl std::error::Error for ShellError {}
 
 /// 按能力表校验能力是否可用；降级态视为可用。
 ///
@@ -67,7 +27,7 @@ impl std::error::Error for ShellError {}
 pub fn require_capability(caps: &CapabilityRegistry, cap: Capability) -> Result<(), ShellError> {
     match caps.query(cap) {
         CapabilityStatus::Unsupported { reason } => Err(ShellError::Unsupported {
-            capability: cap,
+            capability: cap.id(),
             reason,
         }),
         _ => Ok(()),
@@ -132,5 +92,27 @@ mod tests {
     #[test]
     fn display_is_readable() {
         assert!(ShellError::ServiceClosed.to_string().contains("停止"));
+    }
+
+    /// 能力不可用的错误带能力标识（取自能力表）。
+    #[test]
+    fn unsupported_carries_capability_id() {
+        let linux = CapabilityRegistry::for_platform(Platform::Linux);
+        let err = require_capability(&linux, Capability::Tray).unwrap_err();
+        assert!(err.to_string().contains(Capability::Tray.id()));
+    }
+
+    /// `snow-shell-core` 里复刻的能力标识与原因 key 必须与能力表一致（核心 crate 不依赖能力表）。
+    #[test]
+    fn core_constants_match_capability_table() {
+        use snow_shell_core::error::{
+            CAPABILITY_GLOBAL_HOTKEY, CAPABILITY_TRAY, REASON_NOT_IMPLEMENTED,
+        };
+        assert_eq!(CAPABILITY_GLOBAL_HOTKEY, Capability::GlobalHotkey.id());
+        assert_eq!(CAPABILITY_TRAY, Capability::Tray.id());
+        assert_eq!(
+            REASON_NOT_IMPLEMENTED,
+            snow_capability::REASON_NOT_IMPLEMENTED
+        );
     }
 }
