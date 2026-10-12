@@ -9,14 +9,16 @@
 //! - [`frame`]：JSON 行编解码与按字节流切行的 [`frame::FrameReader`]。
 //! - [`seq`]：命令序号、UI 侧去重与 `exit_request` 握手的仲裁（宿主是唯一仲裁方）。
 //! - [`base64`]：快照里图标像素用的最小 base64（不引入第三方依赖）。
-//!
-//! 本阶段（阶段 1）只提供定义与单测，不接入运行时。
+//! - [`launch`]：宿主拉起 UI 进程的命令行开关（`--ui --session <名> --token <令牌>` 等）。
+//! - [`spec_file`]：读取 `host/spec.json`（宿主侧；UI 侧的原子写在 `snow-shot` 里）。
 
 pub mod base64;
 pub mod frame;
+pub mod launch;
 pub mod message;
 pub mod seq;
 pub mod spec;
+pub mod spec_file;
 
 use std::time::Duration;
 
@@ -67,6 +69,31 @@ pub const ACTION_TOGGLE_FULLSCREEN_GATE: &str = "quick.toggle_disable_on_focused
 
 /// 动作 id：退出（宿主通知 UI 优雅退出后自己也退出）。
 pub const ACTION_QUIT: &str = "quit";
+
+/// 动作 id：重启（宿主让 UI 优雅退出后，拉起延迟启动的新宿主再退出）。
+pub const ACTION_RESTART: &str = "restart";
+
+/// 动作 id：发起截图（热键、`--cmd screenshot`）。
+pub const ACTION_CAPTURE: &str = "capture";
+
+/// 动作 id：开始录屏（`--cmd recording`）。
+pub const ACTION_START_RECORDING: &str = "start_recording";
+
+/// 动作 id：发起长截图（`--cmd scroll-capture`）。
+pub const ACTION_SCROLL_CAPTURE: &str = "scroll_capture";
+
+/// 动作 id：把剪贴板图像贴到屏幕（托盘菜单、`--cmd pin-clipboard`）。
+pub const ACTION_PIN_CLIPBOARD: &str = "pin_clipboard";
+
+/// 动作 id：打开设置窗口（托盘菜单、`--cmd settings`）。
+pub const ACTION_SETTINGS: &str = "settings";
+
+/// 动作 id：唤醒主窗口（托盘点击、`--cmd show`）。
+pub const ACTION_MAIN_WINDOW: &str = "main_window";
+
+/// 配置键：前台全屏窗口时停用全局热键（宿主切换开关后经 `set_config` 让 UI 落盘）。
+pub const CONFIG_KEY_DISABLE_ON_FULLSCREEN: &str =
+    "global_shortcuts/disable_on_focused_fullscreen_window";
 
 /// 快照提示文案里“失败原因”的占位符；宿主把它替换成实际的失败描述。
 pub const PLACEHOLDER_FAILURES: &str = "{failures}";

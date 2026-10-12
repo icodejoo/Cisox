@@ -39,6 +39,7 @@ use windows::Win32::System::Threading::{
 use windows::core::{HSTRING, PCWSTR, PWSTR};
 
 pub mod line_pipe;
+pub mod session_pipe;
 
 /// 管道命名空间前缀。
 const PIPE_NAMESPACE: &str = r"\\.\pipe\";

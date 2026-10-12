@@ -154,6 +154,12 @@ pub struct HostStrings {
     pub notice_gate_on: String,
     /// 前台全屏停用热键已关闭。
     pub notice_gate_off: String,
+    /// 界面进程启动失败（超时、握手不通过）；空串时宿主用内置英文兜底文案。
+    #[serde(default)]
+    pub notice_ui_start_failed: String,
+    /// 界面进程反复异常退出、进入退避；空串时宿主用内置英文兜底文案。
+    #[serde(default)]
+    pub notice_ui_crash_loop: String,
 }
 
 /// 保活与登录时要做的事。
@@ -372,6 +378,8 @@ mod tests {
                 notice_resume_failed: "failed".into(),
                 notice_gate_on: "on".into(),
                 notice_gate_off: "off".into(),
+                notice_ui_start_failed: "ui failed".into(),
+                notice_ui_crash_loop: "ui loop".into(),
             },
             flags: HostFlags {
                 keep_alive: vec![crate::KEEP_ALIVE_MCP.into()],

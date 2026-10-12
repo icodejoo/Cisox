@@ -32,3 +32,7 @@ quick-notice-capture-busy = A screenshot is already in progress.
 quick-notice-folder-failed = Could not open the folder: { $arg1 }
 
 tray-tooltip-paused = { $product } (hotkeys paused)
+
+tray-notice-ui-start-failed = The interface process failed to start.
+
+tray-notice-ui-crash-loop = The interface process keeps exiting unexpectedly. It will be retried later.

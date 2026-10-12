@@ -21,6 +21,10 @@ mod win_pipe;
 #[cfg(windows)]
 pub use win_pipe::line_pipe;
 
+/// 双工会话管道（托盘宿主与 UI 进程的长连接：两端都能随时主动写，一行一条消息）。
+#[cfg(windows)]
+pub use win_pipe::session_pipe;
+
 #[cfg(windows)]
 use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE};
 #[cfg(windows)]

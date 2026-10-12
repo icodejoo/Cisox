@@ -32,3 +32,7 @@ quick-notice-capture-busy = 已有截图正在进行。
 quick-notice-folder-failed = 无法打开文件夹：{ $arg1 }
 
 tray-tooltip-paused = { $product }（热键已暂停）
+
+tray-notice-ui-start-failed = 界面进程启动失败。
+
+tray-notice-ui-crash-loop = 界面进程反复异常退出，稍后会再次尝试。

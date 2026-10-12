@@ -318,6 +318,25 @@ impl ShellContext<'_> {
             .update(self.app, |_, window, _| window.activate_window());
     }
 
+    /// 当前打开的窗口数（UI 进程据此判断“所有窗口都关了”）。
+    pub fn window_count(&self) -> usize {
+        self.app.windows().len()
+    }
+
+    /// 注册“窗口关闭”回调：任何窗口被关闭后在主线程上调用一次（此时 `window_count` 已不含该窗口）。
+    ///
+    /// # 参数
+    /// - `callback`：回调，应只做轻量转发（如往收件箱投一个事件）。
+    ///
+    /// ```no_run
+    /// snow_ui_shell::ui::run_resident(|cx| {
+    ///     cx.on_window_closed(|| println!("有窗口关了"));
+    /// });
+    /// ```
+    pub fn on_window_closed(&mut self, callback: impl Fn() + 'static) {
+        self.app.on_window_closed(move |_, _| callback()).detach();
+    }
+
     /// 最后一个窗口关闭时自动退出应用。
     pub fn quit_on_last_window_closed(&mut self) {
         self.app

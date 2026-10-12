@@ -54,19 +54,19 @@ pub fn pipe_name_for(app_id: &str) -> Result<String, String> {
 
 /// 行缓冲：把字节流切成行。
 #[derive(Default)]
-struct LineBuffer {
+pub(super) struct LineBuffer {
     /// 尚未取走的字节。
     pending: Vec<u8>,
 }
 
 impl LineBuffer {
     /// 追加收到的字节。
-    fn push(&mut self, bytes: &[u8]) {
+    pub(super) fn push(&mut self, bytes: &[u8]) {
         self.pending.extend_from_slice(bytes);
     }
 
     /// 取出下一整行（去掉 `\n` 与可选的 `\r`）；没有整行返回 `None`。
-    fn next_line(&mut self) -> Option<Vec<u8>> {
+    pub(super) fn next_line(&mut self) -> Option<Vec<u8>> {
         let end = self.pending.iter().position(|b| *b == b'\n')?;
         let mut line: Vec<u8> = self.pending.drain(..=end).collect();
         line.pop();
@@ -77,7 +77,7 @@ impl LineBuffer {
     }
 
     /// 缓冲中未成行的字节数。
-    fn len(&self) -> usize {
+    pub(super) fn len(&self) -> usize {
         self.pending.len()
     }
 }

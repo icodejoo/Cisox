@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 /// 开关状态的配置键（布尔）。
 pub const DISABLE_ON_FULLSCREEN_CONFIG_KEY: &str =
-    "global_shortcuts/disable_on_focused_fullscreen_window";
+    snow_host_protocol::CONFIG_KEY_DISABLE_ON_FULLSCREEN;
 
 /// 开关的进程内镜像：热键线程读取，主线程在切换时写入。
 static ENABLED: AtomicBool = AtomicBool::new(false);

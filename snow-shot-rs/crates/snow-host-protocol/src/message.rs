@@ -20,6 +20,18 @@ pub enum GesturePhase {
     Cancel,
 }
 
+/// 动作的触发来源（只用于 UI 侧日志与来源标签，不影响动作本身）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionOrigin {
+    /// 全局热键。
+    Hotkey,
+    /// 托盘菜单或托盘点击。
+    Tray,
+    /// 命令行 `--cmd`（控制管道）。
+    Ipc,
+}
+
 /// 单个 `config_key` 的热键注册结果。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HotkeyResult {
@@ -42,6 +54,9 @@ pub enum HostMessage {
         seq: u64,
         /// 动作 id。
         id: String,
+        /// 触发来源；旧宿主不带这个字段，按未知处理。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin: Option<ActionOrigin>,
     },
     /// 恢复上次保存的贴图。
     RestorePins {
@@ -93,7 +108,7 @@ impl HostMessage {
     ///
     /// ```rust
     /// use snow_host_protocol::message::HostMessage;
-    /// let m = HostMessage::Command { seq: 7, id: "capture".into() };
+    /// let m = HostMessage::Command { seq: 7, id: "capture".into(), origin: None };
     /// assert_eq!(m.seq(), Some(7));
     /// assert_eq!(HostMessage::Shutdown.seq(), None);
     /// ```
@@ -188,6 +203,28 @@ impl std::fmt::Display for HelloError {
 
 impl std::error::Error for HelloError {}
 
+/// 字节串转小写十六进制文本（令牌、一次性 launch_id 用）。
+///
+/// # 参数
+/// - `bytes`：任意字节。
+///
+/// # 返回
+/// 长度为 `bytes.len() * 2` 的小写十六进制字符串。
+///
+/// ```rust
+/// use snow_host_protocol::message::hex_lower;
+/// assert_eq!(hex_lower(&[0x0f, 0xa0]), "0fa0");
+/// ```
+pub fn hex_lower(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        out.push(DIGITS[usize::from(b >> 4)] as char);
+        out.push(DIGITS[usize::from(b & 0x0f)] as char);
+    }
+    out
+}
+
 /// 令牌是否合法：恰好 `TOKEN_BYTES` 个字节的十六进制文本（小写）。
 ///
 /// # 参数
@@ -264,8 +301,17 @@ mod tests {
                 HostMessage::Command {
                     seq: 1,
                     id: "capture".into(),
+                    origin: None,
                 },
                 json!({"type": "command", "seq": 1, "id": "capture"}),
+            ),
+            (
+                HostMessage::Command {
+                    seq: 10,
+                    id: "settings".into(),
+                    origin: Some(ActionOrigin::Ipc),
+                },
+                json!({"type": "command", "seq": 10, "id": "settings", "origin": "ipc"}),
             ),
             (
                 HostMessage::RestorePins { seq: 2 },
@@ -406,6 +452,15 @@ mod tests {
         ] {
             assert_eq!(control.seq(), None);
         }
+    }
+
+    /// 十六进制编码：定长、小写、与令牌格式校验互相印证。
+    #[test]
+    fn hex_encoding_matches_token_format() {
+        assert_eq!(hex_lower(&[]), "");
+        assert_eq!(hex_lower(&[0x00, 0xff, 0x1a]), "00ff1a");
+        let token = hex_lower(&[0xabu8; TOKEN_BYTES]);
+        assert!(is_valid_token(&token));
     }
 
     /// 令牌格式：长度与字符集。
