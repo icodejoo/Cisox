@@ -394,6 +394,20 @@ impl PinShared {
             .collect()
     }
 
+    /// 下次登录要恢复的贴图数：与 `PinnedManager::restore_all` 同口径——贴图历史开启时，当前激活分组里的记录数；
+    /// 历史关闭为 0。宿主据此（快照 `pins_to_restore`）决定登录时要不要拉起 UI 恢复贴图。
+    ///
+    /// ```ignore
+    /// let n = shared.restorable_count();
+    /// ```
+    pub fn restorable_count(&self) -> u32 {
+        if !self.policy().enabled {
+            return 0;
+        }
+        let active = self.active_group_id();
+        u32::try_from(self.ids_in_group(&active).len()).unwrap_or(u32::MAX)
+    }
+
     /// 读取一个布尔配置项；缺失或类型不对按 `false`。
     ///
     /// # 参数
@@ -903,6 +917,31 @@ mod tests {
         assert_eq!(removed, vec![a]);
         assert_eq!(shared.active_group_id(), "default");
         assert_eq!(shared.ids_in_group("default"), vec![b]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 登录时要恢复的贴图数：按激活分组计数，与 `restore_all` 同口径；关闭（删除）后少一张；
+    /// 切到别的分组后数的是那个分组；贴图历史关闭时为 0。
+    #[test]
+    fn restorable_count_follows_active_group_and_policy() {
+        let dir = temp_dir("restorable");
+        let (shared, _) = open_in(&dir);
+        assert_eq!(shared.restorable_count(), 0);
+        let a = store_pin(&shared, 8, 8, PhysicalRect::new(0, 0, 8, 8));
+        let b = store_pin(&shared, 8, 8, PhysicalRect::new(10, 0, 8, 8));
+        assert_eq!(shared.restorable_count(), 2);
+        let zh = crate::ocr_backend::i18n_for("zh-CN");
+        let work = shared.create_group(Some("工作"), zh).unwrap();
+        shared.move_pin(&a, &work).unwrap();
+        assert_eq!(shared.restorable_count(), 1, "默认分组里只剩 b");
+        shared.set_active_group(&work).unwrap();
+        assert_eq!(shared.restorable_count(), 1, "工作分组里是 a");
+        assert!(shared.remove(&a));
+        assert_eq!(shared.restorable_count(), 0);
+        shared.set_active_group("default").unwrap();
+        assert_eq!(shared.restorable_count(), 1);
+        assert!(shared.remove(&b));
+        assert_eq!(shared.restorable_count(), 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

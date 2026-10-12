@@ -602,6 +602,66 @@ mod tests {
         assert!(!root.exists());
     }
 
+    /// 双进程下 MCP 与宿主共存（方案 §10 第 2 条：MCP 开启时 UI 保活）：MCP 管道、宿主控制管道、宿主会话管道三个名字
+    /// 互不相同，MCP 服务开着时宿主的会话管道照常可建可连；描述符写在数据根的 `mcp/` 下（不碰 `host/`），指向 MCP 管道，
+    /// 服务关闭后描述符随之清理。用自定义管道名，不占用本机真实的 MCP 管道。
+    #[cfg(windows)]
+    #[test]
+    fn mcp_service_coexists_with_host_pipes() {
+        use snow_mcp::service::{McpService, PIPE_APP_ID, ServiceConfig};
+        use snow_platform::single_instance::line_pipe::pipe_name_for;
+        use snow_platform::single_instance::session_pipe::{SessionPipeClient, SessionPipeServer};
+        let root = unique_temp_dir("cisox-mcp-host", "coexist");
+        let tag = format!(
+            "{}-{}",
+            std::process::id(),
+            snow_platform::unix_time::unix_nanos()
+        );
+        let mcp_pipe = pipe_name_for(&format!("cisox-mcp-test-{tag}")).unwrap();
+        let session_pipe = pipe_name_for(&format!(
+            "{}.coexist{tag}",
+            snow_data_paths::SESSION_PIPE_APP_ID_PREFIX
+        ))
+        .unwrap();
+        let control_pipe = pipe_name_for(snow_data_paths::SINGLE_INSTANCE_APP_ID).unwrap();
+        // 产品里 MCP 默认管道名、宿主控制管道名、会话管道名前缀互不相同
+        let default_mcp = pipe_name_for(PIPE_APP_ID).unwrap();
+        assert_ne!(default_mcp, control_pipe);
+        assert!(!default_mcp.contains(snow_data_paths::SESSION_PIPE_APP_ID_PREFIX));
+        assert_ne!(mcp_pipe, session_pipe);
+        assert_ne!(mcp_pipe, control_pipe);
+
+        let service = McpService::start(
+            ServiceConfig {
+                data_root: root.clone(),
+                server: snow_mcp::tools::ServerInfo {
+                    name: "cisox-test".to_string(),
+                    version: "0".to_string(),
+                },
+                granted: vec![Scope::ReadOnly],
+                pipe_name: Some(mcp_pipe.clone()),
+            },
+            Arc::new(backend(BTreeMap::new(), MainThreadInbox::new())),
+        )
+        .expect("MCP 服务应能启动");
+        // MCP 开着：宿主的会话管道照常建得起来、连得上
+        let server =
+            SessionPipeServer::start(&session_pipe, |_| {}).expect("会话管道应能与 MCP 并存");
+        let client = SessionPipeClient::connect(&session_pipe).expect("UI 应连得上会话管道");
+        drop(client);
+        // 描述符在 mcp/ 下（宿主的 host/ 目录归快照与日志），指向 MCP 管道
+        let descriptor = service.descriptor_path().to_path_buf();
+        assert!(descriptor.starts_with(root.join("mcp")), "{descriptor:?}");
+        assert!(!root.join("host").exists(), "MCP 不碰宿主的目录");
+        let text = std::fs::read_to_string(&descriptor).unwrap();
+        let parsed: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(parsed["pipe"], json!(mcp_pipe));
+        drop(server);
+        drop(service);
+        assert!(!descriptor.exists(), "服务关闭后描述符清理");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// 授权域：默认只读 + 截图；打开控制后含控制；关掉截图后只剩只读。
     #[test]
     fn scopes_follow_config() {

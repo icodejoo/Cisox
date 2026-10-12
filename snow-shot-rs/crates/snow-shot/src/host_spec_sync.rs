@@ -4,7 +4,7 @@
 //! `rev` 单调递增：启动时接着文件里已有的修订号继续往上加，内容没变就不写、不涨 `rev`，
 //! 所以 UI 每次启动“校验并重写快照”不会让宿主白白重新应用一遍。
 
-use snow_host_protocol::spec::HostSpec;
+use snow_host_protocol::spec::{HostFlags, HostSpec};
 use snow_host_protocol::spec_file::read_spec;
 use snow_platform::atomic_file::atomic_write;
 use std::path::PathBuf;
@@ -103,15 +103,42 @@ impl SpecSync {
         self.last = Some(spec);
         Ok(Some(self.rev))
     }
+
+    /// 只改文件里现有快照的 `flags`（登录恢复贴图数、更新检查到点时间……），不重新渲染托盘菜单。
+    ///
+    /// 这类字段变得勤（每次贴图增减 / 更新检查结束），而整份快照生成一次要 ~235ms（i18n + 图标光栅化），
+    /// 无窗口更新检查还可能与正在运行的 UI 并存，不该去碰贴图仓储：所以只做“读现有快照 → 改标志 → 发布”。
+    ///
+    /// # 参数
+    /// - `apply`：对 `flags` 的修改。
+    ///
+    /// # 返回
+    /// 写入了新版本返回 `Some(新 rev)`；没有现成快照（留给完整生成）或标志没变返回 `None`；写盘失败返回错误文本。
+    ///
+    /// ```no_run
+    /// # use snow_shot::host_spec_sync::SpecSync;
+    /// # fn demo(mut sync: SpecSync) {
+    /// let _ = sync.patch_flags(|flags| flags.pins_to_restore = 3);
+    /// # }
+    /// ```
+    pub fn patch_flags(
+        &mut self,
+        apply: impl FnOnce(&mut HostFlags),
+    ) -> Result<Option<u64>, String> {
+        let Some(last) = &self.last else {
+            return Ok(None);
+        };
+        let mut spec = last.clone();
+        apply(&mut spec.flags);
+        self.publish(spec)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use snow_host_protocol::SPEC_VERSION;
-    use snow_host_protocol::spec::{
-        GateSpec, HostFlags, HostStrings, IconRgba, TraySection, TrayTheme,
-    };
+    use snow_host_protocol::spec::{GateSpec, HostStrings, IconRgba, TraySection, TrayTheme};
 
     /// 最小合法快照，`tooltip` 用来区分内容。
     fn spec(tooltip: &str) -> HostSpec {
@@ -174,6 +201,43 @@ mod tests {
         assert_eq!(second.rev(), 2);
         assert_eq!(second.publish(spec("b")).unwrap(), None);
         assert_eq!(second.publish(spec("c")).unwrap(), Some(3));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap().parent().unwrap());
+    }
+
+    /// 只改标志：保持其余内容不变、rev + 1；标志没变不写；没有现成快照不凭空造（留给完整生成）。
+    #[test]
+    fn patch_flags_touches_only_flags() {
+        let path = scratch("patch");
+        let mut sync = SpecSync::open(path.clone());
+        assert_eq!(
+            sync.patch_flags(|flags| flags.pins_to_restore = 2).unwrap(),
+            None,
+            "没有基线快照"
+        );
+        assert!(!path.exists());
+        sync.publish(spec("keep me")).unwrap();
+        assert_eq!(
+            sync.patch_flags(|flags| flags.pins_to_restore = 2).unwrap(),
+            Some(2)
+        );
+        let read = read_spec(&path).unwrap();
+        assert_eq!(read.flags.pins_to_restore, 2);
+        assert_eq!(read.tray.tooltip, "keep me");
+        assert_eq!(
+            sync.patch_flags(|flags| flags.pins_to_restore = 2).unwrap(),
+            None,
+            "没变不写"
+        );
+        assert_eq!(
+            sync.patch_flags(|flags| flags.update_due_at = Some(99))
+                .unwrap(),
+            Some(3)
+        );
+        let read = read_spec(&path).unwrap();
+        assert_eq!(
+            (read.flags.pins_to_restore, read.flags.update_due_at),
+            (2, Some(99))
+        );
         let _ = std::fs::remove_dir_all(path.parent().unwrap().parent().unwrap());
     }
 

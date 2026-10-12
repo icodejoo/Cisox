@@ -11,17 +11,19 @@
 //! 待回报登记等纯逻辑在 `crate::host_link`，有离屏测试。
 
 use super::*;
+use crate::activity::{BusyInputs, busy_reasons as compute_busy_reasons};
 use crate::host_link::{HostEvent, HostLink, PendingApply, apply_failure};
 use crate::host_spec::{HostSpecInputs, command_from_id, host_spec_from_document};
 use crate::host_spec_sync::SpecSync;
 use snow_app_core::command::CommandContext;
-use snow_host_protocol::message::{ActionOrigin, HostMessage, UiMessage};
+use snow_host_protocol::message::{ActionOrigin, GesturePhase, HostMessage, UiMessage};
 use snow_host_protocol::spec::HostSpec;
 use snow_host_protocol::{
-    ACTION_CAPTURE, ACTION_QUIT, ACTION_RESTART, ACTION_SCROLL_CAPTURE, ACTION_START_RECORDING,
-    ACTION_TOGGLE_FULLSCREEN_GATE, ACTION_TOGGLE_GLOBAL_HOTKEYS, HOTKEYS_APPLY_TIMEOUT,
-    KEEP_ALIVE_MCP, KEEP_ALIVE_OCR_HOT_START,
+    ACTION_CAPTURE, ACTION_KEEP_ALIVE, ACTION_QUIT, ACTION_RESTART, ACTION_SCROLL_CAPTURE,
+    ACTION_START_RECORDING, ACTION_TOGGLE_FULLSCREEN_GATE, ACTION_TOGGLE_GLOBAL_HOTKEYS,
+    HOTKEYS_APPLY_TIMEOUT,
 };
+use snow_platform::global_mouse::{DragEvent, Point};
 use snow_platform::single_instance::session_pipe::PipeWriter;
 use std::cell::Cell;
 
@@ -31,17 +33,6 @@ const HOST_EXE_NAME: &str = "snow-shot.exe";
 /// 等宿主回报热键注册结果超时时给设置页的失败原因（占位，设置页前缀已本地化）。
 const APPLY_TIMEOUT_REASON: &str = "host did not respond";
 
-/// 阻止退出的原因：有窗口。
-const BUSY_WINDOWS: &str = "windows";
-/// 阻止退出的原因：采集进行中。
-const BUSY_CAPTURE: &str = "capture";
-/// 阻止退出的原因：直接截图进行中。
-const BUSY_DIRECT_CAPTURE: &str = "direct_capture";
-/// 阻止退出的原因：延迟截图倒计时。
-const BUSY_DELAY_CAPTURE: &str = "delay_capture";
-/// 阻止退出的原因：语音转文字进行中。
-const BUSY_DICTATION: &str = "dictation";
-
 /// 宿主转来的动作该怎么处理。
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum ActionTarget {
@@ -49,8 +40,45 @@ pub(super) enum ActionTarget {
     Event(UiEvent),
     /// 走命令总线（热键 / 托盘原来的路径）。
     Command(AppCommand),
+    /// 宿主要求常驻的占位动作：收到即确认，什么都不做。
+    Noop,
     /// 宿主自己处理的动作或不认识的 id，忽略。
     Ignored,
+}
+
+/// 宿主转来的鼠标手势事件还原成钩子的拖动事件（坐标为虚拟桌面物理像素）。
+///
+/// # 参数
+/// - `phase`：阶段。
+/// - `id`：手势编号。
+/// - `action`：动作标识（只有 `begin` 带）。
+/// - `x` / `y`：位置（`cancel` 没有位置，忽略）。
+///
+/// # 返回
+/// 拖动事件；`begin` 没带动作标识（协议不一致）返回 `None`，调用方记日志并忽略。
+///
+/// ```ignore
+/// let event = drag_event_from_host(GesturePhase::Finish, 3, None, 10, 20);
+/// assert!(matches!(event, Some(DragEvent::Finish { id: 3, .. })));
+/// ```
+pub(super) fn drag_event_from_host(
+    phase: GesturePhase,
+    id: u64,
+    action: Option<String>,
+    x: i32,
+    y: i32,
+) -> Option<DragEvent> {
+    let pos = Point { x, y };
+    Some(match phase {
+        GesturePhase::Begin => DragEvent::Begin {
+            id,
+            action: action?,
+            pos,
+        },
+        GesturePhase::Update => DragEvent::Update { id, pos },
+        GesturePhase::Finish => DragEvent::Finish { id, pos },
+        GesturePhase::Cancel => DragEvent::Cancel { id },
+    })
 }
 
 /// 把宿主转来的动作 id 映射成要执行的东西。
@@ -69,6 +97,7 @@ pub(super) fn target_for_action(id: &str, origin: Option<ActionOrigin>) -> Actio
         None => ORIGIN_OTHER,
     };
     match id {
+        ACTION_KEEP_ALIVE => ActionTarget::Noop,
         ACTION_CAPTURE => ActionTarget::Event(UiEvent::Capture { origin: label }),
         ACTION_START_RECORDING => ActionTarget::Event(UiEvent::StartRecording),
         ACTION_SCROLL_CAPTURE => ActionTarget::Event(UiEvent::StartScrollCapture),
@@ -93,6 +122,7 @@ pub(super) fn affects_host_spec(key: &str) -> bool {
         || key.starts_with("global_shortcuts/")
         || key.starts_with("global_mouse/")
         || key.starts_with("dictation/")
+        || key.starts_with("updates/")
         || key == LANGUAGE_KEY
         || key == THEME_MODE_KEY
         || key == DELAY_SECONDS_CONFIG_KEY
@@ -125,6 +155,10 @@ pub(crate) struct HostSession {
     startup_synced: Cell<bool>,
     /// 最近一次上报的活动状态。
     last_activity: RefCell<Option<Activity>>,
+    /// 最近一次写进快照的“登录要恢复的贴图数”（`None` 表示还没写过，第一次空闲时校一遍）。
+    last_restorable: Cell<Option<u32>>,
+    /// 缓存：是否绑定了语音转文字热键（保活判定每个事件都要用，配置变化时清空）。
+    dictation_bound: Cell<Option<bool>>,
 }
 
 impl HostSession {
@@ -142,6 +176,30 @@ impl HostSession {
             spec_dirty: Cell::new(false),
             startup_synced: Cell::new(false),
             last_activity: RefCell::new(None),
+            last_restorable: Cell::new(None),
+            dictation_bound: Cell::new(None),
+        }
+    }
+
+    /// 请宿主改托盘悬停提示（单进程里是本进程直接改托盘）。
+    ///
+    /// # 参数
+    /// - `text`：悬停提示全文。
+    pub(crate) fn send_tooltip(&self, text: &str) {
+        self.link.send(&UiMessage::Tooltip {
+            text: text.to_string(),
+        });
+    }
+
+    /// 是否绑定了语音转文字热键（带缓存，配置变化时由 [`on_config_key_changed`] 清空）。
+    fn dictation_hotkey_bound(&self, document: &ConfigDocument) -> bool {
+        match self.dictation_bound.get() {
+            Some(bound) => bound,
+            None => {
+                let bound = crate::hotkey_plan::dictation_hotkey_bound(document);
+                self.dictation_bound.set(Some(bound));
+                bound
+            }
         }
     }
 
@@ -170,12 +228,71 @@ fn spec_of(state: &AppState) -> Result<HostSpec, String> {
             hotkeys_paused: false,
             groups: &groups,
             active_group: &state.pins.shared().active_group_id(),
-            // 登录恢复贴图、更新检查到点时间留给阶段 3
-            pins_to_restore: 0,
-            update_due_at: None,
+            pins_to_restore: state.pins.shared().restorable_count(),
+            update_due_at: crate::net_settings::update_due_at(
+                document,
+                &state.data_root,
+                crate::net_settings::unix_now(),
+            ),
             rev: 0,
         },
     )
+}
+
+/// 配置键变化时调用：清掉按配置缓存的判定（语音热键是否绑定）。
+///
+/// # 参数
+/// - `state`：运行时状态（没接宿主会话时什么都不做）。
+pub(super) fn on_config_key_changed(state: &AppState) {
+    if let Some(session) = state.host.as_ref() {
+        session.dictation_bound.set(None);
+    }
+}
+
+/// 把“下次登录要恢复的贴图数”写进快照（只改标志，不重新渲染菜单）；数没变就什么都不做。
+///
+/// 宿主不需要被通知：这个值只在宿主下次启动（登录、重启、崩溃后）时读。
+///
+/// # 参数
+/// - `state`：运行时状态。
+/// - `session`：宿主会话。
+fn sync_restorable_pins(state: &AppState, session: &HostSession) {
+    let count = state.pins.shared().restorable_count();
+    if session.last_restorable.replace(Some(count)) == Some(count) {
+        return;
+    }
+    match session
+        .sync
+        .borrow_mut()
+        .patch_flags(|flags| flags.pins_to_restore = count)
+    {
+        Ok(Some(rev)) => tracing::debug!(count, rev, "登录恢复贴图数已写入快照"),
+        Ok(None) => {}
+        Err(e) => tracing::warn!(error = %e, "写入登录恢复贴图数失败"),
+    }
+}
+
+/// 退出前（贴图已落盘之后）校准快照里的登录恢复贴图数：宿主重启 / 崩溃后重拉时据此恢复贴图。
+///
+/// # 参数
+/// - `state`：运行时状态（没接宿主会话时什么都不做）。
+pub(super) fn finalize_on_shutdown(state: &AppState) {
+    if let Some(session) = state.host.as_ref() {
+        // 强制重算：落盘后的记录数才是下次要恢复的数
+        session.last_restorable.set(None);
+        sync_restorable_pins(state, session);
+    }
+}
+
+/// 请宿主取消进行中的鼠标手势（UI 放弃了这次拖选，钩子别再吞鼠标输入）。
+///
+/// # 参数
+/// - `state`：运行时状态。
+/// - `id`：被放弃的手势编号。
+pub(super) fn send_cancel_gesture(state: &AppState, id: u64) {
+    if let Some(session) = state.host.as_ref() {
+        session.link.send(&UiMessage::CancelGesture { id });
+    }
 }
 
 /// 重新生成并发布快照；有变化就通知宿主。
@@ -202,49 +319,27 @@ pub(super) fn request_spec_sync(state: &AppState) {
     }
 }
 
-/// 请宿主改托盘悬停提示（单进程里是本进程直接改托盘）。
+/// 现场快照：把运行时状态里“能不能退出”相关的东西摘出来（判定本身是 `activity::busy_reasons` 的纯函数）。
 ///
 /// # 参数
+/// - `cx`：外壳上下文（窗口数、录屏 / 长截图控制窗是否还开着）。
 /// - `state`：运行时状态。
-/// - `text`：悬停提示全文。
-pub(super) fn send_tooltip(state: &AppState, text: &str) {
-    if let Some(session) = state.host.as_ref() {
-        session.link.send(&UiMessage::Tooltip {
-            text: text.to_string(),
-        });
-    }
-}
-
-/// 当前阻止退出的原因（为空才算空闲）。
-///
-/// 阶段 2 覆盖：窗口、采集 / 直接截图 / 延迟截图进行中、语音转文字进行中、用户显式要求常驻
-/// （MCP、OCR 预热）。完整的活动守卫（下载、历史写入、worker 结果消费者等）是阶段 3。
-fn busy_reasons(cx: &ShellContext, state: &AppState) -> Vec<String> {
-    let mut reasons = Vec::new();
-    if cx.window_count() > 0 {
-        reasons.push(BUSY_WINDOWS.to_string());
-    }
-    if state.capture_in_flight {
-        reasons.push(BUSY_CAPTURE.to_string());
-    }
-    if state.direct_in_flight {
-        reasons.push(BUSY_DIRECT_CAPTURE.to_string());
-    }
-    if state.delay.is_pending() {
-        reasons.push(BUSY_DELAY_CAPTURE.to_string());
-    }
-    if state.dictation.is_active() {
-        reasons.push(BUSY_DICTATION.to_string());
-    }
+/// - `session`：宿主会话（语音热键绑定判定的缓存）。
+fn busy_inputs(cx: &ShellContext, state: &AppState, session: &HostSession) -> BusyInputs {
     let config = state.config.borrow();
     let document = config.document();
-    if state.mcp.is_running() || document.bool_or(crate::mcp_host::KEY_ENABLED, false) {
-        reasons.push(KEEP_ALIVE_MCP.to_string());
+    BusyInputs {
+        windows: cx.window_count(),
+        capture_in_flight: state.capture_in_flight,
+        direct_in_flight: state.direct_in_flight,
+        delay_pending: state.delay.is_pending(),
+        dictation_active: state.dictation.is_active(),
+        recording: state.recording.is_busy(cx),
+        scroll_capture: state.scroll.is_busy(cx),
+        mcp: state.mcp.is_running() || document.bool_or(crate::mcp_host::KEY_ENABLED, false),
+        ocr_hot_start: document.bool_or(crate::ocr_service::KEY_HOT_START, false),
+        dictation_hotkey: session.dictation_hotkey_bound(document),
     }
-    if document.bool_or(crate::ocr_service::KEY_HOT_START, false) {
-        reasons.push(KEEP_ALIVE_OCR_HOT_START.to_string());
-    }
-    reasons
 }
 
 /// 每处理完一个事件后调用：上报活动状态的变化；收件箱已空且无窗口无活动时请求退出。
@@ -259,19 +354,29 @@ pub(super) fn after_event(cx: &ShellContext, state: &AppState) {
     let Some(session) = state.host.as_ref() else {
         return;
     };
-    let busy = busy_reasons(cx, state);
+    let inputs = busy_inputs(cx, state, session);
+    let busy = compute_busy_reasons(&inputs, &state.activity);
     let activity = Activity {
-        windows: cx.window_count() as u32,
+        windows: inputs.windows as u32,
         pins: state.pins.pin_count() as u32,
         busy: busy.clone(),
     };
     if session.last_activity.borrow().as_ref() != Some(&activity) {
+        // 贴图增减时顺手把“登录要恢复的贴图数”写进快照（第一次也校一遍）
+        let pins_changed = session
+            .last_activity
+            .borrow()
+            .as_ref()
+            .is_none_or(|last| last.pins != activity.pins);
         session.link.send(&UiMessage::Activity {
             windows: activity.windows,
             pins: activity.pins,
             busy_reasons: activity.busy.clone(),
         });
         *session.last_activity.borrow_mut() = Some(activity);
+        if pins_changed {
+            sync_restorable_pins(state, session);
+        }
     }
     if !busy.is_empty() || !state.inbox.is_empty() {
         return;
@@ -344,6 +449,7 @@ fn handle_message(
                         tracing::warn!(%id, error = %e, "宿主转来的命令执行失败");
                     }
                 }
+                ActionTarget::Noop => tracing::debug!("宿主要求 UI 常驻，无需动作"),
                 ActionTarget::Ignored => tracing::warn!(%id, "宿主转来的动作无法识别，已忽略"),
             }
         }
@@ -357,10 +463,29 @@ fn handle_message(
                 apply_set_config(state, &key, value);
             }
         }
-        HostMessage::Gesture { seq, .. } => {
-            // 鼠标手势流在阶段 3 接入；宿主阶段 2 不装手势钩子，不会发来
-            session.link.accept(seq);
-            tracing::debug!("收到鼠标手势事件，阶段 2 暂不处理");
+        HostMessage::Gesture {
+            seq,
+            phase,
+            id,
+            action,
+            x,
+            y,
+        } => {
+            // update 每秒上百条，宿主不等确认：安静地登记序号，不回 ack
+            let check = if phase == GesturePhase::Update {
+                session.link.accept_quiet(seq)
+            } else {
+                session.link.accept(seq)
+            };
+            if check == snow_host_protocol::seq::SeqCheck::Duplicate {
+                return;
+            }
+            match drag_event_from_host(phase, id, action, x, y) {
+                Some(event) => {
+                    state.inbox.push(UiEvent::MouseGesture(event));
+                }
+                None => tracing::warn!(id, "宿主转来的手势 begin 没带动作标识，已忽略"),
+            }
         }
         HostMessage::Shutdown | HostMessage::ExitOk => {
             session.link.begin_closing();
@@ -551,6 +676,79 @@ mod tests {
         );
     }
 
+    /// 宿主的“保活”占位动作：收到即确认、什么都不做（既不开窗也不告警）。
+    #[test]
+    fn keep_alive_action_is_a_noop() {
+        for origin in [None, Some(ActionOrigin::Hotkey), Some(ActionOrigin::Ipc)] {
+            assert_eq!(
+                target_for_action(ACTION_KEEP_ALIVE, origin),
+                ActionTarget::Noop
+            );
+        }
+    }
+
+    /// 宿主转来的手势四个阶段还原成钩子的拖动事件；begin 没带动作标识（协议不一致）返回 `None`。
+    #[test]
+    fn host_gesture_maps_to_drag_events() {
+        assert_eq!(
+            drag_event_from_host(GesturePhase::Begin, 5, Some("screenshot_ocr".into()), -7, 9),
+            Some(DragEvent::Begin {
+                id: 5,
+                action: "screenshot_ocr".into(),
+                pos: Point { x: -7, y: 9 },
+            })
+        );
+        assert_eq!(
+            drag_event_from_host(GesturePhase::Update, 5, None, 1, 2),
+            Some(DragEvent::Update {
+                id: 5,
+                pos: Point { x: 1, y: 2 },
+            })
+        );
+        assert_eq!(
+            drag_event_from_host(GesturePhase::Finish, 5, None, 3, 4),
+            Some(DragEvent::Finish {
+                id: 5,
+                pos: Point { x: 3, y: 4 },
+            })
+        );
+        assert_eq!(
+            drag_event_from_host(GesturePhase::Cancel, 5, None, 0, 0),
+            Some(DragEvent::Cancel { id: 5 })
+        );
+        assert_eq!(
+            drag_event_from_host(GesturePhase::Begin, 5, None, 0, 0),
+            None
+        );
+    }
+
+    /// 手势动作标识与 UI 侧的截图模式一一对应：宿主快照里 `mouse` 的每个动作都能映射成模式。
+    #[test]
+    fn every_gesture_action_has_a_capture_mode() {
+        let doc = ConfigDocument::from_bytes(None);
+        let spec = host_spec_from_document(
+            &doc,
+            &HostSpecInputs {
+                locale: "en-US",
+                hotkeys_paused: false,
+                groups: &[],
+                active_group: "",
+                pins_to_restore: 0,
+                update_due_at: None,
+                rev: 1,
+            },
+        )
+        .unwrap();
+        assert!(!spec.mouse.is_empty(), "默认配置带手势绑定");
+        for binding in &spec.mouse {
+            assert!(
+                crate::mouse_gesture::mode_for_action(&binding.action).is_some(),
+                "{}",
+                binding.action
+            );
+        }
+    }
+
     /// `--cmd` 七个命令派生的动作 id 与旧入口 `map_ipc_command` 的结果一一对应。
     #[test]
     fn ipc_derived_ids_match_legacy_ipc_mapping() {
@@ -649,7 +847,7 @@ mod tests {
         }
     }
 
-    /// 影响宿主快照的配置键：托盘、全局快捷键、手势、语音、语言、主题、延迟秒数、MCP、OCR 预热；
+    /// 影响宿主快照的配置键：托盘、全局快捷键、手势、语音、更新策略（到点时间）、语言、主题、延迟秒数、MCP、OCR 预热；
     /// 无关的键（截图质量等）不触发重新生成（生成一次要渲染菜单图标，不能每次改配置都做）。
     #[test]
     fn spec_relevant_keys() {
@@ -659,6 +857,8 @@ mod tests {
             "global_shortcuts/disable_on_focused_fullscreen_window",
             "global_mouse/screenshot_copy",
             "dictation/trigger_mode",
+            "updates/mode",
+            "updates/manifest_url",
             LANGUAGE_KEY,
             THEME_MODE_KEY,
             DELAY_SECONDS_CONFIG_KEY,
@@ -667,11 +867,7 @@ mod tests {
         ] {
             assert!(affects_host_spec(key), "{key}");
         }
-        for key in [
-            "screenshot/image_quality",
-            "updates/mode",
-            "storage/schema_version",
-        ] {
+        for key in ["screenshot/image_quality", "storage/schema_version"] {
             assert!(!affects_host_spec(key), "{key}");
         }
     }

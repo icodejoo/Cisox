@@ -464,6 +464,38 @@ pub fn auto_check_target(document: &ConfigDocument, data_root: &Path, now: u64) 
     .ok()
 }
 
+/// 下一次自动更新检查的到点时间（Unix 秒），写进宿主快照的 `update_due_at`，宿主据此到点拉起无窗口检查。
+///
+/// 策略为手动、清单地址未配置或非法时没有待办（`None`）；从没检查过或时钟回拨（上次检查在未来）算“现在就到点”
+/// （`Some(0)`）；否则是上次检查时间加最小间隔。与 [`auto_check_target`] 的放行条件一致。
+///
+/// # 参数
+/// - `document`：配置文档。
+/// - `data_root`：应用数据根目录（读取上次检查时间）。
+/// - `now`：当前 Unix 秒。
+///
+/// ```ignore
+/// let due = update_due_at(&doc, &data_root, unix_now());
+/// ```
+pub fn update_due_at(document: &ConfigDocument, data_root: &Path, now: u64) -> Option<u64> {
+    let mode = UpdateMode::parse(document.str_or(KEY_UPDATE_MODE, ""));
+    if !mode.checks_automatically() {
+        return None;
+    }
+    resolve_manifest_url(
+        document
+            .value(KEY_UPDATE_MANIFEST_URL)
+            .as_str()
+            .unwrap_or_default(),
+    )
+    .ok()?;
+    Some(match read_last_check(data_root) {
+        None => 0,
+        Some(last) if last > now => 0,
+        Some(last) => last.saturating_add(AUTO_CHECK_MIN_INTERVAL_SECS),
+    })
+}
+
 /// 自动检查发现新版本时的托盘提示文案；其它结果（含失败）返回 `None`，由调用方只记日志。
 ///
 /// # 参数
@@ -966,6 +998,41 @@ mod tests {
             auto_check_notice(&UpdateCheckOutcome::FetchFailed("x".into()), "zh-CN"),
             None
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 到点时间（宿主快照 `update_due_at`）与 `auto_check_target` 的放行条件一致：
+    /// 手动 / 没地址没有待办；从没检查过或时钟回拨“现在就到点”；否则上次检查 + 最小间隔；
+    /// 到了那个时刻 `auto_check_target` 确实放行。
+    #[test]
+    fn update_due_at_matches_auto_check_rules() {
+        let dir = std::env::temp_dir().join(format!("cisox-update-due-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut doc = ConfigDocument::from_bytes(None);
+        let now = 2_000_000;
+        // 没配置地址：没有待办
+        assert_eq!(update_due_at(&doc, &dir, now), None);
+        doc.set_value(KEY_UPDATE_MANIFEST_URL, json!("https://example.com/m.json"))
+            .unwrap();
+        doc.set_value(KEY_UPDATE_MODE, json!("check")).unwrap();
+        // 从没检查过：现在就到点
+        assert_eq!(update_due_at(&doc, &dir, now), Some(0));
+        // 检查过：上次 + 间隔，且恰好那一刻自动检查放行、前一秒不放行
+        write_last_check(&dir, now - 100);
+        let due = update_due_at(&doc, &dir, now).unwrap();
+        assert_eq!(due, now - 100 + AUTO_CHECK_MIN_INTERVAL_SECS);
+        assert!(auto_check_target(&doc, &dir, due).is_some());
+        assert!(auto_check_target(&doc, &dir, due - 1).is_none());
+        // 时钟回拨（上次检查在未来）：现在就到点
+        write_last_check(&dir, now + 5000);
+        assert_eq!(update_due_at(&doc, &dir, now), Some(0));
+        // 手动模式 / 地址非法：没有待办
+        doc.set_value(KEY_UPDATE_MODE, json!("manual")).unwrap();
+        assert_eq!(update_due_at(&doc, &dir, now), None);
+        doc.set_value(KEY_UPDATE_MODE, json!("check")).unwrap();
+        doc.set_value(KEY_UPDATE_MANIFEST_URL, json!("not a url"))
+            .unwrap();
+        assert_eq!(update_due_at(&doc, &dir, now), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

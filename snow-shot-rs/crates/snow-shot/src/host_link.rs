@@ -125,6 +125,24 @@ impl<W: LineSink> HostLink<W> {
         check
     }
 
+    /// 同 [`accept`](Self::accept)，但不回 `ack`：给高频、丢一条无所谓的消息（鼠标手势的 `update`，每秒上百条）用。
+    ///
+    /// 序号照样登记，所以后面第一条要确认的消息的 `ack` 会（累计地）把它一并确认，`exit_request` 带的
+    /// `last_seq` 也包含它；宿主那一侧同样不等它的确认。
+    ///
+    /// # 参数
+    /// - `seq`：宿主命令的序号。
+    ///
+    /// # 返回
+    /// 同 [`accept`](Self::accept)。
+    pub fn accept_quiet(&self, seq: u64) -> SeqCheck {
+        let check = self.seq.borrow_mut().accept(seq);
+        if check == SeqCheck::Gap {
+            tracing::warn!(seq, "宿主命令序号跳号");
+        }
+        check
+    }
+
     /// 在“收件箱已空、没有窗口、没有活动”时请求退出：同一时刻只保留一个未决请求。
     ///
     /// # 返回
@@ -306,6 +324,27 @@ mod tests {
                 UiMessage::Ack { seq: 5 },
             ]
         );
+    }
+
+    /// 安静登记（手势 update）：不回 ack，但序号照常推进——退出请求带的 `last_seq` 包含它，重发的旧序号仍是 Duplicate。
+    #[test]
+    fn accept_quiet_tracks_seq_without_acking() {
+        let link = HostLink::new(Recorder::default());
+        assert_eq!(link.accept(1), SeqCheck::Fresh);
+        for seq in 2..=50 {
+            assert_eq!(link.accept_quiet(seq), SeqCheck::Fresh);
+        }
+        assert_eq!(link.accept_quiet(50), SeqCheck::Duplicate);
+        assert_eq!(
+            sent(&link),
+            vec![UiMessage::Ack { seq: 1 }],
+            "50 条里只有第 1 条回了 ack"
+        );
+        // 下一条要确认的消息的 ack 累计覆盖前面的 update；退出请求的 last_seq 含 update
+        assert_eq!(link.accept(51), SeqCheck::Fresh);
+        assert!(link.request_exit());
+        let last = sent(&link).pop().unwrap();
+        assert_eq!(last, UiMessage::ExitRequest { last_seq: 51 });
     }
 
     /// 退出请求：带上已处理的最后序号；未决期间不重复发；被拒绝后可以再请求。

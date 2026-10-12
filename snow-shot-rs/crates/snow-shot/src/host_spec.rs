@@ -21,8 +21,8 @@ use snow_host_protocol::spec::{
     MouseBindingSpec, TraySection, TrayTheme,
 };
 use snow_host_protocol::{
-    ACTION_TOGGLE_FULLSCREEN_GATE, ACTION_TOGGLE_GLOBAL_HOTKEYS, KEEP_ALIVE_MCP,
-    KEEP_ALIVE_OCR_HOT_START, PLACEHOLDER_FAILURES, SPEC_VERSION,
+    ACTION_TOGGLE_FULLSCREEN_GATE, ACTION_TOGGLE_GLOBAL_HOTKEYS, KEEP_ALIVE_DICTATION_HOTKEY,
+    KEEP_ALIVE_MCP, KEEP_ALIVE_OCR_HOT_START, PLACEHOLDER_FAILURES, SPEC_VERSION,
 };
 use snow_i18n::Args;
 use snow_ui::shell::tray::{TrayAction, TrayIconImage, TrayMenuEntry};
@@ -238,14 +238,24 @@ fn mouse_specs(document: &ConfigDocument) -> Vec<MouseBindingSpec> {
         .collect()
 }
 
-/// 保活原因：用户显式要求常驻的功能。
-fn keep_alive_reasons(document: &ConfigDocument) -> Vec<String> {
+/// 保活原因：用户显式要求常驻的功能（MCP、OCR 预热），以及绑定了语音转文字热键（方案 §10 第 2~4 条）。
+///
+/// # 参数
+/// - `document`：配置文档。
+///
+/// ```ignore
+/// assert!(keep_alive_reasons(&ConfigDocument::from_bytes(None)).is_empty());
+/// ```
+pub fn keep_alive_reasons(document: &ConfigDocument) -> Vec<String> {
     let mut reasons = Vec::new();
     if document.bool_or(crate::mcp_host::KEY_ENABLED, false) {
         reasons.push(KEEP_ALIVE_MCP.to_string());
     }
     if document.bool_or(crate::ocr_service::KEY_HOT_START, false) {
         reasons.push(KEEP_ALIVE_OCR_HOT_START.to_string());
+    }
+    if crate::hotkey_plan::dictation_hotkey_bound(document) {
+        reasons.push(KEEP_ALIVE_DICTATION_HOTKEY.to_string());
     }
     reasons
 }
@@ -669,6 +679,51 @@ mod tests {
             .unwrap();
         let light = host_spec_from_document(&doc, &inputs(&[], "")).unwrap();
         assert_eq!(light.tray.theme, TrayTheme::Light);
+    }
+
+    /// 保活原因（§10 第 2~4 条）：默认全无；开 MCP / OCR 预热各加一项；绑定语音热键加 `dictation_hotkey`，
+    /// 解绑即消失；顺序固定。登录时要宿主拉起 UI 的只有前两项。
+    #[test]
+    fn keep_alive_reasons_follow_config() {
+        let mut doc = ConfigDocument::from_bytes(None);
+        assert!(keep_alive_reasons(&doc).is_empty());
+        doc.set_value(
+            crate::app_runtime::DICTATION_TOGGLE_HOTKEY_CONFIG_KEY,
+            json!(["Ctrl+Alt+D"]),
+        )
+        .unwrap();
+        doc.set_value(
+            crate::app_runtime::DICTATION_TRIGGER_MODE_CONFIG_KEY,
+            json!("toggle"),
+        )
+        .unwrap();
+        assert_eq!(keep_alive_reasons(&doc), [KEEP_ALIVE_DICTATION_HOTKEY]);
+        let spec = host_spec_from_document(&doc, &inputs(&[], "")).unwrap();
+        assert!(
+            !spec.flags.needs_resident_ui(),
+            "只绑语音热键不要求登录拉起"
+        );
+        doc.set_value(crate::mcp_host::KEY_ENABLED, json!(true))
+            .unwrap();
+        doc.set_value(crate::ocr_service::KEY_HOT_START, json!(true))
+            .unwrap();
+        assert_eq!(
+            keep_alive_reasons(&doc),
+            [
+                KEEP_ALIVE_MCP,
+                KEEP_ALIVE_OCR_HOT_START,
+                KEEP_ALIVE_DICTATION_HOTKEY
+            ]
+        );
+        doc.set_value(
+            crate::app_runtime::DICTATION_TOGGLE_HOTKEY_CONFIG_KEY,
+            json!([]),
+        )
+        .unwrap();
+        assert_eq!(
+            keep_alive_reasons(&doc),
+            [KEEP_ALIVE_MCP, KEEP_ALIVE_OCR_HOT_START]
+        );
     }
 
     /// 托盘在设置里关闭：快照里 `enabled = false`、菜单为空，但仍带合法图标与文案。
