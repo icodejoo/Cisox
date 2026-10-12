@@ -28,6 +28,8 @@ const TRANSLATION_ONLY_ENDONYMS: &[(&str, &str)] = &[
     ("ar", "العربية"),
     ("ko", "한국어"),
     ("tr", "Türkçe"),
+    ("vi", "Tiếng Việt"),
+    ("id", "Bahasa Indonesia"),
 ];
 
 /// 该配置键的选项是否为语言代码。

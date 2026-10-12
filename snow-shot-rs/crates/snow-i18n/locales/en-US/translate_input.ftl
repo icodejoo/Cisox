@@ -2,13 +2,17 @@
 
 translate-input-placeholder = Type or paste text to translate
 
-translate-input-button = Translate
+translate-input-title = Input translation
+
+translate-input-close = Close
+
+translate-input-clear = Clear input and translation
+
+translate-input-copy = Copy translation
 
 translate-input-working = Translating... the first run loads the model, please wait
 
 translate-input-result-empty = The translation will appear here
-
-translate-input-click-copy = Click the translation to copy it
 
 translate-input-copied = Copied
 

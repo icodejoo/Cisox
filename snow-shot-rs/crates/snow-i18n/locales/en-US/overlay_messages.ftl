@@ -156,3 +156,17 @@ overlay-panel-confirm = OK
 overlay-panel-undo = Undo
 
 overlay-panel-close = Close
+
+overlay-translate-bar-details = View details
+
+overlay-translate-bar-undo = Undo translation
+
+overlay-translate-bar-close = Close and exit screenshot
+
+overlay-translate-bar-save-image = Save translated image
+
+overlay-translate-bar-save-original = Save original image
+
+overlay-translate-detail-source = Original
+
+overlay-translate-detail-target = Translation

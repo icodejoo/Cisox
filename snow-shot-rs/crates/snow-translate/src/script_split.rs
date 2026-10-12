@@ -159,7 +159,15 @@ struct Span {
 fn is_latin_lang(lang: Lang) -> bool {
     matches!(
         lang,
-        Lang::En | Lang::Fr | Lang::De | Lang::Es | Lang::It | Lang::Pt | Lang::Tr
+        Lang::En
+            | Lang::Fr
+            | Lang::De
+            | Lang::Es
+            | Lang::It
+            | Lang::Pt
+            | Lang::Tr
+            | Lang::Vi
+            | Lang::Id
     )
 }
 

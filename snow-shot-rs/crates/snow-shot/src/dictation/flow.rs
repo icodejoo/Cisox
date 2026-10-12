@@ -624,6 +624,7 @@ impl DictationHost {
             show_in_taskbar: false,
             focus: false,
             resizable: false,
+            draggable: false,
         };
         match cx.open_window(&spec, |_window, app| ListeningBadge::create(app)) {
             Ok((window, view)) => {
@@ -695,6 +696,7 @@ impl DictationHost {
             show_in_taskbar: false,
             focus: false,
             resizable: false,
+            draggable: false,
         };
         let prefs = ui_prefs_from_config(&self.config);
         match cx.open_window(&spec, move |window, app| {

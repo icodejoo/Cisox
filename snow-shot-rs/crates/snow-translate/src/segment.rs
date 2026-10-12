@@ -130,6 +130,32 @@ pub fn segment_weight(text: &str) -> usize {
         .sum()
 }
 
+/// 判定一段文本的主导语言：按识别器切分后，取文字分量最大的有语言片段；全是中性字符（数字、标点）返回 `None`。
+///
+/// # 参数
+/// - `splitter`：语言识别器。
+/// - `text`：待判定文本。
+///
+/// # 返回
+/// 主导语言；识别不出返回 `None`。
+///
+/// # 示例
+/// ```rust
+/// use snow_translate::script_split::ScriptSplitter;
+/// use snow_translate::segment::dominant_language;
+/// use snow_translate::Lang;
+/// assert_eq!(dominant_language(&ScriptSplitter, "你好，世界"), Some(Lang::ZhHans));
+/// assert_eq!(dominant_language(&ScriptSplitter, "123 !?"), None);
+/// ```
+pub fn dominant_language(splitter: &dyn SegmentSplitter, text: &str) -> Option<Lang> {
+    splitter
+        .split(text, Lang::Auto)
+        .into_iter()
+        .filter_map(|s| s.lang.map(|lang| (segment_weight(&s.text), lang)))
+        .max_by_key(|(weight, _)| *weight)
+        .map(|(_, lang)| lang)
+}
+
 /// 对识别器输出做后处理：分量低于阈值的短片段（OK、人名、型号）并入相邻片段，相邻同语言片段合并。
 ///
 /// 每轮取分量最小的短片段并入分量更大的邻居（并列时取前一个），直到没有短片段或只剩一个。
@@ -204,6 +230,36 @@ fn coalesce(segments: Vec<Segment>) -> Vec<Segment> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 固定返回预设片段的识别器。
+    struct Fixed(Vec<Segment>);
+
+    impl SegmentSplitter for Fixed {
+        fn split(&self, _text: &str, _hint: Lang) -> Vec<Segment> {
+            self.0.clone()
+        }
+
+        fn name(&self) -> &'static str {
+            "fixed"
+        }
+    }
+
+    /// 主导语言取分量最大的有语言片段；没有语言片段时为 `None`。
+    #[test]
+    fn dominant_language_picks_heaviest_segment() {
+        let mixed = Fixed(vec![
+            seg("hello ", Lang::En),
+            seg("你好世界", Lang::ZhHans),
+            seg("ok", Lang::En),
+        ]);
+        assert_eq!(dominant_language(&mixed, "x"), Some(Lang::ZhHans));
+        let unknown = Fixed(vec![Segment {
+            text: "123".into(),
+            lang: None,
+        }]);
+        assert_eq!(dominant_language(&unknown, "123"), None);
+        assert_eq!(dominant_language(&NoSplit, ""), None);
+    }
 
     /// 造片段。
     fn seg(text: &str, lang: Lang) -> Segment {

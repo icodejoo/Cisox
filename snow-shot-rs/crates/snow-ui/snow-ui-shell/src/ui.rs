@@ -28,9 +28,9 @@ pub use gpui_kit::{
     MouseMoveEvent, MouseUpEvent, ObjectFit, ParentElement, Pixels, Point, QuitMode, Render,
     RenderImage, RenderOnce, Rgba, SharedString, Size, StatefulInteractiveElement, Styled,
     StyledImage, Task, TextAlign, TextRun, UTF16Selection, UnderlineStyle, ViewElement, WeakEntity,
-    Window, actions,
+    Window, WindowControlArea, actions,
     DispatchPhase, ScrollDelta, ScrollStrategy, ScrollWheelEvent, ShapedLine, UniformListScrollHandle, canvas, component, div, hsla, img, point,
-    px, rgb, rgba, size, uniform_list,
+    px, radians, rgb, rgba, size, uniform_list,
 };
 pub use gpui_kit::prelude::FluentBuilder;
 /// 锚定弹层宿主（触发元素 + 延迟绘制的弹出内容，自带窗口边缘避让与遮挡）。
@@ -451,7 +451,7 @@ fn window_options(spec: &WindowSpec, placed: &ResolvedPlacement) -> WindowOption
         } else {
             WindowKind::PopUp
         },
-        is_movable: spec.decorations,
+        is_movable: spec.decorations || spec.draggable,
         is_resizable: spec.resizable,
         is_minimizable: spec.decorations,
         display_id: Some(DisplayId::new(placed.monitor.id.0)),
@@ -605,6 +605,29 @@ mod tests {
         };
         assert_eq!(b.origin.x.as_f32(), -1280.0);
         assert_eq!(b.size.width.as_f32(), 1280.0);
+    }
+
+    /// 无边框窗口默认不可拖；`draggable` 打开后才允许经 `WindowControlArea::Drag` 区域移动。
+    #[test]
+    fn borderless_window_movable_only_when_draggable() {
+        let mon = MonitorInfo {
+            id: MonitorId(1),
+            name: String::new(),
+            bounds: PhysicalRect::new(0, 0, 1000, 800),
+            work_area: PhysicalRect::new(0, 0, 1000, 800),
+            scale: ScaleFactor::ONE,
+            is_primary: true,
+        };
+        let placed = ResolvedPlacement {
+            rect: mon.bounds,
+            monitor: mon,
+        };
+        let mut spec = WindowSpec::overlay(MonitorTarget::Primary);
+        assert!(!window_options(&spec, &placed).is_movable);
+        spec.draggable = true;
+        assert!(window_options(&spec, &placed).is_movable);
+        let normal = WindowSpec::normal("t", crate::geometry::LogicalSize::new(10.0, 10.0));
+        assert!(window_options(&normal, &placed).is_movable);
     }
 
     /// 普通窗口映射为 Normal + 标题栏。

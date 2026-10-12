@@ -38,10 +38,15 @@ use crate::screenshot_output::{
 };
 use crate::settings_state::SharedConfig;
 use crate::translate_flow::{
-    LINK_BORDER, LINK_FILL, LinkHover, PANEL_MAX_PARAGRAPHS, TranslateUiState,
-    panel_lines as translate_panel_lines, stage_text,
+    LINK_BORDER, LINK_FILL, LinkHover, TranslateUiState, panel_lines as translate_panel_lines,
+    stage_text,
 };
-use crate::translate_service::{TranslateFlowError, TranslateOutcome, TranslateStage};
+use crate::translate_render::{
+    detail_panel_origin, render_with_system_font, rgba_to_premultiplied_bgra,
+};
+use crate::translate_service::{
+    TOOLBAR_TARGET_LANGS, TranslateFlowError, TranslateOutcome, TranslateStage,
+};
 use crate::window_pick::{
     DRAG_THRESHOLD_LOGICAL, HighlightTransition, PickPath, PickTarget, SELECTION_TARGET_KEY,
     WindowHover, exceeds_drag_threshold,
@@ -58,6 +63,7 @@ use snow_draw_engine::ColorRgba8;
 use snow_i18n::{Args, I18n};
 use snow_platform::clipboard::{copy_image_to_clipboard, copy_text_to_clipboard};
 use snow_platform::text_raster::DEFAULT_FONT_FAMILY;
+use snow_translate::Lang;
 use snow_ui::shell::geometry::{PhysicalPoint, PhysicalRect};
 use snow_ui::shell::selection::{
     DEFAULT_EDGE_TOLERANCE, DEFAULT_HANDLE_SIZE, DEFAULT_MINIMUM_SELECTION_SIZE, SelectionDragMode,
@@ -80,8 +86,9 @@ use snow_ui::widgets::{
     calculate_toolbar_placement, max_menu_height, toolbar_logical_size,
 };
 use snow_ui::widgets::{
-    IconMenuButton, LABEL_FONT_PX, MenuEntry, calculate_region_bar_placement, max_label_width,
-    menu_button_menu_height, menu_button_outer_width, menu_button_size,
+    IconMenuButton, LABEL_FONT_PX, MenuEntry, ResultBar, ResultBarItem,
+    calculate_outer_first_bar_placement, calculate_region_bar_placement, max_label_width,
+    menu_button_menu_height, menu_button_outer_width, menu_button_size, result_bar_size,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -322,6 +329,27 @@ fn region_menu_entries(
         })
         .collect()
 }
+
+/// 翻译目标语言二级菜单项：显示各语言自称，当前使用的语言带对勾。
+///
+/// # 参数
+/// - `locale`：界面语言代码（保留与其他语言选项一致的取名入口）。
+/// - `current`：本次截图当前使用的目标语言。
+fn translate_language_entries(locale: &str, current: Lang) -> Vec<MenuEntry> {
+    TOOLBAR_TARGET_LANGS
+        .iter()
+        .map(|lang| MenuEntry {
+            id: lang.code().to_string(),
+            icon: TRANSLATE_LANGUAGE_ICON,
+            label: crate::language_names::language_option_label(lang.code(), locale),
+            checked: *lang == current,
+            separator_before: false,
+        })
+        .collect()
+}
+
+/// 二级菜单里每个语言项的图标（与翻译按钮同一个）。
+const TRANSLATE_LANGUAGE_ICON: &str = "icons/antd/translation.svg";
 
 /// 选区形状的配置键。
 const REGION_TYPE_KEY: &str = "screenshot_selection/region_type";
@@ -725,6 +753,90 @@ impl TileSprite {
     }
 }
 
+/// 详情面板的宽度（逻辑像素）。
+const DETAIL_PANEL_WIDTH: f32 = 640.0;
+/// 详情面板的高度（逻辑像素）。
+const DETAIL_PANEL_HEIGHT: f32 = 360.0;
+/// 详情面板与选区、屏幕边缘的间距（逻辑像素）。
+const DETAIL_PANEL_GAP: f32 = 8.0;
+/// 详情面板里每个条目的高度（逻辑像素，列表等高才能虚拟滚动）。
+const DETAIL_ROW_HEIGHT: f32 = 44.0;
+/// 详情面板里条目文字最多显示的行数。
+const DETAIL_ROW_LINES: usize = 2;
+/// 详情面板标题行的高度（逻辑像素）。
+const DETAIL_HEADER_HEIGHT: f32 = 24.0;
+
+/// 译文原位替换后的整张选区图。
+struct TranslatedImage {
+    /// 图像宽（物理像素）。
+    width: u32,
+    /// 图像高（物理像素）。
+    height: u32,
+    /// 直通 alpha 的 RGBA 像素（“保存图片”用）。
+    rgba: Vec<u8>,
+    /// 屏幕上显示用的 GPUI 图像资源（预乘 BGRA）。
+    render: Arc<RenderImage>,
+}
+
+/// 翻译完成后那排图标按钮里的一个动作。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TranslateBarAction {
+    /// 打开 / 收起详情面板。
+    Details,
+    /// 一次性撤销：显示回原文，丢弃本次译文。
+    Undo,
+    /// 退出翻译并退出截图。
+    Close,
+    /// 保存译文图（无译文时保存原图）。
+    SaveImage,
+    /// 保存原图（不含译文）。
+    SaveOriginal,
+}
+
+/// 按钮条里各动作的从左到右顺序。
+const TRANSLATE_BAR_ACTIONS: [TranslateBarAction; 5] = [
+    TranslateBarAction::Details,
+    TranslateBarAction::Undo,
+    TranslateBarAction::SaveImage,
+    TranslateBarAction::SaveOriginal,
+    TranslateBarAction::Close,
+];
+
+impl TranslateBarAction {
+    /// 元素 id 片段。
+    fn id(self) -> &'static str {
+        match self {
+            Self::Details => "details",
+            Self::Undo => "undo",
+            Self::Close => "close",
+            Self::SaveImage => "save-image",
+            Self::SaveOriginal => "save-original",
+        }
+    }
+
+    /// 图标资源路径。
+    fn icon(self) -> &'static str {
+        match self {
+            Self::Details => "icons/antd/unordered-list.svg",
+            Self::Undo => "icons/antd/rollback.svg",
+            Self::Close => "icons/antd/close.svg",
+            Self::SaveImage => "icons/antd/save.svg",
+            Self::SaveOriginal => "icons/antd/picture.svg",
+        }
+    }
+
+    /// 悬停提示的 message id。
+    fn tooltip_id(self) -> &'static str {
+        match self {
+            Self::Details => "overlay-translate-bar-details",
+            Self::Undo => "overlay-translate-bar-undo",
+            Self::Close => "overlay-translate-bar-close",
+            Self::SaveImage => "overlay-translate-bar-save-image",
+            Self::SaveOriginal => "overlay-translate-bar-save-original",
+        }
+    }
+}
+
 /// 样式下拉里的一个选项：取值（数字或头型标识）加本地化标签。
 #[derive(Clone)]
 struct StyleItem {
@@ -1063,12 +1175,14 @@ pub trait OutputSink {
     /// - `serial`：本次请求序号，回传结果时原样带回（过期结果据此丢弃）。
     /// - `width` / `height`：图像尺寸。
     /// - `rgba`：选区（含标注合成）的 RGBA 像素。
+    /// - `target`：本次翻译的目标语言。
     fn start_translate(
         &mut self,
         _serial: u64,
         _width: u32,
         _height: u32,
         _rgba: Vec<u8>,
+        _target: Lang,
     ) -> Result<(), String> {
         Err(ERR_TRANSLATE_NOT_WIRED.to_string())
     }
@@ -1215,8 +1329,8 @@ pub struct SystemOutput {
     on_latex_download: Option<Box<dyn Fn()>>,
     /// 打开识别结果窗的回调。
     on_recognition_window: Option<Box<dyn Fn(crate::recognition_view::RecognitionData)>>,
-    /// 文字翻译回调：`(序号, 宽, 高, RGBA)`。
-    on_translate: Option<OcrCallback>,
+    /// 文字翻译回调：`(序号, 宽, 高, RGBA, 目标语言)`。
+    on_translate: Option<TranslateCallback>,
     /// 翻译运行时下载回调。
     on_translate_download: Option<Box<dyn Fn()>>,
     /// 长截图回调（参数为覆盖窗底图坐标下的选区）。
@@ -1230,6 +1344,9 @@ type HistoryCallback = Box<dyn Fn(HistorySource, u32, u32, &[u8])>;
 
 /// 文字识别回调类型：`(序号, 宽, 高, RGBA)`。
 type OcrCallback = Box<dyn Fn(u64, u32, u32, Vec<u8>)>;
+
+/// 文字翻译回调类型：`(序号, 宽, 高, RGBA, 目标语言)`。
+type TranslateCallback = Box<dyn Fn(u64, u32, u32, Vec<u8>, Lang)>;
 
 /// 贴图回调类型：`(选区, 宽, 高, RGBA)`。
 type PinCallback = Box<dyn Fn(PhysicalRect, u32, u32, Vec<u8>)>;
@@ -1371,8 +1488,11 @@ impl SystemOutput {
     /// 设置文字翻译回调：用户点“翻译”时触发（识别与翻译在后台线程执行）。
     ///
     /// # 参数
-    /// - `callback`：接收请求序号、图像尺寸与 RGBA 像素。
-    pub fn with_translate(mut self, callback: impl Fn(u64, u32, u32, Vec<u8>) + 'static) -> Self {
+    /// - `callback`：接收请求序号、图像尺寸、RGBA 像素与本次目标语言。
+    pub fn with_translate(
+        mut self,
+        callback: impl Fn(u64, u32, u32, Vec<u8>, Lang) + 'static,
+    ) -> Self {
         self.on_translate = Some(Box::new(callback));
         self
     }
@@ -1638,9 +1758,10 @@ impl OutputSink for SystemOutput {
         width: u32,
         height: u32,
         rgba: Vec<u8>,
+        target: Lang,
     ) -> Result<(), String> {
         invoke_callback(&self.on_translate, ERR_TRANSLATE_NOT_WIRED, |callback| {
-            callback(serial, width, height, rgba)
+            callback(serial, width, height, rgba, target)
         })
     }
 
@@ -1755,6 +1876,10 @@ pub struct ScreenshotOverlayView {
     region_bar_rect: Option<PhysicalRect>,
     /// 工具栏分组复合按钮的共享状态（当前项记忆与下拉弹出），首次渲染工具栏时创建。
     toolbar_groups: Option<Entity<ToolbarGroups>>,
+    /// 翻译目标语言的默认值（来自设置，每次新截图由运行时重新写入）。
+    translate_default_target: Lang,
+    /// 本次截图会话里在二级菜单选的目标语言；`None` 表示用默认值，不写设置。
+    translate_target: Option<Lang>,
     /// 调整选区时是否让被抓的边直接跟随鼠标位置（而非跟随位移）。
     resize_follow_position: bool,
     /// 按住「移动整个选区」键：框选拖动变成平移。
@@ -1847,7 +1972,17 @@ pub struct ScreenshotOverlayView {
     translate: TranslateUiState,
     /// 最近一次翻译请求序号（过期结果据此丢弃）。
     translate_serial: u64,
-    /// 译文段落与 OCR 行框的悬停联动状态。
+    /// 翻译开始时的选区图像副本（宽, 高, RGBA）；完成时就地换成译文图，失败或退出时丢弃。
+    translate_source: Option<(u32, u32, Vec<u8>)>,
+    /// 译文原位替换后的图像；撤销 / 退出翻译时丢弃。
+    translated_image: Option<TranslatedImage>,
+    /// 详情面板是否展开。
+    translate_detail_open: bool,
+    /// 详情面板原文列表的滚动句柄。
+    detail_source_scroll: UniformListScrollHandle,
+    /// 详情面板译文列表的滚动句柄。
+    detail_target_scroll: UniformListScrollHandle,
+    /// 原文 / 译文条目与识别区的三方悬停联动状态。
     link_hover: LinkHover,
     /// 窗口悬停来源（智能选区开启时才有）。
     window_hover: Option<Box<dyn WindowHover>>,
@@ -1946,6 +2081,8 @@ impl ScreenshotOverlayView {
             region_menu_open: false,
             region_bar_rect: None,
             toolbar_groups: None,
+            translate_default_target: Lang::En,
+            translate_target: None,
             resize_follow_position: false,
             move_held: false,
             keep_ratio: false,
@@ -1991,6 +2128,11 @@ impl ScreenshotOverlayView {
             latex_text: None,
             translate: TranslateUiState::Idle,
             translate_serial: 0,
+            translate_source: None,
+            translated_image: None,
+            translate_detail_open: false,
+            detail_source_scroll: UniformListScrollHandle::new(),
+            detail_target_scroll: UniformListScrollHandle::new(),
             link_hover: LinkHover::default(),
             window_hover: None,
             pick: PickPath::new(PickTarget::WindowSubElement),
@@ -2702,6 +2844,12 @@ impl ScreenshotOverlayView {
             // 加 / 减区域进行中：取消键先取消这次操作
             OverlayKeyAction::Cancel if self.region_op.is_some() => {
                 self.cancel_region_op();
+                OverlayOutcome::Stay
+            }
+            // 详情面板展开时，取消键先收起它
+            OverlayKeyAction::Cancel if self.translate_detail_open => {
+                self.translate_detail_open = false;
+                self.link_hover.clear();
                 OverlayOutcome::Stay
             }
             // 翻译 / OCR 界面打开时，取消键先退出该界面，再按一次才关闭覆盖窗
@@ -4523,9 +4671,25 @@ impl ScreenshotOverlayView {
         request: Option<&SaveRequest>,
         quick: bool,
     ) -> OverlayOutcome {
-        let Some((w, h, rgba)) = self.committed_selection_image() else {
+        let Some(image) = self.committed_selection_image() else {
             return OverlayOutcome::Stay;
         };
+        self.save_image_inner(image, request, quick)
+    }
+
+    /// 保存给定图像（普通保存与“保存译文图 / 原图”共用）：流程、文件名、对话框与设置都一样，只是源图像不同。
+    ///
+    /// # 参数
+    /// - `image`：要保存的图像 `(宽, 高, RGBA)`。
+    /// - `request`：外部导出命令带来的保存请求；`None` 表示用户点保存。
+    /// - `quick`：为真时跳过另存为对话框。
+    fn save_image_inner(
+        &mut self,
+        image: (u32, u32, Vec<u8>),
+        request: Option<&SaveRequest>,
+        quick: bool,
+    ) -> OverlayOutcome {
+        let (w, h, rgba) = image;
         self.remember_selection();
         let snapshot = self.history_snapshot(w, h, &rgba);
         if !quick && let Some(job) = self.output.begin_manual_save(request) {
@@ -4952,21 +5116,53 @@ impl ScreenshotOverlayView {
         &self.ocr
     }
 
+    /// 本次截图实际使用的翻译目标语言：会话里选过用选的，否则用设置默认值。
+    ///
+    /// # 返回
+    /// 目标语言。
+    pub fn translate_target(&self) -> Lang {
+        self.translate_target
+            .unwrap_or(self.translate_default_target)
+    }
+
+    /// 写入翻译目标语言的默认值（设置项的当前值）；不改动会话里已选的语言。
+    ///
+    /// # 参数
+    /// - `lang`：默认目标语言。
+    pub fn set_translate_default_target(&mut self, lang: Lang) {
+        self.translate_default_target = lang;
+    }
+
+    /// 在二级菜单选了目标语言：只记在本次会话里（不写设置），并立刻用它翻译。
+    ///
+    /// # 参数
+    /// - `lang`：选中的目标语言。
+    ///
+    /// # 返回
+    /// 窗口去向（与点“翻译”一致）。
+    pub fn translate_with_target(&mut self, lang: Lang) -> OverlayOutcome {
+        self.translate_target = Some(lang);
+        self.apply_action(ToolbarAction::Translate)
+    }
+
     /// 对选区（含标注合成结果）发起“识别 + 翻译”；在后台进行，结果经 [`Self::finish_translate`] 回来。
     fn start_translate(&mut self) -> OverlayOutcome {
         let Some((w, h, rgba)) = self.recognition_prelude(true) else {
             return OverlayOutcome::Stay;
         };
         self.translate_serial += 1;
+        let target = self.translate_target();
+        self.translate_source = Some((w, h, rgba.clone()));
         match self
             .output
-            .start_translate(self.translate_serial, w, h, rgba)
+            .start_translate(self.translate_serial, w, h, rgba, target)
         {
             Ok(()) => {
                 tracing::info!(
                     serial = self.translate_serial,
                     width = w,
                     height = h,
+                    target = target.code(),
                     "已提交文字翻译"
                 );
                 self.set_translate_state(TranslateUiState::Running(stage_text(
@@ -4976,6 +5172,7 @@ impl ScreenshotOverlayView {
             }
             Err(e) => {
                 tracing::error!(error = %e, "提交文字翻译失败");
+                self.translate_source = None;
                 self.set_translate_state(TranslateUiState::Failed {
                     message: self.i18n.tr_with(
                         "overlay-msg-translate-unavailable",
@@ -4992,6 +5189,7 @@ impl ScreenshotOverlayView {
     fn set_translate_state(&mut self, state: TranslateUiState) {
         self.status_message = state.status_text(self.i18n);
         self.link_hover.clear();
+        self.translate_detail_open = false;
         self.translate = state;
     }
 
@@ -5000,6 +5198,9 @@ impl ScreenshotOverlayView {
         self.translate_serial += 1;
         self.translate = TranslateUiState::Idle;
         self.link_hover.clear();
+        self.translate_detail_open = false;
+        self.translate_source = None;
+        self.drop_translated_image();
         self.status_message = None;
     }
 
@@ -5054,6 +5255,38 @@ impl ScreenshotOverlayView {
             }
         };
         self.set_translate_state(state);
+        self.build_translated_image();
+    }
+
+    /// 译文完成后，把开始时留的选区图像副本就地换成译文原位替换图（并装成屏幕显示用的图像资源）；
+    /// 没有可替换的段落时不生成，保存图片会回落到原图。
+    fn build_translated_image(&mut self) {
+        self.drop_translated_image();
+        let source = self.translate_source.take();
+        let (TranslateUiState::Done { boxes, pairs, .. }, Some((w, h, mut rgba))) =
+            (&self.translate, source)
+        else {
+            return;
+        };
+        if render_with_system_font(&mut rgba, w, h, boxes, pairs) == 0 {
+            return;
+        }
+        let Some(buffer) = RgbaImage::from_raw(w, h, rgba_to_premultiplied_bgra(&rgba)) else {
+            return;
+        };
+        self.translated_image = Some(TranslatedImage {
+            width: w,
+            height: h,
+            rgba,
+            render: Arc::new(RenderImage::new(vec![Frame::new(buffer)])),
+        });
+    }
+
+    /// 丢掉译文图；图像资源排队到下一帧释放（GPUI 要求在窗口上下文里 drop）。
+    fn drop_translated_image(&mut self) {
+        if let Some(old) = self.translated_image.take() {
+            self.pending_drops.push(old.render);
+        }
     }
 
     /// 触发翻译运行时下载（仅缺运行时可用）。
@@ -5131,90 +5364,374 @@ impl ScreenshotOverlayView {
         }
     }
 
-    /// 翻译结果浮层：选区内的行框描边（联动高亮）+ 白底译文面板（无翻译界面时为空）。
+    /// 翻译结果浮层。完成态：译文原位替换图 + 识别区悬停层 + 一排图标按钮 + 可选的详情面板；
+    /// 进行中 / 失败 / 译文为空：白底文字面板。无翻译界面时为空。
     ///
     /// # 参数
     /// - `selection`：选区（画布物理坐标）。
     /// - `screen`：本屏在画布里的逻辑矩形 `(x, y, 宽, 高)`，面板不超出它。
+    /// - `toolbar_pos`：主工具栏位置（逻辑像素），按钮条与详情面板据此避让。
+    /// - `selection_logical`：选区在本屏上的逻辑矩形（按钮条摆放用）。
     /// - `cx`：视图上下文（挂悬停与按钮回调）。
     fn translate_overlay(
-        &self,
+        &mut self,
         selection: PhysicalRect,
         screen: (f32, f32, f32, f32),
+        toolbar_pos: Option<PhysicalPoint>,
+        selection_logical: Option<PhysicalRect>,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
+        if self.translate_result_visible() {
+            return self.translate_result_parts(
+                selection,
+                screen,
+                toolbar_pos,
+                selection_logical,
+                cx,
+            );
+        }
         let lines = translate_panel_lines(&self.translate, self.i18n);
         if lines.is_empty() {
             return Vec::new();
         }
+        let rows: Vec<AnyElement> = lines
+            .iter()
+            .map(|l| div().child(l.clone()).into_any_element())
+            .collect();
+        vec![self.result_panel(selection, screen, &lines, rows, false, cx)]
+    }
+
+    /// 翻译结果是否该以“原位替换 + 按钮条”呈现：完成态且译文非空。
+    fn translate_result_visible(&self) -> bool {
+        matches!(
+            &self.translate,
+            TranslateUiState::Done { translated, .. } if !translated.trim().is_empty()
+        )
+    }
+
+    /// 完成态的浮层元素：译文图、识别区悬停层、按钮条、详情面板。
+    fn translate_result_parts(
+        &mut self,
+        selection: PhysicalRect,
+        screen: (f32, f32, f32, f32),
+        toolbar_pos: Option<PhysicalPoint>,
+        selection_logical: Option<PhysicalRect>,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let TranslateUiState::Done { pairs, boxes, .. } = &self.translate else {
+            return Vec::new();
+        };
         let mut parts: Vec<AnyElement> = Vec::new();
-        let mut confirm_enabled = false;
-        let rows: Vec<AnyElement> = if let TranslateUiState::Done {
-            pairs,
-            boxes,
-            translated,
-            ..
-        } = &self.translate
-        {
-            confirm_enabled = !translated.trim().is_empty();
-            for (ix, b) in boxes.iter().enumerate() {
-                let active = self.link_hover.box_active(pairs, ix);
-                parts.push(
-                    div()
-                        .id(("translate-box", ix))
-                        .absolute()
-                        .top(self.lp(selection.y + b.rect.y))
-                        .left(self.lp(selection.x + b.rect.x))
-                        .w(self.lp(b.rect.width))
-                        .h(self.lp(b.rect.height))
-                        .border_1()
-                        .border_color(if active {
+        if let Some(image) = &self.translated_image {
+            parts.push(
+                img(ImageSource::Render(Arc::clone(&image.render)))
+                    .absolute()
+                    .top(self.lp(selection.y))
+                    .left(self.lp(selection.x))
+                    .w(self.lp(image.width as i32))
+                    .h(self.lp(image.height as i32))
+                    .object_fit(ObjectFit::Fill)
+                    .into_any_element(),
+            );
+        }
+        // 识别区：平时透明只负责悬停；展开详情时描一圈，悬停联动时高亮
+        for (ix, b) in boxes.iter().enumerate() {
+            let active = self.link_hover.box_active(pairs, ix);
+            parts.push(
+                div()
+                    .id(("translate-box", ix))
+                    .absolute()
+                    .top(self.lp(selection.y + b.rect.y))
+                    .left(self.lp(selection.x + b.rect.x))
+                    .w(self.lp(b.rect.width))
+                    .h(self.lp(b.rect.height))
+                    .when(self.translate_detail_open || active, |d| {
+                        d.border_1().border_color(if active {
                             rgba(LINK_BORDER)
                         } else {
                             rgb(OCR_BOX_COLOR)
                         })
-                        .when(active, |d| d.bg(rgba(LINK_FILL)))
-                        .on_hover(cx.listener(move |this, hovered: &bool, _w, cx| {
-                            this.link_hover.set_box(ix, *hovered);
-                            cx.notify();
-                        }))
-                        .into_any_element(),
-                );
-            }
-            // 第 0 行是标题，接着最多 PANEL_MAX_PARAGRAPHS 行对应译文段落，其余是提示行
-            let hoverable = pairs.len().min(PANEL_MAX_PARAGRAPHS);
-            let active_para = self.link_hover.active_paragraph(pairs);
-            lines
-                .iter()
-                .enumerate()
-                .map(
-                    |(row_ix, line)| match row_ix.checked_sub(1).filter(|p| *p < hoverable) {
-                        Some(p) => div()
-                            .id(("translate-para", p))
-                            .rounded_sm()
-                            .when(active_para == Some(p), |d| {
-                                d.bg(rgba(LINK_FILL))
-                                    .border_1()
-                                    .border_color(rgba(LINK_BORDER))
-                            })
-                            .on_hover(cx.listener(move |this, hovered: &bool, _w, cx| {
-                                this.link_hover.set_paragraph(p, *hovered);
-                                cx.notify();
-                            }))
-                            .child(line.clone())
-                            .into_any_element(),
-                        None => div().child(line.clone()).into_any_element(),
-                    },
-                )
-                .collect()
-        } else {
-            lines
-                .iter()
-                .map(|l| div().child(l.clone()).into_any_element())
-                .collect()
-        };
-        parts.push(self.result_panel(selection, screen, &lines, rows, confirm_enabled, cx));
+                    })
+                    .when(active, |d| d.bg(rgba(LINK_FILL)))
+                    .on_hover(cx.listener(move |this, hovered: &bool, _w, cx| {
+                        this.link_hover.set_box(ix, *hovered);
+                        this.apply_hover_scroll();
+                        cx.notify();
+                    }))
+                    .into_any_element(),
+            );
+        }
+        let (bar, bar_rect) = self.translate_bar(toolbar_pos, selection_logical, screen, cx);
+        self.region_bar_rect = Some(bar_rect);
+        parts.push(bar);
+        if self.translate_detail_open {
+            let toolbar_rect = toolbar_pos.map(|p| {
+                let (w, h) = self.toolbar_size();
+                PhysicalRect::new(p.x, p.y, w, h)
+            });
+            let avoid: Vec<PhysicalRect> = std::iter::once(bar_rect).chain(toolbar_rect).collect();
+            parts.push(self.translate_detail_panel(selection_logical, screen, &avoid, cx));
+        }
         parts
+    }
+
+    /// 那排图标按钮及其逻辑矩形：选区外面放得下就放外面（右下角一侧），放不下放进选区里面（右下角）。
+    fn translate_bar(
+        &self,
+        toolbar_pos: Option<PhysicalPoint>,
+        selection_logical: Option<PhysicalRect>,
+        screen: (f32, f32, f32, f32),
+        cx: &mut Context<Self>,
+    ) -> (AnyElement, PhysicalRect) {
+        let (bar_w, bar_h) = result_bar_size(TRANSLATE_BAR_ACTIONS.len());
+        let size = (bar_w.ceil() as i32, bar_h.ceil() as i32);
+        let screen_rect = PhysicalRect::new(
+            screen.0 as i32,
+            screen.1 as i32,
+            screen.2 as i32,
+            screen.3 as i32,
+        );
+        let (toolbar_w, toolbar_h) = self.toolbar_size();
+        let toolbar = toolbar_pos.map_or(PhysicalRect::new(0, 0, 0, 0), |p| {
+            PhysicalRect::new(p.x, p.y, toolbar_w, toolbar_h)
+        });
+        let at = calculate_outer_first_bar_placement(
+            selection_logical.unwrap_or(screen_rect),
+            toolbar,
+            size,
+            screen_rect,
+            REGION_BAR_MARGIN as i32,
+            REGION_BAR_GAP as i32,
+        );
+        let items: Vec<ResultBarItem> = TRANSLATE_BAR_ACTIONS
+            .iter()
+            .map(|a| ResultBarItem {
+                id: a.id(),
+                icon: a.icon(),
+                tooltip: self.i18n.tr(a.tooltip_id()),
+                danger: *a == TranslateBarAction::Close,
+            })
+            .collect();
+        let view = cx.entity();
+        let bar = ResultBar::new("translate-bar", items).on_click(move |index, window, app| {
+            let Some(action) = TRANSLATE_BAR_ACTIONS.get(index).copied() else {
+                return;
+            };
+            view.update(app, |this, cx| {
+                let outcome = this.apply_translate_bar_action(action);
+                this.finish(outcome, window, cx);
+            });
+        });
+        (
+            div()
+                .absolute()
+                .top(px(at.y as f32))
+                .left(px(at.x as f32))
+                .child(bar)
+                .into_any_element(),
+            PhysicalRect::new(at.x, at.y, size.0, size.1),
+        )
+    }
+
+    /// 执行按钮条上的一个动作。
+    ///
+    /// # 参数
+    /// - `action`：被点的按钮。
+    ///
+    /// # 返回
+    /// 窗口去向：`Close` 退出整个截图；保存按保存流程给出（可能是 `AwaitSave`）；其余 `Stay`。
+    fn apply_translate_bar_action(&mut self, action: TranslateBarAction) -> OverlayOutcome {
+        match action {
+            TranslateBarAction::Details => {
+                self.translate_detail_open = !self.translate_detail_open;
+                self.link_hover.clear();
+                OverlayOutcome::Stay
+            }
+            TranslateBarAction::Undo => {
+                self.dismiss_translate();
+                OverlayOutcome::Stay
+            }
+            TranslateBarAction::Close => OverlayOutcome::Close,
+            TranslateBarAction::SaveImage => self.save_translation_image(false),
+            TranslateBarAction::SaveOriginal => self.save_translation_image(true),
+        }
+    }
+
+    /// 保存图片：`original` 为假时保存译文图，当前没有译文图（无翻译、已撤销或没替换出任何段）就保存原图；
+    /// 为真时无条件保存原图（选区含标注的合成图，不含任何译文）。保存流程、文件名、对话框与设置同普通保存。
+    ///
+    /// # 参数
+    /// - `original`：是否强制保存原图。
+    fn save_translation_image(&mut self, original: bool) -> OverlayOutcome {
+        let translated = (!original)
+            .then_some(self.translated_image.as_ref())
+            .flatten()
+            .map(|t| (t.width, t.height, t.rgba.clone()));
+        let Some(image) = translated.or_else(|| self.committed_selection_image()) else {
+            return OverlayOutcome::Stay;
+        };
+        self.save_image_inner(image, None, false)
+    }
+
+    /// 悬停联动后的列表滚动：详情展开时，让另外两方列表把高亮条目滚到可视区正中。
+    fn apply_hover_scroll(&mut self) {
+        let TranslateUiState::Done { pairs, .. } = &self.translate else {
+            return;
+        };
+        let Some(request) = self.link_hover.take_scroll(pairs) else {
+            return;
+        };
+        if !self.translate_detail_open {
+            return;
+        }
+        if let Some(ix) = request.source {
+            self.detail_source_scroll
+                .scroll_to_item_strict(ix, ScrollStrategy::Center);
+        }
+        if let Some(ix) = request.target {
+            self.detail_target_scroll
+                .scroll_to_item_strict(ix, ScrollStrategy::Center);
+        }
+    }
+
+    /// 详情面板：并排的“原文”与“译文”两列条目，按段落一一对应；悬停任一方联动高亮另两方。
+    fn translate_detail_panel(
+        &self,
+        selection_logical: Option<PhysicalRect>,
+        screen: (f32, f32, f32, f32),
+        avoid: &[PhysicalRect],
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let screen_rect = PhysicalRect::new(
+            screen.0 as i32,
+            screen.1 as i32,
+            screen.2 as i32,
+            screen.3 as i32,
+        );
+        let width = DETAIL_PANEL_WIDTH.min((screen.2 - 2.0 * DETAIL_PANEL_GAP).max(1.0));
+        let height = DETAIL_PANEL_HEIGHT.min((screen.3 - 2.0 * DETAIL_PANEL_GAP).max(1.0));
+        let (x, y) = detail_panel_origin(
+            selection_logical.unwrap_or(screen_rect),
+            (width as i32, height as i32),
+            screen_rect,
+            avoid,
+            DETAIL_PANEL_GAP as i32,
+        );
+        let count = match &self.translate {
+            TranslateUiState::Done { pairs, .. } => pairs.len(),
+            _ => 0,
+        };
+        let mut columns: Vec<AnyElement> = Vec::new();
+        for source in [true, false] {
+            let (id, scroll, title) = if source {
+                (
+                    "translate-detail-source",
+                    &self.detail_source_scroll,
+                    self.i18n.tr("overlay-translate-detail-source"),
+                )
+            } else {
+                (
+                    "translate-detail-target",
+                    &self.detail_target_scroll,
+                    self.i18n.tr("overlay-translate-detail-target"),
+                )
+            };
+            let list = uniform_list(
+                id,
+                count,
+                cx.processor(move |this, range: std::ops::Range<usize>, _window, cx| {
+                    range
+                        .map(|ix| this.translate_detail_row(source, ix, cx))
+                        .collect::<Vec<_>>()
+                }),
+            )
+            .track_scroll(scroll)
+            .flex_1();
+            columns.push(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .h(px(DETAIL_HEADER_HEIGHT))
+                            .flex_none()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(title),
+                    )
+                    .child(list)
+                    .into_any_element(),
+            );
+        }
+        div()
+            .absolute()
+            .top(px(y as f32))
+            .left(px(x as f32))
+            .w(px(width))
+            .h(px(height))
+            .flex()
+            .flex_row()
+            .gap_2()
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .border_1()
+            .border_color(rgba(OCR_PANEL_BORDER))
+            .bg(rgba(OCR_PANEL_BG))
+            .text_color(rgba(OCR_PANEL_TEXT))
+            .text_xs()
+            .occlude()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+            .children(columns)
+            .into_any_element()
+    }
+
+    /// 详情面板里一列的一个条目：显示该段原文或译文，悬停时联动，高亮时描边填色。
+    fn translate_detail_row(&self, source: bool, ix: usize, cx: &mut Context<Self>) -> AnyElement {
+        let TranslateUiState::Done { pairs, .. } = &self.translate else {
+            return div().into_any_element();
+        };
+        let Some(pair) = pairs.get(ix) else {
+            return div().into_any_element();
+        };
+        let (text, active) = if source {
+            (
+                pair.source.clone(),
+                self.link_hover.source_active(pairs, ix),
+            )
+        } else {
+            (
+                pair.translated.clone(),
+                self.link_hover.target_active(pairs, ix),
+            )
+        };
+        div()
+            .id((if source { "detail-src" } else { "detail-dst" }, ix))
+            .h(px(DETAIL_ROW_HEIGHT))
+            .px_1()
+            .py_0p5()
+            .overflow_hidden()
+            .rounded_sm()
+            .border_1()
+            .border_color(if active {
+                rgba(LINK_BORDER)
+            } else {
+                rgba(0x00000000)
+            })
+            .when(active, |d| d.bg(rgba(LINK_FILL)))
+            .on_hover(cx.listener(move |this, hovered: &bool, _w, cx| {
+                if source {
+                    this.link_hover.set_source(ix, *hovered);
+                } else {
+                    this.link_hover.set_paragraph(ix, *hovered);
+                }
+                this.apply_hover_scroll();
+                cx.notify();
+            }))
+            .child(div().line_clamp(DETAIL_ROW_LINES).child(text))
+            .into_any_element()
     }
 
     /// 执行双击 / 中键配置的选区动作；没有确定选区时只提示（`None` 动作除外）。
@@ -5848,6 +6365,21 @@ impl ScreenshotOverlayView {
     ) {
         self.commit_text_edit(window, cx);
         let outcome = self.apply_action(action);
+        self.finish(outcome, window, cx);
+    }
+
+    /// 翻译目标语言二级菜单入口（由菜单点击回调）：按序号取语言并立刻翻译。
+    fn on_translate_language_selected(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(lang) = TOOLBAR_TARGET_LANGS.get(index).copied() else {
+            return;
+        };
+        self.commit_text_edit(window, cx);
+        let outcome = self.translate_with_target(lang);
         self.finish(outcome, window, cx);
     }
 
@@ -7064,6 +7596,7 @@ impl ScreenshotOverlayView {
                 selection_logical = Some(logical_rect(on_this_monitor, scale));
                 let entity = cx.entity();
                 let tool_entity = entity.clone();
+                let lang_entity = entity.clone();
                 let (can_undo, can_redo) = self.history_state();
                 let tb = ScreenshotToolbar::new("overlay-toolbar")
                     .active_tool(self.tool)
@@ -7072,6 +7605,15 @@ impl ScreenshotOverlayView {
                     .show_tools(!self.record_mode && !self.scroll_mode)
                     .popup_up(popup_up)
                     .groups(groups)
+                    .translate_languages(translate_language_entries(
+                        &self.locale,
+                        self.translate_target(),
+                    ))
+                    .on_translate_language(move |index, window, app| {
+                        lang_entity.update(app, |this, cx| {
+                            this.on_translate_language_selected(index, window, cx)
+                        });
+                    })
                     .disabled_actions(if self.record_mode {
                         &RECORD_MODE_DISABLED_ACTIONS[..]
                     } else if self.scroll_mode {
@@ -7142,7 +7684,9 @@ impl ScreenshotOverlayView {
             for part in self.ocr_overlay(s, screen_logical, cx) {
                 root = root.child(part);
             }
-            for part in self.translate_overlay(s, screen_logical, cx) {
+            for part in
+                self.translate_overlay(s, screen_logical, toolbar_pos, selection_logical, cx)
+            {
                 root = root.child(part);
             }
         }
@@ -7403,9 +7947,12 @@ impl Render for OverlayWindowView {
     /// 渲染：交给共享视图按本屏几何绘制。
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let (index, focus) = (self.index, self.focus.clone());
-        self.shared.update(cx, |view, vcx| {
+        crate::timing_diag::mark("overlay-render-begin");
+        let element = self.shared.update(cx, |view, vcx| {
             view.render_monitor(index, Some(&focus), window, vcx)
-        })
+        });
+        crate::timing_diag::mark("overlay-render-end");
+        element
     }
 }
 
@@ -7465,6 +8012,8 @@ mod tests {
         urls: Vec<String>,
         /// 保存的图像 `(宽, 高)`。
         saved: Vec<(u32, u32)>,
+        /// 保存的图像 `(宽, 高, RGBA)`。
+        saved_images: Vec<(u32, u32, Vec<u8>)>,
         /// 录屏选区。
         records: Vec<PhysicalRect>,
         /// 贴图 `(选区, 宽, 高, RGBA)`。
@@ -7483,6 +8032,8 @@ mod tests {
         latex_downloads: u32,
         /// 文字翻译请求 `(序号, 宽, 高, RGBA)`。
         translates: Vec<Request>,
+        /// 文字翻译请求对应的目标语言（与 `translates` 一一对应）。
+        translate_targets: Vec<Lang>,
         /// 翻译运行时下载请求次数。
         translate_downloads: u32,
         /// 长截图选区。
@@ -7548,9 +8099,11 @@ mod tests {
             Ok(())
         }
         /// 记录保存动作。
-        fn save_image(&mut self, w: u32, h: u32, _rgba: &[u8]) -> Result<PathBuf, String> {
+        fn save_image(&mut self, w: u32, h: u32, rgba: &[u8]) -> Result<PathBuf, String> {
             self.gate()?;
-            self.rec.borrow_mut().saved.push((w, h));
+            let mut rec = self.rec.borrow_mut();
+            rec.saved.push((w, h));
+            rec.saved_images.push((w, h, rgba.to_vec()));
             Ok(PathBuf::from("mock.png"))
         }
         /// 记录录屏选区。
@@ -7638,9 +8191,12 @@ mod tests {
             w: u32,
             h: u32,
             rgba: Vec<u8>,
+            target: Lang,
         ) -> Result<(), String> {
             self.gate()?;
-            self.rec.borrow_mut().translates.push((serial, w, h, rgba));
+            let mut rec = self.rec.borrow_mut();
+            rec.translates.push((serial, w, h, rgba));
+            rec.translate_targets.push(target);
             Ok(())
         }
         /// 记录翻译运行时下载请求。
@@ -9515,6 +10071,55 @@ mod tests {
         assert!(rec.borrow().ocrs.is_empty(), "翻译进行中不能同时发起 OCR");
     }
 
+    /// 点“翻译”按默认目标语言；二级菜单选语言立刻按它翻译，且只在本次会话生效。
+    #[test]
+    fn translate_target_is_session_scoped() {
+        let (mut view, rec) = view_with(100, 80, 1.0, false);
+        view.set_translate_default_target(Lang::Fr);
+        assert_eq!(view.translate_target(), Lang::Fr);
+        drag(&mut view, (5, 5), (44, 34));
+        view.apply_action(ToolbarAction::Translate);
+        assert_eq!(rec.borrow().translate_targets, [Lang::Fr]);
+        // 选语言：立即以它翻译（先退出上一次进行中的翻译界面）
+        view.dismiss_translate();
+        assert_eq!(view.translate_with_target(Lang::Vi), OverlayOutcome::Stay);
+        assert_eq!(view.translate_target(), Lang::Vi);
+        assert_eq!(rec.borrow().translate_targets, [Lang::Fr, Lang::Vi]);
+        // 默认值变化不影响已选语言
+        view.set_translate_default_target(Lang::De);
+        assert_eq!(view.translate_target(), Lang::Vi);
+        // 新一次截图（新视图）回到设置默认值
+        let (mut next, _rec) = view_with(100, 80, 1.0, false);
+        next.set_translate_default_target(Lang::De);
+        assert_eq!(next.translate_target(), Lang::De);
+    }
+
+    /// 二级菜单固定 14 种语言：不含自动与繁体、无重复、代码可往返；当前语言带对勾。
+    #[test]
+    fn translate_language_menu_lists_fixed_main14() {
+        let codes: Vec<&str> = TOOLBAR_TARGET_LANGS.iter().map(Lang::code).collect();
+        assert_eq!(
+            codes,
+            [
+                "zh-CN", "en", "fr", "es", "ru", "ar", "de", "ja", "ko", "pt", "it", "tr", "vi",
+                "id"
+            ]
+        );
+        for lang in TOOLBAR_TARGET_LANGS {
+            assert!(!matches!(lang, Lang::Auto | Lang::ZhHant));
+            assert_eq!(Lang::from_code(lang.code()), Some(lang));
+        }
+        let entries = translate_language_entries("en-US", Lang::Ja);
+        assert_eq!(entries.len(), 14);
+        assert_eq!(entries.iter().filter(|e| e.checked).count(), 1);
+        assert!(entries.iter().find(|e| e.id == "ja").unwrap().checked);
+        let label = |id: &str| entries.iter().find(|e| e.id == id).unwrap().label.clone();
+        assert_eq!(label("vi"), "Tiếng Việt");
+        assert_eq!(label("id"), "Bahasa Indonesia");
+        assert_eq!(label("zh-CN"), "简体中文");
+        assert!(entries.iter().all(|e| !e.label.is_empty()));
+    }
+
     /// 翻译成功：译文复制到剪贴板；Enter 再复制并关闭；Esc 先退出翻译界面再关闭窗口。
     #[test]
     fn translate_success_copies_translation_and_enter_closes() {
@@ -9599,6 +10204,183 @@ mod tests {
         let one = estimate_panel_height(&["a".to_string()], 300.0);
         let wrapped = estimate_panel_height(&["a".repeat(200)], 300.0);
         assert!(wrapped > one);
+    }
+
+    /// 造一份带大框的译文产出：框在选区图像 (2,2)–(32,14)，译文“你好世界”。
+    fn translate_outcome_with_box() -> TranslateOutcome {
+        let mut outcome = translate_outcome("你好世界");
+        outcome.boxes[0].rect = PhysicalRect::new(2, 2, 30, 12);
+        outcome
+    }
+
+    /// 造一个已选区（5,5）-（44,34）、翻译已完成（带译文图）的视图。
+    fn translated_view() -> (ScreenshotOverlayView, Rc<RefCell<Recorded>>) {
+        let (mut view, rec) = view_with(100, 80, 1.0, false);
+        drag(&mut view, (5, 5), (44, 34));
+        view.apply_action(ToolbarAction::Translate);
+        view.finish_translate(1, Ok(translate_outcome_with_box()));
+        (view, rec)
+    }
+
+    /// 翻译完成：生成译文原位替换图（与原图同尺寸但像素不同），按钮条可见；开始时的副本已转手。
+    #[test]
+    fn translate_done_builds_replacement_image() {
+        let (view, rec) = translated_view();
+        assert!(view.translate_result_visible());
+        assert!(view.translate_source.is_none());
+        let image = view.translated_image.as_ref().expect("应生成译文图");
+        let (_, w, h, original) = rec.borrow().translates[0].clone();
+        assert_eq!((image.width, image.height), (w, h));
+        assert_ne!(image.rgba, original, "框内应被背景色与译文改写");
+        // 框外（右下角）分毫不动
+        let last = (w * h - 1) as usize * 4;
+        assert_eq!(image.rgba[last..last + 4], original[last..last + 4]);
+    }
+
+    /// 按钮条的动作表：五个按钮、顺序固定、图标与提示 id 都不重复。
+    #[test]
+    fn translate_bar_actions_are_distinct() {
+        let mut ids: Vec<&str> = TRANSLATE_BAR_ACTIONS.iter().map(|a| a.id()).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), 5);
+        let mut tips: Vec<&str> = TRANSLATE_BAR_ACTIONS
+            .iter()
+            .map(|a| a.tooltip_id())
+            .collect();
+        tips.sort_unstable();
+        tips.dedup();
+        assert_eq!(tips.len(), 5);
+        for a in TRANSLATE_BAR_ACTIONS {
+            assert!(snow_ui::shell::ui::icon_asset_exists(a.icon()), "{:?}", a);
+            for lang in ["en-US", "zh-CN"] {
+                let text = crate::ocr_backend::i18n_for(lang).tr(a.tooltip_id());
+                assert!(!text.is_empty() && !text.contains("[!"), "{lang} {a:?}");
+            }
+        }
+    }
+
+    /// “保存图片”有译文图时保存译文图；“保存原图”始终保存不含译文的原图。
+    #[test]
+    fn save_image_picks_translated_or_original() {
+        let (mut view, rec) = translated_view();
+        let translated = view.translated_image.as_ref().unwrap().rgba.clone();
+        let original = rec.borrow().translates[0].3.clone();
+        assert_eq!(
+            view.apply_translate_bar_action(TranslateBarAction::SaveImage),
+            OverlayOutcome::Close
+        );
+        assert_eq!(
+            view.apply_translate_bar_action(TranslateBarAction::SaveOriginal),
+            OverlayOutcome::Close
+        );
+        let r = rec.borrow();
+        assert_eq!(r.saved_images.len(), 2);
+        assert_eq!(r.saved_images[0], (40, 30, translated.clone()));
+        assert_eq!(r.saved_images[1], (40, 30, original.clone()));
+        assert_ne!(translated, original);
+    }
+
+    /// 撤销是一次性的：回到原文、丢掉译文图与译文状态；之后“保存图片”保存的是原图，要再看得重新翻译。
+    #[test]
+    fn undo_discards_translation_and_saves_original() {
+        let (mut view, rec) = translated_view();
+        let original = rec.borrow().translates[0].3.clone();
+        view.apply_translate_bar_action(TranslateBarAction::Details);
+        assert!(view.translate_detail_open);
+        assert_eq!(
+            view.apply_translate_bar_action(TranslateBarAction::Undo),
+            OverlayOutcome::Stay
+        );
+        assert_eq!(view.translate_state(), &TranslateUiState::Idle);
+        assert!(view.translated_image.is_none() && !view.translate_detail_open);
+        assert!(!view.translate_result_visible(), "撤销后按钮条消失");
+        assert!(!view.pending_drops.is_empty(), "译文图排队释放");
+        assert_eq!(
+            view.apply_translate_bar_action(TranslateBarAction::SaveImage),
+            OverlayOutcome::Close
+        );
+        assert_eq!(rec.borrow().saved_images[0], (40, 30, original));
+        // 再次翻译才会重新出现译文
+        assert!(view.translated_image.is_none());
+    }
+
+    /// 没有任何译文图（从未翻译）时“保存图片”也保存原图；没有选区则什么都不做。
+    #[test]
+    fn save_image_without_translation_saves_original() {
+        let (mut view, rec) = view_with(100, 80, 1.0, false);
+        assert_eq!(
+            view.apply_translate_bar_action(TranslateBarAction::SaveImage),
+            OverlayOutcome::Stay
+        );
+        assert!(rec.borrow().saved_images.is_empty());
+        drag(&mut view, (5, 5), (44, 34));
+        assert_eq!(
+            view.apply_translate_bar_action(TranslateBarAction::SaveImage),
+            OverlayOutcome::Close
+        );
+        let r = rec.borrow();
+        assert_eq!(r.saved_images.len(), 1);
+        assert_eq!(&r.saved_images[0].2[0..3], &[5, 5, 9]);
+    }
+
+    /// “关闭”：退出整个截图（与取消同一路径 `Close`）；“详情”只切换面板，Esc 先收详情。
+    #[test]
+    fn close_exits_and_details_toggle() {
+        let (mut view, _rec) = translated_view();
+        assert_eq!(
+            view.apply_translate_bar_action(TranslateBarAction::Details),
+            OverlayOutcome::Stay
+        );
+        assert!(view.translate_detail_open);
+        // Esc：先收详情，翻译结果仍在
+        assert_eq!(
+            view.handle_key("escape", false, false),
+            OverlayOutcome::Stay
+        );
+        assert!(!view.translate_detail_open && view.translate_result_visible());
+        assert_eq!(
+            view.apply_translate_bar_action(TranslateBarAction::Close),
+            OverlayOutcome::Close
+        );
+    }
+
+    /// 译文为空、无可替换段落或失败时不出按钮条、不生成译文图，且不残留选区副本。
+    #[test]
+    fn no_bar_without_translation() {
+        let (mut view, _rec) = view_with(100, 80, 1.0, false);
+        drag(&mut view, (5, 5), (44, 34));
+        view.apply_action(ToolbarAction::Translate);
+        assert!(view.translate_source.is_some());
+        assert!(!view.translate_result_visible(), "加载中不显示按钮条");
+        view.finish_translate(1, Ok(translate_outcome("")));
+        assert!(!view.translate_result_visible());
+        assert!(view.translated_image.is_none() && view.translate_source.is_none());
+        view.dismiss_translate();
+        view.apply_action(ToolbarAction::Translate);
+        view.finish_translate(3, Err(TranslateFlowError::NoText));
+        assert!(!view.translate_result_visible());
+        assert!(
+            matches!(view.translate_state(), TranslateUiState::Failed { .. }),
+            "应进入失败态"
+        );
+        assert!(view.translate_source.is_none(), "失败后副本立即释放");
+        view.dismiss_translate();
+        assert!(view.translate_source.is_none());
+    }
+
+    /// 三方联动在视图里的滚动：详情展开后悬停识别区，另两方请求被取走（不重复）。
+    #[test]
+    fn hover_on_box_requests_scroll_once() {
+        let (mut view, _rec) = translated_view();
+        view.apply_translate_bar_action(TranslateBarAction::Details);
+        view.link_hover.set_box(0, true);
+        view.apply_hover_scroll();
+        let TranslateUiState::Done { pairs, .. } = &view.translate else {
+            panic!("应为完成态");
+        };
+        assert_eq!(view.link_hover.take_scroll(pairs), None, "已被取走");
+        assert!(view.link_hover.box_active(pairs, 0));
     }
 
     /// 过期结果（用户已退出后才回来的）被丢弃，不会复活界面或改剪贴板。

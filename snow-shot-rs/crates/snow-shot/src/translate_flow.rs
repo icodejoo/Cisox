@@ -25,13 +25,26 @@ pub const LINK_FILL: u32 = 0xFADB1473;
 /// 段落与行框联动高亮的描边色（黄）。
 pub const LINK_BORDER: u32 = 0xFAAD14FF;
 
-/// 译文段落与 OCR 行框的悬停联动状态：鼠标在某段译文或某个行框上。
+/// 悬停联动要求列表滚动到可视区正中的请求：哪个列表滚到哪一段。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScrollRequest {
+    /// 原文列表要居中的条目（悬停就发生在原文列表里时为 `None`，免得条目在鼠标下跑掉）。
+    pub source: Option<usize>,
+    /// 译文列表要居中的条目（同理）。
+    pub target: Option<usize>,
+}
+
+/// 截图上的识别区、原文条目、译文条目三方的悬停联动状态：悬停任一方，另两方对应的一段高亮。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct LinkHover {
-    /// 悬停的译文段落下标。
+    /// 悬停的译文条目（段落下标）。
     paragraph: Option<usize>,
+    /// 悬停的原文条目（段落下标）。
+    source: Option<usize>,
     /// 悬停的行框下标。
     box_ix: Option<usize>,
+    /// 上一次已发出滚动请求的段落；段落没变就不重复滚动。
+    scrolled_for: Option<usize>,
 }
 
 /// 更新一个悬停槽：进入时记录，离开时只清除自己（避免晚到的“离开”清掉新的“进入”）。
@@ -44,13 +57,22 @@ fn set_hover(slot: &mut Option<usize>, index: usize, hovered: bool) {
 }
 
 impl LinkHover {
-    /// 更新译文段落的悬停：进入时记录，离开时只清除自己（避免晚到的“离开”清掉新的“进入”）。
+    /// 更新译文条目的悬停：进入时记录，离开时只清除自己（避免晚到的“离开”清掉新的“进入”）。
     ///
     /// # 参数
     /// - `index`：段落下标。
     /// - `hovered`：鼠标是进入（`true`）还是离开（`false`）。
     pub fn set_paragraph(&mut self, index: usize, hovered: bool) {
         set_hover(&mut self.paragraph, index, hovered);
+    }
+
+    /// 更新原文条目的悬停，规则同 [`Self::set_paragraph`]。
+    ///
+    /// # 参数
+    /// - `index`：段落下标。
+    /// - `hovered`：鼠标是进入还是离开。
+    pub fn set_source(&mut self, index: usize, hovered: bool) {
+        set_hover(&mut self.source, index, hovered);
     }
 
     /// 更新行框的悬停，规则同 [`Self::set_paragraph`]。
@@ -67,18 +89,36 @@ impl LinkHover {
         *self = Self::default();
     }
 
-    /// 当前该高亮的译文段落：悬停段落本身，或悬停行框所属的段落。
+    /// 当前该高亮的段落：悬停的译文条目、原文条目，或悬停行框所属的段落。
     ///
     /// # 参数
     /// - `pairs`：逐段对照。
     pub fn active_paragraph(&self, pairs: &[TranslatedParagraph]) -> Option<usize> {
-        self.paragraph.or_else(|| {
+        self.paragraph.or(self.source).or_else(|| {
             let ix = self.box_ix?;
             pairs.iter().position(|p| p.box_indices.contains(&ix))
         })
     }
 
-    /// 某个行框是否该高亮：它属于悬停的段落，或它自己被悬停。
+    /// 原文条目是否该高亮。
+    ///
+    /// # 参数
+    /// - `pairs`：逐段对照。
+    /// - `index`：段落下标。
+    pub fn source_active(&self, pairs: &[TranslatedParagraph], index: usize) -> bool {
+        self.active_paragraph(pairs) == Some(index)
+    }
+
+    /// 译文条目是否该高亮。
+    ///
+    /// # 参数
+    /// - `pairs`：逐段对照。
+    /// - `index`：段落下标。
+    pub fn target_active(&self, pairs: &[TranslatedParagraph], index: usize) -> bool {
+        self.active_paragraph(pairs) == Some(index)
+    }
+
+    /// 某个行框是否该高亮：它自己被悬停，或它属于被悬停条目对应的段落。
     ///
     /// # 参数
     /// - `pairs`：逐段对照。
@@ -87,8 +127,34 @@ impl LinkHover {
         self.box_ix == Some(box_ix)
             || self
                 .paragraph
+                .or(self.source)
                 .and_then(|p| pairs.get(p))
                 .is_some_and(|p| p.box_indices.contains(&box_ix))
+    }
+
+    /// 取出待执行的滚动请求：高亮段落变了才有，让另外两方列表把该条目滚到可视区正中。
+    ///
+    /// 悬停发生在哪个列表，就不滚那个列表（它的条目已在鼠标下，再滚会让条目从鼠标下跑掉）；
+    /// 悬停在截图识别区上时两个列表都滚。悬停离开后清除记忆，下次再悬停同一段会重新滚动。
+    ///
+    /// # 参数
+    /// - `pairs`：逐段对照。
+    ///
+    /// # 返回
+    /// 无需滚动为 `None`。
+    pub fn take_scroll(&mut self, pairs: &[TranslatedParagraph]) -> Option<ScrollRequest> {
+        let active = self.active_paragraph(pairs);
+        if active == self.scrolled_for {
+            return None;
+        }
+        self.scrolled_for = active;
+        let p = active?;
+        let from_target = self.paragraph.is_some();
+        let from_source = !from_target && self.source.is_some();
+        Some(ScrollRequest {
+            source: (!from_source).then_some(p),
+            target: (!from_target).then_some(p),
+        })
     }
 }
 
@@ -438,6 +504,89 @@ mod tests {
         assert_eq!(hover.active_paragraph(&pairs), Some(0));
         hover.clear();
         assert_eq!(hover, LinkHover::default());
+    }
+
+    /// 三方联动：悬停原文 / 译文条目 / 识别区任一方，另两方对应高亮；离开后清除。
+    #[test]
+    fn three_way_hover_highlights_the_other_two() {
+        let pairs = two_pairs();
+        let mut hover = LinkHover::default();
+        // 悬停原文条目 1：译文条目 1 与行框 2 高亮，别的不亮
+        hover.set_source(1, true);
+        assert!(hover.source_active(&pairs, 1) && hover.target_active(&pairs, 1));
+        assert!(hover.box_active(&pairs, 2));
+        assert!(!hover.target_active(&pairs, 0) && !hover.box_active(&pairs, 0));
+        hover.set_source(1, false);
+        assert_eq!(hover.active_paragraph(&pairs), None);
+        // 悬停译文条目 0：原文条目 0 与行框 0、1 高亮
+        hover.set_paragraph(0, true);
+        assert!(hover.source_active(&pairs, 0));
+        assert!(hover.box_active(&pairs, 0) && hover.box_active(&pairs, 1));
+        hover.set_paragraph(0, false);
+        // 悬停识别区行框 1：原文 / 译文条目 0 高亮，同段的行框 0 不跟着亮（只亮自己）
+        hover.set_box(1, true);
+        assert!(hover.source_active(&pairs, 0) && hover.target_active(&pairs, 0));
+        assert!(hover.box_active(&pairs, 1) && !hover.box_active(&pairs, 0));
+        hover.set_box(1, false);
+        assert!(!hover.source_active(&pairs, 0) && !hover.box_active(&pairs, 1));
+    }
+
+    /// 滚动请求：悬停原文只滚译文列表、悬停译文只滚原文列表、悬停识别区两个都滚；
+    /// 同一段不重复请求，离开后再进入重新请求。
+    #[test]
+    fn hover_scroll_requests_skip_the_origin_list() {
+        let pairs = two_pairs();
+        let mut hover = LinkHover::default();
+        assert_eq!(hover.take_scroll(&pairs), None);
+
+        hover.set_source(1, true);
+        assert_eq!(
+            hover.take_scroll(&pairs),
+            Some(ScrollRequest {
+                source: None,
+                target: Some(1)
+            })
+        );
+        assert_eq!(hover.take_scroll(&pairs), None, "同一段不重复滚动");
+        hover.set_source(1, false);
+        assert_eq!(hover.take_scroll(&pairs), None, "离开不触发滚动");
+
+        hover.set_paragraph(0, true);
+        assert_eq!(
+            hover.take_scroll(&pairs),
+            Some(ScrollRequest {
+                source: Some(0),
+                target: None
+            })
+        );
+        hover.set_paragraph(0, false);
+        let _ = hover.take_scroll(&pairs);
+
+        hover.set_box(2, true);
+        assert_eq!(
+            hover.take_scroll(&pairs),
+            Some(ScrollRequest {
+                source: Some(1),
+                target: Some(1)
+            })
+        );
+        // 离开后再次悬停同一个行框，重新请求
+        hover.set_box(2, false);
+        let _ = hover.take_scroll(&pairs);
+        hover.set_box(2, true);
+        assert!(hover.take_scroll(&pairs).is_some());
+        // 直接换到另一段：立即请求新的一段
+        hover.set_box(2, false);
+        hover.set_box(0, true);
+        assert_eq!(
+            hover.take_scroll(&pairs),
+            Some(ScrollRequest {
+                source: Some(0),
+                target: Some(0)
+            })
+        );
+        hover.clear();
+        assert_eq!(hover.take_scroll(&pairs), None);
     }
 
     /// 可见性、忙碌、阶段文案。

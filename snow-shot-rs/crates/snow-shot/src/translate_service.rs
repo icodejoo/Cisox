@@ -111,6 +111,24 @@ pub(crate) const SUPPORTED_TARGETS: [(Lang, &str); 11] = [
     (Lang::ZhHans, "zh-Hans"),
 ];
 
+/// 截图工具栏「翻译」二级菜单的目标语言：固定 14 种（不含自动与繁体），顺序即菜单顺序。
+pub const TOOLBAR_TARGET_LANGS: [Lang; 14] = [
+    Lang::ZhHans,
+    Lang::En,
+    Lang::Fr,
+    Lang::Es,
+    Lang::Ru,
+    Lang::Ar,
+    Lang::De,
+    Lang::Ja,
+    Lang::Ko,
+    Lang::Pt,
+    Lang::It,
+    Lang::Tr,
+    Lang::Vi,
+    Lang::Id,
+];
+
 /// 把语言映射到支持集合内的配置值拼写；不在集合内返回 `None`。
 fn target_code(lang: Lang) -> Option<&'static str> {
     SUPPORTED_TARGETS

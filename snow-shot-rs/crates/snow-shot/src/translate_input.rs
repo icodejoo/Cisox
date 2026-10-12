@@ -267,6 +267,23 @@ impl TranslateInputModel {
         Some(self.serial)
     }
 
+    /// 以最新选择重新开始一次翻译：即使正在翻译也接受，旧请求的结果按序号过期丢弃。
+    ///
+    /// # 参数
+    /// - `text`：用户输入。
+    ///
+    /// # 返回
+    /// 通过则返回新的请求序号；输入为空时返回 `None` 且不改变状态。
+    pub fn restart(&mut self, text: &str) -> Option<u64> {
+        if text.trim().is_empty() {
+            return None;
+        }
+        self.serial += 1;
+        self.phase = Phase::Translating;
+        self.copy = CopyState::Pending;
+        Some(self.serial)
+    }
+
     /// 收到翻译结果；序号过期（不是最近一次请求）或当前不在翻译中则忽略。
     ///
     /// # 参数
@@ -288,6 +305,13 @@ impl TranslateInputModel {
             Err(e) => Phase::Failed(e),
         };
         true
+    }
+
+    /// 清空：回到空闲态并作废进行中的请求（其结果到达时按过期忽略）。
+    pub fn reset(&mut self) {
+        self.serial += 1;
+        self.phase = Phase::Idle;
+        self.copy = CopyState::Pending;
     }
 
     /// 当前可复制的译文；非完成态为空。
@@ -588,6 +612,50 @@ mod tests {
         assert!(second > first);
         assert!(m.finish(second, Err(InputError::Translate(TranslateError::Timeout))));
         assert_eq!(m.translation(), "");
+    }
+
+    /// 重新开始：翻译中也接受并作废旧请求；空输入不动状态。
+    #[test]
+    fn restart_supersedes_in_flight() {
+        let mut m = TranslateInputModel::default();
+        assert_eq!(m.restart("  "), None);
+        assert_eq!(m.phase, Phase::Idle);
+        let first = m.begin("hello").unwrap();
+        let second = m.restart("hello").expect("翻译中也能重新开始");
+        assert!(second > first && m.is_busy());
+        let ok = |t: &str| {
+            Ok(Translated {
+                texts: vec![t.into()],
+                label: "l".into(),
+            })
+        };
+        assert!(!m.finish(first, ok("旧")), "旧结果按序号丢弃");
+        assert!(m.is_busy());
+        assert!(m.finish(second, ok("新")));
+        assert_eq!(m.translation(), "新");
+    }
+
+    /// 清空回到空闲态；进行中的请求作废，之后可以立即开始新的翻译。
+    #[test]
+    fn reset_clears_and_invalidates_in_flight() {
+        let mut m = TranslateInputModel::default();
+        let first = m.begin("hello").unwrap();
+        m.reset();
+        assert_eq!(
+            (m.phase.clone(), m.copy.clone()),
+            (Phase::Idle, CopyState::Pending)
+        );
+        assert!(!m.is_busy());
+        assert!(!m.finish(
+            first,
+            Ok(Translated {
+                texts: vec!["你好".into()],
+                label: "l".into()
+            })
+        ));
+        assert_eq!(m.phase, Phase::Idle);
+        let second = m.begin("again").expect("清空后可立即再翻译");
+        assert!(second > first);
     }
 
     /// 点击复制：完成态记录成功/失败，状态行随之变化；新译文重置复制状态；非完成态点击无效。

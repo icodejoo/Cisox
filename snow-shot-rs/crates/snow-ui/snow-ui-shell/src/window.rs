@@ -39,6 +39,8 @@ pub struct WindowSpec {
     pub focus: bool,
     /// 是否允许用户调整大小。
     pub resizable: bool,
+    /// 无边框窗口是否允许用户拖动（视图里用 `WindowControlArea::Drag` 标出可拖区域；带边框窗口恒可拖）。
+    pub draggable: bool,
 }
 
 /// 解析后的落点：具体显示器与物理像素矩形。
@@ -69,6 +71,7 @@ impl WindowSpec {
             show_in_taskbar: false,
             focus: false,
             resizable: false,
+            draggable: false,
         }
     }
 
@@ -97,6 +100,7 @@ impl WindowSpec {
             show_in_taskbar: true,
             focus: true,
             resizable: true,
+            draggable: false,
         }
     }
 

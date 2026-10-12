@@ -64,6 +64,10 @@ pub enum Lang {
     Tr,
     /// 阿拉伯语。
     Ar,
+    /// 越南语。
+    Vi,
+    /// 印尼语。
+    Id,
 }
 
 impl Lang {
@@ -94,6 +98,8 @@ impl Lang {
             Self::Pt => "pt",
             Self::Tr => "tr",
             Self::Ar => "ar",
+            Self::Vi => "vi",
+            Self::Id => "id",
         }
     }
 
@@ -124,6 +130,8 @@ impl Lang {
             Self::Pt => "葡萄牙语",
             Self::Tr => "土耳其语",
             Self::Ar => "阿拉伯语",
+            Self::Vi => "越南语",
+            Self::Id => "印尼语",
         }
     }
 
@@ -159,6 +167,8 @@ impl Lang {
             "pt" | "pt-br" | "por_latn" => Some(Self::Pt),
             "tr" | "tur_latn" => Some(Self::Tr),
             "ar" | "arb_arab" => Some(Self::Ar),
+            "vi" | "vie_latn" => Some(Self::Vi),
+            "id" | "in" | "ind_latn" => Some(Self::Id),
             _ => None,
         }
     }
@@ -1013,6 +1023,18 @@ mod tests {
         }
     }
 
+    /// 越南语、印尼语的代码往返与显示名。
+    #[test]
+    fn test_vi_id_roundtrip() {
+        for (lang, code, name) in [(Lang::Vi, "vi", "越南语"), (Lang::Id, "id", "印尼语")] {
+            assert_eq!(lang.code(), code);
+            assert_eq!(lang.display_name(), name);
+            assert_eq!(Lang::from_code(code), Some(lang));
+            assert_eq!(Lang::from_locale(&format!("{code}-XX")), Some(lang));
+        }
+        assert_eq!(Lang::from_code("in"), Some(Lang::Id));
+    }
+
     /// 旧格式清单（无扩展字段）仍可解析；缺省字段有合理默认。
     #[test]
     fn old_manifest_still_parses() {
@@ -1165,7 +1187,7 @@ mod tests {
     fn m2m100_pack_manifest_scans() {
         let text = r#"{"schema_version":1,"id":"nllb","family":"m2m100","quantization":"int4",
             "files":{"encoder":"encoder.onnx","encoder_data":"encoder.onnx_data","decoder":"decoder.onnx","decoder_data":"decoder.onnx_data","tokenizer":"tokenizer.json"},
-            "languages":["zh-CN","en","vi"],"lang_tokens":{"zh-CN":"zho_Hans","en":"eng_Latn","vi":"vie_Latn"},
+            "languages":["zh-CN","en","xx"],"lang_tokens":{"zh-CN":"zho_Hans","en":"eng_Latn","xx":"xxx_Latn"},
             "generation":{"num_beams":2,"bad_token_ids":[],"min_length_ratio":0.5},
             "execution":{"prepacking":true}}"#;
         let manifest: ModelManifest = serde_json::from_str(text).expect("m2m100 清单");

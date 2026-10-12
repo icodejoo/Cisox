@@ -156,3 +156,17 @@ overlay-panel-confirm = 确定
 overlay-panel-undo = 撤销
 
 overlay-panel-close = 关闭
+
+overlay-translate-bar-details = 查看详情
+
+overlay-translate-bar-undo = 撤销翻译
+
+overlay-translate-bar-close = 关闭并退出截图
+
+overlay-translate-bar-save-image = 保存译文图
+
+overlay-translate-bar-save-original = 保存原图
+
+overlay-translate-detail-source = 原文
+
+overlay-translate-detail-target = 译文

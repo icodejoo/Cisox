@@ -290,6 +290,10 @@ pub enum UiEvent {
         text: String,
         /// 下拉选中的包 ID（空串为自动）。
         model_id: String,
+        /// 浮窗上选的源语言（可为自动检测）。
+        source: snow_translate::Lang,
+        /// 浮窗上选的目标语言。
+        target: snow_translate::Lang,
     },
     /// 输入框翻译完成（成功或失败）。
     TranslateInputFinished {
@@ -518,6 +522,8 @@ pub enum UiEvent {
         height: u32,
         /// RGBA 像素。
         rgba: Vec<u8>,
+        /// 本次翻译的目标语言（会话里选的或设置默认值）。
+        target: snow_translate::Lang,
     },
     /// 翻译流程进入新阶段。
     TranslateProgress {
@@ -1697,6 +1703,7 @@ impl AppState {
 pub fn on_capture_requested(state: &mut AppState, origin: &'static str) -> u64 {
     state.capture_requests += 1;
     tracing::info!(origin, seq = state.capture_requests, "capture requested");
+    crate::mem_diag::log("capture-requested");
     state.capture_requests
 }
 
@@ -1906,6 +1913,7 @@ fn request_capture(
     for target in targets {
         let inbox = inbox.clone();
         let spawned = spawn_capture(target, move |result| {
+            crate::timing_diag::mark("capture-thread-done");
             inbox.push(match result {
                 Ok(payload) => UiEvent::CaptureReady(payload),
                 Err(e) => UiEvent::CaptureFailed(e),
@@ -1946,6 +1954,7 @@ pub fn cursor_in_monitor(monitor: &MonitorInfo, cursor: Option<PhysicalPoint>) -
 /// - `payloads`：按开窗顺序排好的采集结果（光标所在屏在最后）。
 fn open_overlays(cx: &mut ShellContext, state: &mut AppState, payloads: Vec<CapturePayload>) {
     state.capture_in_flight = false;
+    crate::timing_diag::mark("open-overlays-begin");
     let mode = std::mem::replace(&mut state.capture_mode, CaptureMode::Screenshot);
     state.overlay_windows.clear();
     if payloads.is_empty() {
@@ -2096,12 +2105,13 @@ fn open_overlays(cx: &mut ShellContext, state: &mut AppState, payloads: Vec<Capt
             .with_recognition_window(move |data| {
                 recognition_inbox.push(UiEvent::OpenRecognitionWindow(Box::new(data)));
             })
-            .with_translate(move |serial, width, height, rgba| {
+            .with_translate(move |serial, width, height, rgba, target| {
                 translate_inbox.push(UiEvent::TranslateRequested {
                     serial,
                     width,
                     height,
                     rgba,
+                    target,
                 });
             })
             .with_translate_download(move || {
@@ -2133,7 +2143,9 @@ fn open_overlays(cx: &mut ShellContext, state: &mut AppState, payloads: Vec<Capt
         } else {
             (None, None)
         };
+        crate::timing_diag::mark("open-window-begin");
         let opened = cx.open_window(&spec, move |window, app| {
+            crate::timing_diag::mark("open-window-build-begin");
             let entity = match (existing, frames_for, output_for) {
                 (Some(entity), _, _) => entity,
                 (None, Some(frames), Some(output)) => {
@@ -2141,8 +2153,11 @@ fn open_overlays(cx: &mut ShellContext, state: &mut AppState, payloads: Vec<Capt
                 }
                 _ => unreachable!("首个窗口必须带着底图与输出通道"),
             };
-            app.new(|vcx| OverlayWindowView::new(entity, index, window, vcx))
+            let root = app.new(|vcx| OverlayWindowView::new(entity, index, window, vcx));
+            crate::timing_diag::mark("open-window-build-end");
+            root
         });
+        crate::timing_diag::mark("open-window-end");
         match opened {
             Ok((window, root)) => {
                 tracing::info!(
@@ -2169,7 +2184,18 @@ fn open_overlays(cx: &mut ShellContext, state: &mut AppState, payloads: Vec<Capt
     };
     state.overlay_windows = windows[..windows.len() - 1].to_vec();
     configure_overlay(cx, state, window, view, canvas, mode, scale_override);
+    crate::timing_diag::mark("configure-overlay-end");
+    crate::mem_diag::log_later("overlay-opened", &DIAG_AFTER_OPEN);
 }
+
+/// 内存诊断：覆盖窗打开后的采样延迟。
+const DIAG_AFTER_OPEN: [Duration; 1] = [Duration::from_millis(1500)];
+/// 内存诊断：覆盖窗关闭后的采样延迟。
+const DIAG_AFTER_CLOSE: [Duration; 3] = [
+    Duration::from_millis(500),
+    Duration::from_secs(3),
+    Duration::from_secs(10),
+];
 
 /// 虚拟桌面外接矩形：所有显示器范围的并集（桌面物理坐标，可为负）；没有显示器时为空矩形。
 ///
@@ -2226,6 +2252,8 @@ fn close_all_overlays(cx: &mut ShellContext, state: &mut AppState) {
         state.overlay_windows.clear();
         return;
     };
+    crate::mem_diag::log("overlay-closing");
+    crate::mem_diag::log_later("overlay-closed", &DIAG_AFTER_CLOSE);
     let mut windows = std::mem::take(&mut state.overlay_windows);
     if let Some(primary) = state.overlay.take() {
         windows.push(primary);
@@ -2259,6 +2287,7 @@ fn configure_overlay(
     mode: CaptureMode,
     scale_override: Option<f32>,
 ) {
+    crate::timing_diag::mark("configure-overlay-begin");
     let record_mode = mode == CaptureMode::Record;
     let scroll_mode = mode == CaptureMode::Scroll;
     let auto_confirm = match mode {
@@ -2272,6 +2301,7 @@ fn configure_overlay(
     if let Some(id) = window.native_id() {
         view.update(cx.app(), |v, _| v.set_owner_window(id.0));
     }
+    crate::timing_diag::mark("cfg-before-keymap");
     let (keymap, locale) = {
         let store = state.config.borrow();
         (
@@ -2283,6 +2313,7 @@ fn configure_overlay(
         v.set_keymap(keymap);
         v.set_locale(&locale);
     });
+    crate::timing_diag::mark("cfg-after-keymap-locale");
     state.overlay = Some(window);
     state.overlay_view = Some(view.clone());
     // 多屏会话协调：任一窗口关闭时，其余显示器上的窗口跟着关闭
@@ -2301,12 +2332,14 @@ fn configure_overlay(
             });
         });
     }
+    crate::timing_diag::mark("cfg-after-close-hook");
     // 标注样式：读取已保存的各工具样式，之后的修改写回同一份配置
     let style_locale = locale_of(state.config.borrow().document());
     let style_config = state.config.clone();
     view.update(cx.app(), |v, _| {
         v.set_style_config(style_config, style_locale)
     });
+    crate::timing_diag::mark("cfg-after-style-config");
     // 选区形状：读取上次使用的形状（矩形 / 折线 / 曲线 / 自由绘制）
     {
         let region_type = crate::region_select::RegionType::from_config(
@@ -2318,6 +2351,15 @@ fn configure_overlay(
         );
         view.update(cx.app(), |v, _| v.set_initial_region_type(region_type));
     }
+    crate::timing_diag::mark("cfg-after-region-type");
+    // 翻译目标语言：每次新截图都回到设置里的值，二级菜单的选择只在本次会话内有效
+    {
+        let target =
+            TranslateConfig::from_document(state.config.borrow().document(), &system_ui_language())
+                .target;
+        view.update(cx.app(), |v, _| v.set_translate_default_target(target));
+    }
+    crate::timing_diag::mark("cfg-after-translate-target");
     // 历史翻页：覆盖窗里用快捷键在截图历史里前后翻，读盘在后台线程
     {
         let policy = policy_from_document(state.config.borrow().document());
@@ -2328,6 +2370,7 @@ fn configure_overlay(
             Err(e) => tracing::warn!(error = %e, "启动截图历史读取线程失败，翻页不可用"),
         }
     }
+    crate::timing_diag::mark("cfg-after-history-provider");
     // 导出成功后由视图把整帧、选区、标注历史与结果图交给历史写入线程
     if let Some(recorder) = state.history.clone() {
         let config = Rc::clone(&state.config);
@@ -2338,6 +2381,7 @@ fn configure_overlay(
             });
         });
     }
+    crate::timing_diag::mark("cfg-before-window-hover");
     if let Some(hover) = state.window_hover.take() {
         let (target, animate) = {
             let config = state.config.borrow();
@@ -2350,6 +2394,7 @@ fn configure_overlay(
             v.set_window_hover(Some(hover), target, animate)
         });
     }
+    crate::timing_diag::mark("cfg-after-window-hover");
     if record_mode {
         view.update(cx.app(), |v, _| v.set_record_mode(true));
     }
@@ -2379,6 +2424,7 @@ fn configure_overlay(
         };
         spawn_overlay_bench(cx, window, view, steps, tool, hold, action);
     }
+    crate::timing_diag::mark("cfg-before-gesture");
     // 鼠标手势触发的截图：把已发生的按下 / 移动补发给刚打开的覆盖窗
     apply_pending_gesture(cx, state);
 }
@@ -2705,10 +2751,19 @@ fn spawn_pin_ocr(state: &AppState, id: String, width: u32, height: u32, rgba: Ve
 /// - `state`：运行时状态（取 OCR 服务、翻译宿主、配置与收件箱）。
 /// - `serial`：请求序号。
 /// - `width` / `height` / `rgba`：选区图像。
-fn spawn_translate(state: &AppState, serial: u64, width: u32, height: u32, rgba: Vec<u8>) {
+/// - `target`：本次目标语言，覆盖设置里的值（仅本次请求，不写回设置）。
+fn spawn_translate(
+    state: &AppState,
+    serial: u64,
+    width: u32,
+    height: u32,
+    rgba: Vec<u8>,
+    target: snow_translate::Lang,
+) {
     let ocr = select_ocr_engine(state);
-    let translate_config =
+    let mut translate_config =
         TranslateConfig::from_document(state.config.borrow().document(), &system_ui_language());
+    translate_config.target = target;
     let translator = Arc::clone(&state.translator);
     let inbox = state.inbox.clone();
     let spawned = std::thread::Builder::new()
@@ -4016,12 +4071,11 @@ fn open_or_focus_translate_input(cx: &mut ShellContext, state: &mut AppState) {
         return;
     }
     let prefs = ui_prefs_from_config(&state.config);
-    let packs = {
-        let config = state.config.borrow();
-        let translate_config =
-            TranslateConfig::from_document(config.document(), &system_ui_language());
-        crate::translate_input::installed_packs(&state.translator.scan(&translate_config).models)
-    };
+    // 目标语言默认取截图翻译设置里的目标语言；源语言默认自动检测
+    let translate_config =
+        TranslateConfig::from_document(state.config.borrow().document(), &system_ui_language());
+    let packs =
+        crate::translate_input::installed_packs(&state.translator.scan(&translate_config).models);
     let size = LogicalSize::new(TRANSLATE_INPUT_WIDTH, TRANSLATE_INPUT_HEIGHT);
     let spec = WindowSpec {
         title: String::new(),
@@ -4035,10 +4089,12 @@ fn open_or_focus_translate_input(cx: &mut ShellContext, state: &mut AppState) {
         show_in_taskbar: false,
         focus: true,
         resizable: false,
+        // 只有视图里的标题栏拖动区可以拖动窗口
+        draggable: true,
     };
     let inbox = state.inbox.clone();
     match cx.open_window(&spec, move |window, app| {
-        TranslateInputView::create(window, app, packs, prefs, inbox)
+        TranslateInputView::create(window, app, &translate_config, packs, prefs, inbox)
     }) {
         Ok((window, view)) => {
             state.translate_input = Some((window, view));
@@ -4055,9 +4111,18 @@ fn open_or_focus_translate_input(cx: &mut ShellContext, state: &mut AppState) {
 /// - `serial`：请求序号。
 /// - `text`：原文。
 /// - `model_id`：下拉选中的包 ID（空串为自动）。
-fn spawn_translate_input(state: &AppState, serial: u64, text: String, model_id: String) {
-    let config =
+/// - `source` / `target`：浮窗上选的语言。
+fn spawn_translate_input(
+    state: &AppState,
+    serial: u64,
+    text: String,
+    model_id: String,
+    source: snow_translate::Lang,
+    target: snow_translate::Lang,
+) {
+    let base =
         TranslateConfig::from_document(state.config.borrow().document(), &system_ui_language());
+    let config = page_config(&base, source, target);
     let translator = Arc::clone(&state.translator);
     let inbox = state.inbox.clone();
     let spawned = std::thread::Builder::new()
@@ -4848,6 +4913,7 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
             request_capture(cx, state, origin, CaptureMode::Screenshot);
         }
         UiEvent::CaptureReady(payload) => {
+            crate::timing_diag::mark("capture-ready-received");
             if let Some(payloads) = state.capture_collector.push(payload) {
                 open_overlays(cx, state, payloads);
             }
@@ -4950,7 +5016,9 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
             serial,
             text,
             model_id,
-        } => spawn_translate_input(state, serial, text, model_id),
+            source,
+            target,
+        } => spawn_translate_input(state, serial, text, model_id, source, target),
         UiEvent::TranslateInputFinished { serial, result } => {
             if let Some((window, view)) = &state.translate_input
                 && cx.is_window_open(window)
@@ -5137,7 +5205,8 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
             width,
             height,
             rgba,
-        } => spawn_translate(state, serial, width, height, rgba),
+            target,
+        } => spawn_translate(state, serial, width, height, rgba, target),
         UiEvent::TranslateProgress { serial, stage } => {
             if let Some(view) = &state.overlay_view {
                 view.update(cx.app(), |v, vcx| {

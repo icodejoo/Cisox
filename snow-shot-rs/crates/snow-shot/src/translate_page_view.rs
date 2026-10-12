@@ -55,13 +55,13 @@ const TEXT_SIZE: f32 = 14.0;
 /// 标签 / 状态行字号。
 const SMALL_SIZE: f32 = 12.0;
 
-/// 下拉里的一个选项（语言与翻译包共用）。
+/// 下拉里的一个选项（语言与翻译包共用；输入框翻译浮窗也用它）。
 #[derive(Clone)]
-struct ChoiceItem {
+pub(crate) struct ChoiceItem {
     /// 取值。
-    id: String,
+    pub(crate) id: String,
     /// 展示名。
-    label: SharedString,
+    pub(crate) label: SharedString,
 }
 
 impl SearchableListItem for ChoiceItem {
@@ -79,10 +79,10 @@ impl SearchableListItem for ChoiceItem {
 }
 
 /// 下拉状态实体类型。
-type ChoiceSelect = SelectState<SearchableVec<ChoiceItem>>;
+pub(crate) type ChoiceSelect = SelectState<SearchableVec<ChoiceItem>>;
 
 /// 由语言选项建下拉条目。
-fn lang_items(choices: Vec<LangChoice>) -> Vec<ChoiceItem> {
+pub(crate) fn lang_items(choices: Vec<LangChoice>) -> Vec<ChoiceItem> {
     choices
         .into_iter()
         .map(|c| ChoiceItem {
@@ -92,8 +92,23 @@ fn lang_items(choices: Vec<LangChoice>) -> Vec<ChoiceItem> {
         .collect()
 }
 
+/// 由已装翻译包建下拉条目（第一项固定为“自动”）。
+///
+/// # 参数
+/// - `packs`：已装翻译包（不含“自动”）。
+/// - `locale`：界面语言。
+pub(crate) fn pack_items(packs: Vec<PackChoice>, locale: &str) -> Vec<ChoiceItem> {
+    dropdown_choices(packs, locale)
+        .into_iter()
+        .map(|c| ChoiceItem {
+            id: c.id,
+            label: c.label.into(),
+        })
+        .collect()
+}
+
 /// 取值在选项里的位置。
-fn index_of(items: &[ChoiceItem], id: &str) -> Option<IndexPath> {
+pub(crate) fn index_of(items: &[ChoiceItem], id: &str) -> Option<IndexPath> {
     items
         .iter()
         .position(|i| i.id == id)
@@ -175,13 +190,7 @@ impl TranslatePageView {
         });
         let source_items = lang_items(language_choices(true, locale));
         let target_items = lang_items(language_choices(false, locale));
-        let pack_items: Vec<ChoiceItem> = dropdown_choices(packs, locale)
-            .into_iter()
-            .map(|c| ChoiceItem {
-                id: c.id,
-                label: c.label.into(),
-            })
-            .collect();
+        let pack_entries = pack_items(packs, locale);
         let mut make_select =
             |items: Vec<ChoiceItem>, selected: Option<IndexPath>, app: &mut App| {
                 app.new(|cx| SelectState::new(SearchableVec::new(items), selected, window, cx))
@@ -196,7 +205,7 @@ impl TranslatePageView {
             index_of(&target_items, lang_code(model.target)),
             app,
         );
-        let pack_select = make_select(pack_items, Some(IndexPath::default()), app);
+        let pack_select = make_select(pack_entries, Some(IndexPath::default()), app);
         let view = app.new(|cx| {
             cx.subscribe_in(
                 &input,

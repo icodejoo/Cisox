@@ -6,6 +6,7 @@
 //! 按钮全部是图标，文案作 tooltip；同类按钮折成「当前项图标 + 小箭头」合一的分组按钮，
 //! 分组表、悬停状态机与尺寸计算见 [`crate::toolbar_groups`]。
 
+use crate::menu_button::MenuEntry;
 use crate::text_measure::{LABEL_FONT_PX, ROW_ICON, max_label_width, menu_outer_width};
 use crate::toolbar_groups::{
     ARROW_GAP, ARROW_ICON, BAR_BORDER, BAR_PADDING_X, BAR_PADDING_Y, BUTTON_SIZE, CHECK_ICON,
@@ -284,6 +285,23 @@ type ToolHandler = Rc<dyn Fn(AnnotationTool, &mut Window, &mut App)>;
 
 /// 一个条目被触发（选中工具 / 执行动作）的回调。
 type ItemRunner = Rc<dyn Fn(&mut Window, &mut App)>;
+/// 选中翻译目标语言的回调，参数是语言项序号。
+type LanguageHandler = Rc<dyn Fn(usize, &mut Window, &mut App)>;
+/// 主菜单某一行的悬停事件对二级菜单的影响：移入「翻译」行展开，移入其他行收起，移出不改变
+/// （移向二级菜单时靠外层悬停保持，不在这里收起）。
+///
+/// # 参数
+/// - `hovered`: 鼠标是否移入该行。
+/// - `is_translate`: 该行是否是「翻译」行。
+///
+/// # 返回
+/// `Some(open)` 表示二级菜单应变成该状态；`None` 表示保持不变。
+fn translate_menu_after_hover(hovered: bool, is_translate: bool) -> Option<bool> {
+    hovered.then_some(is_translate)
+}
+
+/// 右箭头图标（Lucide），翻译行末尾的语言二级菜单入口。
+const SUBMENU_ARROW_ICON: &str = "icons/chevron-right.svg";
 
 /// 工具栏动作按钮的显示顺序、文案。
 pub(crate) const TOOLBAR_ACTIONS: [(&str, ToolbarAction); 10] = [
@@ -460,6 +478,8 @@ pub struct ToolbarGroups {
     memory: GroupMemory,
     /// 下拉弹出状态机。
     machine: PopupMachine,
+    /// 翻译目标语言二级菜单是否展开（随分组菜单收起而复位）。
+    translate_menu_open: bool,
 }
 
 impl Default for ToolbarGroups {
@@ -474,6 +494,20 @@ impl ToolbarGroups {
         Self {
             memory: GroupMemory::default(),
             machine: PopupMachine::default(),
+            translate_menu_open: false,
+        }
+    }
+
+    /// 翻译目标语言二级菜单是否展开。
+    pub fn translate_menu_open(&self) -> bool {
+        self.translate_menu_open
+    }
+
+    /// 展开 / 收起翻译目标语言二级菜单（悬停「翻译」行展开，悬停其他行收起）；状态没变不重绘。
+    pub fn set_translate_menu(&mut self, open: bool, cx: &mut Context<Self>) {
+        if self.translate_menu_open != open {
+            self.translate_menu_open = open;
+            cx.notify();
         }
     }
 
@@ -494,6 +528,10 @@ impl ToolbarGroups {
 
     /// 执行状态机给出的副作用：重绘或启动计时器。
     fn apply(&mut self, effect: PopupEffect, cx: &mut Context<Self>) {
+        // 分组菜单收起后，二级菜单一并复位
+        if self.machine.open().is_none() {
+            self.translate_menu_open = false;
+        }
         match effect {
             PopupEffect::Idle => {}
             PopupEffect::Redraw => cx.notify(),
@@ -559,6 +597,10 @@ pub struct ScreenshotToolbar {
     on_action: Option<ActionHandler>,
     labels: Option<LabelProvider>,
     groups: Option<Entity<ToolbarGroups>>,
+    /// 翻译目标语言菜单项；为空则翻译行没有二级菜单入口。
+    translate_languages: Vec<MenuEntry>,
+    /// 选中语言的回调。
+    on_translate_language: Option<LanguageHandler>,
 }
 
 impl ScreenshotToolbar {
@@ -588,6 +630,8 @@ impl ScreenshotToolbar {
             on_action: None,
             labels: None,
             groups: None,
+            translate_languages: Vec::new(),
+            on_translate_language: None,
         }
     }
 
@@ -643,6 +687,24 @@ impl ScreenshotToolbar {
     /// 交给工具栏一份跨帧保留的分组状态；不设置则没有下拉与当前项记忆（主按钮固定为组内第一项）。
     pub fn groups(mut self, groups: Entity<ToolbarGroups>) -> Self {
         self.groups = Some(groups);
+        self
+    }
+
+    /// 给分组菜单里的「翻译」行加目标语言二级菜单：行末出现右箭头提示，悬停该行即展开。
+    ///
+    /// # 参数
+    /// - `entries`: 语言项（当前项 `checked`）；为空则不显示二级菜单。
+    pub fn translate_languages(mut self, entries: Vec<MenuEntry>) -> Self {
+        self.translate_languages = entries;
+        self
+    }
+
+    /// 选中二级菜单里某个语言的回调，参数是语言项序号；调用前菜单已收起。
+    pub fn on_translate_language(
+        mut self,
+        handler: impl Fn(usize, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_translate_language = Some(Rc::new(handler));
         self
     }
 
@@ -875,7 +937,13 @@ impl ScreenshotToolbar {
             .iter()
             .map(|item| self.label_text(item.label()))
             .collect();
-        let width = menu_outer_width(max_label_width(window, &labels, LABEL_FONT_PX));
+        let has_languages = !self.translate_languages.is_empty()
+            && group
+                .items()
+                .contains(&ToolbarItem::Action(ToolbarAction::Translate));
+        // 翻译行末尾的箭头提示占一个图标宽
+        let arrow_extra = if has_languages { ROW_ICON } else { 0.0 };
+        let width = menu_outer_width(max_label_width(window, &labels, LABEL_FONT_PX)) + arrow_extra;
         let mut menu = div()
             .id(SharedString::from(format!("tb-menu-{key}")))
             .flex()
@@ -890,16 +958,31 @@ impl ScreenshotToolbar {
             .shadow_lg()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation());
-        if let Some(groups) = self.groups.clone() {
-            menu = menu.on_hover(move |hovered, _, cx| {
-                groups.update(cx, |state, gcx| state.menu_hover(*hovered, gcx));
-            });
-        }
+        let translate_open = self
+            .groups
+            .as_ref()
+            .is_some_and(|g| g.read(cx).translate_menu_open());
         for item in group.items().iter().copied() {
             let disabled = self.item_disabled(item);
             let is_current = item == current;
-            let content =
+            let is_translate =
+                has_languages && item == ToolbarItem::Action(ToolbarAction::Translate);
+            let mut content =
                 menu_row_content(item.icon_path(), self.label_text(item.label()), is_current);
+            if is_translate {
+                // 箭头只是“有子菜单”的提示，和文字同属一个点击 / 悬停区域
+                content = div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .w_full()
+                    .child(content.flex_1())
+                    .child(
+                        Icon::default()
+                            .path(SUBMENU_ARROW_ICON)
+                            .with_size(ComponentSize::Size(px(ROW_ICON))),
+                    );
+            }
             let mut row = Button::new(SharedString::from(format!("tb-{key}-item-{item:?}")))
                 .custom(self.item_look(item).variant(cx))
                 .with_size(ComponentSize::Size(px(ROW_ICON)))
@@ -909,6 +992,81 @@ impl ScreenshotToolbar {
                 .child(content);
             if let Some(act) = self.item_click(item) {
                 row = row.on_click(move |_, window, cx| act(window, cx));
+            }
+            let mut cell = div()
+                .id(SharedString::from(format!("tb-{key}-cell-{item:?}")))
+                .w_full()
+                .child(row);
+            if has_languages && let Some(groups) = self.groups.clone() {
+                // 悬停“翻译”行展开二级菜单，悬停其他行收起；移向二级菜单靠外层 wrap 的悬停保持
+                cell = cell.on_hover(move |hovered, _, cx| {
+                    if let Some(open) = translate_menu_after_hover(*hovered, is_translate) {
+                        groups.update(cx, |state, gcx| state.set_translate_menu(open, gcx));
+                    }
+                });
+            }
+            menu = menu.child(cell);
+        }
+        let mut wrap = div()
+            .id(SharedString::from(format!("tb-menu-wrap-{key}")))
+            .flex()
+            .flex_row()
+            .items_start()
+            .gap(px(ITEM_GAP))
+            .child(menu);
+        if has_languages && translate_open {
+            wrap = wrap.child(self.language_menu(window, cx));
+        }
+        // 悬停判定覆盖主菜单与二级菜单，鼠标移进二级菜单时不会收起
+        if let Some(groups) = self.groups.clone() {
+            wrap = wrap.on_hover(move |hovered, _, cx| {
+                groups.update(cx, |state, gcx| state.menu_hover(*hovered, gcx));
+            });
+        }
+        wrap.into_any_element()
+    }
+
+    /// 目标语言二级菜单：选中后先收起菜单，再回调语言序号。
+    fn language_menu(&self, window: &Window, cx: &App) -> AnyElement {
+        let labels: Vec<String> = self
+            .translate_languages
+            .iter()
+            .map(|e| e.label.clone())
+            .collect();
+        let width = menu_outer_width(max_label_width(window, &labels, LABEL_FONT_PX));
+        let mut menu = div()
+            .id("tb-translate-lang-menu")
+            .flex()
+            .flex_col()
+            .gap(px(ITEM_GAP))
+            .p(px(MENU_PADDING))
+            .w(px(width))
+            .rounded_md()
+            .bg(rgba(COLOR_BAR_BG))
+            .border_1()
+            .border_color(rgba(COLOR_BAR_BORDER))
+            .shadow_lg()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation());
+        for (index, entry) in self.translate_languages.iter().enumerate() {
+            let content = menu_row_content(entry.icon, entry.label.clone(), entry.checked);
+            let mut row = Button::new(SharedString::from(format!(
+                "tb-translate-lang-{}",
+                entry.id
+            )))
+            .custom(Look::Normal.variant(cx))
+            .with_size(ComponentSize::Size(px(ROW_ICON)))
+            .w_full()
+            .h(px(MENU_ROW_HEIGHT))
+            .child(content);
+            if let Some(handler) = self.on_translate_language.clone() {
+                let groups = self.groups.clone();
+                row = row.on_click(move |_, window, cx| {
+                    if let Some(groups) = &groups {
+                        groups.update(cx, |state, gcx| state.dismiss(gcx));
+                    }
+                    handler(index, window, cx);
+                });
             }
             menu = menu.child(row);
         }
@@ -1087,6 +1245,15 @@ mod tests {
         assert!(!seen.contains(&ToolbarAction::Undo) && !seen.contains(&ToolbarAction::Redo));
     }
 
+    /// 悬停「翻译」行展开二级菜单，悬停其他行收起，移出保持不变。
+    #[test]
+    fn translate_submenu_follows_row_hover() {
+        assert_eq!(translate_menu_after_hover(true, true), Some(true));
+        assert_eq!(translate_menu_after_hover(true, false), Some(false));
+        assert_eq!(translate_menu_after_hover(false, true), None);
+        assert_eq!(translate_menu_after_hover(false, false), None);
+    }
+
     /// 条目点击行为：置灰或没注册回调时不挂点击，有回调才返回。
     #[test]
     fn item_click_requires_enabled_and_handler() {
@@ -1101,6 +1268,10 @@ mod tests {
             .disabled_actions(&[ToolbarAction::Copy]);
         assert!(wired.item_click(copy).is_none());
         assert!(wired.item_click(tool).is_some());
-        assert!(wired.item_click(ToolbarItem::Action(ToolbarAction::Save)).is_some());
+        assert!(
+            wired
+                .item_click(ToolbarItem::Action(ToolbarAction::Save))
+                .is_some()
+        );
     }
 }

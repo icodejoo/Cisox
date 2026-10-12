@@ -84,14 +84,48 @@ pub fn is_auto_start_enabled(name: &str) -> bool {
     imp::is_auto_start_enabled(name)
 }
 
+/// 读取当前用户注册表里的 `REG_DWORD` 值（直接调系统 API，不起 `reg.exe` 子进程）。
+///
+/// # 参数
+/// - `subkey`：`HKEY_CURRENT_USER` 下的子键路径，如 `Control Panel\International`。
+/// - `value`：值名。
+///
+/// # 返回
+/// 值存在且类型为 `REG_DWORD` 时返回数值；不存在、类型不符、读取失败或平台不支持返回 `None`。
+///
+/// ```no_run
+/// use snow_platform::system_integration::read_user_dword;
+/// let light = read_user_dword(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize", "AppsUseLightTheme");
+/// ```
+pub fn read_user_dword(subkey: &str, value: &str) -> Option<u32> {
+    imp::read_user_dword(subkey, value)
+}
+
+/// 读取当前用户注册表里的 `REG_SZ` 字符串值（直接调系统 API，不起 `reg.exe` 子进程）。
+///
+/// # 参数
+/// - `subkey`：`HKEY_CURRENT_USER` 下的子键路径。
+/// - `value`：值名。
+///
+/// # 返回
+/// 值存在且类型为 `REG_SZ` 时返回去掉结尾 NUL 的字符串；不存在、类型不符、读取失败或平台不支持返回 `None`。
+///
+/// ```no_run
+/// use snow_platform::system_integration::read_user_string;
+/// let locale = read_user_string(r"Control Panel\International", "LocaleName");
+/// ```
+pub fn read_user_string(subkey: &str, value: &str) -> Option<String> {
+    imp::read_user_string(subkey, value)
+}
+
 #[cfg(windows)]
 mod imp {
     use super::{PriorityLevel, run_command};
     use std::path::Path;
     use windows::Win32::Foundation::ERROR_FILE_NOT_FOUND;
     use windows::Win32::System::Registry::{
-        HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE, REG_SZ, RegCloseKey, RegDeleteValueW, RegOpenKeyExW,
-        RegQueryValueExW, RegSetValueExW,
+        HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE, REG_ROUTINE_FLAGS, REG_SZ, RRF_RT_REG_DWORD,
+        RRF_RT_REG_SZ, RegCloseKey, RegDeleteValueW, RegGetValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
     };
     use windows::Win32::System::Threading::{
         ABOVE_NORMAL_PRIORITY_CLASS, GetCurrentProcess, HIGH_PRIORITY_CLASS, NORMAL_PRIORITY_CLASS,
@@ -178,6 +212,63 @@ mod imp {
         let status = unsafe { RegQueryValueExW(key.0, PCWSTR(value_name.as_ptr()), None, None, None, None) };
         status.is_ok()
     }
+
+    /// `RegGetValueW` 的薄封装：先问长度再读数据，返回原始字节；失败返回 `None`。
+    fn get_value(subkey: &str, value: &str, flags: REG_ROUTINE_FLAGS) -> Option<Vec<u8>> {
+        let subkey = HSTRING::from(subkey);
+        let value = HSTRING::from(value);
+        let mut size = 0u32;
+        // SAFETY: 两个名字是以 0 结尾的宽字符串；只问长度时数据指针为空，size 是有效输出位置。
+        let status = unsafe {
+            RegGetValueW(
+                HKEY_CURRENT_USER,
+                PCWSTR(subkey.as_ptr()),
+                PCWSTR(value.as_ptr()),
+                flags,
+                None,
+                None,
+                Some(&mut size),
+            )
+        };
+        if status.is_err() {
+            return None;
+        }
+        let mut data = vec![0u8; size as usize];
+        // SAFETY: data 有 size 字节可写；size 在调用里会被更新为实际写入的字节数。
+        let status = unsafe {
+            RegGetValueW(
+                HKEY_CURRENT_USER,
+                PCWSTR(subkey.as_ptr()),
+                PCWSTR(value.as_ptr()),
+                flags,
+                None,
+                Some(data.as_mut_ptr().cast()),
+                Some(&mut size),
+            )
+        };
+        if status.is_err() {
+            return None;
+        }
+        data.truncate(size as usize);
+        Some(data)
+    }
+
+    /// 读取 `REG_DWORD`。
+    pub fn read_user_dword(subkey: &str, value: &str) -> Option<u32> {
+        let data = get_value(subkey, value, RRF_RT_REG_DWORD)?;
+        Some(u32::from_ne_bytes(data.get(..4)?.try_into().ok()?))
+    }
+
+    /// 读取 `REG_SZ`（`RegGetValueW` 保证结尾有 NUL，这里去掉）。
+    pub fn read_user_string(subkey: &str, value: &str) -> Option<String> {
+        let data = get_value(subkey, value, RRF_RT_REG_SZ)?;
+        let wide: Vec<u16> = data
+            .chunks_exact(2)
+            .map(|pair| u16::from_ne_bytes([pair[0], pair[1]]))
+            .take_while(|&unit| unit != 0)
+            .collect();
+        String::from_utf16(&wide).ok()
+    }
 }
 
 #[cfg(not(windows))]
@@ -198,6 +289,16 @@ mod imp {
     /// 非 Windows 平台没有实现。
     pub fn is_auto_start_enabled(_name: &str) -> bool {
         false
+    }
+
+    /// 非 Windows 平台没有注册表。
+    pub fn read_user_dword(_subkey: &str, _value: &str) -> Option<u32> {
+        None
+    }
+
+    /// 非 Windows 平台没有注册表。
+    pub fn read_user_string(_subkey: &str, _value: &str) -> Option<String> {
+        None
     }
 }
 
@@ -233,5 +334,37 @@ mod tests {
         set_auto_start(&name, exe, false).unwrap();
         assert!(!is_auto_start_enabled(&name));
         set_auto_start(&name, exe, false).unwrap();
+    }
+
+    /// `REG_SZ` 读取：写入临时自启值后能读回完整命令行（含空格与引号），删除后读不到。
+    #[cfg(windows)]
+    #[test]
+    fn read_user_string_roundtrip() {
+        let name = format!("SnowShotReadTest-{}", std::process::id());
+        let exe = std::path::Path::new(r"C:\Program Files\Cisox Test\cisox.exe");
+        let run_key = r"Software\Microsoft\Windows\CurrentVersion\Run";
+        assert_eq!(read_user_string(run_key, &name), None);
+        set_auto_start(&name, exe, true).unwrap();
+        assert_eq!(read_user_string(run_key, &name), Some(run_command(exe)));
+        // 类型不符（REG_SZ 当 DWORD 读）返回 None，不会把字符串当数值
+        assert_eq!(read_user_dword(run_key, &name), None);
+        set_auto_start(&name, exe, false).unwrap();
+        assert_eq!(read_user_string(run_key, &name), None);
+    }
+
+    /// 子键或值不存在时两个读取函数都返回 `None`，不 panic。
+    #[test]
+    fn read_user_missing_is_none() {
+        let key = r"Software\SnowShotNoSuchKey-5f1c";
+        assert_eq!(read_user_dword(key, "Nope"), None);
+        assert_eq!(read_user_string(key, "Nope"), None);
+    }
+
+    /// 系统自带的界面语言值（`LocaleName`）在任何 Windows 用户下都存在且非空。
+    #[cfg(windows)]
+    #[test]
+    fn read_user_string_reads_system_locale() {
+        let locale = read_user_string(r"Control Panel\International", "LocaleName");
+        assert!(locale.is_some_and(|l| !l.is_empty()));
     }
 }

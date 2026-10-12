@@ -2,13 +2,17 @@
 
 translate-input-placeholder = 输入或粘贴要翻译的文字
 
-translate-input-button = 翻译
+translate-input-title = 输入框翻译
+
+translate-input-close = 关闭
+
+translate-input-clear = 清空输入和译文
+
+translate-input-copy = 复制译文
 
 translate-input-working = 正在翻译……首次会加载模型，稍等片刻
 
 translate-input-result-empty = 译文会显示在这里
-
-translate-input-click-copy = 点击译文即可复制
 
 translate-input-copied = 已复制
 

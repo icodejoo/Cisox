@@ -12,8 +12,8 @@
 
 use crate::script_split::ScriptSplitter;
 use crate::segment::{
-    DEFAULT_MIN_SEGMENT_WEIGHT, SegmentSplitter, merge_short_segments, same_language,
-    segment_weight, split_whitespace_edges,
+    DEFAULT_MIN_SEGMENT_WEIGHT, SegmentSplitter, dominant_language, merge_short_segments,
+    same_language, segment_weight, split_whitespace_edges,
 };
 use crate::worker::{MemorySnapshot, WorkerEngine};
 use crate::{Lang, ModelManifest, TranslateError, TranslationEngine};
@@ -576,12 +576,7 @@ impl RoutedEngine {
 
     /// 判定一条文本的主导源语言：按脚本切分后取文字量最大的有语言片段；全是中性字符返回 `None`。
     fn detect_source(&self, text: &str) -> Option<Lang> {
-        self.splitter
-            .split(text, Lang::Auto)
-            .into_iter()
-            .filter_map(|s| s.lang.map(|lang| (segment_weight(&s.text), lang)))
-            .max_by_key(|(weight, _)| *weight)
-            .map(|(_, lang)| lang)
+        dominant_language(self.splitter.as_ref(), text)
     }
 
     /// 单包路径（`single` / `specialized_first`）：选一个包，整批交给它。

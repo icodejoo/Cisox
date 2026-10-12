@@ -28,6 +28,119 @@ pub enum AutoDecision {
     Skip,
 }
 
+/// 自动翻译的防抖状态：翻译页与输入框翻译浮窗共用。
+///
+/// 每次输入变化代数加一，防抖到点时代数不符说明又有新输入；同一原文不重复翻译；
+/// 到点时正忙则排队，等当前翻译结束后再判断。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AutoTranslate {
+    /// 是否开启输入变化后自动翻译。
+    enabled: bool,
+    /// 防抖代数。
+    generation: u64,
+    /// 最近一次发出翻译的原文（防止对同一原文重复翻译）。
+    last_text: String,
+    /// 防抖到点时正忙而排队的自动翻译。
+    queued: bool,
+}
+
+impl AutoTranslate {
+    /// 创建防抖状态。
+    ///
+    /// # 参数
+    /// - `enabled`：是否开启自动翻译。
+    pub fn new(enabled: bool) -> Self {
+        Self {
+            enabled,
+            ..Self::default()
+        }
+    }
+
+    /// 是否开启自动翻译。
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// 开关自动翻译；关闭时作废已排的防抖与排队。
+    ///
+    /// # 参数
+    /// - `enabled`：新的开关值。
+    pub fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+        if !enabled {
+            self.cancel();
+        }
+    }
+
+    /// 作废已排的防抖与排队。
+    pub fn cancel(&mut self) {
+        self.generation += 1;
+        self.queued = false;
+    }
+
+    /// 记下刚发出翻译的原文（之后同一原文不再自动翻译）。
+    ///
+    /// # 参数
+    /// - `text`：发出翻译的原文。
+    pub fn mark_sent(&mut self, text: &str) {
+        self.last_text = text.to_string();
+    }
+
+    /// 原文与译文已对上（历史回填、清空等）：记下原文并作废已排的防抖。
+    ///
+    /// # 参数
+    /// - `text`：当前已对应译文的原文。
+    pub fn mark_synced(&mut self, text: &str) {
+        self.last_text = text.to_string();
+        self.cancel();
+    }
+
+    /// 输入框内容变化：决定是否启动一轮防抖。
+    ///
+    /// # 参数
+    /// - `text`：当前输入。
+    ///
+    /// # 返回
+    /// 需要防抖时返回本轮代数（到点时交给 [`Self::debounce_due`]）；不需要返回 `None`。
+    pub fn input_changed(&mut self, text: &str) -> Option<u64> {
+        self.cancel();
+        (self.enabled && !text.trim().is_empty() && text != self.last_text)
+            .then_some(self.generation)
+    }
+
+    /// 防抖到点：判断要不要发起翻译。
+    ///
+    /// # 参数
+    /// - `generation`：启动防抖时拿到的代数。
+    /// - `text`：此刻的输入。
+    /// - `busy`：此刻是否正在翻译。
+    pub fn debounce_due(&mut self, generation: u64, text: &str, busy: bool) -> AutoDecision {
+        if generation != self.generation
+            || !self.enabled
+            || text.trim().is_empty()
+            || text == self.last_text
+        {
+            return AutoDecision::Skip;
+        }
+        if busy {
+            self.queued = true;
+            return AutoDecision::Queued;
+        }
+        AutoDecision::Run
+    }
+
+    /// 当前翻译结束后，取走排队的自动翻译；返回真表示应对 `text` 再发一轮。
+    ///
+    /// # 参数
+    /// - `text`：此刻的输入。
+    pub fn take_queued(&mut self, text: &str) -> bool {
+        let wanted =
+            self.queued && self.enabled && !text.trim().is_empty() && text != self.last_text;
+        self.queued = false;
+        wanted
+    }
+}
+
 /// 源语言下拉里“自动检测”项的取值。
 pub const AUTO_LANGUAGE_ID: &str = "auto";
 
@@ -56,11 +169,21 @@ fn is_page_language(lang: Lang) -> bool {
 /// - `with_auto`：是否在最前面加“自动检测”（只有源语言用）。
 /// - `locale`：界面语言。
 pub fn language_choices(with_auto: bool, locale: &str) -> Vec<LangChoice> {
+    choices_for(&page_languages(), with_auto, locale)
+}
+
+/// 由给定的具体语言集合生成下拉选项（显示各语言自称）。
+///
+/// # 参数
+/// - `langs`：具体语言（按此顺序排列）。
+/// - `with_auto`：是否在最前面加“自动检测”。
+/// - `locale`：界面语言。
+pub fn choices_for(langs: &[Lang], with_auto: bool, locale: &str) -> Vec<LangChoice> {
     let auto = with_auto.then(|| LangChoice {
         id: AUTO_LANGUAGE_ID.to_string(),
         label: i18n_for(locale).tr("translate-page-lang-auto"),
     });
-    let concrete = page_languages().into_iter().map(|lang| LangChoice {
+    let concrete = langs.iter().map(|lang| LangChoice {
         id: lang.code().to_string(),
         label: endonym(lang.code()).unwrap_or(lang.code()).to_string(),
     });
@@ -115,14 +238,8 @@ pub struct TranslatePageModel {
     pub history: TranslateHistory,
     /// 历史自上次落盘后是否有变化。
     history_dirty: bool,
-    /// 是否开启输入变化后自动翻译。
-    auto: bool,
-    /// 防抖代数：每次输入变化加一，到点时代数不符说明又有新输入。
-    debounce_gen: u64,
-    /// 最近一次发出翻译的原文（防止对同一原文重复翻译）。
-    last_text: String,
-    /// 防抖到点时正忙而排队的自动翻译。
-    queued: bool,
+    /// 输入变化后自动翻译的防抖状态。
+    auto: AutoTranslate,
     /// 进行中请求的原文与语言对，完成后据此记历史。
     in_flight: Option<InFlight>,
 }
@@ -174,10 +291,7 @@ impl TranslatePageModel {
             flow: TranslateInputModel::default(),
             history: TranslateHistory::default(),
             history_dirty: false,
-            auto: false,
-            debounce_gen: 0,
-            last_text: String::new(),
-            queued: false,
+            auto: AutoTranslate::default(),
             in_flight: None,
         }
     }
@@ -228,15 +342,13 @@ impl TranslatePageModel {
         };
         self.flow.copy = CopyState::Pending;
         // 回填的原文已有译文，不要再被自动翻译重复触发
-        self.last_text = entry.source_text.clone();
-        self.queued = false;
-        self.debounce_gen += 1;
+        self.auto.mark_synced(&entry.source_text);
         Some(entry.source_text)
     }
 
     /// 是否开启自动翻译。
     pub fn auto_enabled(&self) -> bool {
-        self.auto
+        self.auto.enabled()
     }
 
     /// 开关自动翻译；关闭时作废已排的防抖与排队。
@@ -244,11 +356,7 @@ impl TranslatePageModel {
     /// # 参数
     /// - `enabled`：新的开关值（来自配置）。
     pub fn set_auto(&mut self, enabled: bool) {
-        self.auto = enabled;
-        if !enabled {
-            self.debounce_gen += 1;
-            self.queued = false;
-        }
+        self.auto.set_enabled(enabled);
     }
 
     /// 输入框内容变化：决定是否启动一轮防抖。
@@ -259,10 +367,7 @@ impl TranslatePageModel {
     /// # 返回
     /// 需要防抖时返回本轮代数（到点时交给 [`Self::debounce_due`]）；不需要返回 `None`。
     pub fn input_changed(&mut self, text: &str) -> Option<u64> {
-        self.debounce_gen += 1;
-        self.queued = false;
-        (self.auto && !text.trim().is_empty() && text != self.last_text)
-            .then_some(self.debounce_gen)
+        self.auto.input_changed(text)
     }
 
     /// 防抖到点：判断要不要发起翻译。
@@ -271,18 +376,8 @@ impl TranslatePageModel {
     /// - `generation`：启动防抖时拿到的代数。
     /// - `text`：此刻的输入。
     pub fn debounce_due(&mut self, generation: u64, text: &str) -> AutoDecision {
-        if generation != self.debounce_gen
-            || !self.auto
-            || text.trim().is_empty()
-            || text == self.last_text
-        {
-            return AutoDecision::Skip;
-        }
-        if self.is_busy() {
-            self.queued = true;
-            return AutoDecision::Queued;
-        }
-        AutoDecision::Run
+        let busy = self.is_busy();
+        self.auto.debounce_due(generation, text, busy)
     }
 
     /// 当前翻译结束后，取走排队的自动翻译；返回真表示应对 `text` 再发一轮。
@@ -290,9 +385,7 @@ impl TranslatePageModel {
     /// # 参数
     /// - `text`：此刻的输入。
     pub fn take_queued(&mut self, text: &str) -> bool {
-        let wanted = self.queued && self.auto && !text.trim().is_empty() && text != self.last_text;
-        self.queued = false;
-        wanted
+        self.auto.take_queued(text)
     }
 
     /// 能否交换语言：源为自动检测或两边相同时不行。
@@ -350,7 +443,7 @@ impl TranslatePageModel {
     /// - `text`：输入原文。
     pub fn begin(&mut self, text: &str) -> Option<u64> {
         let serial = self.flow.begin(text)?;
-        self.last_text = text.to_string();
+        self.auto.mark_sent(text);
         self.in_flight = Some(InFlight {
             text: text.to_string(),
             source: self.source,

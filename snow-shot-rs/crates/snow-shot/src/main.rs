@@ -49,12 +49,15 @@ pub mod latex_ocr;
 pub mod latex_service;
 pub mod mcp_host;
 pub mod mcp_settings;
+pub mod mem_diag;
 pub mod model_catalog;
 pub mod model_pick;
 pub mod mouse_gesture;
 pub mod net_settings;
 pub mod ocr_assets;
 pub mod ocr_backend;
+#[cfg(test)]
+mod ocr_box_probe;
 pub mod ocr_client;
 pub mod ocr_download;
 pub mod ocr_flow;
@@ -93,22 +96,29 @@ pub mod stitch_service;
 pub mod stt_download;
 pub mod stt_models;
 pub mod stt_settings;
-#[cfg(test)]
-mod test_util;
 pub mod sys_prefs;
 pub mod system_settings;
 pub mod table_assets;
 pub mod table_service;
 pub mod table_structure;
+#[cfg(test)]
+mod test_util;
+pub mod timing_diag;
 pub mod translate_flow;
 pub mod translate_history;
 pub mod translate_input;
+pub mod translate_input_session;
 pub mod translate_input_view;
 pub mod translate_layout;
 pub mod translate_page;
 pub mod translate_page_view;
+pub mod translate_paint;
+pub mod translate_render;
+#[cfg(test)]
+mod translate_render_scene;
 pub mod translate_service;
 pub mod translate_settings;
+pub mod translate_typeset;
 pub mod tray_config;
 pub mod window_geometry;
 pub mod window_pick;

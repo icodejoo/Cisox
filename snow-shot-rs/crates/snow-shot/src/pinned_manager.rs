@@ -52,6 +52,7 @@ fn pin_aux_spec(rect: PhysicalRect, topmost: bool) -> WindowSpec {
         show_in_taskbar: false,
         focus: false,
         resizable: false,
+        draggable: false,
     }
 }
 
@@ -638,6 +639,7 @@ impl PinnedManager {
             show_in_taskbar: false,
             focus: false,
             resizable: false,
+            draggable: false,
         };
         let shared = Rc::clone(&self.shared);
         let (window, view) = cx

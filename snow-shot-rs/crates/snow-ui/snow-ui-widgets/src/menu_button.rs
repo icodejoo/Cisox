@@ -36,7 +36,7 @@ pub fn menu_button_size(outer_width: f32) -> (f32, f32) {
 }
 
 /// 两个矩形是否有重叠面积。
-fn overlaps(a: PhysicalRect, b: PhysicalRect) -> bool {
+pub(crate) fn overlaps(a: PhysicalRect, b: PhysicalRect) -> bool {
     a.intersect(&b).is_some()
 }
 

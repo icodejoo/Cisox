@@ -1,6 +1,7 @@
 //! 翻译前的版式整理：把 OCR 按物理行切分的文本块合并成段落，避免一句话被拆开逐行翻译。
 
 use crate::ocr_service::OcrTextBox;
+use crate::translate_typeset::leading_bullet;
 
 /// 垂直间距过大的判断系数（相对较大行高）。
 const VERTICAL_GAP_THRESHOLD: f32 = 0.6;
@@ -73,8 +74,36 @@ fn clamped_height(height: i32) -> f32 {
     (height as f32).max(MIN_LINE_HEIGHT)
 }
 
-/// 判断相邻两块之间是否应断段。
-fn should_break_paragraph(prev: &OcrTextBox, cur: &OcrTextBox, prev_text: &str) -> bool {
+/// 标题 / 正文断段：单行段落与下一行的行高比超过它，且左边界错开，就当作“标题 + 正文”分开翻译。
+/// 取 1.25 以上是因为缺下伸字母的行框会矮约 25%–33%，只靠行高会把正常正文拆碎，所以必须再配合左边界错位。
+const HEADING_HEIGHT_RATIO: f32 = 1.25;
+/// 标题 / 正文断段所需的左边界错位（相对较小行高）。
+const HEADING_X_OFFSET: f32 = 0.75;
+
+/// 单行段落（`prev` 是它唯一的一行）后面跟着行高明显不同、左边界又错开的一行时，视为“标题 + 正文”。
+/// 带项目符号的行（缩进的续行很常见）不参与。
+fn is_heading_break(prev: &OcrTextBox, cur: &OcrTextBox) -> bool {
+    if leading_bullet(&prev.text).is_some() || leading_bullet(&cur.text).is_some() {
+        return false;
+    }
+    let (ph, ch) = (
+        clamped_height(prev.rect.height),
+        clamped_height(cur.rect.height),
+    );
+    ph.max(ch) / ph.min(ch) > HEADING_HEIGHT_RATIO
+        && (cur.rect.x as f32 - prev.rect.x as f32).abs() > HEADING_X_OFFSET * ph.min(ch)
+}
+
+/// 判断相邻两块之间是否应断段；`prev_single` 表示当前段目前只有 `prev` 这一行。
+fn should_break_paragraph(
+    prev: &OcrTextBox,
+    cur: &OcrTextBox,
+    prev_text: &str,
+    prev_single: bool,
+) -> bool {
+    if prev_single && is_heading_break(prev, cur) {
+        return true;
+    }
     // (a) 上一块以句末标点结尾
     if ends_with_sentence_punctuation(prev_text) {
         return true;
@@ -166,7 +195,9 @@ pub fn paragraphs_from_boxes(boxes: &[OcrTextBox], mode: LayoutMode) -> Vec<(Str
             Some(prev) => {
                 let split = match mode {
                     LayoutMode::Original => true,
-                    LayoutMode::SmartMerge => should_break_paragraph(prev, bx, &current),
+                    LayoutMode::SmartMerge => {
+                        should_break_paragraph(prev, bx, &current, current_indices.len() == 1)
+                    }
                 };
                 if split {
                     paragraphs.push((
@@ -334,6 +365,59 @@ mod tests {
         assert_eq!(
             texts(&boxes, LayoutMode::SmartMerge),
             vec!["Small", "Large"]
+        );
+    }
+
+    /// 标题 + 正文：单行标题比正文行高、又和正文左边界错开，拆成两段；正文自己的多行仍合并。
+    #[test]
+    fn heading_and_body_split() {
+        let boxes = vec![
+            b(708, 245, 80, 27, "Report"),
+            b(670, 288, 137, 21, "Report risk events"),
+            b(669, 308, 105, 17, "and incidents"),
+        ];
+        let merged = paragraphs_from_boxes(&boxes, LayoutMode::SmartMerge);
+        assert_eq!(merged[0], ("Report".to_string(), vec![0]));
+        assert_eq!(
+            merged[1],
+            ("Report risk events and incidents".to_string(), vec![1, 2])
+        );
+    }
+
+    /// 纯正文多行不被误切：行高抖动（缺下伸字母的行矮一截）、末行很短、左边界一致。
+    #[test]
+    fn body_with_height_jitter_is_not_split() {
+        let boxes = vec![
+            b(10, 0, 200, 15, "Directly manage the risks that"),
+            b(10, 17, 190, 12, "arise in their daily work and"),
+            b(10, 31, 195, 15, "report every incident to the"),
+            b(10, 48, 60, 11, "owner"),
+        ];
+        assert_eq!(
+            paragraphs_from_boxes(&boxes, LayoutMode::SmartMerge).len(),
+            1
+        );
+        // 两行：首行高、次行矮但左对齐，同样不拆
+        let two = vec![
+            b(10, 0, 200, 15, "Directly manage"),
+            b(10, 17, 80, 11, "area"),
+        ];
+        assert_eq!(
+            texts(&two, LayoutMode::SmartMerge),
+            vec!["Directly manage area"]
+        );
+    }
+
+    /// 项目符号条目带缩进的续行，即使行高抖动也不拆。
+    #[test]
+    fn bullet_continuation_is_not_split() {
+        let boxes = vec![
+            b(303, 312, 185, 20, "• Prevent incidents from"),
+            b(320, 332, 131, 14, "happening again"),
+        ];
+        assert_eq!(
+            paragraphs_from_boxes(&boxes, LayoutMode::SmartMerge).len(),
+            1
         );
     }
 
