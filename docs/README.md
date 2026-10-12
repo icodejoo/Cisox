@@ -14,6 +14,7 @@
 - [cisox-migration-acceptance-report.md](cisox-migration-acceptance-report.md) — 迁移验收报告。**已失实，不作验收依据**（见迁移方案 §845 第 10 条），待重写。
 - [design/multi-display-overlay.md](design/multi-display-overlay.md) — 多屏覆盖窗设计：每屏一窗 + 共享虚拟桌面选区，坐标约定、M0~M5 分阶段验收、真机验证办法。**草案，待批准**。
 - [design/mcp-subsystem.md](design/mcp-subsystem.md) — MCP 子系统设计（A12）：本地命名管道、令牌鉴权、应用 / 截图 / 文档 / 媒体四域（对应旧版 101 个 tool）、分期与对照入口。**第一期（M0 骨架）已实现，后续分期待做**。
+- [design/tray-host-split.md](design/tray-host-split.md) — 托盘宿主 + 按需 UI 进程拆分方案：进程边界、双管道 IPC 与退出握手、冷启动预算、阶段 0~6 验收、回退；含本机宿主内存探针实测。**已审定（2026-10-12）**，开放问题全部按推荐拍板。阶段 0 已完成（§12 为实测结果）。
 - [snow-shot-releases.md](snow-shot-releases.md) — 发布与更新规格（有自己的优先级，见 principles.md 末尾）。
 
 ## 录屏
@@ -51,4 +52,5 @@
 - [research/adr5-local-nmt.md](research/adr5-local-nmt.md) — ADR-5 本地 NMT 推理后端选型。
 - [research/adr8-canvas-blob.md](research/adr8-canvas-blob.md) — ADR-8 canvas 历史/会话文件调研。
 - [research/speech-to-text-backends.md](research/speech-to-text-backends.md) — 实时语音转文字后端调研：sherpa-onnx 与 ort 共用 ORT、纯 ort 流式 Zipformer 实测（RTF≈0.12、~253MB）、Windows 系统语音、SendInput 键入、按住说话热键与分阶段计划。§3 候选与 §7 首期推荐已被实测选型取代，见下一条。
+- [research/tray-idle-memory.md](research/tray-idle-memory.md) — 托盘态内存调研（2026-10-12）：截图关闭后多出的约 70MB（IME/UIA 注入、驱动整屏副本、着色器缓存）逐项机制、候选对比与最小验证实验；已找到 UIA 被拉起的根因（GPUI 每窗调 AccessKit `init_uia`）；IME 无进程内卸载手段，推荐"托盘宿主 + 按需 UI 进程"。未实现，量化实验待做。
 - [research/stt-model-selection.md](research/stt-model-selection.md) — 语音转文字模型选型与评测：流式与离线整句两个独立维度、评测方法与口径差异、各组默认与备选结论、语音翻译（端到端不可行、用级联）量化评测、复现方法与未验证清单。
