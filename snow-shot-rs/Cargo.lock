@@ -7065,6 +7065,7 @@ dependencies = [
  "snow-canvas-text",
  "snow-capability",
  "snow-config",
+ "snow-data-paths",
  "snow-draw-engine",
  "snow-draw-engine-document",
  "snow-draw-engine-editor",
@@ -7112,6 +7113,20 @@ dependencies = [
  "serde_json",
  "snow-net",
  "tracing",
+]
+
+[[package]]
+name = "snow-tray-host"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "snow-data-paths",
+ "snow-host-protocol",
+ "snow-platform",
+ "snow-shell-core",
+ "tracing",
+ "windows-sys 0.61.2",
+ "winresource",
 ]
 
 [[package]]

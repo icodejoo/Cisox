@@ -1,0 +1,604 @@
+//! 宿主核心：把状态机、快照、热键暂停 / 前台全屏闸门、托盘与热键的应用串在一起。
+//!
+//! 所有系统调用（拉起进程、写管道、托盘、热键、前台探测、修剪工作集……）都在 [`Platform`] 特征后面，
+//! 核心本身是单线程、不读时钟、不碰系统，所以整条链路（热键 → 闸门 → 状态机 → 拉起 UI → 握手 → 投递、
+//! 快照更新、暂停开关、退出）都能用假平台离屏确定性地测试。真实平台在 `win` 模块。
+//!
+//! 线程模型：托盘线程、热键线程、管道读线程、进程等待线程只把事件投进同一个通道（[`Event`]），
+//! 由主线程按序处理；主线程用 `recv_timeout(下一个截止时刻)` 等待，空闲时没有任何轮询。
+
+use crate::machine::{Effect, HostMachine, Notice};
+use crate::queue::Outbound;
+use crate::view::{
+    FALLBACK_NOTICE_UI_CRASH_LOOP, FALLBACK_NOTICE_UI_START_FAILED, aggregate_results,
+    compose_tooltip, describe_failures, effective_hotkeys, effective_menu, fallback_spec,
+    fill_failures, gate_config_change,
+};
+use snow_host_protocol::frame::decode_line;
+use snow_host_protocol::message::{ActionOrigin, HostMessage, HotkeyResult, UiMessage};
+use snow_host_protocol::spec::{HostSpec, HotkeySpec, IconRgba, MenuItemSpec, TrayTheme};
+use snow_host_protocol::spec_file::SpecFileError;
+use snow_host_protocol::{
+    ACTION_QUIT, ACTION_RESTART, ACTION_TOGGLE_FULLSCREEN_GATE, ACTION_TOGGLE_GLOBAL_HOTKEYS,
+};
+use std::time::{Duration, Instant};
+
+/// 宿主启动后多久做第一次工作集修剪（等启动期的一次性分配落定）。
+pub const TRIM_AFTER_START: Duration = Duration::from_secs(5);
+
+/// UI 进程退出后多久做一次工作集修剪。
+pub const TRIM_AFTER_UI_EXIT: Duration = Duration::from_secs(2);
+
+/// 拉起 UI 进程的结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpawnedUi {
+    /// UI 进程 ID。
+    pub pid: u32,
+    /// 传给 UI 的一次性令牌（校验 `hello` 用）。
+    pub token: String,
+}
+
+/// 要显示的托盘（创建或替换时整体交给平台）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct TrayPlan {
+    /// 托盘图标（32x32）。
+    pub icon: IconRgba,
+    /// 悬停提示。
+    pub tooltip: String,
+    /// 右键菜单（已叠上宿主状态的勾选）。
+    pub menu: Vec<MenuItemSpec>,
+    /// 左键单击动作 id。
+    pub on_left: Option<String>,
+    /// 中键单击动作 id。
+    pub on_middle: Option<String>,
+    /// 左键双击动作 id。
+    pub on_double: Option<String>,
+}
+
+/// 平台能力：宿主核心需要系统做的所有事。
+pub trait Platform {
+    /// 建会话管道并拉起 UI 进程（先建管道、再 `CreateProcess`，UI 一启动就连得上）。
+    ///
+    /// # 参数
+    /// - `generation`：会话代数；管道事件、进程退出事件都要带着它回报。
+    fn spawn_ui(&mut self, generation: u64) -> Result<SpawnedUi, String>;
+
+    /// 往该代会话的管道写一条消息。
+    fn send(&mut self, generation: u64, message: &HostMessage) -> Result<(), String>;
+
+    /// 关闭该代会话的管道。
+    fn close_session(&mut self, generation: u64);
+
+    /// 强制结束 UI 进程（最后手段）。
+    fn kill_ui(&mut self, pid: u32);
+
+    /// 对 UI 进程调 `AllowSetForegroundWindow`。
+    fn grant_foreground(&mut self, pid: u32);
+
+    /// 读取 `host/spec.json`。
+    fn read_spec(&mut self) -> Result<HostSpec, SpecFileError>;
+
+    /// 拉起 `--headless emit-spec` 的 UI 生成快照；结束后平台投递 [`Event::SpecEmitted`]。
+    fn spawn_emit_spec(&mut self) -> Result<(), String>;
+
+    /// 创建（或整体替换）托盘。
+    fn start_tray(&mut self, plan: &TrayPlan) -> Result<(), String>;
+
+    /// 只替换托盘右键菜单。
+    fn set_tray_menu(&mut self, menu: &[MenuItemSpec]) -> Result<(), String>;
+
+    /// 更新托盘悬停提示。
+    fn set_tooltip(&mut self, text: &str);
+
+    /// 移除托盘图标。
+    fn stop_tray(&mut self);
+
+    /// 设置弹出菜单的深浅色。
+    fn set_popup_theme(&mut self, theme: TrayTheme);
+
+    /// 注销全部旧热键并注册 `hotkeys`；返回与 `hotkeys` 一一对应的结果。
+    fn register_hotkeys(&mut self, hotkeys: &[HotkeySpec]) -> Vec<Result<(), String>>;
+
+    /// 前台是否是全屏窗口。
+    fn fullscreen_focused(&mut self) -> bool;
+
+    /// 修剪工作集（`EmptyWorkingSet`，只降工作集不降提交）。
+    fn trim_working_set(&mut self);
+
+    /// 拉起延迟启动的新宿主（重启用）。
+    fn restart_host(&mut self) -> Result<(), String>;
+}
+
+/// 汇入主线程的事件。
+#[derive(Debug, Clone, PartialEq)]
+pub enum Event {
+    /// 托盘 / 热键 / `--cmd` 触发了一个动作。
+    Action {
+        /// 动作 id。
+        id: String,
+        /// 触发来源。
+        origin: ActionOrigin,
+    },
+    /// 会话管道：客户端连上了。
+    SessionConnected {
+        /// 会话代数。
+        generation: u64,
+        /// 客户端进程 ID（0 表示取不到）。
+        client_pid: u32,
+    },
+    /// 会话管道：收到一行。
+    SessionLine {
+        /// 会话代数。
+        generation: u64,
+        /// 一行文本（JSON）。
+        line: String,
+    },
+    /// 会话管道：连接结束。
+    SessionClosed {
+        /// 会话代数。
+        generation: u64,
+    },
+    /// UI 进程退出了。
+    UiExited {
+        /// 会话代数。
+        generation: u64,
+    },
+    /// `--headless emit-spec` 的 UI 结束了（快照应已生成）。
+    SpecEmitted,
+}
+
+/// 宿主核心。
+pub struct HostCore<P: Platform> {
+    /// 平台。
+    platform: P,
+    /// UI 进程状态机。
+    machine: HostMachine,
+    /// 当前生效的快照。
+    spec: Option<HostSpec>,
+    /// 当前生效的是不是内置兜底快照。
+    fallback_active: bool,
+    /// 当前显示的托盘（用来判断只换菜单还是整体重建）。
+    tray_shown: Option<TrayPlan>,
+    /// 当前已注册的热键表（用来判断要不要重新注册）。
+    registered: Vec<HotkeySpec>,
+    /// 最近一次热键注册的逐配置键结果。
+    last_results: Vec<HotkeyResult>,
+    /// 全局热键是否被暂停。
+    paused: bool,
+    /// 前台全屏闸门是否打开。
+    gate_on: bool,
+    /// 是否已经请求过生成快照（只请求一次，避免反复拉起）。
+    emit_requested: bool,
+    /// 下一次工作集修剪的时刻。
+    trim_at: Option<Instant>,
+    /// 宿主该退出了（`Some(restart)`）。
+    exit: Option<bool>,
+}
+
+impl<P: Platform> HostCore<P> {
+    /// 新建（尚未读快照）。
+    pub fn new(platform: P) -> Self {
+        Self {
+            platform,
+            machine: HostMachine::new(),
+            spec: None,
+            fallback_active: false,
+            tray_shown: None,
+            registered: Vec::new(),
+            last_results: Vec::new(),
+            paused: false,
+            gate_on: false,
+            emit_requested: false,
+            trim_at: None,
+            exit: None,
+        }
+    }
+
+    /// 平台的只读引用（测试读取记录用）。
+    pub fn platform(&self) -> &P {
+        &self.platform
+    }
+
+    /// 状态机的只读引用（测试与日志用）。
+    pub fn machine(&self) -> &HostMachine {
+        &self.machine
+    }
+
+    /// 启动：读快照、显示托盘、注册热键；登录时有贴图要恢复就拉起 UI；安排第一次工作集修剪。
+    ///
+    /// # 参数
+    /// - `now`：当前时刻。
+    pub fn start(&mut self, now: Instant) {
+        self.load_spec(true);
+        self.schedule_trim(now + TRIM_AFTER_START);
+        let restore = self
+            .spec
+            .as_ref()
+            .is_some_and(|spec| spec.flags.pins_to_restore > 0);
+        if restore {
+            tracing::info!("快照里有待恢复的贴图，拉起 UI");
+            self.submit(now, Outbound::RestorePins);
+        }
+    }
+
+    /// 宿主是否该退出：`Some(restart)`。
+    pub fn exit_requested(&self) -> Option<bool> {
+        self.exit
+    }
+
+    /// 退出前的收尾：需要重启就拉起延迟启动的新宿主（托盘与热键随核心被丢弃时一并释放）。
+    pub fn finish(&mut self) {
+        if self.exit == Some(true)
+            && let Err(e) = self.platform.restart_host()
+        {
+            tracing::error!(error = %e, "拉起新宿主失败，重启取消");
+        }
+    }
+
+    /// 处理一个事件。
+    ///
+    /// # 参数
+    /// - `now`：当前时刻。
+    /// - `event`：事件。
+    pub fn handle(&mut self, now: Instant, event: Event) {
+        match event {
+            Event::Action { id, origin } => self.handle_action(now, id, origin),
+            Event::SessionConnected {
+                generation,
+                client_pid,
+            } => self.machine.on_pipe_connected(generation, client_pid),
+            Event::SessionLine { generation, line } => match decode_line::<UiMessage>(&line) {
+                Ok(message) => {
+                    let effects = self.machine.on_ui_message(now, generation, message);
+                    self.run_effects(now, effects);
+                }
+                Err(e) => tracing::warn!(error = %e, "会话里收到无法解析的消息，已忽略"),
+            },
+            Event::SessionClosed { generation } => {
+                tracing::debug!(generation, "会话管道已断开");
+            }
+            Event::UiExited { generation } => {
+                let effects = self.machine.on_ui_exited(now, generation);
+                self.run_effects(now, effects);
+            }
+            Event::SpecEmitted => self.load_spec(true),
+        }
+    }
+
+    /// 处理到点的事：状态机的各种超时、工作集修剪。
+    ///
+    /// # 参数
+    /// - `now`：当前时刻。
+    pub fn tick(&mut self, now: Instant) {
+        let effects = self.machine.on_tick(now);
+        self.run_effects(now, effects);
+        if self.trim_at.is_some_and(|at| now >= at) {
+            self.trim_at = None;
+            self.platform.trim_working_set();
+        }
+    }
+
+    /// 下一个需要调用 [`tick`](Self::tick) 的时刻；没有待办返回 `None`（主线程可以无限期等事件）。
+    pub fn next_deadline(&self) -> Option<Instant> {
+        [self.machine.next_deadline(), self.trim_at]
+            .into_iter()
+            .flatten()
+            .min()
+    }
+
+    /// 处理一个动作：宿主自己的（退出、重启、两个开关）直接做，其余转给 UI。
+    fn handle_action(&mut self, now: Instant, id: String, origin: ActionOrigin) {
+        match id.as_str() {
+            ACTION_QUIT => return self.quit(now, false),
+            ACTION_RESTART => return self.quit(now, true),
+            _ => {}
+        }
+        let is_toggle = id == ACTION_TOGGLE_GLOBAL_HOTKEYS || id == ACTION_TOGGLE_FULLSCREEN_GATE;
+        // 前台全屏闸门：只拦热键（托盘、命令行不受影响），两个开关本身除外，否则关不回去
+        if origin == ActionOrigin::Hotkey
+            && self.gate_on
+            && !is_toggle
+            && self.platform.fullscreen_focused()
+        {
+            tracing::info!(%id, "前台为全屏窗口，已忽略全局热键");
+            return;
+        }
+        match id.as_str() {
+            ACTION_TOGGLE_GLOBAL_HOTKEYS => self.toggle_pause(),
+            ACTION_TOGGLE_FULLSCREEN_GATE => self.toggle_gate(now),
+            _ => self.submit(
+                now,
+                Outbound::Action {
+                    id,
+                    origin: Some(origin),
+                },
+            ),
+        }
+    }
+
+    /// 退出（或重启）：UI 在就先让它优雅退出。
+    fn quit(&mut self, now: Instant, restart: bool) {
+        let effects = self.machine.request_quit(now, restart);
+        self.run_effects(now, effects);
+    }
+
+    /// 提交一条要转给 UI 的消息。
+    fn submit(&mut self, now: Instant, message: Outbound) {
+        let effects = self.machine.submit(now, message);
+        self.run_effects(now, effects);
+    }
+
+    /// 执行状态机给出的动作；拉起结果会产生新的动作，所以循环到没有为止。
+    fn run_effects(&mut self, now: Instant, effects: Vec<Effect>) {
+        let mut pending = std::collections::VecDeque::from(effects);
+        while let Some(effect) = pending.pop_front() {
+            match effect {
+                Effect::SpawnUi { generation } => {
+                    let follow_up = match self.platform.spawn_ui(generation) {
+                        Ok(spawned) => {
+                            self.machine
+                                .on_spawned(generation, spawned.pid, spawned.token)
+                        }
+                        Err(reason) => self.machine.on_spawn_failed(now, generation, &reason),
+                    };
+                    pending.extend(follow_up);
+                }
+                Effect::Send {
+                    generation,
+                    message,
+                } => {
+                    if let Err(e) = self.platform.send(generation, &message) {
+                        tracing::warn!(error = %e, ?message, "写会话管道失败");
+                    }
+                }
+                Effect::CloseSession { generation } => self.platform.close_session(generation),
+                Effect::GrantForeground { pid } => self.platform.grant_foreground(pid),
+                Effect::KillUi { pid } => self.platform.kill_ui(pid),
+                Effect::Notice(notice) => self.show_notice(notice),
+                Effect::FromUi(message) => self.handle_ui_message(message),
+                Effect::GaveUp { seq } => tracing::warn!(seq, "命令重发后仍未确认，已放弃"),
+                Effect::UiGone => self.schedule_trim(now + TRIM_AFTER_UI_EXIT),
+                Effect::ExitHost { restart } => self.exit = Some(restart),
+            }
+        }
+    }
+
+    /// 处理 UI 发来的信息类消息。
+    fn handle_ui_message(&mut self, message: UiMessage) {
+        match message {
+            UiMessage::Tooltip { text } => self.platform.set_tooltip(&text),
+            UiMessage::SpecChanged { .. } => self.load_spec(true),
+            UiMessage::HotkeysApply { rev } => self.apply_hotkeys_request(rev),
+            UiMessage::Activity {
+                windows,
+                pins,
+                busy_reasons,
+            } => tracing::debug!(windows, pins, ?busy_reasons, "UI 活动状态"),
+            // 握手、确认、退出请求由状态机消化，不会走到这里
+            UiMessage::Hello { .. } | UiMessage::Ack { .. } | UiMessage::ExitRequest { .. } => {}
+        }
+    }
+
+    /// 读快照并应用：缺失 / 损坏时退回内置最小菜单并去生成快照；修订号没变就跳过。
+    ///
+    /// `register_hotkeys` 为假时只更新托盘与开关状态，热键由调用方随后自己注册
+    /// （设置页改热键的流程要拿注册结果，不能在这里先注册一遍）。
+    fn load_spec(&mut self, register_hotkeys: bool) {
+        match self.platform.read_spec() {
+            Ok(spec) => {
+                let unchanged = !self.fallback_active
+                    && self
+                        .spec
+                        .as_ref()
+                        .is_some_and(|current| current.rev == spec.rev);
+                if unchanged {
+                    tracing::debug!(rev = spec.rev, "快照修订号没变，跳过");
+                    return;
+                }
+                self.fallback_active = false;
+                self.apply_spec(spec, register_hotkeys);
+            }
+            Err(error) => {
+                tracing::warn!(%error, "读取快照失败");
+                if self.spec.is_none() {
+                    self.fallback_active = true;
+                    self.apply_spec(fallback_spec(), register_hotkeys);
+                }
+                self.request_emit_spec();
+            }
+        }
+    }
+
+    /// 请求生成快照（只请求一次）。
+    fn request_emit_spec(&mut self) {
+        if self.emit_requested {
+            return;
+        }
+        self.emit_requested = true;
+        if let Err(e) = self.platform.spawn_emit_spec() {
+            tracing::error!(error = %e, "拉起快照生成任务失败，托盘将保持内置最小菜单");
+        }
+    }
+
+    /// 应用一份快照：闸门状态、托盘、热键。
+    fn apply_spec(&mut self, spec: HostSpec, register_hotkeys: bool) {
+        if !self.fallback_active {
+            self.gate_on = spec.gate.fullscreen_disable;
+        }
+        self.platform.set_popup_theme(spec.tray.theme);
+        self.apply_tray(&spec);
+        if register_hotkeys && (!spec.hotkeys.is_empty() || !self.registered.is_empty()) {
+            let wanted = effective_hotkeys(&spec.hotkeys, self.paused);
+            if wanted != self.registered {
+                self.register(&wanted);
+            }
+        }
+        self.spec = Some(spec);
+    }
+
+    /// 按快照与宿主状态显示托盘：只有菜单 / 提示变了就原地换，图标或点击动作变了才整体重建。
+    fn apply_tray(&mut self, spec: &HostSpec) {
+        if !spec.tray.enabled {
+            if self.tray_shown.take().is_some() {
+                self.platform.stop_tray();
+            }
+            return;
+        }
+        let plan = TrayPlan {
+            icon: spec.tray.icon_rgba.clone(),
+            tooltip: self.base_tooltip(spec),
+            menu: effective_menu(&spec.tray.menu, self.paused, self.gate_on),
+            on_left: spec.tray.on_left.clone(),
+            on_middle: spec.tray.on_middle.clone(),
+            on_double: spec.tray.on_double.clone(),
+        };
+        match &self.tray_shown {
+            Some(shown) if same_shell(shown, &plan) => {
+                if shown.menu != plan.menu
+                    && let Err(e) = self.platform.set_tray_menu(&plan.menu)
+                {
+                    tracing::warn!(error = %e, "更新托盘菜单失败");
+                }
+                if shown.tooltip != plan.tooltip {
+                    self.platform.set_tooltip(&plan.tooltip);
+                }
+            }
+            _ => {
+                if let Err(e) = self.platform.start_tray(&plan) {
+                    tracing::error!(error = %e, "创建托盘失败，将无托盘图标运行");
+                    self.tray_shown = None;
+                    return;
+                }
+            }
+        }
+        self.tray_shown = Some(plan);
+    }
+
+    /// 当前常态悬停提示：暂停时用“已暂停”提示。
+    fn base_tooltip(&self, spec: &HostSpec) -> String {
+        if self.paused {
+            spec.tray.paused_tooltip.clone()
+        } else {
+            spec.tray.tooltip.clone()
+        }
+    }
+
+    /// 注册一份热键表并记下结果。
+    fn register(&mut self, wanted: &[HotkeySpec]) -> Vec<HotkeyResult> {
+        let outcomes = self.platform.register_hotkeys(wanted);
+        let results = aggregate_results(wanted, &outcomes);
+        self.registered = wanted.to_vec();
+        self.last_results = results.clone();
+        let failed = results.iter().filter(|r| !r.ok).count();
+        tracing::info!(registered = wanted.len(), failed, "全局热键已注册");
+        results
+    }
+
+    /// UI 请求立即按最新快照重注册热键（设置页改热键），并回报每个配置键的成败。
+    fn apply_hotkeys_request(&mut self, rev: u64) {
+        self.load_spec(false);
+        let hotkeys = self
+            .spec
+            .as_ref()
+            .map(|spec| effective_hotkeys(&spec.hotkeys, self.paused))
+            .unwrap_or_default();
+        let results = self.register(&hotkeys);
+        let reply = HostMessage::HotkeysResult { rev, results };
+        if let Err(e) = self.platform.send(self.machine.generation(), &reply) {
+            tracing::warn!(error = %e, "回报热键注册结果失败");
+        }
+    }
+
+    /// 暂停 / 恢复全部全局热键：暂停时只保留开关本身，菜单勾选与悬停提示随之变化。
+    fn toggle_pause(&mut self) {
+        self.paused = !self.paused;
+        let Some(spec) = self.spec.clone() else {
+            return;
+        };
+        let wanted = effective_hotkeys(&spec.hotkeys, self.paused);
+        let results = self.register(&wanted);
+        self.apply_tray(&spec);
+        let failures = describe_failures(&results);
+        tracing::info!(paused = self.paused, "全局热键暂停状态已切换");
+        if self.paused {
+            // 暂停状态要常驻可见：悬停提示固定为“热键已暂停”
+            self.platform.set_tooltip(&spec.tray.paused_tooltip);
+            return;
+        }
+        let text = if failures.is_empty() {
+            spec.strings.notice_resumed.clone()
+        } else {
+            fill_failures(&spec.strings.notice_resume_failed, &failures)
+        };
+        self.platform
+            .set_tooltip(&compose_tooltip(&spec.tray.tooltip, &text));
+    }
+
+    /// 切换“前台全屏窗口时停用热键”：宿主自己改勾选，并让 UI 把新状态落盘（UI 是配置唯一写者）。
+    fn toggle_gate(&mut self, now: Instant) {
+        self.gate_on = !self.gate_on;
+        if let Some(spec) = self.spec.clone() {
+            self.apply_tray(&spec);
+            let text = if self.gate_on {
+                &spec.strings.notice_gate_on
+            } else {
+                &spec.strings.notice_gate_off
+            };
+            self.platform
+                .set_tooltip(&compose_tooltip(&spec.tray.tooltip, text));
+        }
+        let (key, value) = gate_config_change(self.gate_on);
+        self.submit(
+            now,
+            Outbound::SetConfig {
+                key: key.to_string(),
+                value,
+            },
+        );
+    }
+
+    /// 显示一条状态提示：用快照里的本地化文案，没有就用内置兜底。
+    fn show_notice(&mut self, notice: Notice) {
+        let (localized, fallback) = match notice {
+            Notice::UiStartFailed => (
+                self.spec
+                    .as_ref()
+                    .map(|spec| spec.strings.notice_ui_start_failed.as_str()),
+                FALLBACK_NOTICE_UI_START_FAILED,
+            ),
+            Notice::UiCrashLoop => (
+                self.spec
+                    .as_ref()
+                    .map(|spec| spec.strings.notice_ui_crash_loop.as_str()),
+                FALLBACK_NOTICE_UI_CRASH_LOOP,
+            ),
+        };
+        let text = localized
+            .filter(|text| !text.is_empty())
+            .unwrap_or(fallback);
+        let base = self
+            .spec
+            .as_ref()
+            .map_or(crate::view::FALLBACK_TOOLTIP, |spec| {
+                spec.tray.tooltip.as_str()
+            });
+        tracing::warn!(?notice, %text, "托盘提示");
+        self.platform.set_tooltip(&compose_tooltip(base, text));
+    }
+
+    /// 安排一次工作集修剪（已有更早的安排就不改）。
+    fn schedule_trim(&mut self, at: Instant) {
+        self.trim_at = Some(self.trim_at.map_or(at, |existing| existing.min(at)));
+    }
+}
+
+/// 两份托盘计划的“外壳”是否相同（图标与点击动作一致，只有菜单 / 提示可能不同）。
+fn same_shell(a: &TrayPlan, b: &TrayPlan) -> bool {
+    a.icon == b.icon
+        && a.on_left == b.on_left
+        && a.on_middle == b.on_middle
+        && a.on_double == b.on_double
+}
+
+#[cfg(test)]
+mod tests;

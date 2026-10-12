@@ -1,0 +1,43 @@
+[package]
+name = "snow-tray-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "托盘宿主：常驻的最小 Win32 进程（托盘、全局热键、单实例与命令行入口、UI 进程的拉起与仲裁），不链接 GPUI"
+
+[lints]
+workspace = true
+
+# 产物沿用旧名 snow-shot.exe（命令行、快捷方式、文档里都是它）；UI 进程改名为 snow-shot-ui.exe
+[[bin]]
+name = "snow-shot"
+path = "src/main.rs"
+
+# 宿主的依赖闭包受 workspace-guard 约束（黑名单见其 closure.rs）：不得依赖配置层、i18n、画布、
+# 异步运行时、tracing-subscriber 等。新增依赖前必须先过这条检查并征得同意。
+[dependencies]
+snow-data-paths = { path = "../snow-data-paths" }
+snow-host-protocol = { path = "../snow-host-protocol" }
+snow-shell-core = { path = "../snow-shell-core" }
+snow-platform = { path = "../snow-platform" }
+serde_json = "1"
+# 日志门面（宿主自己实现一个写 host.log 的 Subscriber，不引入 tracing-subscriber）
+tracing = "0.1"
+
+# 宿主自己的 Win32 调用（进程加固、拉起 / 结束 UI 进程、前台授权、工作集修剪）只用 windows-sys：
+# 它已经在锁里（tray-icon / global-hotkey 的依赖），而 `windows` 的错误类型会把 oleaut32 带进导入表
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security_Cryptography",
+    "Win32_System_Threading",
+    "Win32_System_ProcessStatus",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_Ime",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+# 构建期嵌入 exe 图标与版本资源（与 UI 进程同一枚图标）
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"

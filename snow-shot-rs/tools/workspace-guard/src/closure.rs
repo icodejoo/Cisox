@@ -11,11 +11,14 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 pub const LOCK_FILE: &str = "Cargo.lock";
 
 /// 必须存在、且闭包必须干净的守卫根（缺失说明改名或误删，按错误处理）。
-pub const HOST_CLOSURE_ROOTS: [&str; 3] =
-    ["snow-host-protocol", "snow-shell-core", "snow-data-paths"];
-
-/// 可选的守卫根：crate 出现在锁文件里就检查，还没建出来（阶段 2 的 `snow-tray-host`）就跳过。
-pub const HOST_CLOSURE_OPTIONAL_ROOTS: [&str; 1] = ["snow-tray-host"];
+///
+/// 前三个是宿主与 UI 共用的 crate，`snow-tray-host` 是宿主本体（阶段 2 建出，产物 `snow-shot.exe`）。
+pub const HOST_CLOSURE_ROOTS: [&str; 4] = [
+    "snow-host-protocol",
+    "snow-shell-core",
+    "snow-data-paths",
+    "snow-tray-host",
+];
 
 /// 闭包里禁止出现的包名（精确匹配）。
 ///
@@ -290,13 +293,13 @@ pub fn check_roots(packages: &[LockPackage], roots: &[&str]) -> Vec<ClosureViola
     violations
 }
 
-/// 对宿主依赖闭包规则做完整检查：必需根必须存在，可选根存在才检查。
+/// 对宿主依赖闭包规则做完整检查：每个守卫根都必须存在，且闭包里不得有黑名单包。
 ///
 /// # 参数
 /// - `lock_text`：`Cargo.lock` 内容。
 ///
 /// # 返回
-/// 违规列表（空表示通过）；必需根缺失返回 [`ClosureError`]。
+/// 违规列表（空表示通过）；守卫根缺失返回 [`ClosureError`]。
 ///
 /// # 示例
 /// ```
@@ -311,9 +314,7 @@ pub fn check_host_closure(lock_text: &str) -> Result<Vec<ClosureViolation>, Clos
             return Err(ClosureError::MissingRoot(root.to_string()));
         }
     }
-    let mut roots: Vec<&str> = HOST_CLOSURE_ROOTS.to_vec();
-    roots.extend(HOST_CLOSURE_OPTIONAL_ROOTS.iter().filter(|r| has(r)));
-    Ok(check_roots(&packages, &roots))
+    Ok(check_roots(&packages, &HOST_CLOSURE_ROOTS))
 }
 
 #[cfg(test)]
@@ -484,14 +485,14 @@ mod tests {
         }
     }
 
-    /// 必需根缺失是错误；可选根缺失被跳过；可选根存在时同样检查。
+    /// 任何一个守卫根缺失都是错误（包括宿主本体 `snow-tray-host`）；根齐全时检查它们的闭包。
     #[test]
-    fn required_and_optional_roots() {
+    fn all_roots_are_required_and_checked() {
         assert_eq!(
             check_host_closure(&pkg("snow-host-protocol", "0.1.0", &[])),
             Err(ClosureError::MissingRoot("snow-shell-core".into()))
         );
-        let required = [
+        let without_host = [
             pkg("snow-host-protocol", "0.1.0", &["serde"]),
             pkg("snow-shell-core", "0.1.0", &["tray-icon"]),
             pkg("snow-data-paths", "0.1.0", &[]),
@@ -499,13 +500,22 @@ mod tests {
             pkg("tray-icon", "0.25.1", &[]),
         ]
         .concat();
-        assert_eq!(check_host_closure(&required), Ok(vec![]));
-        let with_host = format!(
-            "{required}{}{}",
+        assert_eq!(
+            check_host_closure(&without_host),
+            Err(ClosureError::MissingRoot("snow-tray-host".into())),
+            "宿主本体改名或误删必须被发现"
+        );
+        let clean = format!(
+            "{without_host}{}",
+            pkg("snow-tray-host", "0.1.0", &["snow-shell-core"])
+        );
+        assert_eq!(check_host_closure(&clean), Ok(vec![]));
+        let dirty = format!(
+            "{without_host}{}{}",
             pkg("snow-tray-host", "0.1.0", &["snow-ui-shell"]),
             pkg("snow-ui-shell", "0.1.0", &[])
         );
-        let found = check_host_closure(&with_host).unwrap();
+        let found = check_host_closure(&dirty).unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].root, "snow-tray-host");
         assert_eq!(found[0].chain, vec!["snow-tray-host", "snow-ui-shell"]);
