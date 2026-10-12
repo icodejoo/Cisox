@@ -26,6 +26,7 @@ members = [
     "crates/snow-data-paths",
     "crates/snow-shell-core",
     "crates/snow-host-protocol",
+    "crates/snow-tray-host",
     "tools/workspace-guard",
 ]
 resolver = "3"

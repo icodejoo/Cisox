@@ -4,6 +4,37 @@
 use snow_app_core::PRODUCT_NAME;
 use snow_config::document::ConfigDocument;
 use snow_platform::system_integration::{PriorityLevel, set_auto_start, set_process_priority};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// 托盘宿主的 exe 文件名（与 UI 进程同目录）。
+const HOST_EXE_NAME: &str = "snow-shot.exe";
+
+/// 是否让开机自启指向托盘宿主（双进程 `--ui` 模式开启）。
+static AUTO_START_HOST: AtomicBool = AtomicBool::new(false);
+
+/// 双进程模式下让开机自启指向托盘宿主（它才是常驻入口）；单进程常驻仍指向自身。
+pub fn prefer_host_exe() {
+    AUTO_START_HOST.store(true, Ordering::Relaxed);
+}
+
+/// 开机自启要登记的可执行文件路径。
+///
+/// # 参数
+/// - `current_exe`：本进程的 exe 路径。
+/// - `prefer_host`：是否指向同目录的托盘宿主。
+///
+/// ```ignore
+/// let target = auto_start_target(Path::new("C:/app/snow-shot-ui.exe"), true);
+/// assert!(target.ends_with("snow-shot.exe"));
+/// ```
+pub fn auto_start_target(current_exe: &Path, prefer_host: bool) -> PathBuf {
+    if prefer_host {
+        current_exe.with_file_name(HOST_EXE_NAME)
+    } else {
+        current_exe.to_path_buf()
+    }
+}
 
 /// 进程优先级配置键。
 pub const KEY_PRIORITY: &str = "system/application_priority";
@@ -52,7 +83,11 @@ pub fn apply(document: &ConfigDocument) {
         return;
     }
     match std::env::current_exe() {
-        Ok(exe) => match set_auto_start(PRODUCT_NAME, &exe, plan.auto_start) {
+        Ok(exe) => match set_auto_start(
+            PRODUCT_NAME,
+            &auto_start_target(&exe, AUTO_START_HOST.load(Ordering::Relaxed)),
+            plan.auto_start,
+        ) {
             Ok(()) => tracing::info!(enabled = plan.auto_start, "开机自启已同步"),
             Err(e) => tracing::warn!(enabled = plan.auto_start, error = %e, "同步开机自启失败"),
         },
@@ -70,6 +105,17 @@ mod tests {
     fn defaults_match_legacy() {
         let plan = plan_from_document(&ConfigDocument::from_bytes(None));
         assert_eq!(plan, SystemPlan { priority: Some(PriorityLevel::AboveNormal), auto_start: true });
+    }
+
+    /// 开机自启目标：双进程模式指向同目录的宿主，单进程常驻指向自身。
+    #[test]
+    fn auto_start_target_follows_mode() {
+        let ui = Path::new("C:/app/snow-shot-ui.exe");
+        assert_eq!(auto_start_target(ui, false), ui);
+        assert_eq!(
+            auto_start_target(ui, true),
+            Path::new("C:/app/snow-shot.exe")
+        );
     }
 
     /// 改配置后计划跟随。

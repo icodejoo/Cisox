@@ -17,10 +17,8 @@ use tracing_subscriber::{EnvFilter, Layer, Registry};
 
 use crate::APP_ID;
 
-/// 数据根下的日志目录名。
-pub const LOG_DIR_NAME: &str = "logs";
-/// 日志目录下的崩溃转储子目录名。
-pub const CRASH_DIR_NAME: &str = "crash";
+/// 日志目录名与崩溃转储子目录名：唯一来源在零依赖的 `snow-data-paths`（托盘宿主写自己的日志也要用）。
+pub use snow_data_paths::{CRASH_DIR_NAME, LOG_DIR_NAME};
 /// 日志文件扩展名。
 const LOG_FILE_SUFFIX: &str = "log";
 /// 默认保留天数（对齐 upstream：保留最近 7 天）。

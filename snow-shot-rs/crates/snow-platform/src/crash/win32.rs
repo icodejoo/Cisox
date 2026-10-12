@@ -5,20 +5,50 @@ use std::mem::forget;
 use std::os::windows::io::AsRawHandle;
 use std::path::Path;
 
+use std::ffi::c_void;
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::System::Diagnostics::Debug::{
     EXCEPTION_POINTERS, MINIDUMP_EXCEPTION_INFORMATION, MINIDUMP_TYPE, MiniDumpWithThreadInfo,
-    MiniDumpWithUnloadedModules, MiniDumpWriteDump, SetUnhandledExceptionFilter,
+    MiniDumpWithUnloadedModules, SetUnhandledExceptionFilter,
 };
+use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 use windows::Win32::System::Threading::{
     GetCurrentProcess, GetCurrentProcessId, GetCurrentThreadId,
 };
+use windows::core::{BOOL, s, w};
 
 use super::{CONFIG, CrashInfo, CrashKind, HANDLING, current_thread_name, now_secs, write_report};
 use std::backtrace::Backtrace;
 
 /// 过滤器返回值：处理完毕，直接终止进程（不弹系统崩溃对话框）。
 const EXCEPTION_EXECUTE_HANDLER: i32 = 1;
+
+/// `MiniDumpWriteDump` 的函数签名（后两个可选参数这里恒传空）。
+type MiniDumpWriteDumpFn = unsafe extern "system" fn(
+    HANDLE,
+    u32,
+    HANDLE,
+    MINIDUMP_TYPE,
+    *const MINIDUMP_EXCEPTION_INFORMATION,
+    *const c_void,
+    *const c_void,
+) -> BOOL;
+
+/// 运行时才加载 `dbghelp.dll` 并取出 `MiniDumpWriteDump`。
+///
+/// 不走静态导入：托盘宿主要求导入表保持精简，也不想为了一个只在崩溃时才用的函数，
+/// 让每个进程启动时都先载入 `dbghelp.dll`。
+fn load_minidump_writer() -> Option<MiniDumpWriteDumpFn> {
+    // SAFETY: 传入的是以 NUL 结尾的常量字符串；取得的函数地址签名与 dbghelp 文档一致。
+    unsafe {
+        let lib = LoadLibraryW(w!("dbghelp.dll")).ok()?;
+        let proc = GetProcAddress(lib, s!("MiniDumpWriteDump"))?;
+        Some(std::mem::transmute::<
+            unsafe extern "system" fn() -> isize,
+            MiniDumpWriteDumpFn,
+        >(proc))
+    }
+}
 
 /// 把当前进程写成 minidump。
 ///
@@ -40,23 +70,27 @@ pub(super) fn write_minidump(path: &Path, exception: Option<*const EXCEPTION_POI
     });
     let dump_type = MINIDUMP_TYPE(MiniDumpWithThreadInfo.0 | MiniDumpWithUnloadedModules.0);
     let handle = HANDLE(file.as_raw_handle());
-    // SAFETY: `handle` 在调用期间由 `file` 持有；`info` 在调用期间存活且布局符合 API 约定。
-    let result = unsafe {
-        MiniDumpWriteDump(
-            GetCurrentProcess(),
-            GetCurrentProcessId(),
-            handle,
-            dump_type,
-            info.as_ref().map(std::ptr::from_ref),
-            None,
-            None,
-        )
+    let written = match load_minidump_writer() {
+        // SAFETY: `handle` 在调用期间由 `file` 持有；`info` 在调用期间存活且布局符合 API 约定。
+        Some(write_dump) => unsafe {
+            write_dump(
+                GetCurrentProcess(),
+                GetCurrentProcessId(),
+                handle,
+                dump_type,
+                info.as_ref().map_or(std::ptr::null(), std::ptr::from_ref),
+                std::ptr::null(),
+                std::ptr::null(),
+            )
+            .as_bool()
+        },
+        None => false,
     };
     drop(file);
-    if result.is_err() {
+    if !written {
         let _ = std::fs::remove_file(path);
     }
-    result.is_ok()
+    written
 }
 
 /// 顶层异常过滤器：写报告后终止进程；处理期间再次崩溃则直接终止，避免死循环。

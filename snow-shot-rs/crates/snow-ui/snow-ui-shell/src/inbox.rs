@@ -135,6 +135,19 @@ impl<T> MainThreadInbox<T> {
     pub fn try_recv(&self) -> Option<T> {
         self.lock().queue.pop_front()
     }
+
+    /// 队列里是否一个待处理事件都没有（UI 进程据此判断“收件箱已空”，决定能否请求退出）。
+    ///
+    /// ```rust
+    /// use snow_ui_shell::inbox::MainThreadInbox;
+    /// let inbox = MainThreadInbox::new();
+    /// assert!(inbox.is_empty());
+    /// inbox.push(1);
+    /// assert!(!inbox.is_empty());
+    /// ```
+    pub fn is_empty(&self) -> bool {
+        self.lock().queue.is_empty()
+    }
 }
 
 #[cfg(test)]
@@ -174,6 +187,17 @@ mod tests {
             }
             std::thread::park_timeout(Duration::from_secs(5));
         }
+    }
+
+    /// 空判断随入队出队变化。
+    #[test]
+    fn is_empty_tracks_queue() {
+        let inbox = MainThreadInbox::new();
+        assert!(inbox.is_empty());
+        inbox.push(1);
+        assert!(!inbox.is_empty());
+        assert_eq!(inbox.try_recv(), Some(1));
+        assert!(inbox.is_empty());
     }
 
     /// 先入队再取：保持先进先出。

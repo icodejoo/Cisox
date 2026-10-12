@@ -2,8 +2,8 @@
 //!
 //! 宿主不读 `config.json`、不带 i18n、不画图标，所以 UI 进程把“宿主要用的东西”——热键表、
 //! 托盘菜单（已本地化文案与 16px 图标）、鼠标手势绑定、开关、提示文案、保活标志——一次性算成
-//! [`HostSpec`]（方案 `docs/design/tray-host-split.md` §2）。本阶段只提供生成与往返校验，
-//! 不接入运行时（阶段 2 才会有宿主进程消费它）。
+//! [`HostSpec`]（方案 `docs/design/tray-host-split.md` §2）。UI 进程（`--ui`）在启动空闲时与配置变化后
+//! 生成并经 `host_spec_sync` 原子写入 `host/spec.json`，托盘宿主读取它；`--headless emit-spec` 也用它。
 //!
 //! 动作 id 不发明新名字：托盘信号沿用现有字符串（`quit`、`settings`、`group:<id>` …），
 //! `AppCommand` / `QuickAction` 用稳定的短名（`capture`、`quick.screenshot_delay` …）。
@@ -28,9 +28,9 @@ use snow_i18n::Args;
 use snow_ui::shell::tray::{TrayAction, TrayIconImage, TrayMenuEntry};
 
 /// 命令 id：发起截图。
-const COMMAND_CAPTURE: &str = "capture";
+const COMMAND_CAPTURE: &str = snow_host_protocol::ACTION_CAPTURE;
 /// 命令 id：开始录屏。
-const COMMAND_START_RECORDING: &str = "start_recording";
+const COMMAND_START_RECORDING: &str = snow_host_protocol::ACTION_START_RECORDING;
 /// 命令 id：把剪贴板内容贴到屏幕。
 const COMMAND_PIN_SELECTION: &str = "pin_selection";
 /// 命令 id：打开输入框翻译浮窗。
@@ -53,6 +53,10 @@ const NOTICE_HOTKEYS_PAUSED: &str = "quick-notice-hotkeys-paused";
 const NOTICE_HOTKEYS_RESUMED: &str = "quick-notice-hotkeys-resumed";
 /// 提示文案 id：恢复热键时有失败。
 const NOTICE_HOTKEYS_RESUME_FAILED: &str = "quick-notice-hotkeys-resume-failed";
+/// 提示文案 id：界面进程启动失败。
+const NOTICE_UI_START_FAILED: &str = "tray-notice-ui-start-failed";
+/// 提示文案 id：界面进程反复异常退出。
+const NOTICE_UI_CRASH_LOOP: &str = "tray-notice-ui-crash-loop";
 /// 提示文案 id：热键暂停期间的托盘悬停提示。
 const TOOLTIP_PAUSED: &str = "tray-tooltip-paused";
 /// 文案里“失败原因”参数的序号。
@@ -354,6 +358,8 @@ pub fn host_spec_from_document(
             notice_resume_failed: failures,
             notice_gate_on: i18n.tr(NOTICE_FULLSCREEN_GATE_ON),
             notice_gate_off: i18n.tr(NOTICE_FULLSCREEN_GATE_OFF),
+            notice_ui_start_failed: i18n.tr(NOTICE_UI_START_FAILED),
+            notice_ui_crash_loop: i18n.tr(NOTICE_UI_CRASH_LOOP),
         },
         flags: HostFlags {
             keep_alive: keep_alive_reasons(document),

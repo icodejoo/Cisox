@@ -14,7 +14,7 @@
 - [cisox-migration-acceptance-report.md](cisox-migration-acceptance-report.md) — 迁移验收报告。**已失实，不作验收依据**（见迁移方案 §845 第 10 条），待重写。
 - [design/multi-display-overlay.md](design/multi-display-overlay.md) — 多屏覆盖窗设计：每屏一窗 + 共享虚拟桌面选区，坐标约定、M0~M5 分阶段验收、真机验证办法。**草案，待批准**。
 - [design/mcp-subsystem.md](design/mcp-subsystem.md) — MCP 子系统设计（A12）：本地命名管道、令牌鉴权、应用 / 截图 / 文档 / 媒体四域（对应旧版 101 个 tool）、分期与对照入口。**第一期（M0 骨架）已实现，后续分期待做**。
-- [design/tray-host-split.md](design/tray-host-split.md) — 托盘宿主 + 按需 UI 进程拆分方案：进程边界、双管道 IPC 与退出握手、冷启动预算、阶段 0~6 验收、回退；含本机宿主内存探针实测。**已审定（2026-10-12）**，开放问题全部按推荐拍板。阶段 0 已完成（§12 为实测结果）。
+- [design/tray-host-split.md](design/tray-host-split.md) — 托盘宿主 + 按需 UI 进程拆分方案：进程边界、双管道 IPC 与退出握手、冷启动预算、阶段 0~6 验收、回退；含本机宿主内存探针实测。**已审定（2026-10-12）**，开放问题全部按推荐拍板。阶段 0 已完成（§12 为实测结果），阶段 1、2 的离屏部分已完成（阶段 2 的真屏验收脚本 `scripts/verify-tray-host-split.ps1` 待执行）。
 - [snow-shot-releases.md](snow-shot-releases.md) — 发布与更新规格（有自己的优先级，见 principles.md 末尾）。
 
 ## 录屏

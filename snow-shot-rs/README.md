@@ -21,7 +21,8 @@ cargo test --workspace
 
 | crate | 职责 | 阶段 / 填充任务 |
 |---|---|---|
-| `snow-shot` | bin 入口、子模式分发、单实例 | P1 单实例与入口 |
+| `snow-shot` | UI 进程（bin 产物 `snow-shot-ui.exe`）：单进程常驻（默认 / `--resident`）、双进程 UI（`--ui`）、无窗口任务（`--headless emit-spec`）、单实例 | P1 单实例与入口 / 托盘宿主拆分阶段 2 |
+| `snow-tray-host` | 托盘宿主（bin 产物 `snow-shot.exe`，不链 GPUI）：托盘、全局热键（暂停 / 前台全屏闸门）、单实例与 `--cmd` 入口、UI 进程拉起与仲裁（状态机、命令队列、崩溃熔断） | 托盘宿主拆分阶段 2 |
 | `snow-app-core` | 产品常量、命令总线、会话编排；已 path 依赖 `snow-draw-engine-core` 验证连通 | P1 命令总线 |
 | `snow-capability` | 平台能力注册表 | P1 能力注册表 |
 | `snow-ui` | GPUI 视图层总入口 | P1 起 |
@@ -31,7 +32,7 @@ cargo test --workspace
 | `snow-ui/snow-ui-shell` | GPUI 隔离层，`gpui::` 只允许出现在这里 | P1 起 |
 | `snow-shell-core` | 托盘与全局热键后端（无 gpui、无命令总线、无能力表；动作负载为泛型），`snow-ui-shell` 重导出 | 托盘宿主拆分阶段 1 |
 | `snow-data-paths` | 数据根目录解析与 `APP_ID` / `PRODUCT_NAME`（零依赖），`snow-config::paths`、`snow-app-core` 重导出 | 托盘宿主拆分阶段 1 |
-| `snow-host-protocol` | 托盘宿主 ↔ UI 进程协议：`host/spec.json` 快照、会话消息、JSON 行编解码、序号与退出握手（只依赖 serde） | 托盘宿主拆分阶段 1 |
+| `snow-host-protocol` | 托盘宿主 ↔ UI 进程协议：`host/spec.json` 快照、会话消息、JSON 行编解码、序号与退出握手、启动开关（只依赖 serde） | 托盘宿主拆分阶段 1 / 2 |
 | `snow-canvas-raster` / `-filters` / `-text` | 画布光栅化 / 滤镜 / 文本 | P2 |
 | `snow-translate` | 本地 NMT | P5 |
 | `snow-i18n` | Fluent 运行时与提取 | P1 i18n |
@@ -41,7 +42,7 @@ cargo test --workspace
 | `snow-update` | 更新（T4 验收前禁用） | P7 |
 | `snow-mcp` | 进程内 MCP | P7 |
 | `snow-platform` | 原生平台调用 | P1 起 |
-| `tools/workspace-guard` | 守卫：shell 之外出现 `gpui::` 或 gpui 依赖即测试失败；另有依赖闭包黑名单（宿主相关 crate 的传递依赖里不得有 gpui 等） | P1 / 托盘宿主拆分阶段 1 |
+| `tools/workspace-guard` | 守卫：shell 之外出现 `gpui::` 或 gpui 依赖即测试失败；另有依赖闭包黑名单（宿主相关 crate 的传递依赖里不得有 gpui 等）与宿主 exe 导入表闸门（`check-host-imports`） | P1 / 托盘宿主拆分阶段 1、2 |
 
 日志与崩溃转储、CI 属 P1 后续任务，尚未建 crate / 流水线。
 

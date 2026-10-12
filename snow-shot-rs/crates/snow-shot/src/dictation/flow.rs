@@ -232,6 +232,11 @@ impl DictationHost {
         }
     }
 
+    /// 是否有进行中的语音转文字会话（含收尾阶段）；双进程模式下据此阻止 UI 进程退出。
+    pub fn is_active(&self) -> bool {
+        self.engine.active()
+    }
+
     /// 应用退出：尽力结束工作进程（不按名查杀，只动自己拉起的那个）。
     pub fn shutdown(&mut self) {
         self.translation.shutdown();

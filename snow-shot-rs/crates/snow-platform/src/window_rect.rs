@@ -88,9 +88,65 @@ pub fn nudge_cursor(dx: i32, dy: i32) -> bool {
 #[cfg(windows)]
 mod imp {
     use super::{ScreenRect, rect_from_edges};
-    use windows::Win32::Foundation::RECT;
-    use windows::Win32::Graphics::Dwm::{DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute};
+    use std::sync::OnceLock;
+    use windows::Win32::Foundation::{HWND, RECT};
+    use windows::Win32::Graphics::Dwm::DWMWA_EXTENDED_FRAME_BOUNDS;
+    use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
     use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowRect, IsIconic};
+    use windows::core::{s, w};
+
+    /// `DwmGetWindowAttribute` 的函数签名（返回 HRESULT，负值为失败）。
+    type DwmGetWindowAttributeFn =
+        unsafe extern "system" fn(HWND, u32, *mut std::ffi::c_void, u32) -> i32;
+
+    /// 运行时解析 `DwmGetWindowAttribute`（只解析一次）。
+    ///
+    /// 不走静态导入：托盘宿主要求导入表里没有 `dwmapi`，而它的“前台全屏闸门”只在打开闸门且
+    /// 有热键触发时才需要这个函数，用到才加载。
+    fn dwm_get_window_attribute() -> Option<DwmGetWindowAttributeFn> {
+        static FUNC: OnceLock<Option<DwmGetWindowAttributeFn>> = OnceLock::new();
+        *FUNC.get_or_init(|| {
+            // SAFETY: 传入常量字符串；取得的函数地址签名与 dwmapi 文档一致。
+            unsafe {
+                let lib = LoadLibraryW(w!("dwmapi.dll")).ok()?;
+                let proc = GetProcAddress(lib, s!("DwmGetWindowAttribute"))?;
+                Some(std::mem::transmute::<
+                    unsafe extern "system" fn() -> isize,
+                    DwmGetWindowAttributeFn,
+                >(proc))
+            }
+        })
+    }
+
+    /// dwmapi 是否已能解析（测试用）。
+    #[cfg(test)]
+    pub fn dwm_resolves() -> bool {
+        dwm_get_window_attribute().is_some()
+    }
+
+    /// 读窗口的一个 DWM 属性到 `out`。
+    ///
+    /// # 参数
+    /// - `hwnd`：窗口句柄。
+    /// - `attribute`：`DWMWA_*` 属性编号。
+    /// - `out`：与该属性大小一致的输出缓冲。
+    ///
+    /// # 返回
+    /// 成功为 `true`；dwmapi 不可用或调用失败为 `false`。
+    fn dwm_attribute<T>(hwnd: HWND, attribute: i32, out: &mut T) -> bool {
+        let Some(func) = dwm_get_window_attribute() else {
+            return false;
+        };
+        // SAFETY: `out` 是大小正好为 `T` 的有效输出缓冲，长度参数与之一致。
+        unsafe {
+            func(
+                hwnd,
+                attribute as u32,
+                std::ptr::from_mut(out).cast(),
+                std::mem::size_of::<T>() as u32,
+            ) >= 0
+        }
+    }
 
     /// 指针偏移（Windows 实现）。
     pub fn nudge_cursor(dx: i32, dy: i32) -> bool {
@@ -117,17 +173,8 @@ mod imp {
             return None;
         }
         let mut rect = RECT::default();
-        // SAFETY: rect 是大小正好为 RECT 的输出缓冲。
-        let dwm = unsafe {
-            DwmGetWindowAttribute(
-                hwnd,
-                DWMWA_EXTENDED_FRAME_BOUNDS,
-                (&mut rect as *mut RECT).cast(),
-                std::mem::size_of::<RECT>() as u32,
-            )
-        };
-        if dwm.is_err() {
-            // SAFETY: 同上，rect 为有效输出位置。
+        if !dwm_attribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS.0, &mut rect) {
+            // SAFETY: rect 是大小正好为 RECT 的输出缓冲。
             unsafe { GetWindowRect(hwnd, &mut rect) }.ok()?;
         }
         rect_from_edges(rect.left, rect.top, rect.right, rect.bottom)
@@ -161,29 +208,11 @@ mod imp {
             }
         }
         let mut cloaked = 0u32;
-        // SAFETY: cloaked 是大小正好为 u32 的输出缓冲。
-        let cloak = unsafe {
-            DwmGetWindowAttribute(
-                hwnd,
-                DWMWA_CLOAKED,
-                (&mut cloaked as *mut u32).cast(),
-                std::mem::size_of::<u32>() as u32,
-            )
-        };
-        if cloak.is_err() || cloaked != 0 {
+        if !dwm_attribute(hwnd, DWMWA_CLOAKED.0, &mut cloaked) || cloaked != 0 {
             return false;
         }
         let mut frame = RECT::default();
-        // SAFETY: frame 是大小正好为 RECT 的输出缓冲。
-        let dwm = unsafe {
-            DwmGetWindowAttribute(
-                hwnd,
-                DWMWA_EXTENDED_FRAME_BOUNDS,
-                (&mut frame as *mut RECT).cast(),
-                std::mem::size_of::<RECT>() as u32,
-            )
-        };
-        if dwm.is_err() {
+        if !dwm_attribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS.0, &mut frame) {
             return false;
         }
         // SAFETY: hwnd 有效；MONITOR_DEFAULTTONULL 下窗口不在任何显示器上时返回空。
@@ -231,6 +260,17 @@ mod imp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 运行时解析 dwmapi 成功（Windows 自带），且前台探测不会 panic、结果是确定的布尔值。
+    #[cfg(windows)]
+    #[test]
+    fn dwm_resolves_at_runtime_and_probe_is_safe() {
+        assert!(imp::dwm_resolves(), "系统应能提供 DwmGetWindowAttribute");
+        let first = focused_fullscreen_window_exists();
+        let second = focused_fullscreen_window_exists();
+        // 两次探测间前台窗口理论上可能变化，这里只要求调用安全、不 panic
+        let _ = (first, second);
+    }
 
     /// 边界换算：负坐标可用，退化矩形被拒绝。
     #[test]
