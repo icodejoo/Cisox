@@ -317,7 +317,8 @@ snow-shot             改  bin 改名 snow-shot-ui；新增 spec 生成（纯函
   6. **更新检查登录后延后 30 秒**（常量 `UPDATE_CHECK_START_DELAY`），避开登录时磁盘与网络高峰；文档原文是“登录后到点就拉起”。
   7. **托盘菜单关闭后修剪**仍没做（`tray-icon` 不暴露事件，阶段 2 已说明），建议直接放弃，保持启动 +5s / UI 退出 +2s 两次。
   8. **没改的**：`--ui` 启动时依旧不推 `RestorePins` / `AutoUpdateCheck`（归宿主）；单进程 `--resident` 路径行为不变（手势、托盘、热键仍在本进程）。
-- **离屏验收结果**（2026-10-12）：见本次提交说明里的命令清单；`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test -p workspace-guard`、`-p snow-host-protocol`、`-p snow-tray-host`（含真起假 UI 的无窗口任务 / 提示读取测试）、`-p snow-shot`、i18n 两条门禁、`scripts/check-host-imports.ps1 -Build`；宿主 release 体积与导入表变化见下一条。
+- **离屏验收结果**（2026-10-12）：`cargo clippy --workspace --all-targets -- -D warnings` 通过；`cargo test` 通过：`workspace-guard`（24 + 6 doc，宿主依赖闭包零违规）、`snow-host-protocol`（38 + 23 doc）、`snow-tray-host`（124 单测 + 4 项 exe 集成测试，含真起假 UI 的无窗口任务 / 提示读取 / 钩子不装测试）、`snow-shot`（1231 项，12 项 ignored）；i18n 两条门禁通过（无新增文案）；`scripts/check-host-imports.ps1 -Build` 通过。
+- **宿主 release 产物**（`cargo build --release -p snow-tray-host`）：`snow-shot.exe` **1,102,336 字节**（阶段 2 为 1,033,216，+69,120 字节，约 +67KB：手势钩子接线、无窗口任务、更新到点调度）；静态导入仍是同样的 18 项、延迟导入 0 项（鼠标 / 键盘钩子用的 `SetWindowsHookExW` 等都在 `user32`，没有新增 DLL）；宿主闭包没有新增 crate。宿主私有提交的实测在真屏验收里（`idle` / `gesture` / `stt-keepalive` / `mcp-keepalive` 场景都记数，默认配置带手势绑定所以要重测 ≤ 6MB）。
 - **留给阶段 4 的事项**：真屏验收结果回填（含手势 / 贴图恢复 / 保活 / MCP / 更新检查五个新场景和 `idle` 重测）；默认切 `split` 时统一自启指向宿主、CI 加导入表闸门；`dictation_hotkey` 是否登录预拉的拍板；手势在“宿主刚拉起 UI、覆盖窗还没就绪”这段的体感（队列合并保证不丢，延迟取决于冷启动）；全套功能回归清单逐项过（本阶段只覆盖了协议 / 状态机 / 守卫的离屏部分）；handoff 加进程模型一节。
 
 ### 阶段 4：切默认与收口
