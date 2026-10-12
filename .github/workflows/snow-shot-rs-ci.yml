@@ -11,12 +11,14 @@ on:
       - "snow-crates/**"
       - "snow_draw_engine_qt/crates/**"
       - ".github/workflows/snow-shot-rs-ci.yml"
+      - "scripts/check-host-imports.ps1"
   pull_request:
     paths:
       - "snow-shot-rs/**"
       - "snow-crates/**"
       - "snow_draw_engine_qt/crates/**"
       - ".github/workflows/snow-shot-rs-ci.yml"
+      - "scripts/check-host-imports.ps1"
 
 permissions:
   contents: read
@@ -76,6 +78,38 @@ jobs:
         run: |
           cargo run -q -p snow-i18n --bin snow-i18n-tool -- check crates/snow-i18n/locales
           cargo run -q -p snow-i18n --bin snow-i18n-tool -- extract crates --exclude crates/snow-i18n --strict-refs --min-refs 10
+
+  # 托盘宿主导入表闸门（docs/design/tray-host-split.md §3 / §8）：仅 Windows。
+  # 宿主 snow-shot.exe 不能静态 / 延迟导入 D3D、DXGI、DWrite、UIA、图像编解码、输入法这类 DLL，
+  # 否则进程一起来就会被加载、托盘态内存涨回去。宿主与 UI（snow-shot-ui.exe）两个包同一条命令构建，
+  # 与真实打包一致；检查器在 tools/workspace-guard（纯 Rust 解析 PE，不依赖 dumpbin）。
+  host-imports:
+    name: tray host imports (windows)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.1
+          components: rustfmt, clippy
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          # 根 .cargo/config.toml 把 target-dir 放在仓库根的 build/cargo，不是 snow-shot-rs/target
+          workspaces: "snow-shot-rs -> ../build/cargo"
+          # 与 ci 任务各自缓存（release 产物不同），key 加后缀避免互相覆盖
+          key: host-imports
+          cache-on-failure: true
+
+      - name: Host import table gate (release build of host + UI)
+        run: ./scripts/check-host-imports.ps1 -Build -WithUi
 
   # 独立 workspace 的工作进程（不在主 workspace 内，上面的 --workspace 覆盖不到），仅 Windows 验证
   workers:
