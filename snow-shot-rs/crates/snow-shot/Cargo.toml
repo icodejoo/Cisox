@@ -8,6 +8,11 @@ rust-version.workspace = true
 [lints]
 workspace = true
 
+# UI 进程：产物改名 snow-shot-ui.exe（托盘宿主 snow-tray-host 沿用 snow-shot.exe 这个名字）
+[[bin]]
+name = "snow-shot-ui"
+path = "src/main.rs"
+
 [dependencies]
 snow-app-core = { path = "../snow-app-core" }
 snow-canvas-filters = { path = "../snow-canvas-filters" }
@@ -15,6 +20,8 @@ snow-canvas-raster = { path = "../snow-canvas-raster" }
 snow-canvas-text = { path = "../snow-canvas-text" }
 snow-capability = { path = "../snow-capability" }
 snow-config = { path = "../snow-config" }
+# 数据根与产品常量（宿主、UI 共用的零依赖 crate）
+snow-data-paths = { path = "../snow-data-paths" }
 snow-i18n = { path = "../snow-i18n" }
 # 标注引擎内核（仓库内 path 依赖，仅依赖 serde，不引入新外部 crate）
 snow-draw-engine = { path = "../../../snow_draw_engine_qt/crates/snow-draw-engine" }
@@ -22,7 +29,7 @@ snow-draw-engine-editor = { path = "../../../snow_draw_engine_qt/crates/snow-dra
 # 自动滤镜区域记录类型（仓库内 path 依赖，引擎已带入，Cargo.lock 无新第三方包）
 snow-draw-engine-document = { path = "../../../snow_draw_engine_qt/crates/snow-draw-engine-document" }
 snow-history = { path = "../snow-history" }
-# 托盘宿主协议：host/spec.json 快照的类型与编解码（阶段 1 只生成快照，不接运行时）
+# 托盘宿主协议：host/spec.json 快照、会话消息与编解码（双进程模式 `--ui` 与宿主通信）
 snow-host-protocol = { path = "../snow-host-protocol" }
 snow-mcp = { path = "../snow-mcp" }
 snow-ocr-protocol = { path = "../snow-ocr-protocol" }

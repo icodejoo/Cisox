@@ -19,6 +19,7 @@ use crate::history_store::{
     HistoryRecorder, HistorySource, HistoryStore, Thumbnail, policy_from_document,
 };
 use crate::history_view::{HistoryAction, HistoryView};
+use crate::host_link::HostEvent;
 use crate::ocr_assets::{ENV_OCR_ASSET_DIR, ocr_root};
 use crate::ocr_backend::{OcrInput, select_from_document};
 use crate::ocr_client::OcrError;
@@ -108,6 +109,10 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
+mod host_session;
+
+pub(crate) use host_session::HostSession;
+
 /// 设置页自动化脚本路径环境变量（JSON 操作数组，验收用）。
 pub const ENV_SETTINGS_AUTOTEST: &str = "SNOW_SETTINGS_AUTOTEST";
 /// 应用窗口所在显示器的设备名子串环境变量（如 `DISPLAY2`，验收用）。
@@ -115,15 +120,15 @@ pub const ENV_SETTINGS_MONITOR: &str = "SNOW_SETTINGS_MONITOR";
 /// 托盘悬停提示。
 pub(crate) const TRAY_TOOLTIP: &str = PRODUCT_NAME;
 /// 托盘信号：从剪贴板贴图。
-pub const TRAY_SIGNAL_PIN_CLIPBOARD: &str = "pin_clipboard";
+pub const TRAY_SIGNAL_PIN_CLIPBOARD: &str = snow_host_protocol::ACTION_PIN_CLIPBOARD;
 /// 托盘信号：打开截图历史。
 pub const TRAY_SIGNAL_HISTORY: &str = "history";
 /// 托盘信号：打开主窗口。
-pub const TRAY_SIGNAL_MAIN_WINDOW: &str = "main_window";
+pub const TRAY_SIGNAL_MAIN_WINDOW: &str = snow_host_protocol::ACTION_MAIN_WINDOW;
 /// 托盘信号：打开设置。
-pub const TRAY_SIGNAL_SETTINGS: &str = "settings";
+pub const TRAY_SIGNAL_SETTINGS: &str = snow_host_protocol::ACTION_SETTINGS;
 /// 托盘信号：退出。
-pub const TRAY_SIGNAL_QUIT: &str = "quit";
+pub const TRAY_SIGNAL_QUIT: &str = snow_host_protocol::ACTION_QUIT;
 /// 托盘信号前缀：切换贴图分组（后接分组 ID）。
 pub const TRAY_SIGNAL_GROUP_PREFIX: &str = "group:";
 /// 托盘信号：打开贴图管理窗口。
@@ -133,7 +138,7 @@ pub const TRAY_SIGNAL_GROUP_NEW: &str = "group_new";
 /// 托盘信号：删除空的贴图分组。
 pub const TRAY_SIGNAL_GROUP_DELETE_EMPTY: &str = "group_delete_empty";
 /// 托盘信号：重启应用。
-pub const TRAY_SIGNAL_RESTART: &str = "restart";
+pub const TRAY_SIGNAL_RESTART: &str = snow_host_protocol::ACTION_RESTART;
 /// 设置窗口逻辑宽度。
 const SETTINGS_WINDOW_WIDTH: f32 = 1000.0;
 /// 设置窗口逻辑高度。
@@ -579,6 +584,8 @@ pub enum UiEvent {
     },
     /// 直接截图完成（成功的输出结果或失败原因）。
     DirectCaptureDone(Result<DirectResult, String>),
+    /// 双进程模式下与托盘宿主的会话事件（宿主消息、会话断开、定时器、快照同步请求）。
+    Host(HostEvent),
     /// 退出应用。
     Quit,
 }
@@ -1486,6 +1493,8 @@ pub struct AppState {
     gesture: Option<GestureSession>,
     /// MCP 服务宿主（设置开关打开才启动）。
     mcp: crate::mcp_host::McpHost,
+    /// 与托盘宿主的会话（只有双进程模式 `--ui` 才有；`--resident` 单进程为 `None`）。
+    host: Option<Rc<HostSession>>,
 }
 
 impl AppState {
@@ -1572,7 +1581,24 @@ impl AppState {
             mouse_service: None,
             gesture: None,
             mcp: crate::mcp_host::McpHost::new(mcp_inbox),
+            host: None,
         }
+    }
+
+    /// 接上托盘宿主的会话（双进程模式）：此后托盘、热键、闸门由宿主负责，本进程只转发与同步。
+    ///
+    /// # 参数
+    /// - `session`：已连上宿主的会话。
+    pub(crate) fn attach_host(&mut self, session: HostSession) {
+        self.host = Some(Rc::new(session));
+    }
+
+    /// 每处理完一个事件后调用：双进程模式下上报活动、判断能否请求退出；单进程模式什么都不做。
+    ///
+    /// # 参数
+    /// - `cx`：外壳上下文。
+    pub fn after_event(&self, cx: &ShellContext) {
+        host_session::after_event(cx, self);
     }
 
     /// 按配置对齐 MCP 服务（启动时与设置变化时调用）。
@@ -4261,6 +4287,11 @@ fn tray_group_labels(state: &AppState, locale: &str) -> Vec<(String, String)> {
 /// # 参数
 /// - `state`：运行时状态。
 fn refresh_tray_menu(state: &AppState) {
+    if state.host.is_some() {
+        // 双进程：托盘在宿主里，重新生成快照交给宿主
+        host_session::request_spec_sync(state);
+        return;
+    }
     let Some(tray) = state.tray.as_ref() else {
         return;
     };
@@ -4335,6 +4366,13 @@ fn on_config_changed(cx: &mut ShellContext, state: &mut AppState, key: &str, pre
     if key == crate::mcp_host::KEY_ENABLED || state.mcp.is_running() {
         state.sync_mcp();
     }
+    // 双进程：影响托盘菜单 / 开关 / 保活的配置变了，重新生成宿主快照（热键类走下面的应用流程）
+    if state.host.is_some()
+        && hotkey_config_key(key).is_none()
+        && host_session::affects_host_spec(key)
+    {
+        host_session::request_spec_sync(state);
+    }
     if key == TRANSLATION_PAGE_ENABLED_KEY {
         let enabled = state.config.borrow().document().bool_or(key, false);
         if let Some(view) = state.settings_view.clone() {
@@ -4389,6 +4427,11 @@ fn on_config_changed(cx: &mut ShellContext, state: &mut AppState, key: &str, pre
         }
         return;
     };
+    if state.host.is_some() {
+        // 双进程：热键在宿主里。发快照让宿主重注册并回报，失败回滚
+        host_session::apply_hotkey_change(cx, state, config_key, previous);
+        return;
+    }
     let Some(service) = state.hotkeys.as_ref() else {
         tracing::warn!(key, "热键服务未运行，无法重新注册");
         return;
@@ -4498,14 +4541,16 @@ fn notify(state: &AppState, id: &str, args: Args) {
 /// - `text`：已本地化的提示文案。
 fn show_notice(state: &AppState, text: &str) {
     tracing::info!(notice = %text, "快捷动作提示");
-    if let Some(tray) = state.tray.as_ref() {
-        let tip: String = format!("{TRAY_TOOLTIP}: {text}")
-            .chars()
-            .take(NOTICE_TOOLTIP_MAX_CHARS)
-            .collect();
-        if let Err(e) = tray.set_tooltip(tip) {
-            tracing::warn!(error = %e, "更新托盘提示失败");
-        }
+    let tip: String = format!("{TRAY_TOOLTIP}: {text}")
+        .chars()
+        .take(NOTICE_TOOLTIP_MAX_CHARS)
+        .collect();
+    if state.host.is_some() {
+        host_session::send_tooltip(state, &tip);
+    } else if let Some(tray) = state.tray.as_ref()
+        && let Err(e) = tray.set_tooltip(tip)
+    {
+        tracing::warn!(error = %e, "更新托盘提示失败");
     }
 }
 
@@ -5242,6 +5287,7 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
             }
         }
         UiEvent::DirectCaptureDone(result) => on_direct_capture_done(state, result),
+        UiEvent::Host(event) => host_session::handle_host_event(cx, state, event),
         UiEvent::Quit => shutdown_app(cx, state),
         UiEvent::Restart => match spawn_restart_helper() {
             Ok(()) => shutdown_app(cx, state),
