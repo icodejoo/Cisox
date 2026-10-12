@@ -14,7 +14,8 @@ param(
 )
 $ErrorActionPreference = "Continue"
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-if (-not $Exe) { $Exe = Join-Path $repoRoot "build/cargo/debug/snow-shot.exe" }
+# 完整应用现在是 UI 进程 snow-shot-ui.exe（单进程常驻行为）；snow-shot.exe 是托盘宿主
+if (-not $Exe) { $Exe = Join-Path $repoRoot "build/cargo/debug/snow-shot-ui.exe" }
 $logDir = Join-Path $env:LOCALAPPDATA "Cisox/logs"
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 Get-ChildItem $OutDir -Force | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
@@ -26,7 +27,7 @@ function New-LogLines([string]$path, [long]$offset) {
     try { $fs.Seek($offset, "Begin") | Out-Null; (New-Object System.IO.StreamReader($fs, [Text.Encoding]::UTF8)).ReadToEnd() -split "`r?`n" } finally { $fs.Dispose() }
 }
 
-if (Get-Process snow-shot -ErrorAction SilentlyContinue) { throw "已有 snow-shot 在运行，请先退出" }
+if (Get-Process snow-shot, snow-shot-ui -ErrorAction SilentlyContinue) { throw "已有 snow-shot / snow-shot-ui 在运行，请先退出" }
 $log = Latest-Log
 $logPath = $log.FullName
 $offset = $log.Length
