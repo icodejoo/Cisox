@@ -7,6 +7,7 @@
 //! 线程模型：托盘线程、热键线程、管道读线程、进程等待线程只把事件投进同一个通道（[`Event`]），
 //! 由主线程按序处理；主线程用 `recv_timeout(下一个截止时刻)` 等待，空闲时没有任何轮询。
 
+use crate::gesture::GestureEvent;
 use crate::machine::{Effect, HostMachine, Notice};
 use crate::queue::Outbound;
 use crate::view::{
@@ -15,12 +16,19 @@ use crate::view::{
     fill_failures, gate_config_change,
 };
 use snow_host_protocol::frame::decode_line;
-use snow_host_protocol::message::{ActionOrigin, HostMessage, HotkeyResult, UiMessage};
-use snow_host_protocol::spec::{HostSpec, HotkeySpec, IconRgba, MenuItemSpec, TrayTheme};
+use snow_host_protocol::launch::HeadlessJob;
+use snow_host_protocol::message::{
+    ActionOrigin, GesturePhase, HostMessage, HotkeyResult, UiMessage,
+};
+use snow_host_protocol::spec::{
+    HostSpec, HotkeySpec, IconRgba, MenuItemSpec, MouseBindingSpec, TrayTheme,
+};
 use snow_host_protocol::spec_file::SpecFileError;
 use snow_host_protocol::{
     ACTION_QUIT, ACTION_RESTART, ACTION_TOGGLE_FULLSCREEN_GATE, ACTION_TOGGLE_GLOBAL_HOTKEYS,
+    UPDATE_CHECK_START_DELAY,
 };
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 /// 宿主启动后多久做第一次工作集修剪（等启动期的一次性分配落定）。
@@ -107,6 +115,52 @@ pub trait Platform {
 
     /// 拉起延迟启动的新宿主（重启用）。
     fn restart_host(&mut self) -> Result<(), String>;
+
+    /// 按快照里的鼠标手势绑定装 / 换 / 卸全局鼠标钩子：空表卸载（平时系统里没有钩子），
+    /// 非空表则在需要时启动钩子线程并替换绑定。钩子事件由平台投递 [`Event::Gesture`]。
+    ///
+    /// # 参数
+    /// - `bindings`：快照里的绑定；无效项（未知名字、没有修饰键）由平台丢弃。
+    fn set_mouse_bindings(&mut self, bindings: &[MouseBindingSpec]) -> Result<(), String>;
+
+    /// 取消进行中的鼠标手势（UI 放弃了这次拖选，钩子别再吞鼠标输入）。
+    fn cancel_gesture(&mut self);
+
+    /// 拉起无窗口任务（`--headless update-check` / `set-config`）；结束后平台投递 [`Event::HeadlessDone`]。
+    ///
+    /// # 参数
+    /// - `job`：任务；生成快照走 [`Platform::spawn_emit_spec`]，不经过这里。
+    fn spawn_headless(&mut self, job: &HeadlessJob) -> Result<(), String>;
+
+    /// 当前 Unix 秒（更新检查到点判断用）。
+    fn unix_now(&mut self) -> u64;
+}
+
+/// 宿主拉起的无窗口任务种类（结束时按它投递 [`Event::HeadlessDone`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeadlessKind {
+    /// 到点的自动更新检查。
+    UpdateCheck,
+    /// 改一项配置。
+    SetConfig,
+}
+
+impl HeadlessKind {
+    /// 任务对应的种类；生成快照不走这条路径，返回 `None`。
+    ///
+    /// ```rust
+    /// use snow_host_protocol::launch::HeadlessJob;
+    /// use snow_tray_host::host::HeadlessKind;
+    /// assert_eq!(HeadlessKind::of(&HeadlessJob::UpdateCheck), Some(HeadlessKind::UpdateCheck));
+    /// assert_eq!(HeadlessKind::of(&HeadlessJob::EmitSpec), None);
+    /// ```
+    pub fn of(job: &HeadlessJob) -> Option<Self> {
+        match job {
+            HeadlessJob::UpdateCheck => Some(Self::UpdateCheck),
+            HeadlessJob::SetConfig { .. } => Some(Self::SetConfig),
+            HeadlessJob::EmitSpec => None,
+        }
+    }
 }
 
 /// 汇入主线程的事件。
@@ -145,6 +199,15 @@ pub enum Event {
     },
     /// `--headless emit-spec` 的 UI 结束了（快照应已生成）。
     SpecEmitted,
+    /// 鼠标手势钩子产生了一个事件（已过节流）。
+    Gesture(GestureEvent),
+    /// 无窗口任务（更新检查 / 改配置）结束了。
+    HeadlessDone {
+        /// 任务种类。
+        kind: HeadlessKind,
+        /// 更新检查发现新版本时的提示文案（UI 侧已本地化，来自标准输出第一行）；其余为 `None`。
+        notice: Option<String>,
+    },
 }
 
 /// 宿主核心。
@@ -173,6 +236,22 @@ pub struct HostCore<P: Platform> {
     trim_at: Option<Instant>,
     /// 宿主该退出了（`Some(restart)`）。
     exit: Option<bool>,
+    /// 启动时刻（更新检查登录后延后用）；`start` 之前为 `None`。
+    started_at: Option<Instant>,
+    /// 当前装着的鼠标手势绑定（用来判断要不要重装钩子）。
+    mouse_applied: Vec<MouseBindingSpec>,
+    /// 快照里的更新检查到点时间里，下一个要检查的那个（`Unix` 秒）。
+    update_due: Option<u64>,
+    /// 下一次更新检查的时刻；`None` 表示没有待办。
+    update_at: Option<Instant>,
+    /// 已经按这个到点时间检查过（或拉起过）：同一个到点时间不重复检查，等 UI 写出新快照。
+    update_done_for: Option<u64>,
+    /// 更新检查的无窗口任务是否在跑。
+    update_running: bool,
+    /// 改配置的无窗口任务是否在跑；期间新消息暂存在 `held`，免得新 UI 和它同时写配置。
+    config_job_running: bool,
+    /// 等改配置任务结束后再投递的消息（保序）。
+    held: VecDeque<Outbound>,
 }
 
 impl<P: Platform> HostCore<P> {
@@ -191,6 +270,14 @@ impl<P: Platform> HostCore<P> {
             emit_requested: false,
             trim_at: None,
             exit: None,
+            started_at: None,
+            mouse_applied: Vec::new(),
+            update_due: None,
+            update_at: None,
+            update_done_for: None,
+            update_running: false,
+            config_job_running: false,
+            held: VecDeque::new(),
         }
     }
 
@@ -204,13 +291,17 @@ impl<P: Platform> HostCore<P> {
         &self.machine
     }
 
-    /// 启动：读快照、显示托盘、注册热键；登录时有贴图要恢复就拉起 UI；安排第一次工作集修剪。
+    /// 启动：读快照、显示托盘、注册热键、装鼠标手势钩子（有绑定才装）；
+    /// 登录时有贴图要恢复就拉起 UI 恢复（贴图窗口让 UI 常驻）；要求常驻的功能（MCP、OCR 预热）开着也拉起 UI；
+    /// 安排第一次工作集修剪与更新检查。
     ///
     /// # 参数
     /// - `now`：当前时刻。
     pub fn start(&mut self, now: Instant) {
-        self.load_spec(true);
+        self.started_at = Some(now);
+        self.load_spec(now, true);
         self.schedule_trim(now + TRIM_AFTER_START);
+        // 要求常驻（MCP / OCR 预热）的拉起在读快照时已经提交（`apply_keep_alive`）
         let restore = self
             .spec
             .as_ref()
@@ -261,7 +352,9 @@ impl<P: Platform> HostCore<P> {
                 let effects = self.machine.on_ui_exited(now, generation);
                 self.run_effects(now, effects);
             }
-            Event::SpecEmitted => self.load_spec(true),
+            Event::SpecEmitted => self.load_spec(now, true),
+            Event::Gesture(gesture) => self.submit(now, gesture.into_outbound()),
+            Event::HeadlessDone { kind, notice } => self.on_headless_done(now, kind, notice),
         }
     }
 
@@ -276,11 +369,15 @@ impl<P: Platform> HostCore<P> {
             self.trim_at = None;
             self.platform.trim_working_set();
         }
+        if self.update_at.is_some_and(|at| now >= at) {
+            self.update_at = None;
+            self.start_update_check();
+        }
     }
 
     /// 下一个需要调用 [`tick`](Self::tick) 的时刻；没有待办返回 `None`（主线程可以无限期等事件）。
     pub fn next_deadline(&self) -> Option<Instant> {
-        [self.machine.next_deadline(), self.trim_at]
+        [self.machine.next_deadline(), self.trim_at, self.update_at]
             .into_iter()
             .flatten()
             .min()
@@ -323,9 +420,137 @@ impl<P: Platform> HostCore<P> {
     }
 
     /// 提交一条要转给 UI 的消息。
+    ///
+    /// - 改配置的无窗口任务在跑时先暂存（保序），免得新拉起的 UI 与它同时写配置；
+    /// - 改配置且 UI 不在时，不拉起 UI 会话，改走 `--headless set-config`（UI 仍是配置唯一写者）；
+    /// - 手势 `begin` 被状态机丢弃（熔断退避）时让钩子取消手势，别一直吞着鼠标输入。
     fn submit(&mut self, now: Instant, message: Outbound) {
+        if self.config_job_running {
+            self.held.push_back(message);
+            return;
+        }
+        if let Outbound::SetConfig { key, value } = &message
+            && !self.machine.ui_alive()
+            && !self.machine.is_quitting()
+        {
+            let job = HeadlessJob::SetConfig {
+                key: key.clone(),
+                value: value.clone(),
+            };
+            match self.platform.spawn_headless(&job) {
+                Ok(()) => {
+                    tracing::info!(%key, "UI 不在，改用无窗口任务写配置");
+                    self.config_job_running = true;
+                    return;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, %key, "拉起写配置的无窗口任务失败，退回会话路径");
+                }
+            }
+        }
+        let is_begin = matches!(
+            &message,
+            Outbound::Gesture {
+                phase: GesturePhase::Begin,
+                ..
+            }
+        );
         let effects = self.machine.submit(now, message);
+        if is_begin
+            && effects
+                .iter()
+                .any(|e| matches!(e, Effect::Notice(Notice::UiCrashLoop)))
+        {
+            // 命令被丢弃了：别让钩子继续吞着这次拖动
+            self.platform.cancel_gesture();
+        }
         self.run_effects(now, effects);
+    }
+
+    /// 无窗口任务结束了。
+    fn on_headless_done(&mut self, now: Instant, kind: HeadlessKind, notice: Option<String>) {
+        match kind {
+            HeadlessKind::UpdateCheck => {
+                self.update_running = false;
+                // 新快照里的到点时间已经往后推了
+                self.load_spec(now, true);
+                if let Some(text) = notice.filter(|text| !text.is_empty()) {
+                    self.show_text(&text);
+                }
+            }
+            HeadlessKind::SetConfig => {
+                self.config_job_running = false;
+                self.load_spec(now, true);
+                // 暂存的消息按序投递；其中又有改配置且 UI 仍不在的，会再起一个任务并把后面的继续暂存
+                let pending = std::mem::take(&mut self.held);
+                for message in pending {
+                    self.submit(now, message);
+                }
+            }
+        }
+    }
+
+    /// 到点的更新检查：拉起 `--headless update-check`；同一个到点时间只拉起一次。
+    fn start_update_check(&mut self) {
+        if self.update_running || self.machine.is_quitting() {
+            return;
+        }
+        self.update_done_for = self.update_due;
+        match self.platform.spawn_headless(&HeadlessJob::UpdateCheck) {
+            Ok(()) => {
+                tracing::info!("到点的更新检查已交给无窗口任务");
+                self.update_running = true;
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "拉起更新检查的无窗口任务失败，等下次快照更新再试")
+            }
+        }
+    }
+
+    /// 按快照里的到点时间安排更新检查：登录后至少再等 [`UPDATE_CHECK_START_DELAY`]；
+    /// 同一个到点时间已经检查过就不再安排（等 UI 写出新快照）。
+    fn schedule_update_check(&mut self, now: Instant, due: Option<u64>) {
+        self.update_due = due;
+        let Some(due) = due else {
+            self.update_at = None;
+            return;
+        };
+        if self.update_done_for == Some(due) {
+            self.update_at = None;
+            return;
+        }
+        let unix = self.platform.unix_now();
+        let wait = Duration::from_secs(due.saturating_sub(unix));
+        let earliest = self
+            .started_at
+            .map_or(now, |started| started + UPDATE_CHECK_START_DELAY);
+        self.update_at = Some((now + wait).max(earliest));
+    }
+
+    /// 按快照装 / 换 / 卸鼠标手势钩子（绑定没变就不动）。
+    fn apply_mouse(&mut self, bindings: &[MouseBindingSpec]) {
+        if self.mouse_applied == bindings {
+            return;
+        }
+        // 先记下再装：装失败也不反复重试，等绑定再变
+        self.mouse_applied = bindings.to_vec();
+        match self.platform.set_mouse_bindings(bindings) {
+            Ok(()) => tracing::info!(bindings = bindings.len(), "鼠标手势绑定已应用"),
+            Err(e) => tracing::warn!(error = %e, "安装鼠标手势钩子失败，手势不可用"),
+        }
+    }
+
+    /// 在托盘悬停提示里放一条文案：`产品名: 文案`。
+    fn show_text(&mut self, text: &str) {
+        let base = self
+            .spec
+            .as_ref()
+            .map_or(crate::view::FALLBACK_TOOLTIP, |spec| {
+                spec.tray.tooltip.as_str()
+            })
+            .to_string();
+        tracing::info!(%text, "托盘提示");
+        self.platform.set_tooltip(&compose_tooltip(&base, text));
     }
 
     /// 执行状态机给出的动作；拉起结果会产生新的动作，所以循环到没有为止。
@@ -355,7 +580,7 @@ impl<P: Platform> HostCore<P> {
                 Effect::GrantForeground { pid } => self.platform.grant_foreground(pid),
                 Effect::KillUi { pid } => self.platform.kill_ui(pid),
                 Effect::Notice(notice) => self.show_notice(notice),
-                Effect::FromUi(message) => self.handle_ui_message(message),
+                Effect::FromUi(message) => self.handle_ui_message(now, message),
                 Effect::GaveUp { seq } => tracing::warn!(seq, "命令重发后仍未确认，已放弃"),
                 Effect::UiGone => self.schedule_trim(now + TRIM_AFTER_UI_EXIT),
                 Effect::ExitHost { restart } => self.exit = Some(restart),
@@ -364,11 +589,15 @@ impl<P: Platform> HostCore<P> {
     }
 
     /// 处理 UI 发来的信息类消息。
-    fn handle_ui_message(&mut self, message: UiMessage) {
+    fn handle_ui_message(&mut self, now: Instant, message: UiMessage) {
         match message {
             UiMessage::Tooltip { text } => self.platform.set_tooltip(&text),
-            UiMessage::SpecChanged { .. } => self.load_spec(true),
-            UiMessage::HotkeysApply { rev } => self.apply_hotkeys_request(rev),
+            UiMessage::SpecChanged { .. } => self.load_spec(now, true),
+            UiMessage::HotkeysApply { rev } => self.apply_hotkeys_request(now, rev),
+            UiMessage::CancelGesture { id } => {
+                tracing::debug!(id, "UI 放弃了这次鼠标手势，取消钩子里的手势");
+                self.platform.cancel_gesture();
+            }
             UiMessage::Activity {
                 windows,
                 pins,
@@ -383,7 +612,7 @@ impl<P: Platform> HostCore<P> {
     ///
     /// `register_hotkeys` 为假时只更新托盘与开关状态，热键由调用方随后自己注册
     /// （设置页改热键的流程要拿注册结果，不能在这里先注册一遍）。
-    fn load_spec(&mut self, register_hotkeys: bool) {
+    fn load_spec(&mut self, now: Instant, register_hotkeys: bool) {
         match self.platform.read_spec() {
             Ok(spec) => {
                 let unchanged = !self.fallback_active
@@ -396,13 +625,13 @@ impl<P: Platform> HostCore<P> {
                     return;
                 }
                 self.fallback_active = false;
-                self.apply_spec(spec, register_hotkeys);
+                self.apply_spec(now, spec, register_hotkeys);
             }
             Err(error) => {
                 tracing::warn!(%error, "读取快照失败");
                 if self.spec.is_none() {
                     self.fallback_active = true;
-                    self.apply_spec(fallback_spec(), register_hotkeys);
+                    self.apply_spec(now, fallback_spec(), register_hotkeys);
                 }
                 self.request_emit_spec();
             }
@@ -420,8 +649,8 @@ impl<P: Platform> HostCore<P> {
         }
     }
 
-    /// 应用一份快照：闸门状态、托盘、热键。
-    fn apply_spec(&mut self, spec: HostSpec, register_hotkeys: bool) {
+    /// 应用一份快照：闸门状态、托盘、热键、鼠标手势钩子、UI 常驻要求、更新检查的到点时间。
+    fn apply_spec(&mut self, now: Instant, spec: HostSpec, register_hotkeys: bool) {
         if !self.fallback_active {
             self.gate_on = spec.gate.fullscreen_disable;
         }
@@ -433,7 +662,24 @@ impl<P: Platform> HostCore<P> {
                 self.register(&wanted);
             }
         }
+        if !self.fallback_active {
+            self.apply_mouse(&spec.mouse);
+            self.apply_keep_alive(now, &spec);
+            self.schedule_update_check(now, spec.flags.update_due_at);
+        }
         self.spec = Some(spec);
+    }
+
+    /// 同步 UI 常驻要求：状态机据此在崩溃 / 退避结束后补拉；启动完成后才出现的要求
+    /// （快照生成任务刚跑完、读到真快照）当场拉起一个 UI。
+    fn apply_keep_alive(&mut self, now: Instant, spec: &HostSpec) {
+        let resident = spec.flags.needs_resident_ui();
+        let newly = resident && !self.machine.keep_alive();
+        self.machine.set_keep_alive(resident);
+        if newly && self.started_at.is_some() && !self.machine.ui_alive() {
+            tracing::info!("快照要求 UI 常驻，拉起 UI");
+            self.submit(now, Outbound::keep_alive());
+        }
     }
 
     /// 按快照与宿主状态显示托盘：只有菜单 / 提示变了就原地换，图标或点击动作变了才整体重建。
@@ -495,8 +741,8 @@ impl<P: Platform> HostCore<P> {
     }
 
     /// UI 请求立即按最新快照重注册热键（设置页改热键），并回报每个配置键的成败。
-    fn apply_hotkeys_request(&mut self, rev: u64) {
-        self.load_spec(false);
+    fn apply_hotkeys_request(&mut self, now: Instant, rev: u64) {
+        self.load_spec(now, false);
         let hotkeys = self
             .spec
             .as_ref()

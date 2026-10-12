@@ -20,14 +20,14 @@ use super::translate::{
 };
 use super::typing::{KeySink, SyncOutcome, SystemKeySink, Typer};
 use super::view::{DictationView, WINDOW_HEIGHT, WINDOW_WIDTH, bottom_right_rect};
-use crate::app_runtime::{TRAY_TOOLTIP, UiEvent, ui_prefs_from_config};
+use crate::app_runtime::{TRAY_TOOLTIP, TooltipSink, UiEvent, ui_prefs_from_config};
 use crate::capture_flow::pick_monitor;
 use crate::settings_state::SharedConfig;
 use crate::sys_prefs::system_ui_language;
 use crate::translate_service::{TranslateConfig, TranslateHost};
 use snow_ui::shell::inbox::MainThreadInbox;
 use snow_ui::shell::overlay::cursor_screen_position;
-use snow_ui::shell::tray::TrayService;
+
 use snow_ui::shell::window::{Placement, WindowSpec};
 use snow_ui::ui::{Context, Entity, ShellContext, ShellWindow};
 use std::path::PathBuf;
@@ -134,12 +134,12 @@ impl DictationHost {
     ///
     /// # 参数
     /// - `cx`：外壳上下文。
-    /// - `tray`：托盘服务（用于状态提示）。
+    /// - `tooltip`：托盘提示的出口（单进程改本进程托盘，双进程经宿主）。
     /// - `command`：切换 / 开始 / 结束。
     pub fn command(
         &mut self,
         cx: &mut ShellContext,
-        tray: Option<&TrayService>,
+        tooltip: TooltipSink<'_>,
         command: DictationCommand,
     ) {
         let now = Instant::now();
@@ -149,12 +149,12 @@ impl DictationHost {
             DictationCommand::Toggle | DictationCommand::Stop
                 if !active && self.drain.is_some() =>
             {
-                self.finish_drain(cx, tray, DrainStep::Forced)
+                self.finish_drain(cx, tooltip, DrainStep::Forced)
             }
-            DictationCommand::Toggle if active => self.stop(cx, tray, now),
-            DictationCommand::Stop if active => self.stop(cx, tray, now),
+            DictationCommand::Toggle if active => self.stop(cx, tooltip, now),
+            DictationCommand::Stop if active => self.stop(cx, tooltip, now),
             DictationCommand::Toggle | DictationCommand::Start if !active => {
-                self.begin(cx, tray, now)
+                self.begin(cx, tooltip, now)
             }
             _ => {}
         }
@@ -164,26 +164,26 @@ impl DictationHost {
     ///
     /// # 参数
     /// - `cx`：外壳上下文。
-    /// - `tray`：托盘服务。
-    pub fn tick(&mut self, cx: &mut ShellContext, tray: Option<&TrayService>) {
+    /// - `tooltip`：托盘提示的出口。
+    pub fn tick(&mut self, cx: &mut ShellContext, tooltip: TooltipSink<'_>) {
         let now = Instant::now();
         let effects = self.engine.poll(now);
-        self.apply(cx, tray, effects, now);
+        self.apply(cx, tooltip, effects, now);
 
         if self.probe_deadline.is_some_and(|d| now >= d) && self.plan_pending() {
-            self.decide_route(cx, tray, None);
+            self.decide_route(cx, tooltip, None);
         }
         if self.typing_behind() {
-            self.type_sync(cx, tray, !self.engine.listening());
+            self.type_sync(cx, tooltip, !self.engine.listening());
         }
         if self.flush_deadline.is_some_and(|d| now >= d) {
             self.flush_deadline = None;
             if self.typing_behind() {
-                self.fall_back(cx, tray, RouteNote::TypingStuck);
+                self.fall_back(cx, tooltip, RouteNote::TypingStuck);
             }
         }
-        self.watch_overlay_dismissed(cx, tray, now);
-        self.tick_drain(cx, tray, now);
+        self.watch_overlay_dismissed(cx, tooltip, now);
+        self.tick_drain(cx, tooltip, now);
         self.sync_badge(cx);
         if !self.engine.active()
             && self.flush_deadline.is_none()
@@ -198,18 +198,18 @@ impl DictationHost {
     ///
     /// # 参数
     /// - `cx`：外壳上下文。
-    /// - `tray`：托盘服务。
+    /// - `tooltip`：托盘提示的出口。
     /// - `round`：探测所属轮次；过期的结果被丢弃。
     /// - `verdict`：能否键入的判定。
     pub fn probed(
         &mut self,
         cx: &mut ShellContext,
-        tray: Option<&TrayService>,
+        tooltip: TooltipSink<'_>,
         round: u64,
         verdict: Verdict,
     ) {
         if round == self.round && self.plan_pending() {
-            self.decide_route(cx, tray, Some(verdict));
+            self.decide_route(cx, tooltip, Some(verdict));
         }
     }
 
@@ -256,7 +256,7 @@ impl DictationHost {
     }
 
     /// 开始新一轮。
-    fn begin(&mut self, cx: &mut ShellContext, tray: Option<&TrayService>, now: Instant) {
+    fn begin(&mut self, cx: &mut ShellContext, tooltip: TooltipSink<'_>, now: Instant) {
         let config = DictationConfig::from_document(self.config.borrow().document());
         self.round += 1;
         self.transcript.clear();
@@ -283,7 +283,7 @@ impl DictationHost {
             }
             self.start_ticker();
         }
-        self.apply(cx, tray, effects, now);
+        self.apply(cx, tooltip, effects, now);
     }
 
     /// 每轮开始时算一次翻译可用性并装配本轮翻译线程；不可用时只留原因，供状态提示。
@@ -318,9 +318,9 @@ impl DictationHost {
     }
 
     /// 请求结束当前一轮。
-    fn stop(&mut self, cx: &mut ShellContext, tray: Option<&TrayService>, now: Instant) {
+    fn stop(&mut self, cx: &mut ShellContext, tooltip: TooltipSink<'_>, now: Instant) {
         let effects = self.engine.stop(now);
-        self.apply(cx, tray, effects, now);
+        self.apply(cx, tooltip, effects, now);
     }
 
     /// 检查并拉起工作进程。
@@ -394,22 +394,22 @@ impl DictationHost {
     fn apply(
         &mut self,
         cx: &mut ShellContext,
-        tray: Option<&TrayService>,
+        tooltip: TooltipSink<'_>,
         effects: Vec<Effect>,
         now: Instant,
     ) {
         for effect in effects {
             match effect {
                 Effect::Begin => self.on_begin(cx),
-                Effect::Loading => self.set_status(cx, tray, Status::Loading),
+                Effect::Loading => self.set_status(cx, tooltip, Status::Loading),
                 Effect::Listening => {
                     let status = self.listening_status();
-                    self.set_status(cx, tray, status);
+                    self.set_status(cx, tooltip, status);
                 }
                 Effect::Partial(text) => {
                     self.transcript.set_partial(&text);
                     self.with_view(cx, |v, vcx| v.push_partial(&text, vcx));
-                    self.type_sync(cx, tray, false);
+                    self.type_sync(cx, tooltip, false);
                 }
                 Effect::Final(text) => {
                     self.transcript.push_final(&text);
@@ -420,11 +420,11 @@ impl DictationHost {
                             v.set_translation(seq, TranslationState::Pending, vcx)
                         });
                     }
-                    self.type_sync(cx, tray, true);
+                    self.type_sync(cx, tooltip, true);
                 }
-                Effect::Finishing => self.set_status(cx, tray, Status::Finishing),
-                Effect::Done => self.on_ended(cx, tray, now, Status::Done),
-                Effect::Failed(failure) => self.on_ended(cx, tray, now, Status::Failed(failure)),
+                Effect::Finishing => self.set_status(cx, tooltip, Status::Finishing),
+                Effect::Done => self.on_ended(cx, tooltip, now, Status::Done),
+                Effect::Failed(failure) => self.on_ended(cx, tooltip, now, Status::Failed(failure)),
             }
         }
     }
@@ -441,7 +441,7 @@ impl DictationHost {
     fn on_ended(
         &mut self,
         cx: &mut ShellContext,
-        tray: Option<&TrayService>,
+        tooltip: TooltipSink<'_>,
         now: Instant,
         status: Status,
     ) {
@@ -461,18 +461,18 @@ impl DictationHost {
             self.plan.overlay = true;
         }
         let finished_ok = !status.is_failed();
-        self.set_status(cx, tray, status);
+        self.set_status(cx, tooltip, status);
         if self.plan.overlay {
             self.ensure_overlay(cx);
         }
         if self.plan.typing {
-            self.type_sync(cx, tray, true);
+            self.type_sync(cx, tooltip, true);
             if self.typing_behind() {
                 self.flush_deadline = Some(now + TYPE_FLUSH_TIMEOUT);
             }
         }
         if finished_ok {
-            self.begin_drain(cx, tray, now);
+            self.begin_drain(cx, tooltip, now);
         }
         self.sync_badge(cx);
     }
@@ -481,7 +481,7 @@ impl DictationHost {
     ///
     /// 译文只显示在浮窗里，所以只键入的方案也会打开浮窗；浮窗被用户关掉或打不开时不等。
     /// 没有待译句（含翻译未启用）时什么都不做，行为与原来一致。
-    fn begin_drain(&mut self, cx: &mut ShellContext, tray: Option<&TrayService>, now: Instant) {
+    fn begin_drain(&mut self, cx: &mut ShellContext, tooltip: TooltipSink<'_>, now: Instant) {
         let Some(drain) = Drain::begin(now, self.translation.pending_count()) else {
             return;
         };
@@ -492,11 +492,11 @@ impl DictationHost {
             return;
         }
         self.drain = Some(drain);
-        self.set_status(cx, tray, Status::Translating);
+        self.set_status(cx, tooltip, Status::Translating);
     }
 
     /// 等译文期间的定时检查：译文回齐则完成，超时则带提示结束。
-    fn tick_drain(&mut self, cx: &mut ShellContext, tray: Option<&TrayService>, now: Instant) {
+    fn tick_drain(&mut self, cx: &mut ShellContext, tooltip: TooltipSink<'_>, now: Instant) {
         let Some(drain) = self.drain else { return };
         let step = if self.dismissed {
             // 浮窗被用户关掉，译文已无处可看
@@ -505,7 +505,7 @@ impl DictationHost {
             drain.step(now, self.translation.pending_count())
         };
         if step != DrainStep::Wait {
-            self.finish_drain(cx, tray, step);
+            self.finish_drain(cx, tooltip, step);
         }
     }
 
@@ -513,7 +513,7 @@ impl DictationHost {
     ///
     /// # 参数
     /// - `step`：结束原因（`Wait` 不应传入，按完成处理）。
-    fn finish_drain(&mut self, cx: &mut ShellContext, tray: Option<&TrayService>, step: DrainStep) {
+    fn finish_drain(&mut self, cx: &mut ShellContext, tooltip: TooltipSink<'_>, step: DrainStep) {
         self.drain = None;
         for seq in self.translation.abandon_pending() {
             self.with_view(cx, |v, vcx| {
@@ -524,51 +524,53 @@ impl DictationHost {
             DrainStep::TimedOut => Status::Failed(Failure::TranslateTimeout),
             _ => Status::Done,
         };
-        self.set_status(cx, tray, status);
+        self.set_status(cx, tooltip, status);
     }
 
     /// 按焦点判定定下本轮输出方案（整轮不变）。
     fn decide_route(
         &mut self,
         cx: &mut ShellContext,
-        tray: Option<&TrayService>,
+        tooltip: TooltipSink<'_>,
         verdict: Option<Verdict>,
     ) {
         self.probe_deadline = None;
         self.plan = decide(self.mode, self.with_overlay, verdict);
         if self.status.is_listening() {
             let status = self.listening_status();
-            self.set_status(cx, tray, status);
+            self.set_status(cx, tooltip, status);
         }
         if self.plan.overlay {
             self.ensure_overlay(cx);
         }
         if self.plan.typing {
-            self.type_sync(cx, tray, true);
+            self.type_sync(cx, tooltip, true);
         }
         self.sync_badge(cx);
     }
 
     /// 把已键入内容修正到当前转写；目标变了或发送失败就退到浮窗。
-    fn type_sync(&mut self, cx: &mut ShellContext, tray: Option<&TrayService>, settle: bool) {
+    fn type_sync(&mut self, cx: &mut ShellContext, tooltip: TooltipSink<'_>, settle: bool) {
         if !self.plan.typing {
             return;
         }
         let desired = self.transcript.full();
         match self.typer.sync(&desired, settle, self.sink.as_mut()) {
             SyncOutcome::Synced | SyncOutcome::Deferred | SyncOutcome::Skipped => {}
-            SyncOutcome::TargetChanged => self.fall_back(cx, tray, RouteNote::TargetLost),
-            SyncOutcome::Failed(reason) => self.fall_back(cx, tray, RouteNote::SendFailed(reason)),
+            SyncOutcome::TargetChanged => self.fall_back(cx, tooltip, RouteNote::TargetLost),
+            SyncOutcome::Failed(reason) => {
+                self.fall_back(cx, tooltip, RouteNote::SendFailed(reason))
+            }
         }
     }
 
     /// 键入出问题：停止键入，浮窗里铺上全部已识别文字，状态里写明原因。
-    fn fall_back(&mut self, cx: &mut ShellContext, tray: Option<&TrayService>, note: RouteNote) {
+    fn fall_back(&mut self, cx: &mut ShellContext, tooltip: TooltipSink<'_>, note: RouteNote) {
         tracing::warn!(?note, "键入中断，文字改在浮窗保留");
         self.plan.fall_back(note);
         if self.status.is_listening() {
             let status = self.listening_status();
-            self.set_status(cx, tray, status);
+            self.set_status(cx, tooltip, status);
         }
         // 浮窗已开（键入时同时显示）就不重铺，免得冲掉用户的编辑；没开则打开并铺上全部转写
         self.ensure_overlay(cx);
@@ -732,30 +734,26 @@ impl DictationHost {
     fn watch_overlay_dismissed(
         &mut self,
         cx: &mut ShellContext,
-        tray: Option<&TrayService>,
+        tooltip: TooltipSink<'_>,
         now: Instant,
     ) {
         if self.overlay_seen_open && self.overlay.is_some() && !self.overlay_open(cx) {
             self.overlay = None;
             self.dismissed = true;
             if self.engine.active() {
-                self.stop(cx, tray, now);
+                self.stop(cx, tooltip, now);
             }
         }
     }
 
     /// 更新状态：记录、同步到浮窗，并刷新托盘悬停提示（进行中显示状态，结束后复原）。
-    fn set_status(&mut self, cx: &mut ShellContext, tray: Option<&TrayService>, status: Status) {
+    fn set_status(&mut self, cx: &mut ShellContext, tooltip: TooltipSink<'_>, status: Status) {
         let locale = crate::app_runtime::locale_of(self.config.borrow().document());
-        let tooltip = match status {
+        let text = match status {
             Status::Done | Status::Failed(_) => TRAY_TOOLTIP.to_string(),
             _ => format!("{TRAY_TOOLTIP} - {}", status.message(locale)),
         };
-        if let Some(tray) = tray
-            && let Err(e) = tray.set_tooltip(tooltip)
-        {
-            tracing::debug!(error = %e, "更新托盘提示失败");
-        }
+        tooltip.set(text);
         self.status = status.clone();
         self.with_view(cx, |v, vcx| v.set_status(status, vcx));
     }

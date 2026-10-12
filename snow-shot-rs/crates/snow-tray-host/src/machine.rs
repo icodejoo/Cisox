@@ -15,7 +15,7 @@
 use crate::breaker::{BreakerState, CrashBreaker};
 use crate::focus::{GRANT_ON_SPAWN, grant_for_forward};
 use crate::queue::{CommandQueue, Outbound, PushOutcome};
-use snow_host_protocol::message::{HelloError, HostMessage, UiMessage, check_hello};
+use snow_host_protocol::message::{GesturePhase, HelloError, HostMessage, UiMessage, check_hello};
 use snow_host_protocol::seq::{ExitDecision, HostSeq};
 use snow_host_protocol::{ACK_TIMEOUT, EXIT_WAIT_TIMEOUT, HELLO_TIMEOUT};
 use std::collections::VecDeque;
@@ -175,6 +175,8 @@ pub struct HostMachine {
     pins: u32,
     /// 管道服务端看到的客户端进程 ID（用来核对 `hello` 里自报的 PID）。
     connected_pid: Option<u32>,
+    /// 快照要求 UI 常驻（MCP / OCR 预热）：崩溃或退避结束后宿主要补拉一个。
+    keep_alive: bool,
 }
 
 impl Default for HostMachine {
@@ -197,7 +199,31 @@ impl HostMachine {
             quit: None,
             pins: 0,
             connected_pid: None,
+            keep_alive: false,
         }
+    }
+
+    /// 设置“UI 要常驻”标志（来自快照的保活原因，见 `HostFlags::needs_resident_ui`）。
+    ///
+    /// 置位后，UI 异常退出（没跳闸）会补拉一个，熔断退避结束时也会补拉；正常的 `exit_ok` 退出不补拉。
+    ///
+    /// # 参数
+    /// - `keep_alive`：是否需要常驻。
+    pub fn set_keep_alive(&mut self, keep_alive: bool) {
+        self.keep_alive = keep_alive;
+    }
+
+    /// 当前是否要求 UI 常驻。
+    pub fn keep_alive(&self) -> bool {
+        self.keep_alive
+    }
+
+    /// UI 当前是否在运行或正在启动（可以直接收命令的状态，用来决定 set-config 走会话还是无窗口任务）。
+    pub fn ui_alive(&self) -> bool {
+        matches!(
+            self.state,
+            State::Starting(_) | State::Running { .. } | State::Exiting(_)
+        )
     }
 
     /// 当前阶段。
@@ -393,10 +419,8 @@ impl HostMachine {
                 out.push(Effect::CloseSession { generation });
                 let pins = std::mem::take(&mut self.pins);
                 let opened = self.record_crash(now, &mut out);
-                if !opened && pins > 0 && self.quit.is_none() {
-                    tracing::info!(pins, "崩溃前有贴图，自动拉起 UI 恢复");
-                    self.enqueue(Outbound::RestorePins, now);
-                    self.start_ui(now, &mut out);
+                if !opened && self.quit.is_none() {
+                    self.recover_after_crash(now, pins, &mut out);
                 }
             }
             State::Exiting(_) => {
@@ -461,7 +485,11 @@ impl HostMachine {
     /// 运行时要执行的动作。
     pub fn on_tick(&mut self, now: Instant) -> Vec<Effect> {
         let mut out = Vec::new();
-        self.leave_backoff_if_due(now);
+        if self.leave_backoff_if_due(now) && self.keep_alive && self.quit.is_none() {
+            tracing::info!("熔断退避结束，UI 需要常驻，补拉一个");
+            self.enqueue(Outbound::keep_alive(), now);
+            self.start_ui(now, &mut out);
+        }
         let expired = self.queue.expire(now);
         if expired > 0 {
             tracing::warn!(expired, "队列里的命令超过 30 秒未能投递，已丢弃");
@@ -519,13 +547,36 @@ impl HostMachine {
     }
 
     /// 退避期满就回到 `Absent`。
-    fn leave_backoff_if_due(&mut self, now: Instant) {
+    ///
+    /// # 返回
+    /// 本次是否刚从退避里出来。
+    fn leave_backoff_if_due(&mut self, now: Instant) -> bool {
         if let State::Backoff { until } = self.state
             && now >= until
         {
             tracing::info!("熔断退避结束，恢复拉起 UI");
             self.breaker.open_until(now);
             self.state = State::Absent;
+            return true;
+        }
+        false
+    }
+
+    /// UI 崩溃（没跳闸）后的恢复：崩溃前有贴图就恢复贴图（方案 §10 第 9 条）；快照要求常驻就补拉一个。
+    fn recover_after_crash(&mut self, now: Instant, pins: u32, out: &mut Vec<Effect>) {
+        let mut respawn = false;
+        if pins > 0 {
+            tracing::info!(pins, "崩溃前有贴图，自动拉起 UI 恢复");
+            self.enqueue(Outbound::RestorePins, now);
+            respawn = true;
+        }
+        if self.keep_alive {
+            tracing::info!("崩溃前 UI 要求常驻，自动补拉");
+            self.enqueue(Outbound::keep_alive(), now);
+            respawn = true;
+        }
+        if respawn {
+            self.start_ui(now, out);
         }
     }
 
@@ -556,12 +607,15 @@ impl HostMachine {
         }
         let seq = self.seq.next();
         let wire = to_wire(seq, &message);
-        self.inflight.push_back(Inflight {
-            seq,
-            message: wire.clone(),
-            sent_at: now,
-            retried: false,
-        });
+        // 手势 `update` 每秒上百条，丢一条无所谓（下一条、`finish` 带着最新位置）：不等确认、不重发
+        if !is_gesture_update(&message) {
+            self.inflight.push_back(Inflight {
+                seq,
+                message: wire.clone(),
+                sent_at: now,
+                retried: false,
+            });
+        }
         out.push(Effect::Send {
             generation,
             message: wire,
@@ -770,14 +824,32 @@ fn to_wire(seq: u64, message: &Outbound) -> HostMessage {
             key: key.clone(),
             value: value.clone(),
         },
-        Outbound::Gesture { phase, id, x, y } => HostMessage::Gesture {
+        Outbound::Gesture {
+            phase,
+            id,
+            action,
+            x,
+            y,
+        } => HostMessage::Gesture {
             seq,
             phase: *phase,
             id: *id,
+            action: action.clone(),
             x: *x,
             y: *y,
         },
     }
+}
+
+/// 是否是手势的 `update` 事件。
+fn is_gesture_update(message: &Outbound) -> bool {
+    matches!(
+        message,
+        Outbound::Gesture {
+            phase: GesturePhase::Update,
+            ..
+        }
+    )
 }
 
 #[cfg(test)]

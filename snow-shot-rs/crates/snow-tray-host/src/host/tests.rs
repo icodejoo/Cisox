@@ -25,11 +25,19 @@ enum Call {
     Hotkeys(Vec<String>),
     Trim,
     Restart,
+    /// 鼠标手势绑定（只记动作标识）。
+    Mouse(Vec<String>),
+    CancelGesture,
+    Headless(HeadlessJob),
 }
 
 /// 假平台。
 #[derive(Default)]
 struct Fake {
+    /// 假的 Unix 秒。
+    unix: u64,
+    /// 无窗口任务是否拉起失败。
+    headless_fails: bool,
     /// 调用记录。
     calls: Vec<Call>,
     /// `read_spec` 的返回（`None` 表示文件不存在）。
@@ -124,6 +132,25 @@ impl Platform for Fake {
     fn restart_host(&mut self) -> Result<(), String> {
         self.calls.push(Call::Restart);
         Ok(())
+    }
+    fn set_mouse_bindings(&mut self, bindings: &[MouseBindingSpec]) -> Result<(), String> {
+        self.calls.push(Call::Mouse(
+            bindings.iter().map(|b| b.action.clone()).collect(),
+        ));
+        Ok(())
+    }
+    fn cancel_gesture(&mut self) {
+        self.calls.push(Call::CancelGesture);
+    }
+    fn spawn_headless(&mut self, job: &HeadlessJob) -> Result<(), String> {
+        if self.headless_fails {
+            return Err("拉不起来".into());
+        }
+        self.calls.push(Call::Headless(job.clone()));
+        Ok(())
+    }
+    fn unix_now(&mut self) -> u64 {
+        self.unix
     }
 }
 
@@ -698,10 +725,11 @@ fn resume_with_failure_reports_reason() {
     )));
 }
 
-/// 切换前台全屏闸门：菜单勾选更新、提示、并让 UI 落盘（set_config）；UI 不在就拉起一个来写。
+/// 切换前台全屏闸门：菜单勾选更新、提示；UI 在就经会话 set_config 让它落盘。
 #[test]
-fn toggling_gate_persists_through_ui() {
+fn toggling_gate_persists_through_live_ui() {
     let (mut core, t0) = started(Some(spec(1)));
+    let (generation, _) = bring_up_ui(&mut core, t0);
     take_calls(&mut core);
     core.handle(
         t0,
@@ -726,7 +754,122 @@ fn toggling_gate_persists_through_ui() {
         }
     ));
     assert!(calls.contains(&Call::Tooltip("Cisox: gate on".into())));
-    assert!(calls.contains(&Call::SpawnUi(1)), "UI 不在则拉起它来落盘");
+    assert!(
+        calls.iter().all(|c| !matches!(c, Call::Headless(_))),
+        "UI 在就不起无窗口任务"
+    );
+    assert!(calls.contains(&Call::Send(
+        generation,
+        HostMessage::SetConfig {
+            seq: 2,
+            key: CONFIG_KEY_DISABLE_ON_FULLSCREEN.into(),
+            value: json!(true)
+        }
+    )));
+}
+
+/// 切换前台全屏闸门而 UI 不在：不拉起 UI 会话，改走 `--headless set-config`（UI 仍是配置唯一写者）。
+#[test]
+fn toggling_gate_without_ui_uses_headless_set_config() {
+    let (mut core, t0) = started(Some(spec(1)));
+    take_calls(&mut core);
+    core.handle(
+        t0,
+        Event::Action {
+            id: ACTION_TOGGLE_FULLSCREEN_GATE.into(),
+            origin: ActionOrigin::Tray,
+        },
+    );
+    let calls = take_calls(&mut core);
+    assert!(calls.contains(&Call::Tooltip("Cisox: gate on".into())));
+    assert!(calls.contains(&Call::Headless(HeadlessJob::SetConfig {
+        key: CONFIG_KEY_DISABLE_ON_FULLSCREEN.into(),
+        value: json!(true),
+    })));
+    assert!(
+        !calls.iter().any(|c| matches!(c, Call::SpawnUi(_))),
+        "只写个配置不该拉起完整 UI"
+    );
+    assert_eq!(core.machine().kind(), crate::machine::StateKind::Absent);
+}
+
+/// 写配置的无窗口任务在跑时，新来的消息暂存保序（不与新 UI 同时写配置）；任务结束后按序投递，
+/// 其中又有改配置且 UI 仍不在的，再起一个任务并继续暂存后面的。
+#[test]
+fn messages_are_held_while_headless_config_job_runs() {
+    let (mut core, t0) = started(Some(spec(1)));
+    take_calls(&mut core);
+    let toggle = |core: &mut HostCore<Fake>| {
+        core.handle(
+            t0,
+            Event::Action {
+                id: ACTION_TOGGLE_FULLSCREEN_GATE.into(),
+                origin: ActionOrigin::Tray,
+            },
+        );
+    };
+    toggle(&mut core); // 开 → 起任务 #1
+    toggle(&mut core); // 关 → 任务在跑，暂存
+    core.handle(
+        t0,
+        Event::Action {
+            id: "capture".into(),
+            origin: ActionOrigin::Hotkey,
+        },
+    );
+    let calls = take_calls(&mut core);
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|c| matches!(c, Call::Headless(_)))
+            .count(),
+        1,
+        "同一时刻只有一个写配置任务"
+    );
+    assert!(
+        !calls.iter().any(|c| matches!(c, Call::SpawnUi(_))),
+        "任务在跑，UI 不能起"
+    );
+    // 任务 #1 结束：暂存的“关”再起任务 #2，截图动作继续暂存
+    core.handle(
+        t0,
+        Event::HeadlessDone {
+            kind: HeadlessKind::SetConfig,
+            notice: None,
+        },
+    );
+    let calls = take_calls(&mut core);
+    assert!(calls.contains(&Call::Headless(HeadlessJob::SetConfig {
+        key: CONFIG_KEY_DISABLE_ON_FULLSCREEN.into(),
+        value: json!(false),
+    })));
+    assert!(!calls.iter().any(|c| matches!(c, Call::SpawnUi(_))));
+    // 任务 #2 结束：截图动作终于拉起 UI
+    core.handle(
+        t0,
+        Event::HeadlessDone {
+            kind: HeadlessKind::SetConfig,
+            notice: None,
+        },
+    );
+    let calls = take_calls(&mut core);
+    assert!(calls.contains(&Call::SpawnUi(1)));
+}
+
+/// 无窗口任务拉不起来：退回会话路径（拉起 UI 来写配置）。
+#[test]
+fn headless_spawn_failure_falls_back_to_ui_session() {
+    let (mut core, t0) = started(Some(spec(1)));
+    core.platform.headless_fails = true;
+    take_calls(&mut core);
+    core.handle(
+        t0,
+        Event::Action {
+            id: ACTION_TOGGLE_FULLSCREEN_GATE.into(),
+            origin: ActionOrigin::Tray,
+        },
+    );
+    assert!(take_calls(&mut core).contains(&Call::SpawnUi(1)));
     core.handle(
         t0,
         Event::SessionLine {
@@ -742,6 +885,448 @@ fn toggling_gate_persists_through_ui() {
             value: json!(true)
         }
     )));
+}
+
+/// 带鼠标手势绑定的快照。
+fn spec_with_mouse(rev: u64, actions: &[&str]) -> HostSpec {
+    let mut s = spec(rev);
+    s.mouse = actions
+        .iter()
+        .map(|action| MouseBindingSpec {
+            action: action.to_string(),
+            modifiers: vec!["windows".into()],
+            button: "left_drag".into(),
+        })
+        .collect();
+    s
+}
+
+/// 鼠标钩子只在快照有绑定时才装；绑定没变不重装；绑定清空就卸载（平时系统里没有钩子）。
+#[test]
+fn mouse_hook_follows_spec_bindings() {
+    let (mut core, t0) = started(Some(spec(1)));
+    assert!(
+        !take_calls(&mut core)
+            .iter()
+            .any(|c| matches!(c, Call::Mouse(_))),
+        "没有绑定不装钩子"
+    );
+    let (generation, _) = bring_up_ui(&mut core, t0);
+    take_calls(&mut core);
+    let reload = |core: &mut HostCore<Fake>, s: HostSpec| {
+        let rev = s.rev;
+        core.platform.spec = Some(s);
+        core.handle(
+            t0,
+            Event::SessionLine {
+                generation,
+                line: line(&UiMessage::SpecChanged { rev }),
+            },
+        );
+        take_calls(core)
+    };
+    let calls = reload(
+        &mut core,
+        spec_with_mouse(2, &["screenshot_copy", "screenshot_ocr"]),
+    );
+    assert!(calls.contains(&Call::Mouse(vec![
+        "screenshot_copy".into(),
+        "screenshot_ocr".into()
+    ])));
+    let calls = reload(
+        &mut core,
+        spec_with_mouse(3, &["screenshot_copy", "screenshot_ocr"]),
+    );
+    assert!(
+        !calls.iter().any(|c| matches!(c, Call::Mouse(_))),
+        "绑定没变不重装"
+    );
+    let calls = reload(&mut core, spec_with_mouse(4, &[]));
+    assert!(calls.contains(&Call::Mouse(vec![])), "清空即卸载");
+}
+
+/// 手势全流程（UI 在）：begin 带动作并授权前台，update / finish 按序写出；UI 放弃时让钩子取消。
+#[test]
+fn gesture_flow_with_live_ui() {
+    let (mut core, t0) = started(Some(spec_with_mouse(1, &["screenshot_copy"])));
+    let (generation, _) = bring_up_ui(&mut core, t0);
+    take_calls(&mut core);
+    let gesture = |phase, action: Option<&str>, x| {
+        Event::Gesture(GestureEvent {
+            phase,
+            id: 4,
+            action: action.map(str::to_string),
+            x,
+            y: 7,
+        })
+    };
+    core.handle(
+        t0,
+        gesture(GesturePhase::Begin, Some("screenshot_copy"), 10),
+    );
+    core.handle(t0, gesture(GesturePhase::Update, None, 20));
+    core.handle(t0, gesture(GesturePhase::Finish, None, 30));
+    let calls = take_calls(&mut core);
+    assert_eq!(calls[0], Call::Grant(1001), "begin 先授权前台");
+    let sent: Vec<_> = calls
+        .iter()
+        .filter_map(|c| match c {
+            Call::Send(
+                _,
+                HostMessage::Gesture {
+                    phase, action, x, ..
+                },
+            ) => Some((*phase, action.clone(), *x)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        sent,
+        [
+            (GesturePhase::Begin, Some("screenshot_copy".to_string()), 10),
+            (GesturePhase::Update, None, 20),
+            (GesturePhase::Finish, None, 30),
+        ]
+    );
+    assert_eq!(
+        calls.iter().filter(|c| matches!(c, Call::Grant(_))).count(),
+        1,
+        "update / finish 不抢焦点"
+    );
+    // UI 放弃了这次手势
+    core.handle(
+        t0,
+        Event::SessionLine {
+            generation,
+            line: line(&UiMessage::CancelGesture { id: 4 }),
+        },
+    );
+    assert!(take_calls(&mut core).contains(&Call::CancelGesture));
+}
+
+/// 手势触发时 UI 不在：begin 拉起 UI，期间的 update 只留最新，握手后按序冲出。
+#[test]
+fn gesture_while_ui_absent_spawns_ui_and_coalesces_updates() {
+    let (mut core, t0) = started(Some(spec_with_mouse(1, &["screenshot_copy"])));
+    take_calls(&mut core);
+    let gesture = |phase, action: Option<&str>, x| {
+        Event::Gesture(GestureEvent {
+            phase,
+            id: 1,
+            action: action.map(str::to_string),
+            x,
+            y: 0,
+        })
+    };
+    core.handle(t0, gesture(GesturePhase::Begin, Some("screenshot_copy"), 0));
+    for x in 1..=30 {
+        core.handle(t0, gesture(GesturePhase::Update, None, x));
+    }
+    core.handle(t0, gesture(GesturePhase::Finish, None, 30));
+    assert!(take_calls(&mut core).contains(&Call::SpawnUi(1)));
+    core.handle(
+        t0,
+        Event::SessionConnected {
+            generation: 1,
+            client_pid: 1001,
+        },
+    );
+    core.handle(
+        t0,
+        Event::SessionLine {
+            generation: 1,
+            line: hello_line(1001),
+        },
+    );
+    let phases: Vec<_> = take_calls(&mut core)
+        .into_iter()
+        .filter_map(|c| match c {
+            Call::Send(_, HostMessage::Gesture { phase, x, .. }) => Some((phase, x)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        phases,
+        [
+            (GesturePhase::Begin, 0),
+            (GesturePhase::Update, 30),
+            (GesturePhase::Finish, 30)
+        ]
+    );
+}
+
+/// 熔断退避期间手势 begin 被丢弃：让钩子取消，别一直吞着用户的鼠标输入。
+#[test]
+fn dropped_gesture_begin_cancels_the_hook_gesture() {
+    let (mut core, t0) = started(Some(spec_with_mouse(1, &["screenshot_copy"])));
+    // 连续三次启动失败 → 熔断
+    core.platform.spawn_fails = true;
+    for _ in 0..3 {
+        core.handle(
+            t0,
+            Event::Action {
+                id: "capture".into(),
+                origin: ActionOrigin::Hotkey,
+            },
+        );
+    }
+    assert_eq!(core.machine().kind(), crate::machine::StateKind::Backoff);
+    take_calls(&mut core);
+    core.handle(
+        t0,
+        Event::Gesture(GestureEvent {
+            phase: GesturePhase::Begin,
+            id: 9,
+            action: Some("screenshot_copy".into()),
+            x: 0,
+            y: 0,
+        }),
+    );
+    assert!(take_calls(&mut core).contains(&Call::CancelGesture));
+}
+
+/// 带保活原因的快照。
+fn spec_with_flags(rev: u64, keep_alive: &[&str], pins: u32, due: Option<u64>) -> HostSpec {
+    let mut s = spec(rev);
+    s.flags = HostFlags {
+        keep_alive: keep_alive.iter().map(|r| r.to_string()).collect(),
+        pins_to_restore: pins,
+        update_due_at: due,
+    };
+    s
+}
+
+/// 保活（§10 第 2、3 条）：MCP / OCR 预热开着，宿主登录就拉起 UI 并投递保活占位；两者都没开则托盘态不拉起。
+#[test]
+fn resident_features_spawn_ui_at_startup() {
+    for reason in [
+        snow_host_protocol::KEEP_ALIVE_MCP,
+        snow_host_protocol::KEEP_ALIVE_OCR_HOT_START,
+    ] {
+        let (mut core, t0) = started(Some(spec_with_flags(1, &[reason], 0, None)));
+        assert!(
+            take_calls(&mut core).contains(&Call::SpawnUi(1)),
+            "{reason}"
+        );
+        assert!(core.machine().keep_alive());
+        core.handle(
+            t0,
+            Event::SessionLine {
+                generation: 1,
+                line: hello_line(1001),
+            },
+        );
+        assert!(take_calls(&mut core).iter().any(|c| matches!(
+            c,
+            Call::Send(1, HostMessage::Command { id, .. }) if id == snow_host_protocol::ACTION_KEEP_ALIVE
+        )));
+    }
+    let (mut core, _) = started(Some(spec_with_flags(1, &[], 0, None)));
+    assert!(
+        !take_calls(&mut core)
+            .iter()
+            .any(|c| matches!(c, Call::SpawnUi(_)))
+    );
+    assert!(!core.machine().keep_alive());
+}
+
+/// 语音热键保活（§10 第 4 条）只是“拉起之后别退”：登录时不预拉 UI，但标志会让状态机记住保活。
+#[test]
+fn dictation_hotkey_keep_alive_does_not_spawn_at_startup() {
+    let (mut core, _) = started(Some(spec_with_flags(
+        1,
+        &[snow_host_protocol::KEEP_ALIVE_DICTATION_HOTKEY],
+        0,
+        None,
+    )));
+    assert!(
+        !take_calls(&mut core)
+            .iter()
+            .any(|c| matches!(c, Call::SpawnUi(_)))
+    );
+    assert!(!core.machine().keep_alive(), "语音热键保活不要求宿主补拉");
+}
+
+/// 快照生成完成后才读到“要常驻”：当场拉起 UI（启动时只有内置兜底快照）；设置里关掉后不再要求。
+#[test]
+fn keep_alive_applies_when_real_spec_arrives_later() {
+    let (mut core, t0) = started(None);
+    take_calls(&mut core);
+    core.platform.spec = Some(spec_with_flags(
+        1,
+        &[snow_host_protocol::KEEP_ALIVE_MCP],
+        0,
+        None,
+    ));
+    core.handle(t0, Event::SpecEmitted);
+    assert!(take_calls(&mut core).contains(&Call::SpawnUi(1)));
+    // UI 里关掉 MCP：快照不再要求常驻
+    let (generation, _) = (1, ());
+    core.handle(
+        t0,
+        Event::SessionLine {
+            generation,
+            line: hello_line(1001),
+        },
+    );
+    core.platform.spec = Some(spec_with_flags(2, &[], 0, None));
+    core.handle(
+        t0,
+        Event::SessionLine {
+            generation,
+            line: line(&UiMessage::SpecChanged { rev: 2 }),
+        },
+    );
+    assert!(!core.machine().keep_alive());
+}
+
+/// 登录恢复贴图 + 要求常驻：只拉起一个 UI，恢复贴图与保活占位都投递。
+#[test]
+fn pins_and_resident_spawn_one_ui() {
+    let (mut core, t0) = started(Some(spec_with_flags(
+        1,
+        &[snow_host_protocol::KEEP_ALIVE_MCP],
+        3,
+        None,
+    )));
+    let calls = take_calls(&mut core);
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|c| matches!(c, Call::SpawnUi(_)))
+            .count(),
+        1
+    );
+    core.handle(
+        t0,
+        Event::SessionLine {
+            generation: 1,
+            line: hello_line(1001),
+        },
+    );
+    let sent = take_calls(&mut core)
+        .into_iter()
+        .filter(|c| matches!(c, Call::Send(..)))
+        .count();
+    assert_eq!(sent, 2);
+}
+
+/// 到点的更新检查：登录后至少延后 30 秒才拉起 `--headless update-check`；同一个到点时间只拉起一次。
+#[test]
+fn update_check_runs_once_after_start_delay() {
+    let mut core = HostCore::new(Fake {
+        unix: 1_000_000,
+        spec: Some(spec_with_flags(1, &[], 0, Some(999_000))),
+        ..Fake::default()
+    });
+    let t0 = Instant::now();
+    core.start(t0);
+    take_calls(&mut core);
+    let at = t0 + UPDATE_CHECK_START_DELAY;
+    assert_eq!(
+        core.next_deadline(),
+        Some(t0 + TRIM_AFTER_START),
+        "先是修剪"
+    );
+    core.tick(t0 + TRIM_AFTER_START);
+    assert_eq!(core.next_deadline(), Some(at));
+    core.tick(at - Duration::from_millis(1));
+    assert!(
+        take_calls(&mut core)
+            .iter()
+            .all(|c| !matches!(c, Call::Headless(_)))
+    );
+    core.tick(at);
+    assert_eq!(
+        take_calls(&mut core)
+            .iter()
+            .filter(|c| **c == Call::Headless(HeadlessJob::UpdateCheck))
+            .count(),
+        1
+    );
+    assert_eq!(core.next_deadline(), None, "拉起后没有待办，不轮询");
+    // 检查结束、快照里到点时间没推进（比如检查被策略挡掉）：同一个到点时间不重复检查
+    core.handle(
+        at,
+        Event::HeadlessDone {
+            kind: HeadlessKind::UpdateCheck,
+            notice: None,
+        },
+    );
+    core.tick(at + Duration::from_secs(3600));
+    assert!(
+        take_calls(&mut core)
+            .iter()
+            .all(|c| !matches!(c, Call::Headless(_)))
+    );
+}
+
+/// 更新检查结束后快照里的到点时间推到未来：宿主按差值安排下一次（不轮询，只设一个截止时刻）；
+/// 发现新版本时提示进托盘悬停。
+#[test]
+fn update_check_reschedules_from_new_spec_and_shows_notice() {
+    let mut core = HostCore::new(Fake {
+        unix: 1_000_000,
+        spec: Some(spec_with_flags(1, &[], 0, Some(0))),
+        ..Fake::default()
+    });
+    let t0 = Instant::now();
+    core.start(t0);
+    take_calls(&mut core);
+    let at = t0 + UPDATE_CHECK_START_DELAY;
+    core.tick(at);
+    assert!(take_calls(&mut core).contains(&Call::Headless(HeadlessJob::UpdateCheck)));
+    // UI 侧检查完把快照改成 24 小时后到点
+    core.platform.spec = Some(spec_with_flags(2, &[], 0, Some(1_000_000 + 86_400)));
+    core.handle(
+        at,
+        Event::HeadlessDone {
+            kind: HeadlessKind::UpdateCheck,
+            notice: Some("Update 9.9.9 available".into()),
+        },
+    );
+    let calls = take_calls(&mut core);
+    assert!(calls.contains(&Call::Tooltip("Cisox: Update 9.9.9 available".into())));
+    // 修剪在拉起检查那次 tick 里已经做完，剩下的待办只有 24 小时后的下一次检查
+    assert_eq!(core.next_deadline(), Some(at + Duration::from_secs(86_400)));
+}
+
+/// 快照里没有到点时间（手动更新 / 没配置地址）：不安排更新检查。
+#[test]
+fn no_update_due_means_no_check() {
+    let (mut core, t0) = started(Some(spec_with_flags(1, &[], 0, None)));
+    core.tick(t0 + Duration::from_secs(10_000));
+    assert!(
+        take_calls(&mut core)
+            .iter()
+            .all(|c| !matches!(c, Call::Headless(_)))
+    );
+}
+
+/// 宿主正在退出时不再拉起更新检查。
+#[test]
+fn update_check_is_skipped_while_quitting() {
+    let mut core = HostCore::new(Fake {
+        unix: 10,
+        spec: Some(spec_with_flags(1, &[], 0, Some(0))),
+        ..Fake::default()
+    });
+    let t0 = Instant::now();
+    core.start(t0);
+    take_calls(&mut core);
+    core.handle(
+        t0,
+        Event::Action {
+            id: ACTION_QUIT.into(),
+            origin: ActionOrigin::Tray,
+        },
+    );
+    core.tick(t0 + UPDATE_CHECK_START_DELAY);
+    assert!(
+        take_calls(&mut core)
+            .iter()
+            .all(|c| !matches!(c, Call::Headless(_)))
+    );
 }
 
 /// 设置页改热键：重新注册并把每个配置键的结果回给 UI；冲突的键报失败与原因。

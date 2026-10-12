@@ -35,11 +35,29 @@ pub enum Outbound {
         phase: GesturePhase,
         /// 手势编号。
         id: u64,
+        /// 手势动作标识（只有 `begin` 带）。
+        action: Option<String>,
         /// 横坐标。
         x: i32,
         /// 纵坐标。
         y: i32,
     },
+}
+
+impl Outbound {
+    /// 要求 UI 常驻的占位消息：UI 收到后什么都不做，只为让宿主有东西可发、从而拉起它
+    /// （登录时按 `keep_alive` 拉起、崩溃或退避结束后补拉）。
+    ///
+    /// ```rust
+    /// use snow_tray_host::queue::Outbound;
+    /// assert!(matches!(Outbound::keep_alive(), Outbound::Action { .. }));
+    /// ```
+    pub fn keep_alive() -> Self {
+        Outbound::Action {
+            id: snow_host_protocol::ACTION_KEEP_ALIVE.to_string(),
+            origin: None,
+        }
+    }
 }
 
 /// 队列里的一项。
@@ -205,7 +223,13 @@ mod tests {
 
     /// 构造手势消息。
     fn gesture(phase: GesturePhase, id: u64, x: i32) -> Outbound {
-        Outbound::Gesture { phase, id, x, y: 0 }
+        Outbound::Gesture {
+            phase,
+            id,
+            action: None,
+            x,
+            y: 0,
+        }
     }
 
     /// 取出全部消息（测试用，时间取入队时刻）。

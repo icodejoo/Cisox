@@ -10,6 +10,7 @@
 //! - [`queue`]：命令队列（64 条 / 30s / 手势 update 只留最新）。
 //! - [`breaker`]：崩溃熔断（60s 内 3 次 → 退避 5 分钟）。
 //! - [`focus`]：前台焦点授权的决策。
+//! - [`gesture`]：鼠标手势的纯逻辑（快照绑定还原、钩子事件转消息、`update` 节流）。
 //! - [`host`]：宿主核心（状态机 + 快照 + 暂停 / 闸门 + 托盘与热键的应用），系统调用都在 [`host::Platform`] 后面。
 //! - [`view`]：从快照算出实际要显示 / 注册的东西（纯函数）。
 //! - [`convert`]：快照类型转 `snow-shell-core` 的托盘 / 热键类型。
@@ -23,6 +24,7 @@ pub mod breaker;
 pub mod cli;
 pub mod convert;
 pub mod focus;
+pub mod gesture;
 pub mod harden;
 pub mod host;
 pub mod host_log;

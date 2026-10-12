@@ -6,24 +6,29 @@
 //! [`HostCore`](crate::host::HostCore) 里。
 
 use crate::convert::{binding_from_spec, origin_from_shell, tray_menu, tray_spec_from_plan};
-use crate::host::{Event, Platform, SpawnedUi, TrayPlan};
-use snow_host_protocol::TOKEN_BYTES;
+use crate::gesture::{GestureThrottle, bindings_from_spec, event_from_drag};
+use crate::host::{Event, HeadlessKind, Platform, SpawnedUi, TrayPlan};
 use snow_host_protocol::frame::encode_line;
-use snow_host_protocol::launch::{FLAG_HEADLESS, HEADLESS_EMIT_SPEC, UiLaunch};
+use snow_host_protocol::launch::{FLAG_HEADLESS, HEADLESS_EMIT_SPEC, HeadlessJob, UiLaunch};
 use snow_host_protocol::message::{HostMessage, hex_lower};
-use snow_host_protocol::spec::{HostSpec, HotkeySpec, MenuItemSpec, TrayTheme};
+use snow_host_protocol::spec::{HostSpec, HotkeySpec, MenuItemSpec, MouseBindingSpec, TrayTheme};
 use snow_host_protocol::spec_file::{SpecFileError, read_spec};
+use snow_host_protocol::{GESTURE_MIN_UPDATE_INTERVAL, MAX_NOTICE_BYTES, TOKEN_BYTES};
 use snow_platform::CREATE_NO_WINDOW;
+use snow_platform::global_mouse::GlobalMouseService;
 use snow_platform::single_instance::line_pipe::pipe_name_for;
 use snow_platform::single_instance::session_pipe::{PipeWriter, SessionEvent, SessionPipeServer};
 use snow_shell_core::dispatch::Dispatcher;
 use snow_shell_core::hotkey::{HotkeyHandle, HotkeyService};
 use snow_shell_core::native::set_popup_menu_dark;
 use snow_shell_core::tray::TrayService;
+use std::io::Read;
 use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::Mutex;
 use std::sync::mpsc::Sender;
+use std::time::Instant;
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
 use windows_sys::Win32::Security::Cryptography::ProcessPrng;
 use windows_sys::Win32::System::ProcessStatus::K32EmptyWorkingSet;
@@ -38,6 +43,10 @@ pub const UI_EXE_NAME: &str = "snow-shot-ui.exe";
 
 /// 环境变量：覆盖 UI 进程 exe 的路径（开发与验收脚本用；正式安装不设置）。
 pub const ENV_UI_EXE: &str = "SNOW_UI_EXE";
+
+/// 环境变量：值为 `1` 时鼠标手势钩子接受 `SendInput` 注入的输入（只给真屏验收脚本用，正式使用不设置：
+/// 默认忽略注入输入，免得被别的程序模拟的鼠标键盘误触发手势）。
+pub const ENV_ACCEPT_INJECTED_INPUT: &str = "SNOW_HOST_ACCEPT_INJECTED_INPUT";
 
 /// 随机会话标识的字节数（编码成十六进制后进入管道名）。
 const LAUNCH_ID_BYTES: usize = 8;
@@ -118,6 +127,8 @@ pub struct WinPlatform {
     hotkeys: Option<HotkeyService<String>>,
     /// 已注册的热键句柄。
     hotkey_handles: Vec<HotkeyHandle>,
+    /// 鼠标手势钩子服务（快照里有绑定才启动；丢弃即卸载钩子）。
+    mouse: Option<GlobalMouseService>,
 }
 
 impl WinPlatform {
@@ -143,6 +154,7 @@ impl WinPlatform {
             tray: None,
             hotkeys: None,
             hotkey_handles: Vec::new(),
+            mouse: None,
         }
     }
 
@@ -194,6 +206,24 @@ fn random_hex(n: usize) -> Result<String, String> {
         return Err("ProcessPrng 失败".to_string());
     }
     Ok(hex_lower(&bytes))
+}
+
+/// 读无窗口任务标准输出里的提示文案：读到结束（最多 [`MAX_NOTICE_BYTES`] 字节），取第一行；空行 / 没输出为 `None`。
+///
+/// # 参数
+/// - `out`：子进程的标准输出读端。
+///
+/// ```ignore
+/// assert_eq!(read_notice("有新版本 1.2\nignored".as_bytes()), Some("有新版本 1.2".to_string()));
+/// ```
+fn read_notice(out: impl Read) -> Option<String> {
+    let mut bytes = Vec::new();
+    out.take(MAX_NOTICE_BYTES as u64)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    let text = String::from_utf8_lossy(&bytes);
+    let first = text.lines().next()?.trim();
+    (!first.is_empty()).then(|| first.to_string())
 }
 
 impl Platform for WinPlatform {
@@ -395,6 +425,79 @@ impl Platform for WinPlatform {
         unsafe {
             K32EmptyWorkingSet(GetCurrentProcess());
         }
+    }
+
+    fn set_mouse_bindings(&mut self, bindings: &[MouseBindingSpec]) -> Result<(), String> {
+        let parsed = bindings_from_spec(bindings);
+        if parsed.is_empty() {
+            // 没有绑定就不留钩子：丢弃服务即卸载键盘 / 鼠标钩子并结束线程
+            self.mouse = None;
+            return Ok(());
+        }
+        if self.mouse.is_none() {
+            let tx = self.tx.clone();
+            let throttle = Mutex::new(GestureThrottle::new(GESTURE_MIN_UPDATE_INTERVAL));
+            // 钩子线程里只做转换、节流、投事件，立即返回（不碰 IME / GPUI，也不做 IO）
+            let service = GlobalMouseService::start(Box::new(move |drag| {
+                let gesture = event_from_drag(&drag);
+                let admitted = throttle
+                    .lock()
+                    .map(|mut throttle| throttle.admit(Instant::now(), &gesture))
+                    .unwrap_or(true);
+                if admitted {
+                    let _ = tx.send(Event::Gesture(gesture));
+                }
+            }))?;
+            if std::env::var_os(ENV_ACCEPT_INJECTED_INPUT).is_some_and(|value| value == "1") {
+                tracing::warn!("鼠标手势钩子接受注入输入（验收模式）");
+                service.accept_injected_input(true);
+            }
+            self.mouse = Some(service);
+        }
+        if let Some(service) = self.mouse.as_ref() {
+            service.set_bindings(parsed);
+        }
+        Ok(())
+    }
+
+    fn cancel_gesture(&mut self) {
+        if let Some(service) = self.mouse.as_ref() {
+            service.cancel();
+        }
+    }
+
+    fn spawn_headless(&mut self, job: &HeadlessJob) -> Result<(), String> {
+        let kind = HeadlessKind::of(job).ok_or_else(|| "生成快照不走通用无窗口路径".to_string())?;
+        let mut command = Command::new(&self.ui_exe);
+        command
+            .args(job.to_args())
+            .creation_flags(CREATE_NO_WINDOW)
+            .stdin(Stdio::null())
+            .stderr(Stdio::null());
+        // 更新检查把提示文案写到标准输出第一行，其余任务不需要输出
+        command.stdout(if kind == HeadlessKind::UpdateCheck {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        });
+        let mut child = command
+            .spawn()
+            .map_err(|e| format!("拉起 {} 失败: {e}", self.ui_exe.display()))?;
+        let tx = self.tx.clone();
+        std::thread::Builder::new()
+            .name("headless-watch".into())
+            .spawn(move || {
+                let notice = child.stdout.take().and_then(read_notice);
+                let status = child.wait();
+                tracing::info!(?kind, ?status, "无窗口任务已结束");
+                let _ = tx.send(Event::HeadlessDone { kind, notice });
+            })
+            .map(|_| ())
+            .map_err(|e| format!("创建无窗口任务等待线程失败: {e}"))
+    }
+
+    fn unix_now(&mut self) -> u64 {
+        snow_platform::unix_time::unix_secs()
     }
 
     fn restart_host(&mut self) -> Result<(), String> {

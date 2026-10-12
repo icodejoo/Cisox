@@ -6,6 +6,7 @@
 //! 所属阶段：A（事件循环骨架）+ B1（截图触发 → 采集光标所在显示器 → 冻结覆盖窗）。
 //! 采集在后台线程完成，结果经收件箱回到主线程再建窗。
 
+use crate::activity::{ActivityTracker, reason};
 use crate::capture_flow::{CaptureCollector, CapturePayload, pick_monitor, spawn_capture};
 use crate::desktop_frames::{DesktopFrames, MonitorFrame};
 use crate::dictation::focus::Verdict;
@@ -14,12 +15,12 @@ use crate::dictation::{DictationCommand, DictationHost};
 use crate::direct_capture::{DirectHistory, DirectResult, spawn_direct_capture};
 use crate::frozen_frame::FrozenFrame;
 use crate::history_nav::ThreadedHistoryProvider;
-use crate::hotkey_plan::{PlannedHotkey, dictation_plan, hotkey_plan, quick_action_plan};
 use crate::history_store::{
     HistoryRecorder, HistorySource, HistoryStore, Thumbnail, policy_from_document,
 };
 use crate::history_view::{HistoryAction, HistoryView};
 use crate::host_link::HostEvent;
+use crate::hotkey_plan::{PlannedHotkey, dictation_plan, hotkey_plan, quick_action_plan};
 use crate::ocr_assets::{ENV_OCR_ASSET_DIR, ocr_root};
 use crate::ocr_backend::{OcrInput, select_from_document};
 use crate::ocr_client::OcrError;
@@ -112,6 +113,67 @@ use std::time::Duration;
 mod host_session;
 
 pub(crate) use host_session::HostSession;
+
+/// 托盘悬停提示的出口：单进程直接改本进程的托盘；双进程经会话管道发 `tooltip` 消息，由宿主改；
+/// 两者都没有（托盘被关 / 启动失败）则忽略。语音状态等原先直接读写 `state.tray` 的地方都走它。
+#[derive(Clone, Copy)]
+pub struct TooltipSink<'a> {
+    /// 实际去向。
+    target: TooltipTarget<'a>,
+}
+
+/// 提示的去向。
+#[derive(Clone, Copy)]
+enum TooltipTarget<'a> {
+    /// 本进程的托盘（单进程）。
+    Tray(&'a TrayService),
+    /// 宿主（双进程）。
+    Host(&'a HostSession),
+    /// 没有托盘可改。
+    Nowhere,
+}
+
+impl<'a> TooltipSink<'a> {
+    /// 按运行形态选出口：有宿主会话走宿主（托盘在宿主里），否则有托盘服务走托盘，都没有则忽略。
+    ///
+    /// # 参数
+    /// - `host`：宿主会话（双进程才有）。
+    /// - `tray`：本进程的托盘服务（单进程才有）。
+    ///
+    /// ```ignore
+    /// let sink = TooltipSink::new(state.host.as_ref(), state.tray.as_ref());
+    /// sink.set("Cisox - 正在聆听".to_string());
+    /// ```
+    pub(crate) fn new(host: Option<&'a Rc<HostSession>>, tray: Option<&'a TrayService>) -> Self {
+        let target = match (host, tray) {
+            (Some(host), _) => TooltipTarget::Host(host),
+            (None, Some(tray)) => TooltipTarget::Tray(tray),
+            (None, None) => TooltipTarget::Nowhere,
+        };
+        Self { target }
+    }
+
+    /// 把悬停提示改成 `text`（失败只记日志，不影响主流程）。
+    ///
+    /// # 参数
+    /// - `text`：提示全文。
+    pub fn set(&self, text: String) {
+        match self.target {
+            TooltipTarget::Tray(tray) => {
+                if let Err(e) = tray.set_tooltip(text) {
+                    tracing::debug!(error = %e, "更新托盘提示失败");
+                }
+            }
+            TooltipTarget::Host(host) => host.send_tooltip(&text),
+            TooltipTarget::Nowhere => {}
+        }
+    }
+
+    /// 提示会不会真的送达某处（测试与日志用）。
+    pub fn is_connected(&self) -> bool {
+        !matches!(self.target, TooltipTarget::Nowhere)
+    }
+}
 
 /// 设置页自动化脚本路径环境变量（JSON 操作数组，验收用）。
 pub const ENV_SETTINGS_AUTOTEST: &str = "SNOW_SETTINGS_AUTOTEST";
@@ -1495,6 +1557,8 @@ pub struct AppState {
     mcp: crate::mcp_host::McpHost,
     /// 与托盘宿主的会话（只有双进程模式 `--ui` 才有；`--resident` 单进程为 `None`）。
     host: Option<Rc<HostSession>>,
+    /// 活动守卫计数器：后台 job、下载、历史写入等持守卫阻止双进程模式下的 UI 退出（方案 §5）。
+    activity: Arc<ActivityTracker>,
 }
 
 impl AppState {
@@ -1518,9 +1582,18 @@ impl AppState {
     ) -> Self {
         let closed_inbox = inbox.clone();
         let history_inbox = inbox.clone();
-        let history = match HistoryRecorder::start(data_root, move || {
-            history_inbox.push(UiEvent::HistoryChanged);
-        }) {
+        // 守卫放行时唤醒主线程重新判断能否退出（否则最后一个后台活动结束后没有事件再触发判断）
+        let wake_inbox = inbox.clone();
+        let activity = ActivityTracker::new(move || {
+            wake_inbox.push(UiEvent::Host(HostEvent::WindowsChanged));
+        });
+        let history = match HistoryRecorder::start_tracked(
+            data_root,
+            move || {
+                history_inbox.push(UiEvent::HistoryChanged);
+            },
+            Arc::clone(&activity),
+        ) {
             Ok(recorder) => Some(Arc::new(recorder)),
             Err(e) => {
                 tracing::warn!(error = %e, "启动截图历史写入线程失败，历史功能不可用");
@@ -1582,7 +1655,47 @@ impl AppState {
             gesture: None,
             mcp: crate::mcp_host::McpHost::new(mcp_inbox),
             host: None,
+            activity,
         }
+    }
+
+    /// 活动守卫计数器（后台线程拿它登记 / 放行活动）。
+    pub fn activity(&self) -> &Arc<ActivityTracker> {
+        &self.activity
+    }
+
+    /// 托盘悬停提示的出口（单进程改本进程托盘，双进程经宿主）。
+    ///
+    /// 注意：调用方同时可变借用 `state` 的别的字段（如 `state.dictation`）时，改用
+    /// `TooltipSink::new(state.host.as_ref(), state.tray.as_ref())` 做字段级借用。
+    pub fn tooltip_sink(&self) -> TooltipSink<'_> {
+        TooltipSink::new(self.host.as_ref(), self.tray.as_ref())
+    }
+
+    /// 起一个持活动守卫的后台线程：守卫在线程创建**之前**登记（不存在“线程还没跑起来就判定空闲”的空窗），
+    /// 随线程结束（含 panic、提前返回）放行；线程创建失败时闭包连同守卫一起被丢弃，同样放行。
+    ///
+    /// # 参数
+    /// - `reason`：活动原因（见 [`crate::activity::reason`]）。
+    /// - `name`：线程名。
+    /// - `job`：线程主体；结果应在返回前推进收件箱（守卫在其后放行并唤醒主线程）。
+    ///
+    /// # 返回
+    /// 线程创建的结果。
+    pub fn spawn_guarded(
+        &self,
+        reason: &'static str,
+        name: &str,
+        job: impl FnOnce() + Send + 'static,
+    ) -> std::io::Result<()> {
+        let guard = self.activity.guard(reason);
+        std::thread::Builder::new()
+            .name(name.to_string())
+            .spawn(move || {
+                let _guard = guard;
+                job();
+            })
+            .map(|_| ())
     }
 
     /// 接上托盘宿主的会话（双进程模式）：此后托盘、热键、闸门由宿主负责，本进程只转发与同步。
@@ -2501,16 +2614,14 @@ fn select_ocr_engine(state: &AppState) -> Arc<dyn crate::ocr_backend::OcrEngine>
 fn spawn_ocr(state: &AppState, serial: u64, width: u32, height: u32, rgba: Vec<u8>) {
     let engine = select_ocr_engine(state);
     let inbox = state.inbox.clone();
-    let spawned = std::thread::Builder::new()
-        .name("snow-ocr-request".into())
-        .spawn(move || {
-            let result = engine.recognize(&OcrInput {
-                width,
-                height,
-                rgba: &rgba,
-            });
-            inbox.push(UiEvent::OcrFinished { serial, result });
+    let spawned = state.spawn_guarded(reason::OCR_JOB, "snow-ocr-request", move || {
+        let result = engine.recognize(&OcrInput {
+            width,
+            height,
+            rgba: &rgba,
         });
+        inbox.push(UiEvent::OcrFinished { serial, result });
+    });
     if let Err(e) = spawned {
         tracing::error!(error = %e, "无法创建 OCR 线程");
         state.inbox.push(UiEvent::OcrFinished {
@@ -2528,12 +2639,10 @@ fn spawn_ocr(state: &AppState, serial: u64, width: u32, height: u32, rgba: Vec<u
 /// - `state`：运行时状态（取收件箱）。
 fn spawn_selected_text_capture(state: &AppState) {
     let inbox = state.inbox.clone();
-    let spawned = std::thread::Builder::new()
-        .name("snow-selected-text".into())
-        .spawn(move || {
-            let text = read_selected_text();
-            inbox.push(UiEvent::SelectedTextReady(text));
-        });
+    let spawned = state.spawn_guarded(reason::SELECTED_TEXT, "snow-selected-text", move || {
+        let text = read_selected_text();
+        inbox.push(UiEvent::SelectedTextReady(text));
+    });
     if let Err(e) = spawned {
         tracing::error!(error = %e, "无法创建读取选中文字的线程");
         state.inbox.push(UiEvent::SelectedTextReady(None));
@@ -2605,40 +2714,38 @@ pub fn is_pinnable_image(path: &std::path::Path) -> bool {
 /// - `state`：运行时状态（取收件箱）。
 fn spawn_pin_selected_files(state: &AppState) {
     let inbox = state.inbox.clone();
-    let spawned = std::thread::Builder::new()
-        .name("snow-pin-files".into())
-        .spawn(move || {
-            let files: Vec<_> = snow_platform::selected_files::foreground_selected_files()
-                .into_iter()
-                .filter(|p| is_pinnable_image(p))
-                .take(MAX_PIN_FILES)
-                .collect();
-            if files.is_empty() {
-                inbox.push(UiEvent::PinFilesEmpty);
-                return;
-            }
-            let mut pinned = 0usize;
-            for path in files {
-                match image::open(&path) {
-                    Ok(img) => {
-                        let rgba = img.to_rgba8();
-                        let (width, height) = rgba.dimensions();
-                        inbox.push(UiEvent::PinImage {
-                            width,
-                            height,
-                            rgba: rgba.into_raw(),
-                        });
-                        pinned += 1;
-                    }
-                    Err(e) => {
-                        tracing::warn!(path = %path.display(), error = %e, "解码要贴的图片失败")
-                    }
+    let spawned = state.spawn_guarded(reason::PIN_JOB, "snow-pin-files", move || {
+        let files: Vec<_> = snow_platform::selected_files::foreground_selected_files()
+            .into_iter()
+            .filter(|p| is_pinnable_image(p))
+            .take(MAX_PIN_FILES)
+            .collect();
+        if files.is_empty() {
+            inbox.push(UiEvent::PinFilesEmpty);
+            return;
+        }
+        let mut pinned = 0usize;
+        for path in files {
+            match image::open(&path) {
+                Ok(img) => {
+                    let rgba = img.to_rgba8();
+                    let (width, height) = rgba.dimensions();
+                    inbox.push(UiEvent::PinImage {
+                        width,
+                        height,
+                        rgba: rgba.into_raw(),
+                    });
+                    pinned += 1;
+                }
+                Err(e) => {
+                    tracing::warn!(path = %path.display(), error = %e, "解码要贴的图片失败")
                 }
             }
-            if pinned == 0 {
-                inbox.push(UiEvent::PinFilesEmpty);
-            }
-        });
+        }
+        if pinned == 0 {
+            inbox.push(UiEvent::PinFilesEmpty);
+        }
+    });
     if let Err(e) = spawned {
         tracing::error!(error = %e, "无法创建贴选中文件的线程");
     }
@@ -2654,21 +2761,19 @@ fn spawn_pin_ocr(state: &AppState, id: String, width: u32, height: u32, rgba: Ve
     let engine = select_ocr_engine(state);
     let inbox = state.inbox.clone();
     let done_id = id.clone();
-    let spawned = std::thread::Builder::new()
-        .name("snow-pin-ocr".into())
-        .spawn(move || {
-            let result = engine
-                .recognize(&OcrInput {
-                    width,
-                    height,
-                    rgba: &rgba,
-                })
-                .map_err(|e| format!("{e:?}"));
-            inbox.push(UiEvent::PinOcrFinished {
-                id: done_id,
-                result,
-            });
+    let spawned = state.spawn_guarded(reason::PIN_JOB, "snow-pin-ocr", move || {
+        let result = engine
+            .recognize(&OcrInput {
+                width,
+                height,
+                rgba: &rgba,
+            })
+            .map_err(|e| format!("{e:?}"));
+        inbox.push(UiEvent::PinOcrFinished {
+            id: done_id,
+            result,
         });
+    });
     if let Err(e) = spawned {
         tracing::error!(error = %e, "无法创建贴图 OCR 线程");
         state.inbox.push(UiEvent::PinOcrFinished {
@@ -2699,26 +2804,24 @@ fn spawn_translate(
     translate_config.target = target;
     let translator = Arc::clone(&state.translator);
     let inbox = state.inbox.clone();
-    let spawned = std::thread::Builder::new()
-        .name("snow-translate-request".into())
-        .spawn(move || {
-            let progress_inbox = inbox.clone();
-            let result = run_flow(
-                || {
-                    ocr.recognize(&OcrInput {
-                        width,
-                        height,
-                        rgba: &rgba,
-                    })
-                },
-                translator.as_ref(),
-                &translate_config,
-                |stage| {
-                    progress_inbox.push(UiEvent::TranslateProgress { serial, stage });
-                },
-            );
-            inbox.push(UiEvent::TranslateFinished { serial, result });
-        });
+    let spawned = state.spawn_guarded(reason::TRANSLATE_JOB, "snow-translate-request", move || {
+        let progress_inbox = inbox.clone();
+        let result = run_flow(
+            || {
+                ocr.recognize(&OcrInput {
+                    width,
+                    height,
+                    rgba: &rgba,
+                })
+            },
+            translator.as_ref(),
+            &translate_config,
+            |stage| {
+                progress_inbox.push(UiEvent::TranslateProgress { serial, stage });
+            },
+        );
+        inbox.push(UiEvent::TranslateFinished { serial, result });
+    });
     if let Err(e) = spawned {
         tracing::error!(error = %e, "无法创建翻译线程");
         state.inbox.push(UiEvent::TranslateFinished {
@@ -2747,7 +2850,7 @@ fn spawn_download(
 ) {
     let inbox = state.inbox.clone();
     let i18n = state_i18n(state);
-    let spawned = std::thread::Builder::new().name(name.into()).spawn({
+    let spawned = state.spawn_guarded(reason::DOWNLOAD, name, {
         let inbox = inbox.clone();
         move || {
             let result = job(i18n, &|message| {
@@ -2813,12 +2916,10 @@ fn spawn_table(state: &AppState, serial: u64, width: u32, height: u32, rgba: Vec
         snow_config::extensions::KEY_TABLE_MODEL,
     );
     let inbox = state.inbox.clone();
-    let spawned = std::thread::Builder::new()
-        .name("snow-table-request".into())
-        .spawn(move || {
-            let result = run_table(&data_root, &table_model, &*engine, width, height, &rgba);
-            inbox.push(UiEvent::OcrFinished { serial, result });
-        });
+    let spawned = state.spawn_guarded(reason::OCR_JOB, "snow-table-request", move || {
+        let result = run_table(&data_root, &table_model, &*engine, width, height, &rgba);
+        inbox.push(UiEvent::OcrFinished { serial, result });
+    });
     if let Err(e) = spawned {
         tracing::error!(error = %e, "无法创建表格识别线程");
         state.inbox.push(UiEvent::OcrFinished {
@@ -2891,12 +2992,10 @@ fn spawn_latex(state: &AppState, serial: u64, width: u32, height: u32, rgba: Vec
     );
     let data_root = state.data_root.clone();
     let inbox = state.inbox.clone();
-    let spawned = std::thread::Builder::new()
-        .name("snow-latex-request".into())
-        .spawn(move || {
-            let result = run_latex_job(&model_dir, &latex_model, &data_root, width, height, &rgba);
-            inbox.push(UiEvent::OcrFinished { serial, result });
-        });
+    let spawned = state.spawn_guarded(reason::OCR_JOB, "snow-latex-request", move || {
+        let result = run_latex_job(&model_dir, &latex_model, &data_root, width, height, &rgba);
+        inbox.push(UiEvent::OcrFinished { serial, result });
+    });
     if let Err(e) = spawned {
         tracing::error!(error = %e, "无法创建公式识别线程");
         state.inbox.push(UiEvent::OcrFinished {
@@ -3150,9 +3249,8 @@ fn run_update_action(state: &AppState, action: crate::net_settings::UpdateAction
             let inbox = state.inbox.clone();
             let data_root = state.data_root.clone();
             let worker = (inbox.clone(), info.clone());
-            let spawned = std::thread::Builder::new()
-                .name("snow-update-download".into())
-                .spawn(move || {
+            let spawned =
+                state.spawn_guarded(reason::DOWNLOAD, "snow-update-download", move || {
                     let outcome = crate::net_settings::download_update(&info, &data_root);
                     inbox.push(UiEvent::UpdateDownloadFinished(info, outcome));
                 });
@@ -3191,16 +3289,14 @@ fn start_update_check(state: &AppState) {
         }
     };
     let inbox = state.inbox.clone();
-    let spawned = std::thread::Builder::new()
-        .name("snow-update-check".into())
-        .spawn({
-            let inbox = inbox.clone();
-            move || {
-                let outcome =
-                    crate::net_settings::run_update_check(&url, crate::net_settings::APP_VERSION);
-                inbox.push(UiEvent::UpdateCheckFinished(outcome));
-            }
-        });
+    let spawned = state.spawn_guarded(reason::UPDATE_CHECK, "snow-update-check", {
+        let inbox = inbox.clone();
+        move || {
+            let outcome =
+                crate::net_settings::run_update_check(&url, crate::net_settings::APP_VERSION);
+            inbox.push(UiEvent::UpdateCheckFinished(outcome));
+        }
+    });
     if let Err(e) = spawned {
         inbox.push(UiEvent::UpdateCheckFinished(
             crate::net_settings::UpdateCheckOutcome::FetchFailed(e.to_string()),
@@ -3223,13 +3319,10 @@ fn start_auto_update_check(state: &AppState) {
     };
     crate::net_settings::write_last_check(&state.data_root, now);
     let inbox = state.inbox.clone();
-    let spawned = std::thread::Builder::new()
-        .name("snow-update-auto".into())
-        .spawn(move || {
-            let outcome =
-                crate::net_settings::run_update_check(&url, crate::net_settings::APP_VERSION);
-            inbox.push(UiEvent::AutoUpdateFinished(outcome));
-        });
+    let spawned = state.spawn_guarded(reason::UPDATE_CHECK, "snow-update-auto", move || {
+        let outcome = crate::net_settings::run_update_check(&url, crate::net_settings::APP_VERSION);
+        inbox.push(UiEvent::AutoUpdateFinished(outcome));
+    });
     if let Err(e) = spawned {
         tracing::warn!(error = %e, "启动自动检查更新线程失败");
     }
@@ -3248,12 +3341,12 @@ fn start_ocr_warm_up(state: &AppState) {
         OcrRequestConfig::from_document(store.document())
     };
     let ocr = state.ocr.clone();
-    let spawned = std::thread::Builder::new()
-        .name("snow-ocr-warm".into())
-        .spawn(move || match ocr.warm_up(&config) {
+    let spawned = state.spawn_guarded(reason::OCR_WARM_UP, "snow-ocr-warm", move || {
+        match ocr.warm_up(&config) {
             Ok(()) => tracing::info!("OCR 模型已预加载"),
             Err(e) => tracing::info!(error = ?e, "OCR 模型预加载跳过"),
-        });
+        }
+    });
     if let Err(e) = spawned {
         tracing::warn!(error = %e, "启动 OCR 预加载线程失败");
     }
@@ -3783,6 +3876,20 @@ pub fn start_mouse_gesture(state: &mut AppState) {
     }
 }
 
+/// 让手势事件的来源放弃进行中的这次手势（钩子别再吞鼠标输入）：单进程取消本进程的钩子服务；
+/// 双进程钩子在宿主里，发 `cancel_gesture` 请宿主取消。
+///
+/// # 参数
+/// - `state`：运行时状态。
+/// - `id`：被放弃的手势编号。
+fn cancel_gesture_source(state: &AppState, id: u64) {
+    if state.host.is_some() {
+        host_session::send_cancel_gesture(state, id);
+    } else if let Some(service) = &state.mouse_service {
+        service.cancel();
+    }
+}
+
 /// 处理鼠标手势事件：开始时发起截图；覆盖窗就绪前的位置先记下，就绪后补发；松开时完成框选。
 ///
 /// # 参数
@@ -3804,9 +3911,7 @@ fn on_mouse_gesture(
             if state.capture_in_flight || any_overlay_open(cx, state) || state.recording.is_busy(cx)
             {
                 tracing::info!(%action, "已有截图 / 录制在进行，忽略鼠标手势");
-                if let Some(service) = &state.mouse_service {
-                    service.cancel();
-                }
+                cancel_gesture_source(state, id);
                 return;
             }
             state.gesture = Some(GestureSession {
@@ -4058,12 +4163,10 @@ fn spawn_translate_input(
     let config = page_config(&base, source, target);
     let translator = Arc::clone(&state.translator);
     let inbox = state.inbox.clone();
-    let spawned = std::thread::Builder::new()
-        .name("snow-translate-input".into())
-        .spawn(move || {
-            let result = translate_text(translator.as_ref(), &config, &model_id, &text);
-            inbox.push(UiEvent::TranslateInputFinished { serial, result });
-        });
+    let spawned = state.spawn_guarded(reason::TRANSLATE_JOB, "snow-translate-input", move || {
+        let result = translate_text(translator.as_ref(), &config, &model_id, &text);
+        inbox.push(UiEvent::TranslateInputFinished { serial, result });
+    });
     if let Err(e) = spawned {
         tracing::error!(error = %e, "无法创建输入框翻译线程");
         state.inbox.push(UiEvent::TranslateInputFinished {
@@ -4131,16 +4234,14 @@ fn spawn_translate_page(
     let config = page_config(&base, source, target);
     let translator = Arc::clone(&state.translator);
     let inbox = state.inbox.clone();
-    let spawned = std::thread::Builder::new()
-        .name("snow-translate-page".into())
-        .spawn(move || {
-            let result = translate_text(translator.as_ref(), &config, &model_id, &text);
-            inbox.push(UiEvent::TranslatePageFinished {
-                serial,
-                result,
-                embedded,
-            });
+    let spawned = state.spawn_guarded(reason::TRANSLATE_JOB, "snow-translate-page", move || {
+        let result = translate_text(translator.as_ref(), &config, &model_id, &text);
+        inbox.push(UiEvent::TranslatePageFinished {
+            serial,
+            result,
+            embedded,
         });
+    });
     if let Err(e) = spawned {
         tracing::error!(error = %e, "无法创建翻译页翻译线程");
         state.inbox.push(UiEvent::TranslatePageFinished {
@@ -4265,10 +4366,20 @@ fn describe_hotkey_failure(attempt: &HotkeyRegistration, config_key: &str) -> St
 /// - `state`：运行时状态。
 /// - `locale`：界面语料语言代码。
 fn tray_group_labels(state: &AppState, locale: &str) -> Vec<(String, String)> {
+    tray_group_labels_for(state.pins.shared(), locale)
+}
+
+/// 托盘分组块的 `(分组 ID, 显示名)` 列表（只依赖贴图仓储，无窗口任务也能算）。
+///
+/// # 参数
+/// - `shared`：贴图共享上下文。
+/// - `locale`：界面语料语言代码。
+pub(crate) fn tray_group_labels_for(
+    shared: &crate::pinned_shared::PinShared,
+    locale: &str,
+) -> Vec<(String, String)> {
     let i18n = crate::ocr_backend::i18n_for(locale);
-    state
-        .pins
-        .shared()
+    shared
         .groups()
         .into_iter()
         .map(|g| {
@@ -4363,6 +4474,7 @@ fn handle_mcp_request(
 /// - `key`：变更的配置键。
 /// - `previous`：变更前的值。
 fn on_config_changed(cx: &mut ShellContext, state: &mut AppState, key: &str, previous: Value) {
+    host_session::on_config_key_changed(state);
     if key == crate::mcp_host::KEY_ENABLED || state.mcp.is_running() {
         state.sync_mcp();
     }
@@ -4545,13 +4657,7 @@ fn show_notice(state: &AppState, text: &str) {
         .chars()
         .take(NOTICE_TOOLTIP_MAX_CHARS)
         .collect();
-    if state.host.is_some() {
-        host_session::send_tooltip(state, &tip);
-    } else if let Some(tray) = state.tray.as_ref()
-        && let Err(e) = tray.set_tooltip(tip)
-    {
-        tracing::warn!(error = %e, "更新托盘提示失败");
-    }
+    state.tooltip_sink().set(tip);
 }
 
 /// 执行一个快捷动作：按 [`plan_for`] 的方案分派，未实现的动作给出本地化提示。
@@ -4952,13 +5058,21 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
                 tracing::warn!(path = %path.display(), error = %e, "打开文件失败");
             }
         }
-        UiEvent::Dictation(command) => state.dictation.command(cx, state.tray.as_ref(), command),
-        UiEvent::DictationPoll => state.dictation.tick(cx, state.tray.as_ref()),
-        UiEvent::DictationProbed { round, verdict } => {
-            state
-                .dictation
-                .probed(cx, state.tray.as_ref(), round, verdict)
-        }
+        UiEvent::Dictation(command) => state.dictation.command(
+            cx,
+            TooltipSink::new(state.host.as_ref(), state.tray.as_ref()),
+            command,
+        ),
+        UiEvent::DictationPoll => state.dictation.tick(
+            cx,
+            TooltipSink::new(state.host.as_ref(), state.tray.as_ref()),
+        ),
+        UiEvent::DictationProbed { round, verdict } => state.dictation.probed(
+            cx,
+            TooltipSink::new(state.host.as_ref(), state.tray.as_ref()),
+            round,
+            verdict,
+        ),
         UiEvent::DictationTranslated {
             round,
             seq,
@@ -5307,6 +5421,12 @@ fn shutdown_app(cx: &mut ShellContext, state: &mut AppState) {
     state.translator.shutdown();
     state.dictation.shutdown();
     state.pins.persist_all(cx);
+    // 双进程：贴图落盘后把“下次登录要恢复的贴图数”写进快照（宿主重启 / 登录时据此拉起 UI）
+    host_session::finalize_on_shutdown(state);
+    let leaked = state.activity.reasons();
+    if !leaked.is_empty() {
+        tracing::warn!(?leaked, "退出时仍有活动守卫没有放行（后台任务被一并结束）");
+    }
     state.shutdown_services();
     cx.quit();
 }
@@ -5400,8 +5520,8 @@ mod tests {
     use super::*;
     use crate::dictation::config::DictationConfig;
     use crate::settings_model::portable_to_hotkey_text;
-    use snow_ui::shell::hotkey::Hotkey;
     use snow_app_core::command::CommandContext;
+    use snow_ui::shell::hotkey::Hotkey;
 
     /// 翻译自动化开关解析：空关闭、download 只下载、其它值下载后重试。
     #[test]

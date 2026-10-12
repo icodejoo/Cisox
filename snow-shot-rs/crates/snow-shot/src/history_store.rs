@@ -4,6 +4,7 @@
 //! 每次操作都在进程级互斥锁内重新打开仓储，保证写入线程与历史页之间不会互相覆盖索引。
 //! 本模块不依赖 GPUI，全部逻辑可离屏单测。
 
+use crate::activity::{ActivityGuard, ActivityTracker, reason};
 use crate::screenshot_output::encode_png;
 use serde_json::Value;
 use snow_config::document::ConfigDocument;
@@ -852,10 +853,23 @@ pub fn process_snapshot(
         .map(|r| RecordOutcome::Recorded(r.id))
 }
 
+/// 排队中的一次写入：任务本身加上（双进程模式下）阻止 UI 退出的活动守卫。
+///
+/// 守卫随任务一起排队、写完（或被丢弃）才放行，所以“历史写入器还有没落盘的任务”期间 UI 不会退出；
+/// 提交失败（写入线程已退出）时任务连同守卫一起被丢弃，同样放行。
+struct Queued {
+    /// 写入任务。
+    job: Job,
+    /// 活动守卫（单进程或测试里没有）。
+    _guard: Option<ActivityGuard>,
+}
+
 /// 后台写入器：提交即返回，写盘在独立线程完成，失败只记日志。
 pub struct HistoryRecorder {
     /// 任务通道发送端。
-    tx: Sender<Job>,
+    tx: Sender<Queued>,
+    /// 活动计数器：给了就为每个排队任务登记“历史写入”守卫。
+    activity: Option<Arc<ActivityTracker>>,
 }
 
 impl HistoryRecorder {
@@ -876,12 +890,52 @@ impl HistoryRecorder {
         data_root: &Path,
         on_recorded: impl Fn() + Send + 'static,
     ) -> std::io::Result<Self> {
-        let (tx, rx) = channel::<Job>();
+        Self::start_with(data_root, on_recorded, None)
+    }
+
+    /// 同 [`start`](Self::start)，并为每个排队的写入任务持一个“历史写入”活动守卫（方案 §5：历史写入器未 flush 时 UI 不能退出）。
+    ///
+    /// # 参数
+    /// - `data_root`：数据根。
+    /// - `on_recorded`：每次成功写入后在写入线程上调用。
+    /// - `activity`：活动计数器。
+    ///
+    /// # 返回
+    /// 写入器；线程创建失败返回 IO 错误。
+    pub fn start_tracked(
+        data_root: &Path,
+        on_recorded: impl Fn() + Send + 'static,
+        activity: Arc<ActivityTracker>,
+    ) -> std::io::Result<Self> {
+        Self::start_with(data_root, on_recorded, Some(activity))
+    }
+
+    /// 启动写入线程（有无活动计数器两种形态共用）。
+    fn start_with(
+        data_root: &Path,
+        on_recorded: impl Fn() + Send + 'static,
+        activity: Option<Arc<ActivityTracker>>,
+    ) -> std::io::Result<Self> {
+        let (tx, rx) = channel::<Queued>();
         let root = data_root.to_path_buf();
         std::thread::Builder::new()
             .name(WRITER_THREAD_NAME.into())
             .spawn(move || writer_loop(&root, rx, on_recorded))?;
-        Ok(Self { tx })
+        Ok(Self { tx, activity })
+    }
+
+    /// 把任务连同守卫排进写入线程。
+    fn enqueue(&self, job: Job) {
+        let queued = Queued {
+            job,
+            _guard: self
+                .activity
+                .as_ref()
+                .map(|tracker| tracker.guard(reason::HISTORY_FLUSH)),
+        };
+        if self.tx.send(queued).is_err() {
+            tracing::warn!("截图历史写入线程已退出，丢弃本次写入");
+        }
     }
 
     /// 提交一次写入（历史关闭时直接忽略，不拷贝像素）。
@@ -901,16 +955,13 @@ impl HistoryRecorder {
         if !policy.enabled {
             return;
         }
-        let job = Job::Plain {
+        self.enqueue(Job::Plain {
             policy,
             source,
             width,
             height,
             rgba: rgba.to_vec(),
-        };
-        if self.tx.send(job).is_err() {
-            tracing::warn!("截图历史写入线程已退出，丢弃本次写入");
-        }
+        });
     }
 
     /// 提交一次带完整现场的写入（历史关闭时直接忽略；现场被移动进任务，不再拷贝）。
@@ -928,21 +979,19 @@ impl HistoryRecorder {
         if !policy.enabled {
             return;
         }
-        let job = Job::Snapshot {
+        self.enqueue(Job::Snapshot {
             policy,
             source,
             snapshot: Box::new(snapshot),
-        };
-        if self.tx.send(job).is_err() {
-            tracing::warn!("截图历史写入线程已退出，丢弃本次写入");
-        }
+        });
     }
 }
 
 /// 写入线程主循环：逐个处理任务，失败只告警。
-fn writer_loop(root: &Path, rx: Receiver<Job>, on_recorded: impl Fn()) {
+fn writer_loop(root: &Path, rx: Receiver<Queued>, on_recorded: impl Fn()) {
     let mut deduper = Deduper::default();
-    while let Ok(job) = rx.recv() {
+    // `_guard` 活到本轮结束：写完（成功或失败）才放行
+    while let Ok(Queued { job, _guard }) = rx.recv() {
         let result = match &job {
             Job::Plain {
                 policy,
@@ -1412,6 +1461,71 @@ mod tests {
                 .total,
             1
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 历史写入守卫（方案 §5）：排队的写入持“历史写入”守卫，写完才放行；历史关闭时不排队也不持守卫。
+    #[test]
+    fn tracked_recorder_holds_a_guard_until_the_write_finishes() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let root = temp_root("tracked");
+        let woken = Arc::new(AtomicU32::new(0));
+        let wake_counter = Arc::clone(&woken);
+        let tracker = ActivityTracker::new(move || {
+            wake_counter.fetch_add(1, Ordering::SeqCst);
+        });
+        // 写入回调在写入线程上、守卫放行之前调用：此刻守卫必须还在
+        let held_during_write = Arc::new(AtomicU32::new(0));
+        let (done_tx, done_rx) = channel::<()>();
+        let done_tx = Mutex::new(done_tx);
+        let recorder = {
+            let in_callback = Arc::clone(&tracker);
+            let held = Arc::clone(&held_during_write);
+            HistoryRecorder::start_tracked(
+                &root,
+                move || {
+                    held.store(in_callback.count(reason::HISTORY_FLUSH), Ordering::SeqCst);
+                    let _ = done_tx.lock().unwrap().send(());
+                },
+                Arc::clone(&tracker),
+            )
+            .unwrap()
+        };
+        // 关闭历史：不拷贝像素、不排队、不持守卫
+        recorder.submit(
+            CaptureHistoryPolicy {
+                enabled: false,
+                ..CaptureHistoryPolicy::default()
+            },
+            HistorySource::Copied,
+            2,
+            2,
+            &solid(2, 2, 1),
+        );
+        tracker.assert_idle();
+        recorder.submit(
+            CaptureHistoryPolicy::default(),
+            HistorySource::Copied,
+            2,
+            2,
+            &solid(2, 2, 2),
+        );
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("应收到写入回调");
+        assert_eq!(
+            held_during_write.load(Ordering::SeqCst),
+            1,
+            "写入期间持有守卫"
+        );
+        // 守卫在回调之后的同一轮循环末尾放行：等到归零并唤醒过主线程
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !tracker.is_idle() {
+            assert!(std::time::Instant::now() < deadline, "守卫没有放行");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        tracker.assert_idle();
+        assert!(woken.load(Ordering::SeqCst) >= 1);
         let _ = std::fs::remove_dir_all(&root);
     }
 
