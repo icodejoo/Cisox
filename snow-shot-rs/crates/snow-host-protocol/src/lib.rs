@@ -91,6 +91,9 @@ pub const ACTION_SETTINGS: &str = "settings";
 /// 动作 id：唤醒主窗口（托盘点击、`--cmd show`）。
 pub const ACTION_MAIN_WINDOW: &str = "main_window";
 
+/// 动作 id：宿主要求 UI 常驻（登录时按 `keep_alive` 拉起、崩溃后补拉），UI 收到后什么都不做。
+pub const ACTION_KEEP_ALIVE: &str = "keep_alive";
+
 /// 配置键：前台全屏窗口时停用全局热键（宿主切换开关后经 `set_config` 让 UI 落盘）。
 pub const CONFIG_KEY_DISABLE_ON_FULLSCREEN: &str =
     "global_shortcuts/disable_on_focused_fullscreen_window";
@@ -103,6 +106,18 @@ pub const KEEP_ALIVE_MCP: &str = "mcp";
 
 /// 快照里的保活原因：`text_recognition/model_hot_start` 为真时 UI 常驻。
 pub const KEEP_ALIVE_OCR_HOT_START: &str = "ocr_hot_start";
+
+/// 快照里的保活原因：绑定了语音转文字热键时 UI 常驻（按住说话不能每次冷启动，方案 §10 第 4 条）。
+pub const KEEP_ALIVE_DICTATION_HOTKEY: &str = "dictation_hotkey";
+
+/// 鼠标手势 `update` 事件转发的最小间隔（约 120Hz，方案 §2）；更密的采样在宿主侧丢弃，`finish` 带最终位置。
+pub const GESTURE_MIN_UPDATE_INTERVAL: Duration = Duration::from_millis(8);
+
+/// 宿主启动后，到点的更新检查至少再等多久才拉起（避开登录时的磁盘与网络高峰）。
+pub const UPDATE_CHECK_START_DELAY: Duration = Duration::from_secs(30);
+
+/// 无窗口更新检查在标准输出里回报提示文案的最大字节数；宿主多读的部分丢弃。
+pub const MAX_NOTICE_BYTES: usize = 4096;
 
 #[cfg(test)]
 mod tests {
@@ -121,5 +136,13 @@ mod tests {
         assert_eq!(CRASH_BREAKER_WINDOW, Duration::from_secs(60));
         assert_eq!(CRASH_BACKOFF, Duration::from_secs(300));
         assert_eq!(TOKEN_BYTES, 32);
+    }
+
+    /// 阶段 3 的常量：手势节流约 120Hz（8ms 一帧），更新检查登录后延后 30 秒。
+    #[test]
+    fn stage3_constants() {
+        assert_eq!(GESTURE_MIN_UPDATE_INTERVAL, Duration::from_millis(8));
+        assert_eq!(UPDATE_CHECK_START_DELAY, Duration::from_secs(30));
+        assert_eq!(KEEP_ALIVE_DICTATION_HOTKEY, "dictation_hotkey");
     }
 }

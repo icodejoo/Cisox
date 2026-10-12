@@ -4,7 +4,8 @@ use super::*;
 use serde_json::json;
 use snow_host_protocol::message::ActionOrigin;
 use snow_host_protocol::{
-    COMMAND_EXPIRY, CRASH_BACKOFF, MAX_QUEUED_COMMANDS, PROTOCOL_VERSION, TOKEN_BYTES,
+    ACTION_KEEP_ALIVE, COMMAND_EXPIRY, CRASH_BACKOFF, MAX_QUEUED_COMMANDS, PROTOCOL_VERSION,
+    TOKEN_BYTES,
 };
 use std::time::Duration;
 
@@ -697,6 +698,7 @@ fn gesture_updates_are_coalesced_while_starting() {
     let gesture = |phase, x| Outbound::Gesture {
         phase,
         id: 1,
+        action: None,
         x,
         y: 0,
     };
@@ -736,5 +738,167 @@ fn next_deadline_is_the_earliest() {
         machine.next_deadline(),
         None,
         "空闲时没有任何待办，宿主不轮询"
+    );
+}
+
+/// 快照要求 UI 常驻：UI 崩溃（没跳闸）后宿主补拉一个，握手后投递“保活”占位消息；序号从 1 开始。
+#[test]
+fn crash_with_keep_alive_respawns_ui() {
+    let t0 = Instant::now();
+    let (mut machine, _, generation) = running_with("capture", t0);
+    machine.set_keep_alive(true);
+    let effects = machine.on_ui_exited(t0, generation);
+    assert!(has(&effects, |e| matches!(e, Effect::SpawnUi { .. })));
+    machine.on_spawned(generation + 1, PID, token());
+    let effects = machine.on_ui_message(t0, generation + 1, hello(PID));
+    let wire = sent(&effects);
+    assert_eq!(wire.len(), 1);
+    assert!(matches!(
+        &wire[0],
+        HostMessage::Command { seq: 1, id, .. } if id == ACTION_KEEP_ALIVE
+    ));
+}
+
+/// 没有常驻要求：UI 崩溃后不自己拉起（托盘态要的就是没有 UI）。
+#[test]
+fn crash_without_keep_alive_stays_absent() {
+    let t0 = Instant::now();
+    let (mut machine, _, generation) = running_with("capture", t0);
+    let effects = machine.on_ui_exited(t0, generation);
+    assert!(!has(&effects, |e| matches!(e, Effect::SpawnUi { .. })));
+    assert_eq!(machine.kind(), StateKind::Absent);
+    assert!(!machine.ui_alive());
+}
+
+/// 常驻 + 崩溃前有贴图：只拉起一个 UI，恢复贴图与保活占位都排进队列（贴图在前）。
+#[test]
+fn crash_with_pins_and_keep_alive_spawns_once() {
+    let t0 = Instant::now();
+    let (mut machine, _, generation) = running_with("capture", t0);
+    machine.set_keep_alive(true);
+    machine.on_ui_message(
+        t0,
+        generation,
+        UiMessage::Activity {
+            windows: 1,
+            pins: 1,
+            busy_reasons: vec![],
+        },
+    );
+    let effects = machine.on_ui_exited(t0, generation);
+    assert_eq!(
+        effects
+            .iter()
+            .filter(|e| matches!(e, Effect::SpawnUi { .. }))
+            .count(),
+        1
+    );
+    machine.on_spawned(generation + 1, PID, token());
+    let wire = sent(&machine.on_ui_message(t0, generation + 1, hello(PID)));
+    assert!(matches!(wire[0], HostMessage::RestorePins { seq: 1 }));
+    assert!(matches!(&wire[1], HostMessage::Command { seq: 2, .. }));
+}
+
+/// 常驻 + 连续崩溃跳闸：退避期间不拉起；退避结束的那次 tick 补拉一个。
+#[test]
+fn keep_alive_respawns_after_backoff_ends() {
+    let t0 = Instant::now();
+    let mut machine = HostMachine::new();
+    machine.set_keep_alive(true);
+    let spawn = machine.submit(t0, action("capture"));
+    let Effect::SpawnUi { mut generation } = spawn[0] else {
+        panic!("首条命令应拉起: {spawn:?}");
+    };
+    for round in 0..3u64 {
+        let at = t0 + Duration::from_secs(10 * round);
+        machine.on_spawned(generation, PID, token());
+        machine.on_ui_message(at, generation, hello(PID));
+        let effects = machine.on_ui_exited(at, generation);
+        if round < 2 {
+            // 没跳闸：常驻要求让宿主立刻补拉
+            let Some(Effect::SpawnUi { generation: next }) = effects
+                .iter()
+                .find(|e| matches!(e, Effect::SpawnUi { .. }))
+                .cloned()
+            else {
+                panic!("第 {round} 轮应补拉: {effects:?}");
+            };
+            generation = next;
+        } else {
+            assert!(!has(&effects, |e| matches!(e, Effect::SpawnUi { .. })));
+        }
+    }
+    assert_eq!(machine.kind(), StateKind::Backoff);
+    assert!(
+        machine
+            .on_tick(t0 + Duration::from_secs(60))
+            .iter()
+            .all(|e| !matches!(e, Effect::SpawnUi { .. })),
+        "退避期间不拉起"
+    );
+    let until = t0 + Duration::from_secs(20) + CRASH_BACKOFF;
+    let effects = machine.on_tick(until);
+    assert!(has(&effects, |e| matches!(e, Effect::SpawnUi { .. })));
+    assert_eq!(machine.kind(), StateKind::Starting);
+}
+
+/// 宿主退出流程里不补拉：常驻要求不能挡住退出。
+#[test]
+fn keep_alive_does_not_block_quit() {
+    let t0 = Instant::now();
+    let (mut machine, _, generation) = running_with("capture", t0);
+    machine.set_keep_alive(true);
+    machine.request_quit(t0, false);
+    let effects = machine.on_ui_exited(t0, generation);
+    assert!(!has(&effects, |e| matches!(e, Effect::SpawnUi { .. })));
+    assert!(has(&effects, |e| *e == Effect::ExitHost { restart: false }));
+}
+
+/// 手势 update 不等确认、不进重发表：连发 100 条 update 只留下 begin / finish 两条待确认，
+/// 且确认超时只重发这两条。
+#[test]
+fn gesture_updates_are_not_tracked_for_ack() {
+    use snow_host_protocol::message::GesturePhase;
+    let t0 = Instant::now();
+    let (mut machine, _, generation) = running_with("capture", t0);
+    machine.on_ui_message(t0, generation, UiMessage::Ack { seq: 1 });
+    let gesture = |phase, x| Outbound::Gesture {
+        phase,
+        id: 7,
+        action: (phase == GesturePhase::Begin).then(|| "screenshot_copy".to_string()),
+        x,
+        y: 0,
+    };
+    let begin = machine.submit(t0, gesture(GesturePhase::Begin, 0));
+    assert!(matches!(
+        &sent(&begin)[0],
+        HostMessage::Gesture { seq: 2, action: Some(a), .. } if a == "screenshot_copy"
+    ));
+    for x in 1..=100 {
+        let effects = machine.submit(t0, gesture(GesturePhase::Update, x));
+        assert_eq!(sent(&effects).len(), 1, "update 立即写出");
+    }
+    machine.submit(t0, gesture(GesturePhase::Finish, 100));
+    assert_eq!(machine.inflight(), 2, "只有 begin 与 finish 等确认");
+    let resent = sent(&machine.on_tick(t0 + ACK_TIMEOUT));
+    assert_eq!(resent.len(), 2);
+    assert!(resent.iter().all(|m| matches!(
+        m,
+        HostMessage::Gesture {
+            phase: GesturePhase::Begin | GesturePhase::Finish,
+            ..
+        }
+    )));
+}
+
+/// UI 发来的“取消手势”被转给运行时（让钩子别再吞鼠标输入）。
+#[test]
+fn cancel_gesture_is_forwarded() {
+    let t0 = Instant::now();
+    let (mut machine, _, generation) = running_with("capture", t0);
+    let message = UiMessage::CancelGesture { id: 3 };
+    assert_eq!(
+        machine.on_ui_message(t0, generation, message.clone()),
+        vec![Effect::FromUi(message)]
     );
 }

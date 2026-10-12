@@ -24,7 +24,19 @@ pub const FLAG_HEADLESS: &str = "--headless";
 /// 无窗口任务：按当前配置生成 `host/spec.json` 后退出。
 pub const HEADLESS_EMIT_SPEC: &str = "emit-spec";
 
-/// UI 进程以 `--ui` 启动时的参数无效。
+/// 无窗口任务：到点的自动更新检查（查完即退；有新版本把提示文案写到标准输出第一行）。
+pub const HEADLESS_UPDATE_CHECK: &str = "update-check";
+
+/// 无窗口任务：改一项配置（UI 是配置唯一写者，宿主要改配置而 UI 不在时用它），后面跟 `--key` / `--value`。
+pub const HEADLESS_SET_CONFIG: &str = "set-config";
+
+/// 开关：`set-config` 的配置键。
+pub const FLAG_KEY: &str = "--key";
+
+/// 开关：`set-config` 的新值（JSON 文本）。
+pub const FLAG_VALUE: &str = "--value";
+
+/// UI 进程以 `--ui` 启动（或无窗口任务）时的参数无效。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LaunchError {
     /// 缺少 `--session`。
@@ -35,6 +47,14 @@ pub enum LaunchError {
     BadSession(String),
     /// 令牌不是小写十六进制或长度不对。
     BadToken,
+    /// 不认识的无窗口任务名。
+    UnknownJob(String),
+    /// `set-config` 缺少 `--key`（或为空）。
+    MissingKey,
+    /// `set-config` 缺少 `--value`。
+    MissingValue,
+    /// `--value` 不是合法的 JSON。
+    BadValue(String),
 }
 
 impl fmt::Display for LaunchError {
@@ -45,6 +65,10 @@ impl fmt::Display for LaunchError {
             LaunchError::MissingToken => write!(f, "--ui 缺少 --token"),
             LaunchError::BadSession(s) => write!(f, "会话名无效: {s:?}"),
             LaunchError::BadToken => write!(f, "会话令牌格式无效"),
+            LaunchError::UnknownJob(job) => write!(f, "未知无窗口任务: {job}"),
+            LaunchError::MissingKey => write!(f, "set-config 缺少 --key"),
+            LaunchError::MissingValue => write!(f, "set-config 缺少 --value"),
+            LaunchError::BadValue(e) => write!(f, "--value 不是合法的 JSON: {e}"),
         }
     }
 }
@@ -117,9 +141,140 @@ impl UiLaunch {
     }
 }
 
+/// 无窗口任务（`--headless <任务>`）：不初始化 GPUI，做完就退。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HeadlessJob {
+    /// 按当前配置生成 `host/spec.json`。
+    EmitSpec,
+    /// 到点的自动更新检查。
+    UpdateCheck,
+    /// 改一项配置。
+    SetConfig {
+        /// 配置键。
+        key: String,
+        /// 新值。
+        value: serde_json::Value,
+    },
+}
+
+impl HeadlessJob {
+    /// 由命令行里的任务名与参数构造并校验。
+    ///
+    /// # 参数
+    /// - `job`：`--headless` 后面的任务名。
+    /// - `key`：`--key` 的值（只有 `set-config` 用）。
+    /// - `value`：`--value` 的值，JSON 文本（只有 `set-config` 用）。
+    ///
+    /// # 返回
+    /// 任务；任务名不认识、`set-config` 缺参数或值不是 JSON 返回 [`LaunchError`]。
+    ///
+    /// ```rust
+    /// use snow_host_protocol::launch::HeadlessJob;
+    /// let job = HeadlessJob::parse("set-config", Some("a/b".into()), Some("true".into())).unwrap();
+    /// assert_eq!(job, HeadlessJob::SetConfig { key: "a/b".into(), value: true.into() });
+    /// assert_eq!(HeadlessJob::parse("update-check", None, None).unwrap(), HeadlessJob::UpdateCheck);
+    /// assert!(HeadlessJob::parse("nope", None, None).is_err());
+    /// ```
+    pub fn parse(
+        job: &str,
+        key: Option<String>,
+        value: Option<String>,
+    ) -> Result<Self, LaunchError> {
+        match job {
+            HEADLESS_EMIT_SPEC => Ok(Self::EmitSpec),
+            HEADLESS_UPDATE_CHECK => Ok(Self::UpdateCheck),
+            HEADLESS_SET_CONFIG => {
+                let key = key
+                    .filter(|key| !key.is_empty())
+                    .ok_or(LaunchError::MissingKey)?;
+                let text = value.ok_or(LaunchError::MissingValue)?;
+                let value = serde_json::from_str(&text)
+                    .map_err(|e| LaunchError::BadValue(e.to_string()))?;
+                Ok(Self::SetConfig { key, value })
+            }
+            other => Err(LaunchError::UnknownJob(other.to_string())),
+        }
+    }
+
+    /// 任务名（`--headless` 后面的那个词）。
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::EmitSpec => HEADLESS_EMIT_SPEC,
+            Self::UpdateCheck => HEADLESS_UPDATE_CHECK,
+            Self::SetConfig { .. } => HEADLESS_SET_CONFIG,
+        }
+    }
+
+    /// 拼成命令行参数（不含程序名）：`--headless <任务> [--key <键> --value <JSON>]`。
+    ///
+    /// ```rust
+    /// use snow_host_protocol::launch::HeadlessJob;
+    /// assert_eq!(HeadlessJob::UpdateCheck.to_args(), ["--headless", "update-check"]);
+    /// let set = HeadlessJob::SetConfig { key: "k".into(), value: 1.into() };
+    /// assert_eq!(set.to_args(), ["--headless", "set-config", "--key", "k", "--value", "1"]);
+    /// ```
+    pub fn to_args(&self) -> Vec<String> {
+        let mut args = vec![FLAG_HEADLESS.to_string(), self.name().to_string()];
+        if let Self::SetConfig { key, value } = self {
+            args.extend([
+                FLAG_KEY.to_string(),
+                key.clone(),
+                FLAG_VALUE.to_string(),
+                value.to_string(),
+            ]);
+        }
+        args
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 无窗口任务：参数往返；缺参数、值不是 JSON、未知任务都被拒绝。
+    #[test]
+    fn headless_jobs_round_trip_and_validate() {
+        for job in [
+            HeadlessJob::EmitSpec,
+            HeadlessJob::UpdateCheck,
+            HeadlessJob::SetConfig {
+                key: "global_shortcuts/x".into(),
+                value: serde_json::json!({"a": [1, "二"], "b": null}),
+            },
+        ] {
+            let args = job.to_args();
+            assert_eq!(args[0], FLAG_HEADLESS);
+            let after = |flag: &str| {
+                args.iter()
+                    .position(|a| a == flag)
+                    .map(|i| args[i + 1].clone())
+            };
+            assert_eq!(
+                HeadlessJob::parse(&args[1], after(FLAG_KEY), after(FLAG_VALUE)).unwrap(),
+                job
+            );
+        }
+        assert_eq!(
+            HeadlessJob::parse(HEADLESS_SET_CONFIG, None, Some("1".into())),
+            Err(LaunchError::MissingKey)
+        );
+        assert_eq!(
+            HeadlessJob::parse(HEADLESS_SET_CONFIG, Some(String::new()), Some("1".into())),
+            Err(LaunchError::MissingKey)
+        );
+        assert_eq!(
+            HeadlessJob::parse(HEADLESS_SET_CONFIG, Some("k".into()), None),
+            Err(LaunchError::MissingValue)
+        );
+        assert!(matches!(
+            HeadlessJob::parse(HEADLESS_SET_CONFIG, Some("k".into()), Some("{oops".into())),
+            Err(LaunchError::BadValue(_))
+        ));
+        assert_eq!(
+            HeadlessJob::parse("nope", None, None),
+            Err(LaunchError::UnknownJob("nope".into()))
+        );
+    }
 
     /// 参数往返：拼出来的参数能被逐项读回并通过校验。
     #[test]

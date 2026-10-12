@@ -194,6 +194,103 @@ fn random_hex_is_hex_and_unique() {
     );
 }
 
+/// 无窗口更新检查：真起假 UI，参数是 `--headless update-check`；标准输出第一行作为提示文案随
+/// `HeadlessDone` 带回；进程没输出时提示为 `None`。
+#[test]
+fn headless_update_check_reports_notice_from_stdout() {
+    let dir = scratch("headless-update");
+    let (mut platform, rx) =
+        platform_with(fake_ui(&dir, "echo Update 9.9.9 available"), dir.clone());
+    platform.spawn_headless(&HeadlessJob::UpdateCheck).unwrap();
+    let Event::HeadlessDone { kind, notice } =
+        wait_for(&rx, |e| matches!(e, Event::HeadlessDone { .. }))
+    else {
+        unreachable!()
+    };
+    assert_eq!(kind, HeadlessKind::UpdateCheck);
+    assert_eq!(notice.as_deref(), Some("Update 9.9.9 available"));
+    let args = std::fs::read_to_string(dir.join("args.txt")).unwrap();
+    assert_eq!(args.trim(), "--headless update-check");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let dir = scratch("headless-update-quiet");
+    let (mut platform, rx) = platform_with(fake_ui(&dir, ""), dir.clone());
+    platform.spawn_headless(&HeadlessJob::UpdateCheck).unwrap();
+    let Event::HeadlessDone { notice, .. } =
+        wait_for(&rx, |e| matches!(e, Event::HeadlessDone { .. }))
+    else {
+        unreachable!()
+    };
+    assert_eq!(notice, None);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 无窗口改配置：参数带 `--key` / `--value`（JSON）；结束后投递 `HeadlessDone`，不带提示。
+#[test]
+fn headless_set_config_passes_key_and_value() {
+    let dir = scratch("headless-config");
+    let (mut platform, rx) = platform_with(fake_ui(&dir, ""), dir.clone());
+    let job = HeadlessJob::SetConfig {
+        key: "global_shortcuts/disable_on_focused_fullscreen_window".into(),
+        value: serde_json::json!(true),
+    };
+    platform.spawn_headless(&job).unwrap();
+    let Event::HeadlessDone { kind, notice } =
+        wait_for(&rx, |e| matches!(e, Event::HeadlessDone { .. }))
+    else {
+        unreachable!()
+    };
+    assert_eq!((kind, notice), (HeadlessKind::SetConfig, None));
+    let args = std::fs::read_to_string(dir.join("args.txt")).unwrap();
+    assert_eq!(
+        args.trim(),
+        "--headless set-config --key global_shortcuts/disable_on_focused_fullscreen_window --value true"
+    );
+    // 生成快照有自己的路径，通用入口拒绝它
+    assert!(platform.spawn_headless(&HeadlessJob::EmitSpec).is_err());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 提示读取：取第一行并去空白；空输出 / 空行 / 非法 UTF-8 都不 panic；超长输出被截到上限。
+#[test]
+fn read_notice_takes_first_line_within_limit() {
+    assert_eq!(
+        read_notice("有新版本 1.2\r\nignored".as_bytes()),
+        Some("有新版本 1.2".to_string())
+    );
+    assert_eq!(read_notice("".as_bytes()), None);
+    assert_eq!(read_notice("\n\n".as_bytes()), None);
+    assert_eq!(
+        read_notice(&b"\xff\xfe ok\n"[..]).as_deref(),
+        Some("\u{fffd}\u{fffd} ok")
+    );
+    let long = "x".repeat(MAX_NOTICE_BYTES * 3);
+    assert_eq!(
+        read_notice(long.as_bytes()).unwrap().len(),
+        MAX_NOTICE_BYTES
+    );
+}
+
+/// 鼠标手势：没有有效绑定不装钩子（`mouse` 保持为空）；取消手势在没有钩子时也安全。
+#[test]
+fn mouse_hook_is_not_installed_without_bindings() {
+    let dir = scratch("mouse");
+    let (mut platform, _rx) = platform_with(dir.join("x.exe"), dir.clone());
+    platform.set_mouse_bindings(&[]).unwrap();
+    // 全是无效项（没有修饰键）等同于没有绑定
+    platform
+        .set_mouse_bindings(&[MouseBindingSpec {
+            action: "screenshot_copy".into(),
+            modifiers: vec![],
+            button: "left_drag".into(),
+        }])
+        .unwrap();
+    assert!(platform.mouse.is_none());
+    platform.cancel_gesture();
+    assert!(platform.unix_now() > 1_600_000_000);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// 工作集修剪与前台授权不会失败崩溃（失败只记日志）。
 #[test]
 fn trim_and_grant_are_safe() {

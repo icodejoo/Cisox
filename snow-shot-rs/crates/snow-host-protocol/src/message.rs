@@ -71,6 +71,9 @@ pub enum HostMessage {
         phase: GesturePhase,
         /// 手势编号（同一次拖动内不变）。
         id: u64,
+        /// 手势动作标识（只有 `begin` 带，如 `screenshot_copy`）；其余阶段省略。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        action: Option<String>,
         /// 横坐标。
         x: i32,
         /// 纵坐标。
@@ -158,6 +161,11 @@ pub enum UiMessage {
     HotkeysApply {
         /// 快照修订号。
         rev: u64,
+    },
+    /// UI 放弃了这次鼠标手势（已有截图 / 录制在进行等）：请宿主让钩子取消，别再吞鼠标输入。
+    CancelGesture {
+        /// 被放弃的手势编号。
+        id: u64,
     },
     /// UI 判定无窗口、无活动，请求退出。
     ExitRequest {
@@ -322,10 +330,23 @@ mod tests {
                     seq: 3,
                     phase: GesturePhase::Update,
                     id: 9,
+                    action: None,
                     x: -10,
                     y: 20,
                 },
                 json!({"type": "gesture", "seq": 3, "phase": "update", "id": 9, "x": -10, "y": 20}),
+            ),
+            (
+                HostMessage::Gesture {
+                    seq: 11,
+                    phase: GesturePhase::Begin,
+                    id: 9,
+                    action: Some("screenshot_copy".into()),
+                    x: 5,
+                    y: 6,
+                },
+                json!({"type": "gesture", "seq": 11, "phase": "begin", "id": 9,
+                       "action": "screenshot_copy", "x": 5, "y": 6}),
             ),
             (
                 HostMessage::SetConfig {
@@ -393,6 +414,10 @@ mod tests {
             (
                 UiMessage::HotkeysApply { rev: 4 },
                 json!({"type": "hotkeys_apply", "rev": 4}),
+            ),
+            (
+                UiMessage::CancelGesture { id: 4 },
+                json!({"type": "cancel_gesture", "id": 4}),
             ),
             (
                 UiMessage::ExitRequest { last_seq: 12 },
