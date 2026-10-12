@@ -243,6 +243,18 @@ snow-shot             改  bin 改名 snow-shot-ui；新增 spec 生成（纯函
 - **范围**：新增 `snow-data-paths`、`snow-host-protocol`、`snow-shell-core`；`snow-ui-shell` 改为重导出（对外路径不变）；`snow-shot` 里把热键注册和托盘菜单拆成"先产出计划/快照（纯函数）、再注册/显示"（`hotkey_plan`、`host_spec_from_document`）；`workspace-guard` 加依赖闭包规则（此时对象还只是 `snow-host-protocol`）。
 - **验收**：`cargo test -p workspace-guard -p snow-host-protocol -p snow-shell-core -p snow-data-paths -p snow-ui-shell`；`snow-shot` 里热键、托盘、`fullscreen_gate` 相关测试通过；快照对默认配置序列化再反序列化一致，热键计划与旧 `register_all_hotkeys_gated` 的注册集合逐项一致（对照测试）；fmt、clippy 通过；i18n 两条门禁通过。运行时行为与改前一致。
 - **禁止**：不新增 bin；不改 IPC；`snow-shell-core` 不得依赖 `snow-app-core`、`snow-capability`、gpui。
+- **状态：已完成（commit 5953974a，2026-10-12）**。验收：`cargo test -p workspace-guard -p snow-host-protocol -p snow-shell-core -p snow-data-paths -p snow-ui-shell -p snow-config -p snow-app-core` 全绿；`snow-shot` 里 `hotkey_plan` / `host_spec` / `app_runtime` / `fullscreen_gate` / `tray_config` / `quick_actions` / `mouse_gesture` 相关 79 项通过；i18n 两条门禁通过；clippy（workspace、all-targets、`-D warnings`）通过。运行时行为未改，无新增第三方依赖。
+- **阶段 1 实施偏差与澄清**：
+  1. `snow-shell-core` 的动作负载用**泛型 `A`** 而不是“不透明 id 字符串”：UI 进程仍是 `AppCommand`，宿主将来用 `String`。`snow-ui-shell` 里 `HotkeyService` / `TrayService` 是套了能力表校验与 `AppCommand` 适配的薄包装，`HotkeyBinding` / `TrayAction` / `TrayMenuEntry` / `TraySpec` 是类型别名，调用方代码零改动。
+  2. `ShellError::Unsupported.capability` 由 `Capability` 改为 `&'static str`（能力标识），因为 core 不能依赖 `snow-capability`；`ui-shell` 里有测试守住 core 复刻的标识与原因 key 与能力表一致。非 Windows 降级桩的弹出菜单主题错误改报 `Tray`（原为 `OverlayClickThrough`），仅影响日志文案。
+  3. 消息循环、唤醒器、弹出菜单主题（`native`）也移入 core；`service_thread`、`error`、`hotkey`、`tray` 如方案所列。单实例 / 命名管道 / 鼠标钩子本来就在 `snow-platform`（无 gpui），无需抽取。
+  4. `snow-host-protocol` 对 §4 的取舍：`hotkeys_apply{rev}` 按 §4 设置页流程解释为 **UI→宿主** 请求，应答为宿主→UI 的 `hotkeys_result{rev, results[]}`；新增 `check_hello`、令牌格式、`FrameReader`（字节流切行、超长行丢弃）、`HostSeq` / `UiSeq` / `ExitDecision`（序号与退出仲裁）、§4 的超时与熔断常量。不含命令队列与状态机（阶段 2）。图标像素的 base64 自带最小实现，保持 crate 只依赖 serde / serde_json。
+  5. `snow-shell-core::hotkey` 新增 `Hotkey::win_vk()` / `Modifiers::win_bits()`（Win32 虚拟键码与 `MOD_*` 位），供快照里的 `mods` / `vk`。
+  6. `workspace-guard` 的依赖闭包规则：纯读 `Cargo.lock`，必需根 `snow-host-protocol`、`snow-shell-core`、`snow-data-paths`，可选根 `snow-tray-host`（阶段 2 建出后自动生效）。黑名单在方案 §3 的清单上多加了 `snow-capability`。**`Cargo.lock` 不区分平台**：`tray-icon` / `muda` 在 Linux 上会拉进 `gtk` → `glib` → `futures-executor`，所以遍历时对 `gtk`、`libappindicator` 两个只在非 Windows 编译的入口不继续深入（`NON_WINDOWS_ONLY`，附测试）；新增条目前须确认它确实只被非 Windows 目标依赖。导入表闸门（第三层）仍属阶段 2。
+  7. `snow-shot` 新增 `hotkey_plan.rs`（`hotkey_plan` 及其三个子计划，纯函数）与 `host_spec.rs`（`host_spec_from_document` + `HostSpecInputs`、动作 id 映射 `command_id` / `command_from_id`）。注册路径 `register_all_hotkeys_gated` 改为“出计划 → `register_plan_with` 注册”，对照测试用独立手写的旧注册顺序作金标准逐项比对（默认配置、多处绑定、暂停、听写三种触发模式）。`host_spec` 阶段 1 不接入运行时，模块上用 `cfg_attr(not(test), allow(dead_code))` 压住未使用告警，阶段 2 接入后去掉。
+  8. 快照里 `keep_alive` 目前只含 `mcp`、`ocr_hot_start`；§10 第 4 条“绑定了语音热键则保活”留到阶段 3。`fullscreen_gate` 仍在 `snow-shot`，宿主侧闸门随阶段 2 实现。
+  9. 工作区基线：本阶段在 worktree 分支上由旧提交快进到 7400567d 后开始。
+- **留给阶段 2**：`snow-tray-host` bin、`snow-shot-ui` 改名与 `--ui` / `--resident`、会话管道（复用 `line_pipe`）与宿主状态机、命令队列（64 条 / 30s / 手势 update 只留最新）、UI 侧会话客户端与活动跟踪、宿主线程创建窗口前 `ImmDisableIME(0)`（§12.9 第 1 条）及其回归测试、`--cmd` 从属实例先对宿主 PID 调 `AllowSetForegroundWindow`（§12.9 第 4 条）、导入表闸门脚本、宿主侧前台全屏闸门与暂停开关、`host/spec.json` 的原子写入与 `rev` 维护、去掉 `host_spec` 的 `allow(dead_code)`。
 
 ### 阶段 2：宿主 + UI 双进程跑通（默认仍是单进程）
 

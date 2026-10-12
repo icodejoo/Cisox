@@ -11,11 +11,9 @@ use snow_draw_engine_core::{EngineConfig, validate_config};
 /// 阶段标记。
 pub const PHASE: &str = "P1";
 
-/// 产品显示名，唯一来源；禁止写入可翻译字符串（约定 11）。
-pub const PRODUCT_NAME: &str = "Cisox";
-
-/// 通用应用标识符（数据目录、锁名等由此派生）。
-pub const APP_ID: &str = "cisox";
+/// 产品显示名与通用应用标识符：唯一来源在零依赖的 `snow-data-paths`（托盘宿主也要用），
+/// 这里重导出，`snow_app_core::{PRODUCT_NAME, APP_ID}` 路径不变。禁止写入可翻译字符串（约定 11）。
+pub use snow_data_paths::{APP_ID, PRODUCT_NAME};
 
 /// 单实例互斥体 / 锁名。
 pub const SINGLE_INSTANCE_NAME: &str = "Cisox.SingleInstance";

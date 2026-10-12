@@ -29,6 +29,9 @@ cargo test --workspace
 | `snow-ui/snow-ui-icons` | 图标模型与资源 | P1 图标 |
 | `snow-ui/snow-ui-widgets` | gpui-kit 缺口组件 | P3 |
 | `snow-ui/snow-ui-shell` | GPUI 隔离层，`gpui::` 只允许出现在这里 | P1 起 |
+| `snow-shell-core` | 托盘与全局热键后端（无 gpui、无命令总线、无能力表；动作负载为泛型），`snow-ui-shell` 重导出 | 托盘宿主拆分阶段 1 |
+| `snow-data-paths` | 数据根目录解析与 `APP_ID` / `PRODUCT_NAME`（零依赖），`snow-config::paths`、`snow-app-core` 重导出 | 托盘宿主拆分阶段 1 |
+| `snow-host-protocol` | 托盘宿主 ↔ UI 进程协议：`host/spec.json` 快照、会话消息、JSON 行编解码、序号与退出握手（只依赖 serde） | 托盘宿主拆分阶段 1 |
 | `snow-canvas-raster` / `-filters` / `-text` | 画布光栅化 / 滤镜 / 文本 | P2 |
 | `snow-translate` | 本地 NMT | P5 |
 | `snow-i18n` | Fluent 运行时与提取 | P1 i18n |
@@ -38,7 +41,7 @@ cargo test --workspace
 | `snow-update` | 更新（T4 验收前禁用） | P7 |
 | `snow-mcp` | 进程内 MCP | P7 |
 | `snow-platform` | 原生平台调用 | P1 起 |
-| `tools/workspace-guard` | 守卫：shell 之外出现 `gpui::` 或 gpui 依赖即测试失败 | P1 |
+| `tools/workspace-guard` | 守卫：shell 之外出现 `gpui::` 或 gpui 依赖即测试失败；另有依赖闭包黑名单（宿主相关 crate 的传递依赖里不得有 gpui 等） | P1 / 托盘宿主拆分阶段 1 |
 
 日志与崩溃转储、CI 属 P1 后续任务，尚未建 crate / 流水线。
 

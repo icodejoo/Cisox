@@ -229,7 +229,7 @@ impl ShellWindow {
 /// set_popup_menu_dark(Some(true))?;
 /// ```
 pub fn set_popup_menu_dark(dark: Option<bool>) -> Result<(), ShellError> {
-    native::set_popup_menu_dark(dark)
+    snow_shell_core::native::set_popup_menu_dark(dark)
 }
 
 /// 启动期上下文：在 [`run`] 的回调里创建窗口、启动服务。

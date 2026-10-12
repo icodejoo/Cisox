@@ -11,7 +11,7 @@ const REASON: &str = snow_capability::REASON_NOT_IMPLEMENTED;
 /// 构造“能力未实现”错误。
 fn unsupported(capability: Capability) -> ShellError {
     ShellError::Unsupported {
-        capability,
+        capability: capability.id(),
         reason: REASON,
     }
 }
@@ -88,10 +88,5 @@ pub(crate) fn set_input_transparent(_hwnd: isize, _transparent: bool) -> Result<
 
 /// 设置窗口标题栏深浅色：桩返回不支持。
 pub(crate) fn set_window_dark_title(_hwnd: isize, _dark: bool) -> Result<(), ShellError> {
-    Err(unsupported(Capability::OverlayClickThrough))
-}
-
-/// 设置弹出菜单深浅色：桩返回不支持。
-pub(crate) fn set_popup_menu_dark(_dark: Option<bool>) -> Result<(), ShellError> {
     Err(unsupported(Capability::OverlayClickThrough))
 }

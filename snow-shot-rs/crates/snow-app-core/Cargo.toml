@@ -10,6 +10,8 @@ workspace = true
 
 [dependencies]
 snow-platform = { path = "../snow-platform" }
+# 产品常量（APP_ID / PRODUCT_NAME）的唯一来源，本 crate 重导出
+snow-data-paths = { path = "../snow-data-paths" }
 # 跨 workspace path 依赖，仅用于连通性验证（方案 §5：共享 Rust 内核）
 snow-draw-engine-core = { path = "../../../snow_draw_engine_qt/crates/snow-draw-engine-core" }
 # 平台能力注册表（命令处理器据此判定降级）

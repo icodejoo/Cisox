@@ -23,6 +23,9 @@ members = [
     "crates/snow-recorder-protocol",
     "crates/snow-ocr-protocol",
     "crates/snow-stt-protocol",
+    "crates/snow-data-paths",
+    "crates/snow-shell-core",
+    "crates/snow-host-protocol",
     "tools/workspace-guard",
 ]
 resolver = "3"
