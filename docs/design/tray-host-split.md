@@ -323,9 +323,25 @@ snow-shot             改  bin 改名 snow-shot-ui；新增 spec 生成（纯函
 
 ### 阶段 4：切默认与收口
 
-- **范围**：默认 `split`；自启指向宿主；文档（handoff、迁移方案、审计表 C03、README 索引、AGENTS.md 的 crate 清单）同步；CI 加导入表闸门；打包脚本出现后纳入两个 exe。
+- **范围**（切默认部分待真屏验收，见下状态）：默认 `split`；自启指向宿主；文档（handoff、迁移方案、审计表 C03、README 索引、AGENTS.md 的 crate 清单）同步；CI 加导入表闸门；打包脚本出现后纳入两个 exe。
 - **验收（量化）**：关闭全部窗口 10s 后，进程只剩宿主，私有提交 ≤ 6MB（对比现状截图后 134~136MB）；一次截图→关闭，UI 与所有 worker 在 3s 内全部消失；冷拉起热键→首帧 ≤ 0.9s；连续 50 次热键截图无丢命令、无两个 UI 并存；全套回归通过；`cargo test` 覆盖 crate 的相关测试、`workspace-guard`、i18n 门禁、fmt、clippy 通过。
 - **禁止**：不删 `--resident` 路径（至少保留到用户另行拍板）；不在文档里把估算写成实测。
+- **状态：离屏部分完成（CI 闸门、文档），切默认待真屏验收（2026-10-12）**。默认仍是单进程；下面的验收（量化）与“切默认”都要等主会话在桌面解锁后跑完 `scripts\verify-tray-host-split.ps1` 全场景并回填阶段 2、3 再决定。
+- **离屏部分交付物**：
+  - **CI 导入表闸门**：`.github/workflows/snow-shot-rs-ci.yml` 新增仅 Windows 的 `host-imports` 任务（独立任务，三平台矩阵的 `ci` 任务不受影响），跑 `scripts/check-host-imports.ps1 -Build -WithUi`：宿主与 UI 两个包用同一条 `cargo build --release -p snow-tray-host -p snow-shot` 构建（与真实打包一致，也能发现两包同构建时的特性统一问题），再用 `workspace-guard` 的 `check-host-imports` 解析宿主 PE 导入表（静态 + 延迟）对白名单。脚本新增 `-WithUi`，产物目录改为尊重 `CARGO_TARGET_DIR`（本机设了它，旧写法固定读 `build\cargo` 会找不到 exe）；脚本加 UTF-8 BOM（PowerShell 5.1 不带 BOM 会把 UTF-8 按 ANSI 读）。CI 路径过滤加入 `scripts/check-host-imports.ps1`。依赖闭包规则继续走 `ci` 任务里的 `cargo test --workspace`（含 `workspace-guard`）。
+  - **旧 bin 名查漏**：CI 里没有引用旧 bin 名 `snow-shot`（UI 现为 `snow-shot-ui`）的步骤；其它 workflow（release / winget / homebrew）是 Qt 版发布流水线，与 Rust 版无关；`scripts/` 下 Rust 版相关脚本里，`verify-snow-shot-recording.ps1`、`tools/self_acceptance_verify.ps1` 阶段 2 已改指 `snow-shot-ui.exe`，其余无引用。Rust 版打包脚本尚不存在（见下清单第 7 项）。
+  - **文档**：`docs/cisox-progress-handoff.md` 新增 §6.2「进程模型」（两个 exe 职责、启动开关、构建、数据与日志位置、验收脚本、现状与切默认前提）；`snow-shot-rs/README.md` 新增“两个 exe 与运行方式”；`AGENTS.md` 构建说明补 CI 闸门、`-WithUi`、进程模型指针与“默认仍单进程”；`docs/README.md` 索引同步。
+- **离屏验收结果**（2026-10-12）：`cargo clippy --workspace --all-targets -- -D warnings` 通过；`cargo test -p workspace-guard` 通过（24 + 6 doc）；`scripts/check-host-imports.ps1 -Build` 通过（宿主 release `snow-shot.exe` 1,102,336 字节，静态导入 18 项、延迟 0 项，与阶段 3 记录一致）；脚本用 Windows PowerShell 5.1 解析 0 错误，UTF-8 BOM、LF；CI YAML 用 PyYAML `safe_load` 校验可解析且三个任务齐全。**未实测**：`-WithUi`（UI 的 fat LTO release 构建很慢，只在 CI 上跑）与 CI 任务本身（本机没有 runner）。本阶段没有改任何 Rust 代码。
+- **切默认改动位置清单**（本节只列、**不改**，真屏验收通过后一次完成；行号以 2026-10-12 的 `0cb332f4` 为准）：
+  1. **无参数默认入口**（`snow-shot/src/main.rs`）：`parse_cli` 末尾 `else { RunMode::Resident }`（约 L251）改成新模式“转去启动同目录宿主 `snow-shot.exe` 后退出”（§3“直接双击 UI exe”那一行；带 `--cmd` 时一并转给宿主）；`--resident` 要变成显式开关（现在是默认的同义词）。同处要改：`RunMode` 文档注释与 `RunMode::Resident` 的“默认”字样（约 L169）、模块头注释（L4 “也是阶段 2 的默认”）、`parse_cli` 文档与 `main` 里的用法提示（`eprintln!` 那行）、单测 `cli_defaults_to_resident`（约 L597）与 `cli_modes_are_exclusive` 里相关断言。
+  2. **自启注册指向**（`snow-shot/src/system_settings.rs`）：`AUTO_START_HOST` 初值 `false` 改 `true`（或去掉开关，永远指向同目录 `snow-shot.exe`），`prefer_host_exe()` 及其唯一调用点 `main.rs::run_ui`（约 L473）随之删除或保留为空操作；单测 `auto_start_target_follows_mode` 同步。注册表值只存带引号的路径、不能带参数（`snow-platform::system_integration::run_command`），所以显式 `--resident` 的回退进程也只能指向宿主。**老用户迁移**：旧版 HKCU Run 值指向 `snow-shot-ui.exe`，改默认后它无参数启动会转去拉宿主（第 1 项），能用；之后 `system_settings::apply`（`main.rs` 约 L419 / L481、`app_runtime.rs` 约 L4529 在配置载入与变化时调用）会把值改写成宿主路径。开发构建（`debug_assertions`）仍不改注册表。
+  3. **重启辅助**（`snow-shot/src/app_runtime.rs::spawn_restart_helper`，约 L1062）：单进程回退模式下用 `current_exe()` 无参数拉起新实例，切默认后会变成“拉宿主”，要改成带 `--resident`（回退模式重启回到回退模式）；双进程模式的重启由宿主处理（动作 `restart`），不走这里。
+  4. **宿主侧**（`snow-tray-host`）：`--resident` 转调 UI（`app.rs::run_resident_fallback`）与 `cli.rs` 的 `USAGE` 基本不用改；无运行实例时 `--cmd` 成为主实例、命令被忽略的旧行为（阶段 2 偏差 11）是否保留，在此一并拍板。宿主互斥体 `Local\cisox.snow_shot.single_instance`、UI 的 `Local\cisox.snow_shot.ui`、会话管道名都**不用改**，只做回归（两种模式互斥、不双注册热键）。
+  5. **快捷方式 / 开始菜单 / 安装脚本**：Rust 版没有安装脚本与快捷方式，无可改之处；将来出现时入口一律指向宿主 `snow-shot.exe`，不是 `snow-shot-ui.exe`。
+  6. **验收与自检脚本**：`scripts/verify-snow-shot-recording.ps1`（约 L42 的 `Start-Process -FilePath $Exe` 无参数启动；后面两处带 `--cmd` 的是委托，不用改）与 `tools/self_acceptance_verify.ps1`（约 L20 `& $exePath`）要的是单进程完整应用，切默认后改为显式 `--resident`；`scripts/verify-tray-host-split.ps1` 本来就起宿主，不受影响。
+  7. **打包 / 更新**：Rust 版打包脚本出现时必须把 `snow-shot.exe` 与 `snow-shot-ui.exe` 放同一目录，开始菜单与自启指向宿主；`snow-update` 将来自动安装要先 `--cmd quit` 宿主再替换两个 exe（现在只下载不安装，不受影响）。
+  8. **文档同步**：本文 §3 表“直接双击 UI exe / 自启 / 单实例”几行与阶段 2 “产物名与过渡”里的“默认仍是单进程”、`AGENTS.md` 第 6 行与构建说明、`snow-shot-rs/README.md`“两个 exe 与运行方式”、`docs/cisox-progress-handoff.md` §6.2「现状 / 切默认的前提」、`docs/README.md` 索引这条、迁移方案 §2.1 的 workspace 布局与 ADR-9（MCP 进程内）加注“UI 保活时成立”、审计表 C03 / C04；开发说明里 `cargo run -p snow-shot` 要加 `-- --resident`。
+  9. **不要动的**：`--resident` 路径与 `snow-shot-ui.exe --cmd` 的单实例委托（至少保留到用户另行拍板）；`HostCli::Resident`；worker 按 `exe_dir()` 找的逻辑。
 
 ### 阶段 5：冷启动优化
 

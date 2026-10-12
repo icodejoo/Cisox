@@ -3,6 +3,7 @@
 > 本文记录 2026-10-03 暂停时的真实状态与续做入口。方案主文档：`docs/cisox-gpui-migration-plan.md`。
 > **功能对齐程度以 [`research/qt-parity-audit.md`](research/qt-parity-audit.md)（2026-10-03，读代码得出）为准**；方案 P2~P7 与旧验收报告里的「已完成」没按现状重核，别直接引用。
 > 最新待办清单在 §5.1；§5 及之前的清单是 09-29 旧稿，仍有效的条目已在 §5 开头标出。
+> 进程模型（托盘宿主 + 按需 UI：两个 exe、启动开关、构建、日志位置、验收脚本、切默认前提）见 §6.2。
 
 ## 0.0 2026-10-09 收口（最新，先读这里）
 
@@ -365,3 +366,49 @@ Windows 主线已经能跑通「热键 / 托盘 / IPC → 截图覆盖窗（单�
 - 翻译成品包：直接从 Release `models` 下载；要重新生成，先下载原版 `facebook/nllb-200-distilled-600M`、`tencent/Hy-MT2-1.8B`、`Helsinki-NLP/opus-mt-*`，再用 `snow-shot-rs/tools/snow-translator/{eval,scripts}` 下的脚本导出、量化、打包（流程见 `docs/guides/translation-model-release.md`）；评测用的 CCMatrix 词频与 FLORES 数据需重新取得。
 - 在本机重装 FFmpeg（`scripts/build-ffmpeg-recorder.ps1`）前先设 `X_VCPKG_ASSET_SOURCES='x-script,E:\workspaces\Cisox\.tools\vcpkg-fetch.cmd {url} {dst}'`：vcpkg 自带 curl 在本机连 msys2 镜像会报 SSL 错误 35，该钩子走 aria2 绕开（钩子脚本放在 `.tools/`，不入库）。下载缓存已清，会重新下载 msys2 工具包与 cmake 等。
 - Qt 参考版（V2 判据所需的参考版 P99）：见 §4，需从零重新构建。
+
+## 6.2 进程模型（托盘宿主 + 按需 UI）（2026-10-12）
+
+> 方案与全部实测见 [`design/tray-host-split.md`](design/tray-host-split.md)（§8 阶段 0~6、§12 阶段 0 实测）。**当前默认仍是单进程**，双进程要显式启动宿主；切默认要等真屏验收（见下「切默认的前提」）。
+
+**两个 exe（同目录；宿主按自己的目录找 UI，环境变量 `SNOW_UI_EXE` 可覆盖）**
+
+| exe | 包 | 职责 |
+| --- | --- | --- |
+| `snow-shot.exe`（宿主，约 1.1MB，不链 GPUI） | `snow-tray-host` | 托盘与菜单、全局热键（含暂停开关、前台全屏闸门）、鼠标手势钩子、单实例互斥体与 `--cmd` 入口、UI 进程拉起与仲裁（状态机、命令队列、崩溃熔断）、更新检查到点拉起 headless、登录时恢复贴图 / 保活拉起。**不读 `config.json`、不带 i18n、不画图标**，只认 UI 写的 `host/spec.json` 快照。 |
+| `snow-shot-ui.exe`（完整应用，约 26MB） | `snow-shot` | 全部窗口、配置读写（唯一写者）、历史、贴图、录屏 / 语音 / 翻译 / OCR 调度、MCP、更新。所有窗口关闭且无后台活动后向宿主请求退出，宿主同意后立即退出（不保活）。 |
+
+**启动开关**
+
+| 入口 | 开关 | 含义 |
+| --- | --- | --- |
+| 宿主 `snow-shot.exe` | 无参数 | 抢单实例互斥体，成为常驻宿主（托盘态只剩它）；抢不到就把命令交给运行中的实例 |
+| | `--cmd screenshot｜recording｜scroll-capture｜pin-clipboard｜settings｜show｜quit` | 把命令经控制管道交给运行中的实例（两种模式命令名不变） |
+| | `--resident` | 不跑宿主，转调 `snow-shot-ui.exe --resident` 后退出（回退入口） |
+| UI `snow-shot-ui.exe` | 无参数 / `--resident` | **单进程常驻**（旧行为，当前默认）：自带托盘 / 热键 / IPC，与宿主共用互斥体所以互斥 |
+| | `--ui --session <名> --token <令牌>` | 宿主拉起的 UI 会话：连会话管道，不持托盘 / 热键；用户不要手敲 |
+| | `--headless emit-spec｜update-check｜set-config --key <键> --value <JSON>` | 无窗口任务，不初始化 GPUI，做完就退（宿主调用） |
+| | `--cmd …` | 同宿主：把命令交给运行中的实例 |
+
+**构建**（在 `snow-shot-rs/` 下；产物目录见 §6 / 根 `.cargo/config.toml`，本机若设了 `CARGO_TARGET_DIR` 以它为准）
+
+- 两个包一起构建：`cargo build -p snow-tray-host -p snow-shot`（加 `--release` 出发布版）。**`<产物目录>/<profile>/snow-shot.exe` 自拆分起是宿主**，完整应用是 `snow-shot-ui.exe`；旧脚本 / 习惯里的 `snow-shot.exe` 要改。
+- 宿主导入表闸门：`scripts/check-host-imports.ps1 -Build [-WithUi]`（`-WithUi` = 两个包同一条命令构建）。CI 的 Windows `host-imports` 任务跑 `-Build -WithUi`。依赖闭包规则在 `cargo test -p workspace-guard`。
+- 完整应用开发：`cargo run -p snow-shot`（= `snow-shot-ui.exe` 无参数 = 单进程常驻）。
+
+**数据与日志位置**（数据根 = 便携标记 `__data_directory` 指向的目录，否则默认 `%LOCALAPPDATA%\Cisox`；宿主与 UI 用同一套解析，代码在 `snow-data-paths`）
+
+- 快照：`<数据根>\host\spec.json`（UI 写、宿主读；热键表、托盘菜单快照、手势绑定、几个开关、`pins_to_restore`、`update_due_at`）。
+- 日志：`<数据根>\logs\`，宿主 `host.log`（INFO 及以上，256KB 滚动为 `host.log.1`），UI 是 `cisox.<日期>.log` 滚动文件；崩溃转储 `logs\crash\`。
+- MCP 描述符 `<数据根>\mcp\descriptor.json` 仍由 UI 写，路径内容不变。
+- 单实例标识：宿主 / `--resident` 共用互斥体 `Local\cisox.snow_shot.single_instance`；UI 另持 `Local\cisox.snow_shot.ui` 防重复；会话管道前缀 `cisox.snow_shot.session`。
+
+**验收脚本**（都要 Windows PowerShell 5.1、桌面已解锁、本机没有别的 Cisox 实例；按约定不在锁屏时跑）
+
+- `scripts\verify-tray-host-split.ps1 [-Scenario all|idle|ime|hotkey|tray-focus|cmd|settings-hotkey|pause-gate|crash|admin|gesture|pins-restore|stt-keepalive|mcp-keepalive|update-headless] [-Rounds 3]`：把宿主 / UI exe 复制到临时目录并写 `__data_directory` 标记，不碰真实数据目录；结果写 `build\split-accept\<时间戳>\results.json`。覆盖 §8 阶段 2、3 里需要真屏的各项（托盘态宿主私有提交 ≤ 6MB、冷拉起热键→首帧 ≤ 1.14s 等）。
+- `scripts\check-host-imports.ps1`：离屏，导入表白名单。
+- 完整应用（单进程）的老脚本：`scripts\verify-snow-shot-recording.ps1`、`tools\self_acceptance_verify.ps1`，已改指 `snow-shot-ui.exe`。
+
+**现状**：阶段 0~3 离屏部分已完成并合入；阶段 2、3 的真屏验收结果待回填；阶段 4 的离屏部分（CI 闸门、文档）已完成，**切默认待真屏验收**；阶段 5（冷启动优化）、6（宿主精简）未做。
+
+**切默认的前提（缺一不可）**：① 真屏验收脚本全场景通过并回填 §8 阶段 2、3；② 托盘态宿主私有提交 ≤ 6MB（默认配置带 3 条手势绑定，要重测）；③ 冷拉起热键→首帧 ≤ 0.9s（阶段 4 量化口径）、连续 50 次热键截图无丢命令无双 UI；④ 全套功能回归清单（§8 阶段 3）逐项过；⑤ 用户拍板 `dictation_hotkey` 是否登录预拉。要改哪些地方见 `design/tray-host-split.md` §8 阶段 4「切默认改动位置清单」。`--resident` 路径至少保留到用户另行拍板。

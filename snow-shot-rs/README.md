@@ -13,6 +13,19 @@ cargo test --workspace
 
 工具链由仓库根 `rust-toolchain.toml` 固定（Rust 1.97.1）。
 
+## 两个 exe 与运行方式
+
+应用拆成两个进程（方案 `../docs/design/tray-host-split.md`，进程模型小结见 `../docs/cisox-progress-handoff.md` §6.2）：
+
+```
+cargo build -p snow-tray-host -p snow-shot        # 同时构建；产物在根 .cargo/config.toml 指定的 build/cargo/<profile>/
+```
+
+- `snow-shot.exe`（包 `snow-tray-host`）：托盘宿主，不链 GPUI，常驻时只剩它；按需拉起 UI。
+- `snow-shot-ui.exe`（包 `snow-shot`）：完整应用（所有窗口、配置、翻译 / 录屏 / 语音等调度）。`--resident` 单进程常驻，`--ui --session <名> --token <令牌>` 由宿主拉起，`--headless emit-spec | update-check | set-config` 无窗口任务。
+- **默认仍是单进程**：直接跑 `snow-shot-ui.exe`（或 `cargo run -p snow-shot`）= 旧的单进程常驻；要走双进程，启动宿主 `snow-shot.exe`。两种模式共用单实例互斥体，不会同时跑。
+- 宿主导入表闸门：`../scripts/check-host-imports.ps1 -Build [-WithUi]`（CI 的 Windows `host-imports` 任务跑同一条）。
+
 ## 目录与后续任务对应
 
 `snow-shot` 新增模块：
@@ -21,8 +34,8 @@ cargo test --workspace
 
 | crate | 职责 | 阶段 / 填充任务 |
 |---|---|---|
-| `snow-shot` | UI 进程（bin 产物 `snow-shot-ui.exe`）：单进程常驻（默认 / `--resident`）、双进程 UI（`--ui`）、无窗口任务（`--headless emit-spec`）、单实例 | P1 单实例与入口 / 托盘宿主拆分阶段 2 |
-| `snow-tray-host` | 托盘宿主（bin 产物 `snow-shot.exe`，不链 GPUI）：托盘、全局热键（暂停 / 前台全屏闸门）、单实例与 `--cmd` 入口、UI 进程拉起与仲裁（状态机、命令队列、崩溃熔断） | 托盘宿主拆分阶段 2 |
+| `snow-shot` | UI 进程（bin 产物 `snow-shot-ui.exe`）：单进程常驻（默认 / `--resident`）、双进程 UI（`--ui`）、无窗口任务（`--headless emit-spec | update-check | set-config`）、单实例 | P1 单实例与入口 / 托盘宿主拆分阶段 2 |
+| `snow-tray-host` | 托盘宿主（bin 产物 `snow-shot.exe`，不链 GPUI）：托盘、全局热键（暂停 / 前台全屏闸门）、单实例与 `--cmd` 入口、UI 进程拉起与仲裁（状态机、命令队列、崩溃熔断） | 托盘宿主拆分阶段 2~3 |
 | `snow-app-core` | 产品常量、命令总线、会话编排；已 path 依赖 `snow-draw-engine-core` 验证连通 | P1 命令总线 |
 | `snow-capability` | 平台能力注册表 | P1 能力注册表 |
 | `snow-ui` | GPUI 视图层总入口 | P1 起 |
