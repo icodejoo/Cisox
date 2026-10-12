@@ -17,6 +17,17 @@
   crash        杀掉 UI 进程（只按 PID）后宿主仍在、下一次热键能重新拉起；3 次连杀触发熔断提示。
   admin        宿主以管理员运行（UAC 弹一次）时热键 / --cmd / 焦点正常；--cmd 来自非管理员 shell（混合权限）。
 
+阶段 3（长生命周期功能与退出规则）新增：
+  gesture      鼠标手势：宿主按快照装低级鼠标钩子（PerMonitorV2），Win+左键拖动 -> 宿主 -> 会话管道 -> UI 的覆盖窗
+               框选并复制（快速拖完 / UI 起来时拖动仍在进行两种）；没有绑定时不装钩子；宿主私有提交仍 <= 6MB。
+               前提：用环境变量 SNOW_HOST_ACCEPT_INJECTED_INPUT=1 启动宿主（脚本自动设），否则钩子按设计忽略注入输入。
+  pins-restore 贴图：有贴图时 UI 保活；UI 被杀后自动恢复贴图；优雅退出后快照记下贴图数；宿主重启 / 登录后恢复贴图。
+  stt-keepalive  语音热键：未绑定时 UI 随窗口关闭立即退出；绑定后 UI 保活，且登录时不预拉 UI。
+  mcp-keepalive  MCP / OCR 预热：开启后宿主登录就拉起 UI 常驻；MCP 管道可连、描述符有效；宿主与 MCP 并存；
+               UI 被杀后宿主补拉；退出后描述符清理。
+  update-headless  更新检查：到点（登录后至少 30s）宿主拉起 --headless update-check，查完即退，不开 UI 会话；
+               快照里的到点时间往后推；发现新版本时提示进托盘悬停。清单用 file:// 本地文件，不联网。
+
 .PARAMETER Scenario
 要跑的场景，默认 all（不含 admin，admin 要单独指定，因为会弹 UAC）。
 
@@ -53,7 +64,7 @@ hotkey 场景的轮数（取中位数），默认 3。
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('all', 'idle', 'ime', 'hotkey', 'tray-focus', 'cmd', 'settings-hotkey', 'pause-gate', 'crash', 'admin')]
+    [ValidateSet('all', 'idle', 'ime', 'hotkey', 'tray-focus', 'cmd', 'settings-hotkey', 'pause-gate', 'crash', 'admin', 'gesture', 'pins-restore', 'stt-keepalive', 'mcp-keepalive', 'update-headless')]
     [string[]]$Scenario = @('all'),
     [string]$HostExe = '',
     [string]$UiExe = '',
@@ -183,6 +194,31 @@ namespace CisoxAccept {
         public static void RightClick(int x, int y) {
             SetCursorPos(x, y);
             mouse_event(0x0008, 0, 0, 0, UIntPtr.Zero); mouse_event(0x0010, 0, 0, 0, UIntPtr.Zero);
+        }
+
+        [DllImport("user32.dll")] public static extern int GetSystemMetrics(int n);
+
+        // 主屏上的绝对移动（MOUSEEVENTF_MOVE|ABSOLUTE，坐标归一化到 0..65535）：走输入栈，低级鼠标钩子才收得到 WM_MOUSEMOVE
+        public static void AbsMove(int x, int y) {
+            int w = GetSystemMetrics(0), h = GetSystemMetrics(1);
+            mouse_event(0x8001, (uint)(x * 65535L / w), (uint)(y * 65535L / h), 0, UIntPtr.Zero);
+        }
+
+        // 按住修饰键 + 左键拖动：steps 步、每步 stepMs 毫秒；走到一半停 holdMidMs（让 UI 在拖动进行中起来）
+        public static void Drag(int x0, int y0, int x1, int y1, int steps, int stepMs, int holdMidMs, ushort modVk) {
+            Key(modVk, false);
+            System.Threading.Thread.Sleep(80);
+            AbsMove(x0, y0);
+            System.Threading.Thread.Sleep(60);
+            mouse_event(0x0002, 0, 0, 0, UIntPtr.Zero);
+            for (int i = 1; i <= steps; i++) {
+                AbsMove(x0 + (x1 - x0) * i / steps, y0 + (y1 - y0) * i / steps);
+                System.Threading.Thread.Sleep(stepMs);
+                if (i == steps / 2 && holdMidMs > 0) System.Threading.Thread.Sleep(holdMidMs);
+            }
+            mouse_event(0x0004, 0, 0, 0, UIntPtr.Zero);
+            System.Threading.Thread.Sleep(80);
+            Key(modVk, true);
         }
     }
 }
@@ -446,6 +482,41 @@ function Get-SpecMenuLabel([string]$ActionId) {
     return $null
 }
 
+# 在没有任何 Cisox 进程时，用产品自己的 `--headless set-config` 预置一项配置（UI 是配置唯一写者，
+# 不手写 config.json）；同时重新生成快照。返回退出码。
+function Set-TestConfig([string]$Key, [string]$JsonValue) {
+    $ui = Join-Path $script:Work 'snow-shot-ui.exe'
+    $quoted = '"' + ($JsonValue -replace '"', '\"') + '"'
+    $p = Start-Process -FilePath $ui -ArgumentList @('--headless', 'set-config', '--key', $Key, '--value', $quoted) -Wait -PassThru -WindowStyle Hidden
+    return $p.ExitCode
+}
+
+function Read-Spec {
+    $p = Join-Path $script:Data 'host\spec.json'
+    if (-not (Test-Path -LiteralPath $p)) { return $null }
+    try { return (Get-Content -LiteralPath $p -Raw -Encoding UTF8 | ConvertFrom-Json) } catch { return $null }
+}
+
+# 工作目录下 UI exe 的进程及其命令行（区分 --ui 会话 / --headless 任务）
+function Get-UiCommandLines {
+    @(Get-CimInstance Win32_Process -Filter "Name='snow-shot-ui.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($script:Work, [StringComparison]::OrdinalIgnoreCase) } |
+        ForEach-Object { [pscustomobject]@{ Id = $_.ProcessId; Cmd = $_.CommandLine } })
+}
+
+# 宿主日志里本次运行新增的部分（日志是追加的，先记下起点）
+function Get-HostLogSince([int]$Offset) {
+    $text = Read-HostLog
+    if ($text.Length -le $Offset) { return '' }
+    return $text.Substring($Offset)
+}
+
+function Stop-HostGracefully {
+    & (Join-Path $script:Work 'snow-shot.exe') --cmd quit | Out-Null
+    $null = Wait-Until { -not (Get-WorkProcesses) } -TimeoutMs 15000
+    $script:HostProc = $null
+}
+
 function Close-ForegroundWindowOfUi {
     $ui = Get-UiProcess
     if (-not $ui) { return }
@@ -635,12 +706,19 @@ function Test-PauseGate {
     [CisoxAccept.W]::Tap([uint16]$VkEsc)
     $null = Wait-Until { -not (Get-UiProcess) } -TimeoutMs 8000
     if (-not $gateLabel) { Add-Result 'pause-gate' 'gate-menu-label' 'SKIP' '' '快照里没有前台全屏闸门菜单项'; return }
+    $logOffset = (Read-HostLog).Length
     $menu = Open-TrayMenu
     if ($menu) { [void](Invoke-MenuItem $menu $gateLabel) }
-    # 闸门开关由宿主经 set_config 让 UI 落盘：UI 会被拉起、写完配置再退出
-    $null = Wait-Until { (Get-Content -LiteralPath (Join-Path $script:Data 'config.json') -Raw -Encoding UTF8) -match 'disable_on_focused_fullscreen_window"\s*:\s*true' } -TimeoutMs 15000
+    # 闸门开关：UI 不在时宿主不再拉起完整 UI 会话，改走 `--headless set-config` 写配置（阶段 3）
+    $script:__sawFull = $false
+    $null = Wait-Until {
+        if (@(Get-UiCommandLines | Where-Object { $_.Cmd -match '--ui ' }).Count -gt 0) { $script:__sawFull = $true }
+        (Get-Content -LiteralPath (Join-Path $script:Data 'config.json') -Raw -Encoding UTF8) -match 'disable_on_focused_fullscreen_window"\s*:\s*true'
+    } -TimeoutMs 15000 -PollMs 100
     $persisted = (Get-Content -LiteralPath (Join-Path $script:Data 'config.json') -Raw -Encoding UTF8) -match 'disable_on_focused_fullscreen_window"\s*:\s*true'
-    Add-Result 'pause-gate' 'gate-persisted-via-ui' $(if ($persisted) { 'PASS' } else { 'FAIL' }) '' '宿主切换闸门 -> set_config -> UI 写 config.json'
+    Add-Result 'pause-gate' 'gate-persisted-via-headless' $(if ($persisted) { 'PASS' } else { 'FAIL' }) '' '宿主切换闸门 -> --headless set-config -> config.json'
+    $headlessLog = (Get-HostLogSince $logOffset) -match '改用无窗口任务写配置'
+    Add-Result 'pause-gate' 'gate-no-full-ui-session' $(if ($headlessLog -and -not $script:__sawFull) { 'PASS' } else { 'FAIL' }) "headless日志=$headlessLog 见到UI会话=$([bool]$script:__sawFull)" '只写个配置不该拉起带窗口的 UI 会话'
     $null = Wait-Until { -not (Get-UiProcess) } -TimeoutMs 8000
     # 用一个全屏置顶窗口模拟全屏应用
     $form = New-Object Windows.Forms.Form
@@ -715,6 +793,216 @@ function Test-Admin {
     $null = Wait-Until { -not (Get-UiProcess) } -TimeoutMs 8000
 }
 
+
+# ---------------------------------------------------------------------------------------------
+# 阶段 3 场景：长生命周期功能与退出规则
+# ---------------------------------------------------------------------------------------------
+function Test-Gesture {
+    $null = Start-TestHost -Env @{ SNOW_HOST_ACCEPT_INJECTED_INPUT = '1' }
+    Start-Sleep -Seconds 6
+    $log = Read-HostLog
+    Add-Result 'gesture' 'hook-installed-on-bindings' $(if ($log -match '鼠标手势绑定已应用') { 'PASS' } else { 'FAIL' }) '' '默认配置带 Win+左 / 中 / 右键拖动三条绑定：宿主按快照装钩子'
+    Add-Result 'gesture' 'host-dpi-aware' $(if ($log -match 'dpi_aware=true') { 'PASS' } else { 'FAIL' }) '' '宿主声明 PerMonitorV2，钩子坐标不被 DPI 虚拟化'
+    $hostPid = (Get-HostProcess).Id
+    $mem = Get-MemoryInfo $hostPid
+    Add-Result 'gesture' 'host-commit-with-hook' $(if ($mem.CommitMB -le $MaxIdleCommitMB) { 'PASS' } else { 'FAIL' }) "$($mem.CommitMB) MB" "装了键盘钩子线程之后宿主私有提交仍 <= $MaxIdleCommitMB MB；线程 $($mem.Threads)"
+    $screen = [Windows.Forms.Screen]::PrimaryScreen.Bounds
+    $x0 = [int]($screen.Width * 0.25); $y0 = [int]($screen.Height * 0.25)
+    $x1 = [int]($screen.Width * 0.6); $y1 = [int]($screen.Height * 0.6)
+    foreach ($variant in @(@{ Name = 'fast'; Hold = 0; Note = '拖动在 UI 起来之前就结束：begin / update / finish 在宿主队列里保序等待，握手后冲出' },
+                           @{ Name = 'slow'; Hold = 2500; Note = '拖动进行中 UI 才起来：覆盖窗就绪后补发按下与最新位置，再接实时 update' })) {
+        [Windows.Forms.Clipboard]::Clear()
+        [CisoxAccept.W]::Drag($x0, $y0, $x1, $y1, 30, 15, $variant.Hold, [uint16]0x5B)   # Win + 左键拖动 = 截图并复制
+        $up = Wait-Until { [bool](Get-UiProcess) } -TimeoutMs 10000
+        Add-Result 'gesture' "$($variant.Name)-ui-spawned" $(if ($up) { 'PASS' } else { 'FAIL' }) '' $variant.Note
+        $copied = Wait-Until { [Windows.Forms.Clipboard]::ContainsImage() } -TimeoutMs 10000
+        Add-Result 'gesture' "$($variant.Name)-selection-copied" $(if ($copied) { 'PASS' } else { 'FAIL' }) '' '框选完成后复制到剪贴板（覆盖窗按手势完成框选）'
+        $gone = Wait-Until { -not (Get-UiProcess) } -TimeoutMs 8000
+        Add-Result 'gesture' "$($variant.Name)-ui-exits" $(if ($gone) { 'PASS' } else { 'FAIL' }) '' '手势截图结束 -> 覆盖窗关闭 -> UI 立即退出'
+        if (-not $gone) { $ui = Get-UiProcess; if ($ui) { [CisoxAccept.W]::Tap([uint16]$VkEsc); Stop-WorkProcessById $ui.Id } }
+        Start-Sleep -Milliseconds 800
+    }
+    Add-Result 'gesture' 'host-still-running' $(if (Get-HostProcess) { 'PASS' } else { 'FAIL' }) '' ''
+    # 没有绑定就不装钩子：把三条默认绑定清空后重启宿主
+    Stop-HostGracefully
+    foreach ($k in @('global_mouse/screenshot_copy', 'global_mouse/screenshot_fixed', 'global_mouse/screenshot_ocr')) { [void](Set-TestConfig $k '{}') }
+    $offset = (Read-HostLog).Length
+    $null = Start-TestHost
+    Start-Sleep -Seconds 5
+    $fresh = Get-HostLogSince $offset
+    Add-Result 'gesture' 'no-bindings-no-hook' $(if ($fresh -notmatch '鼠标手势绑定已应用') { 'PASS' } else { 'FAIL' }) '' '没有任何有效绑定：宿主不装全局鼠标 / 键盘钩子'
+}
+
+# 清掉贴图仓储并重新生成快照（pins_to_restore 归零）：贴图验收之后别让后面的场景登录就被拉起 UI
+function Reset-PinsData {
+    $store = Join-Path $script:Data 'pinned_windows_v2'
+    if (Test-Path -LiteralPath $store) { Remove-Item -LiteralPath $store -Recurse -Force -ErrorAction SilentlyContinue }
+    $ui = Join-Path $script:Work 'snow-shot-ui.exe'
+    $null = Start-Process -FilePath $ui -ArgumentList @('--headless', 'emit-spec') -Wait -PassThru -WindowStyle Hidden
+}
+
+function Test-PinsRestore {
+    $null = Start-TestHost
+    Start-Sleep -Seconds 5
+    $exe = Join-Path $script:Work 'snow-shot.exe'
+    $bmp = New-Object Drawing.Bitmap 240, 140
+    $g = [Drawing.Graphics]::FromImage($bmp); $g.Clear([Drawing.Color]::FromArgb(255, 30, 120, 200)); $g.Dispose()
+    [Windows.Forms.Clipboard]::SetImage($bmp)
+    $logOffset = (Read-HostLog).Length
+    & $exe --cmd pin-clipboard | Out-Null
+    $up = Wait-Until { [bool](Get-UiProcess) } -TimeoutMs 10000
+    Add-Result 'pins-restore' 'pin-spawns-ui' $(if ($up) { 'PASS' } else { 'FAIL' }) '' '--cmd pin-clipboard -> 宿主拉起 UI -> 剪贴板图像贴成贴图窗口'
+    Start-Sleep -Seconds 4
+    Add-Result 'pins-restore' 'ui-stays-alive-with-pin' $(if (Get-UiProcess) { 'PASS' } else { 'FAIL' }) '' '有贴图窗口：UI 不退（方案 §5 窗口含贴图）'
+    $spec = Read-Spec
+    Add-Result 'pins-restore' 'spec-pins-to-restore-live' $(if ($spec -and $spec.flags.pins_to_restore -eq 1) { 'PASS' } else { 'FAIL' }) $(if ($spec) { "pins_to_restore=$($spec.flags.pins_to_restore)" } else { '快照读不到' }) '贴图增减时 UI 把登录要恢复的贴图数写进快照'
+    # 崩溃恢复：杀 UI（只按 PID），宿主按“崩溃前有贴图”自动拉起并恢复
+    $ui = Get-UiProcess
+    if ($ui) { Stop-WorkProcessById $ui.Id }
+    $back = Wait-Until { $n = Get-UiProcess; $n -and $n.Id -ne $ui.Id } -TimeoutMs 15000
+    $recovered = (Get-HostLogSince $logOffset) -match '崩溃前有贴图'
+    Add-Result 'pins-restore' 'crash-auto-restores-pins' $(if ($back -and $recovered) { 'PASS' } else { 'FAIL' }) "新UI=$back 日志=$recovered" '§10 第 9 条：崩溃前有贴图则自动拉起 UI 恢复（未跳闸时）'
+    Start-Sleep -Seconds 3
+    Add-Result 'pins-restore' 'restored-ui-stays-alive' $(if (Get-UiProcess) { 'PASS' } else { 'FAIL' }) '' '恢复出来的贴图窗口让 UI 常驻'
+    # 优雅退出：贴图落盘，快照里的贴图数保留
+    Stop-HostGracefully
+    $spec = Read-Spec
+    Add-Result 'pins-restore' 'pins-persisted-on-quit' $(if ($spec -and $spec.flags.pins_to_restore -ge 1) { 'PASS' } else { 'FAIL' }) $(if ($spec) { "pins_to_restore=$($spec.flags.pins_to_restore)" }) '退出后快照仍记着要恢复的贴图'
+    # 登录 / 重启：宿主一起来就按快照拉起 UI 恢复贴图
+    $logOffset = (Read-HostLog).Length
+    $null = Start-TestHost
+    $restored = Wait-Until { [bool](Get-UiProcess) } -TimeoutMs 15000
+    $log = (Get-HostLogSince $logOffset) -match '快照里有待恢复的贴图'
+    Add-Result 'pins-restore' 'host-start-restores-pins' $(if ($restored -and $log) { 'PASS' } else { 'FAIL' }) "UI=$restored 日志=$log" '有贴图时宿主登录即拉起 UI（按贴图规则保活）'
+    Start-Sleep -Seconds 3
+    Add-Result 'pins-restore' 'pin-window-visible' $(if ((Get-UiProcess) -and @([CisoxAccept.W]::BigWindowsOf([uint32](Get-UiProcess).Id, 100)).Count -gt 0) { 'PASS' } else { 'INFO' }) '' '贴图窗口宽度 >= 100 的可见窗'
+    Stop-HostGracefully
+    Reset-PinsData
+}
+
+function Test-SttKeepalive {
+    $exe = Join-Path $script:Work 'snow-shot.exe'
+    # 对照：语音热键未绑定（默认）：UI 随窗口关闭立即退出
+    $null = Start-TestHost
+    Start-Sleep -Seconds 5
+    [Windows.Forms.Clipboard]::Clear()
+    & $exe --cmd pin-clipboard | Out-Null    # 剪贴板没有图像：UI 起来、什么窗口都不开
+    $up = Wait-Until { [bool](Get-UiProcess) } -TimeoutMs 10000
+    $gone = Wait-Until { -not (Get-UiProcess) } -TimeoutMs 6000
+    Add-Result 'stt-keepalive' 'unbound-ui-exits-at-once' $(if ($up -and $gone) { 'PASS' } else { 'FAIL' }) "拉起=$up 退出=$gone" '未绑定语音热键：无窗口无活动 -> UI 立即退出（§10 第 4 条）'
+    Stop-HostGracefully
+    # 绑定后：UI 保活，但登录时不预拉
+    [void](Set-TestConfig 'global_shortcuts/dictation_toggle' '["F9"]')
+    [void](Set-TestConfig 'dictation/trigger_mode' '"toggle"')
+    $null = Start-TestHost
+    Start-Sleep -Seconds 6
+    Add-Result 'stt-keepalive' 'bound-no-spawn-at-login' $(if (-not (Get-UiProcess)) { 'PASS' } else { 'FAIL' }) '' '绑定了语音热键只是“拉起之后别退”：登录时不预拉 UI（托盘态内存）'
+    $spec = Read-Spec
+    Add-Result 'stt-keepalive' 'spec-keep-alive-reason' $(if ($spec -and ($spec.flags.keep_alive -contains 'dictation_hotkey')) { 'PASS' } else { 'FAIL' }) $(if ($spec) { ($spec.flags.keep_alive -join ',') }) '快照 keep_alive 含 dictation_hotkey'
+    $mem = Get-MemoryInfo (Get-HostProcess).Id
+    Add-Result 'stt-keepalive' 'host-commit' $(if ($mem.CommitMB -le $MaxIdleCommitMB) { 'PASS' } else { 'FAIL' }) "$($mem.CommitMB) MB" ''
+    [Windows.Forms.Clipboard]::Clear()
+    & $exe --cmd pin-clipboard | Out-Null
+    $up = Wait-Until { [bool](Get-UiProcess) } -TimeoutMs 10000
+    Start-Sleep -Seconds 8
+    Add-Result 'stt-keepalive' 'bound-ui-stays-alive' $(if ($up -and (Get-UiProcess)) { 'PASS' } else { 'FAIL' }) '' '同样的无窗口无活动，绑定了语音热键 UI 不退（按住说话不每次冷启动）'
+    $ui = Get-UiProcess
+    if ($ui) {
+        $mem = Get-MemoryInfo $ui.Id
+        Add-Result 'stt-keepalive' 'kept-ui-commit' 'INFO' "$($mem.CommitMB) MB" '保活 UI 的私有提交（单进程常驻同口径的参照）'
+    }
+    # 还原：解绑语音热键，别影响后面的场景
+    Stop-HostGracefully
+    [void](Set-TestConfig 'global_shortcuts/dictation_toggle' '[]')
+}
+
+function Test-McpKeepalive {
+    [void](Set-TestConfig 'mcp/enabled' 'true')
+    $logOffset = (Read-HostLog).Length
+    $null = Start-TestHost
+    $up = Wait-Until { [bool](Get-UiProcess) } -TimeoutMs 20000
+    Add-Result 'mcp-keepalive' 'ui-spawned-at-login' $(if ($up) { 'PASS' } else { 'FAIL' }) '' 'MCP 开启：宿主登录就拉起 UI 常驻（无需任何命令）'
+    $descPath = Join-Path $script:Data 'mcp\descriptor.json'
+    $haveDesc = Wait-Until { Test-Path -LiteralPath $descPath } -TimeoutMs 15000
+    Add-Result 'mcp-keepalive' 'descriptor-written' $(if ($haveDesc) { 'PASS' } else { 'FAIL' }) '' '<数据根>/mcp/descriptor.json 由 UI 写，路径内容不变'
+    $generation1 = $null
+    if ($haveDesc) {
+        $desc = Get-Content -LiteralPath $descPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $generation1 = $desc.generation
+        $pipeName = ($desc.pipe -replace '^\\\\\.\\pipe\\', '')
+        $client = New-Object IO.Pipes.NamedPipeClientStream('.', $pipeName, [IO.Pipes.PipeDirection]::InOut)
+        try { $client.Connect(3000); $connected = $client.IsConnected } catch { $connected = $false } finally { $client.Dispose() }
+        Add-Result 'mcp-keepalive' 'mcp-pipe-connectable' $(if ($connected) { 'PASS' } else { 'FAIL' }) $pipeName '宿主（控制管道 + 会话管道）与 MCP 管道并存、互不冲突'
+    }
+    Start-Sleep -Seconds 12
+    Add-Result 'mcp-keepalive' 'ui-stays-with-no-windows' $(if (Get-UiProcess) { 'PASS' } else { 'FAIL' }) '' '没有任何窗口，MCP 开着 UI 不退'
+    Add-Result 'mcp-keepalive' 'host-and-ui-coexist' $(if ((Get-HostProcess) -and (Get-UiProcess)) { 'PASS' } else { 'FAIL' }) '' ''
+    $mem = Get-MemoryInfo (Get-HostProcess).Id
+    Add-Result 'mcp-keepalive' 'host-commit-with-resident-ui' $(if ($mem.CommitMB -le $MaxIdleCommitMB) { 'PASS' } else { 'FAIL' }) "$($mem.CommitMB) MB" '宿主自己的私有提交不因 UI 常驻而涨'
+    # UI 被杀：宿主补拉（常驻要求），描述符换新一代
+    $ui = Get-UiProcess
+    if ($ui) { Stop-WorkProcessById $ui.Id }
+    $back = Wait-Until { $n = Get-UiProcess; $n -and $n.Id -ne $ui.Id } -TimeoutMs 20000
+    Add-Result 'mcp-keepalive' 'ui-respawned-after-kill' $(if ($back -and ((Get-HostLogSince $logOffset) -match '崩溃前 UI 要求常驻')) { 'PASS' } else { 'FAIL' }) '' 'UI 异常退出（没跳闸）：宿主按常驻要求补拉'
+    $null = Wait-Until { (Test-Path -LiteralPath $descPath) -and ((Get-Content -LiteralPath $descPath -Raw -Encoding UTF8 | ConvertFrom-Json).generation -ne $generation1) } -TimeoutMs 15000
+    $newGen = if (Test-Path -LiteralPath $descPath) { (Get-Content -LiteralPath $descPath -Raw -Encoding UTF8 | ConvertFrom-Json).generation } else { $null }
+    Add-Result 'mcp-keepalive' 'descriptor-regenerated' $(if ($newGen -and $newGen -ne $generation1) { 'PASS' } else { 'FAIL' }) '' '补拉的 UI 重新写描述符（新令牌 / 新一代），旧的陈旧描述符被覆盖'
+    Stop-HostGracefully
+    Add-Result 'mcp-keepalive' 'descriptor-removed-on-quit' $(if (-not (Test-Path -LiteralPath $descPath)) { 'PASS' } else { 'FAIL' }) '' '优雅退出：MCP 关闭、描述符清理'
+    # OCR 预热也算常驻：关 MCP、开 model_hot_start
+    [void](Set-TestConfig 'mcp/enabled' 'false')
+    [void](Set-TestConfig 'text_recognition/model_hot_start' 'true')
+    $null = Start-TestHost
+    $up = Wait-Until { [bool](Get-UiProcess) } -TimeoutMs 20000
+    Add-Result 'mcp-keepalive' 'ocr-hot-start-spawns-ui' $(if ($up) { 'PASS' } else { 'FAIL' }) '' 'model_hot_start 开启：宿主登录拉起 UI 常驻（语义：用户明确要常驻换速度）'
+    # 还原：关掉预热，别影响后面的场景
+    Stop-HostGracefully
+    [void](Set-TestConfig 'text_recognition/model_hot_start' 'false')
+}
+
+function Test-UpdateHeadless {
+    $manifest = Join-Path $script:Work 'update-manifest.json'
+    [System.IO.File]::WriteAllText($manifest, '{"version":"99.0.0","notes":"acceptance"}', (New-Object System.Text.UTF8Encoding($false)))
+    $url = 'file:///' + ($manifest -replace '\\', '/')
+    [void](Set-TestConfig 'updates/mode' '"check"')
+    [void](Set-TestConfig 'updates/manifest_url' ('"' + $url + '"'))
+    $last = Join-Path $script:Data 'updates\last_check.txt'
+    if (Test-Path -LiteralPath $last) { Remove-Item -LiteralPath $last -Force }
+    $spec = Read-Spec
+    Add-Result 'update-headless' 'spec-has-due-time' $(if ($spec -and $null -ne $spec.flags.update_due_at) { 'PASS' } else { 'FAIL' }) $(if ($spec) { "update_due_at=$($spec.flags.update_due_at)" }) '快照带下一次检查的到点时间（从没查过 = 0，现在就到点）'
+    $logOffset = (Read-HostLog).Length
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    $null = Start-TestHost
+    # Wait-Until 的脚本块在子作用域里跑：要带出结果的变量必须是 $script: 作用域
+    $script:__sawHeadless = $null; $script:__sawSession = $false
+    $null = Wait-Until {
+        $cmds = @(Get-UiCommandLines)
+        if (@($cmds | Where-Object { $_.Cmd -match '--ui ' }).Count -gt 0) { $script:__sawSession = $true }
+        if (-not $script:__sawHeadless -and @($cmds | Where-Object { $_.Cmd -match '--headless update-check' }).Count -gt 0) { $script:__sawHeadless = $sw.Elapsed.TotalSeconds }
+        [bool]$script:__sawHeadless
+    } -TimeoutMs 70000 -PollMs 150
+    $sawHeadless = $script:__sawHeadless; $sawSession = $script:__sawSession
+    $inWindow = $sawHeadless -and $sawHeadless -ge 25 -and $sawHeadless -le 60
+    Add-Result 'update-headless' 'headless-spawned-after-start-delay' $(if ($inWindow) { 'PASS' } else { 'FAIL' }) $(if ($sawHeadless) { "$([math]::Round($sawHeadless, 1)) s" } else { '没出现' }) '登录后至少延后 30 秒才拉起 --headless update-check（避开登录高峰）'
+    Add-Result 'update-headless' 'no-ui-session-spawned' $(if (-not $sawSession) { 'PASS' } else { 'FAIL' }) '' '更新检查不开带窗口的 UI 会话'
+    $null = Wait-Until { -not (Get-UiCommandLines) } -TimeoutMs 40000
+    Add-Result 'update-headless' 'checks-and-exits' $(if (-not (Get-UiCommandLines)) { 'PASS' } else { 'FAIL' }) '' '查完即退，整套进程回到只有宿主'
+    Start-Sleep -Seconds 1
+    Add-Result 'update-headless' 'last-check-written' $(if (Test-Path -LiteralPath $last) { 'PASS' } else { 'FAIL' }) '' 'updates/last_check.txt 已更新（先记时间，失败也按间隔节流）'
+    $spec = Read-Spec
+    $due = if ($spec) { [int64]$spec.flags.update_due_at } else { 0 }
+    $nowUnix = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    Add-Result 'update-headless' 'due-time-advanced' $(if ($due -gt $nowUnix + 80000 -and $due -lt $nowUnix + 90000) { 'PASS' } else { 'FAIL' }) "update_due_at=$due (now=$nowUnix)" '快照里的到点时间推到约 24 小时后（宿主不会对同一个到点时间再拉起一次）'
+    $log = Get-HostLogSince $logOffset
+    Add-Result 'update-headless' 'notice-shown-in-tooltip' $(if ($log -match '托盘提示.*99\.0\.0') { 'PASS' } else { 'FAIL' }) '' '发现新版本（清单 99.0.0）：提示经宿主放进托盘悬停（日志里的“托盘提示”行）'
+    Start-Sleep -Seconds 10
+    $count = ([regex]::Matches((Get-HostLogSince $logOffset), '到点的更新检查已交给无窗口任务')).Count
+    Add-Result 'update-headless' 'no-repeat-check' $(if ($count -eq 1) { 'PASS' } else { 'FAIL' }) "拉起 $count 次" ''
+    # 还原：改回手动更新
+    Stop-HostGracefully
+    [void](Set-TestConfig 'updates/mode' '"manual"')
+}
+
 # ---------------------------------------------------------------------------------------------
 # 主流程
 # ---------------------------------------------------------------------------------------------
@@ -722,12 +1010,14 @@ Test-Prerequisites
 $machine = Get-MachineInfo
 Write-Host ('机器: {0} | {1} | {2} | {3} | 屏幕: {4}' -f $machine.Computer, $machine.Cpu, $machine.Gpu, $machine.Os, $machine.Screens)
 
-$all = @('idle', 'ime', 'hotkey', 'tray-focus', 'cmd', 'settings-hotkey', 'pause-gate', 'crash')
+$all = @('idle', 'ime', 'hotkey', 'tray-focus', 'cmd', 'settings-hotkey', 'pause-gate', 'crash', 'gesture', 'pins-restore', 'stt-keepalive', 'mcp-keepalive', 'update-headless')
 $selected = if ($Scenario -contains 'all') { $all } else { $Scenario | Where-Object { $_ -ne 'all' } }
 $scenarioMap = @{
     'idle' = { Test-Idle }; 'ime' = { Test-Ime }; 'hotkey' = { Test-Hotkey }; 'tray-focus' = { Test-TrayFocus }
     'cmd' = { Test-Cmd }; 'settings-hotkey' = { Test-SettingsHotkey }; 'pause-gate' = { Test-PauseGate }
     'crash' = { Test-Crash }; 'admin' = { Test-Admin }
+    'gesture' = { Test-Gesture }; 'pins-restore' = { Test-PinsRestore }; 'stt-keepalive' = { Test-SttKeepalive }
+    'mcp-keepalive' = { Test-McpKeepalive }; 'update-headless' = { Test-UpdateHeadless }
 }
 
 Initialize-Work

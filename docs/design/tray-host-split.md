@@ -296,6 +296,29 @@ snow-shot             改  bin 改名 snow-shot-ui；新增 spec 生成（纯函
 - **验收**：§5 表格每一行有一条测试或一条真机记录；全套功能回归清单（下）逐项过；MCP 开启时宿主 + UI 稳定共存、描述符有效；录屏进行中关掉所有其它窗口 UI 不退、停止后退；有贴图时重启宿主后贴图恢复。
 - **禁止**：不得让守卫在异常路径泄漏（用 RAII，加"守卫归零"断言测试）；不得为了省事把守卫做成固定延时。
 - **功能回归清单**：截图（单屏/多屏/混合 DPI）→复制/保存/贴图/OCR/翻译/长截图/录屏；各快捷动作（直接截图、延迟截图、选中贴图文件、恢复最近关闭）；输入框翻译与选中文字翻译；语音转文字（切换式、按住式）；历史、贴图管理；设置页全部热键项；表格/公式识别；配置归档导入导出；更新检查与提示；重启；退出后贴图落盘。
+- **状态：离屏部分完成（2026-10-12），真屏硬验收待执行**（用户解锁桌面后由主会话跑 `scripts\verify-tray-host-split.ps1` 的新场景，结果回填本节）。默认仍是单进程（阶段 4 才切默认）。
+- **交付物**：
+  - **活动守卫**（`snow-shot::activity`）：`ActivityTracker`（可跨线程共享的按原因计数器）+ RAII 的 `ActivityGuard`（持有即忙，丢弃含 panic 展开即放行，放行时唤醒主线程重新判断退出，否则“最后一个后台活动在后台线程结束”之后没有事件再触发判断）；`busy_reasons(BusyInputs, tracker)` 把状态型原因（窗口、采集 / 直接截图 / 延迟截图、语音转文字、录屏 / 长截图控制窗、MCP / OCR 预热 / 语音热键保活）与守卫型原因合成发给宿主的 `activity.busy_reasons`。`AppState::spawn_guarded` 在**线程创建之前**登记守卫（不存在“线程没跑起来就判空闲”的空窗）、线程创建失败时随闭包一并放行；接入点：OCR / 表格 / 公式识别、识别 + 翻译、输入框翻译、翻译页翻译、贴图 OCR、选中文件贴图、读取选中文字、模型 / 运行时 / 更新包下载（`spawn_download` 与更新下载）、手动 / 到点更新检查、OCR 预热线程；历史写入器（`HistoryRecorder::start_tracked`）每个排队任务持一个 `history_flush` 守卫，写完才放行。录屏 / 长截图 / 语音转文字 / 采集 / 延迟截图是状态型：控制窗在（或 `is_active`）就算忙，不另持守卫（控制窗被外部关掉而 `active` 不清时守卫会泄漏，状态型没有这个问题）。退出时若仍有守卫记 warn（泄漏诊断）。
+  - **保活**：`host_spec::keep_alive_reasons` 新增 `dictation_hotkey`（语音触发模式放行的热键里有格式有效的绑定）；`HostFlags::needs_resident_ui()`：`mcp`、`ocr_hot_start` 要宿主在**登录 / 崩溃后 / 退避结束后**主动拉起 UI（这两项没有 UI 在场就没意义），`dictation_hotkey` 只是“拉起之后别退”、登录不预拉（托盘态内存优先）。宿主用占位动作 `keep_alive` 拉起（UI 收到即确认，什么都不做）。UI 侧 `busy_inputs` 同口径；配置变化时清缓存。
+  - **登录恢复贴图 / 崩溃恢复**：快照 `pins_to_restore` = 激活分组里的贴图记录数（`PinShared::restorable_count`，与 `restore_all` 同口径）；UI 在贴图数变化时用 `SpecSync::patch_flags` 只改标志写进快照（不重新渲染菜单），`shutdown_app` 贴图落盘后再校准一次（宿主崩溃 / 重启重拉时据此恢复）；宿主登录读到 `pins_to_restore > 0` 就拉起 UI 恢复；崩溃（没跳闸）时有贴图自动恢复、要求常驻则补拉（`HostMachine::set_keep_alive`），熔断退避结束的那次 tick 也补拉；阈值仍是 60s / 3 次 / 5 分钟（§10 第 9 条，原常量与测试未改）。
+  - **更新检查 headless**：快照 `update_due_at`（`net_settings::update_due_at`：手动 / 无地址为 `None`，没查过或时钟回拨为 `0`，否则上次检查 + 24h）；宿主在 `max(到点, 启动 + 30s)` 设一个截止时刻（不轮询）到点拉起 `snow-shot-ui.exe --headless update-check`，同一个到点时间只拉起一次；任务先写检查时间再查，查完用 `patch_flags` 把到点时间推后（不重新渲染菜单、不碰贴图仓储——它可能与运行中的 UI 并存），发现新版本把已本地化提示写到**标准输出第一行**，宿主读出后放进托盘悬停。
+  - **`--headless set-config --key <键> --value <JSON>`**：`snow-shot::headless`（与 `emit-spec`、`update-check` 同处，`snow_host_protocol::launch::HeadlessJob` 统一解析 / 拼参数）。宿主改配置（前台全屏闸门）时 UI 不在 → 起这个任务写完即退，再重新生成完整快照（含贴图分组、恢复数、到点时间）；任务在跑期间宿主把新消息暂存（保序），避免新拉起的 UI 与它同时写配置；任务拉不起来退回阶段 2 的会话路径。取代阶段 2 “拉起普通 UI 会话写配置”的做法。
+  - **鼠标手势**：宿主按快照 `mouse` 绑定装 `snow_platform::global_mouse`（键盘钩子常驻、鼠标钩子仅在修饰键匹配 / 手势进行中，沿用旧行为），空绑定即卸载；宿主进程 PerMonitorV2（阶段 2 的加固已有）所以坐标是虚拟桌面物理像素；钩子回调只做转换 + 8ms 节流（`GestureThrottle`，约 120Hz，`finish` 带最终位置）+ 投通道，不碰 IME / GPUI；`Gesture` 消息新增 `action`（只 `begin` 带），`update` 不等确认、不进重发表（UI 用 `accept_quiet` 登记序号不回 ack），`begin` 授权前台；UI 放弃手势（已有截图 / 录制在进行）发新消息 `cancel_gesture` 让宿主取消钩子里的手势；熔断退避里 `begin` 被丢弃时宿主同样取消。UI 侧把消息还原成 `DragEvent` 交给原有的 `on_mouse_gesture`（覆盖窗未就绪时的缓存补发逻辑原样复用）。
+  - **tooltip**：`TooltipSink`（单进程改本进程托盘、双进程发 `tooltip` 消息、都没有则忽略）取代语音状态等对 `state.tray` 的直接读写；`show_notice` 走它。
+  - **MCP / OCR 预热与宿主共存**：宿主登录就拉起 UI（`needs_resident_ui`），MCP 描述符路径内容不变（`<数据根>/mcp/descriptor.json`，由 UI 写），管道名（MCP `cisox-mcp`、宿主控制管道、会话管道前缀）互不相同；离屏测试 `mcp_service_coexists_with_host_pipes` 同时起 MCP 服务与宿主会话管道，验证描述符在 `mcp/` 下、关闭后清理。UI 崩溃后补拉的新 UI 重写描述符（新令牌 / 新一代）。
+  - 脚本：`scripts/verify-tray-host-split.ps1` 新增 `gesture`、`pins-restore`、`stt-keepalive`、`mcp-keepalive`、`update-headless` 五个场景，`pause-gate` 的闸门落盘检查改为验证走 `--headless set-config`、没有拉起带窗口的 UI 会话。前提见脚本头部（`gesture` 用环境变量 `SNOW_HOST_ACCEPT_INJECTED_INPUT=1` 让钩子接受注入输入，仅验收用；`update-headless` 用 `file://` 本地清单、要等约 35 秒；各场景改配置都经产品自己的 `--headless set-config`，场景之间还原语音热键 / 预热 / 更新策略 / 贴图数据）。
+- **§5 表格逐行对应**：采集 / 直接截图 / 延迟截图 / 录屏 / 长截图 / 语音转文字 / `keep_alive`（含语音热键）→ `activity::tests::every_state_row_of_the_table_blocks_exit`；下载 / 更新检查 / 历史写入 / OCR·翻译 job / 贴图 job / 选中文字 / OCR 预热 → `every_guard_row_of_the_table_blocks_exit_until_released` + `history_store::tracked_recorder_holds_a_guard_until_the_write_finishes`；异常路径不泄漏（panic、提前返回、线程创建失败、锁中毒、并发）与“归零断言”（`assert_idle`）→ `activity::tests` 其余 7 项。
+- **阶段 3 实施偏差与澄清**：
+  1. **守卫型 / 状态型两类**：录屏、长截图、语音转文字、采集、延迟截图按状态判定而不是 RAII（它们的“存活”本来就由窗口 / 引擎状态表示，见上）；文档 §5 的“守卫兜底”在这些行等价于这条状态判定。
+  2. **语音热键保活不在登录时预拉 UI**（§10 第 4 条只说“绑定了就保活”）：预拉会让任何绑了语音热键的用户托盘态都带一个 UI，违背“托盘态只管内存”的目标；现在是“第一次按下冷拉起一次，之后不退”。要改成登录预拉，只需把 `dictation_hotkey` 加进 `needs_resident_ui`。
+  3. **宿主改配置在 UI 不在时用无窗口任务**，且任务期间暂存新消息：这是对“配置唯一写者”的保序保护，没有在文档里要求过，但没有它会出现 UI 与无窗口任务同时写 `config.json`。
+  4. **`update-check` 回报提示用标准输出**（宿主没有 i18n，文案要 UI 侧本地化；管道 / 临时文件都比读一行 stdout 重）。上限 4KB。
+  5. **默认配置自带三条手势绑定**，所以宿主在默认配置下登录就装键盘钩子线程（一个线程 + 小栈）；宿主私有提交是否仍 ≤ 6MB 待真屏（`gesture` / `idle` 场景记数）。
+  6. **更新检查登录后延后 30 秒**（常量 `UPDATE_CHECK_START_DELAY`），避开登录时磁盘与网络高峰；文档原文是“登录后到点就拉起”。
+  7. **托盘菜单关闭后修剪**仍没做（`tray-icon` 不暴露事件，阶段 2 已说明），建议直接放弃，保持启动 +5s / UI 退出 +2s 两次。
+  8. **没改的**：`--ui` 启动时依旧不推 `RestorePins` / `AutoUpdateCheck`（归宿主）；单进程 `--resident` 路径行为不变（手势、托盘、热键仍在本进程）。
+- **离屏验收结果**（2026-10-12）：见本次提交说明里的命令清单；`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test -p workspace-guard`、`-p snow-host-protocol`、`-p snow-tray-host`（含真起假 UI 的无窗口任务 / 提示读取测试）、`-p snow-shot`、i18n 两条门禁、`scripts/check-host-imports.ps1 -Build`；宿主 release 体积与导入表变化见下一条。
+- **留给阶段 4 的事项**：真屏验收结果回填（含手势 / 贴图恢复 / 保活 / MCP / 更新检查五个新场景和 `idle` 重测）；默认切 `split` 时统一自启指向宿主、CI 加导入表闸门；`dictation_hotkey` 是否登录预拉的拍板；手势在“宿主刚拉起 UI、覆盖窗还没就绪”这段的体感（队列合并保证不丢，延迟取决于冷启动）；全套功能回归清单逐项过（本阶段只覆盖了协议 / 状态机 / 守卫的离屏部分）；handoff 加进程模型一节。
 
 ### 阶段 4：切默认与收口
 
