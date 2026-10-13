@@ -86,10 +86,13 @@ impl Dedup {
 /// - `source`：音频来源。
 /// - `ctl`：命令通道。
 /// - `emit`：事件输出回调。
-/// - `max_seconds`：最长录音秒数，0 表示不限。
+/// - `max_seconds`：最长录音秒数，0 表示不限；按实际喂给后端的样本计（含加载期间录下的积压）。
 ///
 /// # 返回
 /// 结束方式与统计。
+///
+/// 收到 STOP 时，来源里还没取走的积压（`AudioSource::drain_pending`）会先喂完再冲刷；
+/// CANCEL / 管道断开则不喂。
 pub fn run_session(
     backend: &mut dyn SttBackend,
     source: &mut dyn AudioSource,
@@ -109,6 +112,11 @@ pub fn run_session(
         loop {
             match ctl.try_recv() {
                 Ok(Ctl::Cmd(Command::Stop)) => {
+                    // 来源里还有没取走的积压（模型加载期间录下的音频）：先喂完再冲刷，不能丢
+                    buf.extend(source.drain_pending());
+                    if feed_chunks(backend, &mut buf, &mut dedup, emit, &mut stats) {
+                        return (SessionEnd::Failed, stats);
+                    }
                     return finish(backend, &mut buf, &mut dedup, emit, stats);
                 }
                 Ok(Ctl::Cmd(Command::Cancel)) => {
@@ -136,16 +144,8 @@ pub fn run_session(
             }
             SourceEvent::Samples(s) => {
                 buf.extend_from_slice(&s);
-                while buf.len() >= CHUNK_SAMPLES {
-                    let t0 = Instant::now();
-                    backend.feed(&buf[..CHUNK_SAMPLES]);
-                    let events = backend.poll();
-                    stats.chunk_micros.push(t0.elapsed().as_micros() as u64);
-                    stats.fed_samples += CHUNK_SAMPLES as u64;
-                    buf.drain(..CHUNK_SAMPLES);
-                    if emit_all(events, &mut dedup, emit) {
-                        return (SessionEnd::Failed, stats);
-                    }
+                if feed_chunks(backend, &mut buf, &mut dedup, emit, &mut stats) {
+                    return (SessionEnd::Failed, stats);
                 }
                 if limit > 0 && stats.fed_samples >= limit {
                     return finish(backend, &mut buf, &mut dedup, emit, stats);
@@ -153,6 +153,38 @@ pub fn run_session(
             }
         }
     }
+}
+
+/// 把缓冲里凑满整块的样本依次喂给后端，每块之后取结果并发出事件；不足一块的尾部留在缓冲里。
+///
+/// # 参数
+/// - `backend`：识别后端。
+/// - `buf`：待喂样本缓冲，喂过的部分会被移除。
+/// - `dedup`：事件去重器。
+/// - `emit`：事件输出回调。
+/// - `stats`：会话统计，按块累加。
+///
+/// # 返回
+/// 后端失败（已发出 ERROR）时为 `true`，调用方据此结束会话。
+fn feed_chunks(
+    backend: &mut dyn SttBackend,
+    buf: &mut Vec<f32>,
+    dedup: &mut Dedup,
+    emit: &mut dyn FnMut(Event),
+    stats: &mut SessionStats,
+) -> bool {
+    while buf.len() >= CHUNK_SAMPLES {
+        let t0 = Instant::now();
+        backend.feed(&buf[..CHUNK_SAMPLES]);
+        let events = backend.poll();
+        stats.chunk_micros.push(t0.elapsed().as_micros() as u64);
+        stats.fed_samples += CHUNK_SAMPLES as u64;
+        buf.drain(..CHUNK_SAMPLES);
+        if emit_all(events, dedup, emit) {
+            return true;
+        }
+    }
+    false
 }
 
 /// 把后端事件去重后依次发出。
@@ -236,6 +268,8 @@ mod tests {
         fed: usize,
         /// feed 调用次数。
         feeds: usize,
+        /// 按喂入顺序记下的全部样本（核对顺序用）。
+        heard: Vec<f32>,
     }
 
     impl FakeBackend {
@@ -246,6 +280,7 @@ mod tests {
                 tail,
                 fed: 0,
                 feeds: 0,
+                heard: Vec::new(),
             }
         }
     }
@@ -254,6 +289,7 @@ mod tests {
         fn feed(&mut self, pcm: &[f32]) {
             self.fed += pcm.len();
             self.feeds += 1;
+            self.heard.extend_from_slice(pcm);
         }
         fn poll(&mut self) -> Vec<SttEvent> {
             self.script.pop_front().unwrap_or_default()
@@ -473,6 +509,137 @@ mod tests {
         let (end, stats, out) = run(&mut b, src, vec![], 1);
         assert_eq!(end, SessionEnd::Stopped);
         assert_eq!(stats.chunk_micros.len(), 4);
+        assert_eq!(out, vec![Event::Final("够了".into()), Event::Stopped]);
+    }
+
+    /// 带积压的假来源：`next` 永远空闲，积压只通过 `drain_pending` 交出（模拟“模型加载期间录下的音频”）。
+    struct Backlog(Vec<f32>);
+
+    impl AudioSource for Backlog {
+        fn next(&mut self, _t: Duration) -> SourceEvent {
+            SourceEvent::Idle
+        }
+        fn drain_pending(&mut self) -> Vec<f32> {
+            std::mem::take(&mut self.0)
+        }
+    }
+
+    /// 跑一次会话，来源是给定的 `AudioSource`。
+    fn run_with(
+        backend: &mut FakeBackend,
+        source: &mut dyn AudioSource,
+        ctl_msgs: Vec<Ctl>,
+        max_seconds: u32,
+    ) -> (SessionEnd, SessionStats, Vec<Event>) {
+        let (tx, rx) = mpsc::channel();
+        for m in ctl_msgs {
+            tx.send(m).unwrap();
+        }
+        let mut out = Vec::new();
+        let (end, stats) = run_session(backend, source, &rx, &mut |e| out.push(e), max_seconds);
+        drop(tx);
+        (end, stats, out)
+    }
+
+    /// 间隔很短的脚本来源：依次交出预设事件，每次之间睡 1 ms（让采集线程不空转），用完后 `Ended`。
+    struct PacedScript(VecDeque<SourceEvent>);
+
+    impl AudioSource for PacedScript {
+        fn next(&mut self, _t: Duration) -> SourceEvent {
+            std::thread::sleep(Duration::from_millis(1));
+            self.0.pop_front().unwrap_or(SourceEvent::Ended)
+        }
+    }
+
+    /// 递增序列：值就是序号，便于核对喂入顺序。
+    fn ramp(n: usize) -> Vec<f32> {
+        (0..n).map(|i| i as f32).collect()
+    }
+
+    /// STOP 时来源里还有积压：先把积压喂完（整块 + 尾部），再冲刷后端并发 STOPPED；喂入顺序与积压一致。
+    #[test]
+    fn stop_feeds_pending_backlog_before_flush() {
+        let mut b = FakeBackend::new(vec![vec![p("你")], vec![f("你好")]], vec![f("尾巴")]);
+        let backlog = ramp(CHUNK_SAMPLES * 2 + 100);
+        let mut src = Backlog(backlog.clone());
+        let (end, stats, out) = run_with(&mut b, &mut src, vec![Ctl::Cmd(Command::Stop)], 0);
+        assert_eq!(end, SessionEnd::Stopped);
+        assert_eq!(b.heard, backlog, "积压按原序全部喂入");
+        assert_eq!(b.feeds, 3, "两整块 + 收尾时的尾部");
+        assert_eq!(stats.fed_samples, backlog.len() as u64);
+        assert_eq!(
+            out,
+            vec![
+                Event::Partial("你".into()),
+                Event::Final("你好".into()),
+                Event::Final("尾巴".into()),
+                Event::Stopped
+            ]
+        );
+    }
+
+    /// CANCEL 不喂积压：直接 STOPPED。
+    #[test]
+    fn cancel_does_not_feed_backlog() {
+        let mut b = FakeBackend::new(vec![], vec![f("不该出现")]);
+        let mut src = Backlog(ramp(CHUNK_SAMPLES * 3));
+        let (end, _, out) = run_with(&mut b, &mut src, vec![Ctl::Cmd(Command::Cancel)], 0);
+        assert_eq!(end, SessionEnd::Canceled);
+        assert_eq!(b.fed, 0);
+        assert_eq!(out, vec![Event::Stopped]);
+    }
+
+    /// 积压喂入时后端失败：发 ERROR 并以失败结束，不再冲刷。
+    #[test]
+    fn backend_failure_while_feeding_backlog_fails() {
+        let mut b = FakeBackend::new(vec![vec![SttEvent::Failed("boom".into())]], vec![f("丢弃")]);
+        let mut src = Backlog(ramp(CHUNK_SAMPLES * 2));
+        let (end, _, out) = run_with(&mut b, &mut src, vec![Ctl::Cmd(Command::Stop)], 0);
+        assert_eq!(end, SessionEnd::Failed);
+        assert_eq!(out, vec![Event::Error("boom".into())]);
+    }
+
+    /// 经真实环形缓存追赶：加载期间到达的音频先于之后的实时音频，按原序整段喂给后端；
+    /// 来源读完时冲刷尾部。
+    #[test]
+    fn catch_up_through_ring_preserves_order() {
+        use crate::preroll::{PumpedSource, cap_samples};
+        let total = CHUNK_SAMPLES * 3 + 777;
+        let all = ramp(total);
+        // 拆成不规则的几段，模拟“开麦后陆续到达的包”
+        let events: VecDeque<SourceEvent> = [0, 1000, 6000, 12_000, total]
+            .windows(2)
+            .map(|w| SourceEvent::Samples(all[w[0]..w[1]].to_vec()))
+            .collect();
+        let mut src = PumpedSource::start(
+            move || Ok(Box::new(PacedScript(events)) as Box<dyn AudioSource>),
+            |_| {},
+            cap_samples(0),
+        );
+        let mut b = FakeBackend::new(vec![], vec![f("完")]);
+        let (end, stats, out) = run_with(&mut b, &mut src, vec![], 0);
+        assert_eq!(end, SessionEnd::Stopped);
+        assert_eq!(b.heard, all, "一个样本不丢、顺序不乱");
+        assert_eq!(stats.fed_samples, total as u64);
+        assert_eq!(out, vec![Event::Final("完".into()), Event::Stopped]);
+    }
+
+    /// `max_seconds` 按实际喂入的样本计（从开麦算起，积压也计入，溢出丢掉的不计）：
+    /// 1 s 上限下缓存只保留最新的 1 s，喂满这 1 s 会话即收尾。
+    #[test]
+    fn max_seconds_counts_backlog_audio() {
+        use crate::preroll::{PumpedSource, cap_samples};
+        let events: VecDeque<SourceEvent> = [SourceEvent::Samples(vec![0.0; 3 * 16_000])].into();
+        let mut src = PumpedSource::start(
+            move || Ok(Box::new(PacedScript(events)) as Box<dyn AudioSource>),
+            |_| {},
+            cap_samples(1),
+        );
+        let mut b = FakeBackend::new(vec![], vec![f("够了")]);
+        let (end, stats, out) = run_with(&mut b, &mut src, vec![], 1);
+        assert_eq!(end, SessionEnd::Stopped);
+        // 缓存上限取 min(30 s, max_seconds)，1 s 上限下只保留最新的 1 s，喂满即停
+        assert!(stats.fed_samples >= 16_000 && stats.fed_samples <= 16_000 + CHUNK_SAMPLES as u64);
         assert_eq!(out, vec![Event::Final("够了".into()), Event::Stopped]);
     }
 

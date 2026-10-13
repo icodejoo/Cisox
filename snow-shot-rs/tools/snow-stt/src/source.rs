@@ -36,6 +36,18 @@ pub trait AudioSource {
     /// # 参数
     /// - `timeout`：最长等待时间。
     fn next(&mut self, timeout: Duration) -> SourceEvent;
+
+    /// 等来源真正就绪（例如先开麦的采集线程已打开麦克风、已发出 RECORDING），最多等 `timeout`。
+    ///
+    /// 主循环开始前调用：保证 `PONG`（识别就绪）不会早于“已在录音”。默认立即返回。
+    fn wait_ready(&mut self, _timeout: Duration) {}
+
+    /// 取走来源里已经缓存、但还没交出的样本（STOP 时用，保证积压也进识别）。
+    ///
+    /// 默认没有缓存，返回空。带环形缓存的来源（见 `preroll::PumpedSource`）会返回全部积压。
+    fn drain_pending(&mut self) -> Vec<f32> {
+        Vec::new()
+    }
 }
 
 /// 默认麦克风来源：采集与重采样都由 snow-audio-recorder 完成，直接得到 16k 单声道。
