@@ -262,6 +262,7 @@ snow-shot             改  bin 改名 snow-shot-ui；新增 spec 生成（纯函
 - **验收**：功能回归（分模式 `split`）：截图热键 / 托盘左中右键 / `--cmd` 七个命令 / 设置里改热键（含冲突回滚）/ 暂停热键 / 前台全屏闸门 / 退出；竞态注入测试（`exit_request` 与新命令交错、UI 启动期间连发命令、UI 被杀）全部确定性通过；宿主 `cargo tree` 与导入表闸门通过；托盘态宿主私有提交 ≤ 6MB；冷拉起热键→首帧 ≤ 1.14s（先达现状冷启动线）。
 - **禁止**：不切默认；不在宿主里读 config.json；宿主不得出现定时轮询 UI 状态的逻辑。
 - **状态：离屏部分完成（2026-10-12），真屏硬验收待执行**。真屏验收（§10 第 14 条、本阶段验收里需要真屏的各项）已写成可复跑的脚本 `scripts/verify-tray-host-split.ps1`，由主会话在桌面解锁后执行，结果回填本节。
+- **真屏验收（2026-10-13）**：环境：i5-13500 / UHD 770（驱动 31.0.101.4953）/ 双屏 2560×1440 / Win10 19045 / 带端点安全软件；release（LTO）构建含未提交的 vendor `GpuReleaseGuard` 补丁；`verify-tray-host-split.ps1`（Windows PowerShell 5.1）。逐场景结果见 `build\split-accept\<时间戳>\results.json`（本节以 `20261013-091941`、`092533`、`093710` 三次完整 `all` 为准，Rounds=5）。**宿主私有提交 2.1MB（2.08~2.13）**，弹菜单后 2.3MB（2.32~2.39），验收线 6MB；弹菜单（含前台、搜狗在位）后宿主无 `*.ime`；**热键→首帧（两屏像素都变）中位 1016 / 831 / 863ms**，验收线 1.14s（首轮冷启动偏慢，各轮约 0.8~2.4s）；UI 拿到前台与键盘焦点 5/5 轮；覆盖窗关闭后 UI 中位 0.29~0.39s 退出；托盘菜单项（显示主界面）拉起 UI 拿前台与键盘焦点通过；`--cmd` 七个命令（含 quit）三次全过；改热键冲突回滚 / 新热键生效三次全过；杀 UI 后宿主存活、重新拉起、3 次连杀熔断三次全过；`admin` 场景 1 次通过但退化（本机 `EnableLUA=0`、当前用户本就是管理员，混合权限的 `--cmd` 没法在这台机器上验）。**暂停 / 前台全屏闸门不稳定**：三次完整运行里 1 次全过、2 次闸门部分失败，另 3 次单场景复跑 2 过 1 败；宿主日志里没有错误，失败轮的现象是托盘菜单点击没有落到预期的那一项（原因判断为 UI Automation 点菜单不稳，非产品问题，但未证实）。验收脚本这次修了若干自身问题（采样与进程枚举过慢、通知区图标查找、托盘菜单项文案、日志文件共享读、数据目录隔离等），首帧数字是修完之后的。
 - **交付物**：
   - `snow-tray-host`（新 crate，bin 产物 `snow-shot.exe` = 宿主）：`queue`（命令队列：64 条 / 30s / 手势 update 只留最新）、`breaker`（崩溃熔断：60s 内 3 次、退避 5 分钟）、`machine`（UI 进程状态机 `Absent → Starting → Running → Exiting → Absent` + `Backoff`：10s 握手超时、ack 1.5s 重发一次再放弃、`exit_request` 序号仲裁、退出 10s 超时才强制结束、按会话代数丢弃过期事件）、`focus`（前台授权决策）、`host`（宿主核心：状态机 + 快照 + 暂停开关 + 前台全屏闸门 + 托盘 / 热键的应用，系统调用全在 `Platform` 特征后面，可用假平台离屏测试）、`view` / `convert` / `ipc_map` / `cli`、`harden`（进程加固）、`host_log`（写 `logs/host.log` 的最小 `tracing` 订阅者，INFO 及以上，256KB 滚动为 `host.log.1`，不引入 `tracing-subscriber`）、`win` / `app`（真实平台与入口）。主线程没有 Win32 消息循环：托盘 / 热键 / 管道读 / 进程等待线程只往一个通道投事件，主线程 `recv_timeout(下一个截止时刻)`，空闲时无限期阻塞（无轮询）。
   - UI 进程：`snow-shot` 包的 bin 改名 `snow-shot-ui`；`--ui --session <名> --token <令牌>`（宿主拉起，连会话管道、不持托盘 / 热键、所有窗口关闭且无活动后请求退出、宿主同意后立即退出）、`--resident`（单进程常驻，**无参数默认也是它**）、`--headless emit-spec`（不初始化 GPUI，按当前配置生成快照）。UI 侧新增 `host_link`（会话客户端、序号去重、退出请求单飞、设置页改热键的待回报登记）、`host_spec_sync`（`host/spec.json` 原子写与 `rev` 维护）、`app_runtime::host_session`（接线：宿主动作 → `UiEvent` / `AppCommand`、快照同步、热键应用与回滚、活动上报与退出判定、宿主崩溃后拉起新宿主）。
@@ -297,6 +298,7 @@ snow-shot             改  bin 改名 snow-shot-ui；新增 spec 生成（纯函
 - **禁止**：不得让守卫在异常路径泄漏（用 RAII，加"守卫归零"断言测试）；不得为了省事把守卫做成固定延时。
 - **功能回归清单**：截图（单屏/多屏/混合 DPI）→复制/保存/贴图/OCR/翻译/长截图/录屏；各快捷动作（直接截图、延迟截图、选中贴图文件、恢复最近关闭）；输入框翻译与选中文字翻译；语音转文字（切换式、按住式）；历史、贴图管理；设置页全部热键项；表格/公式识别；配置归档导入导出；更新检查与提示；重启；退出后贴图落盘。
 - **状态：离屏部分完成（2026-10-12），真屏硬验收待执行**（用户解锁桌面后由主会话跑 `scripts\verify-tray-host-split.ps1` 的新场景，结果回填本节）。默认仍是单进程（阶段 4 才切默认）。
+- **真屏验收（2026-10-13）**：环境同阶段 2。`gesture`：默认三条手势绑定下宿主装钩子后私有提交 2.09~2.18MB（≤6MB），PerMonitorV2 生效；快速拖完 / UI 起来时拖动仍在进行两种都拉起 UI 并把框选复制到剪贴板、UI 随后退出，3 次完整运行里 2 次全过、1 次失败（那次运行发生在改脚本隔离数据目录之前，被上一个场景改过的配置污染，判断为脚本问题）；注意复制出的图尺寸与拖动框不一致（如 340×185、160×990，拖动框约 896×504），像是智能选区吸附到了光标下的元素，**未确认是预期行为还是手势 update 丢失，待查**。`pins-restore` 2/3 通过（失败那次同为数据目录污染，`pins_to_restore=2`）：贴图保活、杀 UI 后自动恢复、优雅退出后快照记数、宿主重启恢复贴图均通过。`stt-keepalive` 3/3：未绑定时 UI 随窗口关闭立即退出，绑定后保活且登录不预拉；保活 UI 私有提交 46.4~46.5MB。`mcp-keepalive` 3/3：登录即拉起 UI、描述符有效、MCP 管道可连并与宿主共存、杀 UI 后补拉、退出后描述符清理，宿主提交 2.15~2.17MB。`update-headless` 3/3：登录后 30s 拉起 `--headless update-check`（脚本改为按宿主日志时间戳判定，原先的进程轮询会漏掉瞬时进程）、不开 UI 会话、查完即退、到点时间推后约 24h、发现新版本进托盘悬停。
 - **交付物**：
   - **活动守卫**（`snow-shot::activity`）：`ActivityTracker`（可跨线程共享的按原因计数器）+ RAII 的 `ActivityGuard`（持有即忙，丢弃含 panic 展开即放行，放行时唤醒主线程重新判断退出，否则“最后一个后台活动在后台线程结束”之后没有事件再触发判断）；`busy_reasons(BusyInputs, tracker)` 把状态型原因（窗口、采集 / 直接截图 / 延迟截图、语音转文字、录屏 / 长截图控制窗、MCP / OCR 预热 / 语音热键保活）与守卫型原因合成发给宿主的 `activity.busy_reasons`。`AppState::spawn_guarded` 在**线程创建之前**登记守卫（不存在“线程没跑起来就判空闲”的空窗）、线程创建失败时随闭包一并放行；接入点：OCR / 表格 / 公式识别、识别 + 翻译、输入框翻译、翻译页翻译、贴图 OCR、选中文件贴图、读取选中文字、模型 / 运行时 / 更新包下载（`spawn_download` 与更新下载）、手动 / 到点更新检查、OCR 预热线程；历史写入器（`HistoryRecorder::start_tracked`）每个排队任务持一个 `history_flush` 守卫，写完才放行。录屏 / 长截图 / 语音转文字 / 采集 / 延迟截图是状态型：控制窗在（或 `is_active`）就算忙，不另持守卫（控制窗被外部关掉而 `active` 不清时守卫会泄漏，状态型没有这个问题）。退出时若仍有守卫记 warn（泄漏诊断）。
   - **保活**：`host_spec::keep_alive_reasons` 新增 `dictation_hotkey`（语音触发模式放行的热键里有格式有效的绑定）；`HostFlags::needs_resident_ui()`：`mcp`、`ocr_hot_start` 要宿主在**登录 / 崩溃后 / 退避结束后**主动拉起 UI（这两项没有 UI 在场就没意义），`dictation_hotkey` 只是“拉起之后别退”、登录不预拉（托盘态内存优先）。宿主用占位动作 `keep_alive` 拉起（UI 收到即确认，什么都不做）。UI 侧 `busy_inputs` 同口径；配置变化时清缓存。
@@ -583,7 +585,7 @@ SNAC 的四个 DLL 在探针和产品进程里都在，没法关掉做 A/B，不
 
 **修复**：`GpuReleaseGuard::drop` 改为显式解绑（新函数 `unbind_window_resources`：`OMSetRenderTargets(None)`、VS / PS 资源槽 0..2 置空、`Flush`），再 `Trim`；不再调 `ClearState`，因此也不用再补回光栅化状态。旧窗口的渲染目标 / 图集纹理仍然被放掉（这是补丁原本的目的）。单测 `release_guard_tests`（WARP 软件设备，离屏）：守卫析构后渲染目标与两个阶段的资源槽全空、光栅化状态保留、无目标时是空操作。vendor 不是 workspace 成员，测试要把 crate 拷到 workspace 外追加空 `[workspace]` 后 `cargo test --offline --lib --features test-support release_guard`（2 项通过）。补丁登记已更新。WARP 不复现驱动 bug，所以"不漏句柄"本身靠上面的探针与真机复测证明。
 
-**修后复测**：（待补，见本节末尾"未完成项"。）
+**修后复测（2026-10-13，release 含 `GpuReleaseGuard` 补丁，连截 3 次）**：空闲 426，第 1 次后 766，第 2、3 次后 773、777（逐次 +7、+4）；同一脚本同一机器的修前基线逐次 +6~+9。**句柄仍在逐次增长，修复没有把泄漏消除**：第 1 到第 3 次之间只有 `Event`（全部无名、访问掩码 0x1F0003）163 → 178，对比修前同口径 156 → 174。3 次样本太少，不能断言斜率变了；原因判断（ClearState 触发驱动漏句柄）至少不完整，还有别的触发点，待再查。
 
 #### B. 热路径首帧 400ms 空档
 
@@ -611,7 +613,7 @@ harness 每轮间隔 1.8~3s，TTL 命中率比真实使用高，所以测得 160
 
 **修复**：`sys_prefs.rs` 不再起 `reg.exe`，改用 `snow_platform::system_integration::{read_user_dword, read_user_string}`（新增，`RegGetValueW`，沿用 snow-platform 已有的 `Win32_System_Registry` 特性，不新增依赖，符合"优先用系统已有能力"）。这样 4 次读取降到微秒级，TTL 缓存与实参提前求值不再有代价。单测：REG_SZ 往返、类型不符返回 None、缺项返回 None、系统语言非空、200 轮读取 < 1s。
 
-**修后复测**：（待补，见下。）
+**修后复测（2026-10-13，release，同口径两屏像素都变，各 3 次）**：修前（17:06 构建）PixAll 481ms（455~772）、WinFirst 122ms、Open1 165ms；修后 PixAll **358ms（323~392）**、WinFirst 137ms、Open1 181ms。中位数快约 123ms（约 26%），主要来自去掉 `reg.exe` 子进程，窗口出现时间持平。
 
 **没修的，供用户决定**（都不是小改动，收益是估算）：
 1. **采集与建窗串行**（采集 100~110ms 之后才建窗）：可让窗口先建好（透明或隐藏）、采集完成后再上底图。预计省 80~100ms，要改覆盖窗的"先建后填"状态机，牵涉共享视图与多屏收集，建议单独评审。
@@ -621,4 +623,5 @@ harness 每轮间隔 1.8~3s，TTL 命中率比真实使用高，所以测得 160
 #### 验收与未完成项
 
 - `cargo clippy -p snow-platform -p snow-shot --all-targets -- -D warnings` 通过；`cargo test -p snow-platform system_integration`（6 项）、`cargo test -p snow-shot --bin snow-shot -- sys_prefs:: timing_diag:: settings_state`（33 项）、`cargo test -p workspace-guard` 通过；vendor 的 `release_guard_tests` 在 workspace 外的拷贝里通过。
-- **真屏复测未完成**：修复完成、release（LTO）已构建后，本机进入锁屏（`LogonUI` 在、无前台窗口），按约定停止真屏测量。待解锁后补：连截 5 次句柄是否不再逐次增长（修前每次 +6~11）；F1 → 两屏像素都变，各 5 次的修前 / 修后中位数（修前同口径 5 次：PixAll 中位 473ms，范围 449~653；WinFirst 123ms）。
+- 真屏复测已完成（2026-10-13），结果见 A、B 两节「修后复测」：首帧改善，句柄泄漏未消除。
+- **搜狗注入复测**（`docs/research/tray-host-minimal.md` §7 第 1 项，探针 `hostmin run pure`，有前台，各 3 次）：默认配置弹菜单后搜狗被注入（`SogouPY.ime`、`SogouTSF.ime`、`msctf.dll`、`ichat_bundle64`，模块 45 → 71，私有提交 2.8MB → 37MB）；禁用扩展点 + `ImmDisableIME(-1)` 后 3/3 都没有任何搜狗 / `.ime` / `msctf` 模块，提交 1.57MB → 1.82MB。真宿主（`snow-shot.exe`）在 `ime` 场景里弹菜单后同样无 `.ime` 模块，提交 2.3MB。

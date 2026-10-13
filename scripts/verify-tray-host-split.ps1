@@ -149,16 +149,41 @@ namespace CisoxAccept {
 
         public static void Tap(ushort vk) { Key(vk, false); Key(vk, true); }
 
-        // 采样屏幕点的亮度（0..255），一次取一批，避免 PowerShell 逐点调用的开销
+        [DllImport("gdi32.dll")] static extern IntPtr CreateCompatibleDC(IntPtr dc);
+        [DllImport("gdi32.dll")] static extern IntPtr CreateCompatibleBitmap(IntPtr dc, int w, int h);
+        [DllImport("gdi32.dll")] static extern IntPtr SelectObject(IntPtr dc, IntPtr o);
+        [DllImport("gdi32.dll")] static extern bool BitBlt(IntPtr d, int x, int y, int w, int h, IntPtr s, int sx, int sy, uint rop);
+        [DllImport("gdi32.dll")] static extern int GetDIBits(IntPtr dc, IntPtr bmp, uint start, uint lines, byte[] bits, ref BITMAPINFOHEADER bi, uint usage);
+        [DllImport("gdi32.dll")] static extern bool DeleteObject(IntPtr o);
+        [DllImport("gdi32.dll")] static extern bool DeleteDC(IntPtr dc);
+        [StructLayout(LayoutKind.Sequential)] struct BITMAPINFOHEADER {
+            public int size, width, height; public short planes, bpp; public int compression, sizeImage, xppm, yppm, clrUsed, clrImportant;
+        }
+
+        // 采样屏幕点的亮度（0..255），一次取一批。逐点 GetPixel 在本机（DWM + 全屏窗口）每点约 17ms，
+        // 80 个点一轮 1.4 秒，会把首帧测量的分辨率拉到秒级；改成对采样点的包围盒做一次 BitBlt + GetDIBits（约 0.1 秒）。
         public static int[] Sample(int[] xs, int[] ys) {
+            int minX = int.MaxValue, minY = int.MaxValue, maxX = int.MinValue, maxY = int.MinValue;
+            for (int i = 0; i < xs.Length; i++) {
+                if (xs[i] < minX) minX = xs[i]; if (xs[i] > maxX) maxX = xs[i];
+                if (ys[i] < minY) minY = ys[i]; if (ys[i] > maxY) maxY = ys[i];
+            }
+            int w = maxX - minX + 1, h = maxY - minY + 1;
             IntPtr dc = GetDC(IntPtr.Zero);
+            IntPtr mdc = CreateCompatibleDC(dc);
+            IntPtr bmp = CreateCompatibleBitmap(dc, w, h);
+            IntPtr old = SelectObject(mdc, bmp);
+            BitBlt(mdc, 0, 0, w, h, dc, minX, minY, 0x00CC0020 | 0x40000000);   // SRCCOPY | CAPTUREBLT
+            BITMAPINFOHEADER bi = new BITMAPINFOHEADER { size = 40, width = w, height = -h, planes = 1, bpp = 32 };
+            byte[] buf = new byte[w * h * 4];
+            GetDIBits(mdc, bmp, 0, (uint)h, buf, ref bi, 0);
+            SelectObject(mdc, old); DeleteObject(bmp); DeleteDC(mdc); ReleaseDC(IntPtr.Zero, dc);
             int[] r = new int[xs.Length];
             for (int i = 0; i < xs.Length; i++) {
-                uint c = GetPixel(dc, xs[i], ys[i]);
-                int R = (int)(c & 0xFF), G = (int)((c >> 8) & 0xFF), B = (int)((c >> 16) & 0xFF);
+                int o = ((ys[i] - minY) * w + (xs[i] - minX)) * 4;
+                int B = buf[o], G = buf[o + 1], R = buf[o + 2];
                 r[i] = (R * 3 + G * 6 + B) / 10;
             }
-            ReleaseDC(IntPtr.Zero, dc);
             return r;
         }
 
@@ -235,6 +260,12 @@ function Add-Result {
     Write-Host ("[{0,-4}] {1}/{2}  {3}  {4}" -f $Status, $Scenario, $Check, $Value, $Note) -ForegroundColor $color
 }
 
+# 剪贴板正被 UI 进程写入时 .NET 会抛 ExternalException（“Requested Clipboard operation did not succeed”），
+# 这是瞬时占用不是失败：吞掉异常按“还没有”处理，由外层的等待循环重试。
+function Invoke-Clip([scriptblock]$Action) {
+    try { return (& $Action) } catch { return $false }
+}
+
 function Wait-Until {
     param([scriptblock]$Condition, [int]$TimeoutMs = 10000, [int]$PollMs = 50)
     $sw = [Diagnostics.Stopwatch]::StartNew()
@@ -255,7 +286,9 @@ function Get-Median([double[]]$Values) {
 
 # 工作目录下的进程（按路径过滤，绝不按名字杀进程）
 function Get-WorkProcesses {
-    Get-Process -ErrorAction SilentlyContinue | Where-Object {
+    # 先按名字缩小范围：对全部进程逐个取 .Path 在本机（带端点安全软件）一次要 8 秒以上，
+    # 会把所有基于轮询的耗时（首帧 / UI 退出）撑成秒级。宿主、UI 与各 worker 的 exe 名都以 snow 开头。
+    Get-Process -Name 'snow*' -ErrorAction SilentlyContinue | Where-Object {
         try { $_.Path -and $_.Path.StartsWith($script:Work, [StringComparison]::OrdinalIgnoreCase) } catch { $false }
     }
 }
@@ -385,16 +418,24 @@ function Save-Logs {
     }
 }
 
+# 日志文件正被宿主 / UI 进程写着，[IO.File]::ReadAllText 默认不共享会抛“正在被另一进程使用”，
+# 所以按 FileShare.ReadWrite | Delete 打开再读。
+function Read-SharedText([string]$Path) {
+    $fs = New-Object System.IO.FileStream($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, ([System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete))
+    try { $sr = New-Object System.IO.StreamReader($fs, [System.Text.Encoding]::UTF8); return $sr.ReadToEnd() }
+    finally { $fs.Dispose() }
+}
+
 function Read-HostLog {
     $p = Join-Path $script:Data 'logs\host.log'
-    if (Test-Path -LiteralPath $p) { return [System.IO.File]::ReadAllText($p) }
+    if (Test-Path -LiteralPath $p) { return Read-SharedText $p }
     return ''
 }
 
 function Read-UiLogs {
     $dir = Join-Path $script:Data 'logs'
     if (-not (Test-Path -LiteralPath $dir)) { return '' }
-    ($dir | Get-ChildItem -File | Where-Object { $_.Name -ne 'host.log' -and $_.Name -ne 'host.log.1' } | ForEach-Object { [System.IO.File]::ReadAllText($_.FullName) }) -join "`n"
+    ($dir | Get-ChildItem -File | Where-Object { $_.Name -ne 'host.log' -and $_.Name -ne 'host.log.1' } | ForEach-Object { Read-SharedText $_.FullName }) -join "`n"
 }
 
 # ---------------------------------------------------------------------------------------------
@@ -422,13 +463,84 @@ function Test-AllScreensChanged($Plan, [int[]]$Baseline, [int[]]$Now, [double]$F
     $total = New-Object 'int[]' $Plan.Screens
     for ($i = 0; $i -lt $Now.Length; $i++) {
         $o = $Plan.Owner[$i]; $total[$o]++
-        if ([math]::Abs($Now[$i] - $Baseline[$i]) -ge 8) { $changed[$o]++ }
+        # 阈值 3（亮度 0..255）：覆盖窗对深色桌面只压暗约 4，原来的 8 会漏掉整块深色屏幕
+        if ([math]::Abs($Now[$i] - $Baseline[$i]) -ge 3) { $changed[$o]++ }
     }
     for ($s = 0; $s -lt $Plan.Screens; $s++) { if ($changed[$s] / [double]$total[$s] -lt $Fraction) { return $false } }
     return $true
 }
 
+# 通知区工具栏的 Win32 回退：本机（Win10 19045）的通知区工具栏 UIA 不暴露子项（Shell_TrayWnd 下全是 Pane、
+# ToolbarWindow32 没有子元素），按名字找 Button 永远找不到。这里跨进程读 TB_GETBUTTON 的 TRAYDATA，
+# 用宿主进程 PID 认图标，再用 TB_GETITEMRECT 取屏幕矩形。返回带 .Current.BoundingRectangle 的对象，调用方不用改。
+function Find-TrayButtonWin32 {
+    if (-not $script:HostProc) { return $null }
+    if (-not ('CisoxAccept.Tray' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+namespace CisoxAccept {
+    public static class Tray {
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern IntPtr FindWindow(string c, string n);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern IntPtr FindWindowEx(IntPtr p, IntPtr a, string c, string n);
+        [DllImport("user32.dll")] static extern IntPtr SendMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
+        [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+        [DllImport("user32.dll")] static extern bool ClientToScreen(IntPtr h, ref POINT p);
+        [DllImport("kernel32.dll")] static extern IntPtr OpenProcess(uint a, bool i, uint pid);
+        [DllImport("kernel32.dll")] static extern IntPtr VirtualAllocEx(IntPtr p, IntPtr a, UIntPtr s, uint t, uint pr);
+        [DllImport("kernel32.dll")] static extern bool VirtualFreeEx(IntPtr p, IntPtr a, UIntPtr s, uint t);
+        [DllImport("kernel32.dll")] static extern bool ReadProcessMemory(IntPtr p, IntPtr a, byte[] b, int n, out IntPtr r);
+        [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
+        [StructLayout(LayoutKind.Sequential)] struct POINT { public int X, Y; }
+        // 返回 [left, top, right, bottom]（屏幕坐标）；找不到或在溢出区（hidden）返回 null
+        public static int[] FindByPid(uint targetPid) {
+            IntPtr tray = FindWindow("Shell_TrayWnd", null);
+            IntPtr notify = FindWindowEx(tray, IntPtr.Zero, "TrayNotifyWnd", null);
+            IntPtr pager = FindWindowEx(notify, IntPtr.Zero, "SysPager", null);
+            IntPtr tb = FindWindowEx(pager, IntPtr.Zero, "ToolbarWindow32", null);
+            if (tb == IntPtr.Zero) return null;
+            uint explorerPid; GetWindowThreadProcessId(tb, out explorerPid);
+            IntPtr proc = OpenProcess(0x0008 | 0x0010 | 0x0020 | 0x0400, false, explorerPid);
+            if (proc == IntPtr.Zero) return null;
+            IntPtr mem = VirtualAllocEx(proc, IntPtr.Zero, (UIntPtr)4096, 0x3000, 4);
+            try {
+                int n = (int)SendMessage(tb, 0x418, IntPtr.Zero, IntPtr.Zero);   // TB_BUTTONCOUNT
+                for (int i = 0; i < n; i++) {
+                    SendMessage(tb, 0x417, (IntPtr)i, mem);                       // TB_GETBUTTON（64 位 TBBUTTON 32 字节）
+                    byte[] b = new byte[32]; IntPtr rd;
+                    ReadProcessMemory(proc, mem, b, 32, out rd);
+                    if ((b[8] & 0x08) != 0) continue;                             // TBSTATE_HIDDEN：在溢出区
+                    long data = BitConverter.ToInt64(b, 16);
+                    if (data == 0) continue;
+                    byte[] td = new byte[16];
+                    if (!ReadProcessMemory(proc, (IntPtr)data, td, 16, out rd)) continue;
+                    long hwnd = BitConverter.ToInt64(td, 0);
+                    uint pid; GetWindowThreadProcessId((IntPtr)hwnd, out pid);
+                    if (pid != targetPid) continue;
+                    SendMessage(tb, 0x41D, (IntPtr)i, mem);                       // TB_GETITEMRECT
+                    byte[] rc = new byte[16]; ReadProcessMemory(proc, mem, rc, 16, out rd);
+                    var lt = new POINT { X = BitConverter.ToInt32(rc, 0), Y = BitConverter.ToInt32(rc, 4) };
+                    var rb = new POINT { X = BitConverter.ToInt32(rc, 8), Y = BitConverter.ToInt32(rc, 12) };
+                    ClientToScreen(tb, ref lt); ClientToScreen(tb, ref rb);
+                    return new[] { lt.X, lt.Y, rb.X, rb.Y };
+                }
+                return null;
+            } finally { VirtualFreeEx(proc, mem, UIntPtr.Zero, 0x8000); CloseHandle(proc); }
+        }
+    }
+}
+'@
+    }
+    $r = [CisoxAccept.Tray]::FindByPid([uint32]$script:HostProc.Id)
+    if (-not $r) { return $null }
+    Add-Type -AssemblyName WindowsBase
+    $rect = New-Object System.Windows.Rect($r[0], $r[1], ($r[2] - $r[0]), ($r[3] - $r[1]))
+    return [pscustomobject]@{ Current = [pscustomobject]@{ BoundingRectangle = $rect; Name = $ProductPattern } }
+}
+
 function Find-TrayButton {
+    $viaWin32 = Find-TrayButtonWin32
+    if ($viaWin32) { return $viaWin32 }
     if (-not $script:HaveUia) { return $null }
     $root = [Windows.Automation.AutomationElement]::RootElement
     $tray = $root.FindFirst([Windows.Automation.TreeScope]::Children,
@@ -446,19 +558,25 @@ function Get-ElementCenter($Element) {
 }
 
 function Open-TrayMenu {
-    $button = Find-TrayButton
-    if (-not $button) { return $null }
-    $c = Get-ElementCenter $button
-    [CisoxAccept.W]::RightClick($c.X, $c.Y)
-    $root = [Windows.Automation.AutomationElement]::RootElement
-    $menu = $null
-    $null = Wait-Until {
-        $script:menuTmp = $root.FindFirst([Windows.Automation.TreeScope]::Children,
-            (New-Object Windows.Automation.PropertyCondition([Windows.Automation.AutomationElement]::ClassNameProperty, '#32768')))
-        [bool]$script:menuTmp
-    } -TimeoutMs 3000
-    $menu = $script:menuTmp
-    return $menu
+    # 右键托盘图标弹菜单；偶尔第一下右键只被任务栏吃掉（刚有窗口关闭、前台刚回到桌面时），
+    # 没弹出就 Esc 清场后重试，最多 3 次。
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        $button = Find-TrayButton
+        if (-not $button) { return $null }
+        $c = Get-ElementCenter $button
+        [CisoxAccept.W]::RightClick($c.X, $c.Y)
+        $root = [Windows.Automation.AutomationElement]::RootElement
+        $script:menuTmp = $null
+        $null = Wait-Until {
+            $script:menuTmp = $root.FindFirst([Windows.Automation.TreeScope]::Children,
+                (New-Object Windows.Automation.PropertyCondition([Windows.Automation.AutomationElement]::ClassNameProperty, '#32768')))
+            [bool]$script:menuTmp
+        } -TimeoutMs 3000
+        if ($script:menuTmp) { return $script:menuTmp }
+        [CisoxAccept.W]::Tap([uint16]$VkEsc)
+        Start-Sleep -Milliseconds 500
+    }
+    return $null
 }
 
 # 在已弹出的菜单里按文案（来自快照）点一项
@@ -606,8 +724,10 @@ function Test-TrayFocus {
     Start-Sleep -Seconds 6
     $menu = Open-TrayMenu
     if (-not $menu) { Add-Result 'tray-focus' 'tray-menu' 'SKIP' '' '通知区里找不到 Cisox 图标'; return }
+    # 当前托盘菜单没有 settings 项（设置从主界面进），回退到“显示主界面”：同样是菜单项 -> 宿主拉起 UI 拿前台
     $label = Get-SpecMenuLabel 'settings'
-    if (-not $label) { Add-Result 'tray-focus' 'menu-label' 'SKIP' '' '快照里没有 settings 菜单项'; return }
+    if (-not $label) { $label = Get-SpecMenuLabel 'main_window' }
+    if (-not $label) { Add-Result 'tray-focus' 'menu-label' 'SKIP' '' '快照里没有 settings / main_window 菜单项'; return }
     $clicked = Invoke-MenuItem $menu $label
     Add-Result 'tray-focus' 'menu-item-clicked' $(if ($clicked) { 'PASS' } else { 'FAIL' }) $label ''
     $opened = Wait-Until { $ui = Get-UiProcess; $ui -and [CisoxAccept.W]::BigWindowsOf([uint32]$ui.Id, 400).Count -gt 0 } -TimeoutMs 8000
@@ -658,8 +778,11 @@ function Test-SettingsHotkey {
     if (-not $registered) { Add-Result 'settings-hotkey' 'setup' 'SKIP' '' '本脚本占不到 Ctrl+Alt+F12（已被别的程序占用），换一个键后重试'; return }
     try {
         # 设置窗口打开后由自动化脚本改热键：先改成冲突的（应回滚），再改成可用的
-        $ops = '[{"op":"shortcut","key":"global_shortcuts/screenshot","text":"Ctrl+Alt+F12"},{"op":"shortcut","key":"global_shortcuts/screenshot","text":"Ctrl+Alt+F11"}]'
-        $null = Start-TestHost -Env @{ SNOW_SETTINGS_AUTOTEST = $ops }
+        # SNOW_SETTINGS_AUTOTEST 的值是“操作 JSON 文件的路径”（不是 JSON 文本），所以先写文件
+        $ops = '[{"op":"shortcut","key":"global_shortcuts/screenshot","index":0,"text":"Ctrl+Alt+F12"},{"op":"shortcut","key":"global_shortcuts/screenshot","index":0,"text":"Ctrl+Alt+F11"}]'
+        $opsFile = Join-Path $script:Work 'settings-autotest.json'
+        [System.IO.File]::WriteAllText($opsFile, $ops, (New-Object System.Text.UTF8Encoding($false)))
+        $null = Start-TestHost -Env @{ SNOW_SETTINGS_AUTOTEST = $opsFile }
         Start-Sleep -Seconds 4
         & (Join-Path $script:Work 'snow-shot.exe') --cmd settings | Out-Null
         $null = Wait-Until { (Read-UiLogs) -match '热键重新注册失败|回滚配置' } -TimeoutMs 20000
@@ -685,6 +808,10 @@ function Test-SettingsHotkey {
 }
 
 function Test-PauseGate {
+    # 默认托盘菜单（tray/menu_options）不含“前台全屏时禁用热键”这一项，闸门的切换入口要先加进菜单配置，
+    # 否则 gate-menu-label 恒为 SKIP。用产品自己的 --headless set-config 写，不手改 config.json。
+    $gateMenu = '["quick.screenshot","quick.screenshot-delay","quick.screenshot-fixed","quick.screenshot-ocr","quick.screenshot-copy","quick.pin-clipboard-content","quick.restore-last-closed-windows","quick.screen-record","quick.toggle-global-hotkeys","quick.toggle-disable-on-focused-fullscreen-window","tray.window-grouping","tray.show-main-window","tray.exit"]'
+    [void](Set-TestConfig 'tray/menu_options' $gateMenu)
     $null = Start-TestHost
     Start-Sleep -Seconds 6
     $menu = Open-TrayMenu
@@ -708,7 +835,9 @@ function Test-PauseGate {
     if (-not $gateLabel) { Add-Result 'pause-gate' 'gate-menu-label' 'SKIP' '' '快照里没有前台全屏闸门菜单项'; return }
     $logOffset = (Read-HostLog).Length
     $menu = Open-TrayMenu
-    if ($menu) { [void](Invoke-MenuItem $menu $gateLabel) }
+    $gateClicked = $false
+    if ($menu) { $gateClicked = Invoke-MenuItem $menu $gateLabel }
+    Add-Result 'pause-gate' 'gate-menu-item-clicked' $(if ($gateClicked) { 'PASS' } else { 'FAIL' }) "菜单弹出=$([bool]$menu) 点击=$gateClicked" $gateLabel
     # 闸门开关：UI 不在时宿主不再拉起完整 UI 会话，改走 `--headless set-config` 写配置（阶段 3）
     $script:__sawFull = $false
     $null = Wait-Until {
@@ -811,11 +940,14 @@ function Test-Gesture {
     $x1 = [int]($screen.Width * 0.6); $y1 = [int]($screen.Height * 0.6)
     foreach ($variant in @(@{ Name = 'fast'; Hold = 0; Note = '拖动在 UI 起来之前就结束：begin / update / finish 在宿主队列里保序等待，握手后冲出' },
                            @{ Name = 'slow'; Hold = 2500; Note = '拖动进行中 UI 才起来：覆盖窗就绪后补发按下与最新位置，再接实时 update' })) {
-        [Windows.Forms.Clipboard]::Clear()
+        Invoke-Clip { [Windows.Forms.Clipboard]::Clear() }
+        $dragLogOffset = (Read-HostLog).Length
         [CisoxAccept.W]::Drag($x0, $y0, $x1, $y1, 30, 15, $variant.Hold, [uint16]0x5B)   # Win + 左键拖动 = 截图并复制
-        $up = Wait-Until { [bool](Get-UiProcess) } -TimeoutMs 10000
+        # slow 变体里 UI 在拖动中途起来、松手后很快就收尾退出，Drag 返回时进程可能已经没了：
+        # 进程在 或 宿主日志里新增了“UI 进程已拉起”都算拉起过
+        $up = Wait-Until { [bool](Get-UiProcess) -or ((Get-HostLogSince $dragLogOffset) -match 'UI 进程已拉起') } -TimeoutMs 10000
         Add-Result 'gesture' "$($variant.Name)-ui-spawned" $(if ($up) { 'PASS' } else { 'FAIL' }) '' $variant.Note
-        $copied = Wait-Until { [Windows.Forms.Clipboard]::ContainsImage() } -TimeoutMs 10000
+        $copied = Wait-Until { Invoke-Clip { [Windows.Forms.Clipboard]::ContainsImage() } } -TimeoutMs 10000
         Add-Result 'gesture' "$($variant.Name)-selection-copied" $(if ($copied) { 'PASS' } else { 'FAIL' }) '' '框选完成后复制到剪贴板（覆盖窗按手势完成框选）'
         $gone = Wait-Until { -not (Get-UiProcess) } -TimeoutMs 8000
         Add-Result 'gesture' "$($variant.Name)-ui-exits" $(if ($gone) { 'PASS' } else { 'FAIL' }) '' '手势截图结束 -> 覆盖窗关闭 -> UI 立即退出'
@@ -885,7 +1017,7 @@ function Test-SttKeepalive {
     # 对照：语音热键未绑定（默认）：UI 随窗口关闭立即退出
     $null = Start-TestHost
     Start-Sleep -Seconds 5
-    [Windows.Forms.Clipboard]::Clear()
+    Invoke-Clip { [Windows.Forms.Clipboard]::Clear() }
     & $exe --cmd pin-clipboard | Out-Null    # 剪贴板没有图像：UI 起来、什么窗口都不开
     $up = Wait-Until { [bool](Get-UiProcess) } -TimeoutMs 10000
     $gone = Wait-Until { -not (Get-UiProcess) } -TimeoutMs 6000
@@ -901,7 +1033,7 @@ function Test-SttKeepalive {
     Add-Result 'stt-keepalive' 'spec-keep-alive-reason' $(if ($spec -and ($spec.flags.keep_alive -contains 'dictation_hotkey')) { 'PASS' } else { 'FAIL' }) $(if ($spec) { ($spec.flags.keep_alive -join ',') }) '快照 keep_alive 含 dictation_hotkey'
     $mem = Get-MemoryInfo (Get-HostProcess).Id
     Add-Result 'stt-keepalive' 'host-commit' $(if ($mem.CommitMB -le $MaxIdleCommitMB) { 'PASS' } else { 'FAIL' }) "$($mem.CommitMB) MB" ''
-    [Windows.Forms.Clipboard]::Clear()
+    Invoke-Clip { [Windows.Forms.Clipboard]::Clear() }
     & $exe --cmd pin-clipboard | Out-Null
     $up = Wait-Until { [bool](Get-UiProcess) } -TimeoutMs 10000
     Start-Sleep -Seconds 8
@@ -979,6 +1111,15 @@ function Test-UpdateHeadless {
         $cmds = @(Get-UiCommandLines)
         if (@($cmds | Where-Object { $_.Cmd -match '--ui ' }).Count -gt 0) { $script:__sawSession = $true }
         if (-not $script:__sawHeadless -and @($cmds | Where-Object { $_.Cmd -match '--headless update-check' }).Count -gt 0) { $script:__sawHeadless = $sw.Elapsed.TotalSeconds }
+        # headless 检查读本地清单，存活不到一次 CIM 轮询的间隔，进程轮询会漏；以宿主日志里“已交给无窗口任务”那一行的时间为准
+        if (-not $script:__sawHeadless) {
+            $t = Get-HostLogSince $logOffset
+            $m0 = [regex]::Match($t, '(?m)^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d) INFO\s+snow_tray_host::app: 托盘宿主启动')
+            $m1 = [regex]::Match($t, '(?m)^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d) INFO\s+snow_tray_host::host: 到点的更新检查已交给无窗口任务')
+            if ($m0.Success -and $m1.Success) {
+                $script:__sawHeadless = ([datetime]::Parse($m1.Groups[1].Value) - [datetime]::Parse($m0.Groups[1].Value)).TotalSeconds
+            }
+        }
         [bool]$script:__sawHeadless
     } -TimeoutMs 70000 -PollMs 150
     $sawHeadless = $script:__sawHeadless; $sawSession = $script:__sawSession
@@ -1029,8 +1170,16 @@ try {
         finally {
             Save-Logs
             Stop-TestHost
-            # 场景之间清理：只按路径过滤、只按 PID 结束，数据目录保留（后一个场景沿用快照）
+            # 场景之间清理：只按路径过滤、只按 PID 结束
             Get-WorkProcesses | ForEach-Object { Stop-WorkProcessById $_.Id }
+            # 数据目录也清掉：场景会改配置（settings-hotkey 把截图热键改成 Ctrl+Alt+F11、gesture 留下贴图等），
+            # 留着会让后一个场景在被污染的配置上跑（实测 pause-gate / gesture / pins-restore 因此误报）。
+            # 后一个场景冷启动时宿主自己会重新生成快照。
+            if ($script:Data -and (Test-Path -LiteralPath $script:Data)) {
+                for ($i = 0; $i -lt 10; $i++) {
+                    try { Remove-Item -LiteralPath $script:Data -Recurse -Force -ErrorAction Stop; break } catch { Start-Sleep -Milliseconds 300 }
+                }
+            }
         }
     }
 }
