@@ -15,8 +15,11 @@ pub const FLAG_SESSION: &str = "--session";
 /// 开关：一次性会话令牌（与 `--ui` 配合）。
 pub const FLAG_TOKEN: &str = "--token";
 
-/// 开关：旧的单进程常驻模式（回退用；阶段 2 之前它就是默认行为）。
+/// 开关：旧的单进程常驻模式（回退用；阶段 4 起不再是默认，必须显式带上）。
 pub const FLAG_RESIDENT: &str = "--resident";
+
+/// 托盘宿主的 exe 文件名（与 UI 进程同目录，是常驻入口：自启、快捷方式、无参数转调都指向它）。
+pub const HOST_EXE_NAME: &str = "snow-shot.exe";
 
 /// 开关：无窗口任务（不初始化 GPUI），后面跟任务名。
 pub const FLAG_HEADLESS: &str = "--headless";

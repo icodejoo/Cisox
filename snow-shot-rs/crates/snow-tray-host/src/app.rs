@@ -6,7 +6,7 @@
 use crate::cli::{FLAG_COMMAND, HostCli, USAGE, parse_cli};
 use crate::harden::{HardenReport, extension_points_disabled};
 use crate::host::{Event, HostCore};
-use crate::ipc_map::action_id_for;
+use crate::ipc_map::{FirstRun, action_id_for, first_run_plan};
 use crate::win::{ENV_UI_EXE, UI_EXE_NAME, WinPlatform};
 use snow_data_paths::paths::{default_app_data_directory, resolve_directory};
 use snow_data_paths::{
@@ -52,7 +52,7 @@ pub fn run(args: Vec<String>, harden: HardenReport) -> ExitCode {
     match cli {
         HostCli::SelfCheckHarden => run_self_check(harden),
         HostCli::Resident => run_resident_fallback(),
-        HostCli::Run { command } => run_host(&command, harden),
+        HostCli::Run { command } => run_host(command, harden),
     }
 }
 
@@ -103,12 +103,19 @@ fn resolve_data_root() -> PathBuf {
     storage.effective_directory.unwrap_or(exe_dir)
 }
 
-/// 宿主主流程：抢单实例；抢不到就当从属实例把命令交给运行中的实例。
-fn run_host(command: &IpcCommand, harden: HardenReport) -> ExitCode {
+/// 宿主主流程：抢单实例；抢不到就当从属实例把命令（没给就唤醒）交给运行中的实例；
+/// 抢到了就常驻，并在起来后执行命令行里显式给出的 `--cmd`（`quit` 除外：没有实例可退）。
+fn run_host(command: Option<IpcCommand>, harden: HardenReport) -> ExitCode {
     let guard = match SingleInstanceManager::acquire(SINGLE_INSTANCE_APP_ID) {
         SingleInstanceStatus::Primary(guard) => guard,
-        SingleInstanceStatus::Secondary => return run_secondary(command),
+        SingleInstanceStatus::Secondary => {
+            return run_secondary(&command.unwrap_or(IpcCommand::ShowMainWindow));
+        }
     };
+    let first_run = first_run_plan(command.as_ref());
+    if first_run == FirstRun::Quit {
+        return ExitCode::SUCCESS;
+    }
     let data_root = resolve_data_root();
     let logging = crate::host_log::init(&host_log_path(&data_root));
     let _crash_guard = install_crash_handler(CrashDumpConfig {
@@ -129,6 +136,7 @@ fn run_host(command: &IpcCommand, harden: HardenReport) -> ExitCode {
     );
     let (tx, rx) = channel::<Event>();
     let ipc_tx = tx.clone();
+    let startup_tx = tx.clone();
     if let Err(e) =
         SingleInstanceManager::start_listener(&guard, move |cmd| match action_id_for(&cmd) {
             Some(id) => {
@@ -146,6 +154,12 @@ fn run_host(command: &IpcCommand, harden: HardenReport) -> ExitCode {
     let host_exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from(UI_EXE_NAME));
     let mut core = HostCore::new(WinPlatform::new(tx, data_root, host_exe));
     core.start(Instant::now());
+    if let FirstRun::Action(id) = first_run {
+        let _ = startup_tx.send(Event::Action {
+            id: id.to_string(),
+            origin: ActionOrigin::Ipc,
+        });
+    }
     event_loop(&mut core, &rx);
     tracing::info!("托盘宿主退出");
     core.finish();

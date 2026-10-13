@@ -16,6 +16,7 @@ use crate::host_link::{HostEvent, HostLink, PendingApply, apply_failure};
 use crate::host_spec::{HostSpecInputs, command_from_id, host_spec_from_document};
 use crate::host_spec_sync::SpecSync;
 use snow_app_core::command::CommandContext;
+use snow_host_protocol::launch::HOST_EXE_NAME;
 use snow_host_protocol::message::{ActionOrigin, GesturePhase, HostMessage, UiMessage};
 use snow_host_protocol::spec::HostSpec;
 use snow_host_protocol::{
@@ -26,9 +27,6 @@ use snow_host_protocol::{
 use snow_platform::global_mouse::{DragEvent, Point};
 use snow_platform::single_instance::session_pipe::PipeWriter;
 use std::cell::Cell;
-
-/// 宿主崩溃后拉起新宿主用的 exe 文件名（与本 exe 同目录）。
-const HOST_EXE_NAME: &str = "snow-shot.exe";
 
 /// 等宿主回报热键注册结果超时时给设置页的失败原因（占位，设置页前缀已本地化）。
 const APPLY_TIMEOUT_REASON: &str = "host did not respond";

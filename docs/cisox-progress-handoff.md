@@ -3,7 +3,7 @@
 > 本文记录 2026-10-03 暂停时的真实状态与续做入口。方案主文档：`docs/cisox-gpui-migration-plan.md`。
 > **功能对齐程度以 [`research/qt-parity-audit.md`](research/qt-parity-audit.md)（2026-10-03，读代码得出）为准**；方案 P2~P7 与旧验收报告里的「已完成」没按现状重核，别直接引用。
 > 最新待办清单在 §5.1；§5 及之前的清单是 09-29 旧稿，仍有效的条目已在 §5 开头标出。
-> 进程模型（托盘宿主 + 按需 UI：两个 exe、启动开关、构建、日志位置、验收脚本、切默认前提）见 §6.2。
+> 进程模型（托盘宿主 + 按需 UI：两个 exe、启动开关、构建、日志位置、验收脚本；**2026-10-13 已切默认为双进程**）见 §6.2。
 
 ## 0.0 2026-10-09 收口（最新，先读这里）
 
@@ -369,7 +369,7 @@ Windows 主线已经能跑通「热键 / 托盘 / IPC → 截图覆盖窗（单�
 
 ## 6.2 进程模型（托盘宿主 + 按需 UI）（2026-10-12）
 
-> 方案与全部实测见 [`design/tray-host-split.md`](design/tray-host-split.md)（§8 阶段 0~6、§12 阶段 0 实测）。**当前默认仍是单进程**，双进程要显式启动宿主；切默认要等真屏验收（见下「切默认的前提」）。
+> 方案与全部实测见 [`design/tray-host-split.md`](design/tray-host-split.md)（§8 阶段 0~6、§12 阶段 0 实测）。**默认是双进程（2026-10-13 起）**：双击 / 自启 / 无参数运行的入口都是宿主 `snow-shot.exe`；单进程常驻成为回退开关 `snow-shot-ui.exe --resident`。
 
 **两个 exe（同目录；宿主按自己的目录找 UI，环境变量 `SNOW_UI_EXE` 可覆盖）**
 
@@ -382,19 +382,21 @@ Windows 主线已经能跑通「热键 / 托盘 / IPC → 截图覆盖窗（单�
 
 | 入口 | 开关 | 含义 |
 | --- | --- | --- |
-| 宿主 `snow-shot.exe` | 无参数 | 抢单实例互斥体，成为常驻宿主（托盘态只剩它）；抢不到就把命令交给运行中的实例 |
-| | `--cmd screenshot｜recording｜scroll-capture｜pin-clipboard｜settings｜show｜quit` | 把命令经控制管道交给运行中的实例（两种模式命令名不变） |
+| 宿主 `snow-shot.exe`（**默认入口**） | 无参数 | 抢单实例互斥体，成为常驻宿主（托盘态只剩它）；抢不到就唤醒运行中的实例 |
+| | `--cmd screenshot｜recording｜scroll-capture｜pin-clipboard｜settings｜show｜quit` | 有运行中的实例：经控制管道把命令交给它；**没有实例：本进程成为宿主并在起来后执行该命令**（`quit` 例外：没有可退出的对象，直接结束）。命令名两种模式不变 |
 | | `--resident` | 不跑宿主，转调 `snow-shot-ui.exe --resident` 后退出（回退入口） |
-| UI `snow-shot-ui.exe` | 无参数 / `--resident` | **单进程常驻**（旧行为，当前默认）：自带托盘 / 热键 / IPC，与宿主共用互斥体所以互斥 |
+| UI `snow-shot-ui.exe` | 无参数 | **转去启动同目录宿主 `snow-shot.exe` 后退出**（老用户注册表里指向本 exe 的开机自启走这条，随后由 UI 进程把自启值改写成宿主路径） |
+| | `--resident` | **单进程常驻**（回退开关，显式才进）：自带托盘 / 热键 / IPC，与宿主共用互斥体所以互斥；开机自启仍指向宿主，不随它改变 |
 | | `--ui --session <名> --token <令牌>` | 宿主拉起的 UI 会话：连会话管道，不持托盘 / 热键；用户不要手敲 |
 | | `--headless emit-spec｜update-check｜set-config --key <键> --value <JSON>` | 无窗口任务，不初始化 GPUI，做完就退（宿主调用） |
-| | `--cmd …` | 同宿主：把命令交给运行中的实例 |
+| | `--cmd …`（不带 `--resident`） | 转给宿主（等价于 `snow-shot.exe --cmd …`）；`--resident --cmd …` 才是单进程模式下的单实例委托 |
 
 **构建**（在 `snow-shot-rs/` 下；产物目录见 §6 / 根 `.cargo/config.toml`，本机若设了 `CARGO_TARGET_DIR` 以它为准）
 
 - 两个包一起构建：`cargo build -p snow-tray-host -p snow-shot`（加 `--release` 出发布版）。**`<产物目录>/<profile>/snow-shot.exe` 自拆分起是宿主**，完整应用是 `snow-shot-ui.exe`；旧脚本 / 习惯里的 `snow-shot.exe` 要改。
 - 宿主导入表闸门：`scripts/check-host-imports.ps1 -Build [-WithUi]`（`-WithUi` = 两个包同一条命令构建）。CI 的 Windows `host-imports` 任务跑 `-Build -WithUi`。依赖闭包规则在 `cargo test -p workspace-guard`。
-- 完整应用开发：`cargo run -p snow-shot`（= `snow-shot-ui.exe` 无参数 = 单进程常驻）。
+- 完整应用开发：单进程调试 `cargo run -p snow-shot -- --resident`（不带 `--resident` 会转去拉宿主，开发时通常没构建宿主）；要跑双进程，先 `cargo build -p snow-tray-host -p snow-shot`，再运行 `<产物目录>/<profile>/snow-shot.exe`。
+- 重启：双进程由宿主处理；单进程回退模式的重启辅助会带 `--resident` 拉起新实例。
 
 **数据与日志位置**（数据根 = 便携标记 `__data_directory` 指向的目录，否则默认 `%LOCALAPPDATA%\Cisox`；宿主与 UI 用同一套解析，代码在 `snow-data-paths`）
 
@@ -407,8 +409,10 @@ Windows 主线已经能跑通「热键 / 托盘 / IPC → 截图覆盖窗（单�
 
 - `scripts\verify-tray-host-split.ps1 [-Scenario all|idle|ime|hotkey|tray-focus|cmd|settings-hotkey|pause-gate|crash|admin|gesture|pins-restore|stt-keepalive|mcp-keepalive|update-headless] [-Rounds 3]`：把宿主 / UI exe 复制到临时目录并写 `__data_directory` 标记，不碰真实数据目录；结果写 `build\split-accept\<时间戳>\results.json`。覆盖 §8 阶段 2、3 里需要真屏的各项（托盘态宿主私有提交 ≤ 6MB、冷拉起热键→首帧 ≤ 1.14s 等）。
 - `scripts\check-host-imports.ps1`：离屏，导入表白名单。
-- 完整应用（单进程）的老脚本：`scripts\verify-snow-shot-recording.ps1`、`tools\self_acceptance_verify.ps1`，已改指 `snow-shot-ui.exe`。
+- 完整应用（单进程）的老脚本：`scripts\verify-snow-shot-recording.ps1`、`tools\self_acceptance_verify.ps1`，指向 `snow-shot-ui.exe` 并**显式 `--resident`**（切默认后无参数会转去宿主；录制脚本里的 `--cmd` 委托也带 `--resident`，免得依赖宿主 exe 存在）。
 
-**现状**：阶段 0~3 离屏部分已完成并合入；阶段 2、3 的真屏验收结果待回填；阶段 4 的离屏部分（CI 闸门、文档）已完成，**切默认待真屏验收**；阶段 5（冷启动优化）、6（宿主精简）未做。
+**现状**：阶段 0~4 已完成并合入：真屏验收通过（主会话 2026-10-13 实测：宿主托盘态私有提交约 2.1MB，热键→首帧 0.83~1.02s，命令无丢失、无双 UI；明细回填见 `design/tray-host-split.md` 阶段 2~4），用户 2026-10-13 拍板**切默认为双进程**，改动清单已按 `design/tray-host-split.md` §8 阶段 4 完成；阶段 5（冷启动优化）、6（宿主精简）未做。
 
-**切默认的前提（缺一不可）**：① 真屏验收脚本全场景通过并回填 §8 阶段 2、3；② 托盘态宿主私有提交 ≤ 6MB（默认配置带 3 条手势绑定，要重测）；③ 冷拉起热键→首帧 ≤ 0.9s（阶段 4 量化口径）、连续 50 次热键截图无丢命令无双 UI；④ 全套功能回归清单（§8 阶段 3）逐项过；⑤ 用户拍板 `dictation_hotkey` 是否登录预拉。要改哪些地方见 `design/tray-host-split.md` §8 阶段 4「切默认改动位置清单」。`--resident` 路径至少保留到用户另行拍板。
+**切默认时的前提（已由用户拍板放行）**：① 真屏验收通过；② 托盘态宿主私有提交 ≤ 6MB；③ 冷拉起热键→首帧、连续热键截图无丢命令无双 UI；④ 功能回归；⑤ `dictation_hotkey` 是否登录预拉（沿用现状，未单独改动）。注意首帧实测上沿 1.02s 高于阶段 4 量化口径 0.9s，属已知偏差，由阶段 5 冷启动优化继续压。`--resident` 路径至少保留到用户另行拍板。
+
+**升级与自启（切默认后）**：开机自启永远指向宿主（`system_settings::auto_start_target`，注册表值不能带参数，所以 `--resident` 回退进程也指向宿主）；老版本登记的是 `snow-shot-ui.exe`，其无参数启动会转去拉宿主，随后配置载入时自启值被改写为宿主路径。Rust 版暂无安装 / 打包脚本与快捷方式（`scripts/package-snow-shot.ps1` 等是 Qt 版流水线）；将来出现时必须把两个 exe 放同一目录，开始菜单与自启指向宿主，`snow-update` 自动安装要先 `--cmd quit` 宿主再替换两个 exe。

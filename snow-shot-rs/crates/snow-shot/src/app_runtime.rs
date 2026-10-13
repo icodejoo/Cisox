@@ -1055,17 +1055,30 @@ pub fn build_tray_spec_with_groups(
     })
 }
 
-/// 拉起一个延迟启动的新实例（等旧进程退出、释放单实例互斥后再启动）。
+/// 单进程常驻的重启辅助命令行：等旧进程退出后带 `--resident` 重新拉起自己（回退模式重启回到回退模式，
+/// 不带的话无参数启动会变成转调宿主）。双进程模式的重启由宿主处理，不走这里。
+///
+/// # 参数
+/// - `exe`：要重新拉起的 exe 路径（本进程自己）。
+///
+/// # 返回
+/// 交给 `cmd` 的参数串。
+fn restart_command_line(exe: &std::path::Path) -> String {
+    format!(
+        "/C ping -n {RESTART_WAIT_PINGS} 127.0.0.1 >NUL & start \"\" \"{}\" {}",
+        exe.display(),
+        snow_host_protocol::launch::FLAG_RESIDENT
+    )
+}
+
+/// 拉起一个延迟启动的新实例（等旧进程退出、释放单实例互斥后再启动；仅单进程常驻模式用）。
 ///
 /// # 返回
 /// 成功拉起辅助进程为 `Ok`；取不到自身路径或拉起失败返回错误。
 fn spawn_restart_helper() -> std::io::Result<()> {
     use std::os::windows::process::CommandExt;
     let exe = std::env::current_exe()?;
-    let line = format!(
-        "/C ping -n {RESTART_WAIT_PINGS} 127.0.0.1 >NUL & start \"\" \"{}\"",
-        exe.display()
-    );
+    let line = restart_command_line(&exe);
     snow_net::quiet_command(std::path::Path::new("cmd"))
         .raw_arg(line)
         .spawn()
@@ -5581,6 +5594,14 @@ mod tests {
             page_event(PageAction::WindowSettled { maximized: true }),
             UiEvent::SettingsWindowSettled { maximized: true }
         );
+    }
+
+    /// 单进程重启辅助必须带 `--resident` 重新拉起自己，否则无参数启动会变成转调宿主。
+    #[test]
+    fn restart_helper_relaunches_with_resident_flag() {
+        let line = restart_command_line(std::path::Path::new("C:/app/snow-shot-ui.exe"));
+        assert!(line.contains("snow-shot-ui.exe\" --resident"), "{line}");
+        assert!(line.starts_with("/C ping -n"));
     }
 
     /// 托盘信号映射：已知信号有事件，未知信号忽略。

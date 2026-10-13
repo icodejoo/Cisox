@@ -4,7 +4,7 @@ $ErrorActionPreference = "Stop"
 Write-Host "=================================================="
 Write-Host " 1. 验证目标二进制是否存在与版本元数据"
 Write-Host "=================================================="
-# 完整应用是 UI 进程 snow-shot-ui.exe（无参数 = 单进程常驻自检）；snow-shot.exe 是托盘宿主
+# 完整应用是 UI 进程 snow-shot-ui.exe；阶段 4 起无参数会转去启动宿主，自检要单进程完整应用，所以显式带 --resident；snow-shot.exe 是托盘宿主
 $exePath = "E:\workspaces\Cisox\build\cargo\debug\snow-shot-ui.exe"
 if (-not (Test-Path $exePath)) {
     throw "未找到二进制文件: $exePath"
@@ -17,7 +17,7 @@ Write-Host "编译时间: $($exeItem.LastWriteTime)"
 Write-Host "`n=================================================="
 Write-Host " 2. 执行主实例启动自检 (引导模式)"
 Write-Host "=================================================="
-$output = & $exePath
+$output = & $exePath --resident
 Write-Host "可执行程序控制台输出:"
 $output | ForEach-Object { Write-Host "  > $_" }
 
