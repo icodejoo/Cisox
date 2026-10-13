@@ -8,7 +8,7 @@ fn main() {
     embed_windows_resources();
 }
 
-/// 嵌入图标；FileDescription 等沿用 Cargo 包元数据，产品名取 PRODUCT_NAME 同值。
+/// 嵌入图标与版本信息；产品名取 PRODUCT_NAME 同值，进程描述固定为 "Cisox UI"。
 #[cfg(windows)]
 fn embed_windows_resources() {
     // build.rs 里的 cfg(windows) 指宿主；目标不是 Windows 时跳过
@@ -19,5 +19,6 @@ fn embed_windows_resources() {
     res.set_icon("assets/app.ico");
     // 与 snow_app_core::PRODUCT_NAME 保持同值（构建脚本不能依赖本工作区 crate）
     res.set("ProductName", "Cisox");
+    res.set("FileDescription", "Cisox UI");
     res.compile().expect("嵌入 Windows 资源失败（需要 MSVC 环境里的 rc.exe）");
 }

@@ -7,6 +7,9 @@ use std::env;
 use std::fs;
 use std::path::PathBuf;
 
+#[path = "../common/worker_version.rs"]
+mod worker_version;
+
 /// FFmpeg 自身的库名前缀集合（不需要重复链接）。
 const FFMPEG_MODULES: [&str; 5] = [
     "libavformat",
@@ -18,6 +21,7 @@ const FFMPEG_MODULES: [&str; 5] = [
 
 /// 构建脚本入口。
 fn main() {
+    worker_version::embed_worker_version("Cisox recorder", "cisox-recorder.exe");
     println!("cargo:rerun-if-env-changed=FFMPEG_DIR");
     println!("cargo:rerun-if-env-changed=VCPKGRS_DYNAMIC");
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {

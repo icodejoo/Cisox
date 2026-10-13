@@ -24,7 +24,7 @@ recording-format-apng = APNG animation
 
 recording-format-webp = WebP animation
 
-recording-error-recorder-missing = The recorder process snow-recorder was not found. Build it first with scripts/build-snow-recorder.ps1.
+recording-error-recorder-missing = The recorder process cisox-recorder was not found. Build it first with scripts/build-snow-recorder.ps1.
 
 recording-error-spawn-failed = Could not start the recorder process { $exe }: { $detail }
 

@@ -1,7 +1,7 @@
 //! 本地 NMT 工作进程客户端：按需拉起、串行请求、空闲卸载、崩溃/卡死复位。
 //!
 //! 一个 [`WorkerEngine`] 绑定一个模型目录与一组解码参数。第一次翻译时才拉起
-//! `snow-translator` 子进程（等待其 `ready` 行）并加载模型；同一时刻只有一个请求在飞
+//! `cisox-translator` 子进程（等待其 `ready` 行）并加载模型；同一时刻只有一个请求在飞
 //! （内部互斥），空闲超过 `idle_timeout` 后发 `unload` 让进程退出，内存全部回收。
 //! 进程崩溃、卡死（超时）、协议版本不符都会得到明确的 [`TranslateError`]，并复位到“未启动”，
 //! 下一次请求重新拉起；复用中的进程中途死亡时自动重启并重试一次。
@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 /// 环境变量：交给 worker 的 onnxruntime 动态库路径。
 pub const ENV_ORT_DYLIB: &str = "SNOW_ORT_DYLIB";
 /// worker 可执行文件名。
-pub const WORKER_EXE_NAME: &str = "snow-translator.exe";
+pub const WORKER_EXE_NAME: &str = "cisox-translator.exe";
 /// 单行协议消息上限（超过则丢弃，防止异常输出撑爆内存）。
 const MAX_LINE_BYTES: usize = 4 * 1024 * 1024;
 /// 单次翻译请求携带的文本字节数上限（worker 单行上限 1 MiB，留足 JSON 转义余量）。
@@ -105,7 +105,7 @@ impl Timeouts {
 /// 本地 NMT 引擎配置。
 #[derive(Debug, Clone)]
 pub struct WorkerConfig {
-    /// `snow-translator` 可执行文件。
+    /// `cisox-translator` 可执行文件。
     pub exe: PathBuf,
     /// 模型目录（含 `model.json`）。
     pub model_dir: PathBuf,
@@ -163,7 +163,7 @@ pub trait WorkerLauncher: Send + Sync {
 pub struct ProcessLauncher;
 
 impl WorkerLauncher for ProcessLauncher {
-    /// 启动 `snow-translator` 子进程：管道 stdin/stdout/stderr，不弹控制台窗口。
+    /// 启动 `cisox-translator` 子进程：管道 stdin/stdout/stderr，不弹控制台窗口。
     fn launch(&self, config: &WorkerConfig) -> Result<Box<dyn Transport>, TranslateError> {
         if !config.exe.is_file() {
             return Err(TranslateError::WorkerUnavailable(format!(
@@ -439,7 +439,7 @@ impl WorkerEngine {
     /// use snow_translate::worker::{Timeouts, WorkerConfig, WorkerEngine};
     /// use snow_translate::{Lang, TranslationEngine};
     /// let engine = WorkerEngine::new(WorkerConfig {
-    ///     exe: "snow-translator.exe".into(),
+    ///     exe: "cisox-translator.exe".into(),
     ///     model_dir: "D:/models/translate/opus-mt-en-zh-int8".into(),
     ///     model_id: "opus-mt-en-zh-int8".into(),
     ///     pairs: vec![(Lang::En, Lang::ZhHans)],
@@ -1691,7 +1691,7 @@ mod tests {
     #[test]
     fn missing_exe_is_reported() {
         let mut cfg = config();
-        cfg.exe = PathBuf::from("Z:/definitely/missing/snow-translator.exe");
+        cfg.exe = PathBuf::from("Z:/definitely/missing/cisox-translator.exe");
         let engine = WorkerEngine::new(cfg);
         let err = engine.translate("x", Lang::En, Lang::ZhHans).unwrap_err();
         assert!(

@@ -1,4 +1,4 @@
-# 录制进程自验证驱动：按行协议驱动 snow-recorder.exe，并用 ffprobe 校验产物。
+# 录制进程自验证驱动：按行协议驱动 cisox-recorder.exe，并用 ffprobe 校验产物。
 # 用法示例:
 #   scripts/verify-snow-recorder.ps1 -Scenario record -Format mp4 -Seconds 5
 #   scripts/verify-snow-recorder.ps1 -Scenario pause  -Format mp4 -Seconds 6
@@ -20,7 +20,7 @@ param(
 )
 $ErrorActionPreference = "Stop"
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-if (-not $Exe) { $Exe = Join-Path $repoRoot "snow-shot-rs/tools/snow-recorder/target/release/snow-recorder.exe" }
+if (-not $Exe) { $Exe = Join-Path $repoRoot "snow-shot-rs/tools/snow-recorder/target/release/cisox-recorder.exe" }
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 $out = Join-Path $OutDir ("verify-{0}-{1}.{2}" -f $Scenario, (Get-Date -Format "HHmmss"), $Format)
 # 注意：不要用 .Split(@(...), options)，PowerShell 7 下会把 "0,0,1280,720" 当成一个整数 1280720。

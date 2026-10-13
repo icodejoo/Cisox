@@ -84,7 +84,7 @@ try {
 finally {
     foreach ($p in @($rec, $fixture)) { if ($p -and -not $p.HasExited) { try { $p.Kill() } catch { } } }
     Start-Sleep -Milliseconds 300
-    $left = @(Get-Process -Name snow-fps-fixture, snow-recorder -ErrorAction SilentlyContinue)
+    $left = @(Get-Process -Name snow-fps-fixture, cisox-recorder -ErrorAction SilentlyContinue)
     "leftover processes: $($left.Count)"
 }
 $scratch = @(Get-ChildItem -Path $OutDir -Directory -Filter ".snow-recording-*" -Force -ErrorAction SilentlyContinue)

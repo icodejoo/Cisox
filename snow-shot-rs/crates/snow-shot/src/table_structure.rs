@@ -1,6 +1,6 @@
 //! 表格结构识别的纯逻辑：图像预处理、SLANet_plus 输出解码、与 OCR 文字框匹配、HTML / Markdown / TSV 输出。
 //!
-//! 不依赖界面与进程，全部可离屏测试。推理本身在 `snow-table` 工作进程里完成（见 `table_service`）。
+//! 不依赖界面与进程，全部可离屏测试。推理本身在 `cisox-table` 工作进程里完成（见 `table_service`）。
 //! 预处理、解码与匹配步骤对齐 RapidTable（Apache-2.0）对 SLANet_plus 的做法：
 //! 最长边缩放到 488 → BGR 通道归一化 → 右下补零到 488x488；结构输出按词表逐步 argmax，
 //! `<td` / `<td></td>` 步对应一个单元格框；文字框按 IoU（相同则按距离）归入单元格。

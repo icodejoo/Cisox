@@ -1,4 +1,4 @@
-﻿# 帧率实测驱动：在非主屏上拉起夹具 -> 用行协议驱动 snow-recorder 录制 -> 分析成品。
+﻿# 帧率实测驱动：在非主屏上拉起夹具 -> 用行协议驱动 cisox-recorder 录制 -> 分析成品。
 # 安全约束：夹具默认只在非主屏创建窗口，单屏机器须显式传 -AllowPrimary 才占主屏；本脚本先用 --check 读取目标显示器真实 bounds，
 #           主屏且未传开关即中止；录制区域必须落在该显示器内；结束后确认夹具/录制进程均已退出。
 # 用法示例:
@@ -56,7 +56,7 @@ $repoRoot = (Resolve-Path (Join-Path $toolRoot "../../..")).Path
 . (Join-Path $PSScriptRoot "cpu-hog.ps1")   # 只定义函数（Get-CpuHogExe/Start-CpuHog/Stop-CpuHog 等）
 . (Join-Path $PSScriptRoot "etw-capture.ps1")   # 只定义函数（Start-EtwCapture/Stop-EtwCapture/Convert-EtwToCsv 等）
 if ($Etw -and -not $Trace) { throw "-Etw 只能与 -Trace 同用（产物要放进 -Trace 的轮目录），中止" }
-if (-not $RecorderExe) { $RecorderExe = Join-Path $repoRoot "snow-shot-rs/tools/snow-recorder/target/release/snow-recorder.exe" }
+if (-not $RecorderExe) { $RecorderExe = Join-Path $repoRoot "snow-shot-rs/tools/snow-recorder/target/release/cisox-recorder.exe" }
 if (-not $FixtureExe) { $FixtureExe = Join-Path $toolRoot "target/release/snow-fps-fixture.exe" }
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 $stamp = Get-Date -Format "HHmmss"
@@ -144,7 +144,7 @@ function Read-GpuCsv($path) {
             $m = [regex]::Match($c, "pid_(\d+).*engtype_(\w+)")
             if (-not $m.Success) { continue }
             $name = (Get-Process -Id ([int]$m.Groups[1].Value) -ErrorAction SilentlyContinue).ProcessName
-            if ($name -notin @("snow-recorder", "snow-fps-fixture", "dwm")) { continue }
+            if ($name -notin @("cisox-recorder", "snow-fps-fixture", "dwm")) { continue }
             $k = "$name/$($m.Groups[2].Value)"
             $acc[$k] = [double]$acc[$k] + $v
         }
@@ -164,7 +164,7 @@ $InterfereSystemPeakPct = 95    # 整机 CPU 任一秒峰值超过该值
 # "可能干扰"进程名单（构建/脚本/转码/杀毒/索引/更新）。
 $SuspectPattern = '^(cargo|rustc|link|lld-link|cl|clang|msbuild|devenv|python|py|node|ffmpeg|MsMpEng|MpDefenderCoreService|NisSrv|SearchIndexer|TiWorker|TrustedInstaller|vctip)$'
 # 本测试自身的进程（不计入后台占用）。
-$SelfPattern = '^(snow-recorder|snow-fps-fixture|snow-cpu-hog|typeperf|powershell|pwsh|dwm|idle|_total|system|wmiprvse|conhost|audiodg|windowsterminal)$'
+$SelfPattern = '^(cisox-recorder|snow-fps-fixture|snow-cpu-hog|typeperf|powershell|pwsh|dwm|idle|_total|system|wmiprvse|conhost|audiodg|windowsterminal)$'
 # 解析 typeperf 的 CPU 采样（整机 + 各进程），每秒一条。
 function Read-CpuSamples($path) {
     if (-not (Test-Path $path)) { return @() }
@@ -241,7 +241,7 @@ function Read-GpuEngines($path) {
             if (-not [double]::TryParse($row.$c, [ref]$v) -or $v -le 0) { continue }
             $k = "all/" + $colInfo[$c].eng
             $acc[$k] = [double]$acc[$k] + $v
-            if ($colInfo[$c].name -in @("snow-recorder", "snow-fps-fixture", "dwm")) {
+            if ($colInfo[$c].name -in @("cisox-recorder", "snow-fps-fixture", "dwm")) {
                 $k2 = $colInfo[$c].name + "/" + $colInfo[$c].eng
                 $acc[$k2] = [double]$acc[$k2] + $v
             }
@@ -384,7 +384,7 @@ finally {
     if ($Trace) { if ($null -eq $prevTraceEnv) { Remove-Item Env:SNOW_RECORDER_FRAME_TRACE -ErrorAction SilentlyContinue } else { $env:SNOW_RECORDER_FRAME_TRACE = $prevTraceEnv } }
     if ($PollTrace) { if ($null -eq $prevPollEnv) { Remove-Item Env:SNOW_RECORDER_POLL_TRACE -ErrorAction SilentlyContinue } else { $env:SNOW_RECORDER_POLL_TRACE = $prevPollEnv } }
     Start-Sleep -Milliseconds 300
-    $left = @(Get-Process -Name snow-fps-fixture, snow-recorder -ErrorAction SilentlyContinue)
+    $left = @(Get-Process -Name snow-fps-fixture, cisox-recorder -ErrorAction SilentlyContinue)
     "leftover processes: $($left.Count)"
     if ($Hog -gt 0) {
         $hogLeft = @(Get-Process -Name $script:CpuHogName -ErrorAction SilentlyContinue).Count

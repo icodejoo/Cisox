@@ -20,7 +20,7 @@ from ctypes import wintypes
 import chrf
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../.."))
-WORKER = os.path.join(REPO, "snow-shot-rs/tools/snow-translator/target/release/snow-translator.exe")
+WORKER = os.path.join(REPO, "snow-shot-rs/tools/snow-translator/target/release/cisox-translator.exe")
 ORT_DLL = os.path.join(REPO, ".cache/ortdll/onnxruntime/capi/onnxruntime.dll")
 FLORES = os.path.join(REPO, "build/flores/flores200_dataset/devtest")
 OUT_ROOT = os.path.join(REPO, "materials/translate/results")

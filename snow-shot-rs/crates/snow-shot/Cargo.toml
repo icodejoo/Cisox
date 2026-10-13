@@ -8,9 +8,9 @@ rust-version.workspace = true
 [lints]
 workspace = true
 
-# UI 进程：产物改名 snow-shot-ui.exe（托盘宿主 snow-tray-host 沿用 snow-shot.exe 这个名字）
+# UI 进程：产物 cisox-ui.exe（托盘宿主 snow-tray-host 的产物是 cisox.exe）
 [[bin]]
-name = "snow-shot-ui"
+name = "cisox-ui"
 path = "src/main.rs"
 
 [dependencies]

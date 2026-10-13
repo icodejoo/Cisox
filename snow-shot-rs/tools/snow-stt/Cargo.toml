@@ -10,8 +10,9 @@ edition = "2024"
 license = "GPL-3.0-only"
 rust-version = "1.97"
 
+# 产物名 cisox-stt.exe（包名仍是 snow-stt）
 [[bin]]
-name = "snow-stt"
+name = "cisox-stt"
 path = "src/main.rs"
 
 [dependencies]

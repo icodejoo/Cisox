@@ -16,11 +16,11 @@ use std::path::{Path, PathBuf};
 /// - `current_exe`：本进程的 exe 路径。
 ///
 /// # 返回
-/// 同目录的 `snow-shot.exe` 路径。
+/// 同目录的 `cisox.exe` 路径。
 ///
 /// ```ignore
-/// let target = auto_start_target(Path::new("C:/app/snow-shot-ui.exe"));
-/// assert!(target.ends_with("snow-shot.exe"));
+/// let target = auto_start_target(Path::new("C:/app/cisox-ui.exe"));
+/// assert!(target.ends_with("cisox.exe"));
 /// ```
 pub fn auto_start_target(current_exe: &Path) -> PathBuf {
     current_exe.with_file_name(HOST_EXE_NAME)
@@ -101,8 +101,8 @@ mod tests {
     /// 已经是宿主路径的保持不变（幂等）。
     #[test]
     fn auto_start_target_always_points_to_host() {
-        let host = Path::new("C:/app/snow-shot.exe");
-        let legacy_ui = Path::new("C:/app/snow-shot-ui.exe");
+        let host = Path::new("C:/app/cisox.exe");
+        let legacy_ui = Path::new("C:/app/cisox-ui.exe");
         assert_eq!(auto_start_target(legacy_ui), host, "迁移：UI exe -> 宿主");
         assert_eq!(auto_start_target(host), host, "幂等");
     }

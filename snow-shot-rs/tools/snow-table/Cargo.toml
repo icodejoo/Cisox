@@ -9,8 +9,9 @@ edition = "2024"
 license = "GPL-3.0-only"
 rust-version = "1.97"
 
+# 产物名 cisox-table.exe（包名仍是 snow-table）
 [[bin]]
-name = "snow-table"
+name = "cisox-table"
 path = "src/main.rs"
 
 [dependencies]

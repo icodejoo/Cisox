@@ -211,7 +211,7 @@ pub fn asset_root(data_root: &Path, env_override: Option<&str>, sub: &str) -> Pa
 /// 可执行文件路径；找不到返回英文技术说明（调用方包成各自的“无工作进程”错误）。
 ///
 /// ```ignore
-/// let exe = locate_worker_exe(None, Some(dir), "SNOW_TABLE_EXE", "snow-table.exe")?;
+/// let exe = locate_worker_exe(None, Some(dir), "SNOW_TABLE_EXE", "cisox-table.exe")?;
 /// ```
 pub fn locate_worker_exe(
     exe_override: Option<&Path>,

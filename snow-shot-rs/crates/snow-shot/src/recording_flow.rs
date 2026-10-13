@@ -256,7 +256,7 @@ impl RecordingHost {
     /// 拉起录制进程并接入会话；失败则让会话直接进入错误状态（用户能在窗口里看到原因）。
     fn attach_recorder(&self, view: &mut RecordingAreaView, countdown: u32) {
         let Some(exe) = locate_recorder_exe() else {
-            tracing::error!("找不到录制进程 snow-recorder（可用环境变量 SNOW_RECORDER_EXE 指定）");
+            tracing::error!("找不到录制进程 cisox-recorder（可用环境变量 SNOW_RECORDER_EXE 指定）");
             view.session.abort(RecordingFailure::RecorderMissing);
             return;
         };

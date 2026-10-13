@@ -1,27 +1,27 @@
 # 听写冷启动真人计时（docs/research/dictation-cold-start.md §7 E2，worker 层）。
 # 需要真人对着麦克风说话，无法无人值守：声学回环会被回声消除滤掉。
 #
-# 运行环境: PowerShell 7（pwsh；脚本含中文字面量，按 UTF-8 读取），Windows，已构建 snow-stt。
-# 做什么: 模拟 UI main 最早处预拉 worker 的做法——一启动 snow-stt 就立刻发 START + PING，
+# 运行环境: PowerShell 7（pwsh；脚本含中文字面量，按 UTF-8 读取），Windows，已构建 cisox-stt。
+# 做什么: 模拟 UI main 最早处预拉 worker 的做法——一启动 cisox-stt 就立刻发 START + PING，
 #         记录 RECORDING（麦克风已开、已在录音）、PONG（模型加载完、识别就绪）、第一条识别文本的时间点，
 #         然后在 -SpeakSeconds 后发 STOP，等 FINAL / STOPPED。
 # 怎么说: 看到 "GO" 立刻开始报数，约 1 次 / 秒："一、二、三、四、五、六……"（别提前说，计时从进程启动算）。
 #         结束后看“第一个被识别的数字”：判据是 ≤ "二"；越晚说明开头丢得越多。
 #
 # 用法: scripts/verify-dictation-cold-start.ps1 -ModelDir <模型目录> [-Rounds 5] [-SpeakSeconds 8] [-Threads 2]
-#         [-LoadDelayMs 0] [-Exe <snow-stt.exe>]
+#         [-LoadDelayMs 0] [-Exe <cisox-stt.exe>]
 #   -ModelDir:     流式模型目录（默认双语模型在 <数据根>\models\stt\<模型ID>，数据根通常是 %LOCALAPPDATA%\Cisox）。
 #   -Rounds:       重复轮数，建议 5~10；每轮间隔 4 秒让你喘口气。
 #   -SpeakSeconds: 每轮从 RECORDING 起说多久再发 STOP（模拟按住说话松开）。
 #   -LoadDelayMs:  worker 加载模型前人为多等这么久（压力场景：模拟 10 s 以上的慢加载，测环形缓存与追赶）。
-#   -Exe:          snow-stt.exe 路径，默认 build/stt/release/snow-stt.exe（先 scripts/build-snow-stt.ps1）。
+#   -Exe:          cisox-stt.exe 路径，默认 build/stt/release/cisox-stt.exe（先 scripts/build-snow-stt.ps1）。
 #
 # 判据（调研文档 §7 E2，worker 层部分）：
 #   - 进程启动到 RECORDING（开麦）的中位数 ≤ 1.3 s，p95 ≤ 1.8 s（热页缓存）；
 #   - 第一个被识别的数字 ≤ "二"；
 #   - 追赶耗时（PONG 到积压喂完，近似为 PONG 到“文字追上实时”）≤ 积压时长 × 0.25；
 #   - 同一轮里 STOP 在 PONG 之前到达时，文字完整出现、不被丢弃（-SpeakSeconds 小于加载时间即可复现）。
-# 端到端（UI + 宿主）部分手工做：运行宿主 snow-shot.exe（两个 exe 都已构建），绑好听写热键，
+# 端到端（UI + 宿主）部分手工做：运行宿主 cisox.exe（两个 exe 都已构建），绑好听写热键，
 #   冷启动场景请先退出所有 UI 窗口；按热键后立刻报数，观察托盘提示 / 右下角图标依次是：
 #   加载中（进度条）→ 录音中（光环 + 进度条）→ 已就绪（光环），按住说话时在“录音中”松开应等加载完再出字。
 # 不会写任何数据目录，不保存音频与识别文本之外的东西；识别文本只打印在本窗口。
@@ -35,7 +35,7 @@ param(
 )
 $ErrorActionPreference = "Stop"
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-if ([string]::IsNullOrWhiteSpace($Exe)) { $Exe = Join-Path $repoRoot "build/stt/release/snow-stt.exe" }
+if ([string]::IsNullOrWhiteSpace($Exe)) { $Exe = Join-Path $repoRoot "build/stt/release/cisox-stt.exe" }
 if (-not (Test-Path $Exe)) { throw "找不到 $Exe，先运行 scripts/build-snow-stt.ps1" }
 if (-not (Test-Path $ModelDir)) { throw "找不到模型目录: $ModelDir" }
 

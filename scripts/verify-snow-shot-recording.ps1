@@ -14,9 +14,9 @@ param(
 )
 $ErrorActionPreference = "Continue"
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-# 完整应用是 UI 进程 snow-shot-ui.exe；阶段 4 起无参数会转去启动宿主，本脚本要单进程完整应用，所以全部显式带 --resident
-# （snow-shot.exe 是托盘宿主，双进程场景见 verify-tray-host-split.ps1）
-if (-not $Exe) { $Exe = Join-Path $repoRoot "build/cargo/debug/snow-shot-ui.exe" }
+# 完整应用是 UI 进程 cisox-ui.exe；阶段 4 起无参数会转去启动宿主，本脚本要单进程完整应用，所以全部显式带 --resident
+# （cisox.exe 是托盘宿主，双进程场景见 verify-tray-host-split.ps1）
+if (-not $Exe) { $Exe = Join-Path $repoRoot "build/cargo/debug/cisox-ui.exe" }
 $logDir = Join-Path $env:LOCALAPPDATA "Cisox/logs"
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 Get-ChildItem $OutDir -Force | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
@@ -28,7 +28,7 @@ function New-LogLines([string]$path, [long]$offset) {
     try { $fs.Seek($offset, "Begin") | Out-Null; (New-Object System.IO.StreamReader($fs, [Text.Encoding]::UTF8)).ReadToEnd() -split "`r?`n" } finally { $fs.Dispose() }
 }
 
-if (Get-Process snow-shot, snow-shot-ui -ErrorAction SilentlyContinue) { throw "已有 snow-shot / snow-shot-ui 在运行，请先退出" }
+if (Get-Process cisox, cisox-ui -ErrorAction SilentlyContinue) { throw "已有 cisox / cisox-ui 在运行，请先退出" }
 $log = Latest-Log
 $logPath = $log.FullName
 $offset = $log.Length
@@ -37,7 +37,7 @@ $plan = "$Region,$Seconds,$Format"
 if ($Scenario -eq "pause") { $plan += ",2:3" }
 $env:SNOW_RECORDING_AUTOTEST = $plan
 $env:SNOW_RECORDING_AUTOTEST_DIR = $OutDir
-if ($Scenario -eq "norecorder") { $env:SNOW_RECORDER_EXE = "Z:\definitely\missing\snow-recorder.exe" }
+if ($Scenario -eq "norecorder") { $env:SNOW_RECORDER_EXE = "Z:\definitely\missing\cisox-recorder.exe" }
 "plan=$plan out=$OutDir"
 
 $primary = Start-Process -FilePath $Exe -ArgumentList "--resident" -PassThru
@@ -54,7 +54,7 @@ while ((Get-Date) -lt $deadline) {
     $lines = New-LogLines $logPath $offset
     if ($Scenario -eq "crash" -and -not $killed -and ($lines -match "录制进程已启动")) {
         Start-Sleep -Seconds 3
-        $rec = Get-Process snow-recorder -ErrorAction SilentlyContinue
+        $rec = Get-Process cisox-recorder -ErrorAction SilentlyContinue
         "killing recorder: $($rec.Id -join ',') at t=$([int]$sw.Elapsed.TotalSeconds)s"
         $rec | Stop-Process -Force
         $killed = $true
@@ -64,7 +64,7 @@ while ((Get-Date) -lt $deadline) {
 "--- log (relevant) ---"
 $lines | Where-Object { $_ -match "录|record|Record|窗|overlay" } | ForEach-Object { $_ }
 "--- state ---"
-"snow-recorder still running: $([bool](Get-Process snow-recorder -ErrorAction SilentlyContinue))"
+"cisox-recorder still running: $([bool](Get-Process cisox-recorder -ErrorAction SilentlyContinue))"
 "primary alive after run: $(-not $primary.HasExited)"
 "output dir listing (incl hidden):"
 Get-ChildItem $OutDir -Force -Recurse | ForEach-Object { "  $($_.FullName)  $($_.Length)" }

@@ -1,4 +1,4 @@
-//! 表格识别服务：拉起 `snow-table` 工作进程做一次结构推理，再与 OCR 文字块合并成表格。
+//! 表格识别服务：拉起 `cisox-table` 工作进程做一次结构推理，再与 OCR 文字块合并成表格。
 //!
 //! 流程：图 → 预处理 → 工作进程（SLANet_plus，ORT）→ 结构解码 → 与现有 OCR 的文字框匹配 → HTML / Markdown / TSV。
 //! 工作进程按需拉起、跑完即退出，不常驻；推理以外的逻辑都在 [`crate::table_structure`]（纯函数）。
@@ -67,7 +67,7 @@ pub trait StructureRunner {
     fn run(&self, tensor: &[f32]) -> Result<WorkerOutput, TableError>;
 }
 
-/// 真实进程：每次推理拉起一个 `snow-table` 子进程。
+/// 真实进程：每次推理拉起一个 `cisox-table` 子进程。
 #[derive(Debug, Clone)]
 pub struct ProcessRunner {
     /// 已就绪的资产。
@@ -379,7 +379,7 @@ mod tests {
     /// 真实模型自检（默认忽略）：需要环境变量 `SNOW_TABLE_E2E_ASSETS=<模型>;<worker>;<ort dll>`。
     /// 画一张 3x3 网格线的图，验证真实 SLANet_plus 能解出表格结构。
     #[test]
-    #[ignore = "needs the real SLANet_plus model, snow-table.exe and onnxruntime.dll"]
+    #[ignore = "needs the real SLANet_plus model, cisox-table.exe and onnxruntime.dll"]
     fn real_model_finds_grid_cells() {
         let spec = std::env::var("SNOW_TABLE_E2E_ASSETS").expect("设置 SNOW_TABLE_E2E_ASSETS");
         let parts: Vec<&str> = spec.split(';').collect();

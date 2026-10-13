@@ -1,4 +1,4 @@
-//! 表格识别资产：SLANet_plus 模型（官方 ONNX 发布包）、onnxruntime 动态库与 `snow-table` 工作进程的定位、
+//! 表格识别资产：SLANet_plus 模型（官方 ONNX 发布包）、onnxruntime 动态库与 `cisox-table` 工作进程的定位、
 //! 清单解析、就绪判定与按需下载。
 //!
 //! 模型放在统一目录 `<数据根>/models/table/`（文件夹 `<模型 ID>/` 或直接放 `.onnx` 文件都认），
@@ -16,10 +16,10 @@ use std::sync::atomic::AtomicBool;
 
 /// 环境变量：覆盖表格资产根目录（默认 `<数据根>/assets/table`）。
 pub const ENV_TABLE_ASSET_DIR: &str = "SNOW_TABLE_ASSET_DIR";
-/// 环境变量：直接指定 `snow-table.exe`（开发 / 自测用）。
+/// 环境变量：直接指定 `cisox-table.exe`（开发 / 自测用）。
 pub const ENV_TABLE_EXE: &str = "SNOW_TABLE_EXE";
 /// 工作进程可执行文件名。
-pub const TABLE_WORKER_EXE_NAME: &str = "snow-table.exe";
+pub const TABLE_WORKER_EXE_NAME: &str = "cisox-table.exe";
 /// 表格子目录名。
 const TABLE_DIR: &str = "table";
 /// 表格清单的组件名（错误文案里的技术名词）。
@@ -121,7 +121,7 @@ pub fn find_model_file(dirs: &[PathBuf], manifest: &TableManifest) -> Option<Pat
 /// 已就绪的表格识别资产路径。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableAssets {
-    /// `snow-table` 工作进程。
+    /// `cisox-table` 工作进程。
     pub exe: PathBuf,
     /// SLANet_plus 的 ONNX 文件。
     pub model: PathBuf,
@@ -139,7 +139,7 @@ pub enum TableUnavailable {
     },
     /// onnxruntime 运行时未下载。
     NoRuntime,
-    /// 找不到 `snow-table` 工作进程（随安装包提供，下载解决不了）。
+    /// 找不到 `cisox-table` 工作进程（随安装包提供，下载解决不了）。
     NoWorker(String),
     /// 清单损坏。
     Manifest(String),
@@ -404,7 +404,7 @@ mod tests {
     /// 环境变量指向不存在的 worker 时报错；只有缺模型 / 运行时可下载。
     #[test]
     fn flags_and_messages() {
-        let missing = Path::new("Z:/nope/snow-table.exe");
+        let missing = Path::new("Z:/nope/cisox-table.exe");
         assert!(matches!(
             locate_worker(Some(missing), None),
             Err(TableUnavailable::NoWorker(_))

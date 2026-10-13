@@ -1,7 +1,7 @@
-# 以独立 target 目录构建 snow-recorder 的变体（例如带 diag 特性的诊断版），不覆盖默认发布产物。
+# 以独立 target 目录构建 cisox-recorder 的变体（例如带 diag 特性的诊断版），不覆盖默认发布产物。
 # 环境准备与 scripts/build-snow-recorder.ps1 一致（静态 FFmpeg、libclang、VS 环境、+crt-static）。
 # 用法: scripts/build-recorder-variant.ps1 -Name diag -Features diag
-# 产物: <repo>/build/recorder-<Name>/release/snow-recorder.exe
+# 产物: <repo>/build/recorder-<Name>/release/cisox-recorder.exe
 param(
     [Parameter(Mandatory)][string]$Name,
     [string]$Features = "",
@@ -27,4 +27,4 @@ if (-not $env:CARGO_BUILD_JOBS) { $env:CARGO_BUILD_JOBS = "4" }
 if ($Test) { cargo test --manifest-path $manifest --release @featureArgs }
 else { cargo build --manifest-path $manifest --release @featureArgs }
 if ($LASTEXITCODE -ne 0) { throw "cargo 失败，退出码 $LASTEXITCODE" }
-"产物: $(Join-Path $env:CARGO_TARGET_DIR 'release/snow-recorder.exe')"
+"产物: $(Join-Path $env:CARGO_TARGET_DIR 'release/cisox-recorder.exe')"

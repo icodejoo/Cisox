@@ -30,7 +30,7 @@ fn fake_ui(dir: &std::path::Path, tail: &str) -> PathBuf {
 /// 建一个指向假 UI 的平台。
 fn platform_with(ui: PathBuf, root: PathBuf) -> (WinPlatform, Receiver<Event>) {
     let (tx, rx) = channel();
-    let mut platform = WinPlatform::new(tx, root, PathBuf::from("snow-shot.exe"));
+    let mut platform = WinPlatform::new(tx, root, PathBuf::from("cisox.exe"));
     platform.ui_exe = ui;
     (platform, rx)
 }

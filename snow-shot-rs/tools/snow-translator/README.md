@@ -1,6 +1,6 @@
 # snow-translator
 
-本地翻译工作进程：stdin/stdout 一行一条 JSON 的行协议（见 `src/protocol.rs`），空闲卸载等于进程退出。
+本地翻译工作进程（产物 `cisox-translator.exe`，包名仍是 `snow-translator`）：stdin/stdout 一行一条 JSON 的行协议（见 `src/protocol.rs`），空闲卸载等于进程退出。
 独立 cargo workspace，`ort`（`load-dynamic`，运行时需 onnxruntime 1.28.0 的 `onnxruntime.dll`）与 `tokenizers` 不进主程序的构建。
 动态库查找顺序：`SNOW_ORT_DYLIB`、`ORT_DYLIB_PATH`、可执行文件同目录。
 

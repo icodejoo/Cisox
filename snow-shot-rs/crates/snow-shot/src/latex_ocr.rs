@@ -1,7 +1,7 @@
 //! 公式识别的纯函数部分（RapidLaTeXOCR 的 Rust 移植）：图像预处理、宽度迭代、自回归解码循环、
 //! tokenizer 解码与 LaTeX 后处理。
 //!
-//! 模型推理由 [`LatexBackend`] 抽象（真实实现是 `snow-latex` 工作进程，见 `latex_service`），
+//! 模型推理由 [`LatexBackend`] 抽象（真实实现是 `cisox-latex` 工作进程，见 `latex_service`），
 //! 因此本模块可以用假张量离屏测试。预处理与后处理逐段对照上游 `rapid_latex_ocr` 的 Python 实现
 //! （`PreProcess.pad` / `minmax_size` / `normalize`、`LaTeXOCR.loop_image_resizer` / `post_process`、
 //! `Decoder.__call__`、`TokenizerCls.token2str`）。

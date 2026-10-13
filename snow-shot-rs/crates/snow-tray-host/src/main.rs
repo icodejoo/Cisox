@@ -1,4 +1,4 @@
-//! 托盘宿主入口（产物 `snow-shot.exe`）。
+//! 托盘宿主入口（产物 `cisox.exe`）。
 //!
 //! `main` 的第一行必须是进程加固：禁用扩展点、`ImmDisableIME(-1)`——任何窗口、线程创建之前。
 
@@ -18,6 +18,6 @@ fn main() -> ExitCode {
 /// 程序入口（非 Windows：宿主只在 Windows 上有实现，见方案 ADR-7）。
 #[cfg(not(windows))]
 fn main() -> ExitCode {
-    eprintln!("snow-shot 托盘宿主目前只支持 Windows");
+    eprintln!("cisox 托盘宿主目前只支持 Windows");
     ExitCode::from(1)
 }

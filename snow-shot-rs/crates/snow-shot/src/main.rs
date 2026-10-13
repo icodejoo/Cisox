@@ -1,11 +1,11 @@
-//! UI 进程入口（产物 `snow-shot-ui.exe`）：命令行、存储解析、日志初始化，随后进入 GPUI 事件循环。
+//! UI 进程入口（产物 `cisox-ui.exe`）：命令行、存储解析、日志初始化，随后进入 GPUI 事件循环。
 //!
 //! 四种运行方式（方案 `docs/design/tray-host-split.md` §3）：
 //! - **转调宿主**（无参数或只带 `--cmd`，阶段 4 起的默认）：不在本进程里干活，拉起同目录的托盘宿主
-//!   `snow-shot.exe`（`--cmd` 原样转给它）后退出；老用户注册表里指向本 exe 的开机自启也走这条。
+//!   `cisox.exe`（`--cmd` 原样转给它）后退出；老用户注册表里指向本 exe 的开机自启也走这条。
 //! - **单进程常驻**（显式 `--resident`，回退开关）：本进程自带托盘 / 热键 / IPC 监听并常驻，
 //!   从属实例（`--resident --cmd`）把命令交给它后退出。
-//! - **双进程 UI**（`--ui --session <名> --token <令牌> [--hint dictation]`，由托盘宿主 `snow-shot.exe` 拉起）：
+//! - **双进程 UI**（`--ui --session <名> --token <令牌> [--hint dictation]`，由托盘宿主 `cisox.exe` 拉起）：
 //!   不持托盘与热键，连宿主的会话管道收动作、写 `host/spec.json` 快照，所有窗口关闭且无活动后请求退出。
 //!   带 `--hint dictation` 时（宿主队首命令是语音转文字）在 `main` 最早处并行预拉起语音 worker。
 //! - **无窗口任务**（`--headless emit-spec | update-check | set-config`）：不初始化 GPUI，做完就退（见 [`headless`]）。
@@ -469,7 +469,7 @@ fn run_primary(ctx: &AppBootstrap, guard: &SingleInstanceGuard) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// 转调宿主：拉起同目录的 `snow-shot.exe` 并把命令行原样交给它，本进程随即退出（不等宿主）。
+/// 转调宿主：拉起同目录的 `cisox.exe` 并把命令行原样交给它，本进程随即退出（不等宿主）。
 ///
 /// # 参数
 /// - `host`：宿主 exe 路径。
@@ -601,7 +601,7 @@ fn main() -> ExitCode {
         Ok(o) => o,
         Err(e) => {
             eprintln!(
-                "{e}\n用法: snow-shot-ui [{CLI_FLAG_COMMAND} screenshot|recording|scroll-capture|pin-clipboard|settings|show|quit] [{FLAG_RESIDENT}]\n（不带 {FLAG_RESIDENT} 时转交给同目录的 {HOST_EXE_NAME}）"
+                "{e}\n用法: cisox-ui [{CLI_FLAG_COMMAND} screenshot|recording|scroll-capture|pin-clipboard|settings|show|quit] [{FLAG_RESIDENT}]\n（不带 {FLAG_RESIDENT} 时转交给同目录的 {HOST_EXE_NAME}）"
             );
             return ExitCode::from(EXIT_CODE_BAD_ARGS);
         }
@@ -680,7 +680,7 @@ mod tests {
     /// 宿主 exe 不存在时转调失败并返回错误（不 panic、不假装成功）。
     #[test]
     fn launch_host_reports_missing_exe() {
-        let missing = std::env::temp_dir().join("snow-shot-no-such-host.exe");
+        let missing = std::env::temp_dir().join("cisox-no-such-host.exe");
         assert!(launch_host(&missing, &[]).is_err());
     }
 

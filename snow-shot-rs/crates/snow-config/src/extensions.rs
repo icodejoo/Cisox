@@ -51,7 +51,7 @@ pub const KEY_LATEX_SHORTCUT: &str = "screenshot_shortcuts/latex_recognition";
 pub const KEY_DICTATION_TOGGLE_HOTKEY: &str = "global_shortcuts/dictation_toggle";
 /// 语音转文字「按住说话」全局热键（按下开始、松开结束；默认不绑定）。
 pub const KEY_DICTATION_HOLD_HOTKEY: &str = "global_shortcuts/dictation_hold";
-/// 语音转文字引擎后端：`local-model` 本地模型（snow-stt），`system` 系统语音（尚未实现）。
+/// 语音转文字引擎后端：`local-model` 本地模型（cisox-stt），`system` 系统语音（尚未实现）。
 pub const KEY_DICTATION_BACKEND: &str = "dictation/backend";
 /// 语音转文字触发模式：`both` 两个热键都生效，`toggle` 只切换式，`hold` 只按住说话。
 pub const KEY_DICTATION_TRIGGER_MODE: &str = "dictation/trigger_mode";

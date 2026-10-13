@@ -9,9 +9,9 @@ description = "托盘宿主：常驻的最小 Win32 进程（托盘、全局热�
 [lints]
 workspace = true
 
-# 产物沿用旧名 snow-shot.exe（命令行、快捷方式、文档里都是它）；UI 进程改名为 snow-shot-ui.exe
+# 产物名 cisox.exe（命令行、快捷方式、自启都指向它）；UI 进程产物是 cisox-ui.exe（snow-shot 包）
 [[bin]]
-name = "snow-shot"
+name = "cisox"
 path = "src/main.rs"
 
 # 宿主的依赖闭包受 workspace-guard 约束（黑名单见其 closure.rs）：不得依赖配置层、i18n、画布、

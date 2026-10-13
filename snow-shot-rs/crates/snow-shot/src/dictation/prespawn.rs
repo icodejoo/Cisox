@@ -1,5 +1,5 @@
 //! 语音 worker 预拉起：宿主发现队首命令是语音转文字，会给 UI 加 `--hint dictation`；
-//! UI 在 `main` 最早处（不等 GPUI 初始化）就在后台线程里读配置、拉起 `snow-stt` 并发 START，
+//! UI 在 `main` 最早处（不等 GPUI 初始化）就在后台线程里读配置、拉起 `cisox-stt` 并发 START，
 //! 之后事件循环收到听写命令时，由 [`claim`] 认领这个已经在开麦、加载模型的 worker。
 //!
 //! 约束：
@@ -216,7 +216,7 @@ fn global() -> &'static Arc<Prespawn> {
     GLOBAL.get_or_init(|| Arc::new(Prespawn::new()))
 }
 
-/// 按配置拉起 `snow-stt` 并发出 START 与 PING（引擎对普通启动也是这两条）。
+/// 按配置拉起 `cisox-stt` 并发出 START 与 PING（引擎对普通启动也是这两条）。
 ///
 /// # 参数
 /// - `config`：听写配置。

@@ -10,7 +10,7 @@ use crate::gesture::{GestureThrottle, bindings_from_spec, event_from_drag};
 use crate::host::{Event, HeadlessKind, Platform, SpawnedUi, TrayPlan};
 use snow_host_protocol::frame::encode_line;
 use snow_host_protocol::launch::{
-    FLAG_HEADLESS, HEADLESS_EMIT_SPEC, HeadlessJob, UiHint, UiLaunch,
+    FLAG_HEADLESS, HEADLESS_EMIT_SPEC, HeadlessJob, UI_EXE_NAME, UiHint, UiLaunch,
 };
 use snow_host_protocol::message::{HostMessage, hex_lower};
 use snow_host_protocol::spec::{HostSpec, HotkeySpec, MenuItemSpec, MouseBindingSpec, TrayTheme};
@@ -39,9 +39,6 @@ use windows_sys::Win32::System::Threading::{
     PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, TerminateProcess, WaitForSingleObject,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow;
-
-/// UI 进程的 exe 文件名（与宿主同目录）。
-pub const UI_EXE_NAME: &str = "snow-shot-ui.exe";
 
 /// 环境变量：覆盖 UI 进程 exe 的路径（开发与验收脚本用；正式安装不设置）。
 pub const ENV_UI_EXE: &str = "SNOW_UI_EXE";
@@ -139,7 +136,7 @@ impl WinPlatform {
     /// # 参数
     /// - `tx`：事件通道发送端。
     /// - `data_root`：数据根目录。
-    /// - `host_exe`：本宿主 exe 路径；UI 进程默认是它同目录的 `snow-shot-ui.exe`。
+    /// - `host_exe`：本宿主 exe 路径；UI 进程默认是它同目录的 `cisox-ui.exe`。
     ///
     /// # 返回
     /// 平台；UI exe 路径可用环境变量 [`ENV_UI_EXE`] 覆盖。

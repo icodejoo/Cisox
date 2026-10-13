@@ -32,7 +32,7 @@
 要跑的场景，默认 all（不含 admin，admin 要单独指定，因为会弹 UAC）。
 
 .PARAMETER HostExe
-宿主 exe，默认 build\cargo\release\snow-shot.exe。UI exe 取它同目录的 snow-shot-ui.exe（-UiExe 可覆盖）。
+宿主 exe，默认 build\cargo\release\cisox.exe。UI exe 取它同目录的 cisox-ui.exe（-UiExe 可覆盖）。
 
 .PARAMETER Rounds
 hotkey 场景的轮数（取中位数），默认 3。
@@ -45,7 +45,7 @@ hotkey 场景的轮数（取中位数），默认 3。
 前提（脚本会在开头逐项检查，不满足就中止，不会硬跑）：
   1. 桌面已解锁、会话在前台（锁屏时 SendInput / 前台判定都无效）。
   2. 本机没有别的 Cisox 实例在跑：宿主与 --resident 的 UI 共用互斥体 Local\cisox.snow_shot.single_instance，
-     有旧的 debug snow-shot.exe 在跑就拿不到互斥体。脚本只报告、不替你结束它（不按名字杀进程）。
+     有旧的 debug cisox.exe 在跑就拿不到互斥体。脚本只报告、不替你结束它（不按名字杀进程）。
   3. 任务栏通知区里能直接看到 Cisox 图标（在“选择哪些图标显示在任务栏上”里把它设为显示，
      否则 tray-focus / ime / pause-gate 找不到图标；找不到时这些场景报 SKIP，不算失败）。
   4. 验收期间不要碰键盘鼠标、不要播放视频（首帧用屏幕采样点判定，桌面必须静止）；关闭屏保与锁屏；
@@ -75,8 +75,8 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $script:RepoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
-if (-not $HostExe) { $HostExe = Join-Path $script:RepoRoot 'build\cargo\release\snow-shot.exe' }
-if (-not $UiExe) { $UiExe = Join-Path (Split-Path -Parent $HostExe) 'snow-shot-ui.exe' }
+if (-not $HostExe) { $HostExe = Join-Path $script:RepoRoot 'build\cargo\release\cisox.exe' }
+if (-not $UiExe) { $UiExe = Join-Path (Split-Path -Parent $HostExe) 'cisox-ui.exe' }
 if (-not $WorkDir) { $WorkDir = Join-Path $env:TEMP 'cisox-split-accept' }
 $script:Stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $script:OutDir = Join-Path $script:RepoRoot "build\split-accept\$script:Stamp"
@@ -287,18 +287,18 @@ function Get-Median([double[]]$Values) {
 # 工作目录下的进程（按路径过滤，绝不按名字杀进程）
 function Get-WorkProcesses {
     # 先按名字缩小范围：对全部进程逐个取 .Path 在本机（带端点安全软件）一次要 8 秒以上，
-    # 会把所有基于轮询的耗时（首帧 / UI 退出）撑成秒级。宿主、UI 与各 worker 的 exe 名都以 snow 开头。
-    Get-Process -Name 'snow*' -ErrorAction SilentlyContinue | Where-Object {
+    # 会把所有基于轮询的耗时（首帧 / UI 退出）撑成秒级。宿主、UI 与各 worker 的 exe 名都以 cisox 开头。
+    Get-Process -Name 'cisox*' -ErrorAction SilentlyContinue | Where-Object {
         try { $_.Path -and $_.Path.StartsWith($script:Work, [StringComparison]::OrdinalIgnoreCase) } catch { $false }
     }
 }
 
 function Get-UiProcess {
-    Get-WorkProcesses | Where-Object { $_.ProcessName -eq 'snow-shot-ui' } | Select-Object -First 1
+    Get-WorkProcesses | Where-Object { $_.ProcessName -eq 'cisox-ui' } | Select-Object -First 1
 }
 
 function Get-HostProcess {
-    Get-WorkProcesses | Where-Object { $_.ProcessName -eq 'snow-shot' } | Select-Object -First 1
+    Get-WorkProcesses | Where-Object { $_.ProcessName -eq 'cisox' } | Select-Object -First 1
 }
 
 function Send-Hotkey([int]$Vk) { [CisoxAccept.W]::Tap([uint16]$Vk) }
@@ -353,7 +353,7 @@ function Test-Prerequisites {
     $mutex = $null
     if ([System.Threading.Mutex]::TryOpenExisting('Local\cisox.snow_shot.single_instance', [ref]$mutex)) {
         $mutex.Dispose()
-        $running = Get-Process -Name 'snow-shot', 'snow-shot-ui' -ErrorAction SilentlyContinue | ForEach-Object { "$($_.ProcessName)#$($_.Id)" }
+        $running = Get-Process -Name 'cisox', 'cisox-ui' -ErrorAction SilentlyContinue | ForEach-Object { "$($_.ProcessName)#$($_.Id)" }
         $problems += "已有 Cisox 实例持有单实例互斥体（$($running -join ', ')）：请先自行退出它，脚本不会替你结束"
     }
     if ($problems.Count -gt 0) {
@@ -371,8 +371,8 @@ function Initialize-Work {
     New-Item -ItemType Directory -Force -Path $WorkDir | Out-Null
     $script:Work = (Resolve-Path -LiteralPath $WorkDir).Path
     $script:Data = Join-Path $script:Work 'data'
-    Copy-Item -LiteralPath $HostExe -Destination (Join-Path $script:Work 'snow-shot.exe')
-    Copy-Item -LiteralPath $UiExe -Destination (Join-Path $script:Work 'snow-shot-ui.exe')
+    Copy-Item -LiteralPath $HostExe -Destination (Join-Path $script:Work 'cisox.exe')
+    Copy-Item -LiteralPath $UiExe -Destination (Join-Path $script:Work 'cisox-ui.exe')
     # 便携标记：让数据根落在工作目录，不碰真实数据目录
     [System.IO.File]::WriteAllText((Join-Path $script:Work '__data_directory'), $script:Data, (New-Object System.Text.UTF8Encoding($false)))
     New-Item -ItemType Directory -Force -Path $script:OutDir | Out-Null
@@ -380,7 +380,7 @@ function Initialize-Work {
 
 function Start-TestHost {
     param([switch]$Admin, [hashtable]$Env = @{})
-    $exe = Join-Path $script:Work 'snow-shot.exe'
+    $exe = Join-Path $script:Work 'cisox.exe'
     foreach ($k in $Env.Keys) { Set-Item -Path "Env:$k" -Value $Env[$k] }
     try {
         if ($Admin) { $script:HostProc = Start-Process -FilePath $exe -Verb RunAs -PassThru -WindowStyle Hidden }
@@ -398,7 +398,7 @@ function Start-TestHost {
 function Stop-TestHost {
     if ($script:HostProc) {
         # 优雅退出：--cmd quit 走控制管道，宿主让 UI 先走 shutdown_app 再自己退出
-        & (Join-Path $script:Work 'snow-shot.exe') --cmd quit | Out-Null
+        & (Join-Path $script:Work 'cisox.exe') --cmd quit | Out-Null
         $gone = Wait-Until { -not (Get-WorkProcesses) } -TimeoutMs 15000
         if (-not $gone) {
             Get-WorkProcesses | ForEach-Object { Stop-WorkProcessById $_.Id }
@@ -603,7 +603,7 @@ function Get-SpecMenuLabel([string]$ActionId) {
 # 在没有任何 Cisox 进程时，用产品自己的 `--headless set-config` 预置一项配置（UI 是配置唯一写者，
 # 不手写 config.json）；同时重新生成快照。返回退出码。
 function Set-TestConfig([string]$Key, [string]$JsonValue) {
-    $ui = Join-Path $script:Work 'snow-shot-ui.exe'
+    $ui = Join-Path $script:Work 'cisox-ui.exe'
     $quoted = '"' + ($JsonValue -replace '"', '\"') + '"'
     $p = Start-Process -FilePath $ui -ArgumentList @('--headless', 'set-config', '--key', $Key, '--value', $quoted) -Wait -PassThru -WindowStyle Hidden
     return $p.ExitCode
@@ -617,7 +617,7 @@ function Read-Spec {
 
 # 工作目录下 UI exe 的进程及其命令行（区分 --ui 会话 / --headless 任务）
 function Get-UiCommandLines {
-    @(Get-CimInstance Win32_Process -Filter "Name='snow-shot-ui.exe'" -ErrorAction SilentlyContinue |
+    @(Get-CimInstance Win32_Process -Filter "Name='cisox-ui.exe'" -ErrorAction SilentlyContinue |
         Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($script:Work, [StringComparison]::OrdinalIgnoreCase) } |
         ForEach-Object { [pscustomobject]@{ Id = $_.ProcessId; Cmd = $_.CommandLine } })
 }
@@ -630,7 +630,7 @@ function Get-HostLogSince([int]$Offset) {
 }
 
 function Stop-HostGracefully {
-    & (Join-Path $script:Work 'snow-shot.exe') --cmd quit | Out-Null
+    & (Join-Path $script:Work 'cisox.exe') --cmd quit | Out-Null
     $null = Wait-Until { -not (Get-WorkProcesses) } -TimeoutMs 15000
     $script:HostProc = $null
 }
@@ -686,7 +686,7 @@ function Test-Idle {
     $hostPid = (Get-HostProcess).Id
     $mem = Get-MemoryInfo $hostPid
     $procs = @(Get-WorkProcesses | ForEach-Object { "$($_.ProcessName)#$($_.Id)" })
-    Add-Result 'idle' 'only-host-process' $(if ($procs.Count -eq 1 -and $procs[0] -like 'snow-shot#*') { 'PASS' } else { 'FAIL' }) ($procs -join ', ') '托盘态应只有宿主：没有 UI、没有任何 worker'
+    Add-Result 'idle' 'only-host-process' $(if ($procs.Count -eq 1 -and $procs[0] -like 'cisox#*') { 'PASS' } else { 'FAIL' }) ($procs -join ', ') '托盘态应只有宿主：没有 UI、没有任何 worker'
     Add-Result 'idle' 'host-private-commit' $(if ($mem.CommitMB -le $MaxIdleCommitMB) { 'PASS' } else { 'FAIL' }) "$($mem.CommitMB) MB" "验收线 <= $MaxIdleCommitMB MB（提交与工作集分开记）"
     Add-Result 'idle' 'host-working-set' 'INFO' "$($mem.WorkingSetMB) MB" "EmptyWorkingSet 后的工作集；线程 $($mem.Threads)"
     $modules = Get-ModuleNames $hostPid
@@ -781,7 +781,7 @@ function Test-TrayFocus {
 function Test-Cmd {
     $null = Start-TestHost
     Start-Sleep -Seconds 4
-    $exe = Join-Path $script:Work 'snow-shot.exe'
+    $exe = Join-Path $script:Work 'cisox.exe'
     foreach ($name in @('show', 'settings', 'screenshot', 'recording', 'scroll-capture', 'pin-clipboard')) {
         $proc = Start-Process -FilePath $exe -ArgumentList @('--cmd', $name) -Wait -PassThru -WindowStyle Hidden
         Add-Result 'cmd' "$name-exit-code" $(if ($proc.ExitCode -eq 0) { 'PASS' } else { 'FAIL' }) "exit=$($proc.ExitCode)" ''
@@ -820,7 +820,7 @@ function Test-SettingsHotkey {
         [System.IO.File]::WriteAllText($opsFile, $ops, (New-Object System.Text.UTF8Encoding($false)))
         $null = Start-TestHost -Env @{ SNOW_SETTINGS_AUTOTEST = $opsFile }
         Start-Sleep -Seconds 4
-        & (Join-Path $script:Work 'snow-shot.exe') --cmd settings | Out-Null
+        & (Join-Path $script:Work 'cisox.exe') --cmd settings | Out-Null
         $null = Wait-Until { (Read-UiLogs) -match '热键重新注册失败|回滚配置' } -TimeoutMs 20000
         Start-Sleep -Seconds 3
         $uiLog = Read-UiLogs
@@ -953,7 +953,7 @@ function Test-Admin {
     [CisoxAccept.W]::Tap([uint16]$VkEsc)
     $null = Wait-Until { -not (Get-UiProcess) } -TimeoutMs 8000
     # 混合权限：本脚本（非管理员）发 --cmd 给管理员宿主，控制管道 DACL 只授当前用户（同 SID，UIPI 不挡）
-    $proc = Start-Process -FilePath (Join-Path $script:Work 'snow-shot.exe') -ArgumentList @('--cmd', 'settings') -Wait -PassThru -WindowStyle Hidden
+    $proc = Start-Process -FilePath (Join-Path $script:Work 'cisox.exe') -ArgumentList @('--cmd', 'settings') -Wait -PassThru -WindowStyle Hidden
     Add-Result 'admin' 'non-elevated-cmd-to-elevated-host' $(if ($proc.ExitCode -eq 0) { 'PASS' } else { 'FAIL' }) "exit=$($proc.ExitCode)" '混合权限：--cmd 来自非管理员 shell'
     $shown = Wait-Until { [bool](Get-UiProcess) } -TimeoutMs 10000
     Add-Result 'admin' 'cmd-spawns-ui' $(if ($shown) { 'PASS' } else { 'FAIL' }) '' ''
@@ -1068,14 +1068,14 @@ function Test-Gesture {
 function Reset-PinsData {
     $store = Join-Path $script:Data 'pinned_windows_v2'
     if (Test-Path -LiteralPath $store) { Remove-Item -LiteralPath $store -Recurse -Force -ErrorAction SilentlyContinue }
-    $ui = Join-Path $script:Work 'snow-shot-ui.exe'
+    $ui = Join-Path $script:Work 'cisox-ui.exe'
     $null = Start-Process -FilePath $ui -ArgumentList @('--headless', 'emit-spec') -Wait -PassThru -WindowStyle Hidden
 }
 
 function Test-PinsRestore {
     $null = Start-TestHost
     Start-Sleep -Seconds 5
-    $exe = Join-Path $script:Work 'snow-shot.exe'
+    $exe = Join-Path $script:Work 'cisox.exe'
     $bmp = New-Object Drawing.Bitmap 240, 140
     $g = [Drawing.Graphics]::FromImage($bmp); $g.Clear([Drawing.Color]::FromArgb(255, 30, 120, 200)); $g.Dispose()
     [Windows.Forms.Clipboard]::SetImage($bmp)
@@ -1112,7 +1112,7 @@ function Test-PinsRestore {
 }
 
 function Test-SttKeepalive {
-    $exe = Join-Path $script:Work 'snow-shot.exe'
+    $exe = Join-Path $script:Work 'cisox.exe'
     # 基线：语音热键未绑定（默认）：UI 随窗口关闭立即退出
     $null = Start-TestHost
     Start-Sleep -Seconds 5

@@ -80,8 +80,8 @@ jobs:
           cargo run -q -p snow-i18n --bin snow-i18n-tool -- extract crates --exclude crates/snow-i18n --strict-refs --min-refs 10
 
   # 托盘宿主导入表闸门（docs/design/tray-host-split.md §3 / §8）：仅 Windows。
-  # 宿主 snow-shot.exe 不能静态 / 延迟导入 D3D、DXGI、DWrite、UIA、图像编解码、输入法这类 DLL，
-  # 否则进程一起来就会被加载、托盘态内存涨回去。宿主与 UI（snow-shot-ui.exe）两个包同一条命令构建，
+  # 宿主 cisox.exe 不能静态 / 延迟导入 D3D、DXGI、DWrite、UIA、图像编解码、输入法这类 DLL，
+  # 否则进程一起来就会被加载、托盘态内存涨回去。宿主与 UI（cisox-ui.exe）两个包同一条命令构建，
   # 与真实打包一致；检查器在 tools/workspace-guard（纯 Rust 解析 PE，不依赖 dumpbin）。
   host-imports:
     name: tray host imports (windows)
