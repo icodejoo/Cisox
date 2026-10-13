@@ -6,6 +6,7 @@ use super::{
 };
 use std::ffi::c_void;
 use std::sync::Arc;
+use snow_light_thread::LightThread;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{
@@ -373,8 +374,8 @@ fn outcome_text(o: &IoOutcome) -> String {
 pub(super) struct PipeListener {
     /// 停止事件（`Drop` 时置位以唤醒后台线程）。
     stop: Arc<OwnedHandle>,
-    /// 后台线程。
-    join: Option<JoinHandle<()>>,
+    /// 后台线程（常驻，用轻量线程省提交）。
+    join: Option<LightThread>,
 }
 
 impl PipeListener {
@@ -394,14 +395,12 @@ impl PipeListener {
         let stop = Arc::new(create_event()?);
 
         let thread_stop = Arc::clone(&stop);
-        let join = std::thread::Builder::new()
-            .name("single-instance-ipc".into())
-            .spawn(move || {
-                // ACL 需在线程内保持到管道关闭（管道创建后系统已复制描述符，这里仅随线程释放）
-                let _acl = acl;
-                serve(&pipe, &io_event, &thread_stop, on_command);
-            })
-            .map_err(|e| format!("创建 IPC 线程失败: {e}"))?;
+        let join = LightThread::spawn("single-instance-ipc", move || {
+            // ACL 需在线程内保持到管道关闭（管道创建后系统已复制描述符，这里仅随线程释放）
+            let _acl = acl;
+            serve(&pipe, &io_event, &thread_stop, on_command);
+        })
+        .map_err(|e| format!("创建 IPC 线程失败: {e}"))?;
         Ok(Self {
             stop,
             join: Some(join),
@@ -416,7 +415,7 @@ impl Drop for PipeListener {
             let _ = SetEvent(self.stop.0);
         }
         if let Some(j) = self.join.take() {
-            let _ = j.join();
+            j.join();
         }
     }
 }

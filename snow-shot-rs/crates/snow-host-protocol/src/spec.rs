@@ -7,6 +7,7 @@
 use crate::{SPEC_VERSION, base64};
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::sync::Arc;
 
 /// 图标像素（RGBA8，行优先），序列化时像素存成 base64 字符串。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -15,9 +16,9 @@ pub struct IconRgba {
     pub width: u32,
     /// 高（像素）。
     pub height: u32,
-    /// RGBA 像素，长度应为 `width * height * 4`。
-    #[serde(with = "base64::bytes")]
-    pub rgba: Vec<u8>,
+    /// RGBA 像素，长度应为 `width * height * 4`；共享所有权，克隆快照 / 托盘计划不复制像素。
+    #[serde(with = "base64::shared_bytes")]
+    pub rgba: Arc<[u8]>,
 }
 
 impl IconRgba {
@@ -28,9 +29,9 @@ impl IconRgba {
     ///
     /// ```rust
     /// use snow_host_protocol::spec::IconRgba;
-    /// let ok = IconRgba { width: 2, height: 1, rgba: vec![0; 8] };
+    /// let ok = IconRgba { width: 2, height: 1, rgba: vec![0; 8].into() };
     /// assert!(ok.is_consistent());
-    /// let bad = IconRgba { width: 2, height: 2, rgba: vec![0; 8] };
+    /// let bad = IconRgba { width: 2, height: 2, rgba: vec![0; 8].into() };
     /// assert!(!bad.is_consistent());
     /// ```
     pub fn is_consistent(&self) -> bool {
@@ -314,19 +315,65 @@ impl HostSpec {
     /// ));
     /// ```
     pub fn from_json(text: &str) -> Result<Self, SpecError> {
-        let value: serde_json::Value =
+        let probe: VersionProbe =
             serde_json::from_str(text).map_err(|e| SpecError::Malformed(e.to_string()))?;
-        let version = value
-            .get("spec_version")
+        probe.check()?;
+        let spec: HostSpec =
+            serde_json::from_str(text).map_err(|e| SpecError::Malformed(e.to_string()))?;
+        spec.validate()?;
+        Ok(spec)
+    }
+
+    /// 从可回绕的读取器流式读取快照（语义同 [`HostSpec::from_json`]）。
+    ///
+    /// 不把整份文件读进一个 `String`：宿主启动时少一段几十 KB 的临时缓冲，托盘态提交（堆峰值）随之下降。
+    /// 先读一遍探版本号，再回绕读一遍解析正文。
+    ///
+    /// # 参数
+    /// - `reader`：快照内容（文件加 `BufReader` 即可）。
+    ///
+    /// # 返回
+    /// 快照，或 [`SpecError`]（读取中途的 IO 错误按 `Malformed` 报告）。
+    ///
+    /// ```rust
+    /// use snow_host_protocol::spec::{HostSpec, SpecError};
+    /// let cursor = std::io::Cursor::new(br#"{"spec_version": 99}"#.to_vec());
+    /// assert!(matches!(HostSpec::from_reader(cursor), Err(SpecError::UnsupportedVersion(99))));
+    /// ```
+    pub fn from_reader<R: std::io::Read + std::io::Seek>(mut reader: R) -> Result<Self, SpecError> {
+        let malformed = |e: &dyn fmt::Display| SpecError::Malformed(e.to_string());
+        let probe: VersionProbe =
+            serde_json::from_reader(&mut reader).map_err(|e| malformed(&e))?;
+        probe.check()?;
+        reader
+            .seek(std::io::SeekFrom::Start(0))
+            .map_err(|e| malformed(&e))?;
+        let spec: HostSpec = serde_json::from_reader(&mut reader).map_err(|e| malformed(&e))?;
+        spec.validate()?;
+        Ok(spec)
+    }
+}
+
+/// 只探版本号：其余字段按“忽略”跳过，不建整棵 `Value` 树（图标 base64 文本有几十 KB，
+/// 整棵树会把宿主的堆峰值抬高、托盘态提交跟着涨）。
+#[derive(Deserialize)]
+struct VersionProbe {
+    /// 版本号字段（缺失或不是整数都按“缺少版本”处理）。
+    spec_version: Option<serde_json::Value>,
+}
+
+impl VersionProbe {
+    /// 版本号缺失或不被认识时返回对应错误。
+    fn check(&self) -> Result<(), SpecError> {
+        let version = self
+            .spec_version
+            .as_ref()
             .and_then(serde_json::Value::as_u64)
             .ok_or(SpecError::MissingVersion)?;
         if version != u64::from(SPEC_VERSION) {
             return Err(SpecError::UnsupportedVersion(version));
         }
-        let spec: HostSpec =
-            serde_json::from_value(value).map_err(|e| SpecError::Malformed(e.to_string()))?;
-        spec.validate()?;
-        Ok(spec)
+        Ok(())
     }
 }
 
@@ -339,7 +386,7 @@ mod tests {
         let icon = |w: u32| IconRgba {
             width: w,
             height: w,
-            rgba: vec![7; (w * w * 4) as usize],
+            rgba: vec![7; (w * w * 4) as usize].into(),
         };
         HostSpec {
             spec_version: SPEC_VERSION,
@@ -428,6 +475,27 @@ mod tests {
         assert_eq!(HostSpec::from_json(&json).unwrap(), spec);
     }
 
+    /// 流式读取与文本读取结果一致，版本闸门与错误分类也一致。
+    #[test]
+    fn reader_matches_text() {
+        let spec = sample();
+        let json = spec.to_json().unwrap();
+        let from_reader = HostSpec::from_reader(std::io::Cursor::new(json.as_bytes())).unwrap();
+        assert_eq!(from_reader, spec);
+        for text in [
+            r#"{"rev": 1}"#,
+            r#"{"spec_version": 2, "weird": []}"#,
+            "",
+            "[]",
+        ] {
+            let by_text = HostSpec::from_json(text).map(|_| ()).unwrap_err();
+            let by_reader = HostSpec::from_reader(std::io::Cursor::new(text.as_bytes()))
+                .map(|_| ())
+                .unwrap_err();
+            assert_eq!(by_text.to_string(), by_reader.to_string(), "{text:?}");
+        }
+    }
+
     /// 缺省字段按默认值读入（旧快照缺新字段时不致命）。
     #[test]
     fn optional_fields_default() {
@@ -472,7 +540,7 @@ mod tests {
     #[test]
     fn validation_catches_inconsistent_content() {
         let mut spec = sample();
-        spec.tray.icon_rgba.rgba.pop();
+        spec.tray.icon_rgba.rgba = vec![7; 32 * 32 * 4 - 1].into();
         assert!(matches!(spec.validate(), Err(SpecError::Invalid(_))));
 
         let mut spec = sample();
@@ -521,13 +589,13 @@ mod tests {
         let zero = IconRgba {
             width: 0,
             height: 0,
-            rgba: vec![],
+            rgba: Arc::from(Vec::new()),
         };
         assert!(!zero.is_consistent());
         let huge = IconRgba {
             width: u32::MAX,
             height: u32::MAX,
-            rgba: vec![],
+            rgba: Arc::from(Vec::new()),
         };
         assert!(!huge.is_consistent());
     }

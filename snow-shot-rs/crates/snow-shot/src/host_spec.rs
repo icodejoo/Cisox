@@ -161,7 +161,7 @@ fn icon_rgba(icon: &TrayIconImage) -> IconRgba {
     IconRgba {
         width,
         height,
-        rgba: icon.rgba().to_vec(),
+        rgba: icon.rgba().into(),
     }
 }
 
@@ -521,7 +521,7 @@ mod tests {
                             .map(|i| (i.width, i.height, i.rgba.clone())),
                         want_icon
                             .as_ref()
-                            .map(|i| (i.size().0, i.size().1, i.rgba().to_vec()))
+                            .map(|i| (i.size().0, i.size().1, i.rgba().into()))
                     );
                     assert_eq!(Some(action_id.clone()), tray_action_id(action));
                 }

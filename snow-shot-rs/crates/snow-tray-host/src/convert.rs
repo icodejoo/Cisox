@@ -18,7 +18,8 @@ use snow_shell_core::tray::{TrayAction, TrayIconImage, TrayMenuEntry, TraySpec};
 /// # 返回
 /// 托盘图标；像素长度与尺寸不符返回错误文本。
 fn tray_icon(icon: &IconRgba) -> Result<TrayIconImage, String> {
-    TrayIconImage::new(icon.rgba.clone(), icon.width, icon.height).map_err(|e| e.to_string())
+    TrayIconImage::from_shared(icon.rgba.clone(), icon.width, icon.height)
+        .map_err(|e| e.to_string())
 }
 
 /// 快照菜单项转托盘菜单项（动作负载是动作 id）。
@@ -65,7 +66,7 @@ pub fn tray_menu(menu: &[MenuItemSpec]) -> Result<Vec<TrayMenuEntry<String>>, St
 /// use snow_tray_host::convert::tray_spec_from_plan;
 /// use snow_tray_host::host::TrayPlan;
 /// let plan = TrayPlan {
-///     icon: IconRgba { width: 1, height: 1, rgba: vec![0; 4] },
+///     icon: IconRgba { width: 1, height: 1, rgba: vec![0; 4].into() },
 ///     tooltip: "Cisox".into(),
 ///     menu: vec![],
 ///     on_left: Some("capture".into()),
@@ -138,7 +139,7 @@ mod tests {
             icon: IconRgba {
                 width: 2,
                 height: 2,
-                rgba: vec![7; 16],
+                rgba: vec![7; 16].into(),
             },
             tooltip: "Cisox".into(),
             menu,
@@ -159,7 +160,7 @@ mod tests {
                 icon_rgba: Some(IconRgba {
                     width: 1,
                     height: 1,
-                    rgba: vec![1, 2, 3, 4],
+                    rgba: vec![1, 2, 3, 4].into(),
                 }),
                 action_id: "capture".into(),
             },
@@ -223,7 +224,7 @@ mod tests {
     #[test]
     fn bad_icon_fails_conversion() {
         let mut bad = plan(vec![]);
-        bad.icon.rgba.pop();
+        bad.icon.rgba = bad.icon.rgba[1..].into();
         assert!(tray_spec_from_plan(&bad).is_err());
         let bad_item = plan(vec![MenuItemSpec::Item {
             label: "x".into(),
@@ -232,7 +233,7 @@ mod tests {
             icon_rgba: Some(IconRgba {
                 width: 4,
                 height: 4,
-                rgba: vec![0; 3],
+                rgba: vec![0; 3].into(),
             }),
             action_id: "x".into(),
         }]);

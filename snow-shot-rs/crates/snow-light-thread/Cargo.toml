@@ -1,0 +1,18 @@
+[package]
+name = "snow-light-thread"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "轻量后台线程：直接 CreateThread，省掉 std::thread 为每条线程做的栈溢出保证预留（托盘宿主的常驻线程用）"
+
+[lints]
+workspace = true
+
+# 只用 windows-sys（已在工作区锁内）；宿主的依赖闭包受 workspace-guard 约束，这里不得引入别的 crate
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Threading",
+] }
