@@ -6,7 +6,7 @@
 - [principles.md](principles.md) — **总原则 / 第一原则 / 根本原则**（三词同义）及执行原则、红线、能力降级。唯一出处。
 
 ## 当前入口
-- [cisox-progress-handoff.md](cisox-progress-handoff.md) — 进度交接。开头是 2026-10-03 暂停点真实状态，**最新待办清单在 §5.1**，**进程模型（托盘宿主 + 按需 UI）在 §6.2**；功能对齐程度看 [research/qt-parity-audit.md](research/qt-parity-audit.md)。
+- [cisox-progress-handoff.md](cisox-progress-handoff.md) — 进度交接。**最新状态与未验证 / 待办在 §0.-1（2026-10-13 收口：截图翻译、翻译浮窗改版、托盘宿主双进程阶段 0~6 并切默认、语音冷启动与双语模型加载提速）**，上一轮见 §0.0（2026-10-09），文件主体仍是 2026-10-03 暂停点的状态；旧待办清单在 §5.1（已被 §0.-1 部分取代），**进程模型（托盘宿主 + 按需 UI）在 §6.2**；功能对齐程度看 [research/qt-parity-audit.md](research/qt-parity-audit.md)。
 
 ## 方案与决策
 - [cisox-gpui-migration-plan.md](cisox-gpui-migration-plan.md) — Snow Shot → Rust + GPUI 改造方案（v2.0，含 ADR 与已拍板决策）。有效。
@@ -14,7 +14,7 @@
 - [cisox-migration-acceptance-report.md](cisox-migration-acceptance-report.md) — 迁移验收报告。**已失实，不作验收依据**（见迁移方案 §845 第 10 条），待重写。
 - [design/multi-display-overlay.md](design/multi-display-overlay.md) — 多屏覆盖窗设计：每屏一窗 + 共享虚拟桌面选区，坐标约定、M0~M5 分阶段验收、真机验证办法。**草案，待批准**。
 - [design/mcp-subsystem.md](design/mcp-subsystem.md) — MCP 子系统设计（A12）：本地命名管道、令牌鉴权、应用 / 截图 / 文档 / 媒体四域（对应旧版 101 个 tool）、分期与对照入口。**第一期（M0 骨架）已实现，后续分期待做**。
-- [design/tray-host-split.md](design/tray-host-split.md) — 托盘宿主 + 按需 UI 进程拆分方案：进程边界、双管道 IPC 与退出握手、冷启动预算、阶段 0~6 验收、回退；含本机宿主内存探针实测。**已审定（2026-10-12）**，开放问题全部按推荐拍板。阶段 0 已完成（§12 为实测结果），阶段 1~3 已完成，阶段 4（CI 导入表闸门、切默认、文档）已完成，“切默认改动位置清单”附实施结果；真屏验收已通过，**阶段 4 完成，2026-10-13 起默认为双进程**（`snow-shot.exe` 宿主是入口，`--resident` 为单进程回退开关）。进程模型小结见 [cisox-progress-handoff.md](cisox-progress-handoff.md) §6.2。
+- [design/tray-host-split.md](design/tray-host-split.md) — 托盘宿主 + 按需 UI 进程拆分方案：进程边界、双管道 IPC 与退出握手、冷启动预算、阶段 0~6 验收、回退；含本机宿主内存探针实测。**已审定（2026-10-12）**，开放问题全部按推荐拍板。阶段 0 已完成（§12 为实测结果），阶段 1~3 已完成，阶段 4（CI 导入表闸门、切默认、文档）已完成，“切默认改动位置清单”附实施结果；真屏验收已通过，**阶段 4 完成，2026-10-13 起默认为双进程**（`snow-shot.exe` 宿主是入口，`--resident` 为单进程回退开关）；阶段 6（宿主精简）也已完成，托盘态私有提交约 1.93MB，逐项取舍有数据（含不做的项）。进程模型小结见 [cisox-progress-handoff.md](cisox-progress-handoff.md) §6.2。
 - [snow-shot-releases.md](snow-shot-releases.md) — 发布与更新规格（有自己的优先级，见 principles.md 末尾）。
 
 ## 录屏

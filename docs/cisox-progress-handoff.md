@@ -1,11 +1,53 @@
-# Cisox 进度交接（2026-10-03 暂停点；2026-10-09 收口见 §0.0）
+# Cisox 进度交接（2026-10-03 暂停点；2026-10-13 最新收口见 §0.-1，上一轮 2026-10-09 见 §0.0）
 
-> 本文记录 2026-10-03 暂停时的真实状态与续做入口。方案主文档：`docs/cisox-gpui-migration-plan.md`。
+> 本文记录 2026-10-03 暂停时的真实状态与续做入口。**续做先读 §0.-1（2026-10-13 收口）**。方案主文档：`docs/cisox-gpui-migration-plan.md`。
 > **功能对齐程度以 [`research/qt-parity-audit.md`](research/qt-parity-audit.md)（2026-10-03，读代码得出）为准**；方案 P2~P7 与旧验收报告里的「已完成」没按现状重核，别直接引用。
 > 最新待办清单在 §5.1；§5 及之前的清单是 09-29 旧稿，仍有效的条目已在 §5 开头标出。
-> 进程模型（托盘宿主 + 按需 UI：两个 exe、启动开关、构建、日志位置、验收脚本；**2026-10-13 已切默认为双进程**）见 §6.2。
+> 进程模型（托盘宿主 + 按需 UI：两个 exe、启动开关、构建、日志位置、验收脚本；**2026-10-13 已切默认为双进程；阶段 0~4、6 完成，阶段 5（冷启动优化）未执行**）见 §6.2。
 
-## 0.0 2026-10-09 收口（最新，先读这里）
+## 0.-1 2026-10-13 收口（最新，先读这里）
+
+**范围**：2026-10-12~13 两天的全部提交（`7f9c96ad..d26aa22b`），均已合入当前分支 `jelon/simplify-cleanup`。**状态口径沿用 §0.0：离屏测试通过，新做的界面与交互没有逐项真机点过**；真屏测过的只有托盘宿主那一块（有数据的写在下面，其余没有记录就当没测）。
+
+**本轮落地**
+- **截图翻译（`7400567d`）**：
+  - 工具栏翻译行悬停展开目标语言二级菜单，14 种（`main14`，新增越南语、印尼语），只对本次截图生效，不写配置。
+  - 译文原位替换：按 OCR 行框锚定，逐行填底色；字号用墨迹实测高度推算，基线与对齐方式推断，处理项目符号；底色从行框边缘采样取色；标题行先从正文段落里切出来再翻译。
+  - 结果按钮条：查看详情 / 撤销 / 关闭 / 保存图片 / 保存原图，选区外侧有空位就放外侧。
+  - 详情面板：悬停时 OCR 框、原文、译文三方联动高亮。
+- **翻译输入浮窗按草稿改版（`7400567d`）**：源语言（自动 + 14 种）/ 目标语言、清空、交换、复制、模型下拉、标题栏可拖动、失焦不关闭；停顿后自动翻译，Enter 翻译、Shift+Enter 换行，两个下拉一变立刻重翻。
+- **托盘宿主 + 按需 UI 双进程，阶段 0~4、6 完成并已切为默认，阶段 5（冷启动优化）未执行**（见本节末「未验证」最后一条；方案与实测见 [design/tray-host-split.md](design/tray-host-split.md)，用法见 §6.2）：
+  - 方案与调研：`82c1dd47`（tray-idle-memory 与拆分方案）、`8010d5f8`（宿主最小化调研）。
+  - 阶段 1 抽 crate 与宿主协议 `5953974a`、`d15cc373`；阶段 2 宿主 + UI 双进程 `9c8a54ba`、`7f1c17ab`；阶段 3 活动守卫、保活规则、贴图恢复、headless 任务、手势接入 `65a7ac40`、`4fc2f908`；阶段 4 CI 导入表闸门 `418ba98c`、真屏验收与脚本加固 `6af6c6c0`；切默认 `fda56c27`（合并 `19027f5f`）；阶段 6 宿主精简 `8da21621`（合并 `7e1640e0`）。
+  - 数据：宿主托盘态私有提交 **约 1.93MB**（阶段 4 实测 2.1MB，阶段 6 降 0.23MB；弹一次菜单后 2.2MB），原单进程空闲 56.8MB、截图后约 135MB；热键到首帧 0.83~1.02s（i5-13500 / UHD 770，双屏 2560×1440，release）。
+  - 语音热键不再保活（`accdbdcf`，2026-10-13 用户改判）：绑了语音热键窗口全关照常退出，只有听写进行中才保活。代价是冷拉起时开头那一小段话会丢，配套见下面「语音」。
+  - 单进程回退开关 `snow-shot-ui.exe --resident` 保留，至少到用户另行拍板。
+  - 阶段 6 逐项测过：做了 5 项（菜单按需构建、图标像素共享、快照探测与流式读取、常驻线程改直接 `CreateThread`）；不做并有数据的 5 项（换 windows-sys、自写托盘 / 热键、HeapCompact、SegmentHeap、日志初始化），数据都在 tray-host-split 阶段 6 执行记录里。
+- **性能 / 稳定性修复**：
+  - 读系统偏好（深色、系统语言）改 `RegGetValueW`，不再起 `reg.exe` 子进程（`7400567d`）。截图热路径里它每次 80~90ms、最多 4 次，修后两屏像素都变的耗时中位数 481ms → 358ms，约 -123ms（各 3 次，release）。
+  - vendor 两处补丁（`3666265b`，登记在 `snow-shot-rs/vendor/README.md`）：`GpuReleaseGuard` 在渲染器销毁后显式解绑并 `Trim`，截图一次后私有提交 169MB → 135MB，释放从约 10s 缩到 0.5s；着色器 / 混合状态改设备级缓存，不再每窗口新建（Intel UHD 770 驱动对新着色器首次绘制会漏内核 Event，每次关窗约 9 个句柄）。
+  - 手势绑定修复（`01db0a95`）：配置规整会把单项 `activation_key` 如 `["windows"]` 变成字符串，手势解析和宿主快照只认数组，重载后绑定全丢、全局钩子没装上。现两种形式都收。
+- **语音转文字**：
+  - 冷启动（`056ab371`、`5a5720fd`，合并 `aedb015c`）：worker 收到 START 先开麦，写入 30s 环形缓存，模型就绪后追赶积压；UI 带宿主传的 `--hint dictation` 启动，在 `main` 最早处预拉 worker；界面区分「加载中 / 录音中 / 已就绪」三态，按住说话在录音开始后松手会等加载与积压处理完再出字。丢字窗口估约 1.0~1.4s，其中麦克风打开 0.7~0.9s 是硬件下限，不补偿。依据 [research/dictation-cold-start.md](research/dictation-cold-start.md)，计时脚本 `scripts/verify-dictation-cold-start.ps1`（`fc33cf45`）。
+  - 双语模型加载提速（`7a901ff2`、`dc76377f`，合并 `d26aa22b`）：清单里的 `model_type` 写进 `model.json` 并传给 sherpa（它不填时会把 encoder 载两遍），再用 ORT 预优化 encoder 落盘缓存。x-asr 480ms 加载中位数 5.8s → 约 0.78s，multi-zh 4.1s → 0.62s，识别文本逐字一致，数据见 [research/stt-bilingual-model-load.md](research/stt-bilingual-model-load.md) §11。**snow-stt 新增 `ort` 依赖**（`=2.0.0-rc.13`，与 snow-table 一致，用户已批准）。
+- **调研 / 设计文档**：[research/tray-idle-memory.md](research/tray-idle-memory.md)、[design/tray-host-split.md](design/tray-host-split.md)、[research/tray-host-minimal.md](research/tray-host-minimal.md)、[research/dictation-cold-start.md](research/dictation-cold-start.md)、[research/stt-bilingual-model-load.md](research/stt-bilingual-model-load.md)。
+
+**未验证 / 待办**
+- 语音先开麦的真人计时没做（要对着麦克风报数，没法无人值守）：`scripts/verify-dictation-cold-start.ps1`，三个条件（UI 冷拉起页缓存热、清页缓存、UI 已在）各 5~10 轮。离线 / VAD 模式下积压喂入也没在真机验过。
+- release 构建下的自启项迁移冒烟没跑：老用户注册表里指向 `snow-shot-ui.exe` 的值，无参数启动转去拉宿主后是否被改写成宿主路径（离屏单测过，开发构建不改注册表）。
+- admin 混合权限（宿主普通权限、UI 管理员）的热键 / `--cmd` / 焦点：本机 UAC 关闭（`EnableLUA=0`，当前用户本就是管理员），测不了；`admin` 场景只能退化通过。
+- 宿主暂停热键 / 前台全屏闸门的真屏验收不稳（三次完整运行 1 次全过，失败轮是托盘菜单点击没落到预期那项，怀疑是 UI Automation 点菜单不稳，未证实）。
+- Intel 句柄泄漏：着色器缓存修复后主会话 2026-10-13 真屏复测（release 单进程 `--resident`，连截 5 次）：空闲 429 → 第 1 次 834（一次性初始化）→ 之后 831~833 持平，已不再逐次增长；双进程下 UI 退出即释放。
+- `stt_download` 测试整组并行跑时偶发失败（`tar` 打包 `assert!(status.success())`），`--test-threads=1` 串行全过；另有子代理观察到 System32 `tar.exe` 不支持 `-j`（bzip2），PATH 加 Git `usr/bin` 后通过。根因未定，待修。
+- 常驻线程再合并（托盘 + 热键 + 鼠标钩子并成一条消息泵线程）：估约 -0.06MB，要把热键改成回调直发，改动面大，建议不做，**待用户定**。
+- 首帧另外三项可选优化（估算，没做）：采集与建窗并行，预计省 80~100ms；首窗 `SetWindowPlacement` 阻塞 79ms，原因未归因；落位时多余两次改尺寸，约 50ms，要动 vendor 或 gpui-kit 选项。
+- 语音缓存溢出（模型加载超过 30s）只写 worker 的 stderr，UI 没有提示，协议里也没有对应事件。
+- 离线 transducer 的 `model_type` 加载前后对比没测（本机没装离线模型）。
+- ORT 预优化缓存只在本机同一台机器、同一版 ORT 1.28.0 上验证过，没在第二台不同 CPU（尤其 AMD）上测；缓存在用户机器本地生成，规避了跨机器问题，但可移植性没实证。
+- 截图翻译原位替换、结果按钮条、详情联动与翻译浮窗改版的真机观感：没有记录，按未真机验证对待。
+- 阶段 5（冷启动优化）在 tray-host-split 里只有范围与验收线、没有独立执行记录；已落地的相关项是上面的 `RegGetValueW` 与语音预拉；该阶段「UI 启动即并行采集」「无窗口动作走 `--headless`」没有记录，「首帧中位数 ≤ 0.7s」也没单独验收（实测 0.83~1.02s）。
+
+## 0.0 2026-10-09 收口（上一轮；其后的变化见 §0.-1）
 
 **状态**：全部已合入 `main`（以 `git log` 为准）；合并后 `snow-shot` 整个 bin 986 个测试通过，相关 crate `clippy -D warnings`、`workspace-guard`、i18n `check` 与 `extract --strict-refs`（引用 397 处、缺失 0）通过。均为离屏验证，**新做的界面都没有真机点过**。
 
@@ -65,7 +107,7 @@
 
 **构建环境补充**：worker 构建需要 `libclang.dll`（已用 PyPI `libclang` 轮子里的 DLL 放在 `.tools/llvm/bin/`，被 gitignore）；`sccache` 在 vcvars 环境下会启动失败，需 `RUSTC_WRAPPER=""`；E: 盘慢，建议把 `CARGO_TARGET_DIR` 指到 C: 盘。
 
-## 0. 2026-10-07 更新（最新，先读这里）
+## 0. 2026-10-07 更新（更早一轮，最新状态见 §0.-1）
 
 **分支与提交**：现在在 `main` 上工作（不再是 `rust-gpui`）。本轮新增提交：`29ef4398`（智能选区 / 历史翻页 / 选区形状）、`1837df69`（托盘重做 + 构建配置，用户的工作）、`95e8aff8`（多屏覆盖窗），外加构建提速文档的 `docs` 提交。**后两个本地提交尚未 push**：连续 3 次推送被 GitHub 返回 `Internal Server Error`（远端临时故障，没用强推），稍后重试。
 
@@ -225,6 +267,8 @@ Windows 主线已经能跑通「热键 / 托盘 / IPC → 截图覆盖窗（单�
 
 ## 5.1 2026-10-01 待办清单（录屏 / OCR·翻译 / 视频编辑；含 10-02、10-03 更新；上面 §5 是 09-29 旧清单）
 
+> 2026-10-13 补：10-12~13 新做与新增待办（托盘宿主、截图翻译、语音冷启动与模型加载提速）集中写在 §0.-1，本节下面各条是当时口径，与 §0.-1 冲突时以 §0.-1 为准。已被取代的条目在行内标了「（2026-10-13）」。
+
 **收尾**
 - [x] ~~工作区约 29 个文件未提交~~ 已过时（2026-10-03）：当前仅剩 fps 夹具 7 个文件与 `materials/`（见 §3）。推送前先 `git status` 看有没有范围外的改动；本地领先远端 1 个提交（`git rev-list --count origin/rust-gpui..HEAD` 查证）。
 - [x] 根目录 `AGENTS.md` 已改写为 Rust+GPUI 版（提交 `25bcc5c3`）。
@@ -295,7 +339,7 @@ Windows 主线已经能跑通「热键 / 托盘 / IPC → 截图覆盖窗（单�
 
 **文本输入翻译浮窗**
 - [x] 快捷键唤起的文本输入翻译浮窗（2026-10-03，提交 07b5e518）：配置键 `global_shortcuts/translate_input`、`AppCommand::OpenTranslateInput`、模型下拉=已装包+自动、点击译文复制。
-- [ ] 真机渲染验证：浮窗位置、焦点获取、Esc 关闭、Select 选择误关窗。
+- [ ] 真机渲染验证：浮窗位置、焦点获取、Esc 关闭、Select 选择误关窗。（2026-10-13：浮窗已按草稿改版，改为失焦不关闭、标题栏拖动，见 §0.-1，本条验证项仍未做。）
 
 **视频编辑器（`docs/research/video-editor-backends.md`）**
 - 已决定：输入只处理本软件录的 MP4（解码 h264）；系统引擎与 FFmpeg 引擎并存、用户自选；输出只做 H.264；不新增第三方依赖（抽帧：FFmpeg 引擎用 FFmpeg，系统引擎用 WIC/ImageIO）。
@@ -323,7 +367,7 @@ Windows 主线已经能跑通「热键 / 托盘 / IPC → 截图覆盖窗（单�
 - [x] 选区形状与加减区域（2026-10-07，已定栅格蒙版方案）：折线（逐点单击、双击 / Enter 闭合、Backspace 撤销顶点）、曲线（Catmull-Rom 闭合样条）、自由绘制（按住拖动、松开完成，RDP 简化）；Ctrl+Tab / Ctrl+Shift+Tab 或屏幕上的形状栏切换，写回 `screenshot_selection/region_type`；已确认区域只能整体移动，点框外整体重置；形状栏在选区后多出「添加 / 减去区域」，加减以栅格蒙版并集 / 差集合成，矩形形状下用框选 / 点选窗口当操作数，Esc / 右键取消。区域外导出为透明：剪贴板 `CF_DIBV5` + `PNG`（真机验证）、PNG / WebP 保留 alpha、JPEG / BMP 铺白、贴图按预乘 alpha 上传。实现：`snow-canvas-raster/src/region.rs`（蒙版、合成、描边遮罩）、`snow-shot/src/region_select.rs`（草稿状态机）。未做：圆角 / 阴影（Qt 对自定义区域也不可用）、`previous_selection` 只存外接矩形（不含区域形状）、草稿阶段不实时压暗区域外、形状栏文字按钮（无图标）。
 - [x] 标注样式面板最小闭环：选中工具弹出样式条（颜色预设+最近 8 色、线宽/字号/箭头头型下拉、矩形椭圆填充开关），按工具记忆并持久化到旧键 `drawing/*_style`（子字段名 `color`/`width`/`font_size`/`fill`/`arrowhead` 为自定，旧版无金样本；`recent_colors` 放在 `shape_style` 内）；荧光笔（`PenHighlight`）与序号球（`SerialNumber`）接通，工具栏新增"高亮""序号"。未做：独立填充色、选择工具（已画标注无法选中改样式）、工具栏按钮文字仍硬编码中文未迁 `.ftl`、面板首次显示会调用一次 `Theme::change(Dark)`。
 - [x] 截图工具栏右侧溢出修复：改为按右边缘锚定，估算宽度 790→890；[ ] 仍是估算值，根治需测量真实宽度。
-- [x] 听写加载中提示与结束收尾（未提交）：模型未就绪时聆听图标下方显示循环进度条，就绪后维持原样；结束时若还有句子在翻译，先弹浮窗等译文（12s 超时），再次触发结束 = 强制结束；toggle 再按 / hold 松开同一路径。详见 `guides/snow-stt-worker.md`「进程生命周期」6、7。未做真机验证（麦克风、热键松开链路、进度条观感）。
+- [x] 听写加载中提示与结束收尾（未提交）：模型未就绪时聆听图标下方显示循环进度条，就绪后维持原样；结束时若还有句子在翻译，先弹浮窗等译文（12s 超时），再次触发结束 = 强制结束；toggle 再按 / hold 松开同一路径。详见 `guides/snow-stt-worker.md`「进程生命周期」6、7。未做真机验证（麦克风、热键松开链路、进度条观感）。（2026-10-13：加载提示已扩成「加载中 / 录音中 / 已就绪」三态，worker 先开麦，见 §0.-1。）
 - [ ] 听写有焦点场景（`output_mode=auto/type`）的真机验证仍未做。
 - [x] 全局热键补全与直接截图（未提交）：新增 `quick_actions.rs`（键表、延迟状态机、输出方案）、`direct_capture.rs`、`AppCommand::QuickAction`。已接线：`screenshot_full_screen`、`screenshot_focused_window`（新增 `foreground_window_rect()`，snow-platform 的 windows 依赖加 `Win32_Graphics_Dwm`）、`screenshot_delay`（只用于该动作，普通 F1 不延迟）、`screenshot_fixed` / `screenshot_copy`（Ctrl+F1）/ `screenshot_ocr` / `screenshot_translation`（覆盖层框选后自动确认，对应旧版 `captureAndPinSelection` 等）、`open_settings`、`toggle_global_hotkeys`、`open_screen_recording_folder`。直接截图始终复制到剪贴板，开 `screenshot/auto_save_after_copy` 或 `copy_image_file_to_clipboard` 时再落盘。
 - [ ] 占位（触发后只给本地化提示，提示走托盘悬停与日志，无弹窗）：`screen_record_copy`、`open_capture_history`、`open_pin_to_screen_management`、`translate_selected_text`、`pin_selected_files`、`restore_last_closed_windows`、`toggle_disable_on_focused_fullscreen_window`。
@@ -367,7 +411,7 @@ Windows 主线已经能跑通「热键 / 托盘 / IPC → 截图覆盖窗（单�
 - 在本机重装 FFmpeg（`scripts/build-ffmpeg-recorder.ps1`）前先设 `X_VCPKG_ASSET_SOURCES='x-script,E:\workspaces\Cisox\.tools\vcpkg-fetch.cmd {url} {dst}'`：vcpkg 自带 curl 在本机连 msys2 镜像会报 SSL 错误 35，该钩子走 aria2 绕开（钩子脚本放在 `.tools/`，不入库）。下载缓存已清，会重新下载 msys2 工具包与 cmake 等。
 - Qt 参考版（V2 判据所需的参考版 P99）：见 §4，需从零重新构建。
 
-## 6.2 进程模型（托盘宿主 + 按需 UI）（2026-10-12）
+## 6.2 进程模型（托盘宿主 + 按需 UI）（2026-10-12；2026-10-13 更新）
 
 > 方案与全部实测见 [`design/tray-host-split.md`](design/tray-host-split.md)（§8 阶段 0~6、§12 阶段 0 实测）。**默认是双进程（2026-10-13 起）**：双击 / 自启 / 无参数运行的入口都是宿主 `snow-shot.exe`；单进程常驻成为回退开关 `snow-shot-ui.exe --resident`。
 
@@ -411,8 +455,8 @@ Windows 主线已经能跑通「热键 / 托盘 / IPC → 截图覆盖窗（单�
 - `scripts\check-host-imports.ps1`：离屏，导入表白名单。
 - 完整应用（单进程）的老脚本：`scripts\verify-snow-shot-recording.ps1`、`tools\self_acceptance_verify.ps1`，指向 `snow-shot-ui.exe` 并**显式 `--resident`**（切默认后无参数会转去宿主；录制脚本里的 `--cmd` 委托也带 `--resident`，免得依赖宿主 exe 存在）。
 
-**现状**：阶段 0~4 已完成并合入：真屏验收通过（主会话 2026-10-13 实测：宿主托盘态私有提交约 2.1MB，热键→首帧 0.83~1.02s，命令无丢失、无双 UI；明细回填见 `design/tray-host-split.md` 阶段 2~4），用户 2026-10-13 拍板**切默认为双进程**，改动清单已按 `design/tray-host-split.md` §8 阶段 4 完成；阶段 5（冷启动优化）、6（宿主精简）未做。
+**现状**：阶段 0~4、6 已完成并合入（阶段 5 冷启动优化未执行）：真屏验收通过（主会话 2026-10-13 实测：宿主托盘态私有提交约 2.1MB，热键→首帧 0.83~1.02s，命令无丢失、无双 UI；明细回填见 `design/tray-host-split.md` 阶段 2~4），用户 2026-10-13 拍板**切默认为双进程**，改动清单已按 `design/tray-host-split.md` §8 阶段 4 完成；阶段 6（宿主精简）把托盘态私有提交再压到**约 1.93MB**（弹一次菜单后约 2.2MB，逐项数据见该文阶段 6 执行记录）。阶段 5（冷启动优化）在方案里没有独立执行记录，口径见 §0.-1「未验证 / 待办」最后一条。
 
-**切默认时的前提（已由用户拍板放行）**：① 真屏验收通过；② 托盘态宿主私有提交 ≤ 6MB；③ 冷拉起热键→首帧、连续热键截图无丢命令无双 UI；④ 功能回归；⑤ ~~`dictation_hotkey` 是否登录预拉~~（**2026-10-13 用户改判：绑语音热键不保活、不预拉，窗口全关照常立即退出**，见 `docs/design/tray-host-split.md` §10 第 4 条；代价是冷拉起时按住说话开头可能丢约 1s）。注意首帧实测上沿 1.02s 高于阶段 4 量化口径 0.9s，属已知偏差，由阶段 5 冷启动优化继续压。`--resident` 路径至少保留到用户另行拍板。
+**切默认时的前提（已由用户拍板放行）**：① 真屏验收通过；② 托盘态宿主私有提交 ≤ 6MB；③ 冷拉起热键→首帧、连续热键截图无丢命令无双 UI；④ 功能回归；⑤ ~~`dictation_hotkey` 是否登录预拉~~（**2026-10-13 用户改判：绑语音热键不保活、不预拉，窗口全关照常立即退出**，见 `docs/design/tray-host-split.md` §10 第 4 条；代价是冷拉起时按住说话开头可能丢约 1s）。注意首帧实测上沿 1.02s 高于阶段 4 量化口径 0.9s，属已知偏差（2026-10-13 读系统偏好改 `RegGetValueW` 后热路径再快约 123ms；剩余可选优化见 §0.-1）。`--resident` 路径至少保留到用户另行拍板。
 
 **升级与自启（切默认后）**：开机自启永远指向宿主（`system_settings::auto_start_target`，注册表值不能带参数，所以 `--resident` 回退进程也指向宿主）；老版本登记的是 `snow-shot-ui.exe`，其无参数启动会转去拉宿主，随后配置载入时自启值被改写为宿主路径。Rust 版暂无安装 / 打包脚本与快捷方式（`scripts/package-snow-shot.ps1` 等是 Qt 版流水线）；将来出现时必须把两个 exe 放同一目录，开始菜单与自启指向宿主，`snow-update` 自动安装要先 `--cmd quit` 宿主再替换两个 exe。
