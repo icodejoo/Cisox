@@ -54,6 +54,9 @@ pub(crate) struct DirectXRenderer {
     /// In that case we want to discard the first frame that we draw as we got reset in the middle of a frame
     /// meaning we lost all the allocated gpu textures and scene resources.
     skip_draws: bool,
+
+    /// 必须保持为最后一个字段：其余资源全部释放后再收尾 GPU 状态。
+    release_guard: GpuReleaseGuard,
 }
 
 /// Direct3D objects
@@ -65,6 +68,8 @@ pub(crate) struct DirectXRendererDevices {
     pub(crate) device_context: ID3D11DeviceContext,
     dxgi_device: Option<IDXGIDevice>,
     annotation: Option<ID3DUserDefinedAnnotation>,
+    /// 设备级共享的着色器 / 混合状态缓存，见 [`PipelineObjectCache`]。
+    pipeline_cache: Arc<PipelineObjectCache>,
 }
 
 struct DirectXResources {
@@ -131,6 +136,7 @@ impl DirectXRendererDevices {
             dxgi_factory,
             device,
             device_context,
+            pipeline_cache,
         } = directx_devices;
         let dxgi_device = if disable_direct_composition {
             None
@@ -146,6 +152,7 @@ impl DirectXRendererDevices {
             device_context: device_context.clone(),
             dxgi_device,
             annotation,
+            pipeline_cache: pipeline_cache.clone(),
         })
     }
 }
@@ -168,7 +175,7 @@ impl DirectXRenderer {
             .context("Creating DirectX resources")?;
         let globals = DirectXGlobalElements::new(&devices.device)
             .context("Creating DirectX global elements")?;
-        let pipelines = DirectXRenderPipelines::new(&devices.device)
+        let pipelines = DirectXRenderPipelines::new(&devices.device, &devices.pipeline_cache)
             .context("Creating DirectX render pipelines")?;
 
         let direct_composition = if disable_direct_composition {
@@ -182,6 +189,7 @@ impl DirectXRenderer {
             Some(composition)
         };
 
+        let release_guard = GpuReleaseGuard::new(&devices);
         Ok(DirectXRenderer {
             hwnd,
             atlas,
@@ -194,6 +202,7 @@ impl DirectXRenderer {
             width: 1,
             height: 1,
             skip_draws: false,
+            release_guard,
         })
     }
 
@@ -298,7 +307,7 @@ impl DirectXRenderer {
         .context("Creating DirectX resources")?;
         let globals = DirectXGlobalElements::new(&devices.device)
             .context("Creating DirectXGlobalElements")?;
-        let pipelines = DirectXRenderPipelines::new(&devices.device)
+        let pipelines = DirectXRenderPipelines::new(&devices.device, &devices.pipeline_cache)
             .context("Creating DirectXRenderPipelines")?;
 
         let direct_composition = if disable_direct_composition {
@@ -318,6 +327,7 @@ impl DirectXRenderer {
                 .device_context
                 .OMSetRenderTargets(Some(slice::from_ref(&resources.render_target_view)), None);
         }
+        self.release_guard.set(&devices);
         self.devices = Some(devices);
         self.resources = Some(resources);
         self.globals = globals;
@@ -940,62 +950,70 @@ impl DirectXResources {
 }
 
 impl DirectXRenderPipelines {
-    pub fn new(device: &ID3D11Device) -> Result<Self> {
+    pub fn new(device: &ID3D11Device, cache: &PipelineObjectCache) -> Result<Self> {
         let shadow_pipeline = PipelineState::new(
             device,
+            cache,
             "shadow_pipeline",
             ShaderModule::Shadow,
             4,
-            create_blend_state(device)?,
+            create_blend_state,
         )?;
         let quad_pipeline = PipelineState::new(
             device,
+            cache,
             "quad_pipeline",
             ShaderModule::Quad,
             64,
-            create_blend_state(device)?,
+            create_blend_state,
         )?;
         let path_rasterization_pipeline = PipelineState::new(
             device,
+            cache,
             "path_rasterization_pipeline",
             ShaderModule::PathRasterization,
             32,
-            create_blend_state_for_path_rasterization(device)?,
+            create_blend_state_for_path_rasterization,
         )?;
         let path_sprite_pipeline = PipelineState::new(
             device,
+            cache,
             "path_sprite_pipeline",
             ShaderModule::PathSprite,
             4,
-            create_blend_state_for_path_sprite(device)?,
+            create_blend_state_for_path_sprite,
         )?;
         let underline_pipeline = PipelineState::new(
             device,
+            cache,
             "underline_pipeline",
             ShaderModule::Underline,
             4,
-            create_blend_state(device)?,
+            create_blend_state,
         )?;
         let mono_sprites = PipelineState::new(
             device,
+            cache,
             "monochrome_sprite_pipeline",
             ShaderModule::MonochromeSprite,
             512,
-            create_blend_state(device)?,
+            create_blend_state,
         )?;
         let subpixel_sprites = PipelineState::new(
             device,
+            cache,
             "subpixel_sprite_pipeline",
             ShaderModule::SubpixelSprite,
             512,
-            create_blend_state_for_subpixel_rendering(device)?,
+            create_blend_state_for_subpixel_rendering,
         )?;
         let poly_sprites = PipelineState::new(
             device,
+            cache,
             "polychrome_sprite_pipeline",
             ShaderModule::PolychromeSprite,
             16,
-            create_blend_state(device)?,
+            create_blend_state,
         )?;
 
         Ok(Self {
@@ -1096,14 +1114,38 @@ struct PipelineState<T> {
     _marker: std::marker::PhantomData<T>,
 }
 
-impl<T> PipelineState<T> {
-    fn new(
+/// 一条管线里不随窗口变化的不可变设备对象：着色器与混合状态。
+#[derive(Clone)]
+struct PipelineObjects {
+    vertex: ID3D11VertexShader,
+    fragment: ID3D11PixelShader,
+    blend_state: ID3D11BlendState,
+}
+
+/// 设备级的着色器 / 混合状态缓存，由同一设备上的所有窗口共享（按管线 label 索引）。
+///
+/// 每个窗口各建一份着色器时，Intel 驱动（UHD 770，31.0.101.4953）会在用这些着色器首次绘制时，
+/// 于驱动内部工作线程里留下永不关闭的内核 Event，每窗口约 9 个，窗口来回开关就持续涨句柄。
+/// 着色器与混合状态本是不可变对象，设备内只建一次即可；实例缓冲等随窗口变化的资源仍各窗口自建。
+/// 设备重建（设备丢失）后会换新的 `DirectXDevices`，缓存随之换新，不会混用旧设备的对象。
+#[derive(Default)]
+pub(crate) struct PipelineObjectCache {
+    entries: std::sync::Mutex<std::collections::HashMap<&'static str, PipelineObjects>>,
+}
+
+impl PipelineObjectCache {
+    /// 取 `label` 对应的着色器 / 混合状态；没有则按 `shader_module` 与 `create_blend` 创建并记下。
+    fn get_or_create(
+        &self,
         device: &ID3D11Device,
         label: &'static str,
         shader_module: ShaderModule,
-        buffer_size: usize,
-        blend_state: ID3D11BlendState,
-    ) -> Result<Self> {
+        create_blend: fn(&ID3D11Device) -> Result<ID3D11BlendState>,
+    ) -> Result<PipelineObjects> {
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(objects) = entries.get(label) {
+            return Ok(objects.clone());
+        }
         let vertex = {
             let raw_shader = RawShaderBytes::new(shader_module, ShaderTarget::Vertex)?;
             create_vertex_shader(device, raw_shader.as_bytes())?
@@ -1112,6 +1154,30 @@ impl<T> PipelineState<T> {
             let raw_shader = RawShaderBytes::new(shader_module, ShaderTarget::Fragment)?;
             create_fragment_shader(device, raw_shader.as_bytes())?
         };
+        let objects = PipelineObjects {
+            vertex,
+            fragment,
+            blend_state: create_blend(device)?,
+        };
+        entries.insert(label, objects.clone());
+        Ok(objects)
+    }
+}
+
+impl<T> PipelineState<T> {
+    fn new(
+        device: &ID3D11Device,
+        cache: &PipelineObjectCache,
+        label: &'static str,
+        shader_module: ShaderModule,
+        buffer_size: usize,
+        create_blend: fn(&ID3D11Device) -> Result<ID3D11BlendState>,
+    ) -> Result<Self> {
+        let PipelineObjects {
+            vertex,
+            fragment,
+            blend_state,
+        } = cache.get_or_create(device, label, shader_module, create_blend)?;
         let buffer = create_buffer(device, std::mem::size_of::<T>(), buffer_size)?;
         let view = create_buffer_view(device, &buffer)?;
 
@@ -1287,6 +1353,68 @@ impl Drop for DirectXRenderer {
         if let Some(devices) = &self.devices {
             report_live_objects(&devices.device).ok();
         }
+    }
+}
+
+/// 窗口的渲染器全部销毁之后，把共享设备上残留的 GPU 状态与驱动缓存还给系统。
+///
+/// 立即上下文由所有窗口共用：窗口销毁后它仍绑着本窗口的渲染目标 / 图集纹理，驱动也会把刚释放的
+/// 大块显存对应的系统内存留在池里，关闭整屏覆盖窗后进程内存会长期居高不下。
+/// 本守卫必须是 `DirectXRenderer` 的最后一个字段：它在其余资源都释放之后才执行，
+/// 先解绑上下文、冲刷命令，再用 `IDXGIDevice3::Trim` 让驱动丢弃池里的临时缓冲。
+struct GpuReleaseGuard {
+    /// 当前渲染器使用的设备与立即上下文（设备丢失重建后要更新）。
+    target: Option<(ID3D11Device, ID3D11DeviceContext)>,
+}
+
+impl GpuReleaseGuard {
+    fn new(devices: &DirectXRendererDevices) -> Self {
+        Self {
+            target: Some((devices.device.clone(), devices.device_context.clone())),
+        }
+    }
+
+    fn set(&mut self, devices: &DirectXRendererDevices) {
+        self.target = Some((devices.device.clone(), devices.device_context.clone()));
+    }
+}
+
+impl Drop for GpuReleaseGuard {
+    fn drop(&mut self) {
+        let Some((device, device_context)) = self.target.take() else {
+            return;
+        };
+        unsafe {
+            unbind_window_resources(&device_context);
+            if let Ok(dxgi_device) = device.cast::<IDXGIDevice3>() {
+                dxgi_device.Trim();
+            }
+        }
+    }
+}
+
+/// 渲染器用到的着色器资源槽数量：槽 0 是图集纹理，槽 1 是实例缓冲视图。
+const UNBIND_SRV_SLOTS: usize = 2;
+
+/// 解绑立即上下文里挂着本窗口资源的绑定点（渲染目标、两个着色器阶段的资源视图槽）并冲刷命令。
+///
+/// 不用 `ClearState`：Intel UHD 770 驱动（31.0.101.4953）每次 `ClearState`（之前画过东西时）
+/// 都会在 UMD 里留下一个永不关闭的内核 Event（独立探针里每轮 +1）；
+/// 显式解绑同样能放掉旧窗口的显存引用，且不触发泄漏。
+/// 光栅化 / 混合 / 着色器等状态不会引用大块显存，且下一帧 `pre_draw` / `set_pipeline_state` 会重设，故不动。
+///
+/// # 参数
+/// - `device_context`：共享的立即上下文。
+///
+/// # 安全
+/// 调用方须保证上下文有效且当前线程是 GPUI 主线程（立即上下文非线程安全）。
+unsafe fn unbind_window_resources(device_context: &ID3D11DeviceContext) {
+    const EMPTY_SRVS: [Option<ID3D11ShaderResourceView>; UNBIND_SRV_SLOTS] = [None, None];
+    unsafe {
+        device_context.OMSetRenderTargets(None, None);
+        device_context.VSSetShaderResources(0, Some(&EMPTY_SRVS));
+        device_context.PSSetShaderResources(0, Some(&EMPTY_SRVS));
+        device_context.Flush();
     }
 }
 
@@ -2066,5 +2194,184 @@ mod dxgi {
             (number >> 16) & 0xFFFF,
             number & 0xFFFF
         ))
+    }
+}
+
+#[cfg(test)]
+mod release_guard_tests {
+    // 不用 `super::*`：它会把 `gpui::test` 属性宏带进来，与 `#[test]` 冲突
+    use super::{GpuReleaseGuard, set_rasterizer_state};
+    use windows::Win32::{
+        Foundation::HMODULE,
+        Graphics::{
+            Direct3D::*,
+            Direct3D11::*,
+            Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC},
+        },
+    };
+
+    /// 建一个 WARP 软件设备与立即上下文（不依赖显卡，离屏可跑）。
+    fn warp_device() -> (ID3D11Device, ID3D11DeviceContext) {
+        let mut device = None;
+        let mut context = None;
+        unsafe {
+            D3D11CreateDevice(
+                None,
+                D3D_DRIVER_TYPE_WARP,
+                HMODULE::default(),
+                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                None,
+                D3D11_SDK_VERSION,
+                Some(&mut device),
+                None,
+                Some(&mut context),
+            )
+            .expect("WARP 设备创建失败");
+        }
+        (device.unwrap(), context.unwrap())
+    }
+
+    /// 按渲染器的用法绑上渲染目标、两个阶段的资源视图和光栅化状态，返回需要保活的资源。
+    fn bind_like_renderer(
+        device: &ID3D11Device,
+        context: &ID3D11DeviceContext,
+    ) -> (ID3D11Texture2D, ID3D11RenderTargetView, ID3D11ShaderResourceView) {
+        let desc = D3D11_TEXTURE2D_DESC {
+            Width: 64,
+            Height: 64,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Usage: D3D11_USAGE_DEFAULT,
+            BindFlags: (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
+            CPUAccessFlags: 0,
+            MiscFlags: 0,
+        };
+        unsafe {
+            let mut texture = None;
+            device.CreateTexture2D(&desc, None, Some(&mut texture)).unwrap();
+            let texture = texture.unwrap();
+            let mut rtv = None;
+            device.CreateRenderTargetView(&texture, None, Some(&mut rtv)).unwrap();
+            let rtv = rtv.unwrap();
+            let mut srv = None;
+            device.CreateShaderResourceView(&texture, None, Some(&mut srv)).unwrap();
+            let srv = srv.unwrap();
+            context.OMSetRenderTargets(Some(&[Some(rtv.clone())]), None);
+            context.VSSetShaderResources(0, Some(&[Some(srv.clone()), Some(srv.clone())]));
+            context.PSSetShaderResources(0, Some(&[Some(srv.clone()), Some(srv.clone())]));
+            set_rasterizer_state(device, context).unwrap();
+            (texture, rtv, srv)
+        }
+    }
+
+    /// 守卫析构后：渲染目标与两个阶段的资源视图槽全空，光栅化状态仍在（其它窗口还要用）。
+    #[test]
+    fn guard_drop_unbinds_window_resources_and_keeps_rasterizer() {
+        let (device, context) = warp_device();
+        let _keep = bind_like_renderer(&device, &context);
+        unsafe {
+            let mut rtvs = [None];
+            context.OMGetRenderTargets(Some(&mut rtvs), None);
+            assert!(rtvs[0].is_some(), "前置条件：渲染目标应已绑定");
+        }
+
+        drop(GpuReleaseGuard {
+            target: Some((device.clone(), context.clone())),
+        });
+
+        unsafe {
+            let mut rtvs = [None];
+            context.OMGetRenderTargets(Some(&mut rtvs), None);
+            assert!(rtvs[0].is_none(), "渲染目标应已解绑");
+            let mut vs = [None, None];
+            context.VSGetShaderResources(0, Some(&mut vs));
+            assert!(vs.iter().all(Option::is_none), "VS 资源槽应已清空");
+            let mut ps = [None, None];
+            context.PSGetShaderResources(0, Some(&mut ps));
+            assert!(ps.iter().all(Option::is_none), "PS 资源槽应已清空");
+            assert!(context.RSGetState().is_ok(), "光栅化状态不应被清掉");
+        }
+    }
+
+    /// 没有目标（已被取走）时析构是空操作，不会 panic。
+    #[test]
+    fn guard_drop_without_target_is_noop() {
+        drop(GpuReleaseGuard { target: None });
+    }
+}
+
+#[cfg(test)]
+mod pipeline_cache_tests {
+    // 不用 `super::*`：它会把 `gpui::test` 属性宏带进来，与 `#[test]` 冲突
+    use super::{DirectXRenderPipelines, PipelineObjectCache};
+    use windows::{
+        Win32::{
+            Foundation::HMODULE,
+            Graphics::{Direct3D::*, Direct3D11::*},
+        },
+        core::Interface,
+    };
+
+    /// 建一个 WARP 软件设备（不依赖显卡，离屏可跑）。
+    fn warp_device() -> ID3D11Device {
+        let mut device = None;
+        unsafe {
+            D3D11CreateDevice(
+                None,
+                D3D_DRIVER_TYPE_WARP,
+                HMODULE::default(),
+                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                None,
+                D3D11_SDK_VERSION,
+                Some(&mut device),
+                None,
+                None,
+            )
+            .expect("WARP 设备创建失败");
+        }
+        device.unwrap()
+    }
+
+    /// 同一缓存建两套管线：着色器与混合状态是同一批 COM 对象，实例缓冲各自独立。
+    #[test]
+    fn pipelines_share_shaders_and_blend_states_but_not_buffers() {
+        let device = warp_device();
+        let cache = PipelineObjectCache::default();
+        let first = DirectXRenderPipelines::new(&device, &cache).unwrap();
+        let second = DirectXRenderPipelines::new(&device, &cache).unwrap();
+
+        assert_eq!(
+            first.quad_pipeline.vertex.as_raw(),
+            second.quad_pipeline.vertex.as_raw()
+        );
+        assert_eq!(
+            first.quad_pipeline.fragment.as_raw(),
+            second.quad_pipeline.fragment.as_raw()
+        );
+        assert_eq!(
+            first.subpixel_sprites.blend_state.as_raw(),
+            second.subpixel_sprites.blend_state.as_raw()
+        );
+        assert_ne!(
+            first.quad_pipeline.buffer.as_raw(),
+            second.quad_pipeline.buffer.as_raw()
+        );
+    }
+
+    /// 不同缓存（例如设备丢失重建后的新 `DirectXDevices`）互不串用。
+    #[test]
+    fn separate_caches_do_not_share_objects() {
+        let device = warp_device();
+        let first = DirectXRenderPipelines::new(&device, &PipelineObjectCache::default()).unwrap();
+        let second = DirectXRenderPipelines::new(&device, &PipelineObjectCache::default()).unwrap();
+        assert_ne!(
+            first.quad_pipeline.vertex.as_raw(),
+            second.quad_pipeline.vertex.as_raw()
+        );
     }
 }

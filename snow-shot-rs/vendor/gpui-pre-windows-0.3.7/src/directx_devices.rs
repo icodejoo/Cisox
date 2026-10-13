@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use anyhow::{Context, Result};
 use gpui_util::ResultExt;
 use itertools::Itertools;
@@ -21,6 +23,8 @@ use windows::Win32::{
 };
 use windows::core::Interface;
 
+use crate::directx_renderer::PipelineObjectCache;
+
 pub(crate) fn try_to_recover_from_device_lost<T>(mut f: impl FnMut() -> Result<T>) -> Result<T> {
     (0..5)
         .map(|i| {
@@ -41,6 +45,8 @@ pub(crate) struct DirectXDevices {
     pub(crate) dxgi_factory: IDXGIFactory6,
     pub(crate) device: ID3D11Device,
     pub(crate) device_context: ID3D11DeviceContext,
+    /// 本设备上跨窗口共享的着色器 / 混合状态缓存；设备重建时随新 `DirectXDevices` 一并换新。
+    pub(crate) pipeline_cache: Arc<PipelineObjectCache>,
 }
 
 impl DirectXDevices {
@@ -68,6 +74,7 @@ impl DirectXDevices {
             dxgi_factory,
             device,
             device_context,
+            pipeline_cache: Arc::new(PipelineObjectCache::default()),
         })
     }
 }
