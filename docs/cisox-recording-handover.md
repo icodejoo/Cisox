@@ -33,7 +33,7 @@ git checkout rust-gpui
 # 0) (可选,首次)准备不含 x265 的静态 FFmpeg,装到 .tools\vcpkg\installed\static-nox265\x64-windows-static
 scripts\build-ffmpeg-recorder.ps1
 
-# 1) 构建录制进程(产物 snow-shot-rs\tools\snow-recorder\target\release\snow-recorder.exe)
+# 1) 构建录制进程(产物 snow-shot-rs\tools\snow-recorder\target\release\cisox-recorder.exe)
 #    FFMPEG_DIR 默认优先用上面的 static-nox265,不存在则回退旧的 installed\static(含 x265)
 scripts\build-snow-recorder.ps1
 # 可选:单测(57 个应全过)

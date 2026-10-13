@@ -1,5 +1,7 @@
 # snow-stt 语音转文字工作进程
 
+> 命名：包 / 目录名是 `snow-stt`，产物（进程名）自 2026-10-13 起是 `cisox-stt.exe`（任务管理器描述 "Cisox speech-to-text"）；下文说“拉起 / 定位 worker”时指的都是这个 exe。
+
 > 状态：worker 与协议已接入主程序，含系统语音后端、离线整句模式、模型清单与按需下载、设置页、语音翻译级联（见「主程序接入」「离线模式」「模型管理与设置」「语音翻译级联」各节）。真机麦克风实测与 UI 截图验证尚未做，见「已知限制与未验证」。背景见 [research/speech-to-text-backends.md](../research/speech-to-text-backends.md)（尤其 §8），模型选型与评测见 [research/stt-model-selection.md](../research/stt-model-selection.md)，原则见 [principles.md](../principles.md)。
 
 ## 组成
@@ -72,7 +74,7 @@ stdin 关闭（主程序退出或崩溃）视为中止：不再发事件，直�
 
 - **`model_type`**：sherpa 在 `model_type` 为空时会先建一个临时 ORT 会话读元数据，等于把 encoder 载两遍。worker 加载前按顺序取：①模型目录 `model.json` 的 `model_type` 字段（主程序下载安装时由清单写入，只写核对过的）；②缓存元数据里记的值（生成缓存时从 encoder 的 ONNX 元数据读出）；③都没有就不设，走 sherpa 旧路径。取值过白名单（流式：`conformer` / `ebranchformer` / `lstm` / `zipformer` / `zipformer2`），不合法的值当没有。
 - **encoder 预优化缓存**：缓存放 `<模型目录>/.opt/`（`encoder.opt.onnx` 约 150MB、`encoder.opt.json` 元数据、`encoder.opt.lock` 生成锁），随模型目录一起被替换 / 删除。命中条件：元数据 `state=ready`、格式版本一致、ORT 指纹一致（`ort::info()` 构建串加 `onnxruntime.dll` 字节数）、源 encoder 的文件名 / 大小 / 修改时间一致、产物的大小 / 修改时间 / 首尾各 64KB 哈希一致。命中就把优化后的文件交给 sherpa，加载 x-asr 480ms 约 0.8 s（原 5~6 s）。
-- **生成**：没命中、没有失败记录、没人在生成时，**会话顺利结束后**拉起后台子进程 `snow-stt --optimize <模型目录>`（空闲优先级类、无窗口、不继承管道；ORT 单线程，EXTENDED 级别，把批量维 `N` 固定为 1，约 5 s），所以这一次识别照常用原文件，下一次起命中。产物先写临时文件，ORT 载入核对输入输出名通过后才改名，最后写元数据；失败写 `failed` 记录，同一份源文件与同一版 ORT 不再重试，ORT 换版本后可重试。生成进程被杀留下的锁 15 分钟后可被接管。`--optimize` 也可手动运行（前台、打印一行结果，退出码 0 / 1）。
+- **生成**：没命中、没有失败记录、没人在生成时，**会话顺利结束后**拉起后台子进程 `cisox-stt --optimize <模型目录>`（空闲优先级类、无窗口、不继承管道；ORT 单线程，EXTENDED 级别，把批量维 `N` 固定为 1，约 5 s），所以这一次识别照常用原文件，下一次起命中。产物先写临时文件，ORT 载入核对输入输出名通过后才改名，最后写元数据；失败写 `failed` 记录，同一份源文件与同一版 ORT 不再重试，ORT 换版本后可重试。生成进程被杀留下的锁 15 分钟后可被接管。`--optimize` 也可手动运行（前台、打印一行结果，退出码 0 / 1）。
 - **回退**：缓存或 `model_type` 导致 sherpa 创建返回失败时，缓存标成失败，退回原 encoder 且不带 `model_type` 重新创建。**注意** sherpa / ORT 对损坏的模型可能直接结束进程（实测覆盖缓存文件头部会这样），所以缓存的完整性在加载前靠大小 / 时间 / 首尾哈希校验，不靠事后回退。
 - **离线**：sherpa 只有离线 transducer 会探测元数据；`offline-transducer` 在 `model.json` 写了 `model_type`（`transducer` / `nemo_transducer`）时会交给 sherpa。清单里目前没给离线模型填值（没核对、没测），其余离线类型本来就不探测。
 - **限制**：固定批量为 1，worker 只有一路流所以没问题，将来要并发多路时需关闭；缓存只在本机（i5-13500 / ORT 1.28.0）验证过，没在别的 CPU 上验证；不跨模型目录共享；没有单独的清理入口。
@@ -82,7 +84,7 @@ stdin 关闭（主程序退出或崩溃）视为中止：不再发事件，直�
 ```
 scripts\build-snow-stt.ps1 [-Profile release|debug] [-Test] [-Clippy] [-Jobs 2]
 ```
-- 产物默认在 `build/stt/<profile>/snow-stt.exe`（`$env:CARGO_TARGET_DIR` 可改，但**必须是短路径**：sherpa 预编译包解压路径很长，目录太深会静默解压失败，随后链接报 `LNK1104`）。
+- 产物默认在 `build/stt/<profile>/cisox-stt.exe`（`$env:CARGO_TARGET_DIR` 可改，但**必须是短路径**：sherpa 预编译包解压路径很长，目录太深会静默解压失败，随后链接报 `LNK1104`）。
 - sherpa-onnx-sys 的 build.rs **构建期联网**从 GitHub Releases 下载预编译库（shared 约 7.7MB）。离线环境可设 `SHERPA_ONNX_ARCHIVE_DIR`（本地 tar.bz2）或 `SHERPA_ONNX_LIB_DIR`。
 - 使用静态 CRT（`+crt-static`），与 sherpa 预编译包（MT）匹配。脚本自带 `-j 2` 与 BelowNormal，并检查自身无 CRLF。
 - 现象记录：`build-snow-stt.ps1` 在这台开发机上的工作副本是 CRLF，脚本自带的 LF 检查会拒绝它（报「含 CRLF，请转成 LF」）；本机评测时用过 LF 副本绕开。已下载好预编译包时可设 `SHERPA_ONNX_LIB_DIR` 复用，不必重新联网下载。这里只记录现象，没有改仓库脚本。
@@ -94,8 +96,8 @@ scripts\build-snow-stt.ps1 [-Profile release|debug] [-Test] [-Clippy] [-Jobs 2]
 ## 运行与自检
 手动：
 ```
-snow-stt.exe            # 麦克风；stdin 发 START/STOP
-snow-stt.exe --wav a.wav --wav-pad-ms 3000 --stats   # 测试用：wav 代替麦克风，末尾补静音，结束时向 stderr 打统计
+cisox-stt.exe            # 麦克风；stdin 发 START/STOP
+cisox-stt.exe --wav a.wav --wav-pad-ms 3000 --stats   # 测试用：wav 代替麦克风，末尾补静音，结束时向 stderr 打统计
 ```
 `--wav` 只接受 16kHz 单声道；wav 读完等价于 STOP。脚本化验证：
 ```
@@ -125,7 +127,7 @@ scripts\verify-snow-stt.ps1 -Mode offline -Kind offline-sense-voice -Itn `
 | 文件 | 职责 |
 |---|---|
 | `engine.rs` | 工作进程生命周期状态机（纯逻辑，进程经 `SttLink` 抽象，时间由调用方传入） |
-| `client.rs` | 定位并拉起 `snow-stt`，读线程转发事件，结束进程只动自己持有的子进程句柄 |
+| `client.rs` | 定位并拉起 `cisox-stt`，读线程转发事件，结束进程只动自己持有的子进程句柄 |
 | `config.rs` | 读配置、启动前检查（后端、exe、模型目录） |
 | `text.rs` / `overlay_model.rs` | PARTIAL / FINAL 累积与句间空格；浮窗文本模型 |
 | `typing.rs` / `focus.rs` / `output.rs` | 键入差异与按键序列、可输入焦点判定、输出去向决策 |
@@ -143,7 +145,7 @@ scripts\verify-snow-stt.ps1 -Mode offline -Kind offline-sense-voice -Itn `
 ### 配置键（`dictation/` 分组）
 | 键 | 默认 | 说明 |
 |---|---|---|
-| `backend` | `local-model` | `local-model` 用本地模型；`system` 用 Windows 系统语音，同样拉起 `snow-stt`（START 带 `backend=system`，不检查模型目录）。选中 `system` 时设置页显示使用前提与设置指引 |
+| `backend` | `local-model` | `local-model` 用本地模型；`system` 用 Windows 系统语音，同样拉起 `cisox-stt`（START 带 `backend=system`，不检查模型目录）。选中 `system` 时设置页显示使用前提与设置指引 |
 | `trigger_mode` | `both` | 见上 |
 | `model_dir` | 空 | 手动模型目录。空 = 用清单里选定的模型（`<数据根>/models/stt/<id>/`）；非空 = 手动目录，按旧行为当流式 `online-transducer` 用，优先于清单，且**不能配合离线模式**；目录不存在时给出带路径的可读错误 |
 | `mode` | `streaming` | 识别模式：`streaming` / `offline` |
@@ -234,7 +236,7 @@ scripts\verify-snow-stt.ps1 -Mode offline -Kind offline-sense-voice -Itn `
    1. `model_dir` 非空（手动目录）：离线模式 → `Failure::ManualDirNeedsStreaming`（目录推断不出模型类型，不猜）；目录不存在 → `Failure::ModelDirMissing(路径)`；否则按旧行为（流式、`online-transducer`、不开 itn）。
    2. 旧版平铺布局：流式、`model_id` 为空、`<数据根>/models/stt` 存在且其下直接有 `tokens.txt` → 沿用该目录，旧用户不用重新下载。
    3. 否则按（语言维度，模式，`model_id`）在清单里取模型：清单里没有 → `Failure::ModelUnavailable(说明)`；未安装 → `Failure::ModelNotInstalled(模型ID)`；离线模型还要求共享 VAD 已装，否则 `Failure::ModelNotInstalled("silero_vad.onnx")`。`itn` 只在选中 SenseVoice 且 `sensevoice_itn` 开时为 1。
-3. 找不到 `snow-stt` 可执行文件另有 `Failure::WorkerMissing`（在上面各步之前判断）。
+3. 找不到 `cisox-stt` 可执行文件另有 `Failure::WorkerMissing`（在上面各步之前判断）。
 
 ### 设置页（`stt_settings.rs` 纯逻辑，`settings_view.rs` 视图）
 语音转文字分组里，识别模式、语言维度、模型三个下拉与一个下载面板：
@@ -264,7 +266,7 @@ scripts\verify-snow-stt.ps1 -Mode offline -Kind offline-sense-voice -Itn `
 - 语言：`auto` 取系统语音语言，其余按完全匹配、再按主语言子标签匹配（`zh-en`、`zh-CN` 都落到 `zh-Hans-CN`）；没有匹配报「语言不可用」。本机支持 `en-US`、`zh-Hans-CN`。
 - 错误分类：worker 的 `ERROR` 文本以 `[system:<类别>]` 打头（`online-off` / `mic-denied` / `language` / `network` / `other`，定义在 `snow-stt-protocol::SystemError`），主程序据此取 `.ftl` 里的本地化提示，提示内带「Windows 设置 -> 隐私 -> 语音 / 麦克风」与 `ms-settings:` 指引文字（只是文字，不会替用户打开设置）。分类依据：HRESULT `0x80045509`（隐私声明未接受）、`0x8004503A`（语言包未装）、`0x80070005`（拒绝访问），其余未归类错误在注册表 `OnlineSpeechPrivacy\HasAccepted` 不为 1 时按「联机识别未开」处理；这几个 HRESULT 取自微软文档与社区资料，除第一个外没有在本机逐个触发过。
 - 依赖：只给 `snow-stt` 新增 `windows` crate（0.62，`Cargo.lock` 里本来就有，未新增 crate），feature：`Foundation`、`Globalization`、`Media_SpeechRecognition`、`Win32_Foundation`、`Win32_System_Com`、`Win32_System_Registry`。
-- 能力探测：`snow-stt.exe --probe-system [--probe-lang <语言>]` 打印联机开关（注册表）、系统语音语言、支持语言、语言解析结果，并实际创建识别器、编译默认听写约束（不开麦克风），然后退出。
+- 能力探测：`cisox-stt.exe --probe-system [--probe-lang <语言>]` 打印联机开关（注册表）、系统语音语言、支持语言、语言解析结果，并实际创建识别器、编译默认听写约束（不开麦克风），然后退出。
 - 前提：系统「联机语音识别」打开（它不是纯离线方案）、麦克风隐私放行、对应语言包已装。限制：只能默认麦克风，START 里的线程 / 端点规则等字段被忽略，识别质量由系统决定。
 
 本机实测（Win10 19045，联机开关关闭）：`--probe-system` 报 `online_speech_enabled: false`、语言 `zh-Hans-CN`、支持 `en-US,zh-Hans-CN`、识别器可创建；`--probe-lang ja` 报语言不可用；真实 `START backend=system` 返回 `ERROR [system:online-off] ...`（`StartAsync` 阶段失败，进程退出码 1）。**打开联机开关后的真实听写没有测过。**
@@ -298,7 +300,7 @@ scripts\verify-snow-stt.ps1 -Mode offline -Kind offline-sense-voice -Itn `
 - **真机验证范围**：已于 2026-10-03/04 在本机（Windows 11，2560x1600，缩放 1.5）截图验证设置页（模式 / 维度 / 模型联动、置灰、itn 显隐、中英文）与真实下载（含取消续传、校验值待固定、离线 VAD 合并下载）。仍未验证：麦克风实时听写（声学回环被麦克风阵列回声消除滤掉）、键入记事本、翻译级联浮窗与翻译模型联调（本机没有翻译模型）。
 - **本轮真机截图发现并已修复的界面问题**：英文说明被两行高度截断（精简文案）；模型下拉标签被截断（去掉体积与状态）；下载中显示原始长 id（改显示模型名称）；中文说明里标点孤立成行（调整文案）；分组标题 13 项而侧栏徽标 14（统一口径）；用户取消下载被记成 WARN（改 INFO）。浮窗位置查过：按工作区右下角定位，本机上浮窗底边在任务栏上方 24 像素，盖住的是搜狗输入法悬浮条（独立置顶窗口），不是定位错误。
 - **下载**：sha256 为空的 7 个模型只校验大小；各模型许可证有 5 个在清单里标 `unverified`，发布前要核实。
-- 打包：三个 DLL 与 `snow-stt.exe` 必须同目录，主程序旁的布局与安装包尚未做；打包脚本与 CI 不覆盖独立 workspace `snow-stt`。
+- 打包：三个 DLL 与 `cisox-stt.exe` 必须同目录，主程序旁的布局与安装包尚未做；打包脚本与 CI 不覆盖独立 workspace `snow-stt`。
 
 ## 许可证注意
 - sherpa-onnx 与 sherpa-onnx-sys 为 Apache-2.0；传递依赖许可证已核对，无与 GPL-3.0-only 冲突者（见调研 §8.1）。

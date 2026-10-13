@@ -118,7 +118,7 @@
 
 ```powershell
 # 1) 构建（tool 本地 target）
-scripts\build-snow-recorder.ps1        # 产物 snow-shot-rs\tools\snow-recorder\target\release\snow-recorder.exe
+scripts\build-snow-recorder.ps1        # 产物 snow-shot-rs\tools\snow-recorder\target\release\cisox-recorder.exe
 # 2) 新硬件流水线，四档各 3 轮并汇总（通过线：30fps>=28.5、60fps>=56，且丢帧率<1%）
 cd snow-shot-rs\tools\snow-fps-fixture
 scripts\run-matrix.ps1 -RecorderExe <上面的 exe> -Name hw -Repeats 3 -EnvPairs "SNOW_RECORDER_HARDWARE=1"

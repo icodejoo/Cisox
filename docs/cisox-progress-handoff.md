@@ -21,7 +21,8 @@
   - 阶段 1 抽 crate 与宿主协议 `5953974a`、`d15cc373`；阶段 2 宿主 + UI 双进程 `9c8a54ba`、`7f1c17ab`；阶段 3 活动守卫、保活规则、贴图恢复、headless 任务、手势接入 `65a7ac40`、`4fc2f908`；阶段 4 CI 导入表闸门 `418ba98c`、真屏验收与脚本加固 `6af6c6c0`；切默认 `fda56c27`（合并 `19027f5f`）；阶段 6 宿主精简 `8da21621`（合并 `7e1640e0`）。
   - 数据：宿主托盘态私有提交 **约 1.93MB**（阶段 4 实测 2.1MB，阶段 6 降 0.23MB；弹一次菜单后 2.2MB），原单进程空闲 56.8MB、截图后约 135MB；热键到首帧 0.83~1.02s（i5-13500 / UHD 770，双屏 2560×1440，release）。
   - 语音热键不再保活（`accdbdcf`，2026-10-13 用户改判）：绑了语音热键窗口全关照常退出，只有听写进行中才保活。代价是冷拉起时开头那一小段话会丢，配套见下面「语音」。
-  - 单进程回退开关 `snow-shot-ui.exe --resident` 保留，至少到用户另行拍板。
+  - **进程名统一 cisox 开头（2026-10-13，用户拍板）**：宿主 `cisox.exe`、UI `cisox-ui.exe`，worker `cisox-recorder.exe` / `cisox-stt.exe` / `cisox-translator.exe` / `cisox-table.exe` / `cisox-latex.exe`（任务管理器里的描述：Cisox / Cisox UI / Cisox recorder 等，worker 的版本资源由 `tools/common/worker_version.rs` 调系统 `rc.exe` 生成，未新增依赖）。只改 bin 名与版本资源，crate / package 名不变（`cargo build -p snow-tray-host -p snow-shot` 照旧）；互斥体、会话管道名、数据目录、日志文件名不变；开发工具 `snow-ocr-compare` / `snow-fps-fixture` / `workspace-guard` / `snow-i18n-tool` 不改。本节与下文 §6.2 以后都用新名，更早的日志性段落里的旧名是当时叫法。
+  - 单进程回退开关 `cisox-ui.exe --resident` 保留，至少到用户另行拍板。
   - 阶段 6 逐项测过：做了 5 项（菜单按需构建、图标像素共享、快照探测与流式读取、常驻线程改直接 `CreateThread`）；不做并有数据的 5 项（换 windows-sys、自写托盘 / 热键、HeapCompact、SegmentHeap、日志初始化），数据都在 tray-host-split 阶段 6 执行记录里。
 - **性能 / 稳定性修复**：
   - 读系统偏好（深色、系统语言）改 `RegGetValueW`，不再起 `reg.exe` 子进程（`7400567d`）。截图热路径里它每次 80~90ms、最多 4 次，修后两屏像素都变的耗时中位数 481ms → 358ms，约 -123ms（各 3 次，release）。
@@ -34,7 +35,7 @@
 
 **未验证 / 待办**
 - 语音先开麦的真人计时没做（要对着麦克风报数，没法无人值守）：`scripts/verify-dictation-cold-start.ps1`，三个条件（UI 冷拉起页缓存热、清页缓存、UI 已在）各 5~10 轮。离线 / VAD 模式下积压喂入也没在真机验过。
-- release 构建下的自启项迁移冒烟没跑：老用户注册表里指向 `snow-shot-ui.exe` 的值，无参数启动转去拉宿主后是否被改写成宿主路径（离屏单测过，开发构建不改注册表）。
+- release 构建下的自启项迁移冒烟没跑：注册表里指向 UI exe（`cisox-ui.exe`）的值，无参数启动转去拉宿主后是否被改写成宿主路径（离屏单测过，开发构建不改注册表）。
 - admin 混合权限（宿主普通权限、UI 管理员）的热键 / `--cmd` / 焦点：本机 UAC 关闭（`EnableLUA=0`，当前用户本就是管理员），测不了；`admin` 场景只能退化通过。
 - 宿主暂停热键 / 前台全屏闸门的真屏验收不稳（三次完整运行 1 次全过，失败轮是托盘菜单点击没落到预期那项，怀疑是 UI Automation 点菜单不稳，未证实）。
 - Intel 句柄泄漏：着色器缓存修复后主会话 2026-10-13 真屏复测（release 单进程 `--resident`，连截 5 次）：空闲 429 → 第 1 次 834（一次性初始化）→ 之后 831~833 持平，已不再逐次增长；双进程下 UI 退出即释放。
@@ -70,7 +71,7 @@
 
 **仍未做 / 已知缺口**
 - 智能擦除（D12 P2 / P3：Lab 多尺度 PatchMatch 自写，零新依赖）；MCP 余下 89 个 tool 与桥接进程；G04 Markdown / HTML 调用。
-- 打包：`snow-table.exe` / `snow-latex.exe` / `snow-stt.exe` 入安装包（Rust 版打包脚本尚不存在）；`snow-stt` CI 里没有 test。
+- 打包：`cisox-table.exe` / `cisox-latex.exe` / `cisox-stt.exe` 入安装包（Rust 版打包脚本尚不存在）；`snow-stt` CI 里没有 test。
 - 聚光灯 / 水印黄金对照、水印模板删除与弹窗命名；录屏默认软件编码预设由 superfast 变为 veryfast（CPU 略高）。
 - 真机验证清单：本轮所有新界面（设置内嵌页、翻译窗口、检查更新、归档对话框、表格 / 公式 / 自动滤镜 / 水印面板）、录屏控制条键盘焦点、G02 结果窗渲染、多屏混合 DPI 与负原点副屏；鼠标钩子全流程这台机器测不了。
 
@@ -91,7 +92,7 @@
 
 **原「待拍板 6 项」已按总原则裁决（2026-10-08，`b3011642`）**
 1. G03 二维码：引入纯 Rust `rqrr`，覆盖窗识别键已接线；内容是 http / https 链接时按 O 用默认浏览器打开（无真机验证）。
-2. G04 表格 / LaTeX / Markdown：**表格已做**（官方 SLANet_plus ONNX，`tools/snow-table` 工作进程 + 纯函数管线，Ctrl+X）；Markdown / HTML 仅做未配置引导；公式识别已做（RapidLaTeXOCR，用户自行下载模型、不内置，`tools/snow-latex`，覆盖窗 Ctrl+L）；`snow-table.exe` 待纳入安装包。详见 research/qt-parity-audit.md G04。
+2. G04 表格 / LaTeX / Markdown：**表格已做**（官方 SLANet_plus ONNX，`tools/snow-table` 工作进程 + 纯函数管线，Ctrl+X）；Markdown / HTML 仅做未配置引导；公式识别已做（RapidLaTeXOCR，用户自行下载模型、不内置，`tools/snow-latex`，覆盖窗 Ctrl+L）；`cisox-table.exe` 待纳入安装包。详见 research/qt-parity-audit.md G04。
 3. A09 自动更新：配置键 `updates/manifest_url`（默认空）+ 地址解析已做；**设置页「更新」分组有“检查更新”入口，发现新版本后显示更新说明并可“下载”到数据目录、校验清单里的 `sha256`、提示“打开所在目录”，不自动安装**；下载支持 `.part` 断点续传，启动后按 `updates/mode`（手动 / 检查）在后台自动检查（间隔至少一天，只在托盘提示新版本）（清单格式 `{"version","url","notes","sha256"}`，细节见审计 A09）。
 4. A10 代理：`network/proxy` 支持 `none` / `system`（环境变量）或直接填地址（`http` / `https` / `socks5` / `socks5h`），转成 curl `--proxy`。
 5. A12 MCP：第一期（M0 骨架）与二期已实现（合计 12/101 个 tool，见 §0.0），余下分期见 [design/mcp-subsystem.md](design/mcp-subsystem.md) §8。
@@ -101,7 +102,7 @@
 - `windows` crate 的 `Win32_Security_Cryptography` 特性（`snow-platform`，MCP 令牌随机数 `BCryptGenRandom`），详见 [design/mcp-subsystem.md](design/mcp-subsystem.md)。
 - 独立 workspace `snow-shot-rs/tools/snow-table`（表格识别工作进程，自带 `[workspace]` 与 `Cargo.lock`，ort load-dynamic）。构建脚本 `scripts/build-snow-table.ps1`，CI `workers` 任务覆盖它与 `snow-stt`。
 
-**STT 清单收尾（2026-10-08）**：13 个模型压缩包 sha256 已全部固定；许可证核对见 `stt-model-manifest.json` 的 `license_source` 与 `licenses/runtime-components.md`（x-asr 三款 Apache-2.0、SenseVoice 为 FunASR 许可，paraformer-zh-small 与 trilingual 仍 `unverified`）。`collect-third-party-licenses.ps1` 新增 `-ExtraNotices` 参数承载非 Cargo 组件声明；Rust 版安装包脚本尚不存在（`package-snow-shot.ps1` 仍是 Qt 版），`snow-table.exe` / `snow-stt.exe` 入包待该脚本出现后接入。
+**STT 清单收尾（2026-10-08）**：13 个模型压缩包 sha256 已全部固定；许可证核对见 `stt-model-manifest.json` 的 `license_source` 与 `licenses/runtime-components.md`（x-asr 三款 Apache-2.0、SenseVoice 为 FunASR 许可，paraformer-zh-small 与 trilingual 仍 `unverified`）。`collect-third-party-licenses.ps1` 新增 `-ExtraNotices` 参数承载非 Cargo 组件声明；Rust 版安装包脚本尚不存在（`package-snow-shot.ps1` 仍是 Qt 版），`cisox-table.exe` / `cisox-stt.exe` 入包待该脚本出现后接入。
 
 **技术上还能继续、但量大的**：见 §0.0「仍未做 / 已知缺口」（本段 2026-10-08 的清单已大部分完成，不再列）。
 
@@ -413,33 +414,33 @@ Windows 主线已经能跑通「热键 / 托盘 / IPC → 截图覆盖窗（单�
 
 ## 6.2 进程模型（托盘宿主 + 按需 UI）（2026-10-12；2026-10-13 更新）
 
-> 方案与全部实测见 [`design/tray-host-split.md`](design/tray-host-split.md)（§8 阶段 0~6、§12 阶段 0 实测）。**默认是双进程（2026-10-13 起）**：双击 / 自启 / 无参数运行的入口都是宿主 `snow-shot.exe`；单进程常驻成为回退开关 `snow-shot-ui.exe --resident`。
+> 方案与全部实测见 [`design/tray-host-split.md`](design/tray-host-split.md)（§8 阶段 0~6、§12 阶段 0 实测）。**默认是双进程（2026-10-13 起）**：双击 / 自启 / 无参数运行的入口都是宿主 `cisox.exe`；单进程常驻成为回退开关 `cisox-ui.exe --resident`。
 
 **两个 exe（同目录；宿主按自己的目录找 UI，环境变量 `SNOW_UI_EXE` 可覆盖）**
 
 | exe | 包 | 职责 |
 | --- | --- | --- |
-| `snow-shot.exe`（宿主，约 1.1MB，不链 GPUI） | `snow-tray-host` | 托盘与菜单、全局热键（含暂停开关、前台全屏闸门）、鼠标手势钩子、单实例互斥体与 `--cmd` 入口、UI 进程拉起与仲裁（状态机、命令队列、崩溃熔断）、更新检查到点拉起 headless、登录时恢复贴图 / 保活拉起。**不读 `config.json`、不带 i18n、不画图标**，只认 UI 写的 `host/spec.json` 快照。 |
-| `snow-shot-ui.exe`（完整应用，约 26MB） | `snow-shot` | 全部窗口、配置读写（唯一写者）、历史、贴图、录屏 / 语音 / 翻译 / OCR 调度、MCP、更新。所有窗口关闭且无后台活动后向宿主请求退出，宿主同意后立即退出（不保活；只有 MCP 开启、OCR 预热、贴图、语音 / 录屏进行中等才留着，绑语音热键不算）。 |
+| `cisox.exe`（宿主，约 1.1MB，不链 GPUI） | `snow-tray-host` | 托盘与菜单、全局热键（含暂停开关、前台全屏闸门）、鼠标手势钩子、单实例互斥体与 `--cmd` 入口、UI 进程拉起与仲裁（状态机、命令队列、崩溃熔断）、更新检查到点拉起 headless、登录时恢复贴图 / 保活拉起。**不读 `config.json`、不带 i18n、不画图标**，只认 UI 写的 `host/spec.json` 快照。 |
+| `cisox-ui.exe`（完整应用，约 26MB） | `snow-shot` | 全部窗口、配置读写（唯一写者）、历史、贴图、录屏 / 语音 / 翻译 / OCR 调度、MCP、更新。所有窗口关闭且无后台活动后向宿主请求退出，宿主同意后立即退出（不保活；只有 MCP 开启、OCR 预热、贴图、语音 / 录屏进行中等才留着，绑语音热键不算）。 |
 
 **启动开关**
 
 | 入口 | 开关 | 含义 |
 | --- | --- | --- |
-| 宿主 `snow-shot.exe`（**默认入口**） | 无参数 | 抢单实例互斥体，成为常驻宿主（托盘态只剩它）；抢不到就唤醒运行中的实例 |
+| 宿主 `cisox.exe`（**默认入口**） | 无参数 | 抢单实例互斥体，成为常驻宿主（托盘态只剩它）；抢不到就唤醒运行中的实例 |
 | | `--cmd screenshot｜recording｜scroll-capture｜pin-clipboard｜settings｜show｜quit` | 有运行中的实例：经控制管道把命令交给它；**没有实例：本进程成为宿主并在起来后执行该命令**（`quit` 例外：没有可退出的对象，直接结束）。命令名两种模式不变 |
-| | `--resident` | 不跑宿主，转调 `snow-shot-ui.exe --resident` 后退出（回退入口） |
-| UI `snow-shot-ui.exe` | 无参数 | **转去启动同目录宿主 `snow-shot.exe` 后退出**（老用户注册表里指向本 exe 的开机自启走这条，随后由 UI 进程把自启值改写成宿主路径） |
+| | `--resident` | 不跑宿主，转调 `cisox-ui.exe --resident` 后退出（回退入口） |
+| UI `cisox-ui.exe` | 无参数 | **转去启动同目录宿主 `cisox.exe` 后退出**（老用户注册表里指向本 exe 的开机自启走这条，随后由 UI 进程把自启值改写成宿主路径） |
 | | `--resident` | **单进程常驻**（回退开关，显式才进）：自带托盘 / 热键 / IPC，与宿主共用互斥体所以互斥；开机自启仍指向宿主，不随它改变 |
 | | `--ui --session <名> --token <令牌> [--hint dictation]` | 宿主拉起的 UI 会话：连会话管道，不持托盘 / 热键；用户不要手敲。`--hint dictation`（宿主队首命令是语音转文字时带）让 UI 在 `main` 最早处并行预拉语音 worker |
 | | `--headless emit-spec｜update-check｜set-config --key <键> --value <JSON>` | 无窗口任务，不初始化 GPUI，做完就退（宿主调用） |
-| | `--cmd …`（不带 `--resident`） | 转给宿主（等价于 `snow-shot.exe --cmd …`）；`--resident --cmd …` 才是单进程模式下的单实例委托 |
+| | `--cmd …`（不带 `--resident`） | 转给宿主（等价于 `cisox.exe --cmd …`）；`--resident --cmd …` 才是单进程模式下的单实例委托 |
 
 **构建**（在 `snow-shot-rs/` 下；产物目录见 §6 / 根 `.cargo/config.toml`，本机若设了 `CARGO_TARGET_DIR` 以它为准）
 
-- 两个包一起构建：`cargo build -p snow-tray-host -p snow-shot`（加 `--release` 出发布版）。**`<产物目录>/<profile>/snow-shot.exe` 自拆分起是宿主**，完整应用是 `snow-shot-ui.exe`；旧脚本 / 习惯里的 `snow-shot.exe` 要改。
+- 两个包一起构建：`cargo build -p snow-tray-host -p snow-shot`（加 `--release` 出发布版）。**`<产物目录>/<profile>/cisox.exe` 自拆分起是宿主**，完整应用是 `cisox-ui.exe`；2026-10-13 起宿主叫 `cisox.exe`、UI 叫 `cisox-ui.exe`（原 `snow-shot.exe` / `snow-shot-ui.exe`，不做旧名兼容），旧脚本 / 习惯里的旧名要改。
 - 宿主导入表闸门：`scripts/check-host-imports.ps1 -Build [-WithUi]`（`-WithUi` = 两个包同一条命令构建）。CI 的 Windows `host-imports` 任务跑 `-Build -WithUi`。依赖闭包规则在 `cargo test -p workspace-guard`。
-- 完整应用开发：单进程调试 `cargo run -p snow-shot -- --resident`（不带 `--resident` 会转去拉宿主，开发时通常没构建宿主）；要跑双进程，先 `cargo build -p snow-tray-host -p snow-shot`，再运行 `<产物目录>/<profile>/snow-shot.exe`。
+- 完整应用开发：单进程调试 `cargo run -p snow-shot -- --resident`（不带 `--resident` 会转去拉宿主，开发时通常没构建宿主）；要跑双进程，先 `cargo build -p snow-tray-host -p snow-shot`，再运行 `<产物目录>/<profile>/cisox.exe`。
 - 重启：双进程由宿主处理；单进程回退模式的重启辅助会带 `--resident` 拉起新实例。
 
 **数据与日志位置**（数据根 = 便携标记 `__data_directory` 指向的目录，否则默认 `%LOCALAPPDATA%\Cisox`；宿主与 UI 用同一套解析，代码在 `snow-data-paths`）
@@ -453,10 +454,10 @@ Windows 主线已经能跑通「热键 / 托盘 / IPC → 截图覆盖窗（单�
 
 - `scripts\verify-tray-host-split.ps1 [-Scenario all|idle|ime|hotkey|tray-focus|cmd|settings-hotkey|pause-gate|crash|admin|gesture|pins-restore|stt-keepalive|mcp-keepalive|update-headless] [-Rounds 3]`：把宿主 / UI exe 复制到临时目录并写 `__data_directory` 标记，不碰真实数据目录；结果写 `build\split-accept\<时间戳>\results.json`。覆盖 §8 阶段 2、3 里需要真屏的各项（托盘态宿主私有提交 ≤ 6MB、冷拉起热键→首帧 ≤ 1.14s 等）。
 - `scripts\check-host-imports.ps1`：离屏，导入表白名单。
-- 完整应用（单进程）的老脚本：`scripts\verify-snow-shot-recording.ps1`、`tools\self_acceptance_verify.ps1`，指向 `snow-shot-ui.exe` 并**显式 `--resident`**（切默认后无参数会转去宿主；录制脚本里的 `--cmd` 委托也带 `--resident`，免得依赖宿主 exe 存在）。
+- 完整应用（单进程）的老脚本：`scripts\verify-snow-shot-recording.ps1`、`tools\self_acceptance_verify.ps1`，指向 `cisox-ui.exe` 并**显式 `--resident`**（切默认后无参数会转去宿主；录制脚本里的 `--cmd` 委托也带 `--resident`，免得依赖宿主 exe 存在）。
 
 **现状**：阶段 0~4、6 已完成并合入（阶段 5 冷启动优化未执行）：真屏验收通过（主会话 2026-10-13 实测：宿主托盘态私有提交约 2.1MB，热键→首帧 0.83~1.02s，命令无丢失、无双 UI；明细回填见 `design/tray-host-split.md` 阶段 2~4），用户 2026-10-13 拍板**切默认为双进程**，改动清单已按 `design/tray-host-split.md` §8 阶段 4 完成；阶段 6（宿主精简）把托盘态私有提交再压到**约 1.93MB**（弹一次菜单后约 2.2MB，逐项数据见该文阶段 6 执行记录）。阶段 5（冷启动优化）在方案里没有独立执行记录，口径见 §0.-1「未验证 / 待办」最后一条。
 
 **切默认时的前提（已由用户拍板放行）**：① 真屏验收通过；② 托盘态宿主私有提交 ≤ 6MB；③ 冷拉起热键→首帧、连续热键截图无丢命令无双 UI；④ 功能回归；⑤ ~~`dictation_hotkey` 是否登录预拉~~（**2026-10-13 用户改判：绑语音热键不保活、不预拉，窗口全关照常立即退出**，见 `docs/design/tray-host-split.md` §10 第 4 条；代价是冷拉起时按住说话开头可能丢约 1s）。注意首帧实测上沿 1.02s 高于阶段 4 量化口径 0.9s，属已知偏差（2026-10-13 读系统偏好改 `RegGetValueW` 后热路径再快约 123ms；剩余可选优化见 §0.-1）。`--resident` 路径至少保留到用户另行拍板。
 
-**升级与自启（切默认后）**：开机自启永远指向宿主（`system_settings::auto_start_target`，注册表值不能带参数，所以 `--resident` 回退进程也指向宿主）；老版本登记的是 `snow-shot-ui.exe`，其无参数启动会转去拉宿主，随后配置载入时自启值被改写为宿主路径。Rust 版暂无安装 / 打包脚本与快捷方式（`scripts/package-snow-shot.ps1` 等是 Qt 版流水线）；将来出现时必须把两个 exe 放同一目录，开始菜单与自启指向宿主，`snow-update` 自动安装要先 `--cmd quit` 宿主再替换两个 exe。
+**升级与自启（切默认后）**：开机自启永远指向宿主（`system_settings::auto_start_target`，注册表值不能带参数，所以 `--resident` 回退进程也指向宿主）；未发布、不做旧名兼容：旧名（`snow-shot.exe` / `snow-shot-ui.exe`）登记的自启项由用户自行重设；若注册表里指向的是 `cisox-ui.exe`，其无参数启动会转去拉宿主，随后配置载入时自启值被改写为宿主路径。Rust 版暂无安装 / 打包脚本与快捷方式（`scripts/package-snow-shot.ps1` 等是 Qt 版流水线）；将来出现时必须把两个 exe 放同一目录，开始菜单与自启指向宿主，`snow-update` 自动安装要先 `--cmd quit` 宿主再替换两个 exe。

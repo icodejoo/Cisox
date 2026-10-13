@@ -26,7 +26,7 @@ setx CARGO_TARGET_DIR "C:\cargo-target\cisox"
 ```
 
 - 仓库的 `.cargo/config.toml` 里是 `target-dir = "build/cargo"`；环境变量优先级更高，不需要改仓库。
-- 文档和脚本里写的 `build\cargo\debug\snow-shot.exe` 等路径，在设置了环境变量后要换成 `C:\cargo-target\cisox\debug\...`。
+- 文档和脚本里写的 `build\cargo\debug\cisox.exe` 等路径，在设置了环境变量后要换成 `C:\cargo-target\cisox\debug\...`。
 - 冷构建一次约 7 分钟（依赖大部分走 sccache 命中），之后增量构建约 8 秒；目录约几 GB，可随时删除。
 
 ## 实测数据
