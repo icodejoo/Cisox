@@ -79,7 +79,7 @@
 ```
 snow-shot-rs/                       # 新 workspace（edition 2024）
 ├── crates/
-│   ├── snow-shot/                  # bin：入口、子模式分发、单实例
+│   ├── snow-shot/                  # bin（产物 snow-shot-ui.exe）：入口、子模式分发、单实例；2026-10-13 起默认由托盘宿主 snow-tray-host（产物 snow-shot.exe）常驻并按需拉起它，`--resident` 为单进程回退（见 design/tray-host-split.md）
 │   ├── snow-app-core/              # ★ 命令总线、应用状态、会话编排（取代 screenshotcontroller god object）
 │   ├── snow-capability/            # ★ 平台能力注册表（Linux 降级的基础设施）
 │   │
@@ -366,7 +366,7 @@ trait TranslationEngine {
 
 现状：Rust 的 `snow-shot-mcp`（`rmcp`，stdio）通过带 token 认证的命名管道 / Unix socket 跟 Qt App 通信，Qt 侧有 7k 行桥接代码。
 
-纯 Rust 后：MCP server 作为**进程内任务**直接向命令总线（§2.3）投递 `AppCommand`。
+纯 Rust 后：MCP server 作为**进程内任务**直接向命令总线（§2.3）投递 `AppCommand`。（注：2026-10-13 起默认双进程，“进程内”指 UI 进程内；MCP 开启时 UI 保活不随窗口关闭退出，所以此决策仍成立，见 `design/tray-host-split.md` §10 第 2 条。）
 - 对外仍保留 stdio transport 与描述符/token 文件，**外部 MCP 客户端零感知**；
 - 删除 7k 行 Qt 桥接；
 - 共 101 个 tool（screenshot 域 28 + application 27 + documents_jobs 33 + recording_pinned 13，见 `snow_shot/mcp-capabilities.json`）退化为命令总线上的一组映射，是本次改造少有的**净减法**。

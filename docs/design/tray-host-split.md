@@ -83,9 +83,9 @@ flags       { keep_alive: ["mcp","ocr_hot_start"], pins_to_restore: n, update_du
 | --- | --- |
 | 宿主 exe | `snow-shot.exe`（沿用名字：命令行 `--cmd`、HKCU Run、快捷方式、文档里都是它）。release：`opt-level=3`、lto、`panic=abort`、strip，静态 CRT。预估 0.5~1MB（探针 0.31MB） |
 | UI exe | `snow-shot-ui.exe`，即现在的 snow-shot bin 改名。模式：`--ui`（宿主拉起，带会话管道名和令牌）、`--headless <job>`（无窗口任务，不初始化 GPUI）、`--resident`（旧单进程行为，回退用） |
-| 直接双击 UI exe | 不带 `--ui` 也不带 `--resident`：转去启动宿主然后退出 |
+| 直接双击 UI exe | 不带 `--ui` / `--headless` / `--resident`：转去启动同目录宿主然后退出，`--cmd` 原样转给宿主（**阶段 4 已实施**，`RunMode::Host`）。`--resident` 才是单进程常驻 |
 | 安装 | 两个 exe 放同一目录（worker 本来就按 `exe_dir()` 找）。Rust 版打包脚本尚不存在，等它出现时纳入；现在 `snow-update` 只下载不安装，不受影响。将来自动安装要先 `--cmd quit` 宿主再替换 |
-| 自启 | `set_auto_start` 的 exe 参数改为宿主路径（UI 取同目录 `snow-shot.exe`） |
+| 自启 | `set_auto_start` 的 exe 参数永远是宿主路径（UI 取同目录 `snow-shot.exe`；**阶段 4 已统一**，`--resident` 进程也指向宿主） |
 | 单实例 | 宿主持有现有互斥体。UI 另持 `Local\cisox.snow_shot.ui` 作保险：拉起时若已存在，新 UI 直接退出并回报。`--resident` 的 UI 持宿主那个互斥体，所以两种模式互斥，不会双注册热键 |
 | MCP 描述符 | 路径、内容不变（`<数据根>/mcp/descriptor.json`），由 UI 写。UI 保活时描述符有效，不保活时 MCP 本来就是关的 |
 | 日志目录 | 同一个 `logs/`，宿主写 `host.log`，UI 沿用现有滚动文件 |
@@ -256,7 +256,7 @@ snow-shot             改  bin 改名 snow-shot-ui；新增 spec 生成（纯函
   9. 工作区基线：本阶段在 worktree 分支上由旧提交快进到 7400567d 后开始。
 - **留给阶段 2**：`snow-tray-host` bin、`snow-shot-ui` 改名与 `--ui` / `--resident`、会话管道（复用 `line_pipe`）与宿主状态机、命令队列（64 条 / 30s / 手势 update 只留最新）、UI 侧会话客户端与活动跟踪、宿主线程创建窗口前 `ImmDisableIME(0)`（§12.9 第 1 条）及其回归测试、`--cmd` 从属实例先对宿主 PID 调 `AllowSetForegroundWindow`（§12.9 第 4 条）、导入表闸门脚本、宿主侧前台全屏闸门与暂停开关、`host/spec.json` 的原子写入与 `rev` 维护、去掉 `host_spec` 的 `allow(dead_code)`。
 
-### 阶段 2：宿主 + UI 双进程跑通（默认仍是单进程）
+### 阶段 2：宿主 + UI 双进程跑通（当时默认仍是单进程，阶段 4 已切默认）
 
 - **范围**：新增 `snow-tray-host`（bin `snow-shot`）；`snow-shot` bin 改名 `snow-shot-ui` 并实现 `--ui`、`--resident`；会话管道、状态机、序号握手、命令队列、崩溃熔断；UI 侧会话客户端与活动跟踪；切换开关见 §9。先打通：托盘、截图热键、`--cmd`、设置窗、退出。
 - **验收**：功能回归（分模式 `split`）：截图热键 / 托盘左中右键 / `--cmd` 七个命令 / 设置里改热键（含冲突回滚）/ 暂停热键 / 前台全屏闸门 / 退出；竞态注入测试（`exit_request` 与新命令交错、UI 启动期间连发命令、UI 被杀）全部确定性通过；宿主 `cargo tree` 与导入表闸门通过；托盘态宿主私有提交 ≤ 6MB；冷拉起热键→首帧 ≤ 1.14s（先达现状冷启动线）。
@@ -270,7 +270,7 @@ snow-shot             改  bin 改名 snow-shot-ui；新增 spec 生成（纯函
   - `snow-host-protocol`：`launch`（启动开关与会话参数校验）、`spec_file`（读快照，IO 错误短暂重试）、`HostMessage::Command.origin`（可选）、`HostStrings` 两个提示文案字段（带默认值）、动作 id 与配置键常量；`snow-data-paths`：单实例 / UI / 会话管道标识、`host/spec.json` 与 `host.log` 路径；`snow-ui-shell`：`window_count`、`on_window_closed`、`MainThreadInbox::is_empty`。
   - 守卫：`workspace-guard` 的依赖闭包规则把 `snow-tray-host` 升为必需根；新增 `imports` 模块与 `check-host-imports` 命令（解析 PE 静态 + 延迟导入表，不依赖 dumpbin / MSVC 环境），脚本 `scripts/check-host-imports.ps1 [-Build]`。
   - 脚本：`scripts/verify-tray-host-split.ps1`（真屏验收，见下）；`scripts/verify-snow-shot-recording.ps1`、`tools/self_acceptance_verify.ps1` 的 exe 名跟随改为 `snow-shot-ui.exe`（它们要的是完整应用）。
-- **产物名与过渡**：宿主 `snow-shot.exe`、UI `snow-shot-ui.exe`，同目录（宿主按自己的目录找 UI，`SNOW_UI_EXE` 可覆盖，验收脚本与测试用）。**默认仍是单进程**：`snow-shot-ui.exe` 不带参数 = 现状的单进程常驻；双进程要显式启动宿主 `snow-shot.exe`（宿主按需拉起 `snow-shot-ui.exe --ui ...`）。`snow-shot.exe --resident` 转调 `snow-shot-ui.exe --resident` 后退出（给习惯用旧入口的人一个回退）。宿主与 `--resident` 的 UI 共用单实例互斥体，不会同时跑；`--cmd` 两种模式都走同一条控制管道，命令名不变。开机自启：`--resident` 指向 UI exe（现状），`--ui` 模式指向同目录的宿主（阶段 4 切默认时统一）。构建要同时带两个包：`cargo build -p snow-tray-host -p snow-shot`；**注意**：`build\cargo\<profile>\snow-shot.exe` 从这一阶段起是宿主，完整应用是 `snow-shot-ui.exe`。
+- **产物名与过渡**：宿主 `snow-shot.exe`、UI `snow-shot-ui.exe`，同目录（宿主按自己的目录找 UI，`SNOW_UI_EXE` 可覆盖，验收脚本与测试用）。**阶段 2 当时默认仍是单进程**（`snow-shot-ui.exe` 不带参数 = 单进程常驻；双进程要显式启动宿主，宿主按需拉起 `snow-shot-ui.exe --ui ...`）；**阶段 4（2026-10-13）已切默认为双进程**：`snow-shot-ui.exe` 不带参数 = 转去启动宿主，单进程常驻要显式 `--resident`。`snow-shot.exe --resident` 转调 `snow-shot-ui.exe --resident` 后退出（给习惯用旧入口的人一个回退）。宿主与 `--resident` 的 UI 共用单实例互斥体，不会同时跑；`--cmd` 两种模式都走同一条控制管道，命令名不变。开机自启：阶段 2 时 `--resident` 指向 UI exe、`--ui` 模式指向宿主；阶段 4 已统一为永远指向宿主。构建要同时带两个包：`cargo build -p snow-tray-host -p snow-shot`；**注意**：`build\cargo\<profile>\snow-shot.exe` 从这一阶段起是宿主，完整应用是 `snow-shot-ui.exe`。
 - **离屏验收结果**（2026-10-12，release / debug 见各项）：
   - 竞态注入测试全部确定性通过（`snow-tray-host` 的 `machine` 测试，时间、进程、管道均由测试注入，不起真进程）：`exit_request` 与新命令交错（拒绝后处理完再请求才同意）、同意退出后来的命令入队并在旧进程退出后按新序号投递、UI 启动期间连发命令保序冲出、语音按下 / 松开保序、握手失败五种（令牌 / PID / 协议版本 / 非 hello / 管道客户端 PID 不符）、握手 10s 超时、ack 超时重发一次再放弃、UI 被杀不重放且不双计、崩溃前有贴图自动恢复、熔断（60s 内 3 次进入退避、退避内丢命令并提示、5 分钟后恢复；窗口外的崩溃不计数）、退出各阶段（运行中 / 启动中 / 退避中 / 退出超时只强制结束一次）、队列 64 条挤旧留新 / 30s 过期 / 手势 update 合并。宿主核心用假平台覆盖：快照缺失 / 损坏退回内置菜单且只请求一次生成、快照增量应用（菜单 / 提示原地换，图标变了才重建托盘）、前台全屏闸门（只拦热键，开关热键豁免）、暂停 / 恢复（含恢复失败原因）、闸门切换经 `set_config` 落盘、设置页改热键的逐配置键回报与回滚、退出 / 重启流程、工作集修剪调度。
   - `cargo clippy --workspace --all-targets -- -D warnings` 通过；`cargo test` 覆盖 crate 通过：`snow-tray-host`（92 项单测 + 4 项 exe 集成测试，含真起假 UI 进程 / 真管道的平台测试与“新进程里加固确实生效”的回归测试）、`snow-host-protocol`（35 + 19 doc）、`snow-data-paths`（14 + 8 doc）、`snow-shell-core`（23）、`workspace-guard`（24 + 6 doc，含宿主依赖闭包对真实 `Cargo.lock` 零违规）、`snow-platform`（`session_pipe` / `line_pipe` / `single_instance` / `crash` / `window_rect` 等 75 项）、`snow-ui-shell`、`snow-app-core`、`snow-config`、`snow-i18n`；`snow-shot` 1193 项通过，另有 10 项 `stt_download` 失败——本机 `tar.exe` 调不起 bzip2（`tar.exe: Can't launch external program: bzip2`），与本次改动无关。i18n 两条门禁（`check`、`extract --strict-refs`）通过。
@@ -325,16 +325,16 @@ snow-shot             改  bin 改名 snow-shot-ui；新增 spec 生成（纯函
 
 ### 阶段 4：切默认与收口
 
-- **范围**（切默认部分待真屏验收，见下状态）：默认 `split`；自启指向宿主；文档（handoff、迁移方案、审计表 C03、README 索引、AGENTS.md 的 crate 清单）同步；CI 加导入表闸门；打包脚本出现后纳入两个 exe。
+- **范围**（已完成，见下状态）：默认 `split`；自启指向宿主；文档（handoff、迁移方案、审计表 C03、README 索引、AGENTS.md 的 crate 清单）同步；CI 加导入表闸门；打包脚本出现后纳入两个 exe。
 - **验收（量化）**：关闭全部窗口 10s 后，进程只剩宿主，私有提交 ≤ 6MB（对比现状截图后 134~136MB）；一次截图→关闭，UI 与所有 worker 在 3s 内全部消失；冷拉起热键→首帧 ≤ 0.9s；连续 50 次热键截图无丢命令、无两个 UI 并存；全套回归通过；`cargo test` 覆盖 crate 的相关测试、`workspace-guard`、i18n 门禁、fmt、clippy 通过。
 - **禁止**：不删 `--resident` 路径（至少保留到用户另行拍板）；不在文档里把估算写成实测。
-- **状态：离屏部分完成（CI 闸门、文档），切默认待真屏验收（2026-10-12）**。默认仍是单进程；下面的验收（量化）与“切默认”都要等主会话在桌面解锁后跑完 `scripts\verify-tray-host-split.ps1` 全场景并回填阶段 2、3 再决定。
+- **状态：已完成（commit），默认已切双进程（2026-10-13）**。2026-10-12 离屏部分（CI 闸门、文档）完成后，真屏验收通过（主会话实测：宿主托盘态私有提交约 2.1MB，热键→首帧 0.83~1.02s，命令无丢失、无双 UI），用户拍板切默认，切默认改动按下面清单一次完成（结果见清单后的“切默认实施结果”）。以下“默认仍是单进程”的字样是 2026-10-12 的历史记录。
 - **离屏部分交付物**：
   - **CI 导入表闸门**：`.github/workflows/snow-shot-rs-ci.yml` 新增仅 Windows 的 `host-imports` 任务（独立任务，三平台矩阵的 `ci` 任务不受影响），跑 `scripts/check-host-imports.ps1 -Build -WithUi`：宿主与 UI 两个包用同一条 `cargo build --release -p snow-tray-host -p snow-shot` 构建（与真实打包一致，也能发现两包同构建时的特性统一问题），再用 `workspace-guard` 的 `check-host-imports` 解析宿主 PE 导入表（静态 + 延迟）对白名单。脚本新增 `-WithUi`，产物目录改为尊重 `CARGO_TARGET_DIR`（本机设了它，旧写法固定读 `build\cargo` 会找不到 exe）；脚本加 UTF-8 BOM（PowerShell 5.1 不带 BOM 会把 UTF-8 按 ANSI 读）。CI 路径过滤加入 `scripts/check-host-imports.ps1`。依赖闭包规则继续走 `ci` 任务里的 `cargo test --workspace`（含 `workspace-guard`）。
   - **旧 bin 名查漏**：CI 里没有引用旧 bin 名 `snow-shot`（UI 现为 `snow-shot-ui`）的步骤；其它 workflow（release / winget / homebrew）是 Qt 版发布流水线，与 Rust 版无关；`scripts/` 下 Rust 版相关脚本里，`verify-snow-shot-recording.ps1`、`tools/self_acceptance_verify.ps1` 阶段 2 已改指 `snow-shot-ui.exe`，其余无引用。Rust 版打包脚本尚不存在（见下清单第 7 项）。
   - **文档**：`docs/cisox-progress-handoff.md` 新增 §6.2「进程模型」（两个 exe 职责、启动开关、构建、数据与日志位置、验收脚本、现状与切默认前提）；`snow-shot-rs/README.md` 新增“两个 exe 与运行方式”；`AGENTS.md` 构建说明补 CI 闸门、`-WithUi`、进程模型指针与“默认仍单进程”；`docs/README.md` 索引同步。
 - **离屏验收结果**（2026-10-12）：`cargo clippy --workspace --all-targets -- -D warnings` 通过；`cargo test -p workspace-guard` 通过（24 + 6 doc）；`scripts/check-host-imports.ps1 -Build` 通过（宿主 release `snow-shot.exe` 1,102,336 字节，静态导入 18 项、延迟 0 项，与阶段 3 记录一致）；脚本用 Windows PowerShell 5.1 解析 0 错误，UTF-8 BOM、LF；CI YAML 用 PyYAML `safe_load` 校验可解析且三个任务齐全。**未实测**：`-WithUi`（UI 的 fat LTO release 构建很慢，只在 CI 上跑）与 CI 任务本身（本机没有 runner）。本阶段没有改任何 Rust 代码。
-- **切默认改动位置清单**（本节只列、**不改**，真屏验收通过后一次完成；行号以 2026-10-12 的 `0cb332f4` 为准）：
+- **切默认改动位置清单**（2026-10-12 列出、**2026-10-13 已按此完成**，处理结果见清单后；行号以 `0cb332f4` 为准，已漂移）：
   1. **无参数默认入口**（`snow-shot/src/main.rs`）：`parse_cli` 末尾 `else { RunMode::Resident }`（约 L251）改成新模式“转去启动同目录宿主 `snow-shot.exe` 后退出”（§3“直接双击 UI exe”那一行；带 `--cmd` 时一并转给宿主）；`--resident` 要变成显式开关（现在是默认的同义词）。同处要改：`RunMode` 文档注释与 `RunMode::Resident` 的“默认”字样（约 L169）、模块头注释（L4 “也是阶段 2 的默认”）、`parse_cli` 文档与 `main` 里的用法提示（`eprintln!` 那行）、单测 `cli_defaults_to_resident`（约 L597）与 `cli_modes_are_exclusive` 里相关断言。
   2. **自启注册指向**（`snow-shot/src/system_settings.rs`）：`AUTO_START_HOST` 初值 `false` 改 `true`（或去掉开关，永远指向同目录 `snow-shot.exe`），`prefer_host_exe()` 及其唯一调用点 `main.rs::run_ui`（约 L473）随之删除或保留为空操作；单测 `auto_start_target_follows_mode` 同步。注册表值只存带引号的路径、不能带参数（`snow-platform::system_integration::run_command`），所以显式 `--resident` 的回退进程也只能指向宿主。**老用户迁移**：旧版 HKCU Run 值指向 `snow-shot-ui.exe`，改默认后它无参数启动会转去拉宿主（第 1 项），能用；之后 `system_settings::apply`（`main.rs` 约 L419 / L481、`app_runtime.rs` 约 L4529 在配置载入与变化时调用）会把值改写成宿主路径。开发构建（`debug_assertions`）仍不改注册表。
   3. **重启辅助**（`snow-shot/src/app_runtime.rs::spawn_restart_helper`，约 L1062）：单进程回退模式下用 `current_exe()` 无参数拉起新实例，切默认后会变成“拉宿主”，要改成带 `--resident`（回退模式重启回到回退模式）；双进程模式的重启由宿主处理（动作 `restart`），不走这里。
@@ -344,6 +344,16 @@ snow-shot             改  bin 改名 snow-shot-ui；新增 spec 生成（纯函
   7. **打包 / 更新**：Rust 版打包脚本出现时必须把 `snow-shot.exe` 与 `snow-shot-ui.exe` 放同一目录，开始菜单与自启指向宿主；`snow-update` 将来自动安装要先 `--cmd quit` 宿主再替换两个 exe（现在只下载不安装，不受影响）。
   8. **文档同步**：本文 §3 表“直接双击 UI exe / 自启 / 单实例”几行与阶段 2 “产物名与过渡”里的“默认仍是单进程”、`AGENTS.md` 第 6 行与构建说明、`snow-shot-rs/README.md`“两个 exe 与运行方式”、`docs/cisox-progress-handoff.md` §6.2「现状 / 切默认的前提」、`docs/README.md` 索引这条、迁移方案 §2.1 的 workspace 布局与 ADR-9（MCP 进程内）加注“UI 保活时成立”、审计表 C03 / C04；开发说明里 `cargo run -p snow-shot` 要加 `-- --resident`。
   9. **不要动的**：`--resident` 路径与 `snow-shot-ui.exe --cmd` 的单实例委托（至少保留到用户另行拍板）；`HostCli::Resident`；worker 按 `exe_dir()` 找的逻辑。
+- **切默认实施结果（2026-10-13）**：
+  1. **无参数入口**：`parse_cli` 新增 `RunMode::Host`（无运行方式开关即是它，含只带 `--cmd`）；`main` 在该模式下用 `quiet_command` 拉起同目录 `snow-shot.exe` 并把命令行原样交给它，不等宿主、立即退出；失败退出码 6。`--resident` 成为显式开关。`HOST_EXE_NAME` 提到 `snow-host-protocol::launch`，UI 侧三处共用。RunMode / 模块头 / `parse_cli` 文档 / 用法提示 / 单测同步（`cli_defaults_to_resident` 改为 `cli_defaults_to_host_and_resident_is_explicit`）。
+  2. **自启**：去掉 `AUTO_START_HOST` 与 `prefer_host_exe()`，`auto_start_target(current_exe)` 永远返回同目录宿主；单测覆盖“UI exe → 宿主（迁移）”与宿主路径幂等。老用户 Run 值指向 UI exe：无参数启动转去拉宿主（单测 `cli_defaults_to_host_and_resident_is_explicit`），随后 `apply()` 改写为宿主路径。
+  3. **重启辅助**：`restart_command_line` 在 `start "" "<exe>"` 后带 `--resident`（单测）；双进程模式的重启仍由宿主处理。
+  4. **宿主侧**：`HostCli::Run.command` 改为 `Option`，区分“显式 `--cmd`”与“无参数”。**拍板（文档无另行定论，按任务要求）**：没有运行实例时 `--cmd` 不再被忽略——本进程成为宿主并在起来后执行该命令（`ipc_map::first_run_plan`：`quit` 直接结束、不白起宿主；无 `--cmd` 只常驻托盘，不弹窗口，保证开机自启不弹主窗口）；有实例时行为不变（无参数 = 唤醒）。`--resident` 转调与 `USAGE` 不变。互斥体与管道名不改。
+  5. **快捷方式 / 安装脚本**：Rust 版没有，跳过（将来指向宿主）。
+  6. **验收脚本**：`verify-snow-shot-recording.ps1` 的主实例启动与两处 `--cmd` 委托、`self_acceptance_verify.ps1` 的启动自检都显式带 `--resident`（录制脚本的 `--cmd` 也带，是为了不依赖宿主 exe 在场）；`verify-tray-host-split.ps1` 不受影响。
+  7. **打包 / 更新**：Rust 版没有打包脚本（`scripts/package-snow-shot.ps1` 等是 Qt 版流水线），`snow-update` 只下载不安装，跳过；约束已写进 handoff §6.2。
+  8. **文档**：本文 §3、阶段 2 “产物名与过渡”、§10；`AGENTS.md`；`snow-shot-rs/README.md`；handoff §6.2；`docs/README.md`；迁移方案 §2.1 与 ADR-9；审计表 C03 / C04 已同步。
+  9. **未动**：`--resident` 路径、`--resident --cmd` 的单实例委托、`HostCli::Resident`、worker 按 `exe_dir()` 找的逻辑、互斥体与会话管道名。
 
 ### 阶段 5：冷启动优化
 
@@ -398,6 +408,7 @@ snow-shot             改  bin 改名 snow-shot-ui；新增 spec 生成（纯函
 13. **冷缓存首帧**（阶段 0 实测清页缓存后约 1.6s）：可接受，不做登录预读等预热。
 14. **阶段 2 硬验收追加**：托盘点击（左键/菜单项）拉起 UI 后能拿到前台与键盘焦点；UI 以管理员运行（及宿主非管理员、UI 管理员的混合情形）下热键、IPC、焦点正常。
 15. **独立排查项（与拆分无关，常驻模式即受益）**：每次截图后内核句柄 +~9 不回落的泄漏；热路径里覆盖窗可见到内容出现约 400ms 的空档。
+16. **切默认为双进程（2026-10-13，用户拍板）**：真屏验收通过后，`snow-shot-ui.exe` 无参数转去启动宿主，自启统一指向宿主，`--resident` 成为显式回退开关；没有运行实例时 `--cmd` 由新宿主执行（`quit` 除外），见阶段 4 “切默认实施结果”。
 
 ## 11. 未证实清单（阶段 0 验证）
 
