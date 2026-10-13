@@ -37,9 +37,62 @@ pub fn action_id_for(command: &IpcCommand) -> Option<&'static str> {
     }
 }
 
+/// 本进程成为第一个实例（此前没有运行中的宿主）时，对命令行里 `--cmd` 的处理方式。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FirstRun {
+    /// 没带 `--cmd`（双击、开机自启）：只常驻托盘，不弹任何窗口。
+    Idle,
+    /// `--cmd quit` 但根本没有实例在跑：没有可退出的对象，直接结束，不白起一个宿主。
+    Quit,
+    /// 其它命令：宿主起来后立刻执行它（动作 id 同托盘 / 热键的一套）。
+    Action(&'static str),
+}
+
+/// 决定第一个实例该怎么处理 `--cmd`（阶段 4 起 `--cmd` 在没有实例时也生效，不再被忽略）。
+///
+/// # 参数
+/// - `command`：命令行显式给出的 `--cmd`；没给传 `None`。
+///
+/// # 返回
+/// 处理方式；没有对应动作的自定义命令按 [`FirstRun::Idle`] 处理。
+///
+/// ```rust
+/// use snow_platform::single_instance::IpcCommand;
+/// use snow_tray_host::ipc_map::{FirstRun, first_run_plan};
+/// assert_eq!(first_run_plan(None), FirstRun::Idle);
+/// assert_eq!(first_run_plan(Some(&IpcCommand::Quit)), FirstRun::Quit);
+/// assert_eq!(first_run_plan(Some(&IpcCommand::TriggerScreenshot)), FirstRun::Action("capture"));
+/// ```
+pub fn first_run_plan(command: Option<&IpcCommand>) -> FirstRun {
+    match command {
+        None => FirstRun::Idle,
+        Some(IpcCommand::Quit) => FirstRun::Quit,
+        Some(other) => action_id_for(other).map_or(FirstRun::Idle, FirstRun::Action),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 第一个实例：无 `--cmd` 只常驻；`quit` 直接结束；其余命令起来就执行。
+    #[test]
+    fn first_run_executes_explicit_command_only() {
+        assert_eq!(first_run_plan(None), FirstRun::Idle);
+        assert_eq!(first_run_plan(Some(&IpcCommand::Quit)), FirstRun::Quit);
+        assert_eq!(
+            first_run_plan(Some(&IpcCommand::ShowMainWindow)),
+            FirstRun::Action("main_window")
+        );
+        assert_eq!(
+            first_run_plan(Some(&IpcCommand::TriggerRecording)),
+            FirstRun::Action("start_recording")
+        );
+        assert_eq!(
+            first_run_plan(Some(&IpcCommand::Custom("x".into()))),
+            FirstRun::Idle
+        );
+    }
 
     /// 七个 `--cmd` 命令都有映射，id 互不相同；自定义参数没有映射。
     #[test]

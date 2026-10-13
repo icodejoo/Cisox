@@ -3,37 +3,27 @@
 
 use snow_app_core::PRODUCT_NAME;
 use snow_config::document::ConfigDocument;
+use snow_host_protocol::launch::HOST_EXE_NAME;
 use snow_platform::system_integration::{PriorityLevel, set_auto_start, set_process_priority};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 
-/// 托盘宿主的 exe 文件名（与 UI 进程同目录）。
-const HOST_EXE_NAME: &str = "snow-shot.exe";
-
-/// 是否让开机自启指向托盘宿主（双进程 `--ui` 模式开启）。
-static AUTO_START_HOST: AtomicBool = AtomicBool::new(false);
-
-/// 双进程模式下让开机自启指向托盘宿主（它才是常驻入口）；单进程常驻仍指向自身。
-pub fn prefer_host_exe() {
-    AUTO_START_HOST.store(true, Ordering::Relaxed);
-}
-
-/// 开机自启要登记的可执行文件路径。
+/// 开机自启要登记的可执行文件路径：永远是 `current_exe` 同目录的托盘宿主（它才是常驻入口）。
+///
+/// 无论本进程是 UI 还是 `--resident` 回退进程都一样：注册表值只能存路径、不能带参数。
+/// 老版本登记的是 UI exe，无参数启动会转调宿主，随后配置载入时由 [`apply`] 用本函数的结果改写。
 ///
 /// # 参数
 /// - `current_exe`：本进程的 exe 路径。
-/// - `prefer_host`：是否指向同目录的托盘宿主。
+///
+/// # 返回
+/// 同目录的 `snow-shot.exe` 路径。
 ///
 /// ```ignore
-/// let target = auto_start_target(Path::new("C:/app/snow-shot-ui.exe"), true);
+/// let target = auto_start_target(Path::new("C:/app/snow-shot-ui.exe"));
 /// assert!(target.ends_with("snow-shot.exe"));
 /// ```
-pub fn auto_start_target(current_exe: &Path, prefer_host: bool) -> PathBuf {
-    if prefer_host {
-        current_exe.with_file_name(HOST_EXE_NAME)
-    } else {
-        current_exe.to_path_buf()
-    }
+pub fn auto_start_target(current_exe: &Path) -> PathBuf {
+    current_exe.with_file_name(HOST_EXE_NAME)
 }
 
 /// 进程优先级配置键。
@@ -85,7 +75,7 @@ pub fn apply(document: &ConfigDocument) {
     match std::env::current_exe() {
         Ok(exe) => match set_auto_start(
             PRODUCT_NAME,
-            &auto_start_target(&exe, AUTO_START_HOST.load(Ordering::Relaxed)),
+            &auto_start_target(&exe),
             plan.auto_start,
         ) {
             Ok(()) => tracing::info!(enabled = plan.auto_start, "开机自启已同步"),
@@ -107,15 +97,14 @@ mod tests {
         assert_eq!(plan, SystemPlan { priority: Some(PriorityLevel::AboveNormal), auto_start: true });
     }
 
-    /// 开机自启目标：双进程模式指向同目录的宿主，单进程常驻指向自身。
+    /// 开机自启目标永远是同目录的宿主；老用户 Run 值指向 UI exe 时，由 UI 进程算出的目标把它改写成宿主路径，
+    /// 已经是宿主路径的保持不变（幂等）。
     #[test]
-    fn auto_start_target_follows_mode() {
-        let ui = Path::new("C:/app/snow-shot-ui.exe");
-        assert_eq!(auto_start_target(ui, false), ui);
-        assert_eq!(
-            auto_start_target(ui, true),
-            Path::new("C:/app/snow-shot.exe")
-        );
+    fn auto_start_target_always_points_to_host() {
+        let host = Path::new("C:/app/snow-shot.exe");
+        let legacy_ui = Path::new("C:/app/snow-shot-ui.exe");
+        assert_eq!(auto_start_target(legacy_ui), host, "迁移：UI exe -> 宿主");
+        assert_eq!(auto_start_target(host), host, "幂等");
     }
 
     /// 改配置后计划跟随。

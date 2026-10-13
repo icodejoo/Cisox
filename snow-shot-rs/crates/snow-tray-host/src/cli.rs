@@ -1,4 +1,4 @@
-//! 宿主的命令行：`--cmd <命令>`（交给运行中的实例）、`--resident`（旧单进程回退）。
+//! 宿主的命令行：`--cmd <命令>`（交给运行中的实例；没有实例时宿主起来后执行它）、`--resident`（旧单进程回退）。
 //!
 //! 命令名、默认行为与 UI 进程的旧入口完全一致（`snow-shot --cmd screenshot` 等照常可用）。
 
@@ -19,8 +19,9 @@ pub const USAGE: &str = "用法: snow-shot [--cmd screenshot|recording|scroll-ca
 pub enum HostCli {
     /// 常驻宿主（已有实例在运行时，作为从属实例把 `command` 交给它后退出）。
     Run {
-        /// 本进程若是从属实例，要交给运行中实例的命令（默认唤醒）。
-        command: IpcCommand,
+        /// 命令行显式给出的 `--cmd`；没给为 `None`。从属实例时 `None` 按唤醒处理；
+        /// 本进程成为第一个实例时，显式命令在宿主起来后执行（`None` 只常驻托盘）。
+        command: Option<IpcCommand>,
     },
     /// `--resident`：不跑宿主，改拉起旧的单进程 UI（`snow-shot-ui.exe --resident`）。
     Resident,
@@ -40,11 +41,11 @@ pub enum HostCli {
 /// use snow_platform::single_instance::IpcCommand;
 /// use snow_tray_host::cli::{HostCli, parse_cli};
 /// let cli = parse_cli(["--cmd".to_string(), "quit".to_string()]).unwrap();
-/// assert_eq!(cli, HostCli::Run { command: IpcCommand::Quit });
+/// assert_eq!(cli, HostCli::Run { command: Some(IpcCommand::Quit) });
 /// assert_eq!(parse_cli(["--resident".to_string()]).unwrap(), HostCli::Resident);
 /// ```
 pub fn parse_cli(args: impl IntoIterator<Item = String>) -> Result<HostCli, String> {
-    let mut command = IpcCommand::ShowMainWindow;
+    let mut command = None;
     let mut resident = false;
     let mut self_check = false;
     let mut iter = args.into_iter();
@@ -54,8 +55,9 @@ pub fn parse_cli(args: impl IntoIterator<Item = String>) -> Result<HostCli, Stri
                 let name = iter
                     .next()
                     .ok_or_else(|| format!("{FLAG_COMMAND} 缺少参数"))?;
-                command =
-                    IpcCommand::from_cli_name(&name).ok_or_else(|| format!("未知命令: {name}"))?;
+                command = Some(
+                    IpcCommand::from_cli_name(&name).ok_or_else(|| format!("未知命令: {name}"))?,
+                );
             }
             FLAG_RESIDENT => resident = true,
             FLAG_SELF_CHECK_HARDEN => self_check = true,
@@ -80,14 +82,12 @@ mod tests {
         items.iter().map(|s| s.to_string()).collect()
     }
 
-    /// 无参数默认唤醒；`--cmd` 支持旧入口的全部命令名（大小写不敏感）。
+    /// 无参数没有显式命令；`--cmd` 支持旧入口的全部命令名（大小写不敏感）。
     #[test]
     fn defaults_and_all_commands() {
         assert_eq!(
             parse_cli(args(&[])).unwrap(),
-            HostCli::Run {
-                command: IpcCommand::ShowMainWindow
-            }
+            HostCli::Run { command: None }
         );
         for (name, want) in [
             ("screenshot", IpcCommand::TriggerScreenshot),
@@ -100,7 +100,9 @@ mod tests {
         ] {
             assert_eq!(
                 parse_cli(args(&["--cmd", name])).unwrap(),
-                HostCli::Run { command: want },
+                HostCli::Run {
+                    command: Some(want)
+                },
                 "{name}"
             );
         }

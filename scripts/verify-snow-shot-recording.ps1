@@ -14,7 +14,8 @@ param(
 )
 $ErrorActionPreference = "Continue"
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-# 完整应用现在是 UI 进程 snow-shot-ui.exe（单进程常驻行为）；snow-shot.exe 是托盘宿主
+# 完整应用是 UI 进程 snow-shot-ui.exe；阶段 4 起无参数会转去启动宿主，本脚本要单进程完整应用，所以全部显式带 --resident
+# （snow-shot.exe 是托盘宿主，双进程场景见 verify-tray-host-split.ps1）
 if (-not $Exe) { $Exe = Join-Path $repoRoot "build/cargo/debug/snow-shot-ui.exe" }
 $logDir = Join-Path $env:LOCALAPPDATA "Cisox/logs"
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
@@ -39,11 +40,11 @@ $env:SNOW_RECORDING_AUTOTEST_DIR = $OutDir
 if ($Scenario -eq "norecorder") { $env:SNOW_RECORDER_EXE = "Z:\definitely\missing\snow-recorder.exe" }
 "plan=$plan out=$OutDir"
 
-$primary = Start-Process -FilePath $Exe -PassThru
+$primary = Start-Process -FilePath $Exe -ArgumentList "--resident" -PassThru
 Start-Sleep -Seconds 5
 "primary alive=$(-not $primary.HasExited) pid=$($primary.Id)"
 $sw = [Diagnostics.Stopwatch]::StartNew()
-Start-Process -FilePath $Exe -ArgumentList "--cmd", "recording" -Wait -PassThru | ForEach-Object { "secondary exit=$($_.ExitCode)" }
+Start-Process -FilePath $Exe -ArgumentList "--resident", "--cmd", "recording" -Wait -PassThru | ForEach-Object { "secondary exit=$($_.ExitCode)" }
 
 $deadline = (Get-Date).AddSeconds($Seconds + 40)
 $killed = $false
@@ -77,6 +78,6 @@ if ($mp) {
         "decode exit=$LASTEXITCODE"
     }
 }
-Start-Process -FilePath $Exe -ArgumentList "--cmd", "quit" -Wait | Out-Null
+Start-Process -FilePath $Exe -ArgumentList "--resident", "--cmd", "quit" -Wait | Out-Null
 Start-Sleep -Seconds 2
 if (-not $primary.HasExited) { $primary | Stop-Process -Force; "primary force-killed" } else { "primary exited cleanly code=$($primary.ExitCode)" }

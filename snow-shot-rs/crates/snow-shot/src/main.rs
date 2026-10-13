@@ -1,8 +1,10 @@
 //! UI 进程入口（产物 `snow-shot-ui.exe`）：命令行、存储解析、日志初始化，随后进入 GPUI 事件循环。
 //!
-//! 三种运行方式（方案 `docs/design/tray-host-split.md` §3）：
-//! - **单进程常驻**（`--resident`，也是阶段 2 的默认）：本进程自带托盘 / 热键 / IPC 监听并常驻，
-//!   从属实例（`--cmd`）把命令交给它后退出。
+//! 四种运行方式（方案 `docs/design/tray-host-split.md` §3）：
+//! - **转调宿主**（无参数或只带 `--cmd`，阶段 4 起的默认）：不在本进程里干活，拉起同目录的托盘宿主
+//!   `snow-shot.exe`（`--cmd` 原样转给它）后退出；老用户注册表里指向本 exe 的开机自启也走这条。
+//! - **单进程常驻**（显式 `--resident`，回退开关）：本进程自带托盘 / 热键 / IPC 监听并常驻，
+//!   从属实例（`--resident --cmd`）把命令交给它后退出。
 //! - **双进程 UI**（`--ui --session <名> --token <令牌>`，由托盘宿主 `snow-shot.exe` 拉起）：不持托盘与热键，
 //!   连宿主的会话管道收动作、写 `host/spec.json` 快照，所有窗口关闭且无活动后请求退出。
 //! - **无窗口任务**（`--headless emit-spec | update-check | set-config`）：不初始化 GPUI，做完就退（见 [`headless`]）。
@@ -23,7 +25,7 @@ use snow_config::paths::{
 use snow_data_paths::{UI_INSTANCE_APP_ID, host_spec_path};
 use snow_host_protocol::launch::{
     FLAG_HEADLESS, FLAG_KEY, FLAG_RESIDENT, FLAG_SESSION, FLAG_TOKEN, FLAG_UI, FLAG_VALUE,
-    HeadlessJob, UiLaunch,
+    HOST_EXE_NAME, HeadlessJob, UiLaunch,
 };
 use snow_platform::crash::{
     CrashDumpConfig, CrashGuard, DEFAULT_MAX_REPORTS, install as install_crash_handler,
@@ -163,10 +165,15 @@ const EXIT_CODE_HOST_LINK_FAILED: u8 = 4;
 /// 无窗口任务失败的退出码。
 const EXIT_CODE_HEADLESS_FAILED: u8 = 5;
 
+/// 拉起托盘宿主失败的退出码。
+const EXIT_CODE_HOST_LAUNCH_FAILED: u8 = 6;
+
 /// 运行方式。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RunMode {
-    /// 单进程常驻（默认，也是 `--resident`）。
+    /// 转去启动同目录的托盘宿主后退出（默认：无参数、或只带 `--cmd`）。
+    Host,
+    /// 单进程常驻（只有显式 `--resident` 才进，回退用）。
     Resident,
     /// 宿主拉起的 UI 进程（`--ui --session <名> --token <令牌>`）。
     Ui(UiLaunch),
@@ -186,7 +193,7 @@ pub struct CliOptions {
 /// 解析命令行参数（不含程序名）。
 ///
 /// # 参数
-/// - `args`：参数序列；支持 `--cmd <screenshot|recording|scroll-capture|pin-clipboard|settings|show|quit>`、
+/// - `args`：参数序列（无运行方式开关时是 [`RunMode::Host`]）；支持 `--cmd <screenshot|recording|scroll-capture|pin-clipboard|settings|show|quit>`、
 ///   `--resident`、`--ui --session <名> --token <令牌>`、`--headless emit-spec | update-check`、
 ///   `--headless set-config --key <配置键> --value <JSON>`。
 ///
@@ -247,8 +254,10 @@ pub fn parse_cli(args: impl IntoIterator<Item = String>) -> Result<CliOptions, S
         RunMode::Ui(UiLaunch::new(session, token).map_err(|e| e.to_string())?)
     } else if let Some(job) = headless {
         RunMode::Headless(HeadlessJob::parse(&job, key, value).map_err(|e| e.to_string())?)
-    } else {
+    } else if resident {
         RunMode::Resident
+    } else {
+        RunMode::Host
     };
     Ok(CliOptions { command, mode })
 }
@@ -446,6 +455,39 @@ fn run_primary(ctx: &AppBootstrap, guard: &SingleInstanceGuard) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// 转调宿主：拉起同目录的 `snow-shot.exe` 并把命令行原样交给它，本进程随即退出（不等宿主）。
+///
+/// # 参数
+/// - `host`：宿主 exe 路径。
+/// - `args`：要转给宿主的参数（本进程的命令行，此时只可能有 `--cmd <命令>`）。
+///
+/// # 返回
+/// 拉起成功为 `Ok`；宿主不存在或无法启动返回错误。
+fn launch_host(host: &Path, args: &[String]) -> std::io::Result<()> {
+    snow_net::quiet_command(host).args(args).spawn().map(|_| ())
+}
+
+/// 转调宿主模式的入口：定位同目录宿主并拉起，失败给出退出码。
+///
+/// # 参数
+/// - `args`：本进程的命令行参数（不含程序名）。
+fn run_host_forward(args: &[String]) -> ExitCode {
+    let host = match std::env::current_exe() {
+        Ok(exe) => exe.with_file_name(HOST_EXE_NAME),
+        Err(e) => {
+            eprintln!("取不到自身路径，无法定位 {HOST_EXE_NAME}: {e}");
+            return ExitCode::from(EXIT_CODE_HOST_LAUNCH_FAILED);
+        }
+    };
+    match launch_host(&host, args) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("拉起 {} 失败: {e}", host.display());
+            ExitCode::from(EXIT_CODE_HOST_LAUNCH_FAILED)
+        }
+    }
+}
+
 /// 双进程 UI：连宿主会话管道，不持托盘 / 热键，所有窗口关闭且无活动后请求退出（宿主同意后立即退出）。
 fn run_ui(ctx: &AppBootstrap, launch: &UiLaunch) -> ExitCode {
     // UI 进程自己的互斥体：已有 UI 在运行就让新来的直接退出（宿主有 10 秒握手超时兜底）
@@ -469,8 +511,6 @@ fn run_ui(ctx: &AppBootstrap, launch: &UiLaunch) -> ExitCode {
     };
     let caps = ctx.capabilities.clone().expect("UI 进程引导必须构建能力表");
     let data_root = ctx.data_root.clone();
-    // 双进程模式下开机自启要指向宿主（它才是常驻入口）
-    system_settings::prefer_host_exe();
     ui::run_resident(move |cx| {
         let bus = CommandBus::new();
         app_runtime::register_bus_handlers(&bus, &inbox);
@@ -547,12 +587,13 @@ fn main() -> ExitCode {
         Ok(o) => o,
         Err(e) => {
             eprintln!(
-                "{e}\n用法: snow-shot-ui [{CLI_FLAG_COMMAND} screenshot|recording|scroll-capture|pin-clipboard|settings|show|quit] [{FLAG_RESIDENT}]"
+                "{e}\n用法: snow-shot-ui [{CLI_FLAG_COMMAND} screenshot|recording|scroll-capture|pin-clipboard|settings|show|quit] [{FLAG_RESIDENT}]\n（不带 {FLAG_RESIDENT} 时转交给同目录的 {HOST_EXE_NAME}）"
             );
             return ExitCode::from(EXIT_CODE_BAD_ARGS);
         }
     };
     match options.mode {
+        RunMode::Host => run_host_forward(&std::env::args().skip(1).collect::<Vec<_>>()),
         RunMode::Resident => {
             println!("{}", banner());
             let ctx = bootstrap(None);
@@ -594,14 +635,32 @@ mod tests {
         let _ = std::fs::remove_dir_all(&temp);
     }
 
-    /// 无参数默认单进程常驻；`--resident` 显式指定同样是常驻。
+    /// 无参数默认转调宿主，只带 `--cmd` 也是（命令交给宿主）；只有显式 `--resident` 才是单进程常驻。
     #[test]
-    fn cli_defaults_to_resident() {
-        assert_eq!(parse_cli([]).unwrap().mode, RunMode::Resident);
+    fn cli_defaults_to_host_and_resident_is_explicit() {
+        assert_eq!(parse_cli([]).unwrap().mode, RunMode::Host);
+        let cmd = parse_cli(["--cmd".to_string(), "quit".to_string()]).unwrap();
+        assert_eq!(cmd.mode, RunMode::Host);
+        assert_eq!(cmd.command, IpcCommand::Quit);
         assert_eq!(
             parse_cli(["--resident".to_string()]).unwrap().mode,
             RunMode::Resident
         );
+        let resident_cmd = parse_cli(
+            ["--resident", "--cmd", "show"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        assert_eq!(resident_cmd.mode, RunMode::Resident);
+    }
+
+    /// 宿主 exe 不存在时转调失败并返回错误（不 panic、不假装成功）。
+    #[test]
+    fn launch_host_reports_missing_exe() {
+        let missing = std::env::temp_dir().join("snow-shot-no-such-host.exe");
+        assert!(launch_host(&missing, &[]).is_err());
     }
 
     /// `--ui` 需要会话名与令牌，缺一不可，格式要对；解析后字段原样带出。
