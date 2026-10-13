@@ -28,7 +28,8 @@
       ],
       "license": "apache-2.0",
       "size_bytes": 76326475,
-      "peak_mem_mb": 163
+      "peak_mem_mb": 163,
+      "model_type": "zipformer2"
     },
     {
       "id": "sherpa-onnx-streaming-zipformer-zh-int8-2025-06-30",
@@ -118,7 +119,8 @@
       "license": "apache-2.0",
       "license_source": "https://huggingface.co/GilgameshWind/X-ASR-zh-en (upstream model card: Apache-2.0; the sherpa-onnx export repo declares no license)",
       "size_bytes": 169347218,
-      "peak_mem_mb": 269
+      "peak_mem_mb": 269,
+      "model_type": "zipformer2"
     },
     {
       "id": "sherpa-onnx-x-asr-160ms-streaming-zipformer-transducer-zh-en-punct-int8-2026-06-05",
@@ -143,7 +145,8 @@
       "license_source": "https://huggingface.co/GilgameshWind/X-ASR-zh-en (upstream model card: Apache-2.0; the sherpa-onnx export repo declares no license)",
       "size_bytes": 169347218,
       "peak_mem_mb": 268,
-      "notes_key": "stt-note-low-latency"
+      "notes_key": "stt-note-low-latency",
+      "model_type": "zipformer2"
     },
     {
       "id": "sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20",

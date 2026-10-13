@@ -146,6 +146,10 @@ pub struct SttModelSpec {
     pub peak_mem_mb: u32,
     /// 说明文案的 i18n 键（可选）。
     pub notes_key: Option<String>,
+    /// sherpa 的 `model_type`（可选）：写进安装目录的 `model.json`，worker 加载时直接交给 sherpa，
+    /// 省掉它再载一遍 encoder 读元数据的代价。只填核对过的（流式 transducer 取 ONNX 元数据里的值）；
+    /// 缺省时 worker 回退到缓存元数据或 sherpa 自己探测。
+    pub model_type: Option<String>,
 }
 
 /// 清单里的原始条目（mode / kind 先按字符串读入，再校验转换）。
@@ -163,6 +167,8 @@ struct RawSpec {
     peak_mem_mb: u32,
     #[serde(default)]
     notes_key: Option<String>,
+    #[serde(default)]
+    model_type: Option<String>,
 }
 
 /// 清单原始文档。
@@ -197,6 +203,9 @@ impl RawSpec {
         if self.files.is_empty() {
             return Err(format!("{}: 文件清单为空", self.id));
         }
+        if self.model_type.as_deref().is_some_and(|t| t.trim().is_empty()) {
+            return Err(format!("{}: model_type 不能为空串", self.id));
+        }
         Ok(SttModelSpec {
             id: self.id,
             dimension: self.dimension,
@@ -209,6 +218,7 @@ impl RawSpec {
             size_bytes: self.size_bytes,
             peak_mem_mb: self.peak_mem_mb,
             notes_key: self.notes_key,
+            model_type: self.model_type,
         })
     }
 }
@@ -394,6 +404,36 @@ mod tests {
             assert_eq!(unique.len(), spec.files.len(), "{} 文件重复", spec.id);
         }
         assert_eq!(m.vad.name, snow_stt_protocol::VAD_MODEL_FILE_NAME);
+    }
+
+    /// `model_type` 是可选字段：缺省为空，空串被拒绝，写了的会原样带到条目里。
+    #[test]
+    fn model_type_is_optional_and_validated() {
+        let with = |extra: &str| {
+            let mut v: serde_json::Value = serde_json::from_str(MANIFEST_JSON).expect("清单是 JSON");
+            let first = &mut v["models"][0];
+            first.as_object_mut().expect("条目是对象").remove("model_type");
+            if !extra.is_empty() {
+                first["model_type"] = serde_json::Value::String(extra.into());
+            }
+            parse_manifest(&v.to_string())
+        };
+        assert_eq!(with("").expect("缺省可解析").models[0].model_type, None);
+        assert_eq!(
+            with("zipformer2").expect("可解析").models[0].model_type.as_deref(),
+            Some("zipformer2")
+        );
+        assert!(with(" ").unwrap_err().contains("model_type"));
+    }
+
+    /// 清单里填了 model_type 的条目只能是流式 transducer（离线类型 sherpa 本来就不探测，且没核对过）。
+    #[test]
+    fn model_type_only_on_online_transducers() {
+        for spec in &manifest().models {
+            if spec.model_type.is_some() {
+                assert_eq!(spec.kind, ModelKind::OnlineTransducer, "{}", spec.id);
+            }
+        }
     }
 
     /// 每个（维度, 模式）组合恰有一个默认模型。
