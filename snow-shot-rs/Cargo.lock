@@ -6999,6 +6999,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "snow-light-thread"
+version = "0.1.0"
+dependencies = [
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "snow-mcp"
 version = "0.1.0"
 dependencies = [
@@ -7019,6 +7026,7 @@ version = "0.1.0"
 name = "snow-platform"
 version = "0.1.0"
 dependencies = [
+ "snow-light-thread",
  "tracing",
  "windows 0.62.2",
 ]
@@ -7046,6 +7054,7 @@ name = "snow-shell-core"
 version = "0.1.0"
 dependencies = [
  "global-hotkey",
+ "snow-light-thread",
  "tracing",
  "tray-icon",
  "windows 0.62.2",

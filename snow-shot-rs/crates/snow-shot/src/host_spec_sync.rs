@@ -153,7 +153,7 @@ mod tests {
                 icon_rgba: IconRgba {
                     width: 1,
                     height: 1,
-                    rgba: vec![0; 4],
+                    rgba: vec![0; 4].into(),
                 },
                 menu: vec![],
                 on_left: None,

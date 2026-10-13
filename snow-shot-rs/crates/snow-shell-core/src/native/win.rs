@@ -76,6 +76,60 @@ pub fn run_message_loop(mut tick: impl FnMut() -> bool) {
     }
 }
 
+/// 在光标处弹出菜单，阻塞到菜单关闭，返回被选中项在菜单里的位置。
+///
+/// 与 `tray-icon` 自带的弹出行为一致：窗口先置前台（点菜单外部才会自动收起），菜单底边 / 左边对齐光标，
+/// 关闭后补投一条 `WM_NULL`（外壳文档对通知区菜单的要求）。
+///
+/// # 参数
+/// - `hwnd`：菜单的所有者窗口（托盘隐藏窗口，必须由当前线程创建）。
+/// - `hmenu`：弹出菜单句柄（`muda::Menu::hpopupmenu`），本函数不销毁它。
+///
+/// # 返回
+/// 被选中项的位置（0 起，与追加顺序一致）；取消、被系统关闭或选中的是子菜单时为 `None`。
+///
+/// # 示例
+/// ```ignore
+/// if let Some(pos) = track_popup_menu_at_cursor(tray_hwnd, menu.hpopupmenu()) {
+///     println!("选中第 {pos} 项");
+/// }
+/// ```
+pub fn track_popup_menu_at_cursor(hwnd: isize, hmenu: isize) -> Option<usize> {
+    use windows::Win32::Foundation::{HWND, POINT};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetCursorPos, GetMenuItemCount, GetMenuItemID, HMENU, PostMessageW, SetForegroundWindow,
+        TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_RETURNCMD, TrackPopupMenu, WM_NULL,
+    };
+    let owner = HWND(hwnd as *mut _);
+    let menu = HMENU(hmenu as *mut _);
+    let mut at = POINT::default();
+    // SAFETY: 句柄由调用方保证有效且属于当前线程；失败时按取消处理。
+    let picked = unsafe {
+        let _ = GetCursorPos(&mut at);
+        let _ = SetForegroundWindow(owner);
+        let picked = TrackPopupMenu(
+            menu,
+            TPM_BOTTOMALIGN | TPM_LEFTALIGN | TPM_RETURNCMD,
+            at.x,
+            at.y,
+            None,
+            owner,
+            None,
+        );
+        let _ = PostMessageW(Some(owner), WM_NULL, WPARAM(0), LPARAM(0));
+        picked.0
+    };
+    if picked <= 0 {
+        return None;
+    }
+    // SAFETY: 菜单仍有效；位置在 `0..count` 内。
+    unsafe {
+        (0..GetMenuItemCount(Some(menu)).max(0))
+            .find(|&pos| GetMenuItemID(menu, pos) as i32 == picked)
+    }
+    .map(|pos| pos as usize)
+}
+
 /// 设置进程内弹出菜单（托盘右键菜单等）的深浅色。
 ///
 /// # 参数

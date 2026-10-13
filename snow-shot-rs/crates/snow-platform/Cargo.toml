@@ -10,6 +10,8 @@ workspace = true
 
 # 日志（与 snow-app-core 同族，已在工作区锁内）
 [dependencies]
+# 常驻后台线程（单实例控制管道、鼠标钩子）用的轻量线程
+snow-light-thread = { path = "../snow-light-thread" }
 tracing = "0.1"
 
 # 与 gpui 使用的 windows 绑定同版本（0.62），避免重复编译

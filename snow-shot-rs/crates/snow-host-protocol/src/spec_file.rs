@@ -12,6 +12,9 @@ use std::time::Duration;
 /// 读快照时遇到 IO 错误的重试次数（含第一次）。
 const READ_ATTEMPTS: u32 = 4;
 
+/// 流式读取的缓冲字节数（够小，不抬宿主的堆峰值）。
+const READ_BUFFER_BYTES: usize = 4096;
+
 /// 重试间隔。
 const READ_RETRY_DELAY: Duration = Duration::from_millis(20);
 
@@ -55,8 +58,15 @@ impl std::error::Error for SpecFileError {}
 pub fn read_spec(path: &Path) -> Result<HostSpec, SpecFileError> {
     let mut last_error = String::new();
     for attempt in 0..READ_ATTEMPTS {
-        match std::fs::read_to_string(path) {
-            Ok(text) => return HostSpec::from_json(&text).map_err(SpecFileError::Spec),
+        match std::fs::File::open(path) {
+            // 小缓冲流式读：不把整份快照读成一个大字符串（宿主启动的堆峰值）
+            Ok(file) => {
+                return HostSpec::from_reader(std::io::BufReader::with_capacity(
+                    READ_BUFFER_BYTES,
+                    file,
+                ))
+                .map_err(SpecFileError::Spec);
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 return Err(SpecFileError::Missing);
             }
@@ -90,7 +100,7 @@ mod tests {
                 icon_rgba: IconRgba {
                     width: 1,
                     height: 1,
-                    rgba: vec![0; 4],
+                    rgba: vec![0; 4].into(),
                 },
                 menu: vec![],
                 on_left: None,

@@ -4,9 +4,9 @@
 //! 启动方阻塞等待线程回报“初始化成功/失败”，丢弃时先通知退出、再 join、最后释放单例标记。
 
 use crate::error::ShellError;
+use snow_light_thread::LightThread;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::channel;
-use std::thread::JoinHandle;
 
 /// 服务线程句柄。`T` 是线程初始化成功后回传给启动方的值（如消息循环唤醒器）。
 ///
@@ -15,7 +15,7 @@ pub(crate) struct ServiceThread<T> {
     /// 进程级单例标记。
     flag: &'static AtomicBool,
     /// 后台线程；丢弃时取出 join。
-    join: Option<JoinHandle<()>>,
+    join: Option<LightThread>,
     /// 线程回传的就绪值。
     ready: T,
     /// 通知线程退出（发控制消息、唤醒消息循环等）。
@@ -54,19 +54,17 @@ impl<T: Send + 'static> ServiceThread<T> {
             return Err(ShellError::AlreadyRunning(service));
         }
         let (ready_tx, ready_rx) = channel::<Result<T, ShellError>>();
-        let spawned = std::thread::Builder::new()
-            .name(thread_name.into())
-            .spawn(move || {
-                let (state, ready) = match init() {
-                    Ok(v) => v,
-                    Err(e) => {
-                        let _ = ready_tx.send(Err(e));
-                        return;
-                    }
-                };
-                let _ = ready_tx.send(Ok(ready));
-                run(state);
-            });
+        let spawned = LightThread::spawn(thread_name, move || {
+            let (state, ready) = match init() {
+                Ok(v) => v,
+                Err(e) => {
+                    let _ = ready_tx.send(Err(e));
+                    return;
+                }
+            };
+            let _ = ready_tx.send(Ok(ready));
+            run(state);
+        });
         let join = match spawned {
             Ok(j) => j,
             Err(e) => {
@@ -82,7 +80,7 @@ impl<T: Send + 'static> ServiceThread<T> {
                 notify: Box::new(notify),
             }),
             Ok(Err(e)) => {
-                let _ = join.join();
+                join.join();
                 flag.store(false, Ordering::SeqCst);
                 Err(e)
             }
@@ -104,7 +102,7 @@ impl<T> Drop for ServiceThread<T> {
     fn drop(&mut self) {
         (self.notify)(&self.ready);
         if let Some(j) = self.join.take() {
-            let _ = j.join();
+            j.join();
         }
         self.flag.store(false, Ordering::SeqCst);
     }

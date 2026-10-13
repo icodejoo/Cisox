@@ -56,7 +56,7 @@ pub fn fallback_spec() -> HostSpec {
             icon_rgba: IconRgba {
                 width: FALLBACK_ICON_SIZE,
                 height: FALLBACK_ICON_SIZE,
-                rgba: FALLBACK_ICON_RGBA.repeat(pixels),
+                rgba: FALLBACK_ICON_RGBA.repeat(pixels).into(),
             },
             menu: vec![MenuItemSpec::Item {
                 label: FALLBACK_QUIT_LABEL.to_string(),

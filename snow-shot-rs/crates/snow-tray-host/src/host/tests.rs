@@ -164,7 +164,7 @@ fn spec(rev: u64) -> HostSpec {
     let icon = IconRgba {
         width: 1,
         height: 1,
-        rgba: vec![1, 2, 3, 4],
+        rgba: vec![1, 2, 3, 4].into(),
     };
     let item = |label: &str, checked: Option<bool>, action: &str| MenuItemSpec::Item {
         label: label.to_string(),
@@ -439,7 +439,7 @@ fn spec_updates_apply_minimal_changes() {
 
     // 图标变了：整体重建
     let mut s3 = spec(3);
-    s3.tray.icon_rgba.rgba = vec![9, 9, 9, 9];
+    s3.tray.icon_rgba.rgba = vec![9, 9, 9, 9].into();
     core.platform.spec = Some(s3);
     core.handle(
         t0,

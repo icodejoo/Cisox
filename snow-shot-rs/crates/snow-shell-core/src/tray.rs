@@ -8,12 +8,13 @@
 use crate::dispatch::Dispatcher;
 use crate::error::ShellError;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// 托盘图标位图（RGBA8，行优先）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrayIconImage {
-    /// RGBA 像素。
-    rgba: Vec<u8>,
+    /// RGBA 像素（共享所有权：克隆图标、菜单计划不复制像素）。
+    rgba: Arc<[u8]>,
     /// 宽（像素）。
     width: u32,
     /// 高（像素）。
@@ -36,6 +37,25 @@ impl TrayIconImage {
     /// assert!(TrayIconImage::new(vec![0; 15], 2, 2).is_err());
     /// ```
     pub fn new(rgba: Vec<u8>, width: u32, height: u32) -> Result<Self, ShellError> {
+        Self::from_shared(rgba.into(), width, height)
+    }
+
+    /// 由共享的 RGBA 数据构造（不复制像素）；校验规则同 [`TrayIconImage::new`]。
+    ///
+    /// # 参数
+    /// - `rgba`：共享像素数据。
+    /// - `width` / `height`：像素尺寸。
+    ///
+    /// # 返回
+    /// 图标，或 `InvalidArgument`。
+    ///
+    /// ```rust
+    /// use snow_shell_core::tray::TrayIconImage;
+    /// let pixels: std::sync::Arc<[u8]> = vec![0; 16].into();
+    /// let icon = TrayIconImage::from_shared(pixels.clone(), 2, 2).unwrap();
+    /// assert!(std::ptr::eq(icon.rgba().as_ptr(), pixels.as_ptr()));
+    /// ```
+    pub fn from_shared(rgba: Arc<[u8]>, width: u32, height: u32) -> Result<Self, ShellError> {
         let expected = (width as usize)
             .checked_mul(height as usize)
             .and_then(|n| n.checked_mul(4));
@@ -180,6 +200,19 @@ impl<A: Clone> TrayActions<A> {
     pub(crate) fn resolve(&self, id: &str) -> Option<&TrayAction<A>> {
         self.map.get(id)
     }
+
+    /// 按菜单里的位置（0 起，与 `plan` 的顺序一致）取动作；分隔线与越界位置返回 `None`。
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub(crate) fn resolve_position(
+        &self,
+        plan: &[MenuPlan],
+        position: usize,
+    ) -> Option<&TrayAction<A>> {
+        match plan.get(position)? {
+            MenuPlan::Item(id, ..) => self.resolve(id),
+            MenuPlan::Separator => None,
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -192,7 +225,7 @@ mod backend {
     use crate::service_thread::ServiceThread;
     use std::sync::atomic::AtomicBool;
     use std::sync::mpsc::{Receiver, Sender, channel};
-    use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+    use tray_icon::menu::{ContextMenu, Menu, MenuItem, PredefinedMenuItem};
     use tray_icon::{
         Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent,
     };
@@ -236,7 +269,7 @@ mod backend {
                     let native_icon = if let Some(i) = icon {
                         let (w, h) = i.size();
                         Some(
-                            tray_icon::menu::Icon::from_rgba(i.rgba.clone(), w, h)
+                            tray_icon::menu::Icon::from_rgba(i.rgba.to_vec(), w, h)
                                 .map_err(|e| plat("图标转换", &e))?,
                         )
                     } else {
@@ -270,32 +303,28 @@ mod backend {
         Ok(menu)
     }
 
-    /// 在线程内创建托盘及其菜单。
-    fn build_tray<A>(
-        spec: &TraySpec<A>,
-        plan: &[MenuPlan],
-    ) -> Result<(TrayIcon, Menu), ShellError> {
+    /// 在线程内创建托盘图标（不带菜单：菜单每次弹出前才按计划构建，见 [`Worker::show_menu`]）。
+    fn build_tray<A>(spec: &TraySpec<A>) -> Result<TrayIcon, ShellError> {
         let plat =
             |what: &str, e: &dyn std::fmt::Display| ShellError::Platform(format!("{what}: {e}"));
-        let menu = build_menu(plan)?;
         let (w, h) = spec.icon.size();
-        let icon = Icon::from_rgba(spec.icon.rgba.clone(), w, h).map_err(|e| plat("图标", &e))?;
-        let tray = TrayIconBuilder::new()
-            .with_menu(Box::new(menu.clone()))
-            .with_menu_on_left_click(spec.on_left_click.is_none())
+        let icon = Icon::from_rgba(spec.icon.rgba.to_vec(), w, h).map_err(|e| plat("图标", &e))?;
+        TrayIconBuilder::new()
+            // 菜单由本模块在点击事件里按需弹出，库自带的弹出行为全部关掉
+            .with_menu_on_left_click(false)
+            .with_menu_on_right_click(false)
             .with_tooltip(&spec.tooltip)
             .with_icon(icon)
             .build()
-            .map_err(|e| plat("创建托盘", &e))?;
-        Ok((tray, menu))
+            .map_err(|e| plat("创建托盘", &e))
     }
 
     /// 后台线程状态。
     struct Worker<A> {
         /// 托盘对象（必须留在创建线程）。
         tray: TrayIcon,
-        /// 菜单，随托盘存活。
-        menu: Menu,
+        /// 菜单构建计划：空闲时只留这份纯数据，原生菜单（含每项图标位图）在弹出时才创建、关闭后立即销毁。
+        plan: Vec<MenuPlan>,
         /// 菜单动作表。
         actions: TrayActions<A>,
         /// 左键动作。
@@ -326,7 +355,32 @@ mod backend {
             }
         }
 
-        /// 处理控制请求与托盘/菜单事件；返回 `false` 表示退出。
+        /// 按计划临时构建原生菜单，在光标处弹出，选中项交给动作出口；菜单（含图标位图）随即销毁。
+        ///
+        /// 空闲时不留原生菜单，每项图标的位图（约 8KB 提交 / 项）就不占托盘态内存。
+        fn show_menu(&self) {
+            if self.plan.is_empty() {
+                return;
+            }
+            let menu = match build_menu(&self.plan) {
+                Ok(menu) => menu,
+                Err(e) => {
+                    tracing::warn!(%e, "构建托盘菜单失败");
+                    return;
+                }
+            };
+            let picked = native::track_popup_menu_at_cursor(
+                self.tray.window_handle() as isize,
+                menu.hpopupmenu(),
+            );
+            if let Some(action) =
+                picked.and_then(|pos| self.actions.resolve_position(&self.plan, pos))
+            {
+                self.run(action);
+            }
+        }
+
+        /// 处理控制请求与托盘事件；返回 `false` 表示退出。
         fn tick(&mut self, ctl: &Receiver<Ctl<A>>) -> bool {
             while let Ok(req) = ctl.try_recv() {
                 match req {
@@ -337,44 +391,45 @@ mod backend {
                     }
                     Ctl::SetSignalSink(sink) => self.sink = Some(sink),
                     Ctl::SetMenu(entries) => {
-                        let (plan, actions) = TrayActions::plan(&entries);
-                        match build_menu(&plan) {
-                            Ok(menu) => {
-                                self.tray.set_menu(Some(Box::new(menu.clone())));
-                                self.menu = menu;
-                                self.actions = actions;
-                            }
-                            Err(e) => tracing::warn!(%e, "更新托盘菜单失败"),
-                        }
+                        (self.plan, self.actions) = TrayActions::plan(&entries);
                     }
                     Ctl::Shutdown => return false,
                 }
             }
-            while let Ok(ev) = MenuEvent::receiver().try_recv() {
-                if let Some(action) = self.actions.resolve(&ev.id.0) {
-                    self.run(action);
-                }
-            }
             while let Ok(ev) = TrayIconEvent::receiver().try_recv() {
-                let action = match ev {
+                match ev {
+                    // 左键：有左键动作就执行，否则弹菜单
                     TrayIconEvent::Click {
                         button: MouseButton::Left,
                         button_state: MouseButtonState::Up,
                         ..
-                    } => self.on_left.as_ref(),
+                    } => match self.on_left.as_ref() {
+                        Some(action) => self.run(action),
+                        None => self.show_menu(),
+                    },
+                    TrayIconEvent::Click {
+                        button: MouseButton::Right,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } => self.show_menu(),
                     TrayIconEvent::DoubleClick {
                         button: MouseButton::Left,
                         ..
-                    } => self.on_double.as_ref(),
+                    } => {
+                        if let Some(action) = self.on_double.as_ref() {
+                            self.run(action);
+                        }
+                    }
                     TrayIconEvent::Click {
                         button: MouseButton::Middle,
                         button_state: MouseButtonState::Up,
                         ..
-                    } => self.on_middle.as_ref(),
-                    _ => None,
-                };
-                if let Some(a) = action {
-                    self.run(a);
+                    } => {
+                        if let Some(action) = self.on_middle.as_ref() {
+                            self.run(action);
+                        }
+                    }
+                    _ => {}
                 }
             }
             true
@@ -397,11 +452,11 @@ mod backend {
                 "创建托盘线程失败",
                 move || {
                     let (plan, actions) = TrayActions::plan(&spec.menu);
-                    let (tray, menu) = build_tray(&spec, &plan)?;
+                    let tray = build_tray(&spec)?;
                     let waker = native::current_thread_waker();
                     let worker = Worker {
                         tray,
-                        menu,
+                        plan,
                         actions,
                         on_left: spec.on_left_click,
                         on_double: spec.on_double_click,
@@ -614,7 +669,7 @@ mod tests {
         assert!(TrayIconImage::new(vec![0; 10], 4, 4).is_err());
         assert!(TrayIconImage::new(vec![], 0, 0).is_err());
         let solid = TrayIconImage::solid(2, 1, [1, 2, 3, 4]).unwrap();
-        assert_eq!(solid.rgba, vec![1, 2, 3, 4, 1, 2, 3, 4]);
+        assert_eq!(&*solid.rgba, &[1, 2, 3, 4, 1, 2, 3, 4]);
     }
 
     /// 菜单计划：条目获得唯一 id，分隔线不占映射，id 可还原动作。
@@ -659,6 +714,39 @@ mod tests {
             Some(&TrayAction::Signal("quit".into()))
         );
         assert_eq!(actions.resolve("nope"), None);
+    }
+
+    /// 按菜单位置取动作：条目命中、分隔线与越界为空。
+    #[test]
+    fn resolve_position_follows_plan_order() {
+        let entries = vec![
+            TrayMenuEntry::Item {
+                label: "甲".into(),
+                enabled: true,
+                checked: None,
+                icon: None,
+                action: TrayAction::Command("a".to_string()),
+            },
+            TrayMenuEntry::Separator,
+            TrayMenuEntry::Item {
+                label: "乙".into(),
+                enabled: true,
+                checked: Some(false),
+                icon: None,
+                action: TrayAction::Signal("b".into()),
+            },
+        ];
+        let (plan, actions) = TrayActions::plan(&entries);
+        assert_eq!(
+            actions.resolve_position(&plan, 0),
+            Some(&TrayAction::Command("a".to_string()))
+        );
+        assert_eq!(actions.resolve_position(&plan, 1), None);
+        assert_eq!(
+            actions.resolve_position(&plan, 2),
+            Some(&TrayAction::Signal("b".into()))
+        );
+        assert_eq!(actions.resolve_position(&plan, 3), None);
     }
 
     /// 图标像素可按只读切片取回。

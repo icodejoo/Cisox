@@ -64,7 +64,7 @@ mod imp {
     use std::collections::BTreeSet;
     use std::sync::mpsc::channel;
     use std::sync::{Arc, Mutex, MutexGuard};
-    use std::thread::JoinHandle;
+    use snow_light_thread::LightThread;
     use windows::Win32::Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM};
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::System::Threading::GetCurrentThreadId;
@@ -155,7 +155,7 @@ mod imp {
     /// 平台实现句柄。
     pub struct Inner {
         /// 钩子线程。
-        thread: Option<JoinHandle<()>>,
+        thread: Option<LightThread>,
         /// 钩子线程的系统线程 ID。
         thread_id: u32,
     }
@@ -168,14 +168,12 @@ mod imp {
             }
             let (tx, rx) = channel::<Result<u32, String>>();
             let handler: Arc<dyn Fn(DragEvent) + Send + Sync> = Arc::from(handler);
-            let thread = std::thread::Builder::new()
-                .name("platform-global-mouse".into())
-                .spawn(move || run_thread(handler, tx))
+            let thread = LightThread::spawn("platform-global-mouse", move || run_thread(handler, tx))
                 .map_err(|e| format!("创建钩子线程失败: {e}"))?;
             match rx.recv() {
                 Ok(Ok(thread_id)) => Ok(Self { thread: Some(thread), thread_id }),
                 Ok(Err(e)) => {
-                    let _ = thread.join();
+                    thread.join();
                     Err(e)
                 }
                 Err(_) => Err("钩子线程意外退出".into()),
@@ -208,7 +206,7 @@ mod imp {
             // SAFETY: 同 `post`。
             let _ = unsafe { PostThreadMessageW(self.thread_id, WM_QUIT, WPARAM(0), LPARAM(0)) };
             if let Some(thread) = self.thread.take() {
-                let _ = thread.join();
+                thread.join();
             }
         }
     }

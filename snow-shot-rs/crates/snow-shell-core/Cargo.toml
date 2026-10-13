@@ -10,6 +10,8 @@ description = "托盘与全局热键后端（与 gpui、命令总线无关，托
 workspace = true
 
 [dependencies]
+# 后台服务线程用的轻量线程（省掉 std::thread 的栈保证预留）
+snow-light-thread = { path = "../snow-light-thread" }
 # 日志门面（不带 subscriber，宿主自己决定怎么落盘）
 tracing = "0.1"
 

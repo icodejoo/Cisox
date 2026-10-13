@@ -1,7 +1,7 @@
 //! 最小 base64（RFC 4648 标准字母表，带 `=` 填充）。
 //!
 //! 只服务快照里的图标像素。为了让宿主的依赖闭包只剩 serde，这里自带实现而不引入 `base64` crate。
-//! 同时提供 `serde(with = "...")` 用的字节序列化适配，见 [`bytes`]。
+//! 同时提供 `serde(with = "...")` 用的字节序列化适配，见 [`bytes`] 与 [`shared_bytes`]。
 
 /// 标准字母表。
 const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -140,6 +140,43 @@ pub mod bytes {
     }
 }
 
+/// `#[serde(with = "snow_host_protocol::base64::shared_bytes")]`：把 `Arc<[u8]>` 存成 base64 字符串。
+///
+/// 与 [`bytes`] 的区别：读取时直接从借用的文本解码，不先分配整段 `String`；结果是可共享的
+/// `Arc<[u8]>`，宿主里图标像素在快照、托盘计划、托盘线程之间只有一份。
+pub mod shared_bytes {
+    use serde::de::{Error, Visitor};
+    use serde::{Deserializer, Serializer};
+    use std::sync::Arc;
+
+    /// 序列化为 base64 字符串。
+    pub fn serialize<S: Serializer>(data: &Arc<[u8]>, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&super::encode(data))
+    }
+
+    /// 解码 base64 文本的访问器。
+    struct Base64Visitor;
+
+    impl Visitor<'_> for Base64Visitor {
+        type Value = Arc<[u8]>;
+
+        /// 描述期望的输入。
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("base64 字符串")
+        }
+
+        /// 文本（借用或临时）直接解码。
+        fn visit_str<E: Error>(self, text: &str) -> Result<Self::Value, E> {
+            super::decode(text).map(Arc::from).map_err(E::custom)
+        }
+    }
+
+    /// 从 base64 字符串反序列化。
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Arc<[u8]>, D::Error> {
+        deserializer.deserialize_str(Base64Visitor)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -202,5 +239,28 @@ mod tests {
         assert_eq!(json, r#"{"data":"AQIDBAU="}"#);
         assert_eq!(serde_json::from_str::<Holder>(&json).unwrap(), h);
         assert!(serde_json::from_str::<Holder>(r#"{"data":"%%%%"}"#).is_err());
+    }
+
+    /// 共享字节适配：往返一致，非法输入报错，克隆不复制数据。
+    #[test]
+    fn shared_adapter_round_trip() {
+        #[derive(serde::Serialize, serde::Deserialize, PartialEq, Debug)]
+        struct Holder {
+            #[serde(with = "super::shared_bytes")]
+            data: std::sync::Arc<[u8]>,
+        }
+        let h = Holder {
+            data: vec![1, 2, 3, 4, 5].into(),
+        };
+        let json = serde_json::to_string(&h).unwrap();
+        assert_eq!(json, r#"{"data":"AQIDBAU="}"#);
+        let back = serde_json::from_str::<Holder>(&json).unwrap();
+        assert_eq!(back, h);
+        assert!(std::ptr::eq(back.data.clone().as_ptr(), back.data.as_ptr()));
+        assert!(serde_json::from_str::<Holder>(r#"{"data":"%%%%"}"#).is_err());
+        assert!(serde_json::from_str::<Holder>(r#"{"data":12}"#).is_err());
+        // 从流里读（文本不是借用的）也一样
+        let streamed: Holder = serde_json::from_reader(json.as_bytes()).unwrap();
+        assert_eq!(streamed, h);
     }
 }
