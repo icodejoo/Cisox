@@ -5,8 +5,9 @@
 //!   `snow-shot.exe`（`--cmd` 原样转给它）后退出；老用户注册表里指向本 exe 的开机自启也走这条。
 //! - **单进程常驻**（显式 `--resident`，回退开关）：本进程自带托盘 / 热键 / IPC 监听并常驻，
 //!   从属实例（`--resident --cmd`）把命令交给它后退出。
-//! - **双进程 UI**（`--ui --session <名> --token <令牌>`，由托盘宿主 `snow-shot.exe` 拉起）：不持托盘与热键，
-//!   连宿主的会话管道收动作、写 `host/spec.json` 快照，所有窗口关闭且无活动后请求退出。
+//! - **双进程 UI**（`--ui --session <名> --token <令牌> [--hint dictation]`，由托盘宿主 `snow-shot.exe` 拉起）：
+//!   不持托盘与热键，连宿主的会话管道收动作、写 `host/spec.json` 快照，所有窗口关闭且无活动后请求退出。
+//!   带 `--hint dictation` 时（宿主队首命令是语音转文字）在 `main` 最早处并行预拉起语音 worker。
 //! - **无窗口任务**（`--headless emit-spec | update-check | set-config`）：不初始化 GPUI，做完就退（见 [`headless`]）。
 
 // 发布形态使用 GUI 子系统（不弹控制台窗口）；调试构建保留控制台便于看日志
@@ -24,8 +25,8 @@ use snow_config::paths::{
 };
 use snow_data_paths::{UI_INSTANCE_APP_ID, host_spec_path};
 use snow_host_protocol::launch::{
-    FLAG_HEADLESS, FLAG_KEY, FLAG_RESIDENT, FLAG_SESSION, FLAG_TOKEN, FLAG_UI, FLAG_VALUE,
-    HOST_EXE_NAME, HeadlessJob, UiLaunch,
+    FLAG_HEADLESS, FLAG_HINT, FLAG_KEY, FLAG_RESIDENT, FLAG_SESSION, FLAG_TOKEN, FLAG_UI,
+    FLAG_VALUE, HOST_EXE_NAME, HeadlessJob, UiHint, UiLaunch,
 };
 use snow_platform::crash::{
     CrashDumpConfig, CrashGuard, DEFAULT_MAX_REPORTS, install as install_crash_handler,
@@ -194,7 +195,7 @@ pub struct CliOptions {
 ///
 /// # 参数
 /// - `args`：参数序列（无运行方式开关时是 [`RunMode::Host`]）；支持 `--cmd <screenshot|recording|scroll-capture|pin-clipboard|settings|show|quit>`、
-///   `--resident`、`--ui --session <名> --token <令牌>`、`--headless emit-spec | update-check`、
+///   `--resident`、`--ui --session <名> --token <令牌> [--hint dictation]`、`--headless emit-spec | update-check`、
 ///   `--headless set-config --key <配置键> --value <JSON>`。
 ///
 /// # 返回
@@ -210,6 +211,7 @@ pub fn parse_cli(args: impl IntoIterator<Item = String>) -> Result<CliOptions, S
     let (mut ui_flag, mut resident) = (false, false);
     let (mut session, mut token, mut headless) = (None, None, None);
     let (mut key, mut value) = (None, None);
+    let mut hint = None;
     let mut iter = args.into_iter();
     let value_of = |iter: &mut dyn Iterator<Item = String>, flag: &str| {
         iter.next().ok_or_else(|| format!("{flag} 缺少参数"))
@@ -225,6 +227,7 @@ pub fn parse_cli(args: impl IntoIterator<Item = String>) -> Result<CliOptions, S
             FLAG_UI => ui_flag = true,
             FLAG_SESSION => session = Some(value_of(&mut iter, FLAG_SESSION)?),
             FLAG_TOKEN => token = Some(value_of(&mut iter, FLAG_TOKEN)?),
+            FLAG_HINT => hint = Some(value_of(&mut iter, FLAG_HINT)?),
             FLAG_HEADLESS => headless = Some(value_of(&mut iter, FLAG_HEADLESS)?),
             FLAG_KEY => key = Some(value_of(&mut iter, FLAG_KEY)?),
             FLAG_VALUE => value = Some(value_of(&mut iter, FLAG_VALUE)?),
@@ -235,6 +238,9 @@ pub fn parse_cli(args: impl IntoIterator<Item = String>) -> Result<CliOptions, S
         return Err(format!(
             "{FLAG_SESSION} / {FLAG_TOKEN} 只能和 {FLAG_UI} 一起用"
         ));
+    }
+    if !ui_flag && hint.is_some() {
+        return Err(format!("{FLAG_HINT} 只能和 {FLAG_UI} 一起用"));
     }
     if headless.is_none() && (key.is_some() || value.is_some()) {
         return Err(format!(
@@ -251,7 +257,15 @@ pub fn parse_cli(args: impl IntoIterator<Item = String>) -> Result<CliOptions, S
         ));
     }
     let mode = if ui_flag {
-        RunMode::Ui(UiLaunch::new(session, token).map_err(|e| e.to_string())?)
+        let hint = match hint {
+            Some(text) => UiHint::parse(&text).map_err(|e| e.to_string())?,
+            None => UiHint::None,
+        };
+        RunMode::Ui(
+            UiLaunch::new(session, token)
+                .map_err(|e| e.to_string())?
+                .with_hint(hint),
+        )
     } else if let Some(job) = headless {
         RunMode::Headless(HeadlessJob::parse(&job, key, value).map_err(|e| e.to_string())?)
     } else if resident {
@@ -602,7 +616,14 @@ fn main() -> ExitCode {
                 None => run_secondary(&options.command),
             }
         }
-        RunMode::Ui(launch) => run_ui(&bootstrap_with(None, false), &launch),
+        RunMode::Ui(launch) => {
+            let ctx = bootstrap_with(None, false);
+            // 宿主提示队首命令是听写：趁 UI 还没抢互斥体、连管道、初始化 GPUI，先并行拉起语音 worker
+            if launch.hint == UiHint::Dictation {
+                dictation::prespawn::begin_early(ctx.data_root.clone());
+            }
+            run_ui(&ctx, &launch)
+        }
         RunMode::Headless(job) => run_headless(&bootstrap_with(None, false), &job),
     }
 }
@@ -675,6 +696,34 @@ mod tests {
         );
         assert!(parse_cli(args(&["--ui"])).is_err());
         assert!(parse_cli(args(&["--ui", "--session", "s"])).is_err());
+        // 启动提示：带了就解析进 UiLaunch；不认识的取值、没有 --ui 都报错
+        let hinted = parse_cli(args(&[
+            "--ui",
+            "--session",
+            "cisox.s.1",
+            "--token",
+            &token,
+            "--hint",
+            "dictation",
+        ]))
+        .unwrap();
+        let RunMode::Ui(launch) = hinted.mode else {
+            panic!("应为 Ui");
+        };
+        assert_eq!(launch.hint, UiHint::Dictation);
+        assert!(
+            parse_cli(args(&[
+                "--ui",
+                "--session",
+                "s",
+                "--token",
+                &token,
+                "--hint",
+                "bogus",
+            ]))
+            .is_err()
+        );
+        assert!(parse_cli(args(&["--hint", "dictation"])).is_err());
         assert!(parse_cli(args(&["--ui", "--session", "s", "--token", "短"])).is_err());
         assert!(
             parse_cli(args(&["--session", "s", "--token", &token])).is_err(),

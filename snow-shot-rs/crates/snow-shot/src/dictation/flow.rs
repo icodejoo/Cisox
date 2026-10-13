@@ -5,13 +5,14 @@
 //! 所有 GPUI 对象只在主线程触碰。
 
 use super::DictationCommand;
-use super::badge::{BADGE_WINDOW_ALPHA, ListeningBadge, badge_rect};
+use super::badge::{BADGE_WINDOW_ALPHA, BadgePhase, ListeningBadge, badge_rect};
 use super::client::{ProcessSttLink, locate_stt_exe};
 use super::config::{DictationConfig, prepare_launch};
 use super::drain::{Drain, DrainStep};
 use super::engine::{Effect, Engine, Launch};
 use super::focus::{FocusProbe, SystemProbe, Verdict, classify};
 use super::output::{OutputMode, OutputPlan, RouteNote, decide};
+use super::prespawn;
 use super::status::{Failure, Status};
 use super::text::Transcript;
 use super::translate::{
@@ -323,7 +324,7 @@ impl DictationHost {
         self.apply(cx, tooltip, effects, now);
     }
 
-    /// 检查并拉起工作进程。
+    /// 检查并拉起工作进程；UI `main` 最早处已预拉起、且请求一致的 worker 直接认领（START 早已发出）。
     fn make_launch(&self, config: &DictationConfig) -> Result<Launch, Failure> {
         let (exe, request) =
             prepare_launch(config, &self.data_root, locate_stt_exe(), |p| p.is_dir())?;
@@ -331,10 +332,19 @@ impl DictationHost {
         let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
             inbox.push(UiEvent::DictationPoll);
         });
+        if let Some(link) = prespawn::claim(&request, Arc::clone(&wake)) {
+            tracing::info!("认领预拉起的语音进程");
+            return Ok(Launch {
+                link,
+                request,
+                started: true,
+            });
+        }
         let link = ProcessSttLink::spawn(&exe, wake).map_err(Failure::Spawn)?;
         Ok(Launch {
             link: Box::new(link),
             request,
+            started: false,
         })
     }
 
@@ -402,6 +412,7 @@ impl DictationHost {
             match effect {
                 Effect::Begin => self.on_begin(cx),
                 Effect::Loading => self.set_status(cx, tooltip, Status::Loading),
+                Effect::Recording => self.set_status(cx, tooltip, Status::Recording),
                 Effect::Listening => {
                     let status = self.listening_status();
                     self.set_status(cx, tooltip, status);
@@ -594,6 +605,11 @@ impl DictationHost {
         self.engine.active() && self.plan.typing && !self.plan.overlay
     }
 
+    /// 聆听指示当前该画哪个阶段（加载中 / 录音中 / 已就绪），取自引擎状态。
+    fn badge_phase(&self) -> BadgePhase {
+        BadgePhase::from_engine(self.engine.loading(), self.engine.recording())
+    }
+
     /// 按当前状态显示或关闭聆听指示。
     fn sync_badge(&mut self, cx: &mut ShellContext) {
         if self.badge_wanted() {
@@ -608,9 +624,9 @@ impl DictationHost {
         if let Some((window, view)) = &self.badge
             && cx.is_window_open(window)
         {
-            // 已打开：只按引擎状态刷新“加载中 / 已就绪”
-            let loading = self.engine.loading();
-            view.update(cx.app(), |v, vcx| v.set_loading(loading, vcx));
+            // 已打开：只按引擎状态刷新“加载中 / 录音中 / 已就绪”
+            let phase = self.badge_phase();
+            view.update(cx.app(), |v, vcx| v.set_phase(phase, vcx));
             return;
         }
         self.badge = None;
@@ -642,8 +658,8 @@ impl DictationHost {
                 if let Err(e) = window.set_window_alpha(BADGE_WINDOW_ALPHA) {
                     tracing::warn!(error = %e, "聆听指示设置整窗透明度失败");
                 }
-                let loading = self.engine.loading();
-                view.update(cx.app(), |v, vcx| v.set_loading(loading, vcx));
+                let phase = self.badge_phase();
+                view.update(cx.app(), |v, vcx| v.set_phase(phase, vcx));
                 self.badge = Some((window, view));
             }
             Err(e) => tracing::warn!(error = %e, "打开聆听指示失败"),

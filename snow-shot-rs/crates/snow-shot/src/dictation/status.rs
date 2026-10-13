@@ -43,8 +43,10 @@ pub enum Failure {
 /// 一轮识别的状态。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Status {
-    /// 正在加载（拉起进程、加载模型）。
+    /// 正在加载（拉起进程、加载模型，麦克风还没开始录音）。
     Loading,
+    /// 已在录音，模型还在加载：现在说的话被缓存，加载完会补识别出字。
+    Recording,
     /// 正在听；携带输出去向说明。
     Listening(RouteNote),
     /// 正在听，并提示本轮翻译不可用的原因。
@@ -82,6 +84,7 @@ impl Status {
         let i18n = i18n_for(locale);
         match self {
             Status::Loading => i18n.tr("dictation-status-loading"),
+            Status::Recording => i18n.tr("dictation-status-recording"),
             Status::Listening(note) => {
                 let route = route_message(note, locale);
                 i18n.tr_with(
@@ -263,6 +266,7 @@ mod tests {
         ];
         let mut statuses = vec![
             Status::Loading,
+            Status::Recording,
             Status::Finishing,
             Status::Translating,
             Status::Done,
@@ -308,6 +312,20 @@ mod tests {
                     info.code
                 );
             }
+        }
+    }
+
+    /// “加载中”“录音中”“已就绪”三种状态的文案互不相同（用户靠它分辨现在该不该说话、字何时出来）。
+    #[test]
+    fn loading_recording_listening_texts_differ() {
+        for info in snow_i18n::locales() {
+            let loading = Status::Loading.message(info.code);
+            let recording = Status::Recording.message(info.code);
+            let listening = Status::Listening(RouteNote::Typing).message(info.code);
+            assert_ne!(loading, recording, "{}", info.code);
+            assert_ne!(recording, listening, "{}", info.code);
+            assert_ne!(loading, listening, "{}", info.code);
+            assert!(!Status::Recording.is_failed() && !Status::Recording.is_listening());
         }
     }
 

@@ -28,6 +28,8 @@ const EVT_FINAL: &str = "FINAL";
 const EVT_ERROR: &str = "ERROR";
 /// 事件字：心跳应答。
 const EVT_PONG: &str = "PONG";
+/// 事件字：麦克风已打开、已在录音（模型可能还在加载）。
+const EVT_RECORDING: &str = "RECORDING";
 /// 事件字：已停止，进程随后退出。
 const EVT_STOPPED: &str = "STOPPED";
 /// START 命令的固定字段个数（不含行尾的模型目录）。
@@ -370,7 +372,15 @@ pub enum Event {
     /// 出错；原因为单行文本，进程随后退出。
     Error(String),
     /// 心跳应答。
+    ///
+    /// 本地后端在模型加载完、会话主循环开始之后才应答 `PING`（加载期间收到的 `PING` 排队，
+    /// 开始后一并应答），所以 `PONG` 仍表示“识别已就绪”；“只是在录音”由 [`Event::Recording`] 表示。
     Pong,
+    /// 麦克风已打开、已经在录音：音频进环形缓存，模型可能还在加载，加载完会快进识别积压。
+    ///
+    /// 只有 worker 自己采麦克风的本地后端才会发，并且每个进程至多一次、早于 `Pong`；
+    /// 系统语音后端与旧版 worker 不发这条，此时 `Pong` 直接表示在听。
+    Recording,
     /// 已完全停止，进程随后退出。
     Stopped,
 }
@@ -670,6 +680,7 @@ impl Event {
             Self::Final(t) => format!("{EVT_FINAL} {}", escape(t)),
             Self::Error(r) => format!("{EVT_ERROR} {}", escape(r)),
             Self::Pong => EVT_PONG.to_string(),
+            Self::Recording => EVT_RECORDING.to_string(),
             Self::Stopped => EVT_STOPPED.to_string(),
         }
     }
@@ -692,6 +703,7 @@ impl Event {
         match word {
             EVT_READY => Ok(Self::Ready),
             EVT_PONG => Ok(Self::Pong),
+            EVT_RECORDING => Ok(Self::Recording),
             EVT_STOPPED => Ok(Self::Stopped),
             EVT_PARTIAL => Ok(Self::Partial(unescape(rest)?)),
             EVT_FINAL => Ok(Self::Final(unescape(rest)?)),
@@ -745,6 +757,7 @@ mod tests {
         for evt in [
             Event::Ready,
             Event::Pong,
+            Event::Recording,
             Event::Stopped,
             Event::Partial("第一行\n第二行\t制表\\反斜杠\r".into()),
             Event::Final("hello world".into()),
@@ -838,6 +851,14 @@ mod tests {
         ] {
             assert!(Command::parse(line).is_err(), "应当失败: {line:?}");
         }
+    }
+
+    /// RECORDING 的线路格式固定；大小写敏感、不带参数。
+    #[test]
+    fn recording_event_wire_format() {
+        assert_eq!(Event::Recording.to_line(), "RECORDING");
+        assert_eq!(Event::parse("RECORDING\r\n").unwrap(), Event::Recording);
+        assert!(Event::parse("recording").is_err());
     }
 
     #[test]

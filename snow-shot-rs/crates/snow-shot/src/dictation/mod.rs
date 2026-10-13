@@ -5,6 +5,9 @@
 //!
 //! 分层：`engine`（进程生命周期状态机）、`typing` / `focus` / `output`（键入差异、焦点判定、去向决策）、
 //! `text` / `overlay_model`（文本合并）都是纯逻辑，可离屏单测；`client`、`flow`、`view` 负责接系统。
+//!
+//! 冷启动：`prespawn` 在 UI `main` 最早处（宿主带 `--hint dictation` 时）并行拉起 worker 并发 START；
+//! worker 先开麦、环形缓存、模型加载完快进识别积压（见 `snow-stt`），引擎分“加载中 / 录音中 / 已就绪”三段。
 
 pub mod badge;
 pub mod client;
@@ -15,6 +18,7 @@ pub mod flow;
 pub mod focus;
 pub mod output;
 pub mod overlay_model;
+pub mod prespawn;
 pub mod status;
 pub mod text;
 pub mod translate;

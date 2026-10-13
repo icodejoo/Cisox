@@ -2,6 +2,8 @@
 
 dictation-status-loading = 正在启动语音引擎并加载模型，首次可能要等一会儿
 
+dictation-status-recording = 已在录音，模型还在加载，文字稍后出现，可以继续说
+
 dictation-status-listening = 正在听。{ $route }
 
 dictation-status-finishing = 正在收尾……

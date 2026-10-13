@@ -16,7 +16,7 @@ use crate::view::{
     fill_failures, gate_config_change,
 };
 use snow_host_protocol::frame::decode_line;
-use snow_host_protocol::launch::HeadlessJob;
+use snow_host_protocol::launch::{HeadlessJob, UiHint};
 use snow_host_protocol::message::{
     ActionOrigin, GesturePhase, HostMessage, HotkeyResult, UiMessage,
 };
@@ -69,7 +69,8 @@ pub trait Platform {
     ///
     /// # 参数
     /// - `generation`：会话代数；管道事件、进程退出事件都要带着它回报。
-    fn spawn_ui(&mut self, generation: u64) -> Result<SpawnedUi, String>;
+    /// - `hint`：启动提示（队首命令是语音转文字时给 UI 提前预拉语音工作进程的机会），转成 `--hint` 参数。
+    fn spawn_ui(&mut self, generation: u64, hint: UiHint) -> Result<SpawnedUi, String>;
 
     /// 往该代会话的管道写一条消息。
     fn send(&mut self, generation: u64, message: &HostMessage) -> Result<(), String>;
@@ -559,7 +560,8 @@ impl<P: Platform> HostCore<P> {
         while let Some(effect) = pending.pop_front() {
             match effect {
                 Effect::SpawnUi { generation } => {
-                    let follow_up = match self.platform.spawn_ui(generation) {
+                    let hint = self.machine.spawn_hint();
+                    let follow_up = match self.platform.spawn_ui(generation, hint) {
                         Ok(spawned) => {
                             self.machine
                                 .on_spawned(generation, spawned.pid, spawned.token)

@@ -15,6 +15,12 @@ pub const FLAG_SESSION: &str = "--session";
 /// 开关：一次性会话令牌（与 `--ui` 配合）。
 pub const FLAG_TOKEN: &str = "--token";
 
+/// 开关：宿主给 UI 的启动提示（与 `--ui` 配合），后面跟提示名，见 [`UiHint`]。
+pub const FLAG_HINT: &str = "--hint";
+
+/// 启动提示取值：队首命令是语音转文字，UI 可在 `main` 最早处预拉语音工作进程。
+pub const HINT_DICTATION: &str = "dictation";
+
 /// 开关：旧的单进程常驻模式（回退用；阶段 4 起不再是默认，必须显式带上）。
 pub const FLAG_RESIDENT: &str = "--resident";
 
@@ -58,6 +64,8 @@ pub enum LaunchError {
     MissingValue,
     /// `--value` 不是合法的 JSON。
     BadValue(String),
+    /// `--hint` 的取值不认识。
+    BadHint(String),
 }
 
 impl fmt::Display for LaunchError {
@@ -72,6 +80,7 @@ impl fmt::Display for LaunchError {
             LaunchError::MissingKey => write!(f, "set-config 缺少 --key"),
             LaunchError::MissingValue => write!(f, "set-config 缺少 --value"),
             LaunchError::BadValue(e) => write!(f, "--value 不是合法的 JSON: {e}"),
+            LaunchError::BadHint(h) => write!(f, "未知启动提示: {h}"),
         }
     }
 }
@@ -86,6 +95,68 @@ fn is_valid_session(session: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
+/// 宿主拉起 UI 时附带的启动提示：宿主已知队首命令是什么，让 UI 不必等事件循环就能提前干活。
+///
+/// 只是优化提示，UI 不认或没收到都不影响功能；宿主不会因此多链任何依赖。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UiHint {
+    /// 没有提示。
+    #[default]
+    None,
+    /// 队首命令是语音转文字（切换式或按住说话按下）。
+    Dictation,
+}
+
+impl UiHint {
+    /// 由队首命令的动作 id 推出提示；不是语音转文字命令返回 [`UiHint::None`]。
+    ///
+    /// # 参数
+    /// - `action_id`：动作 id。
+    ///
+    /// ```rust
+    /// use snow_host_protocol::launch::UiHint;
+    /// assert_eq!(UiHint::for_action("toggle_dictation"), UiHint::Dictation);
+    /// assert_eq!(UiHint::for_action("start_dictation"), UiHint::Dictation);
+    /// // 松开只会跟在按下之后，不单独构成提示
+    /// assert_eq!(UiHint::for_action("stop_dictation"), UiHint::None);
+    /// assert_eq!(UiHint::for_action("capture"), UiHint::None);
+    /// ```
+    pub fn for_action(action_id: &str) -> Self {
+        match action_id {
+            crate::ACTION_TOGGLE_DICTATION | crate::ACTION_START_DICTATION => Self::Dictation,
+            _ => Self::None,
+        }
+    }
+
+    /// 命令行里 `--hint` 的取值；没有提示时不写这个开关。
+    pub fn flag_value(self) -> Option<&'static str> {
+        match self {
+            Self::None => None,
+            Self::Dictation => Some(HINT_DICTATION),
+        }
+    }
+
+    /// 解析 `--hint` 的取值。
+    ///
+    /// # 参数
+    /// - `value`：命令行里 `--hint` 后面的词。
+    ///
+    /// # 返回
+    /// 提示；不认识的取值返回 [`LaunchError::BadHint`]。
+    ///
+    /// ```rust
+    /// use snow_host_protocol::launch::UiHint;
+    /// assert_eq!(UiHint::parse("dictation").unwrap(), UiHint::Dictation);
+    /// assert!(UiHint::parse("nope").is_err());
+    /// ```
+    pub fn parse(value: &str) -> Result<Self, LaunchError> {
+        match value {
+            HINT_DICTATION => Ok(Self::Dictation),
+            other => Err(LaunchError::BadHint(other.to_string())),
+        }
+    }
+}
+
 /// 宿主传给 UI 进程的会话参数。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UiLaunch {
@@ -93,6 +164,8 @@ pub struct UiLaunch {
     pub session: String,
     /// 一次性会话令牌（小写十六进制）。
     pub token: String,
+    /// 启动提示（缺省没有）。
+    pub hint: UiHint,
 }
 
 impl UiLaunch {
@@ -121,10 +194,31 @@ impl UiLaunch {
         if !is_valid_token(&token) {
             return Err(LaunchError::BadToken);
         }
-        Ok(Self { session, token })
+        Ok(Self {
+            session,
+            token,
+            hint: UiHint::None,
+        })
     }
 
-    /// 拼成命令行参数（不含程序名）：`--ui --session <名> --token <令牌>`。
+    /// 附上启动提示。
+    ///
+    /// # 参数
+    /// - `hint`：启动提示。
+    ///
+    /// ```rust
+    /// use snow_host_protocol::launch::{UiHint, UiLaunch};
+    /// let launch = UiLaunch::new(Some("s".into()), Some("cd".repeat(32)))
+    ///     .unwrap()
+    ///     .with_hint(UiHint::Dictation);
+    /// assert_eq!(launch.to_args().last().map(String::as_str), Some("dictation"));
+    /// ```
+    pub fn with_hint(mut self, hint: UiHint) -> Self {
+        self.hint = hint;
+        self
+    }
+
+    /// 拼成命令行参数（不含程序名）：`--ui --session <名> --token <令牌> [--hint <提示>]`。
     ///
     /// ```rust
     /// use snow_host_protocol::launch::UiLaunch;
@@ -132,15 +226,20 @@ impl UiLaunch {
     /// let args = launch.to_args();
     /// assert_eq!(args[0], "--ui");
     /// assert_eq!(args[2], "s");
+    /// assert_eq!(args.len(), 5);
     /// ```
     pub fn to_args(&self) -> Vec<String> {
-        vec![
+        let mut args = vec![
             FLAG_UI.to_string(),
             FLAG_SESSION.to_string(),
             self.session.clone(),
             FLAG_TOKEN.to_string(),
             self.token.clone(),
-        ]
+        ];
+        if let Some(value) = self.hint.flag_value() {
+            args.extend([FLAG_HINT.to_string(), value.to_string()]);
+        }
+        args
     }
 }
 
@@ -293,6 +392,24 @@ mod tests {
         assert_eq!(args[3], FLAG_TOKEN);
         let again = UiLaunch::new(Some(args[2].clone()), Some(args[4].clone())).unwrap();
         assert_eq!(again, launch);
+    }
+
+    /// 启动提示：由队首动作推出，写进参数后能读回；没有提示时不多写开关。
+    #[test]
+    fn hint_round_trips_through_args() {
+        assert_eq!(UiHint::for_action("toggle_dictation"), UiHint::Dictation);
+        assert_eq!(UiHint::for_action("start_dictation"), UiHint::Dictation);
+        for other in ["stop_dictation", "capture", "keep_alive", ""] {
+            assert_eq!(UiHint::for_action(other), UiHint::None, "{other}");
+        }
+        let base = UiLaunch::new(Some("s".into()), Some("ab".repeat(32))).unwrap();
+        assert_eq!(base.to_args().len(), 5);
+        let hinted = base.with_hint(UiHint::Dictation);
+        let args = hinted.to_args();
+        assert_eq!(args.len(), 7);
+        assert_eq!(args[5], FLAG_HINT);
+        assert_eq!(UiHint::parse(&args[6]).unwrap(), UiHint::Dictation);
+        assert_eq!(UiHint::parse("x"), Err(LaunchError::BadHint("x".into())));
     }
 
     /// 缺参数、会话名含路径分隔符、令牌格式不对都被拒绝。

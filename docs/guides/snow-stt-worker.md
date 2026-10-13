@@ -24,13 +24,14 @@
 | | `PARTIAL <文本>` | 当前句的临时文本，仅在变化时发 |
 | | `FINAL <文本>` | 一句话定稿（端点触发后或 STOP 冲刷时） |
 | | `ERROR <原因>` | 单行原因，随后退出（模型缺失、麦克风被拒等） |
-| | `PONG` / `STOPPED` | 心跳应答 / 已停止 |
+| | `RECORDING` | 麦克风已打开、已在录音（本地后端、worker 自己采麦克风时才发，每进程至多一次，早于 `PONG`）：音频进环形缓存，模型可能还在加载，加载完会快进识别积压。系统语音后端与旧 worker 不发 |
+| | `PONG` / `STOPPED` | 心跳应答 / 已停止。本地后端在**模型加载完、会话主循环开始之后**才应答 `PING`（加载期间收到的 PING 排队），所以 `PONG` 仍表示“识别已就绪” |
 
 前缀键（含 `backend=`）顺序任意、不可重复（重复、未知键、非法值都报解析错误）；序列化固定顺序 `backend mode kind vad itn`，缺省值不写，所以旧格式的字节不变。FINAL / PARTIAL 事件与协议版本都没有变。因为 `vad` 带 f32，`StartRequest` 与 `Command` 不再派生 `Eq`（只保留 `PartialEq`）。
 
 stdin 关闭（主程序退出或崩溃）视为中止：不再发事件，直接退出。进程一次只做一次识别，退出即释放模型与麦克风。首行若带 UTF-8 BOM 会被忽略。
 
-流程：加载完模型才打开麦克风（避免把加载期间的旧音频喂进去）；音频按 320ms（5120 样本）一块喂 sherpa；每块后取结果，文本变化发 `PARTIAL`，`is_endpoint` 为真发 `FINAL` 并重置流；STOP 时补 0.66s 静音、`input_finished` 后冲刷最后一句。
+流程（本地后端 + 麦克风，2026-10-13 起）：收到 START 先开麦——采集在独立线程里边开边存（开麦成功发 `RECORDING`，失败立刻发 `ERROR`，不等模型加载完），样本进有上限的环形缓存（默认 30 s，取 `min(30 s, max_seconds)`；写满丢最旧并向 stderr 记一行）；同时在主线程加载模型。模型就绪后进入会话主循环：先应答排队的 `PING`，再把积压每次 1 s 一批按序快进喂给识别器（追平后自然转实时，批与批之间照常处理 STOP / CANCEL / PING）。音频按 320ms（5120 样本）一块喂 sherpa；每块后取结果，文本变化发 `PARTIAL`，`is_endpoint` 为真发 `FINAL` 并重置流。`STOP` 时先把缓存里剩下的积压喂完，再补 0.66s 静音、`input_finished` 后冲刷最后一句；`CANCEL` 不喂。`max_seconds` 按实际喂给后端的样本计（从开麦算起，溢出丢掉的不计）。系统语音后端与 `--wav` 不走这条（系统识别器自己占麦克风；wav 保持“加载完再读”，`--wav-preroll` 可让 wav 也走缓存流程，`--load-delay-ms <n>` 人为拖慢加载，二者合用可离线复现追赶）。离线模式同样先开麦、积压喂 VAD（积压喂入 VAD 的行为未在真机验证）。
 
 ## 模型放置
 模型不随仓库打包。目录里需要的文件按模型类型（`kind`）识别，文件名按前缀 / 约定匹配：
@@ -105,7 +106,7 @@ scripts\verify-snow-stt.ps1 -Mode offline -Kind offline-sense-voice -Itn `
 ```
 
 ## 单测
-`scripts\build-snow-stt.ps1 -Test`（worker 44 个，含主循环 Fake 测试、系统后端的纯逻辑：HRESULT / 状态分类、语言解析、假设升格、节拍来源）与 `cargo test -p snow-stt-protocol`（协议往返与异常输入）。
+`scripts\build-snow-stt.ps1 -Test`（worker 65 个，含主循环 Fake 测试、先开麦环形缓存与积压追赶、系统后端的纯逻辑：HRESULT / 状态分类、语言解析、假设升格、节拍来源）与 `cargo test -p snow-stt-protocol`（协议往返与异常输入）。
 
 ## 主程序接入
 入口代码在 `snow-shot-rs/crates/snow-shot/src/dictation/`，分层如下（纯逻辑层都有离屏单测）：
@@ -150,8 +151,9 @@ scripts\verify-snow-stt.ps1 -Mode offline -Kind offline-sense-voice -Itn `
 
 ### 进程生命周期
 1. 定位 exe：环境变量 `SNOW_STT_EXE`（指向不存在的文件不再回退）→ 主程序同目录 → 沿目录向上的开发布局（`build/stt/{release,debug}/`、`snow-shot-rs/tools/snow-stt/target/release/`）。找不到时提示可读错误（放在主程序旁边或设环境变量）。
-2. 拉起后等 `READY`（上限 120s），随即发 `START`，**并紧跟一条 `PING`**：worker 只在会话主循环里应答 `PONG`，而主循环要等模型加载完、麦克风打开之后才开始，所以 `PONG`（或第一条 `PARTIAL`/`FINAL`，兼容旧 worker）就表示「已经在听」。从 `START` 到 `PONG` 同样给 120s（冷加载大模型可能很久），期间状态显示「加载中」。协议本身没有专门的「已就绪」事件，这是不改协议的做法。
-3. 结束：在听时发 `STOP`，等 `FINAL` + `STOPPED`（上限 10s）；超时改发 `CANCEL` 再等 3s；仍不退出则强制结束，并报错。还没开始听就要结束（按住说话点了一下），没有可冲刷的音频，直接结束进程。
+2. 拉起后等 `READY`（上限 120s），随即发 `START`，**并紧跟一条 `PING`**：worker 只在会话主循环里应答 `PONG`，而主循环要等模型加载完才开始，所以 `PONG`（或第一条 `PARTIAL`/`FINAL`，兼容旧 worker）表示「识别已就绪，正在听」。从 `START` 到 `PONG` 同样给 120s（冷加载大模型可能很久）。期间分两段：收到 `RECORDING` 之前是「加载中」（麦克风还没开始录），收到之后是「录音中」（已在录音，字稍后出，状态文案 `dictation-status-recording`，右下角图标画光环 + 进度条）；没有 `RECORDING` 的 worker（系统语音、旧版）从「加载中」直接到「正在听」。
+   - **预拉起**：宿主发现队首命令是切换式 / 按住说话按下，给 UI 加 `--hint dictation`；UI 在 `main` 最早处（`dictation/prespawn.rs`）后台线程里读配置、拉起 worker 并立刻发 `START` + `PING`，之后事件循环收到听写命令时认领（请求与当前配置不一致就作废重拉；15 s 无人认领自动结束）。认领的引擎直接进入「加载中」，不再等 `READY`、不重复发 START。
+3. 结束：在听时发 `STOP`，等 `FINAL` + `STOPPED`（上限 10s）；超时改发 `CANCEL` 再等 3s；仍不退出则强制结束，并报错。**已在录音（收到 `RECORDING`）但模型还在加载**时松开：同样发 `STOP`，worker 等加载完、喂完积压再冲刷出字（等待期间按加载期限 120s 计，`PONG` 到了再按 10s 收尾期限计；加载超时按「启动超时」失败）。**还没开始录音**（没收到 `RECORDING`）就要结束，没有音频可冲刷，直接结束进程，这段话丢就丢（不做补偿）。
 4. 异常：`ERROR`、进程意外退出（带退出码）、写命令失败都会结束会话并给出可读提示；`STOPPED` 之后给进程 2s 自行退出。
 5. 主程序退出：发 `CANCEL`、关闭 stdin（worker 视为中止），短宽限后强制结束。结束进程只用自己 `spawn` 得到的子进程句柄，不按进程名查杀。
 6. 结束请求（toggle 再按一次 / hold 松开，都走 `DictationCommand::Stop` 同一条路）：识别部分仍是第 3 条（worker 冲刷排队的段）；引擎结束后若还有句子在翻译（`TranslationTracker::pending_count() > 0`），宿主弹出浮窗并进入「正在完成翻译」（`dictation/drain.rs`，上限 12s，超时提示后结束），译文回齐后才落「已结束」；等待或收尾期间再次触发结束 = 强制立即结束（`Engine::force_stop` 发 CANCEL 并释放进程）。注意：worker 进程在识别冲刷完成后即退出、麦克风随之关闭，不会为等译文而保留（译文跑在主程序线程里，与 worker 无关）。
@@ -279,6 +281,7 @@ scripts\verify-snow-stt.ps1 -Mode offline -Kind offline-sense-voice -Itn `
 - **UIA 阻塞**：目标程序无响应时 `GetFocusedElement` 可能卡住。探测在后台线程执行、2.5s 无结果就按不确定处理，但该线程会一直挂到调用返回（不影响主线程）。
 - **浮窗**：位置（含多显示器、副屏负坐标、混合 DPI）、「不抢焦点」（依赖 gpui `focus: false` 与 PopUp 窗口样式，未确认不会触发窗口激活）、文本区更新时光标位置（每次落定都会重置选区，用户正在中间编辑时光标会跳到开头）、Esc 只在浮窗拿到焦点后才有效——都是真机项。
 - **「已就绪」判定依赖 PONG**：见「进程生命周期」第 2 点；用旧版没有 PING 应答的 worker 时，会一直显示「加载中」直到第一条识别文本出现。
+- **先开麦 / 预拉起**（2026-10-13）：只有离屏单测（环形缓存、追赶顺序、引擎状态机、`--hint` 解析、宿主提示）；端到端计时（按键到首个麦克风包、第一个被识别的数字、追赶耗时）待真人跑 `scripts/verify-dictation-cold-start.ps1`，判据见 [research/dictation-cold-start.md](../research/dictation-cold-start.md) §7 E2。缓存溢出（模型加载超过 30 s）时最旧的音频被丢弃，目前只记 stderr 日志，UI 没有提示。键入模式下，加载期间说的话会在加载完后一口气打出。
 - **系统语音后端**：实机听写质量、延迟、中英文表现**未验证**（本机联机语音识别开关是关的，没有对着麦克风说过话）；只验证了错误路径与能力探测，见「系统语音后端」一节。
 - **离线模式**：只在 wav 与 Python 评测上验证过，没有对着麦克风跑过；VAD 默认值（500ms 静音等）未经评测，会把长句切开，需用真实录音复测；离线模型没有做 `snow-stt` 对 Python 的逐句一致性对照。
 - **真机验证范围**：已于 2026-10-03/04 在本机（Windows 11，2560x1600，缩放 1.5）截图验证设置页（模式 / 维度 / 模型联动、置灰、itn 显隐、中英文）与真实下载（含取消续传、校验值待固定、离线 VAD 合并下载）。仍未验证：麦克风实时听写（声学回环被麦克风阵列回声消除滤掉）、键入记事本、翻译级联浮窗与翻译模型联调（本机没有翻译模型）。

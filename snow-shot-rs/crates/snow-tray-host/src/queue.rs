@@ -103,6 +103,20 @@ impl CommandQueue {
         self.items.is_empty()
     }
 
+    /// 队首的消息（最先入队、握手后最先投递的那条）；不含已过期的判断，调用方按需先 `expire`。
+    ///
+    /// ```rust
+    /// use snow_tray_host::queue::{CommandQueue, Outbound};
+    /// use std::time::Instant;
+    /// let mut queue = CommandQueue::new();
+    /// assert!(queue.front().is_none());
+    /// queue.push(Outbound::RestorePins, Instant::now());
+    /// assert_eq!(queue.front(), Some(&Outbound::RestorePins));
+    /// ```
+    pub fn front(&self) -> Option<&Outbound> {
+        self.items.front().map(|queued| &queued.message)
+    }
+
     /// 入队一条消息。
     ///
     /// 手势 `update` 若队列里已有同一手势的 `update`，就地替换成最新坐标（不增长）；队列已满时

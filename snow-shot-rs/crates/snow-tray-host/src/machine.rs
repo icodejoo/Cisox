@@ -15,6 +15,7 @@
 use crate::breaker::{BreakerState, CrashBreaker};
 use crate::focus::{GRANT_ON_SPAWN, grant_for_forward};
 use crate::queue::{CommandQueue, Outbound, PushOutcome};
+use snow_host_protocol::launch::UiHint;
 use snow_host_protocol::message::{GesturePhase, HelloError, HostMessage, UiMessage, check_hello};
 use snow_host_protocol::seq::{ExitDecision, HostSeq};
 use snow_host_protocol::{ACK_TIMEOUT, EXIT_WAIT_TIMEOUT, HELLO_TIMEOUT};
@@ -177,6 +178,8 @@ pub struct HostMachine {
     connected_pid: Option<u32>,
     /// 快照要求 UI 常驻（MCP / OCR 预热）：崩溃或退避结束后宿主要补拉一个。
     keep_alive: bool,
+    /// 最近一次拉起 UI 时带的启动提示（拉起那一刻队首命令的种类）。
+    spawn_hint: UiHint,
 }
 
 impl Default for HostMachine {
@@ -200,7 +203,14 @@ impl HostMachine {
             pins: 0,
             connected_pid: None,
             keep_alive: false,
+            spawn_hint: UiHint::None,
         }
+    }
+
+    /// 最近一次 `SpawnUi` 要带给 UI 的启动提示：拉起那一刻队首命令是语音转文字就是
+    /// [`UiHint::Dictation`]，让 UI 在 `main` 最早处预拉语音工作进程；其余情况没有提示。
+    pub fn spawn_hint(&self) -> UiHint {
+        self.spawn_hint
     }
 
     /// 设置“UI 要常驻”标志（来自快照的保活原因，见 `HostFlags::needs_resident_ui`）。
@@ -582,6 +592,10 @@ impl HostMachine {
 
     /// 拉起一个新的 UI 会话。
     fn start_ui(&mut self, now: Instant, out: &mut Vec<Effect>) {
+        self.spawn_hint = match self.queue.front() {
+            Some(Outbound::Action { id, .. }) => UiHint::for_action(id),
+            _ => UiHint::None,
+        };
         self.generation += 1;
         self.seq = HostSeq::new();
         self.inflight.clear();

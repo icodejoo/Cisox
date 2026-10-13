@@ -2,6 +2,8 @@
 
 dictation-status-loading = Starting the speech engine and loading the model. The first run can take a while.
 
+dictation-status-recording = Recording. The model is still loading, so text will appear a bit later. You can keep talking.
+
 dictation-status-listening = Listening. { $route }
 
 dictation-status-finishing = Finishing...

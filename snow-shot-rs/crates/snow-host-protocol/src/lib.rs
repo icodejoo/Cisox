@@ -94,6 +94,12 @@ pub const ACTION_MAIN_WINDOW: &str = "main_window";
 /// 动作 id：宿主要求 UI 常驻（登录时按 `keep_alive` 拉起、崩溃后补拉），UI 收到后什么都不做。
 pub const ACTION_KEEP_ALIVE: &str = "keep_alive";
 
+/// 动作 id：切换式语音转文字（热键）。
+pub const ACTION_TOGGLE_DICTATION: &str = "toggle_dictation";
+
+/// 动作 id：开始语音转文字（按住说话按下）。
+pub const ACTION_START_DICTATION: &str = "start_dictation";
+
 /// 配置键：前台全屏窗口时停用全局热键（宿主切换开关后经 `set_config` 让 UI 落盘）。
 pub const CONFIG_KEY_DISABLE_ON_FULLSCREEN: &str =
     "global_shortcuts/disable_on_focused_fullscreen_window";

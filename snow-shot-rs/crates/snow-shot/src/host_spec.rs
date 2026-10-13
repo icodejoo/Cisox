@@ -35,9 +35,9 @@ const COMMAND_PIN_SELECTION: &str = "pin_selection";
 /// 命令 id：打开输入框翻译浮窗。
 const COMMAND_OPEN_TRANSLATE_INPUT: &str = "open_translate_input";
 /// 命令 id：切换式语音转文字。
-const COMMAND_TOGGLE_DICTATION: &str = "toggle_dictation";
+const COMMAND_TOGGLE_DICTATION: &str = snow_host_protocol::ACTION_TOGGLE_DICTATION;
 /// 命令 id：开始语音转文字（按住说话按下）。
-const COMMAND_START_DICTATION: &str = "start_dictation";
+const COMMAND_START_DICTATION: &str = snow_host_protocol::ACTION_START_DICTATION;
 /// 命令 id：结束语音转文字（按住说话松开）。
 const COMMAND_STOP_DICTATION: &str = "stop_dictation";
 

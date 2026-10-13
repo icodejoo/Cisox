@@ -1,6 +1,6 @@
 # 语音转文字冷启动：UI 退出后怎么不丢开头
 
-> 状态：调研 + 本机离线实测完成，**未改任何产品代码**；方案待用户拍板。日期 2026-10-13。依据 [`principles.md`](../principles.md) 的优先级链（高性能 > 低内存 > 高 fps > 少编译依赖 > 多用系统能力，另含不常驻）。
+> 状态：**已拍板并实施（2026-10-13）**：推荐 1（worker 先开麦 + 环形缓存 + 追赶）与推荐 2（UI `main` 最早处预拉 worker）已落地，离屏单测通过；宿主直接拉 worker、宿主录音、麦克风常开不做；麦克风打开那 0.7~0.9 s 内的话丢就丢；§7 的 E2 真人计时待做（脚本 `scripts/verify-dictation-cold-start.ps1`），§9 第 5 条（双语模型加载提速）另立项。以下正文是拍板前的调研原文，行为描述（如“现状”）指拍板前。日期 2026-10-13。依据 [`principles.md`](../principles.md) 的优先级链（高性能 > 低内存 > 高 fps > 少编译依赖 > 多用系统能力，另含不常驻）。
 > 关联：[`design/tray-host-split.md`](../design/tray-host-split.md)（§10 第 4 条已于 2026-10-13 改判为"绑了语音热键也立即退出"，其中写了"后续可能另做 worker 预拉优化"，本文就是这件事的调研；UI 冷启动分段见其 §12.1）、[`guides/snow-stt-worker.md`](../guides/snow-stt-worker.md)（worker 协议与生命周期）、[`research/stt-model-selection.md`](stt-model-selection.md)（模型加载耗时的历史口径）、[`research/tray-host-minimal.md`](tray-host-minimal.md)（宿主内存与导入表约束）。
 > 资料来源说明：产品行为全部来自读代码和本机实测（探针与脚本在 scratchpad，不入仓库）。业界做法先走网络搜索，再对能打开的页面 WebFetch 核对；只有搜索摘要、没能读到正文的写"未证实"。
 > 任务背景里写的"现行规则：绑了语音热键 UI 保活"已经过时：`accdbdcf`（2026-10-13 12:38）已改判为不保活，`host_spec::keep_alive_reasons` 只剩 MCP 与 OCR 预热。所以本文的问题是改判之后遗留的那一条：冷拉起 UI 时按住说话的开头会丢多少，能不能不丢。
@@ -239,3 +239,21 @@ START 一到：①立刻开麦（独立线程）并把 16kHz 样本写进有上�
 - worker：`sttbench.ps1 -NoStart`（只量到 READY）、`-ModelDir <目录>`（真麦克风，量 START→PONG 与内存，1.5 s 后 CANCEL）、`-ModelDir <目录> -Wav <wav>`（`--wav`，打印 `stats: load_ms=…`）。START 行用 `START auto 2 2400 1200 20000 120 <转义后的目录>`，**目录里的反斜杠要写成 `\\`**（协议转义，漏了会得到 `未知转义` 的 ERROR）。每个实验 3 次。
 - 麦克风：`audioprobe.exe <秒数> [mix] [again]`，`mix` 用混音格式，`again` 追加 1 s 后二次打开。进程先做扩展点缓解 + `ImmDisableIME(-1)` + 建隐藏窗口，再开麦。
 - 没有动任何系统设置、注册表或用户数据目录；只读了 `%LOCALAPPDATA%\Cisox\models\stt` 与 `config.json`。没有启动 `snow-shot.exe` / `snow-shot-ui.exe`，没有弹窗或模拟热键。真麦克风被打开过约 20 次（每次 ≤ 3 s），识别结果没有保存。
+
+## 13. 实施记录（2026-10-13）
+
+用户拍板：做推荐 1（worker 先开麦 + 环形缓存 + 追赶）与推荐 2（UI `main` 最早处并行拉 worker，宿主只多一个启动参数）；宿主直接拉 worker、宿主录音、麦克风常开都不做；麦克风打开那 0.7~0.9 s 内的话丢就丢；UI 区分“加载中 / 已就绪”；按住说话在录音开始之后松开 = 等加载与积压处理完再出字（键入模式加载完后一次性打出可接受）；缓冲上限默认 30 s；双语模型加载提速另立项。
+
+落地要点（细节见 `guides/snow-stt-worker.md`）：
+- **协议**：`snow-stt-protocol` 新增事件 `RECORDING`（麦克风已开、已在录音）。`PONG` 语义不变（模型加载完、主循环开始才应答，仍表示识别就绪）。
+- **worker**（`tools/snow-stt`）：本地后端收到 START 先开采集线程（`preroll.rs`，样本进环形缓存，上限 `min(30 s, max_seconds)`，满了丢最旧并记 stderr），主线程同时加载模型；就绪后主循环每次 1 s 一批快进积压，批间照常响应 STOP / CANCEL / PING；STOP 先喂完积压再冲刷；开麦失败立刻报 ERROR。系统语音与 `--wav` 保持老流程；测试用参数 `--wav-preroll`、`--load-delay-ms`。
+- **引擎**（`dictation/engine.rs`）：新增“录音中”阶段（收到 `RECORDING`）；没收到 `RECORDING` 就松开仍直接结束进程（丢就丢）；已在录音时松开发 STOP 并等加载，收尾期限等 `PONG` 后才按 10 s 重新计时，加载超时按启动超时失败。
+- **UI**：状态 `Status::Recording`（文案 `dictation-status-recording`，en-US / zh-CN），右下角图标三态（加载中只有进度条，录音中光环 + 进度条，就绪只有光环）。
+- **预拉起**：宿主 `--ui ... --hint dictation`（拉起时队首命令是 `toggle_dictation` / `start_dictation`），UI 在 `bootstrap` 之后、抢互斥体 / 连管道 / 初始化 GPUI 之前后台线程读配置（只读）、拉 worker、发 START + PING；`begin()` 认领（请求不一致作废）；15 s 无人认领自动结束。
+
+偏差与未做：
+1. 预拉起放在 `bootstrap_with` 之后（含日志与崩溃处理器初始化），没有更早，没测这段耗时。
+2. 缓存溢出（模型加载超过 30 s）只记 worker 的 stderr，UI 没有提示（协议里没有对应事件）。
+3. 离线（VAD）模式的积压喂入未在真机验证；端到端计时（E2）待真人。
+4. 收尾等加载期间状态显示“收尾中”，没有单独文案。
+

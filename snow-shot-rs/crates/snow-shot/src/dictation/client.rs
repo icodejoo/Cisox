@@ -343,6 +343,7 @@ mod tests {
             Ok(Launch {
                 link: Box::new(link),
                 request,
+                started: false,
             }),
         );
         let mut transcript = Transcript::default();
