@@ -48,6 +48,8 @@ struct Fake {
     fullscreen: bool,
     /// 注册失败的热键文本。
     busy_hotkeys: HashSet<String>,
+    /// 每次拉起 UI 带的启动提示。
+    spawn_hints: Vec<UiHint>,
     /// 拉起是否失败。
     spawn_fails: bool,
     /// 下一个 UI 进程 ID。
@@ -55,8 +57,9 @@ struct Fake {
 }
 
 impl Platform for Fake {
-    fn spawn_ui(&mut self, generation: u64) -> Result<SpawnedUi, String> {
+    fn spawn_ui(&mut self, generation: u64, hint: UiHint) -> Result<SpawnedUi, String> {
         self.calls.push(Call::SpawnUi(generation));
+        self.spawn_hints.push(hint);
         if self.spawn_fails {
             return Err("找不到 exe".into());
         }
@@ -490,6 +493,28 @@ fn hotkeys_reregister_only_when_changed() {
         "Ctrl+Alt+R".into(),
         "Ctrl+Alt+P".into()
     ])));
+}
+
+/// 启动提示：队首命令是语音转文字（切换 / 按住说话按下）才带 `--hint dictation`，其它命令不带。
+#[test]
+fn spawn_hint_follows_queue_head() {
+    for (id, expected) in [
+        ("toggle_dictation", UiHint::Dictation),
+        ("start_dictation", UiHint::Dictation),
+        ("stop_dictation", UiHint::None),
+        ("capture", UiHint::None),
+    ] {
+        let (mut core, t0) = started(Some(spec(1)));
+        take_calls(&mut core);
+        core.handle(
+            t0,
+            Event::Action {
+                id: id.into(),
+                origin: ActionOrigin::Hotkey,
+            },
+        );
+        assert_eq!(core.platform.spawn_hints, vec![expected], "{id}");
+    }
 }
 
 /// 热键触发：UI 不在 → 拉起、握手后投递；动作带来源；先授权前台再写管道。

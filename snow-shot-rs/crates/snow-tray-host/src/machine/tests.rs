@@ -77,6 +77,26 @@ fn cold_submit_spawns_and_queues() {
     assert_eq!(granted, vec![Effect::GrantForeground { pid: PID }]);
 }
 
+/// 拉起时的启动提示只看队首：语音命令在前才提示；先截图后语音不提示；没有拉起就保持上次的值。
+#[test]
+fn spawn_hint_only_looks_at_queue_head() {
+    let t0 = Instant::now();
+    let mut machine = HostMachine::new();
+    assert_eq!(machine.spawn_hint(), UiHint::None);
+    machine.submit(t0, action("toggle_dictation"));
+    assert_eq!(machine.spawn_hint(), UiHint::Dictation);
+
+    let mut machine = HostMachine::new();
+    machine.submit(t0, action("capture"));
+    machine.submit(t0, action("start_dictation"));
+    assert_eq!(machine.spawn_hint(), UiHint::None, "队首是截图");
+
+    let mut machine = HostMachine::new();
+    machine.submit(t0, action("start_dictation"));
+    machine.submit(t0, action("stop_dictation"));
+    assert_eq!(machine.spawn_hint(), UiHint::Dictation);
+}
+
 /// UI 启动期间连发命令：全部入队保序，握手完成后按序号 1..n 依次写出，且不重复拉起。
 #[test]
 fn burst_during_startup_is_flushed_in_order() {

@@ -36,10 +36,52 @@ const LOADING_BAR_BOTTOM: f32 = 10.0;
 /// 耳朵图标资源路径（Material Icons 的 hearing，自绘图标表里）。
 const EAR_ICON: &str = "icons/snow/hearing.svg";
 
-/// 聆听指示视图（动画由 GPUI 驱动）；模型未就绪时在图标下方显示循环进度条，并暂停光环。
+/// 聆听指示的三种阶段：用户靠它分辨“还没在录”“已在录、字稍后出”“识别已就绪”。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BadgePhase {
+    /// 加载中：麦克风还没开始录音，此时说的话不会被收到。
+    Loading,
+    /// 录音中：已在录音，模型还在加载，说的话被缓存、稍后出字。
+    Recording,
+    /// 已就绪：识别在出字。
+    Ready,
+}
+
+impl BadgePhase {
+    /// 由引擎状态得到阶段。
+    ///
+    /// # 参数
+    /// - `loading`：识别是否还没就绪（`Engine::loading`，含录音中）。
+    /// - `recording`：是否已在录音但识别未就绪（`Engine::recording`）。
+    ///
+    /// ```ignore
+    /// assert_eq!(BadgePhase::from_engine(true, true), BadgePhase::Recording);
+    /// ```
+    pub fn from_engine(loading: bool, recording: bool) -> Self {
+        if recording {
+            Self::Recording
+        } else if loading {
+            Self::Loading
+        } else {
+            Self::Ready
+        }
+    }
+
+    /// 是否画扩散光环：没开始录音时不画（光环表示“正在收音”）。
+    pub fn show_ring(self) -> bool {
+        self != Self::Loading
+    }
+
+    /// 是否画循环进度条：识别还没就绪（加载中、录音中）时画，提示模型还在加载。
+    pub fn show_loading_bar(self) -> bool {
+        self != Self::Ready
+    }
+}
+
+/// 聆听指示视图（动画由 GPUI 驱动）：加载中只画进度条；录音中光环与进度条都画；就绪后只画光环。
 pub struct ListeningBadge {
-    /// 引擎是否还在启动 / 加载模型（此时说话不会被识别）。
-    loading: bool,
+    /// 当前阶段。
+    phase: BadgePhase,
 }
 
 impl ListeningBadge {
@@ -48,16 +90,18 @@ impl ListeningBadge {
     /// # 参数
     /// - `app`：应用上下文。
     pub fn create(app: &mut App) -> Entity<Self> {
-        app.new(|_cx| Self { loading: true })
+        app.new(|_cx| Self {
+            phase: BadgePhase::Loading,
+        })
     }
 
-    /// 切换“加载中”提示；状态没变时不重绘。
+    /// 切换阶段；状态没变时不重绘。
     ///
     /// # 参数
-    /// - `loading`：引擎是否尚未就绪。
-    pub fn set_loading(&mut self, loading: bool, cx: &mut Context<Self>) {
-        if self.loading != loading {
-            self.loading = loading;
+    /// - `phase`：新阶段。
+    pub fn set_phase(&mut self, phase: BadgePhase, cx: &mut Context<Self>) {
+        if self.phase != phase {
+            self.phase = phase;
             cx.notify();
         }
     }
@@ -100,10 +144,10 @@ impl Render for ListeningBadge {
             .flex()
             .items_center()
             .justify_center()
-            .when(!self.loading, |this| this.child(ring))
+            .when(self.phase.show_ring(), |this| this.child(ring))
             .child(ear)
-            .when(self.loading, |this| {
-                // 未就绪：图标下方一条循环进度条，提示模型还在加载
+            .when(self.phase.show_loading_bar(), |this| {
+                // 识别未就绪：图标下方一条循环进度条，提示模型还在加载
                 this.child(
                     div()
                         .absolute()
@@ -178,6 +222,19 @@ pub fn badge_rect(work_area: PhysicalRect, scale: ScaleFactor) -> PhysicalRect {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 阶段由引擎的两个标志推出（录音中优先于加载中），三种阶段的光环 / 进度条组合各不相同。
+    #[test]
+    fn phase_follows_engine_flags() {
+        assert_eq!(BadgePhase::from_engine(true, false), BadgePhase::Loading);
+        assert_eq!(BadgePhase::from_engine(true, true), BadgePhase::Recording);
+        assert_eq!(BadgePhase::from_engine(false, false), BadgePhase::Ready);
+        // (光环, 进度条)：加载中只有进度条，录音中两者都有，就绪只有光环
+        let shown = |p: BadgePhase| (p.show_ring(), p.show_loading_bar());
+        assert_eq!(shown(BadgePhase::Loading), (false, true));
+        assert_eq!(shown(BadgePhase::Recording), (true, true));
+        assert_eq!(shown(BadgePhase::Ready), (true, false));
+    }
 
     /// 光环起点是起始大小且可见，终点是窗口大小且完全透明。
     #[test]

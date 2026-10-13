@@ -72,7 +72,7 @@ fn session_from_args(dir: &std::path::Path) -> String {
 fn spawn_passes_launch_args_and_reports_exit() {
     let dir = scratch("args");
     let (mut platform, rx) = platform_with(fake_ui(&dir, ""), dir.clone());
-    let spawned = platform.spawn_ui(7).unwrap();
+    let spawned = platform.spawn_ui(7, UiHint::None).unwrap();
     assert!(spawned.pid > 0);
     assert!(snow_host_protocol::message::is_valid_token(&spawned.token));
     wait_for(&rx, |e| matches!(e, Event::UiExited { generation: 7 }));
@@ -88,6 +88,26 @@ fn spawn_passes_launch_args_and_reports_exit() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// 启动提示：带 `Dictation` 时命令行末尾多 `--hint dictation`，没有提示时不带这个开关。
+#[test]
+fn spawn_adds_hint_arg_only_when_hinted() {
+    let dir = scratch("hint");
+    let (mut platform, rx) = platform_with(fake_ui(&dir, ""), dir.clone());
+    platform.spawn_ui(1, UiHint::Dictation).unwrap();
+    wait_for(&rx, |e| matches!(e, Event::UiExited { generation: 1 }));
+    let args = std::fs::read_to_string(dir.join("args.txt")).unwrap();
+    assert!(args.contains("--hint dictation"), "{args}");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let dir = scratch("nohint");
+    let (mut platform, rx) = platform_with(fake_ui(&dir, ""), dir.clone());
+    platform.spawn_ui(2, UiHint::None).unwrap();
+    wait_for(&rx, |e| matches!(e, Event::UiExited { generation: 2 }));
+    let args = std::fs::read_to_string(dir.join("args.txt")).unwrap();
+    assert!(!args.contains("--hint"), "{args}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// 会话管道：UI 一侧连上后，宿主收到连接事件（带客户端 PID）与消息行；宿主写的消息 UI 读得到；
 /// 过期代数的写入被拒绝；关闭会话后再写失败。
 #[test]
@@ -95,7 +115,7 @@ fn session_pipe_carries_messages_both_ways() {
     let dir = scratch("pipe");
     // 假 UI 停留约 3 秒（`ping`），让管道在测试期间一直可连
     let (mut platform, rx) = platform_with(fake_ui(&dir, "ping -n 4 127.0.0.1 >NUL"), dir.clone());
-    let spawned = platform.spawn_ui(1).unwrap();
+    let spawned = platform.spawn_ui(1, UiHint::None).unwrap();
     let session = session_from_args(&dir);
     let mut client = SessionPipeClient::connect(&pipe_name_for(&session).unwrap()).unwrap();
     assert_eq!(
@@ -145,7 +165,7 @@ fn kill_terminates_only_the_session_process() {
     let dir = scratch("kill");
     // 假 UI 停留约 30 秒，靠 kill 提前结束
     let (mut platform, rx) = platform_with(fake_ui(&dir, "ping -n 30 127.0.0.1 >NUL"), dir.clone());
-    let spawned = platform.spawn_ui(3).unwrap();
+    let spawned = platform.spawn_ui(3, UiHint::None).unwrap();
     platform.kill_ui(spawned.pid.wrapping_add(1));
     assert!(
         rx.recv_timeout(Duration::from_millis(500)).is_err(),
@@ -161,7 +181,7 @@ fn kill_terminates_only_the_session_process() {
 fn missing_ui_exe_fails_cleanly() {
     let dir = scratch("missing");
     let (mut platform, _rx) = platform_with(dir.join("no-such-ui.exe"), dir.clone());
-    let error = platform.spawn_ui(1).unwrap_err();
+    let error = platform.spawn_ui(1, UiHint::None).unwrap_err();
     assert!(error.contains("no-such-ui.exe"), "{error}");
     assert!(platform.session.is_none());
     let _ = std::fs::remove_dir_all(&dir);

@@ -9,7 +9,9 @@ use crate::convert::{binding_from_spec, origin_from_shell, tray_menu, tray_spec_
 use crate::gesture::{GestureThrottle, bindings_from_spec, event_from_drag};
 use crate::host::{Event, HeadlessKind, Platform, SpawnedUi, TrayPlan};
 use snow_host_protocol::frame::encode_line;
-use snow_host_protocol::launch::{FLAG_HEADLESS, HEADLESS_EMIT_SPEC, HeadlessJob, UiLaunch};
+use snow_host_protocol::launch::{
+    FLAG_HEADLESS, HEADLESS_EMIT_SPEC, HeadlessJob, UiHint, UiLaunch,
+};
 use snow_host_protocol::message::{HostMessage, hex_lower};
 use snow_host_protocol::spec::{HostSpec, HotkeySpec, MenuItemSpec, MouseBindingSpec, TrayTheme};
 use snow_host_protocol::spec_file::{SpecFileError, read_spec};
@@ -227,7 +229,7 @@ fn read_notice(out: impl Read) -> Option<String> {
 }
 
 impl Platform for WinPlatform {
-    fn spawn_ui(&mut self, generation: u64) -> Result<SpawnedUi, String> {
+    fn spawn_ui(&mut self, generation: u64, hint: UiHint) -> Result<SpawnedUi, String> {
         // 旧会话（已退出、等着被替换）先释放，避免两个管道服务端并存
         self.session = None;
         let app_id = format!(
@@ -250,7 +252,9 @@ impl Platform for WinPlatform {
             let _ = tx.send(message);
         })?;
         let token = random_hex(TOKEN_BYTES)?;
-        let launch = UiLaunch::new(Some(app_id), Some(token.clone())).map_err(|e| e.to_string())?;
+        let launch = UiLaunch::new(Some(app_id), Some(token.clone()))
+            .map_err(|e| e.to_string())?
+            .with_hint(hint);
         let child = Command::new(&self.ui_exe)
             .args(launch.to_args())
             .creation_flags(CREATE_NO_WINDOW)
