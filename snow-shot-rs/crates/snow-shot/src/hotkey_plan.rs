@@ -131,22 +131,6 @@ pub fn dictation_plan(document: &ConfigDocument) -> Vec<PlannedHotkey> {
     plan
 }
 
-/// 是否绑定了（格式有效的）语音转文字热键：触发模式放行的那个热键有至少一条能解析。
-///
-/// 绑定了就让 UI 保活（方案 §10 第 4 条）：按住说话每次都冷启动 UI 太慢；没绑定则随窗口关闭立即退出。
-///
-/// # 参数
-/// - `document`：配置文档。
-///
-/// ```ignore
-/// assert!(!dictation_hotkey_bound(&ConfigDocument::from_bytes(None)));
-/// ```
-pub fn dictation_hotkey_bound(document: &ConfigDocument) -> bool {
-    dictation_plan(document)
-        .iter()
-        .any(|planned| planned.parsed.is_ok())
-}
-
 /// 全部“快捷动作”热键（直接截图、延迟截图、打开设置、暂停热键等）的计划；未绑定的不进计划。
 ///
 /// # 参数
@@ -365,37 +349,6 @@ mod tests {
                 "{mode}"
             );
         }
-    }
-
-    /// 语音热键保活的判定：默认配置没绑定 → 不保活；绑定了触发模式放行的热键 → 保活；
-    /// 只绑了被模式排除的那个 → 不保活；格式无效的热键不算。
-    #[test]
-    fn dictation_hotkey_bound_follows_binding_and_mode() {
-        let default_doc = ConfigDocument::from_bytes(None);
-        assert!(!dictation_hotkey_bound(&default_doc), "默认不绑语音热键");
-
-        let mut doc = document_with_many_bindings();
-        assert!(dictation_hotkey_bound(&doc));
-        // 触发模式只放行 toggle，而 toggle 没绑：不保活
-        doc.set_value(DICTATION_TOGGLE_HOTKEY_CONFIG_KEY, json!([]))
-            .unwrap();
-        doc.set_value(
-            crate::app_runtime::DICTATION_TRIGGER_MODE_CONFIG_KEY,
-            json!("toggle"),
-        )
-        .unwrap();
-        assert!(!dictation_hotkey_bound(&doc));
-        // 换成 hold 模式：按住说话那个绑定了 → 保活
-        doc.set_value(
-            crate::app_runtime::DICTATION_TRIGGER_MODE_CONFIG_KEY,
-            json!("hold"),
-        )
-        .unwrap();
-        assert!(dictation_hotkey_bound(&doc));
-        // 两个都解绑：不保活
-        doc.set_value(DICTATION_HOLD_HOTKEY_CONFIG_KEY, json!([]))
-            .unwrap();
-        assert!(!dictation_hotkey_bound(&doc));
     }
 
     /// 只有“暂停 / 恢复”开关标记为暂停期间保持注册；有效热键的解析结果与配置原文一致。

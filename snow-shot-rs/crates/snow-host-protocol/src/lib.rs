@@ -107,9 +107,6 @@ pub const KEEP_ALIVE_MCP: &str = "mcp";
 /// 快照里的保活原因：`text_recognition/model_hot_start` 为真时 UI 常驻。
 pub const KEEP_ALIVE_OCR_HOT_START: &str = "ocr_hot_start";
 
-/// 快照里的保活原因：绑定了语音转文字热键时 UI 常驻（按住说话不能每次冷启动，方案 §10 第 4 条）。
-pub const KEEP_ALIVE_DICTATION_HOTKEY: &str = "dictation_hotkey";
-
 /// 鼠标手势 `update` 事件转发的最小间隔（约 120Hz，方案 §2）；更密的采样在宿主侧丢弃，`finish` 带最终位置。
 pub const GESTURE_MIN_UPDATE_INTERVAL: Duration = Duration::from_millis(8);
 
@@ -143,6 +140,5 @@ mod tests {
     fn stage3_constants() {
         assert_eq!(GESTURE_MIN_UPDATE_INTERVAL, Duration::from_millis(8));
         assert_eq!(UPDATE_CHECK_START_DELAY, Duration::from_secs(30));
-        assert_eq!(KEEP_ALIVE_DICTATION_HOTKEY, "dictation_hotkey");
     }
 }

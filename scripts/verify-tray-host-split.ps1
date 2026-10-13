@@ -22,7 +22,7 @@
                框选并复制（快速拖完 / UI 起来时拖动仍在进行两种）；没有绑定时不装钩子；宿主私有提交仍 <= 6MB。
                前提：用环境变量 SNOW_HOST_ACCEPT_INJECTED_INPUT=1 启动宿主（脚本自动设），否则钩子按设计忽略注入输入。
   pins-restore 贴图：有贴图时 UI 保活；UI 被杀后自动恢复贴图；优雅退出后快照记下贴图数；宿主重启 / 登录后恢复贴图。
-  stt-keepalive  语音热键：未绑定时 UI 随窗口关闭立即退出；绑定后 UI 保活，且登录时不预拉 UI。
+  stt-keepalive  语音热键不保活：未绑定与绑定后，UI 都随窗口关闭立即退出，且登录时不预拉 UI。
   mcp-keepalive  MCP / OCR 预热：开启后宿主登录就拉起 UI 常驻；MCP 管道可连、描述符有效；宿主与 MCP 并存；
                UI 被杀后宿主补拉；退出后描述符清理。
   update-headless  更新检查：到点（登录后至少 30s）宿主拉起 --headless update-check，查完即退，不开 UI 会话；
@@ -1113,7 +1113,7 @@ function Test-PinsRestore {
 
 function Test-SttKeepalive {
     $exe = Join-Path $script:Work 'snow-shot.exe'
-    # 对照：语音热键未绑定（默认）：UI 随窗口关闭立即退出
+    # 基线：语音热键未绑定（默认）：UI 随窗口关闭立即退出
     $null = Start-TestHost
     Start-Sleep -Seconds 5
     Invoke-Clip { [Windows.Forms.Clipboard]::Clear() }
@@ -1122,26 +1122,21 @@ function Test-SttKeepalive {
     $gone = Wait-Until { -not (Get-UiProcess) } -TimeoutMs 6000
     Add-Result 'stt-keepalive' 'unbound-ui-exits-at-once' $(if ($up -and $gone) { 'PASS' } else { 'FAIL' }) "拉起=$up 退出=$gone" '未绑定语音热键：无窗口无活动 -> UI 立即退出（§10 第 4 条）'
     Stop-HostGracefully
-    # 绑定后：UI 保活，但登录时不预拉
+    # 绑定后（2026-10-13 改判）：语音热键不保活，登录不预拉，UI 窗口全关照常立即退出
     [void](Set-TestConfig 'global_shortcuts/dictation_toggle' '["F9"]')
     [void](Set-TestConfig 'dictation/trigger_mode' '"toggle"')
     $null = Start-TestHost
     Start-Sleep -Seconds 6
-    Add-Result 'stt-keepalive' 'bound-no-spawn-at-login' $(if (-not (Get-UiProcess)) { 'PASS' } else { 'FAIL' }) '' '绑定了语音热键只是“拉起之后别退”：登录时不预拉 UI（托盘态内存）'
+    Add-Result 'stt-keepalive' 'bound-no-spawn-at-login' $(if (-not (Get-UiProcess)) { 'PASS' } else { 'FAIL' }) '' '绑定了语音热键：登录时不预拉 UI（托盘态内存）'
     $spec = Read-Spec
-    Add-Result 'stt-keepalive' 'spec-keep-alive-reason' $(if ($spec -and ($spec.flags.keep_alive -contains 'dictation_hotkey')) { 'PASS' } else { 'FAIL' }) $(if ($spec) { ($spec.flags.keep_alive -join ',') }) '快照 keep_alive 含 dictation_hotkey'
+    Add-Result 'stt-keepalive' 'spec-no-keep-alive-reason' $(if ($spec -and -not ($spec.flags.keep_alive -contains 'dictation_hotkey')) { 'PASS' } else { 'FAIL' }) $(if ($spec) { ($spec.flags.keep_alive -join ',') }) '快照 keep_alive 不含 dictation_hotkey（语音热键不保活）'
     $mem = Get-MemoryInfo (Get-HostProcess).Id
     Add-Result 'stt-keepalive' 'host-commit' $(if ($mem.CommitMB -le $MaxIdleCommitMB) { 'PASS' } else { 'FAIL' }) "$($mem.CommitMB) MB" ''
     Invoke-Clip { [Windows.Forms.Clipboard]::Clear() }
     & $exe --cmd pin-clipboard | Out-Null
     $up = Wait-Until { [bool](Get-UiProcess) } -TimeoutMs 10000
-    Start-Sleep -Seconds 8
-    Add-Result 'stt-keepalive' 'bound-ui-stays-alive' $(if ($up -and (Get-UiProcess)) { 'PASS' } else { 'FAIL' }) '' '同样的无窗口无活动，绑定了语音热键 UI 不退（按住说话不每次冷启动）'
-    $ui = Get-UiProcess
-    if ($ui) {
-        $mem = Get-MemoryInfo $ui.Id
-        Add-Result 'stt-keepalive' 'kept-ui-commit' 'INFO' "$($mem.CommitMB) MB" '保活 UI 的私有提交（单进程常驻同口径的参照）'
-    }
+    $gone = Wait-Until { -not (Get-UiProcess) } -TimeoutMs 6000
+    Add-Result 'stt-keepalive' 'bound-ui-exits-at-once' $(if ($up -and $gone) { 'PASS' } else { 'FAIL' }) "拉起=$up 退出=$gone" '同样的无窗口无活动，绑定了语音热键 UI 也立即退出（接受冷拉起时按住说话开头可能丢约 1s）'
     # 还原：解绑语音热键，别影响后面的场景
     Stop-HostGracefully
     [void](Set-TestConfig 'global_shortcuts/dictation_toggle' '[]')

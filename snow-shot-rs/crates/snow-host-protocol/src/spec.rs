@@ -180,21 +180,21 @@ impl HostFlags {
     /// 登录时（以及 UI 崩溃后）是否需要宿主主动拉起 UI 常驻。
     ///
     /// MCP 监听与 OCR 预热必须有 UI 进程在场才有意义，所以这两项要宿主拉起；
-    /// 语音热键保活（[`crate::KEEP_ALIVE_DICTATION_HOTKEY`]）只是“拉起之后别退”，不在登录时预拉。
+    /// 其余原因（含旧版本快照里的 `dictation_hotkey`）一律忽略，不预拉也不保活。
     ///
     /// # 返回
     /// 保活原因里含 `mcp` 或 `ocr_hot_start` 为 `true`。
     ///
     /// ```rust
-    /// use snow_host_protocol::{KEEP_ALIVE_DICTATION_HOTKEY, KEEP_ALIVE_MCP};
+    /// use snow_host_protocol::KEEP_ALIVE_MCP;
     /// use snow_host_protocol::spec::HostFlags;
     /// let mcp = HostFlags { keep_alive: vec![KEEP_ALIVE_MCP.into()], ..HostFlags::default() };
     /// assert!(mcp.needs_resident_ui());
-    /// let dictation = HostFlags {
-    ///     keep_alive: vec![KEEP_ALIVE_DICTATION_HOTKEY.into()],
+    /// let legacy = HostFlags {
+    ///     keep_alive: vec!["dictation_hotkey".into()],
     ///     ..HostFlags::default()
     /// };
-    /// assert!(!dictation.needs_resident_ui());
+    /// assert!(!legacy.needs_resident_ui());
     /// ```
     pub fn needs_resident_ui(&self) -> bool {
         self.keep_alive.iter().any(|reason| {
@@ -500,7 +500,7 @@ mod tests {
         assert!(sample().validate().is_ok());
     }
 
-    /// 登录拉起 UI 的判定：只有 MCP 与 OCR 预热算；语音热键保活与空列表都不算。
+    /// 登录拉起 UI 的判定：只有 MCP 与 OCR 预热算；空列表与旧快照里的 `dictation_hotkey`（已废弃）都不算。
     #[test]
     fn resident_ui_flags() {
         let flags = |reasons: &[&str]| HostFlags {
@@ -510,10 +510,9 @@ mod tests {
         assert!(!flags(&[]).needs_resident_ui());
         assert!(flags(&[crate::KEEP_ALIVE_MCP]).needs_resident_ui());
         assert!(flags(&[crate::KEEP_ALIVE_OCR_HOT_START]).needs_resident_ui());
-        assert!(!flags(&[crate::KEEP_ALIVE_DICTATION_HOTKEY]).needs_resident_ui());
-        assert!(
-            flags(&[crate::KEEP_ALIVE_DICTATION_HOTKEY, crate::KEEP_ALIVE_MCP]).needs_resident_ui()
-        );
+        // 旧快照里的语音热键保活原因：忽略
+        assert!(!flags(&["dictation_hotkey"]).needs_resident_ui());
+        assert!(flags(&["dictation_hotkey", crate::KEEP_ALIVE_MCP]).needs_resident_ui());
     }
 
     /// 图标尺寸与长度校验的边界：零尺寸、溢出。

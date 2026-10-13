@@ -143,9 +143,7 @@ mod tests {
     use crate::test_util::unique_temp_dir;
     use serde_json::json;
     use snow_host_protocol::spec_file::read_spec;
-    use snow_host_protocol::{
-        CONFIG_KEY_DISABLE_ON_FULLSCREEN, KEEP_ALIVE_DICTATION_HOTKEY, KEEP_ALIVE_MCP,
-    };
+    use snow_host_protocol::{CONFIG_KEY_DISABLE_ON_FULLSCREEN, KEEP_ALIVE_MCP};
 
     /// 在数据根里存一张贴图记录（登录恢复贴图的来源）。
     fn store_one_pin(root: &Path) {
@@ -261,7 +259,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// 快照里的保活原因随配置：开 MCP 后重新生成就带上 `mcp`；语音热键绑定带 `dictation_hotkey`。
+    /// 快照里的保活原因随配置：开 MCP 后重新生成就带上 `mcp`；绑语音热键不带任何保活原因。
     #[test]
     fn emitted_spec_carries_keep_alive_reasons() {
         let root = unique_temp_dir("snow-emit-spec", "keep");
@@ -273,12 +271,7 @@ mod tests {
         )
         .unwrap();
         let spec = read_spec(&host_spec_path(&root)).unwrap();
-        assert!(spec.flags.keep_alive.contains(&KEEP_ALIVE_MCP.to_string()));
-        assert!(
-            spec.flags
-                .keep_alive
-                .contains(&KEEP_ALIVE_DICTATION_HOTKEY.to_string())
-        );
+        assert_eq!(spec.flags.keep_alive, [KEEP_ALIVE_MCP]);
         assert!(spec.flags.needs_resident_ui());
         let _ = std::fs::remove_dir_all(&root);
     }

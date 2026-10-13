@@ -1130,21 +1130,48 @@ fn resident_features_spawn_ui_at_startup() {
     assert!(!core.machine().keep_alive());
 }
 
-/// 语音热键保活（§10 第 4 条）只是“拉起之后别退”：登录时不预拉 UI，但标志会让状态机记住保活。
+/// 语音热键不保活（§10 第 4 条，2026-10-13 改判）：旧快照里残留的 `dictation_hotkey` 原因被忽略，
+/// 登录不预拉 UI、状态机不记保活；热键拉起 UI 后窗口全关（exit_request）照常同意退出，退出后不补拉。
 #[test]
-fn dictation_hotkey_keep_alive_does_not_spawn_at_startup() {
-    let (mut core, _) = started(Some(spec_with_flags(
-        1,
-        &[snow_host_protocol::KEEP_ALIVE_DICTATION_HOTKEY],
-        0,
-        None,
-    )));
+fn legacy_dictation_hotkey_reason_is_ignored() {
+    let (mut core, t0) = started(Some(spec_with_flags(1, &["dictation_hotkey"], 0, None)));
     assert!(
         !take_calls(&mut core)
             .iter()
             .any(|c| matches!(c, Call::SpawnUi(_)))
     );
-    assert!(!core.machine().keep_alive(), "语音热键保活不要求宿主补拉");
+    assert!(!core.machine().keep_alive(), "语音热键不保活");
+    // 热键冷拉起 UI，处理完命令后窗口全关，UI 请求退出
+    let (generation, _) = bring_up_ui(&mut core, t0);
+    core.handle(
+        t0,
+        Event::SessionLine {
+            generation,
+            line: line(&UiMessage::Ack { seq: 1 }),
+        },
+    );
+    take_calls(&mut core);
+    core.handle(
+        t0,
+        Event::SessionLine {
+            generation,
+            line: line(&UiMessage::ExitRequest { last_seq: 1 }),
+        },
+    );
+    assert!(
+        take_calls(&mut core)
+            .iter()
+            .any(|c| matches!(c, Call::Send(g, HostMessage::ExitOk) if *g == generation)),
+        "绑了语音热键也同意退出"
+    );
+    core.handle(t0 + Duration::from_secs(1), Event::UiExited { generation });
+    core.tick(t0 + Duration::from_secs(5));
+    assert!(
+        !take_calls(&mut core)
+            .iter()
+            .any(|c| matches!(c, Call::SpawnUi(_))),
+        "退出后不补拉"
+    );
 }
 
 /// 快照生成完成后才读到“要常驻”：当场拉起 UI（启动时只有内置兜底快照）；设置里关掉后不再要求。

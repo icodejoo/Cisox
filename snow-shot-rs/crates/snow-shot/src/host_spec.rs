@@ -20,8 +20,8 @@ use snow_host_protocol::spec::{
     MouseBindingSpec, TraySection, TrayTheme,
 };
 use snow_host_protocol::{
-    ACTION_TOGGLE_FULLSCREEN_GATE, ACTION_TOGGLE_GLOBAL_HOTKEYS, KEEP_ALIVE_DICTATION_HOTKEY,
-    KEEP_ALIVE_MCP, KEEP_ALIVE_OCR_HOT_START, PLACEHOLDER_FAILURES, SPEC_VERSION,
+    ACTION_TOGGLE_FULLSCREEN_GATE, ACTION_TOGGLE_GLOBAL_HOTKEYS, KEEP_ALIVE_MCP,
+    KEEP_ALIVE_OCR_HOT_START, PLACEHOLDER_FAILURES, SPEC_VERSION,
 };
 use snow_i18n::Args;
 use snow_ui::shell::tray::{TrayAction, TrayIconImage, TrayMenuEntry};
@@ -234,7 +234,7 @@ fn mouse_specs(document: &ConfigDocument) -> Vec<MouseBindingSpec> {
         .collect()
 }
 
-/// 保活原因：用户显式要求常驻的功能（MCP、OCR 预热），以及绑定了语音转文字热键（方案 §10 第 2~4 条）。
+/// 保活原因：用户显式要求常驻的功能（MCP、OCR 预热，方案 §10 第 2、3 条）；语音热键不保活（第 4 条）。
 ///
 /// # 参数
 /// - `document`：配置文档。
@@ -249,9 +249,6 @@ pub fn keep_alive_reasons(document: &ConfigDocument) -> Vec<String> {
     }
     if document.bool_or(crate::ocr_service::KEY_HOT_START, false) {
         reasons.push(KEEP_ALIVE_OCR_HOT_START.to_string());
-    }
-    if crate::hotkey_plan::dictation_hotkey_bound(document) {
-        reasons.push(KEEP_ALIVE_DICTATION_HOTKEY.to_string());
     }
     reasons
 }
@@ -697,8 +694,8 @@ mod tests {
         assert_eq!(light.tray.theme, TrayTheme::Light);
     }
 
-    /// 保活原因（§10 第 2~4 条）：默认全无；开 MCP / OCR 预热各加一项；绑定语音热键加 `dictation_hotkey`，
-    /// 解绑即消失；顺序固定。登录时要宿主拉起 UI 的只有前两项。
+    /// 保活原因（§10 第 2、3 条）：默认全无；开 MCP / OCR 预热各加一项，顺序固定；
+    /// 绑定语音热键不产生任何保活原因（第 4 条，2026-10-13 改判）。
     #[test]
     fn keep_alive_reasons_follow_config() {
         let mut doc = ConfigDocument::from_bytes(None);
@@ -713,29 +710,14 @@ mod tests {
             json!("toggle"),
         )
         .unwrap();
-        assert_eq!(keep_alive_reasons(&doc), [KEEP_ALIVE_DICTATION_HOTKEY]);
+        assert!(keep_alive_reasons(&doc).is_empty(), "绑语音热键不保活");
         let spec = host_spec_from_document(&doc, &inputs(&[], "")).unwrap();
-        assert!(
-            !spec.flags.needs_resident_ui(),
-            "只绑语音热键不要求登录拉起"
-        );
+        assert!(spec.flags.keep_alive.is_empty());
+        assert!(!spec.flags.needs_resident_ui());
         doc.set_value(crate::mcp_host::KEY_ENABLED, json!(true))
             .unwrap();
         doc.set_value(crate::ocr_service::KEY_HOT_START, json!(true))
             .unwrap();
-        assert_eq!(
-            keep_alive_reasons(&doc),
-            [
-                KEEP_ALIVE_MCP,
-                KEEP_ALIVE_OCR_HOT_START,
-                KEEP_ALIVE_DICTATION_HOTKEY
-            ]
-        );
-        doc.set_value(
-            crate::app_runtime::DICTATION_TOGGLE_HOTKEY_CONFIG_KEY,
-            json!([]),
-        )
-        .unwrap();
         assert_eq!(
             keep_alive_reasons(&doc),
             [KEEP_ALIVE_MCP, KEEP_ALIVE_OCR_HOT_START]

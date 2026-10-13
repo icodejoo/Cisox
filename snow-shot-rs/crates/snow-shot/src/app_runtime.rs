@@ -4487,7 +4487,6 @@ fn handle_mcp_request(
 /// - `key`：变更的配置键。
 /// - `previous`：变更前的值。
 fn on_config_changed(cx: &mut ShellContext, state: &mut AppState, key: &str, previous: Value) {
-    host_session::on_config_key_changed(state);
     if key == crate::mcp_host::KEY_ENABLED || state.mcp.is_running() {
         state.sync_mcp();
     }

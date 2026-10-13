@@ -155,8 +155,6 @@ pub(crate) struct HostSession {
     last_activity: RefCell<Option<Activity>>,
     /// 最近一次写进快照的“登录要恢复的贴图数”（`None` 表示还没写过，第一次空闲时校一遍）。
     last_restorable: Cell<Option<u32>>,
-    /// 缓存：是否绑定了语音转文字热键（保活判定每个事件都要用，配置变化时清空）。
-    dictation_bound: Cell<Option<bool>>,
 }
 
 impl HostSession {
@@ -175,7 +173,6 @@ impl HostSession {
             startup_synced: Cell::new(false),
             last_activity: RefCell::new(None),
             last_restorable: Cell::new(None),
-            dictation_bound: Cell::new(None),
         }
     }
 
@@ -187,18 +184,6 @@ impl HostSession {
         self.link.send(&UiMessage::Tooltip {
             text: text.to_string(),
         });
-    }
-
-    /// 是否绑定了语音转文字热键（带缓存，配置变化时由 [`on_config_key_changed`] 清空）。
-    fn dictation_hotkey_bound(&self, document: &ConfigDocument) -> bool {
-        match self.dictation_bound.get() {
-            Some(bound) => bound,
-            None => {
-                let bound = crate::hotkey_plan::dictation_hotkey_bound(document);
-                self.dictation_bound.set(Some(bound));
-                bound
-            }
-        }
     }
 
     /// 发布快照；内容有变化才写并返回新修订号，写盘失败记日志并返回 `None`。
@@ -235,16 +220,6 @@ fn spec_of(state: &AppState) -> Result<HostSpec, String> {
             rev: 0,
         },
     )
-}
-
-/// 配置键变化时调用：清掉按配置缓存的判定（语音热键是否绑定）。
-///
-/// # 参数
-/// - `state`：运行时状态（没接宿主会话时什么都不做）。
-pub(super) fn on_config_key_changed(state: &AppState) {
-    if let Some(session) = state.host.as_ref() {
-        session.dictation_bound.set(None);
-    }
 }
 
 /// 把“下次登录要恢复的贴图数”写进快照（只改标志，不重新渲染菜单）；数没变就什么都不做。
@@ -322,8 +297,7 @@ pub(super) fn request_spec_sync(state: &AppState) {
 /// # 参数
 /// - `cx`：外壳上下文（窗口数、录屏 / 长截图控制窗是否还开着）。
 /// - `state`：运行时状态。
-/// - `session`：宿主会话（语音热键绑定判定的缓存）。
-fn busy_inputs(cx: &ShellContext, state: &AppState, session: &HostSession) -> BusyInputs {
+fn busy_inputs(cx: &ShellContext, state: &AppState) -> BusyInputs {
     let config = state.config.borrow();
     let document = config.document();
     BusyInputs {
@@ -336,7 +310,6 @@ fn busy_inputs(cx: &ShellContext, state: &AppState, session: &HostSession) -> Bu
         scroll_capture: state.scroll.is_busy(cx),
         mcp: state.mcp.is_running() || document.bool_or(crate::mcp_host::KEY_ENABLED, false),
         ocr_hot_start: document.bool_or(crate::ocr_service::KEY_HOT_START, false),
-        dictation_hotkey: session.dictation_hotkey_bound(document),
     }
 }
 
@@ -352,7 +325,7 @@ pub(super) fn after_event(cx: &ShellContext, state: &AppState) {
     let Some(session) = state.host.as_ref() else {
         return;
     };
-    let inputs = busy_inputs(cx, state, session);
+    let inputs = busy_inputs(cx, state);
     let busy = compute_busy_reasons(&inputs, &state.activity);
     let activity = Activity {
         windows: inputs.windows as u32,

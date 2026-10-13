@@ -50,8 +50,6 @@ pub mod reason {
     pub const MCP: &str = snow_host_protocol::KEEP_ALIVE_MCP;
     /// 保活：开启了 OCR 模型热启动。
     pub const OCR_HOT_START: &str = snow_host_protocol::KEEP_ALIVE_OCR_HOT_START;
-    /// 保活：绑定了语音转文字热键（按住说话不能每次冷启动）。
-    pub const DICTATION_HOTKEY: &str = snow_host_protocol::KEEP_ALIVE_DICTATION_HOTKEY;
 }
 
 /// 放行时的唤醒回调（在丢弃守卫的线程上调用，只应做投递，例如往主线程收件箱推一个“重新判断”事件）。
@@ -209,8 +207,6 @@ pub struct BusyInputs {
     pub mcp: bool,
     /// 开启了 OCR 模型热启动。
     pub ocr_hot_start: bool,
-    /// 绑定了（有效的）语音转文字热键。
-    pub dictation_hotkey: bool,
 }
 
 /// 当前阻止 UI 退出的全部原因：状态型（按 [`BusyInputs`]）加上带守卫的（来自计数器）；为空才算空闲。
@@ -243,7 +239,6 @@ pub fn busy_reasons(inputs: &BusyInputs, tracker: &ActivityTracker) -> Vec<Strin
         (inputs.scroll_capture, reason::SCROLL_CAPTURE),
         (inputs.mcp, reason::MCP),
         (inputs.ocr_hot_start, reason::OCR_HOT_START),
-        (inputs.dictation_hotkey, reason::DICTATION_HOTKEY),
     ];
     let mut reasons: Vec<String> = flags
         .into_iter()
@@ -404,7 +399,7 @@ mod tests {
     #[test]
     fn every_state_row_of_the_table_blocks_exit() {
         let (tracker, _) = tracker();
-        let cases: [(BusyInputs, &str); 10] = [
+        let cases: [(BusyInputs, &str); 9] = [
             (
                 BusyInputs {
                     windows: 2,
@@ -468,13 +463,6 @@ mod tests {
                 },
                 reason::OCR_HOT_START,
             ),
-            (
-                BusyInputs {
-                    dictation_hotkey: true,
-                    ..BusyInputs::default()
-                },
-                reason::DICTATION_HOTKEY,
-            ),
         ];
         for (inputs, expected) in cases {
             assert_eq!(busy_reasons(&inputs, &tracker), [expected], "{expected}");
@@ -535,6 +523,5 @@ mod tests {
     fn keep_alive_reasons_match_protocol() {
         assert_eq!(reason::MCP, "mcp");
         assert_eq!(reason::OCR_HOT_START, "ocr_hot_start");
-        assert_eq!(reason::DICTATION_HOTKEY, "dictation_hotkey");
     }
 }
