@@ -47,6 +47,7 @@ cargo build -p snow-tray-host -p snow-shot        # 同时构建；产物在根 
 | `snow-shell-core` | 托盘与全局热键后端（无 gpui、无命令总线、无能力表；动作负载为泛型），`snow-ui-shell` 重导出 | 托盘宿主拆分阶段 1 |
 | `snow-data-paths` | 数据根目录解析与 `APP_ID` / `PRODUCT_NAME`（零依赖），`snow-config::paths`、`snow-app-core` 重导出 | 托盘宿主拆分阶段 1 |
 | `snow-host-protocol` | 托盘宿主 ↔ UI 进程协议：`host/spec.json` 快照、会话消息、JSON 行编解码、序号与退出握手、启动开关（只依赖 serde） | 托盘宿主拆分阶段 1 / 2 |
+| `snow-light-thread` | 轻量后台线程：直接 `CreateThread`，省掉 `std::thread` 每条线程 ~14KB 的栈保证预留（托盘、热键、单实例管道、鼠标钩子这些常驻线程用，只依赖 windows-sys） | 托盘宿主拆分阶段 6 |
 | `snow-canvas-raster` / `-filters` / `-text` | 画布光栅化 / 滤镜 / 文本 | P2 |
 | `snow-translate` | 本地 NMT | P5 |
 | `snow-i18n` | Fluent 运行时与提取 | P1 i18n |
