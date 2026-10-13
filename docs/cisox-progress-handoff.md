@@ -387,7 +387,7 @@ Windows 主线已经能跑通「热键 / 托盘 / IPC → 截图覆盖窗（单�
 | | `--resident` | 不跑宿主，转调 `snow-shot-ui.exe --resident` 后退出（回退入口） |
 | UI `snow-shot-ui.exe` | 无参数 | **转去启动同目录宿主 `snow-shot.exe` 后退出**（老用户注册表里指向本 exe 的开机自启走这条，随后由 UI 进程把自启值改写成宿主路径） |
 | | `--resident` | **单进程常驻**（回退开关，显式才进）：自带托盘 / 热键 / IPC，与宿主共用互斥体所以互斥；开机自启仍指向宿主，不随它改变 |
-| | `--ui --session <名> --token <令牌>` | 宿主拉起的 UI 会话：连会话管道，不持托盘 / 热键；用户不要手敲 |
+| | `--ui --session <名> --token <令牌> [--hint dictation]` | 宿主拉起的 UI 会话：连会话管道，不持托盘 / 热键；用户不要手敲。`--hint dictation`（宿主队首命令是语音转文字时带）让 UI 在 `main` 最早处并行预拉语音 worker |
 | | `--headless emit-spec｜update-check｜set-config --key <键> --value <JSON>` | 无窗口任务，不初始化 GPUI，做完就退（宿主调用） |
 | | `--cmd …`（不带 `--resident`） | 转给宿主（等价于 `snow-shot.exe --cmd …`）；`--resident --cmd …` 才是单进程模式下的单实例委托 |
 
