@@ -401,7 +401,7 @@ pub fn archive_path(spec: &SttModelSpec, data_root: &Path) -> PathBuf {
 
 /// 写 `model.json`：记录模型的基本元数据，便于排查与后续升级。
 fn write_model_meta(spec: &SttModelSpec, dir: &Path, pinned: bool) -> Result<(), FetchError> {
-    let meta = serde_json::json!({
+    let mut meta = serde_json::json!({
         "schema": META_SCHEMA,
         "id": spec.id,
         "dimension": spec.dimension.as_str(),
@@ -412,6 +412,10 @@ fn write_model_meta(spec: &SttModelSpec, dir: &Path, pinned: bool) -> Result<(),
         "archive_sha256": spec.archive.sha256,
         "sha256_pinned": pinned,
     });
+    // worker 读这个字段把 model_type 直接交给 sherpa（见 snow-stt 的加载提速）；没有核对过就不写
+    if let Some(model_type) = &spec.model_type {
+        meta["model_type"] = serde_json::Value::String(model_type.clone());
+    }
     let text = serde_json::to_string_pretty(&meta)
         .map_err(|e| FetchError::SerializeMeta(e.to_string()))?;
     std::fs::write(dir.join(MODEL_META_FILE), text)
@@ -649,6 +653,7 @@ mod tests {
             size_bytes: 15,
             peak_mem_mb: 1,
             notes_key: None,
+            model_type: (!offline).then(|| "zipformer2".to_string()),
         }
     }
 
@@ -721,6 +726,7 @@ mod tests {
         assert_eq!(meta["id"], "pack-stream");
         assert_eq!(meta["kind"], "online-transducer");
         assert_eq!(meta["mode"], "streaming");
+        assert_eq!(meta["model_type"], "zipformer2", "清单里的 model_type 要写进 model.json");
         let models = stt_models::models_root(&root);
         assert!(!models.join("pack-stream.extracting").exists());
         assert!(
@@ -752,6 +758,11 @@ mod tests {
         );
         assert!(vad_installed_with(&vad, &root));
         assert!(plan_with(&spec, &vad, &root).is_empty());
+        let meta = std::fs::read_to_string(
+            stt_models::model_dir(&spec, &root).join(MODEL_META_FILE),
+        )
+        .expect("读");
+        assert!(!meta.contains("model_type"), "没核对过的不写 model_type");
         for d in [src, root] {
             let _ = std::fs::remove_dir_all(&d);
         }

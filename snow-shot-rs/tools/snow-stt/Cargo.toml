@@ -20,6 +20,11 @@ snow-stt-protocol = { path = "../../crates/snow-stt-protocol" }
 snow-audio-recorder = { path = "../../../snow-crates/crates/snow-audio-recorder" }
 # 用户已批准新增；shared 链接，onnxruntime.dll 由构建脚本替换为仓库同版
 sherpa-onnx = { version = "=1.13.8", default-features = false, features = ["shared"] }
+# encoder 预优化缓存：用 ORT 离线优化并落盘（用户已批准新增）。版本、特性与 snow-table / snow-translator 对齐，
+# load-dynamic 按路径加载 exe 同目录的 onnxruntime.dll（与 sherpa 共用同一份）
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "api-28", "load-dynamic"] }
+# 读 model.json 与缓存元数据；已在 Cargo.lock 里（sherpa 的构建依赖），未新增 crate
+serde_json = "1"
 
 # 系统语音后端：只用 windows crate 的 feature（版本与 Cargo.lock 中已有的 0.62 一致，未新增 crate）
 [target.'cfg(windows)'.dependencies]
@@ -29,8 +34,15 @@ windows = { version = "0.62", features = [
     "Media_SpeechRecognition",
     "Win32_Foundation",
     "Win32_System_Com",
+    # 后台子进程不继承 worker 的标准句柄（SetHandleInformation / GetStdHandle）
+    "Win32_System_Console",
     "Win32_System_Registry",
 ] }
+
+# 与 snow-translator / snow-table 保持同一 ort 补丁，wrapper 与 sys 必须同 rev。
+[patch.crates-io]
+ort = { git = "https://github.com/mg-chao/ort.git", rev = "90018ee581fb1bb1baf8e82eba8e679728ff27dc" }
+ort-sys = { git = "https://github.com/mg-chao/ort.git", rev = "90018ee581fb1bb1baf8e82eba8e679728ff27dc" }
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

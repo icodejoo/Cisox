@@ -4,7 +4,7 @@
 
 ## 组成
 - `snow-shot-rs/crates/snow-stt-protocol`：主 workspace 成员，零依赖的行文本协议，主程序与 worker 共用。
-- `snow-shot-rs/tools/snow-stt`：独立 workspace（自己的 `[workspace]` 与 `Cargo.lock`），二进制 `snow-stt`。依赖 sherpa-onnx 1.13.8（shared 链接，用户已批准新增）、协议 crate、`snow-crates/snow-audio-recorder`（WASAPI 默认麦克风采集与 16k 单声道重采样，不自写）。
+- `snow-shot-rs/tools/snow-stt`：独立 workspace（自己的 `[workspace]` 与 `Cargo.lock`），二进制 `snow-stt`。依赖 sherpa-onnx 1.13.8（shared 链接，用户已批准新增）、`ort`（`=2.0.0-rc.13`，load-dynamic，与 snow-table 同版同补丁，用户已批准新增，只用于 encoder 预优化缓存）、`serde_json`（读 `model.json` 与缓存元数据）、协议 crate、`snow-crates/snow-audio-recorder`（WASAPI 默认麦克风采集与 16k 单声道重采样，不自写）。
 - 识别后端是 `SttBackend` trait（`feed` / `poll` / `finish`），有两份实现：sherpa（本地模型）与 Windows 系统语音（见「系统语音后端」）；主循环 `session.rs` 只认 trait 和 `AudioSource`，单测用 Fake 后端与脚本化来源，不依赖麦克风和模型。
 
 ## 协议
@@ -43,7 +43,7 @@ stdin 关闭（主程序退出或崩溃）视为中止：不再发事件，直�
 | `offline-whisper` | `*encoder*.onnx`、`*decoder*.onnx`（均优先 int8），加 `tokens.txt` 或 `*-tokens.txt` |
 | `offline-moonshine` | `preprocess*.onnx`、`encode*.onnx`（优先 int8）、`uncached_decode*.onnx`、`cached_decode*.onnx`，加 `tokens.txt` |
 
-主程序管理的目录结构：`<数据根>/models/stt/<模型ID>/`，里面是上表的文件，另有 `model.json`（元数据：id、维度、模式、kind、文件清单、压缩包 sha256 与是否已固定）和 `.complete.json`（完成标记，下载解压全部成功后最后写入）。离线模式共用的 `silero_vad.onnx` 放在 `<数据根>/models/stt/` 根下，各模型目录的父目录正好能被 worker 找到。旧版把模型文件直接平铺在 `<数据根>/models/stt/` 下（有 `tokens.txt`）的布局仍兼容，见「模型管理与设置」。
+主程序管理的目录结构：`<数据根>/models/stt/<模型ID>/`，里面是上表的文件，另有 `model.json`（元数据：id、维度、模式、kind、文件清单、压缩包 sha256 与是否已固定，以及清单里核对过时才写的 `model_type`）和 `.complete.json`（完成标记，下载解压全部成功后最后写入）。离线模式共用的 `silero_vad.onnx` 放在 `<数据根>/models/stt/` 根下，各模型目录的父目录正好能被 worker 找到。旧版把模型文件直接平铺在 `<数据根>/models/stt/` 下（有 `tokens.txt`）的布局仍兼容，见「模型管理与设置」。
 
 早期已测模型：`csukuangfj/sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20`（Apache-2.0）。现在的默认与备选以清单为准，见 [research/stt-model-selection.md](../research/stt-model-selection.md)。下载大文件用 `aria2c -x16 -s16 -k8M --continue=true`。
 
@@ -66,6 +66,17 @@ stdin 关闭（主程序退出或崩溃）视为中止：不再发事件，直�
 - `offline-sense-voice`：只认 `zh` / `en` / `ja` / `ko` / `yue`，其余（含 `auto`、`zh-en` 这类组合）回落 `auto`。
 - `offline-whisper`：单语言码生效（如 `zh`、`en`）；`auto` 或带 `-`/`_` 的组合值按自动判断。任务固定为 `transcribe`（只转写，不翻译）。
 - 其它 kind 不使用语言字段。
+
+## 加载提速（`model_type` 与 encoder 预优化缓存）
+依据与实测见 [research/stt-bilingual-model-load.md](../research/stt-bilingual-model-load.md) §11；代码在 `tools/snow-stt/src/optcache.rs`。只作用于**流式 transducer**（离线侧见下）。
+
+- **`model_type`**：sherpa 在 `model_type` 为空时会先建一个临时 ORT 会话读元数据，等于把 encoder 载两遍。worker 加载前按顺序取：①模型目录 `model.json` 的 `model_type` 字段（主程序下载安装时由清单写入，只写核对过的）；②缓存元数据里记的值（生成缓存时从 encoder 的 ONNX 元数据读出）；③都没有就不设，走 sherpa 旧路径。取值过白名单（流式：`conformer` / `ebranchformer` / `lstm` / `zipformer` / `zipformer2`），不合法的值当没有。
+- **encoder 预优化缓存**：缓存放 `<模型目录>/.opt/`（`encoder.opt.onnx` 约 150MB、`encoder.opt.json` 元数据、`encoder.opt.lock` 生成锁），随模型目录一起被替换 / 删除。命中条件：元数据 `state=ready`、格式版本一致、ORT 指纹一致（`ort::info()` 构建串加 `onnxruntime.dll` 字节数）、源 encoder 的文件名 / 大小 / 修改时间一致、产物的大小 / 修改时间 / 首尾各 64KB 哈希一致。命中就把优化后的文件交给 sherpa，加载 x-asr 480ms 约 0.8 s（原 5~6 s）。
+- **生成**：没命中、没有失败记录、没人在生成时，**会话顺利结束后**拉起后台子进程 `snow-stt --optimize <模型目录>`（空闲优先级类、无窗口、不继承管道；ORT 单线程，EXTENDED 级别，把批量维 `N` 固定为 1，约 5 s），所以这一次识别照常用原文件，下一次起命中。产物先写临时文件，ORT 载入核对输入输出名通过后才改名，最后写元数据；失败写 `failed` 记录，同一份源文件与同一版 ORT 不再重试，ORT 换版本后可重试。生成进程被杀留下的锁 15 分钟后可被接管。`--optimize` 也可手动运行（前台、打印一行结果，退出码 0 / 1）。
+- **回退**：缓存或 `model_type` 导致 sherpa 创建返回失败时，缓存标成失败，退回原 encoder 且不带 `model_type` 重新创建。**注意** sherpa / ORT 对损坏的模型可能直接结束进程（实测覆盖缓存文件头部会这样），所以缓存的完整性在加载前靠大小 / 时间 / 首尾哈希校验，不靠事后回退。
+- **离线**：sherpa 只有离线 transducer 会探测元数据；`offline-transducer` 在 `model.json` 写了 `model_type`（`transducer` / `nemo_transducer`）时会交给 sherpa。清单里目前没给离线模型填值（没核对、没测），其余离线类型本来就不探测。
+- **限制**：固定批量为 1，worker 只有一路流所以没问题，将来要并发多路时需关闭；缓存只在本机（i5-13500 / ORT 1.28.0）验证过，没在别的 CPU 上验证；不跨模型目录共享；没有单独的清理入口。
+- **测试 / 对比开关**（命令行，生产不用）：`--no-model-type`（不交 `model_type`）、`--no-opt-cache`（不使用也不生成缓存）、`--stats` 时多打一行 `load_plan: encoder=cache|original model_type=… fell_back=… want_generation=…`。
 
 ## 构建
 ```
@@ -106,7 +117,7 @@ scripts\verify-snow-stt.ps1 -Mode offline -Kind offline-sense-voice -Itn `
 ```
 
 ## 单测
-`scripts\build-snow-stt.ps1 -Test`（worker 65 个，含主循环 Fake 测试、先开麦环形缓存与积压追赶、系统后端的纯逻辑：HRESULT / 状态分类、语言解析、假设升格、节拍来源）与 `cargo test -p snow-stt-protocol`（协议往返与异常输入）。
+`scripts\build-snow-stt.ps1 -Test`（worker 83 个，含主循环 Fake 测试、先开麦环形缓存与积压追赶、系统后端的纯逻辑：HRESULT / 状态分类、语言解析、假设升格、节拍来源，以及加载提速的 `model_type` 解析、缓存命中 / 失效 / 生成失败回退 / 锁 / 首尾哈希校验）与 `cargo test -p snow-stt-protocol`（协议往返与异常输入）。
 
 ## 主程序接入
 入口代码在 `snow-shot-rs/crates/snow-shot/src/dictation/`，分层如下（纯逻辑层都有离屏单测）：
@@ -292,5 +303,5 @@ scripts\verify-snow-stt.ps1 -Mode offline -Kind offline-sense-voice -Itn `
 ## 许可证注意
 - sherpa-onnx 与 sherpa-onnx-sys 为 Apache-2.0；传递依赖许可证已核对，无与 GPL-3.0-only 冲突者（见调研 §8.1）。
 - 随包的 `sherpa-onnx-c-api.dll` 内含 **espeak-ng**（TTS 用），上游为 **GPL-3.0-or-later**；用于 GPL-3.0-only 工程可行，但**分发时必须在第三方声明里补 espeak-ng 及 sherpa 预编译库其余部分（ORT MIT、kaldi-native-fbank 等 Apache-2.0）的许可证文本**。
-- `scripts/collect-third-party-licenses.ps1` 目前只由 `package-snow-shot.ps1` 以 Qt 版的清单调用，**不覆盖 snow-stt**（它按 `-CargoManifest` 逐个清单收集，且不处理 build.rs 下载的预编译库）。接入打包时需单独加入 `snow-stt/Cargo.toml` 并手写预编译库的声明，本步骤未改动脚本。
+- `scripts/collect-third-party-licenses.ps1` 按 `-CargoManifest` 逐个清单收集 Cargo 依赖，非 Cargo 组件走 `-ExtraNotices`（读 `licenses/runtime-components.md`）；但目前只有 Qt 版 `package-snow-shot.ps1` 调用它，Rust 版安装包脚本还不存在，所以 **snow-stt 还没有接入收集器**（接入时把 `snow-stt/Cargo.toml` 加进 `-CargoManifest` 即可，新增的 `ort` / `serde_json` 会被自动收集）。新增 `ort`（MIT OR Apache-2.0，与 snow-table 同一份）已手工补进 `licenses/runtime-components.md` 的「随包二进制」表。
 - 模型权重另有各自许可，不随仓库分发。

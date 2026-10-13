@@ -10,7 +10,7 @@ Cargo 依赖由 `scripts/collect-third-party-licenses.ps1` 按 `cargo tree` 自�
 | sherpa-onnx 预编译库（`sherpa-onnx-c-api.dll` 等，`snow-stt` 构建期下载） | 语音转文字 | Apache-2.0 | https://github.com/k2-fsa/sherpa-onnx |
 | onnxruntime.dll（1.28.x，`snow-stt` / `snow-table` / 翻译共用） | ONNX 推理 | MIT | https://github.com/microsoft/onnxruntime |
 | espeak-ng（随 sherpa 预编译包） | 文本前端 | GPL-3.0-or-later | https://github.com/espeak-ng/espeak-ng |
-| `snow-table` 依赖的 `ort`（mg-chao 补丁，rev 90018ee5） | ORT 绑定 | MIT OR Apache-2.0 | https://github.com/mg-chao/ort |
+| `snow-table`、`snow-stt` 依赖的 `ort`（mg-chao 补丁，rev 90018ee5；`snow-stt` 用它做 encoder 预优化缓存） | ORT 绑定 | MIT OR Apache-2.0 | https://github.com/mg-chao/ort |
 | SLANet_plus ONNX（表格结构识别模型，按需下载） | 表格识别 | Apache-2.0（以 `table-model-manifest.json` 记录为准，未另行复核） | https://www.modelscope.cn/models/RapidAI/RapidTable |
 
 `snow-table`、`snow-stt` 的 Cargo 依赖通过 `-CargoManifest` 传入各自 `Cargo.toml` 即可由收集器处理。
