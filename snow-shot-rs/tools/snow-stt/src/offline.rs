@@ -23,6 +23,7 @@ use snow_stt_protocol::{
 };
 
 use crate::backend::{KindFiles, SttBackend, SttEvent, discover};
+use crate::optcache::{self, LoadOpts, OFFLINE_TRANSDUCER_TYPES};
 use crate::sherpa::{MS_PER_SECOND, SAMPLE_RATE};
 
 /// VAD 默认阈值（sherpa 示例常见值，未经评测，需在真实音频上复测）。
@@ -429,19 +430,26 @@ pub struct OfflineSherpaBackend {
 impl OfflineSherpaBackend {
     /// 按请求加载 VAD 与离线识别器。
     ///
+    /// 离线 transducer 在 `model.json` 写了 `model_type` 时直接交给 sherpa（省掉它再载一遍 encoder 读元数据）；
+    /// 其它离线类型 sherpa 按配置字段直接选识别器，本来就不探测，不受影响。
+    ///
     /// # 参数
     /// - `req`：START 请求（须已通过 [`check_mode_kind`]）。
+    /// - `opts`：加载选项（`model_type` 为假时不传，对比实验用）。
     ///
     /// # 返回
     /// 后端实例；模型缺失或加载失败时返回中文原因。
-    pub fn load(req: &StartRequest) -> Result<Self, String> {
+    pub fn load(req: &StartRequest, opts: LoadOpts) -> Result<Self, String> {
         let dir = Path::new(&req.model_dir);
         let files = discover(dir, req.kind)?;
         let vad_model = find_vad_model(dir)?;
         let vad_cfg = build_vad_config(&vad_model, req.vad.unwrap_or_else(default_vad_params));
         let vad = VoiceActivityDetector::create(&vad_cfg, VAD_BUFFER_SECONDS)
             .ok_or_else(|| "sherpa 创建 VAD 失败（silero_vad.onnx 损坏或不兼容）".to_string())?;
-        let cfg = build_offline_config(req.kind, &files, req)?;
+        let mut cfg = build_offline_config(req.kind, &files, req)?;
+        if opts.model_type && req.kind == ModelKind::OfflineTransducer {
+            cfg.model_config.model_type = optcache::read_model_type(dir, &OFFLINE_TRANSDUCER_TYPES);
+        }
         let recognizer = OfflineRecognizer::create(&cfg)
             .ok_or_else(|| "sherpa 创建离线识别器失败（模型文件损坏或不兼容）".to_string())?;
         Self::new(
@@ -966,7 +974,7 @@ mod tests {
             threads: 2,
             ..Default::default()
         };
-        let mut b = OfflineSherpaBackend::load(&req).unwrap();
+        let mut b = OfflineSherpaBackend::load(&req, LoadOpts::default()).unwrap();
         let wave = sherpa_onnx::Wave::read(&wav).expect("读 wav 失败");
         b.feed(wave.samples());
         b.feed(&vec![0.0; SAMPLE_RATE as usize]);

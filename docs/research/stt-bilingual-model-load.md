@@ -1,6 +1,6 @@
 # 双语流式模型加载提速：慢在哪、怎么降到 1 秒内
 
-> 状态：调研 + 本机离线实测完成，**未改任何产品代码**；方案待用户拍板。日期 2026-10-13。依据 [`principles.md`](../principles.md) 的优先级链（高性能 > 低内存 > 高 fps > 少编译依赖 > 多用系统能力，另含小体积、不常驻）。
+> 状态：**已实施（2026-10-13）**：§5.1（`model_type`）与 §5.2（encoder 预优化缓存）都已落地到 `tools/snow-stt`，实测数据见 §11；§1~§10 保留为调研原文（其中"未改任何产品代码""待拍板"等描述以 §11 为准）。日期 2026-10-13。依据 [`principles.md`](../principles.md) 的优先级链（高性能 > 低内存 > 高 fps > 少编译依赖 > 多用系统能力，另含小体积、不常驻）。
 > 关联：[`research/dictation-cold-start.md`](dictation-cold-start.md)（§3.1 量到 x-asr 480ms 加载 5.7 / 9.4 / 13.6 s、§9 第 5 条、§7 E5 就是本文的起点）、[`research/stt-model-selection.md`](stt-model-selection.md)（历史加载口径）、[`research/speech-to-text-backends.md`](speech-to-text-backends.md)、[`guides/snow-stt-worker.md`](../guides/snow-stt-worker.md)（worker 协议与构建）。
 > 资料来源说明：产品行为来自读代码和本机实测（探针与脚本在 scratchpad，不入仓库；`rprobe` 的构建目录在已被忽略的 `build/stt-probe`）。ORT / sherpa-onnx 的行为先读源码与官方文档，再用本机实测交叉验证；只读到摘要、没实测的写"未证实"。**本机测量时有其它进程在编译和跑脚本（处理器利用率 30%~120%），绝对数字噪声很大，所以所有对比都是同一时段交替跑，看量级和排序，不看小数。**
 
@@ -248,3 +248,54 @@ x-asr 480ms 与 160ms 的 encoder 文件体积完全相同，加载代价按同�
 - 产物：`sttload\{opt2,opt99,fd2,sim,simopt2,ortfmt}\`（各种优化后的 encoder）、`m480opt2\`、`m480simopt2\`、`m480fd2\`、`mz*\`（可直接给 worker 当模型目录）、`speech.wav` / `speech_zh.wav` / `long.wav`（Windows TTS 合成）。Python 依赖（onnxsim 0.8.1、onnxruntime 1.31.0）装在 `sttload\pylib`，只给 `simp.py` 用。
 - 复现 F：`python ortprobe.py <ORT dll 目录> <原 encoder> --level 2 --freedim N=1 --save <输出路径>`，再 `rprobe.exe <原模型目录> zipformer2 <输出路径>`。
 - 没有动任何系统设置、注册表或用户数据目录（只读了 `%LOCALAPPDATA%\Cisox\models\stt`，所有产物都在 scratchpad 与 `build\stt-probe`）；**唯一的整机级动作是 3 轮清备用列表（§3.2）**。没有启动 `snow-shot.exe` / `snow-shot-ui.exe`，没有弹窗，没有打开麦克风（全部用 `--wav` 与离线探针）。没有修改 `tools/snow-stt` 源码。
+
+## 11. 实施结果（2026-10-13，已落地）
+
+用户拍板：①`model_type` 来源是模型清单 `model.json` 字段；②snow-stt 引入 `ort`（版本与 snow-table / snow-translator 对齐）；③缓存放模型目录旁、约 150MB/模型。实现见 [`guides/snow-stt-worker.md`](../guides/snow-stt-worker.md)「加载提速」一节，代码在 `tools/snow-stt/src/{optcache,sherpa,offline,main}.rs`。
+
+### 11.1 与调研方案的差异和实施中的发现
+
+1. **`model_type` 的取值核对了源码**（`online-transducer-model.cc`、`offline-recognizer-impl.cc`，master 分支）：流式 transducer 只认 `conformer / ebranchformer / lstm / zipformer / zipformer2`；离线侧**只有 transducer 会探测**（sense_voice / paraformer / whisper / moonshine / 各 ctc 在到达 `model_type` 分支之前就按配置字段选了识别器），所以 V6 的结论是：离线只有 `offline-transducer` 受益，取值 `transducer`（NeMo 系是 `nemo_transducer`）。离线这条路径只接了线，清单里**没有给离线模型填值**（没装离线模型，没核对过，也没测过加载时间）。
+2. 清单（`stt-model-manifest.json`）里只给**核对过的 3 个流式模型**填了 `"model_type": "zipformer2"`（multi-zh、x-asr 480ms、x-asr 160ms，值取自各自 encoder 的 ONNX 元数据，生成缓存时由 ORT 读出，三个都是 `zipformer2`）。其余 4 个流式模型没下载过，不填；它们和**旧安装**（`model.json` 里没有该字段）靠第二来源：缓存元数据里记着生成时从 encoder 读到的 `model_type`，所以第一次听写结束、缓存生成后，下一次起也能省掉"载两遍"。取值顺序：`model.json`（过白名单）→ 缓存元数据 → 不设（sherpa 自己探测，旧行为）。
+3. **生成缓存放在后台子进程里，不在 worker 里**：worker 一次识别就退出，进程内线程会被半路杀掉；改为会话顺利结束后拉起 `snow-stt --optimize <模型目录>`（空闲优先级、无窗口、不继承管道），产物先写临时文件、成功后改名、最后才写元数据，被杀只会留下临时文件与过期锁（15 分钟后可接管）。这一次的识别照常用原文件加载。
+4. **没有用 `PROCESS_MODE_BACKGROUND_BEGIN`**：实测它连带压低 IO / 内存优先级，生成从约 5 s 拖到 **85~88 s**（本机另有其它编译在跑）；只用空闲优先级类约 5 s。限线程：ORT 会话 intra / inter 都是 1。
+5. **发现并修掉一个管道继承问题**：Rust 的 `Command` 在 Windows 上默认继承父进程的标准句柄，子进程会把 worker 与宿主之间的管道多撑住约 5 s（宿主读管道读不到 EOF）。现在拉起前把本进程的 stdin/stdout/stderr 设为不可继承，已实测消除。
+6. **损坏的缓存不能靠"sherpa 创建失败再回退"**：把 `encoder.opt.onnx` 头部覆盖 4KB 随机字节（长度不变）后，worker 进程在 sherpa / ORT 里直接结束，没有任何输出，没机会回退。所以改为**加载前校验**：缓存元数据里存产物的字节数、修改时间、首尾各 64KB 的 FNV-1a 哈希（整份 150MB 哈希太慢，会吃掉收益）；校验不过就当没有缓存、用原文件，并重新生成。中间部分被改而首尾、大小、时间都不变的损坏发现不了（极不可能，未防）。"sherpa 创建返回失败"这条回退仍保留（把缓存标成失败、不再重试），只是不能保证每种损坏都走到这里。
+7. 缓存键用**大小 + 修改时间**绑定源 encoder，没有算源文件的整体哈希（同理太慢）；ORT 指纹是 `ort::info()` 的构建信息串加 `onnxruntime.dll` 字节数（读它只是读 dll 里的字符串，不建 ORT 环境）。生成失败 / 校验失败会写 `failed` 记录，同一份源文件与同一版 ORT 不再重试；ORT 版本变化后允许重试。
+8. 依赖：snow-stt 新增 `ort`（`=2.0.0-rc.13`，`std` / `api-28` / `load-dynamic`，与 snow-table 完全一致，沿用同一 `[patch.crates-io]` git rev）与 `serde_json`（读 `model.json` 与缓存元数据，已在 `Cargo.lock` 里，是 sherpa 的构建依赖），windows crate 增加 `Win32_System_Console` feature（拉起子进程前改句柄继承标志），没有新增 crate 之外的东西。Cargo.lock 只新增了 ort 及其传递依赖（ort-sys、libloading、tracing、ndarray 等），没有改动已有版本。
+
+### 11.2 实测：加载前后
+
+环境同 §3：Dell i5-13500，Win10，release 构建，ORT 用仓库同版 1.28.0.20260724；**测量时机器有其它会话的编译在跑（处理器占用 24%~99%），所以看量级和排序，不看小数**。每项 3 次，A / B / C 交替跑，`snow-stt.exe --wav ... --stats` 的 `load_ms`（毫秒）。A = 旧行为（`--no-model-type --no-opt-cache`），B = 只填 `model_type`（`--no-opt-cache`），C = 生产默认（`model_type` + 预优化缓存命中）。
+
+| 模型（音频） | A 原行为 | B 只填 model_type | C 缓存命中 | C 相对 A |
+| --- | --- | --- | --- | --- |
+| x-asr 480ms（TTS 中英混合 7 s） | 5827 / 7524 / 5697 | 2760 / 2820 / 2737 | **757 / 865 / 777** | 约 -86%（中位数 5827 → 777） |
+| multi-zh（TTS 中文） | 3629 / 5054 / 4145 | 1979 / 2520 / 2336 | **616 / 617 / 522** | 约 -85%（4145 → 617） |
+| x-asr 160ms（只测 1 次） | 4306 | — | 847 | 约 -80% |
+
+注：multi-zh 另有一组用了英文音频（识别为空）的交替测量（A 2842 / 10151 / 22740，B 1755 / 9828 / 8013，C 736 / 2184 / 1578），那一轮机器正被其它编译占满，波动极大，因音频不对已弃用，上表是换成中文音频后的重测；两轮的排序一致（C < B < A）。
+
+### 11.3 实测：文本一致性（V2）
+
+- x-asr 480ms，74 s TTS 中英混合音频（同 §4 的整段），A / B / C 各 1 次：**7 条 FINAL 逐字一致，输出文件的 SHA-256 完全相同**。
+- multi-zh（中文音频）A / B / C 各 3 次：FINAL 文本 SHA 全部相同。x-asr 160ms（英文短音频）A / C：SHA 相同。
+- 仍是 TTS 合成音频，**不是评测集，不能当精度结论**（与 §8 第 4 条一致）；推理本身没变，只是同一张图换了 ORT 预先优化过的形式。
+- RTF 不变（多数 0.06~0.13，个别被背景负载拉到 0.19 以上，噪声大），没有看到变慢。
+
+### 11.4 实测：生成缓存与回退（V1 / V4）
+
+- 生成耗时（`snow-stt --optimize`，x-asr 480ms）：普通优先级 3.3 s（另一次 16 s，背景负载），空闲优先级类 4.9 / 5.5 s，产物 152.4MB（原 155.3MB），元数据约 0.4KB。multi-zh 5.3 s，160ms 9.9 s（背景负载）。
+- 真实流程（无缓存 → 一次会话 → 会话结束后自动拉起空闲优先级子进程 → 下一次直接命中）已走通，第二次 `load_ms` 1011，识别文本不变。
+- 不拖慢听写：生成子进程与一次 74 s 音频的识别重叠（3 对交替，机器占用 99%）：对照 p95 块耗时 151 / 66 / 58 ms，重叠 74 / 63 / 74 ms；RTF 对照 0.191 / 0.103 / 0.091，重叠 0.113 / 0.096 / 0.104。差异在噪声以内，没有观察到变慢。
+- V4：①缓存元数据里的 ORT 指纹改成假的 → 用原文件加载（文本不变）、后台重新生成、下一次命中；②缓存产物覆盖 4KB 随机字节（长度不变）→ 首尾哈希发现，用原文件加载、重新生成、下一次命中（见 11.1 第 6 条的前因）；③旧元数据格式版本 → 失效重建；④`model.json` 没有 `model_type`（旧安装）→ 由缓存元数据补上，`model_type=zipformer2` 生效。
+- 离屏单测：worker 83 个（82 通过 + 1 个需要真实模型的忽略项），其中缓存相关 14 个、`model_type` 解析、配置构造、命令行开关；`snow-shot` 里清单解析与 `model.json` 写入有对应单测。
+
+### 11.5 仍未做 / 未证实
+
+- V3 的"页缓存冷"栏、V5（第二台不同 CPU，尤其 AMD 无 E 核）：没做。EXTENDED 缓存只在本机验证过。
+- 离线 transducer 的 `model_type` 加载前后对比：没装离线模型，没测。
+- 精度：仍没有评测集 CER。
+- 缓存按模型目录存放，**不跨模型共享**；用户手动换 `model_dir` 指到别的目录会各自生成各自的 `.opt`。
+- `.opt` 随模型目录一起被替换 / 删除（重装模型会清掉缓存，下次听写后重新生成）；没有单独的"清理缓存"入口。
+- 固定批量为 1 的结论不变：将来若同一 worker 要并发多路流，这条路径要关掉（`--no-opt-cache` 就是现成的开关位）。

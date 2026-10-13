@@ -9,9 +9,13 @@
 //! `--wav-preroll` 让 wav 也走先开麦的环形缓存流程，`--load-delay-ms <n>` 在加载模型前人为等待
 //! （二者合用可离线复现“加载很慢、积压追赶”），`--stats` 结束时向 stderr 打印耗时统计，
 //! `--probe-system [--probe-lang <语言>]` 只探测系统语音能力后退出。
+//! 加载提速（见 [`optcache`]）：加载时把 `model_type` 交给 sherpa、命中 encoder 预优化缓存就直接用；没有缓存时
+//! 本次照常加载，会话结束后拉起空闲优先级的后台子进程 `--optimize <模型目录>` 生成一次。对比实验可用
+//! `--no-model-type` / `--no-opt-cache` 单独关闭各项。
 
 mod backend;
 mod offline;
+mod optcache;
 mod preroll;
 mod session;
 mod sherpa;
@@ -26,6 +30,7 @@ use std::time::{Duration, Instant};
 use snow_stt_protocol::{BackendKind, Command, Event, RecognitionMode, StartRequest, SystemError};
 
 use backend::SttBackend;
+use optcache::LoadOpts;
 use preroll::{PumpedSource, cap_samples};
 use session::{Ctl, SessionEnd, SessionStats, run_session, wait_for_start};
 use sherpa::SAMPLE_RATE;
@@ -59,6 +64,12 @@ struct Args {
     wav_preroll: bool,
     /// 加载模型前人为等待的毫秒数（测试用，模拟加载很慢）。
     load_delay_ms: u64,
+    /// 前台生成指定模型目录的 encoder 预优化缓存后退出（后台子进程的入口，也可手动运行）。
+    optimize: Option<String>,
+    /// 不把 `model_type` 交给 sherpa（对比实验用）。
+    no_model_type: bool,
+    /// 不使用也不生成 encoder 预优化缓存（对比实验用）。
+    no_opt_cache: bool,
 }
 
 /// 解析命令行参数；未知参数忽略。
@@ -84,6 +95,9 @@ fn parse_args_from(items: impl IntoIterator<Item = String>) -> Args {
         stats: false,
         wav_preroll: false,
         load_delay_ms: 0,
+        optimize: None,
+        no_model_type: false,
+        no_opt_cache: false,
     };
     let mut it = items.into_iter();
     while let Some(a) = it.next() {
@@ -95,6 +109,9 @@ fn parse_args_from(items: impl IntoIterator<Item = String>) -> Args {
                 args.load_delay_ms = it.next().and_then(|v| v.parse().ok()).unwrap_or(0);
             }
             "--stats" => args.stats = true,
+            optcache::ARG_OPTIMIZE => args.optimize = it.next(),
+            "--no-model-type" => args.no_model_type = true,
+            "--no-opt-cache" => args.no_opt_cache = true,
             "--probe-system" => args.probe_system = Some("auto".into()),
             "--probe-lang" => {
                 args.probe_system = Some(it.next().unwrap_or_else(|| "auto".into()));
@@ -221,6 +238,9 @@ fn main() {
         println!("{}", system::probe_report(lang));
         return;
     }
+    if let Some(dir) = &args.optimize {
+        std::process::exit(optcache::run_optimize_cli(std::path::Path::new(dir)));
+    }
     let ctl = spawn_stdin_reader();
     emit(&Event::Ready);
 
@@ -235,25 +255,33 @@ fn main() {
     if args.load_delay_ms > 0 {
         std::thread::sleep(Duration::from_millis(args.load_delay_ms));
     }
-    let loaded: Result<Box<dyn SttBackend>, String> = match offline::check_mode_kind(&req)
-        .map(|()| req.backend)
-    {
-        Err(why) => Err(why),
-        // 离线整句识别：VAD 切句 + 后台线程解码（端点规则对其无意义）
-        Ok(BackendKind::Local) if req.mode == RecognitionMode::Offline => {
-            offline::OfflineSherpaBackend::load(&req).map(|b| Box::new(b) as Box<dyn SttBackend>)
-        }
-        Ok(BackendKind::Local) => {
-            sherpa::SherpaBackend::load(&req).map(|b| Box::new(b) as Box<dyn SttBackend>)
-        }
-        // 系统语音：识别器自己占用默认麦克风
-        Ok(BackendKind::System) if args.wav.is_some() => {
-            Err(SystemError::Other.to_error_text("系统语音后端不支持 --wav，只能用麦克风"))
-        }
-        Ok(BackendKind::System) => {
-            system::SystemBackend::load(&req).map(|b| Box::new(b) as Box<dyn SttBackend>)
-        }
+    let load_opts = LoadOpts {
+        model_type: !args.no_model_type,
+        opt_cache: !args.no_opt_cache,
     };
+    let mut load_report: Option<sherpa::LoadReport> = None;
+    let loaded: Result<Box<dyn SttBackend>, String> =
+        match offline::check_mode_kind(&req).map(|()| req.backend) {
+            Err(why) => Err(why),
+            // 离线整句识别：VAD 切句 + 后台线程解码（端点规则对其无意义）
+            Ok(BackendKind::Local) if req.mode == RecognitionMode::Offline => {
+                offline::OfflineSherpaBackend::load(&req, load_opts)
+                    .map(|b| Box::new(b) as Box<dyn SttBackend>)
+            }
+            Ok(BackendKind::Local) => {
+                sherpa::SherpaBackend::load(&req, load_opts).map(|(b, report)| {
+                    load_report = Some(report);
+                    Box::new(b) as Box<dyn SttBackend>
+                })
+            }
+            // 系统语音：识别器自己占用默认麦克风
+            Ok(BackendKind::System) if args.wav.is_some() => {
+                Err(SystemError::Other.to_error_text("系统语音后端不支持 --wav，只能用麦克风"))
+            }
+            Ok(BackendKind::System) => {
+                system::SystemBackend::load(&req).map(|b| Box::new(b) as Box<dyn SttBackend>)
+            }
+        };
     let mut backend = loaded.unwrap_or_else(|why| fail(why));
     let load_ms = t0.elapsed().as_millis();
 
@@ -286,6 +314,17 @@ fn main() {
     );
     if args.stats {
         print_stats(load_ms, &stats);
+        if let Some(report) = &load_report {
+            eprintln!("{}", report.summary());
+        }
+    }
+    // 会话顺利结束后，没有缓存就在后台生成一次（空闲优先级子进程，不影响刚结束的听写，也不会拖慢下一次）
+    if end != SessionEnd::Failed
+        && let Some(report) = &load_report
+        && report.wants_generation()
+        && let Err(why) = report.spawn_generation()
+    {
+        eprintln!("optcache: {why}");
     }
     // 先释放采集与模型，再退出
     drop(source);
@@ -329,6 +368,21 @@ mod tests {
         assert_eq!(bad.load_delay_ms, 0);
         let probe = parse_args_from(argv(&["--probe-lang", "zh"]));
         assert_eq!(probe.probe_system.as_deref(), Some("zh"));
+    }
+
+    /// 加载提速相关的开关：`--optimize <目录>`、`--no-model-type`、`--no-opt-cache`；缺省全部关闭。
+    #[test]
+    fn parses_load_opt_flags() {
+        let a = parse_args_from(argv(&[
+            "--optimize",
+            "M",
+            "--no-model-type",
+            "--no-opt-cache",
+        ]));
+        assert_eq!(a.optimize.as_deref(), Some("M"));
+        assert!(a.no_model_type && a.no_opt_cache);
+        let none = parse_args_from(argv(&["--wav", "a.wav"]));
+        assert!(none.optimize.is_none() && !none.no_model_type && !none.no_opt_cache);
     }
 
     /// 先开麦只用于本地后端：麦克风与 `--wav-preroll` 走缓存；普通 wav 与系统语音保持老流程。
