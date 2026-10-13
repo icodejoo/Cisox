@@ -5,7 +5,7 @@
 译文写到 results/<name>/<src>-<tgt>/hyp.txt，并与 Python 评测的译文（同一目录名的 python 结果）逐句比较。
 
 用法示例：
-    python run_worker.py --exe C:/tmp/snow-translator.exe --pack E:/models/translate-eval/opusmt-en-zh-int8-pack \
+    python run_worker.py --exe C:/tmp/cisox-translator.exe --pack E:/models/translate-eval/opusmt-en-zh-int8-pack \
         --src en --tgt zh-CN --src-file E:/.../results/en-zh/src.txt --name opusmt-en-zh-int8-rust --limit 10
 """
 import argparse

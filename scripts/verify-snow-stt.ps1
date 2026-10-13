@@ -1,5 +1,5 @@
-# 端到端自检 snow-stt：用 wav 代替麦克风，走真实 stdin/stdout 协议，记录事件序列、耗时与内存峰值。
-# 用法: scripts/verify-snow-stt.ps1 -ModelDir <模型目录> -Wav <16k 单声道 wav> [-PadMs 3000] [-Threads 2] [-StopAfterMs 0] [-Exe <snow-stt.exe>]
+# 端到端自检 cisox-stt：用 wav 代替麦克风，走真实 stdin/stdout 协议，记录事件序列、耗时与内存峰值。
+# 用法: scripts/verify-snow-stt.ps1 -ModelDir <模型目录> -Wav <16k 单声道 wav> [-PadMs 3000] [-Threads 2] [-StopAfterMs 0] [-Exe <cisox-stt.exe>]
 #         [-Mode streaming|offline] [-Kind <模型类型>] [-VadModel <silero_vad.onnx>] [-Itn]
 #   -Mode offline: 离线整句识别（VAD 切句），须配 -Kind offline-*；默认 streaming，START 行与旧版逐字节相同。
 #   -Kind: online-transducer|offline-transducer|offline-paraformer|offline-sense-voice|offline-whisper|offline-zipformer-ctc|offline-nemo-ctc|offline-moonshine。
@@ -21,7 +21,7 @@ param(
 )
 $ErrorActionPreference = "Stop"
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-if ([string]::IsNullOrWhiteSpace($Exe)) { $Exe = Join-Path $repoRoot "build/stt/release/snow-stt.exe" }
+if ([string]::IsNullOrWhiteSpace($Exe)) { $Exe = Join-Path $repoRoot "build/stt/release/cisox-stt.exe" }
 if (-not (Test-Path $Exe)) { throw "找不到 $Exe，先运行 scripts/build-snow-stt.ps1" }
 
 if ($VadModel) {

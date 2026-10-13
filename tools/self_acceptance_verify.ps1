@@ -4,8 +4,8 @@ $ErrorActionPreference = "Stop"
 Write-Host "=================================================="
 Write-Host " 1. 验证目标二进制是否存在与版本元数据"
 Write-Host "=================================================="
-# 完整应用是 UI 进程 snow-shot-ui.exe；阶段 4 起无参数会转去启动宿主，自检要单进程完整应用，所以显式带 --resident；snow-shot.exe 是托盘宿主
-$exePath = "E:\workspaces\Cisox\build\cargo\debug\snow-shot-ui.exe"
+# 完整应用是 UI 进程 cisox-ui.exe；阶段 4 起无参数会转去启动宿主，自检要单进程完整应用，所以显式带 --resident；cisox.exe 是托盘宿主
+$exePath = "E:\workspaces\Cisox\build\cargo\debug\cisox-ui.exe"
 if (-not (Test-Path $exePath)) {
     throw "未找到二进制文件: $exePath"
 }

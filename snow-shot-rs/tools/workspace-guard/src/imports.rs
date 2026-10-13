@@ -187,7 +187,7 @@ const DELAY_DESCRIPTOR_SIZE: usize = 32;
 /// 静态与延迟导入的 DLL 名（小写）；格式不对返回 [`ImportError`]。
 ///
 /// ```no_run
-/// let bytes = std::fs::read("snow-shot.exe").unwrap();
+/// let bytes = std::fs::read("cisox.exe").unwrap();
 /// let imports = workspace_guard::imports::parse_imports(&bytes).unwrap();
 /// println!("{:?}", imports.static_dlls);
 /// ```

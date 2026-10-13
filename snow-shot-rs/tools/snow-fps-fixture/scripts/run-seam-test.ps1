@@ -1,10 +1,10 @@
-﻿# 跨屏接缝对齐/光标验证驱动：拉起 grid 夹具(1920x1080，以接缝为中心) -> 行协议驱动 snow-recorder 录约 4 秒(光标关) -> check_seam.py；带 -Cursor 再录一段光标开 -> check_cursor.py。
+﻿# 跨屏接缝对齐/光标验证驱动：拉起 grid 夹具(1920x1080，以接缝为中心) -> 行协议驱动 cisox-recorder 录约 4 秒(光标关) -> check_seam.py；带 -Cursor 再录一段光标开 -> check_cursor.py。
 # 安全约束：跨屏会占用主屏一部分，必须显式传 -AllowPrimary，否则中止；先用夹具 --check 校验区域，结束后确认夹具/录制进程均已退出。
 # 用法示例:
 #   scripts/run-seam-test.ps1 -AllowPrimary                 # 仅接缝对齐
 #   scripts/run-seam-test.ps1 -AllowPrimary -Dual           # 双窗口：每块屏一个夹具窗口
 #   scripts/run-seam-test.ps1 -AllowPrimary -Cursor         # 另加光标跨接缝检查（会移动鼠标到接缝处）
-#   scripts/run-seam-test.ps1 -AllowPrimary -SeamX 2560 -RecorderExe D:\x\snow-recorder.exe
+#   scripts/run-seam-test.ps1 -AllowPrimary -SeamX 2560 -RecorderExe D:\x\cisox-recorder.exe
 # 退出码: 0=全部通过，1=有检查不通过，其它=运行出错。
 param(
     [string]$RecorderExe = "",
@@ -25,7 +25,7 @@ $X0 = $SeamX - $W / 2; $Y0 = 0
 $Fps = 60
 $toolRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $repoRoot = (Resolve-Path (Join-Path $toolRoot "../../..")).Path
-if (-not $RecorderExe) { $RecorderExe = Join-Path $repoRoot "snow-shot-rs/tools/snow-recorder/target/release/snow-recorder.exe" }
+if (-not $RecorderExe) { $RecorderExe = Join-Path $repoRoot "snow-shot-rs/tools/snow-recorder/target/release/cisox-recorder.exe" }
 if (-not $FixtureExe) { $FixtureExe = Join-Path $toolRoot "target/release/snow-fps-fixture.exe" }
 if (-not $AllowPrimary) { throw "跨屏模式会占用主屏的一部分，必须传 -AllowPrimary，中止" }
 if (-not (Test-Path $RecorderExe)) { throw "找不到录制进程: $RecorderExe" }
@@ -118,7 +118,7 @@ try {
 }
 finally {
     Start-Sleep -Milliseconds 300
-    $left = @(Get-Process -Name snow-fps-fixture, snow-recorder -ErrorAction SilentlyContinue)
+    $left = @(Get-Process -Name snow-fps-fixture, cisox-recorder -ErrorAction SilentlyContinue)
     "leftover processes: $($left.Count)"
     if ($left.Count -gt 0) { $left | ForEach-Object { try { $_.Kill() } catch { } }; $failed = $true }
 }

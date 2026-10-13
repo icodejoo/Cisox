@@ -25,7 +25,10 @@ pub const HINT_DICTATION: &str = "dictation";
 pub const FLAG_RESIDENT: &str = "--resident";
 
 /// 托盘宿主的 exe 文件名（与 UI 进程同目录，是常驻入口：自启、快捷方式、无参数转调都指向它）。
-pub const HOST_EXE_NAME: &str = "snow-shot.exe";
+pub const HOST_EXE_NAME: &str = "cisox.exe";
+
+/// UI 进程的 exe 文件名（宿主拉起它、重启辅助与自启目标推导都按它定位同目录文件）。
+pub const UI_EXE_NAME: &str = "cisox-ui.exe";
 
 /// 开关：无窗口任务（不初始化 GPUI），后面跟任务名。
 pub const FLAG_HEADLESS: &str = "--headless";

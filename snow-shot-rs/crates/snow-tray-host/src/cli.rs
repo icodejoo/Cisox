@@ -1,6 +1,6 @@
 //! 宿主的命令行：`--cmd <命令>`（交给运行中的实例；没有实例时宿主起来后执行它）、`--resident`（旧单进程回退）。
 //!
-//! 命令名、默认行为与 UI 进程的旧入口完全一致（`snow-shot --cmd screenshot` 等照常可用）。
+//! 命令名、默认行为与 UI 进程的旧入口完全一致（`cisox --cmd screenshot` 等照常可用）。
 
 use snow_host_protocol::launch::FLAG_RESIDENT;
 use snow_platform::single_instance::IpcCommand;
@@ -12,7 +12,7 @@ pub const FLAG_COMMAND: &str = "--cmd";
 pub const FLAG_SELF_CHECK_HARDEN: &str = "--self-check-harden";
 
 /// 用法提示。
-pub const USAGE: &str = "用法: snow-shot [--cmd screenshot|recording|scroll-capture|pin-clipboard|settings|show|quit] [--resident]";
+pub const USAGE: &str = "用法: cisox [--cmd screenshot|recording|scroll-capture|pin-clipboard|settings|show|quit] [--resident]";
 
 /// 解析后的命令行。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,7 +23,7 @@ pub enum HostCli {
         /// 本进程成为第一个实例时，显式命令在宿主起来后执行（`None` 只常驻托盘）。
         command: Option<IpcCommand>,
     },
-    /// `--resident`：不跑宿主，改拉起旧的单进程 UI（`snow-shot-ui.exe --resident`）。
+    /// `--resident`：不跑宿主，改拉起旧的单进程 UI（`cisox-ui.exe --resident`）。
     Resident,
     /// `--self-check-harden`：只验证进程加固是否生效。
     SelfCheckHarden,

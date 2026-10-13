@@ -1,6 +1,6 @@
 # 构建表格结构识别工作进程 snow-table（独立 workspace，ort load-dynamic，运行期才找 onnxruntime.dll）。
 # 用法: scripts/build-snow-table.ps1 [-Profile release|debug] [-Test] [-Clippy]
-# 产物: snow-shot-rs/tools/snow-table/target/<profile>/snow-table.exe；发布时需放在主程序同目录。
+# 产物: snow-shot-rs/tools/snow-table/target/<profile>/cisox-table.exe；发布时需放在主程序同目录。
 param(
     [ValidateSet("release", "debug")][string]$Profile = "release",
     [switch]$Test,

@@ -1,4 +1,4 @@
-//! 语音转文字工作进程客户端：定位并拉起 `snow-stt`，按行协议通信。
+//! 语音转文字工作进程客户端：定位并拉起 `cisox-stt`，按行协议通信。
 //!
 //! 写法沿用录制进程客户端：读线程把 stdout 事件转发到通道并唤醒主线程；
 //! stderr 由独立线程排空（否则日志写满管道会卡死子进程）；结束进程只动自己持有的子进程句柄，
@@ -15,10 +15,10 @@ use std::time::{Duration, Instant};
 
 /// 工作进程可执行文件名。
 #[cfg(windows)]
-pub const STT_EXE_NAME: &str = "snow-stt.exe";
+pub const STT_EXE_NAME: &str = "cisox-stt.exe";
 /// 工作进程可执行文件名。
 #[cfg(not(windows))]
-pub const STT_EXE_NAME: &str = "snow-stt";
+pub const STT_EXE_NAME: &str = "cisox-stt";
 /// 指定工作进程路径的环境变量（优先级最高）。
 pub const ENV_STT_EXE: &str = "SNOW_STT_EXE";
 /// 开发布局下相对仓库根的构建产物目录（`scripts/build-snow-stt.ps1` 的默认输出）。
@@ -44,7 +44,7 @@ const EXIT_CODE_WAIT: Duration = Duration::from_millis(500);
 /// 找到的路径；都不存在返回 `None`。
 ///
 /// ```ignore
-/// let exe = find_stt_exe(None, Path::new("C:/app/snow-shot.exe"), |p| p.exists());
+/// let exe = find_stt_exe(None, Path::new("C:/app/cisox.exe"), |p| p.exists());
 /// ```
 pub fn find_stt_exe(
     env_value: Option<&str>,
@@ -268,7 +268,7 @@ mod tests {
     /// 环境变量优先；指向不存在的文件则不回退。
     #[test]
     fn env_override_wins() {
-        let exe = Path::new("C:/app/snow-shot.exe");
+        let exe = Path::new("C:/app/cisox.exe");
         let hit = find_stt_exe(Some("D:/x/stt.exe"), exe, fs(&["D:/x/stt.exe"]));
         assert_eq!(hit, Some(PathBuf::from("D:/x/stt.exe")));
         assert_eq!(find_stt_exe(Some("D:/none.exe"), exe, fs(&[])), None);
@@ -278,7 +278,7 @@ mod tests {
     /// 同目录优先于开发布局。
     #[test]
     fn beside_exe_preferred() {
-        let exe = Path::new("C:/app/snow-shot.exe");
+        let exe = Path::new("C:/app/cisox.exe");
         let beside = format!("C:/app/{STT_EXE_NAME}");
         let dev = format!("C:/build/stt/release/{STT_EXE_NAME}");
         assert_eq!(
@@ -290,7 +290,7 @@ mod tests {
     /// 开发布局：沿目录向上找 build/stt/release，其次工具自己的 target。
     #[test]
     fn dev_layout_found_via_ancestors() {
-        let exe = Path::new("C:/repo/build/cargo/debug/snow-shot.exe");
+        let exe = Path::new("C:/repo/build/cargo/debug/cisox.exe");
         let built = format!("C:/repo/build/stt/release/{STT_EXE_NAME}");
         assert_eq!(
             find_stt_exe(None, exe, fs(&[&built])),
@@ -309,7 +309,7 @@ mod tests {
     /// 环境变量：`SNOW_STT_EXE`（工作进程）、`SNOW_STT_TEST_MODEL_DIR`（模型目录）、`SNOW_STT_TEST_WAV`（16k 单声道 wav）。
     /// 运行：`cargo test -p snow-shot real_worker_wav_session -- --ignored --nocapture`。
     #[test]
-    #[ignore = "需要真实 snow-stt、模型与 wav，见文档注释里的环境变量"]
+    #[ignore = "需要真实 cisox-stt、模型与 wav，见文档注释里的环境变量"]
     fn real_worker_wav_session() {
         use crate::dictation::engine::{Effect, Engine, Launch};
         use crate::dictation::overlay_model::OverlayModel;
@@ -335,7 +335,7 @@ mod tests {
             "3000".to_string(),
         ];
         let link =
-            ProcessSttLink::spawn_with_args(&exe, &args, Arc::new(|| {})).expect("拉起 snow-stt");
+            ProcessSttLink::spawn_with_args(&exe, &args, Arc::new(|| {})).expect("拉起 cisox-stt");
         let mut engine = Engine::default();
         let begin = Instant::now();
         let mut effects = engine.start(

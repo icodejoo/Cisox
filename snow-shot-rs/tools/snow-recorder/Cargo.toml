@@ -12,8 +12,9 @@ rust-version = "1.97"
 
 build = "build.rs"
 
+# 产物名 cisox-recorder.exe（包名仍是 snow-recorder）
 [[bin]]
-name = "snow-recorder"
+name = "cisox-recorder"
 path = "src/main.rs"
 
 [dependencies]

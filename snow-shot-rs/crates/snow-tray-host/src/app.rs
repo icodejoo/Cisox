@@ -7,12 +7,12 @@ use crate::cli::{FLAG_COMMAND, HostCli, USAGE, parse_cli};
 use crate::harden::{HardenReport, extension_points_disabled};
 use crate::host::{Event, HostCore};
 use crate::ipc_map::{FirstRun, action_id_for, first_run_plan};
-use crate::win::{ENV_UI_EXE, UI_EXE_NAME, WinPlatform};
+use crate::win::{ENV_UI_EXE, WinPlatform};
 use snow_data_paths::paths::{default_app_data_directory, resolve_directory};
 use snow_data_paths::{
     CRASH_DIR_NAME, LOG_DIR_NAME, PRODUCT_NAME, SINGLE_INSTANCE_APP_ID, host_log_path,
 };
-use snow_host_protocol::launch::FLAG_RESIDENT;
+use snow_host_protocol::launch::{FLAG_RESIDENT, UI_EXE_NAME};
 use snow_host_protocol::message::ActionOrigin;
 use snow_platform::crash::{
     CrashDumpConfig, DEFAULT_MAX_REPORTS, install as install_crash_handler,
@@ -70,7 +70,7 @@ fn run_self_check(harden: HardenReport) -> ExitCode {
     }
 }
 
-/// UI 进程 exe 路径：环境变量覆盖，否则是本 exe 同目录的 `snow-shot-ui.exe`。
+/// UI 进程 exe 路径：环境变量覆盖，否则是本 exe 同目录的 `cisox-ui.exe`。
 fn ui_exe_path() -> Option<PathBuf> {
     std::env::var_os(ENV_UI_EXE)
         .map(PathBuf::from)

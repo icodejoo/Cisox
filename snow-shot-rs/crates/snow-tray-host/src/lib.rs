@@ -2,7 +2,7 @@
 //!
 //! 宿主只管“能让用户唤起 Cisox 的东西”：托盘图标与菜单、全局热键（含前台全屏闸门、暂停开关）、
 //! 单实例与命令行入口、UI 进程的拉起与仲裁。窗口、配置读写、i18n、历史、贴图、录屏 / 语音 /
-//! 翻译 / OCR 的调度全在 UI 进程（`snow-shot-ui.exe`）。宿主**不链接 GPUI、不碰 D3D / IME / UIA**，
+//! 翻译 / OCR 的调度全在 UI 进程（`cisox-ui.exe`）。宿主**不链接 GPUI、不碰 D3D / IME / UIA**，
 //! 依赖闭包受 `workspace-guard` 约束，导入表受 `scripts/check-host-imports.ps1` 约束。
 //!
 //! # 模块

@@ -21,10 +21,11 @@ cargo test --workspace
 cargo build -p snow-tray-host -p snow-shot        # 同时构建；产物在根 .cargo/config.toml 指定的 build/cargo/<profile>/
 ```
 
-- `snow-shot.exe`（包 `snow-tray-host`）：托盘宿主，不链 GPUI，常驻时只剩它；按需拉起 UI。
-- `snow-shot-ui.exe`（包 `snow-shot`）：完整应用（所有窗口、配置、翻译 / 录屏 / 语音等调度）。不带参数 = 转去启动同目录宿主；`--resident` 显式单进程常驻（回退），`--ui --session <名> --token <令牌>` 由宿主拉起，`--headless emit-spec | update-check | set-config` 无窗口任务。
-- **默认是双进程**（2026-10-13 起）：运行 `snow-shot.exe`（宿主）；开机自启也指向它；直接跑 `snow-shot-ui.exe` 只会转去拉宿主。要单进程常驻（回退 / 调试）显式加 `--resident`：`snow-shot-ui.exe --resident` 或 `cargo run -p snow-shot -- --resident`。两种模式共用单实例互斥体，不会同时跑。
-- 开发时运行双进程：先 `cargo build -p snow-tray-host -p snow-shot`，再运行 `build/cargo/<profile>/snow-shot.exe`。没有运行实例时 `snow-shot.exe --cmd <命令>` 会让新宿主执行该命令（`quit` 除外）。
+- `cisox.exe`（包 `snow-tray-host`）：托盘宿主，不链 GPUI，常驻时只剩它；按需拉起 UI。
+- `cisox-ui.exe`（包 `snow-shot`）：完整应用（所有窗口、配置、翻译 / 录屏 / 语音等调度）。不带参数 = 转去启动同目录宿主；`--resident` 显式单进程常驻（回退），`--ui --session <名> --token <令牌>` 由宿主拉起，`--headless emit-spec | update-check | set-config` 无窗口任务。
+- **默认是双进程**（2026-10-13 起）：运行 `cisox.exe`（宿主）；开机自启也指向它；直接跑 `cisox-ui.exe` 只会转去拉宿主。要单进程常驻（回退 / 调试）显式加 `--resident`：`cisox-ui.exe --resident` 或 `cargo run -p snow-shot -- --resident`。两种模式共用单实例互斥体，不会同时跑。
+- 开发时运行双进程：先 `cargo build -p snow-tray-host -p snow-shot`，再运行 `build/cargo/<profile>/cisox.exe`。没有运行实例时 `cisox.exe --cmd <命令>` 会让新宿主执行该命令（`quit` 除外）。
+- 工作进程（`tools/` 下独立工作区，包名不变、产物统一 cisox 开头）：`cisox-recorder.exe`（`snow-recorder`）、`cisox-stt.exe`（`snow-stt`）、`cisox-translator.exe`（`snow-translator`）、`cisox-table.exe`（`snow-table`）、`cisox-latex.exe`（`snow-latex`），与宿主、UI 放同一目录；版本资源（FileDescription 等）由 `tools/common/worker_version.rs` 在构建时嵌入。
 - 宿主导入表闸门：`../scripts/check-host-imports.ps1 -Build [-WithUi]`（CI 的 Windows `host-imports` 任务跑同一条）。
 
 ## 目录与后续任务对应
@@ -35,8 +36,8 @@ cargo build -p snow-tray-host -p snow-shot        # 同时构建；产物在根 
 
 | crate | 职责 | 阶段 / 填充任务 |
 |---|---|---|
-| `snow-shot` | UI 进程（bin 产物 `snow-shot-ui.exe`）：转调宿主（无参数 / 只带 `--cmd`，默认）、单进程常驻（显式 `--resident`）、双进程 UI（`--ui`）、无窗口任务（`--headless emit-spec | update-check | set-config`）、单实例 | P1 单实例与入口 / 托盘宿主拆分阶段 2 |
-| `snow-tray-host` | 托盘宿主（bin 产物 `snow-shot.exe`，不链 GPUI）：托盘、全局热键（暂停 / 前台全屏闸门）、单实例与 `--cmd` 入口、UI 进程拉起与仲裁（状态机、命令队列、崩溃熔断） | 托盘宿主拆分阶段 2~3 |
+| `snow-shot` | UI 进程（bin 产物 `cisox-ui.exe`）：转调宿主（无参数 / 只带 `--cmd`，默认）、单进程常驻（显式 `--resident`）、双进程 UI（`--ui`）、无窗口任务（`--headless emit-spec | update-check | set-config`）、单实例 | P1 单实例与入口 / 托盘宿主拆分阶段 2 |
+| `snow-tray-host` | 托盘宿主（bin 产物 `cisox.exe`，不链 GPUI）：托盘、全局热键（暂停 / 前台全屏闸门）、单实例与 `--cmd` 入口、UI 进程拉起与仲裁（状态机、命令队列、崩溃熔断） | 托盘宿主拆分阶段 2~3 |
 | `snow-app-core` | 产品常量、命令总线、会话编排；已 path 依赖 `snow-draw-engine-core` 验证连通 | P1 命令总线 |
 | `snow-capability` | 平台能力注册表 | P1 能力注册表 |
 | `snow-ui` | GPUI 视图层总入口 | P1 起 |

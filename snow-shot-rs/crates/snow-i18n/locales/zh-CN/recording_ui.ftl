@@ -24,7 +24,7 @@ recording-format-apng = APNG 动图
 
 recording-format-webp = WebP 动图
 
-recording-error-recorder-missing = 找不到录制进程 snow-recorder，请先用 scripts/build-snow-recorder.ps1 构建。
+recording-error-recorder-missing = 找不到录制进程 cisox-recorder，请先用 scripts/build-snow-recorder.ps1 构建。
 
 recording-error-spawn-failed = 无法启动录制进程 { $exe }: { $detail }
 

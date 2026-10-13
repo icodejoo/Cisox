@@ -12,7 +12,7 @@ pub const LOCK_FILE: &str = "Cargo.lock";
 
 /// 必须存在、且闭包必须干净的守卫根（缺失说明改名或误删，按错误处理）。
 ///
-/// 前三个是宿主与 UI 共用的 crate，`snow-tray-host` 是宿主本体（阶段 2 建出，产物 `snow-shot.exe`）。
+/// 前三个是宿主与 UI 共用的 crate，`snow-tray-host` 是宿主本体（阶段 2 建出，产物 `cisox.exe`）。
 pub const HOST_CLOSURE_ROOTS: [&str; 4] = [
     "snow-host-protocol",
     "snow-shell-core",

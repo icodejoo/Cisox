@@ -273,7 +273,7 @@ fn spawn_failure_notifies_and_returns_to_absent() {
     let t0 = Instant::now();
     let mut machine = HostMachine::new();
     machine.submit(t0, action("capture"));
-    let effects = machine.on_spawn_failed(t0, 1, "找不到 snow-shot-ui.exe");
+    let effects = machine.on_spawn_failed(t0, 1, "找不到 cisox-ui.exe");
     assert!(has(&effects, |e| *e == Effect::Notice(Notice::UiStartFailed)));
     assert_eq!(machine.kind(), StateKind::Absent);
     assert_eq!(machine.queued(), 0);

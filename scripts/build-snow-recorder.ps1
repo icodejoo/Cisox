@@ -1,6 +1,6 @@
 # 构建录制工作进程 snow-recorder（独立 workspace，静态 CRT + 静态 FFmpeg，默认无 x265 版）。
 # 用法: scripts/build-snow-recorder.ps1 [-Profile release|debug] [-Test] [-Clippy]
-# 产物: snow-shot-rs/tools/snow-recorder/target/<profile>/snow-recorder.exe
+# 产物: snow-shot-rs/tools/snow-recorder/target/<profile>/cisox-recorder.exe
 param(
     [ValidateSet("release", "debug")][string]$Profile = "release",
     [switch]$Test,

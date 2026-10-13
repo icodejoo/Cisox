@@ -1,6 +1,6 @@
 # 构建翻译工具 snow-translator（独立 workspace）。
 # 用法: scripts/build-snow-translator.ps1 [-Profile release|debug] [-Test] [-Clippy]
-# 产物: snow-shot-rs/tools/snow-translator/target/<profile>/snow-translator.exe
+# 产物: snow-shot-rs/tools/snow-translator/target/<profile>/cisox-translator.exe
 param(
     [ValidateSet("release", "debug")][string]$Profile = "release",
     [switch]$Test,

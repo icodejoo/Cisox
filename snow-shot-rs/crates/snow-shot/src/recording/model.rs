@@ -286,7 +286,7 @@ mod tests {
         let failures = [
             RecordingFailure::RecorderMissing,
             RecordingFailure::SpawnFailed {
-                exe: "snow-recorder.exe".into(),
+                exe: "cisox-recorder.exe".into(),
                 detail: "denied".into(),
             },
             RecordingFailure::ProcessExited { code: Some(3) },

@@ -1,6 +1,6 @@
 # 构建语音转文字工作进程 snow-stt（独立 workspace，sherpa-onnx shared 链接，静态 CRT）。
 # 用法: scripts/build-snow-stt.ps1 [-Profile release|debug] [-Test] [-Clippy] [-Jobs 2]
-# 产物: <target>/<profile>/snow-stt.exe，旁边自动放 sherpa-onnx-c-api.dll 与仓库同版 onnxruntime.dll。
+# 产物: <target>/<profile>/cisox-stt.exe，旁边自动放 sherpa-onnx-c-api.dll 与仓库同版 onnxruntime.dll。
 # 注意:
 #   - sherpa-onnx-sys 的 build.rs 构建期要联网下载预编译库（GitHub Releases）；失败请如实排查网络，别绕过。
 #   - 预编译包解压路径很长，target 目录必须短（默认 <repo>/build/stt，可用 $env:CARGO_TARGET_DIR 覆盖）。

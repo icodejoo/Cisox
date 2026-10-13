@@ -25,9 +25,9 @@ const LEGACY_FLAT_MARKER: &str = "tokens.txt";
 /// 引擎后端。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Backend {
-    /// 本地模型（snow-stt 工作进程）。
+    /// 本地模型（cisox-stt 工作进程）。
     LocalModel,
-    /// 系统语音（Windows `SpeechRecognizer`，同样由 snow-stt 工作进程承载）。
+    /// 系统语音（Windows `SpeechRecognizer`，同样由 cisox-stt 工作进程承载）。
     System,
 }
 
@@ -324,7 +324,7 @@ mod tests {
 
     /// 测试用的 worker 路径。
     fn exe() -> Option<PathBuf> {
-        Some(PathBuf::from("D:/stt/snow-stt.exe"))
+        Some(PathBuf::from("D:/stt/cisox-stt.exe"))
     }
 
     /// 启动前检查：找不到 exe → 可读错误；系统后端不查模型；本地模型没装 → 未安装；旧版平铺目录 → 沿用旧行为。

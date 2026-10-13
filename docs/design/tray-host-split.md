@@ -7,13 +7,14 @@ summary: 把常驻托盘的最小 Win32 宿主和承载全部窗口的 GPUI UI �
 
 > 状态：**已审定（2026-10-12）**，§10 开放问题全部按推荐拍板，可按 §8 分阶段实施。
 > 依据：[../research/tray-idle-memory.md](../research/tray-idle-memory.md)（托盘态多出的约 70MB 里，IME/UIA 注入进程内清不掉，只有换进程能清干净）；原则见 [../principles.md](../principles.md)；约定见 [../cisox-gpui-migration-plan.md](../cisox-gpui-migration-plan.md) §7。
+> **进程名（2026-10-13 起）**：宿主 `cisox.exe`、UI `cisox-ui.exe`，worker 为 `cisox-recorder.exe` / `cisox-stt.exe` / `cisox-translator.exe` / `cisox-table.exe` / `cisox-latex.exe`（§10 第 17 条）。下文 §8 阶段记录、§12 实测里出现的 `snow-shot.exe` / `snow-shot-ui.exe` 是当时的名字，作为历史保留，不再改写。
 > 已拍板、本文不再讨论：①目标只管托盘态内存；②架构是"托盘宿主（不链 GPUI、不碰 D3D/IME/UIA）+ 按需 UI 进程"；③UI 进程在所有窗口关闭后**立即退出**，不保活；④先出方案、审过再做；⑤无障碍（AccessKit/UIA）曾关闭，阶段 0 实测对内存零收益（§12.9 第 7 条），2026-10-12 已回退，保留屏幕阅读器支持。
 
 ## TL;DR
 
 - **边界一句话**：宿主只管"能让用户唤起 Cisox 的东西"——托盘图标与菜单、全局热键（含前台全屏闸门、暂停开关）、鼠标手势钩子、单实例与命令行入口、开机自启入口、UI 进程的拉起与仲裁。其余一律在 UI 进程：窗口、配置读写、i18n、历史、贴图、录屏/语音/翻译/OCR 的调度、MCP、更新检查。
 - **宿主不读 config.json、不带 i18n、不画图标**。UI 进程每次配置变化都把"宿主要用的东西"（热键表、托盘菜单快照含已渲染图标与文案、手势绑定、几个开关）写成一份 `host/spec.json` 并通知宿主。宿主只认这份快照。
-- **两个 exe**：宿主（沿用 `snow-shot.exe` 这个名字，保持命令行与自启兼容）和 `snow-shot-ui.exe`。单 exe 做不到：`d3d11 / dxgi / uiautomationcore / imm32` 是现 exe 的静态导入（见研究文档 §2），进程一起来就会被加载。
+- **两个 exe**：宿主 `cisox.exe`（2026-10-13 前叫 `snow-shot.exe`）和 UI `cisox-ui.exe`。单 exe 做不到：`d3d11 / dxgi / uiautomationcore / imm32` 是现 exe 的静态导入（见研究文档 §2），进程一起来就会被加载。
 - **本机实测基线（本次做的一次性探针，不入仓库）**：只有 `tray-icon + global-hotkey`、12 个热键、20 项菜单的空闲进程，私有提交约 2.9MB，工作集 12MB（绝大部分是共享 DLL 页），`EmptyWorkingSet` 后工作集 1.2MB。现状空闲 56.8MB、截图后 134~136MB。真宿主估计 3~4.5MB 提交，细节见 §7。
 - **代价要说在前面**：UI 进程"立即退出"意味着**每次截图都是冷拉起**，现在的 0.57s 热路径不复存在（除非别的窗口恰好开着）。估算冷拉起热键→首帧 0.65~0.9s，比现在慢 0.1~0.3s，换托盘态内存从 134MB 降到个位数。靠"UI 启动时并行采集"（§6）把冷拉起压到 1.14s 以下，不靠常驻预热。
 - **分 6 个阶段**，每阶段可单独提交、单独回退；阶段 2 之前默认行为不变，阶段 4 才切默认。单进程模式保留为回退开关。
@@ -81,11 +82,11 @@ flags       { keep_alive: ["mcp","ocr_hot_start"], pins_to_restore: n, update_du
 
 | 项 | 做法 |
 | --- | --- |
-| 宿主 exe | `snow-shot.exe`（沿用名字：命令行 `--cmd`、HKCU Run、快捷方式、文档里都是它）。release：`opt-level=3`、lto、`panic=abort`、strip，静态 CRT。预估 0.5~1MB（探针 0.31MB） |
-| UI exe | `snow-shot-ui.exe`，即现在的 snow-shot bin 改名。模式：`--ui`（宿主拉起，带会话管道名和令牌）、`--headless <job>`（无窗口任务，不初始化 GPUI）、`--resident`（旧单进程行为，回退用） |
+| 宿主 exe | `cisox.exe`（命令行 `--cmd`、HKCU Run、快捷方式、文档里都是它；原名 `snow-shot.exe`，2026-10-13 起统一 cisox 开头，不做旧名兼容）。release：`opt-level=3`、lto、`panic=abort`、strip，静态 CRT。预估 0.5~1MB（探针 0.31MB） |
+| UI exe | `cisox-ui.exe`（`snow-shot` 包的 bin，原名 `snow-shot-ui.exe`）。模式：`--ui`（宿主拉起，带会话管道名和令牌）、`--headless <job>`（无窗口任务，不初始化 GPUI）、`--resident`（旧单进程行为，回退用） |
 | 直接双击 UI exe | 不带 `--ui` / `--headless` / `--resident`：转去启动同目录宿主然后退出，`--cmd` 原样转给宿主（**阶段 4 已实施**，`RunMode::Host`）。`--resident` 才是单进程常驻 |
 | 安装 | 两个 exe 放同一目录（worker 本来就按 `exe_dir()` 找）。Rust 版打包脚本尚不存在，等它出现时纳入；现在 `snow-update` 只下载不安装，不受影响。将来自动安装要先 `--cmd quit` 宿主再替换 |
-| 自启 | `set_auto_start` 的 exe 参数永远是宿主路径（UI 取同目录 `snow-shot.exe`；**阶段 4 已统一**，`--resident` 进程也指向宿主） |
+| 自启 | `set_auto_start` 的 exe 参数永远是宿主路径（UI 取同目录 `cisox.exe`；**阶段 4 已统一**，`--resident` 进程也指向宿主） |
 | 单实例 | 宿主持有现有互斥体。UI 另持 `Local\cisox.snow_shot.ui` 作保险：拉起时若已存在，新 UI 直接退出并回报。`--resident` 的 UI 持宿主那个互斥体，所以两种模式互斥，不会双注册热键 |
 | MCP 描述符 | 路径、内容不变（`<数据根>/mcp/descriptor.json`），由 UI 写。UI 保活时描述符有效，不保活时 MCP 本来就是关的 |
 | 日志目录 | 同一个 `logs/`，宿主写 `host.log`，UI 沿用现有滚动文件 |
@@ -98,9 +99,9 @@ snow-data-paths/      新  从 snow-config::paths 抽出：数据根解析 + APP
 snow-host-protocol/   新  spec 结构、会话消息、帧编解码、协议版本与常量。只依赖 serde、serde_json
 snow-shell-core/      新  从 snow-ui-shell 抽出的无 gpui 部分：hotkey（解析+服务）、tray、service_thread、error、
                           native 里的消息循环/唤醒器/弹出菜单主题。动作负载用不透明 id，不依赖 snow-app-core / snow-capability
-snow-tray-host/       新  bin 名 `snow-shot`。依赖 snow-host-protocol、snow-shell-core、snow-data-paths、snow-platform
+snow-tray-host/       新  bin 名 `cisox`（产物 cisox.exe）。依赖 snow-host-protocol、snow-shell-core、snow-data-paths、snow-platform
 ui/snow-ui-shell      改  依赖 snow-shell-core 并重导出，原路径 `snow_ui_shell::{hotkey,tray,...}` 不变；AppCommand 适配留在这里
-snow-shot             改  bin 改名 snow-shot-ui；新增 spec 生成（纯函数）、会话客户端、活动跟踪
+snow-shot             改  bin 改名 cisox-ui；新增 spec 生成（纯函数）、会话客户端、活动跟踪
 ```
 
 `snow-platform` 本身不链 gpui，宿主直接用它的 `single_instance`、`global_mouse`、`system_integration`、`window_rect`、`crash`。它的 `windows` 特性很宽（含 UIA、WinRT OCR），但只有被引用的函数才会进导入表，所以**用二进制层面的闸门兜底**（下面第 3 条）。
@@ -436,7 +437,7 @@ snow-shot             改  bin 改名 snow-shot-ui；新增 spec 生成（纯函
 
 ## 10. 已拍板的决定（2026-10-12，全部按推荐）
 
-1. **exe 命名**：宿主沿用 `snow-shot.exe`，UI 进程为 `snow-shot-ui.exe`。
+1. **exe 命名**：宿主沿用 `snow-shot.exe`，UI 进程为 `snow-shot-ui.exe`。（**已被第 17 条取代**）
 2. **MCP 开启时**：UI 保活（v1 不做宿主中转；MCP 默认关，托盘态不受影响）。
 3. **`model_hot_start` 开启时**：UI 保活。
 4. **语音转文字**：~~绑定了语音热键就让 UI 保活；未绑定则随窗口关闭立即退出~~。**2026-10-13 用户改判：绑了语音热键也立即退出**，窗口全关且无活动就走退出仲裁，与未绑定一致。理由：用户绑了 F10 后，首次截图（或任何拉起 UI 的操作）之后 UI 常驻约 135MB，违背“托盘态只管内存”；**代价与配套（2026-10-13 用户拍板，依据 `research/dictation-cold-start.md`）**：冷拉起 UI 时，按键到麦克风可用的这段（现行 worker 为 UI 冷启动 + worker 启动 + 模型加载 + 麦克风打开，本机实测 4.5~15 s，其中模型加载占大头，**与 UI 是否常驻基本无关**）里说的话会丢。配套工作：①worker 先开麦、环形缓存（默认 30 s）、模型就绪后快进识别积压，丢字窗口降到约 1.0~1.4 s（其中麦克风打开 0.7~0.9 s 是硬件下限，该段说的话丢就丢，不做补偿；协议新增 `RECORDING` 事件，UI 区分“加载中 / 录音中 / 已就绪”，按住说话在录音开始之后松开会等加载与积压处理完再出字，键入模式下加载完后一次性打出可以接受）；②UI 带 `--hint dictation` 启动时在 `main` 最早处并行预拉 worker（宿主只多这一个启动参数，闭包与导入表不变）；③宿主直接拉 worker、宿主自录音、麦克风常开都不做。双语模型加载提速另立项。已于 2026-10-13 实施（离屏单测通过，真机计时见 `research/dictation-cold-start.md` §7 E2）。语音**进行中**（浮窗、worker 在听写）仍然保活：状态型原因 `dictation`（`BusyInputs::dictation_active`）不变。快照 `keep_alive` 不再产生 `dictation_hotkey`，旧快照里残留的该原因宿主一律忽略（`needs_resident_ui` 只认 `mcp` / `ocr_hot_start`），协议常量 `KEEP_ALIVE_DICTATION_HOTKEY` 已删除。
@@ -452,6 +453,7 @@ snow-shot             改  bin 改名 snow-shot-ui；新增 spec 生成（纯函
 14. **阶段 2 硬验收追加**：托盘点击（左键/菜单项）拉起 UI 后能拿到前台与键盘焦点；UI 以管理员运行（及宿主非管理员、UI 管理员的混合情形）下热键、IPC、焦点正常。
 15. **独立排查项（与拆分无关，常驻模式即受益）**：每次截图后内核句柄 +~9 不回落的泄漏；热路径里覆盖窗可见到内容出现约 400ms 的空档。
 16. **切默认为双进程（2026-10-13，用户拍板）**：真屏验收通过后，`snow-shot-ui.exe` 无参数转去启动宿主，自启统一指向宿主，`--resident` 成为显式回退开关；没有运行实例时 `--cmd` 由新宿主执行（`quit` 除外），见阶段 4 “切默认实施结果”。
+17. **进程名统一 cisox 开头（2026-10-13，用户拍板）**：宿主 `snow-shot.exe` → `cisox.exe`（FileDescription "Cisox"）；UI `snow-shot-ui.exe` → `cisox-ui.exe`（"Cisox UI"）；worker `snow-recorder` / `snow-stt` / `snow-translator` / `snow-table` / `snow-latex` → `cisox-recorder` / `cisox-stt` / `cisox-translator` / `cisox-table` / `cisox-latex`（"Cisox recorder" 等）。只改 `[[bin]] name` 与版本资源，crate / package 名仍是 `snow-*`（`cargo build -p snow-tray-host -p snow-shot` 不变）；开发工具 `snow-ocr-compare`、`snow-fps-fixture`、`workspace-guard`、`snow-i18n-tool` 不改。未发布，不做旧名兼容（旧自启项由用户自行重设）；单实例互斥体、会话管道名、数据目录、日志文件名不变。exe 名常量集中在 `snow_host_protocol::launch`（`HOST_EXE_NAME`、`UI_EXE_NAME`），worker 名仍放各自客户端模块（`RECORDER_EXE_NAME` 等）。
 
 ## 11. 未证实清单（阶段 0 验证）
 

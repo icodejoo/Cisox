@@ -79,7 +79,7 @@
 ```
 snow-shot-rs/                       # 新 workspace（edition 2024）
 ├── crates/
-│   ├── snow-shot/                  # bin（产物 snow-shot-ui.exe）：入口、子模式分发、单实例；2026-10-13 起默认由托盘宿主 snow-tray-host（产物 snow-shot.exe）常驻并按需拉起它，`--resident` 为单进程回退（见 design/tray-host-split.md）
+│   ├── snow-shot/                  # bin（产物 cisox-ui.exe）：入口、子模式分发、单实例；2026-10-13 起默认由托盘宿主 snow-tray-host（产物 cisox.exe）常驻并按需拉起它，`--resident` 为单进程回退（见 design/tray-host-split.md）
 │   ├── snow-app-core/              # ★ 命令总线、应用状态、会话编排（取代 screenshotcontroller god object）
 │   ├── snow-capability/            # ★ 平台能力注册表（Linux 降级的基础设施）
 │   │

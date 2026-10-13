@@ -10,10 +10,10 @@ use snow_config::extensions::KEY_LATEX_MODEL_DIR;
 use snow_i18n::{Args, I18n};
 use std::path::{Path, PathBuf};
 
-/// 环境变量：直接指定 `snow-latex.exe`（开发 / 自测用）。
+/// 环境变量：直接指定 `cisox-latex.exe`（开发 / 自测用）。
 pub const ENV_LATEX_EXE: &str = "SNOW_LATEX_EXE";
 /// 工作进程可执行文件名。
-pub const LATEX_WORKER_EXE_NAME: &str = "snow-latex.exe";
+pub const LATEX_WORKER_EXE_NAME: &str = "cisox-latex.exe";
 /// 官方来源地址在语料里的 message id（文档性文本，随语言可调）。
 const SOURCE_URL_MESSAGE: &str = "latex-source-url";
 
@@ -65,7 +65,7 @@ pub struct ModelPaths {
 /// 已就绪的公式识别资产。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LatexAssets {
-    /// `snow-latex` 工作进程。
+    /// `cisox-latex` 工作进程。
     pub exe: PathBuf,
     /// 模型文件。
     pub models: ModelPaths,
@@ -85,7 +85,7 @@ pub enum LatexUnavailable {
     },
     /// onnxruntime 运行时未安装。
     NoRuntime,
-    /// 找不到 `snow-latex` 工作进程或运行时路径有误（附说明）。
+    /// 找不到 `cisox-latex` 工作进程或运行时路径有误（附说明）。
     NoWorker(String),
 }
 
@@ -339,7 +339,7 @@ mod tests {
             .can_download()
         );
         assert!(matches!(
-            locate_worker(Some(Path::new("Z:/nope/snow-latex.exe")), None),
+            locate_worker(Some(Path::new("Z:/nope/cisox-latex.exe")), None),
             Err(LatexUnavailable::NoWorker(_))
         ));
     }

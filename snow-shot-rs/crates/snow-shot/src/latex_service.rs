@@ -1,4 +1,4 @@
-//! 公式识别服务：拉起 `snow-latex` 工作进程托管三个 ONNX 会话，主程序用 [`crate::latex_ocr`]
+//! 公式识别服务：拉起 `cisox-latex` 工作进程托管三个 ONNX 会话，主程序用 [`crate::latex_ocr`]
 //! 的纯函数驱动整条流水线（预处理、宽度迭代、自回归解码、后处理）。
 //!
 //! 工作进程只在一次识别期间存活，识别完立即退出，不常驻。识别是阻塞调用，必须在后台线程里执行。
@@ -21,7 +21,7 @@ pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 /// 保留的 stderr 末尾字节数（给错误提示用）。
 const STDERR_TAIL: usize = 400;
 
-/// 真实后端：与 `snow-latex` 子进程按行 JSON 对话。
+/// 真实后端：与 `cisox-latex` 子进程按行 JSON 对话。
 pub struct ProcessBackend {
     /// 子进程。
     child: Child,
@@ -329,10 +329,10 @@ mod tests {
         assert!(!OcrError::EmptyLatex.can_download());
     }
 
-    /// 真机自检（默认忽略）：需要环境变量 `SNOW_LATEX_E2E=<模型目录>;<snow-latex.exe>;<onnxruntime.dll>`，
+    /// 真机自检（默认忽略）：需要环境变量 `SNOW_LATEX_E2E=<模型目录>;<cisox-latex.exe>;<onnxruntime.dll>`，
     /// 目录里放官方 RapidLaTeXOCR 的四个文件。画一个“x 的平方”样的图，验证整条链路能跑通并产出非空 LaTeX。
     #[test]
-    #[ignore = "needs the official RapidLaTeXOCR files, snow-latex.exe and onnxruntime.dll"]
+    #[ignore = "needs the official RapidLaTeXOCR files, cisox-latex.exe and onnxruntime.dll"]
     fn real_model_end_to_end() {
         let spec = std::env::var("SNOW_LATEX_E2E").expect("设置 SNOW_LATEX_E2E");
         let parts: Vec<&str> = spec.split(';').collect();

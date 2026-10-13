@@ -412,7 +412,7 @@ fn write_model_meta(spec: &SttModelSpec, dir: &Path, pinned: bool) -> Result<(),
         "archive_sha256": spec.archive.sha256,
         "sha256_pinned": pinned,
     });
-    // worker 读这个字段把 model_type 直接交给 sherpa（见 snow-stt 的加载提速）；没有核对过就不写
+    // worker 读这个字段把 model_type 直接交给 sherpa（见 cisox-stt 的加载提速）；没有核对过就不写
     if let Some(model_type) = &spec.model_type {
         meta["model_type"] = serde_json::Value::String(model_type.clone());
     }

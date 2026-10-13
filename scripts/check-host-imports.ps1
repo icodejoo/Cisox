@@ -1,6 +1,6 @@
 ﻿# 托盘宿主 exe 导入表闸门（方案 docs/design/tray-host-split.md §3 第三层、§12.6）。
 #
-# 检查宿主 snow-shot.exe 的 PE 导入表（静态 + 延迟）只含白名单内的系统 DLL，没有 D3D / DXGI / DWrite /
+# 检查宿主 cisox.exe 的 PE 导入表（静态 + 延迟）只含白名单内的系统 DLL，没有 D3D / DXGI / DWrite /
 # UIA / 图像编解码 / 输入法这类会在进程启动时被加载、涨内存的 DLL。不依赖 dumpbin / MSVC 环境：
 # 解析器与白名单在 snow-shot-rs/tools/workspace-guard（imports.rs），这里只是构建 + 调用的薄包装。
 #
@@ -36,7 +36,7 @@ if (-not $Exe) {
     else {
         Join-Path $repoRoot "build\cargo"
     }
-    $Exe = Join-Path $targetDir "release\snow-shot.exe"
+    $Exe = Join-Path $targetDir "release\cisox.exe"
 }
 
 Push-Location $workspace

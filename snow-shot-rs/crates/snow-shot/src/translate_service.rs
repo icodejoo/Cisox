@@ -43,7 +43,7 @@ pub const KEY_LAYOUT: &str = "screenshot_translation/layout_processing";
 pub const KEY_CUSTOM_MODEL: &str = "screenshot_translation/model";
 /// 配置键：自定义模型列表。
 pub const KEY_CUSTOM_MODELS: &str = "api_configuration/custom_models";
-/// 环境变量：直接指定 `snow-translator.exe`（开发 / 自测用）。
+/// 环境变量：直接指定 `cisox-translator.exe`（开发 / 自测用）。
 pub const ENV_TRANSLATOR_EXE: &str = "SNOW_TRANSLATOR_EXE";
 /// 模型根目录相对数据根的路径。
 const MODELS_SUBDIR: [&str; 2] = ["models", "translate"];
@@ -399,7 +399,7 @@ pub fn default_models_dir(data_root: &Path) -> PathBuf {
         .fold(data_root.to_path_buf(), |dir, part| dir.join(part))
 }
 
-/// 定位 `snow-translator.exe`：环境变量优先，其次主程序同目录。
+/// 定位 `cisox-translator.exe`：环境变量优先，其次主程序同目录。
 ///
 /// # 参数
 /// - `env_exe`：`SNOW_TRANSLATOR_EXE` 的值。
@@ -901,7 +901,7 @@ mod tests {
 
     /// 造一个带假 exe 与假 dll 的宿主（不会真的拉起进程）。
     fn host_with_files(root: &Path) -> (TranslateHost, PathBuf) {
-        let exe = root.join("snow-translator.exe");
+        let exe = root.join("cisox-translator.exe");
         let dll = root.join("onnxruntime.dll");
         std::fs::write(&exe, b"x").expect("写 exe");
         std::fs::write(&dll, b"x").expect("写 dll");
@@ -1295,7 +1295,7 @@ mod tests {
         write_model(&models, "en-zh", r#"[["en","zh-CN"]]"#);
         let mut cfg = config();
         cfg.target = Lang::ZhHans;
-        let exe = root.join("snow-translator.exe");
+        let exe = root.join("cisox-translator.exe");
         std::fs::write(&exe, b"x").expect("写 exe");
         let no_runtime = TranslateHost::with_env(&root, None, Some(exe.clone()));
         let err = no_runtime.prepare(&cfg).unwrap_err();

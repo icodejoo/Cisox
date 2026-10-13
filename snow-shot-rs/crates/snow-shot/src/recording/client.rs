@@ -1,4 +1,4 @@
-//! 录制进程客户端：拉起 `snow-recorder` 子进程并按行协议通信。
+//! 录制进程客户端：拉起 `cisox-recorder` 子进程并按行协议通信。
 //!
 //! 读线程把 stdout 事件转发到通道并唤醒主线程；stderr 由独立线程排空（否则编码器日志会写满管道卡死子进程）。
 //! 子进程崩溃或被杀时读线程见到 EOF，会话据此复位；`shutdown` 负责收尸并清理中间产物目录。
@@ -15,10 +15,10 @@ use std::time::{Duration, Instant};
 
 /// 录制进程可执行文件名。
 #[cfg(windows)]
-pub const RECORDER_EXE_NAME: &str = "snow-recorder.exe";
+pub const RECORDER_EXE_NAME: &str = "cisox-recorder.exe";
 /// 录制进程可执行文件名。
 #[cfg(not(windows))]
-pub const RECORDER_EXE_NAME: &str = "snow-recorder";
+pub const RECORDER_EXE_NAME: &str = "cisox-recorder";
 /// 指定录制进程路径的环境变量（优先级最高）。
 pub const ENV_RECORDER_EXE: &str = "SNOW_RECORDER_EXE";
 /// 开发布局下录制进程相对仓库工作区的构建产物目录。
@@ -46,7 +46,7 @@ const EXIT_CODE_WAIT: Duration = Duration::from_millis(500);
 ///
 /// # 示例
 /// ```ignore
-/// let exe = find_recorder_exe(None, Path::new("C:/app/snow-shot.exe"), |p| p.exists());
+/// let exe = find_recorder_exe(None, Path::new("C:/app/cisox.exe"), |p| p.exists());
 /// ```
 pub fn find_recorder_exe(
     env_value: Option<&str>,
@@ -265,7 +265,7 @@ mod tests {
     /// 环境变量优先；指向不存在的文件则不回退（显式配置错误应暴露）。
     #[test]
     fn env_override_wins() {
-        let exe = Path::new("C:/app/snow-shot.exe");
+        let exe = Path::new("C:/app/cisox.exe");
         let hit = find_recorder_exe(Some("D:/x/rec.exe"), exe, fs(&["D:/x/rec.exe"]));
         assert_eq!(hit, Some(PathBuf::from("D:/x/rec.exe")));
         assert_eq!(find_recorder_exe(Some("D:/none.exe"), exe, fs(&[])), None);
@@ -274,7 +274,7 @@ mod tests {
     /// 同目录优先于开发布局。
     #[test]
     fn beside_exe_preferred() {
-        let exe = Path::new("C:/app/snow-shot.exe");
+        let exe = Path::new("C:/app/cisox.exe");
         let beside = format!("C:/app/{RECORDER_EXE_NAME}");
         let dev = format!("C:/tools/snow-recorder/target/release/{RECORDER_EXE_NAME}");
         let hit = find_recorder_exe(None, exe, fs(&[&beside, &dev]));
@@ -284,13 +284,13 @@ mod tests {
     /// 开发布局：沿目录向上寻找 tools/snow-recorder/target/release。
     #[test]
     fn dev_layout_found_via_ancestors() {
-        let exe = Path::new("C:/ws/snow-shot-rs/target/debug/snow-shot.exe");
+        let exe = Path::new("C:/ws/snow-shot-rs/target/debug/cisox.exe");
         let dev =
             format!("C:/ws/snow-shot-rs/tools/snow-recorder/target/release/{RECORDER_EXE_NAME}");
         let hit = find_recorder_exe(None, exe, fs(&[&dev]));
         assert_eq!(hit, Some(PathBuf::from(dev)));
         // 仓库根下的 snow-shot-rs 子目录布局（构建目录在仓库根的 build/ 下时）
-        let exe2 = Path::new("C:/repo/build/cargo/debug/snow-shot.exe");
+        let exe2 = Path::new("C:/repo/build/cargo/debug/cisox.exe");
         let dev2 =
             format!("C:/repo/snow-shot-rs/tools/snow-recorder/target/release/{RECORDER_EXE_NAME}");
         assert_eq!(

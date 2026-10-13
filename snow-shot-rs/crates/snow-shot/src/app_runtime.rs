@@ -2913,7 +2913,7 @@ fn spawn_translate_runtime_download(state: &AppState) {
     );
 }
 
-/// 在后台线程做表格识别：先查组件是否齐全，再跑 OCR 取文字框，最后拉起 `snow-table` 做结构推理并合并。
+/// 在后台线程做表格识别：先查组件是否齐全，再跑 OCR 取文字框，最后拉起 `cisox-table` 做结构推理并合并。
 ///
 /// 结果走 `OcrFinished`（同文字识别），缺组件时给出可下载的引导。
 ///
@@ -2989,7 +2989,7 @@ fn run_table(
     crate::table_service::table_result(&runner, width, height, rgba, ocr)
 }
 
-/// 在后台线程做公式识别：按配置里的模型目录定位资产，拉起 `snow-latex` 跑 RapidLaTeXOCR。
+/// 在后台线程做公式识别：按配置里的模型目录定位资产，拉起 `cisox-latex` 跑 RapidLaTeXOCR。
 ///
 /// 结果走 `OcrFinished`（同文字识别）；模型由用户自行下载，缺文件时给出本地化引导。
 ///
@@ -5598,8 +5598,8 @@ mod tests {
     /// 单进程重启辅助必须带 `--resident` 重新拉起自己，否则无参数启动会变成转调宿主。
     #[test]
     fn restart_helper_relaunches_with_resident_flag() {
-        let line = restart_command_line(std::path::Path::new("C:/app/snow-shot-ui.exe"));
-        assert!(line.contains("snow-shot-ui.exe\" --resident"), "{line}");
+        let line = restart_command_line(std::path::Path::new("C:/app/cisox-ui.exe"));
+        assert!(line.contains("cisox-ui.exe\" --resident"), "{line}");
         assert!(line.starts_with("/C ping -n"));
     }
 

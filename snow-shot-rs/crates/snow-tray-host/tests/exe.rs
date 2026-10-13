@@ -1,11 +1,11 @@
-//! 宿主 exe（`snow-shot.exe`）的离屏集成测试：只跑不创建窗口 / 线程的入口，
+//! 宿主 exe（`cisox.exe`）的离屏集成测试：只跑不创建窗口 / 线程的入口，
 //! 不会抢单实例互斥体，也不会碰运行中的实例。
 #![cfg(windows)]
 
 use std::process::Command;
 
 /// 被测 exe（cargo 在构建集成测试时已把二进制构建好）。
-const EXE: &str = env!("CARGO_BIN_EXE_snow-shot");
+const EXE: &str = env!("CARGO_BIN_EXE_cisox");
 
 /// 进程加固在一个全新进程里确实生效：扩展点禁用策略读回为开启，`ImmDisableIME(-1)` 成功。
 /// 这是“`main` 第一行就加固”的回归测试：加固失效（比如被挪到窗口创建之后、或 API 调用错误）时，

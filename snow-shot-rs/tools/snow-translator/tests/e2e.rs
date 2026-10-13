@@ -30,7 +30,7 @@ struct Proc {
 impl Proc {
     /// 启动并吃掉 `ready` 事件。
     fn spawn() -> Self {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_snow-translator"));
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_cisox-translator"));
         // 未显式指定动态库时，回落到评测机上的 ORT 1.28.0（存在才设置）
         if std::env::var_os("SNOW_ORT_DYLIB").is_none()
             && std::env::var_os("ORT_DYLIB_PATH").is_none()
@@ -43,7 +43,7 @@ impl Proc {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
-            .expect("spawn snow-translator");
+            .expect("spawn cisox-translator");
         let stdin = child.stdin.take();
         let stdout = BufReader::new(child.stdout.take().expect("stdout"));
         let mut p = Self {
