@@ -18,7 +18,30 @@ pub const ACTIONS: [&str; 7] = [
     "screen_recording",
 ];
 
-/// 解析一项 `{"activation_key": [...], "mouse_button": "..."}` 配置；空对象、缺字段、
+/// 取出一项手势配置里的激活键名字。
+///
+/// 配置落盘 / 重新加载时单个激活键会被规范化成字符串（`"windows"`），多个才是数组，两种形式都要认；
+/// 只认数组会让重载过的配置（用户的真实配置就是这样）悄悄丢光全部手势绑定。
+///
+/// # 参数
+/// - `value`：`global_mouse/<动作>` 的配置值。
+///
+/// # 返回
+/// 名字列表；没有 `activation_key` 或类型不对返回 `None`。
+///
+/// ```ignore
+/// let one = serde_json::json!({"activation_key": "windows", "mouse_button": "left_drag"});
+/// assert_eq!(activation_names(&one), Some(vec!["windows"]));
+/// ```
+pub fn activation_names(value: &Value) -> Option<Vec<&str>> {
+    match value.get("activation_key")? {
+        Value::String(name) => Some(vec![name.as_str()]),
+        Value::Array(items) => Some(items.iter().filter_map(Value::as_str).collect()),
+        _ => None,
+    }
+}
+
+/// 解析一项 `{"activation_key": "..." 或 [...], "mouse_button": "..."}` 配置；空对象、缺字段、
 /// 未知名字或没有修饰键（会劫持普通鼠标操作）都返回 `None`。
 ///
 /// # 参数
@@ -30,7 +53,7 @@ pub const ACTIONS: [&str; 7] = [
 /// assert!(binding_from_value("screenshot_copy", &value).is_some());
 /// ```
 pub fn binding_from_value(action: &str, value: &Value) -> Option<Binding> {
-    let keys: Vec<&str> = value.get("activation_key")?.as_array()?.iter().filter_map(Value::as_str).collect();
+    let keys = activation_names(value)?;
     let modifiers = Modifiers::parse(&keys)?;
     if modifiers.is_empty() {
         return None;
@@ -93,6 +116,45 @@ mod tests {
         assert!(binding_from_value("a", &json!({"activation_key": ["alt"], "mouse_button": "double"})).is_none());
         let ok = binding_from_value("a", &json!({"activation_key": ["ctrl", "alt"], "mouse_button": "side_button_1_drag"})).unwrap();
         assert!(ok.modifiers.ctrl && ok.modifiers.alt && ok.button == MouseKey::Back);
+    }
+
+    /// 单个激活键在配置里是字符串（落盘重载后的规范化形式），多个才是数组：两种都要能解析成绑定。
+    #[test]
+    fn string_and_array_activation_keys_both_parse() {
+        let one = json!({"activation_key": "windows", "mouse_button": "left_drag"});
+        assert_eq!(activation_names(&one), Some(vec!["windows"]));
+        let binding = binding_from_value("a", &one).unwrap();
+        assert!(binding.modifiers.win && binding.button == MouseKey::Left);
+        let many = json!({"activation_key": ["alt", "ctrl"], "mouse_button": "right_drag"});
+        assert_eq!(activation_names(&many), Some(vec!["alt", "ctrl"]));
+        assert!(binding_from_value("a", &many).is_some());
+        assert_eq!(activation_names(&json!({"activation_key": 1})), None);
+        assert_eq!(activation_names(&json!({})), None);
+        assert!(
+            binding_from_value(
+                "a",
+                &json!({"activation_key": "hyper", "mouse_button": "left_drag"})
+            )
+            .is_none()
+        );
+    }
+
+    /// 重载过的配置（单个激活键已规范化成字符串）仍然带着三条默认绑定，不会被当成“没配置”。
+    #[test]
+    fn normalized_document_keeps_default_bindings() {
+        let mut doc = ConfigDocument::from_bytes(None);
+        for (action, button) in [
+            ("screenshot_copy", "left_drag"),
+            ("screenshot_fixed", "wheel_drag"),
+            ("screenshot_ocr", "right_drag"),
+        ] {
+            doc.set_value(
+                &format!("global_mouse/{action}"),
+                json!({"activation_key": "windows", "mouse_button": button}),
+            )
+            .unwrap();
+        }
+        assert_eq!(bindings_from_document(&doc).len(), 3);
     }
 
     /// 每个动作都能映射到截图模式。

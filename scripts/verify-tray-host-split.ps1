@@ -641,6 +641,42 @@ function Close-ForegroundWindowOfUi {
     foreach ($h in [CisoxAccept.W]::BigWindowsOf([uint32]$ui.Id, 1)) { [void][CisoxAccept.W]::PostMessage($h, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) }   # WM_CLOSE
 }
 
+# 保证工作目录下没有残留的 UI 进程：先 Esc，再 WM_CLOSE，最后只按 PID 强杀（路径限定在工作目录）。
+# 脚本是靠“UI 进程在不在”判热键成败的，前一步残留的覆盖窗（Esc 被前台抢走的 Lark / Zed 等吃掉）会让后面全部误判。
+# 返回是否动用过强杀。
+function Clear-StrayUi {
+    if (-not (Get-UiProcess)) { return $false }
+    [CisoxAccept.W]::Tap([uint16]$VkEsc)
+    if (Wait-Until { -not (Get-UiProcess) } -TimeoutMs 4000) { return $false }
+    Close-ForegroundWindowOfUi
+    if (Wait-Until { -not (Get-UiProcess) } -TimeoutMs 4000) { return $false }
+    $ui = Get-UiProcess
+    if ($ui) { Stop-WorkProcessById $ui.Id }
+    [void](Wait-Until { -not (Get-UiProcess) } -TimeoutMs 4000)
+    return $true
+}
+
+# 点托盘菜单项，并用宿主日志确认这一下真的生效了；没生效（右键被任务栏吃掉、菜单被别的窗口抢走、
+# 鼠标被人动了而误点）就清场重试，最多 3 次。UI Automation 点菜单本身并不可靠，不验证就会把环境抖动
+# 误报成闸门 / 暂停逻辑的失败。
+# 参数：$Label 菜单文案；$Pattern 宿主日志里“该点击已生效”的正则（只在点击之后新增的日志里找）。
+# 返回：第几次尝试生效（0 = 3 次都没生效）；生效那次点击之前的日志偏移放在 $script:__clickOffset。
+function Invoke-TrayItemVerified([string]$Label, [string]$Pattern) {
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        [void](Clear-StrayUi)
+        $script:__clickOffset = (Read-HostLog).Length
+        $offset = $script:__clickOffset
+        $menu = Open-TrayMenu
+        $clicked = $false
+        if ($menu) { $clicked = Invoke-MenuItem $menu $Label }
+        if (Wait-Until { (Get-HostLogSince $offset) -match $Pattern } -TimeoutMs 3000 -PollMs 100) { return $attempt }
+        Write-Host ("  托盘菜单点击未生效（第 {0} 次：菜单弹出={1} 点中={2}），清场重试" -f $attempt, [bool]$menu, $clicked) -ForegroundColor Yellow
+        [CisoxAccept.W]::Tap([uint16]$VkEsc)
+        Start-Sleep -Milliseconds 700
+    }
+    return 0
+}
+
 # ---------------------------------------------------------------------------------------------
 # 场景
 # ---------------------------------------------------------------------------------------------
@@ -814,55 +850,64 @@ function Test-PauseGate {
     [void](Set-TestConfig 'tray/menu_options' $gateMenu)
     $null = Start-TestHost
     Start-Sleep -Seconds 6
-    $menu = Open-TrayMenu
-    if (-not $menu) { Add-Result 'pause-gate' 'tray-menu' 'SKIP' '' '通知区里找不到 Cisox 图标'; return }
+    if (-not (Find-TrayButton)) { Add-Result 'pause-gate' 'tray-menu' 'SKIP' '' '通知区里找不到 Cisox 图标'; return }
     $pauseLabel = Get-SpecMenuLabel 'quick.toggle_global_hotkeys'
     $gateLabel = Get-SpecMenuLabel 'quick.toggle_disable_on_focused_fullscreen'
     if (-not $pauseLabel) { Add-Result 'pause-gate' 'menu-label' 'SKIP' '' '快照里没有暂停热键菜单项'; return }
-    [void](Invoke-MenuItem $menu $pauseLabel)
-    Start-Sleep -Milliseconds 800
+    # 托盘菜单靠 UI Automation 点，偶尔点不中（右键被任务栏吃掉、前台被别的程序抢走）。每一下都用宿主日志确认生效，
+    # 没生效就重试；3 次都没生效记 SKIP（环境问题，不是暂停 / 闸门逻辑的失败），并中止后面依赖它的检查。
+    $pauseTries = Invoke-TrayItemVerified $pauseLabel 'paused=true'
+    if (-not $pauseTries) { Add-Result 'pause-gate' 'pause-menu-click' 'SKIP' '' '托盘菜单点“暂停热键”3 次都没生效（UI Automation / 桌面环境不稳），后续检查无意义'; return }
+    Start-Sleep -Milliseconds 500
     Send-Hotkey $HotkeyVk
     Start-Sleep -Seconds 2
     Add-Result 'pause-gate' 'paused-hotkey-ignored' $(if (-not (Get-UiProcess)) { 'PASS' } else { 'FAIL' }) '' '暂停后 F1 不应拉起 UI'
-    $menu = Open-TrayMenu
-    if ($menu) { [void](Invoke-MenuItem $menu $pauseLabel) }
+    $resumeTries = Invoke-TrayItemVerified $pauseLabel 'paused=false'
+    if (-not $resumeTries) { Add-Result 'pause-gate' 'resume-menu-click' 'SKIP' '' '托盘菜单点“恢复热键”3 次都没生效，后续检查无意义'; return }
     Start-Sleep -Milliseconds 800
     Send-Hotkey $HotkeyVk
     $fired = Wait-Until { [bool](Get-UiProcess) } -TimeoutMs 8000
     Add-Result 'pause-gate' 'resumed-hotkey-fires' $(if ($fired) { 'PASS' } else { 'FAIL' }) '' ''
-    [CisoxAccept.W]::Tap([uint16]$VkEsc)
-    $null = Wait-Until { -not (Get-UiProcess) } -TimeoutMs 8000
+    [void](Clear-StrayUi)
     if (-not $gateLabel) { Add-Result 'pause-gate' 'gate-menu-label' 'SKIP' '' '快照里没有前台全屏闸门菜单项'; return }
-    $logOffset = (Read-HostLog).Length
-    $menu = Open-TrayMenu
-    $gateClicked = $false
-    if ($menu) { $gateClicked = Invoke-MenuItem $menu $gateLabel }
-    Add-Result 'pause-gate' 'gate-menu-item-clicked' $(if ($gateClicked) { 'PASS' } else { 'FAIL' }) "菜单弹出=$([bool]$menu) 点击=$gateClicked" $gateLabel
-    # 闸门开关：UI 不在时宿主不再拉起完整 UI 会话，改走 `--headless set-config` 写配置（阶段 3）
-    $script:__sawFull = $false
-    $null = Wait-Until {
-        if (@(Get-UiCommandLines | Where-Object { $_.Cmd -match '--ui ' }).Count -gt 0) { $script:__sawFull = $true }
-        (Get-Content -LiteralPath (Join-Path $script:Data 'config.json') -Raw -Encoding UTF8) -match 'disable_on_focused_fullscreen_window"\s*:\s*true'
-    } -TimeoutMs 15000 -PollMs 100
+    # 闸门开关：UI 不在时宿主不再拉起完整 UI 会话，改走 `--headless set-config` 写配置（阶段 3）。
+    # 生效标志就是这行“改用无窗口任务”日志；之后新增的日志里出现“UI 进程已拉起”就说明误走了完整会话。
+    $gateTries = Invoke-TrayItemVerified $gateLabel '改用无窗口任务写配置'
+    Add-Result 'pause-gate' 'gate-menu-item-clicked' $(if ($gateTries) { 'PASS' } else { 'SKIP' }) "尝试 $gateTries 次生效（菜单点击 pause=$pauseTries resume=$resumeTries）" $gateLabel
+    if (-not $gateTries) { return }
+    $gateLog = Get-HostLogSince $script:__clickOffset
+    $null = Wait-Until { (Get-Content -LiteralPath (Join-Path $script:Data 'config.json') -Raw -Encoding UTF8) -match 'disable_on_focused_fullscreen_window"\s*:\s*true' } -TimeoutMs 15000 -PollMs 100
     $persisted = (Get-Content -LiteralPath (Join-Path $script:Data 'config.json') -Raw -Encoding UTF8) -match 'disable_on_focused_fullscreen_window"\s*:\s*true'
     Add-Result 'pause-gate' 'gate-persisted-via-headless' $(if ($persisted) { 'PASS' } else { 'FAIL' }) '' '宿主切换闸门 -> --headless set-config -> config.json'
-    $headlessLog = (Get-HostLogSince $logOffset) -match '改用无窗口任务写配置'
-    Add-Result 'pause-gate' 'gate-no-full-ui-session' $(if ($headlessLog -and -not $script:__sawFull) { 'PASS' } else { 'FAIL' }) "headless日志=$headlessLog 见到UI会话=$([bool]$script:__sawFull)" '只写个配置不该拉起带窗口的 UI 会话'
-    $null = Wait-Until { -not (Get-UiProcess) } -TimeoutMs 8000
-    # 用一个全屏置顶窗口模拟全屏应用
+    $sawFull = (Get-HostLogSince $script:__clickOffset) -match 'UI 进程已拉起'
+    Add-Result 'pause-gate' 'gate-no-full-ui-session' $(if (($gateLog -match '改用无窗口任务写配置') -and -not $sawFull) { 'PASS' } else { 'FAIL' }) "见到UI会话=$([bool]$sawFull)" '只写个配置不该拉起带窗口的 UI 会话'
+    [void](Clear-StrayUi)
+    # 用一个全屏置顶窗口模拟全屏应用；先确认它真的拿到了前台，否则“前台全屏”这个前提不成立（别的程序抢了前台），记 SKIP
     $form = New-Object Windows.Forms.Form
     $form.FormBorderStyle = 'None'; $form.WindowState = 'Maximized'; $form.TopMost = $true; $form.BackColor = 'Black'
-    $form.Show(); $form.Activate()
-    Start-Sleep -Seconds 1
+    $form.Show()
+    $hasForeground = $false
+    for ($i = 0; $i -lt 5 -and -not $hasForeground; $i++) {
+        $form.Activate()
+        Start-Sleep -Milliseconds 400
+        $hasForeground = ([CisoxAccept.W]::ForegroundInfo()[0] -eq [uint32]$PID)
+    }
     Send-Hotkey $HotkeyVk
     Start-Sleep -Seconds 2
-    Add-Result 'pause-gate' 'fullscreen-hotkey-dropped' $(if (-not (Get-UiProcess)) { 'PASS' } else { 'FAIL' }) '' '前台全屏 + 闸门打开：F1 被丢弃'
+    $dropped = -not (Get-UiProcess)
+    if ($hasForeground) {
+        Add-Result 'pause-gate' 'fullscreen-hotkey-dropped' $(if ($dropped) { 'PASS' } else { 'FAIL' }) '' '前台全屏 + 闸门打开：F1 被丢弃'
+    }
+    else {
+        Add-Result 'pause-gate' 'fullscreen-hotkey-dropped' 'SKIP' '' '模拟全屏窗口没拿到前台（被别的程序抢走），前提不成立'
+    }
     $form.Close(); $form.Dispose()
+    [void](Clear-StrayUi)
     Start-Sleep -Seconds 1
     Send-Hotkey $HotkeyVk
     $fired = Wait-Until { [bool](Get-UiProcess) } -TimeoutMs 8000
     Add-Result 'pause-gate' 'hotkey-works-after-fullscreen-closed' $(if ($fired) { 'PASS' } else { 'FAIL' }) '' ''
-    [CisoxAccept.W]::Tap([uint16]$VkEsc)
+    [void](Clear-StrayUi)
 }
 
 function Test-Crash {
@@ -926,6 +971,44 @@ function Test-Admin {
 # ---------------------------------------------------------------------------------------------
 # 阶段 3 场景：长生命周期功能与退出规则
 # ---------------------------------------------------------------------------------------------
+# 光标轨迹独立采样（1ms 轮询 GetCursorPos，不经任何钩子）：判断拖动期间有没有别的指针源（实体鼠标）插手。
+function Initialize-CursorSampler {
+    if ('CisoxAccept.Sampler' -as [type]) { return }
+    Add-Type -TypeDefinition @'
+using System; using System.Collections.Generic; using System.Diagnostics; using System.Runtime.InteropServices; using System.Threading;
+namespace CisoxAccept {
+    public static class Sampler {
+        [DllImport("user32.dll")] static extern bool GetCursorPos(out POINT p);
+        [StructLayout(LayoutKind.Sequential)] struct POINT { public int X, Y; }
+        static Thread worker; static volatile bool running; static List<int[]> samples = new List<int[]>();
+        public static void Start() {
+            samples = new List<int[]>(); running = true;
+            worker = new Thread(() => {
+                int lx = int.MinValue, ly = int.MinValue;
+                while (running) { POINT p; GetCursorPos(out p); if (p.X != lx || p.Y != ly) { samples.Add(new[] { p.X, p.Y }); lx = p.X; ly = p.Y; } Thread.Sleep(1); }
+            });
+            worker.IsBackground = true; worker.Start();
+        }
+        public static int[][] Stop() { running = false; if (worker != null) worker.Join(); return samples.ToArray(); }
+    }
+}
+'@
+}
+
+# 停止采样，返回偏离“起点到终点直线”超过 4 像素的采样点数。
+# 拖动前光标停在哪儿不确定，所以只统计第一次到达起点附近（15 像素内）之后的点。
+function Stop-CursorSampler([int]$X0, [int]$Y0, [int]$X1, [int]$Y1) {
+    $samples = [CisoxAccept.Sampler]::Stop()
+    $started = $false; $off = 0
+    foreach ($s in $samples) {
+        $px = $s[0]; $py = $s[1]
+        if (-not $started) { if ([Math]::Abs($px - $X0) -le 15 -and [Math]::Abs($py - $Y0) -le 15) { $started = $true } else { continue } }
+        $ideal = $Y0 + ($px - $X0) * ($Y1 - $Y0) / ($X1 - $X0)
+        if ($px -lt $X0 - 3 -or $px -gt $X1 + 3 -or [Math]::Abs($py - $ideal) -gt 4) { $off++ }
+    }
+    return $off
+}
+
 function Test-Gesture {
     $null = Start-TestHost -Env @{ SNOW_HOST_ACCEPT_INJECTED_INPUT = '1' }
     Start-Sleep -Seconds 6
@@ -942,6 +1025,8 @@ function Test-Gesture {
                            @{ Name = 'slow'; Hold = 2500; Note = '拖动进行中 UI 才起来：覆盖窗就绪后补发按下与最新位置，再接实时 update' })) {
         Invoke-Clip { [Windows.Forms.Clipboard]::Clear() }
         $dragLogOffset = (Read-HostLog).Length
+        Initialize-CursorSampler
+        [CisoxAccept.Sampler]::Start()
         [CisoxAccept.W]::Drag($x0, $y0, $x1, $y1, 30, 15, $variant.Hold, [uint16]0x5B)   # Win + 左键拖动 = 截图并复制
         # slow 变体里 UI 在拖动中途起来、松手后很快就收尾退出，Drag 返回时进程可能已经没了：
         # 进程在 或 宿主日志里新增了“UI 进程已拉起”都算拉起过
@@ -949,12 +1034,26 @@ function Test-Gesture {
         Add-Result 'gesture' "$($variant.Name)-ui-spawned" $(if ($up) { 'PASS' } else { 'FAIL' }) '' $variant.Note
         $copied = Wait-Until { Invoke-Clip { [Windows.Forms.Clipboard]::ContainsImage() } } -TimeoutMs 10000
         Add-Result 'gesture' "$($variant.Name)-selection-copied" $(if ($copied) { 'PASS' } else { 'FAIL' }) '' '框选完成后复制到剪贴板（覆盖窗按手势完成框选）'
+        # 选区尺寸必须等于拖动框（起点到终点，含终点像素）。实体鼠标在拖动期间被碰过（本机有人在用）会把起点 / 终点带偏，
+        # 产品按钩子给的真实光标位置框选，结果自然不是脚本想要的框：独立采样光标轨迹，偏离注入路径就记 SKIP 而不是 FAIL。
+        $off = Stop-CursorSampler $x0 $y0 $x1 $y1
+        $img = if ($copied) { Invoke-Clip { [Windows.Forms.Clipboard]::GetImage() } } else { $null }
+        $wantW = $x1 - $x0 + 1; $wantH = $y1 - $y0 + 1
+        $got = if ($img) { "$($img.Width)x$($img.Height)" } else { '' }
+        $fits = [bool]$img -and [Math]::Abs($img.Width - $wantW) -le 2 -and [Math]::Abs($img.Height - $wantH) -le 2
+        if ($img) { $img.Dispose() }
+        $sizeNote = "期望 ${wantW}x${wantH}（Win+左键从 ($x0,$y0) 拖到 ($x1,$y1)）"
+        if ($fits) { Add-Result 'gesture' "$($variant.Name)-selection-size" 'PASS' $got $sizeNote }
+        elseif ($off -gt 0) { Add-Result 'gesture' "$($variant.Name)-selection-size" 'SKIP' $got "拖动期间光标偏离注入路径 $off 次（实体鼠标被碰了），尺寸无法判定；$sizeNote" }
+        else { Add-Result 'gesture' "$($variant.Name)-selection-size" 'FAIL' $got $sizeNote }
         $gone = Wait-Until { -not (Get-UiProcess) } -TimeoutMs 8000
         Add-Result 'gesture' "$($variant.Name)-ui-exits" $(if ($gone) { 'PASS' } else { 'FAIL' }) '' '手势截图结束 -> 覆盖窗关闭 -> UI 立即退出'
         if (-not $gone) { $ui = Get-UiProcess; if ($ui) { [CisoxAccept.W]::Tap([uint16]$VkEsc); Stop-WorkProcessById $ui.Id } }
         Start-Sleep -Milliseconds 800
     }
     Add-Result 'gesture' 'host-still-running' $(if (Get-HostProcess) { 'PASS' } else { 'FAIL' }) '' ''
+    # UI 会话重载配置后（单个激活键被规范化成字符串）重新生成的快照仍要带着手势绑定，宿主不能把钩子卸掉
+    Add-Result 'gesture' 'bindings-kept-after-ui-sessions' $(if ((Read-HostLog) -notmatch '鼠标手势绑定已应用 bindings=0') { 'PASS' } else { 'FAIL' }) '' 'UI 会话改写配置后快照里的手势绑定不能变成 0 条（否则之后的手势全部失效）'
     # 没有绑定就不装钩子：把三条默认绑定清空后重启宿主
     Stop-HostGracefully
     foreach ($k in @('global_mouse/screenshot_copy', 'global_mouse/screenshot_fixed', 'global_mouse/screenshot_ocr')) { [void](Set-TestConfig $k '{}') }

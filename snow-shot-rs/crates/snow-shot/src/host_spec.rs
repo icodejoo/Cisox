@@ -13,7 +13,6 @@ use crate::hotkey_plan::{PlannedHotkey, hotkey_plan};
 use crate::quick_actions::{
     NOTICE_FULLSCREEN_GATE_OFF, NOTICE_FULLSCREEN_GATE_ON, QUICK_ACTION_KEYS,
 };
-use serde_json::Value;
 use snow_app_core::command::{AppCommand, CaptureRequest, QuickAction, RecordingConfig};
 use snow_config::document::ConfigDocument;
 use snow_host_protocol::spec::{
@@ -222,11 +221,8 @@ fn mouse_specs(document: &ConfigDocument) -> Vec<MouseBindingSpec> {
             let value = document.value(&format!("global_mouse/{action}"));
             // 无效配置（空对象、没有修饰键、未知名字）与实际安装钩子时一样被忽略
             crate::mouse_gesture::binding_from_value(action, &value)?;
-            let modifiers = value
-                .get("activation_key")?
-                .as_array()?
-                .iter()
-                .filter_map(Value::as_str)
+            let modifiers = crate::mouse_gesture::activation_names(&value)?
+                .into_iter()
                 .map(str::to_string)
                 .collect();
             Some(MouseBindingSpec {
@@ -622,6 +618,26 @@ mod tests {
             .unwrap();
         let spec = host_spec_from_document(&doc, &inputs(&[], "")).unwrap();
         assert_eq!(spec.mouse.len(), 2);
+    }
+
+    /// 配置重载后单个激活键是字符串：快照里仍要有手势绑定（只认数组会让宿主把全部手势钩子卸掉）。
+    #[test]
+    fn mouse_bindings_survive_string_activation_key() {
+        let mut doc = ConfigDocument::from_bytes(None);
+        for (action, button) in [
+            ("screenshot_copy", "left_drag"),
+            ("screenshot_fixed", "wheel_drag"),
+            ("screenshot_ocr", "right_drag"),
+        ] {
+            doc.set_value(
+                &format!("global_mouse/{action}"),
+                json!({"activation_key": "windows", "mouse_button": button}),
+            )
+            .unwrap();
+        }
+        let spec = host_spec_from_document(&doc, &inputs(&[], "")).unwrap();
+        assert_eq!(spec.mouse.len(), 3);
+        assert!(spec.mouse.iter().all(|m| m.modifiers == ["windows"]));
     }
 
     /// 开关、保活原因、暂停勾选、分组与登录恢复字段都按输入与配置落进快照。
