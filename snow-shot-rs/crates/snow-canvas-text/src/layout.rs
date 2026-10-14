@@ -225,7 +225,12 @@ impl TextLayoutResult {
                     }
                     found_x
                 };
-                return TextRect::from_xywh(x, line.bounds.top(), cursor_width, line.bounds.size.height);
+                return TextRect::from_xywh(
+                    x,
+                    line.bounds.top(),
+                    cursor_width,
+                    line.bounds.size.height,
+                );
             }
         }
 
@@ -408,7 +413,9 @@ impl TextLayoutResult {
         for line in &mut laid_lines {
             let offset_x = match style.alignment {
                 TextAlignment::Left => 0.0,
-                TextAlignment::Center => ((total_box_width - line.bounds.size.width) * 0.5).max(0.0),
+                TextAlignment::Center => {
+                    ((total_box_width - line.bounds.size.width) * 0.5).max(0.0)
+                }
                 TextAlignment::Right => (total_box_width - line.bounds.size.width).max(0.0),
             };
             if offset_x > 0.0 {

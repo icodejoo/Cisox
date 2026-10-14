@@ -131,7 +131,8 @@ pub fn recognize(
 
 /// 校验尺寸与像素长度一致且非空。
 fn check_dimensions(width: u32, height: u32, len: usize) -> Result<(), WinOcrError> {
-    if width == 0 || height == 0 || crate::clipboard::expected_rgba_len(width, height) != Some(len) {
+    if width == 0 || height == 0 || crate::clipboard::expected_rgba_len(width, height) != Some(len)
+    {
         return Err(WinOcrError::InvalidImage(format!(
             "{width}x{height} does not match pixel length {len}"
         )));

@@ -51,7 +51,10 @@ pub struct SystemPlan {
 /// ```
 pub fn plan_from_document(document: &ConfigDocument) -> SystemPlan {
     SystemPlan {
-        priority: document.value(KEY_PRIORITY).as_str().and_then(PriorityLevel::parse),
+        priority: document
+            .value(KEY_PRIORITY)
+            .as_str()
+            .and_then(PriorityLevel::parse),
         auto_start: document.bool_or(KEY_AUTO_START, true),
     }
 }
@@ -73,11 +76,7 @@ pub fn apply(document: &ConfigDocument) {
         return;
     }
     match std::env::current_exe() {
-        Ok(exe) => match set_auto_start(
-            PRODUCT_NAME,
-            &auto_start_target(&exe),
-            plan.auto_start,
-        ) {
+        Ok(exe) => match set_auto_start(PRODUCT_NAME, &auto_start_target(&exe), plan.auto_start) {
             Ok(()) => tracing::info!(enabled = plan.auto_start, "开机自启已同步"),
             Err(e) => tracing::warn!(enabled = plan.auto_start, error = %e, "同步开机自启失败"),
         },
@@ -94,7 +93,13 @@ mod tests {
     #[test]
     fn defaults_match_legacy() {
         let plan = plan_from_document(&ConfigDocument::from_bytes(None));
-        assert_eq!(plan, SystemPlan { priority: Some(PriorityLevel::AboveNormal), auto_start: true });
+        assert_eq!(
+            plan,
+            SystemPlan {
+                priority: Some(PriorityLevel::AboveNormal),
+                auto_start: true
+            }
+        );
     }
 
     /// 开机自启目标永远是同目录的宿主；老用户 Run 值指向 UI exe 时，由 UI 进程算出的目标把它改写成宿主路径，
@@ -113,6 +118,12 @@ mod tests {
         let mut doc = ConfigDocument::from_bytes(None);
         doc.set_value(KEY_PRIORITY, json!("high")).unwrap();
         doc.set_value(KEY_AUTO_START, json!(false)).unwrap();
-        assert_eq!(plan_from_document(&doc), SystemPlan { priority: Some(PriorityLevel::High), auto_start: false });
+        assert_eq!(
+            plan_from_document(&doc),
+            SystemPlan {
+                priority: Some(PriorityLevel::High),
+                auto_start: false
+            }
+        );
     }
 }

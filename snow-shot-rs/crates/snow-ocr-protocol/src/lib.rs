@@ -846,9 +846,7 @@ mod tests {
         );
         assert_eq!(
             prepare_session_payload(true, 1, "D", "R", "X"),
-            vec![
-                1, 1, 1, 0, 0, 0, b'D', 1, 0, 0, 0, b'R', 1, 0, 0, 0, b'X'
-            ]
+            vec![1, 1, 1, 0, 0, 0, b'D', 1, 0, 0, 0, b'R', 1, 0, 0, 0, b'X']
         );
         let mut expected = Vec::new();
         expected.extend_from_slice(&2u64.to_le_bytes());
@@ -975,13 +973,19 @@ mod tests {
     fn reject_bad_payloads() {
         let mut p = complete_payload(&CompleteResult::Failed("x".into()));
         p.push(0);
-        assert_eq!(decode_complete(&p).unwrap_err(), ProtocolError::TrailingBytes);
+        assert_eq!(
+            decode_complete(&p).unwrap_err(),
+            ProtocolError::TrailingBytes
+        );
 
         assert_eq!(
             decode_session_ready(&[1, 0]).unwrap_err(),
             ProtocolError::TrailingBytes
         );
-        assert_eq!(decode_session_ready(&[]).unwrap_err(), ProtocolError::Truncated);
+        assert_eq!(
+            decode_session_ready(&[]).unwrap_err(),
+            ProtocolError::Truncated
+        );
         assert_eq!(
             decode_image_consumed(&[0; 15]).unwrap_err(),
             ProtocolError::Truncated
@@ -999,8 +1003,14 @@ mod tests {
             decode_ready(&[1, 0, 1, 0, 0, 0, 0xff]).unwrap_err(),
             ProtocolError::InvalidUtf8
         );
-        assert_eq!(decode_ready(&[1, 0, 1, 0, 0, 0]).unwrap_err(), ProtocolError::Truncated);
-        assert_eq!(decode_complete(&[7]).unwrap_err(), ProtocolError::BadKind(7));
+        assert_eq!(
+            decode_ready(&[1, 0, 1, 0, 0, 0]).unwrap_err(),
+            ProtocolError::Truncated
+        );
+        assert_eq!(
+            decode_complete(&[7]).unwrap_err(),
+            ProtocolError::BadKind(7)
+        );
 
         // 声明 u32::MAX 行但无数据:不得爆内存,只返回 Truncated。
         let mut lie = vec![STATUS_SUCCESS, 0, 0, 0, 0];
@@ -1048,9 +1058,15 @@ mod tests {
         assert_eq!(dst, [3, 2, 1, 4, 30, 20, 10, 40]);
 
         let mut d3 = [0u8; 3];
-        assert_eq!(bgra_to_rgba(&mut d3, &[1, 2, 3]).unwrap_err(), ProtocolError::Truncated);
+        assert_eq!(
+            bgra_to_rgba(&mut d3, &[1, 2, 3]).unwrap_err(),
+            ProtocolError::Truncated
+        );
         let mut d4 = [0u8; 4];
-        assert_eq!(bgra_to_rgba(&mut d4, &src).unwrap_err(), ProtocolError::Truncated);
+        assert_eq!(
+            bgra_to_rgba(&mut d4, &src).unwrap_err(),
+            ProtocolError::Truncated
+        );
     }
 
     /// Kind 数值互转覆盖全部变体。

@@ -9,7 +9,9 @@ use std::sync::Arc;
 
 use snow_cursor::{AttachedCursorSample, CursorShape, CursorShapeState};
 use snow_d3d11::{SharedDevice, Texture};
-use windows::Win32::Graphics::Direct3D11::{D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, ID3D11DeviceContext4};
+use windows::Win32::Graphics::Direct3D11::{
+    D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, ID3D11DeviceContext4,
+};
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::core::Interface;
 
@@ -56,9 +58,19 @@ impl GpuComposer {
     /// - `src_size`：选区尺寸。
     /// - `out_size`：输出尺寸。
     /// - `fps`：帧率（仅用于视频处理器内容描述）。
-    pub fn new(device: SharedDevice, hw: Arc<HwContext>, src_size: (u32, u32), out_size: (u32, u32), fps: u32) -> Result<Self, String> {
-        let blitter = VideoBlitter::new(device.device(), device.context(), src_size, out_size, fps)?;
-        let context4: ID3D11DeviceContext4 = device.context().cast().map_err(|e| format!("合成上下文不支持栅栏: {e}"))?;
+    pub fn new(
+        device: SharedDevice,
+        hw: Arc<HwContext>,
+        src_size: (u32, u32),
+        out_size: (u32, u32),
+        fps: u32,
+    ) -> Result<Self, String> {
+        let blitter =
+            VideoBlitter::new(device.device(), device.context(), src_size, out_size, fps)?;
+        let context4: ID3D11DeviceContext4 = device
+            .context()
+            .cast()
+            .map_err(|e| format!("合成上下文不支持栅栏: {e}"))?;
         Ok(Self {
             device,
             context4,
@@ -106,14 +118,26 @@ impl GpuComposer {
         // 视频处理器对 BGRA 输入最通用（与桌面同格式），RGBA 形状在此换成 BGRA
         let texture = self
             .device
-            .texture(shape.width, shape.height, DXGI_FORMAT_B8G8R8A8_UNORM, (D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET).0 as u32)
+            .texture(
+                shape.width,
+                shape.height,
+                DXGI_FORMAT_B8G8R8A8_UNORM,
+                (D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET).0 as u32,
+            )
             .map_err(|e| format!("创建光标贴图失败: {e:#}"))?;
         let bgra = rgba_to_bgra(&shape.shape_rgba);
         {
             let _lock = self.device.lock();
             // SAFETY: bgra 长度已校验为 宽*高*4，行距 = 宽*4。
             unsafe {
-                self.device.context().UpdateSubresource(texture.raw(), 0, None, bgra.as_ptr().cast(), shape.width * 4, 0);
+                self.device.context().UpdateSubresource(
+                    texture.raw(),
+                    0,
+                    None,
+                    bgra.as_ptr().cast(),
+                    shape.width * 4,
+                    0,
+                );
             }
         }
         if self.order.len() >= CURSOR_CACHE_LIMIT
@@ -137,7 +161,12 @@ impl FrameComposer for GpuComposer {
     }
 
     /// 桌面 + 光标一次 Blt 合成到表面；栅栏保证与采集复制、采集复用之间的顺序。
-    fn compose(&mut self, frame: &GpuFrame, cursor: Option<&AttachedCursorSample>, surface: &mut Surface) -> Result<(), String> {
+    fn compose(
+        &mut self,
+        frame: &GpuFrame,
+        cursor: Option<&AttachedCursorSample>,
+        surface: &mut Surface,
+    ) -> Result<(), String> {
         let mut layers = std::mem::take(&mut self.layers);
         layers.clear();
         match &frame.tiles {
@@ -157,10 +186,16 @@ impl FrameComposer for GpuComposer {
         }
         if let Some(sample) = cursor
             && let Some(shape) = self.resolve_shape(sample)
-            && let Some((source, destination)) = cursor_geometry(sample, &shape, self.src_size, self.out_size)
+            && let Some((source, destination)) =
+                cursor_geometry(sample, &shape, self.src_size, self.out_size)
         {
             let texture = self.cursor_texture(&shape)?;
-            layers.push(VpLayer { texture: texture.raw().clone(), source, destination, alpha: true });
+            layers.push(VpLayer {
+                texture: texture.raw().clone(),
+                source,
+                destination,
+                alpha: true,
+            });
         }
         let _lock = self.device.lock();
         let fail = |what: &str, e: windows::core::Error| format!("{what}: {e}");
@@ -168,10 +203,14 @@ impl FrameComposer for GpuComposer {
         // SAFETY: 持有设备锁；栅栏与纹理都属于设备 B（或其共享视图）。
         unsafe {
             for slot in frame.slots() {
-                self.context4.Wait(slot.fence_b(), slot.value()).map_err(|e| fail("栅栏等待失败", e))?;
+                self.context4
+                    .Wait(slot.fence_b(), slot.value())
+                    .map_err(|e| fail("栅栏等待失败", e))?;
             }
         }
-        let blit = self.blitter.blit(&layers, surface.texture(), surface.slice());
+        let blit = self
+            .blitter
+            .blit(&layers, surface.texture(), surface.slice());
         // 图层持有的纹理引用随即释放，暂存容量留给下一帧
         layers.clear();
         self.layers = layers;
@@ -180,7 +219,9 @@ impl FrameComposer for GpuComposer {
         unsafe {
             for slot in frame.slots() {
                 let value = slot.value();
-                self.context4.Signal(slot.fence_b(), value + 1).map_err(|e| fail("栅栏 Signal 失败", e))?;
+                self.context4
+                    .Signal(slot.fence_b(), value + 1)
+                    .map_err(|e| fail("栅栏 Signal 失败", e))?;
                 slot.set_value(value + 1);
             }
             self.device.context().Flush();

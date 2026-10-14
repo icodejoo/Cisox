@@ -29,7 +29,17 @@ const VK_RMENU: u16 = 0xA5;
 /// # 参数
 /// - `vk`：虚拟键码。
 pub(super) fn is_modifier_key(vk: u16) -> bool {
-    [VK_LWIN, VK_RWIN, VK_LSHIFT, VK_RSHIFT, VK_LCONTROL, VK_RCONTROL, VK_LMENU, VK_RMENU].contains(&vk)
+    [
+        VK_LWIN,
+        VK_RWIN,
+        VK_LSHIFT,
+        VK_RSHIFT,
+        VK_LCONTROL,
+        VK_RCONTROL,
+        VK_LMENU,
+        VK_RMENU,
+    ]
+    .contains(&vk)
 }
 
 /// 由按住的虚拟键集合算出修饰键集合（左右键任一按着即算）。
@@ -68,7 +78,12 @@ mod tests {
     }
 
     /// Win 修饰键。
-    const WIN: Modifiers = Modifiers { win: true, ctrl: false, alt: false, shift: false };
+    const WIN: Modifiers = Modifiers {
+        win: true,
+        ctrl: false,
+        alt: false,
+        shift: false,
+    };
 
     /// Win 卡住（跟踪里有、真实没按）：被清掉，且不再匹配 Win 手势。
     #[test]
@@ -96,7 +111,13 @@ mod tests {
         let held = set(&[VK_LWIN, VK_LCONTROL, VK_RSHIFT]);
         let clean = reconcile_held(&held, |vk| vk == VK_LCONTROL);
         assert_eq!(clean, set(&[VK_LCONTROL]));
-        assert_eq!(modifiers_from_keys(&clean), Modifiers { ctrl: true, ..Default::default() });
+        assert_eq!(
+            modifiers_from_keys(&clean),
+            Modifiers {
+                ctrl: true,
+                ..Default::default()
+            }
+        );
         assert_ne!(modifiers_from_keys(&clean), modifiers_from_keys(&held));
     }
 

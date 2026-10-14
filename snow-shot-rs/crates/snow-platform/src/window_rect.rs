@@ -196,7 +196,10 @@ mod imp {
         }
         // SAFETY: hwnd 来自上面的查询，以下都是只读的窗口状态查询。
         unsafe {
-            if !IsWindow(Some(hwnd)).as_bool() || !IsWindowVisible(hwnd).as_bool() || IsIconic(hwnd).as_bool() {
+            if !IsWindow(Some(hwnd)).as_bool()
+                || !IsWindowVisible(hwnd).as_bool()
+                || IsIconic(hwnd).as_bool()
+            {
                 return false;
             }
             let root = GetAncestor(hwnd, GA_ROOT);
@@ -284,10 +287,26 @@ mod tests {
     #[test]
     fn covers_monitor_tolerance() {
         let monitor = (0, 0, 2560, 1440);
-        assert!(frame_covers_monitor((0, 0, 2560, 1440), monitor, FULLSCREEN_TOLERANCE));
-        assert!(frame_covers_monitor((1, 1, 2559, 1439), monitor, FULLSCREEN_TOLERANCE));
-        assert!(!frame_covers_monitor((2, 0, 2560, 1440), monitor, FULLSCREEN_TOLERANCE));
-        assert!(!frame_covers_monitor((0, 0, 2560, 1400), monitor, FULLSCREEN_TOLERANCE));
+        assert!(frame_covers_monitor(
+            (0, 0, 2560, 1440),
+            monitor,
+            FULLSCREEN_TOLERANCE
+        ));
+        assert!(frame_covers_monitor(
+            (1, 1, 2559, 1439),
+            monitor,
+            FULLSCREEN_TOLERANCE
+        ));
+        assert!(!frame_covers_monitor(
+            (2, 0, 2560, 1440),
+            monitor,
+            FULLSCREEN_TOLERANCE
+        ));
+        assert!(!frame_covers_monitor(
+            (0, 0, 2560, 1400),
+            monitor,
+            FULLSCREEN_TOLERANCE
+        ));
     }
 
     /// 探测前台全屏窗口不会 panic（结果取决于桌面环境）。

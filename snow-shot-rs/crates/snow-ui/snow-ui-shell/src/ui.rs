@@ -6,6 +6,7 @@
 
 use crate::error::ShellError;
 use crate::geometry::PhysicalRect;
+use crate::inbox::MainThreadInbox;
 use crate::monitor::Monitors;
 use crate::native;
 use crate::overlay::{NativeWindowId, OverlayWindow};
@@ -15,30 +16,28 @@ use gpui_kit::{
     WindowKind, WindowOptions,
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use crate::inbox::MainThreadInbox;
 use snow_capability::CapabilityRegistry;
 
 // ---- 精选 GPUI 子集（视图层使用）----
-pub use gpui_kit::{
-    Animation, AnimationExt,
-    Anchor, AnyElement, App, AppContext, Bounds, ClickEvent, Context, CursorStyle, Div, Element,
-    ElementId, ElementInputHandler, Entity, EntityInputHandler, FocusHandle, Focusable, FontWeight,
-    PathBuilder,
-    Hsla, ImageSource, InteractiveElement, IntoElement, KeyDownEvent, KeyUpEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, ObjectFit, ParentElement, Pixels, Point, QuitMode, Render,
-    RenderImage, RenderOnce, Rgba, SharedString, Size, StatefulInteractiveElement, Styled,
-    StyledImage, Task, TextAlign, TextRun, UTF16Selection, UnderlineStyle, ViewElement, WeakEntity,
-    Window, WindowControlArea, actions,
-    DispatchPhase, ScrollDelta, ScrollStrategy, ScrollWheelEvent, ShapedLine, UniformListScrollHandle, canvas, component, div, hsla, img, point,
-    linear_color_stop, linear_gradient, px, radians, rgb, rgba, size, uniform_list,
-};
-pub use gpui_kit::prelude::FluentBuilder;
-/// 锚定弹层宿主（触发元素 + 延迟绘制的弹出内容，自带窗口边缘避让与遮挡）。
-pub use gpui_kit::base::Popup;
 /// 应用资源源与图标资源检查（antd / 自绘图标路径约定见 `assets` 模块）。
 pub use crate::assets::{ANTD_ICON_PREFIX, AppAssets, OWN_ICON_PREFIX, icon_asset_exists};
+/// 锚定弹层宿主（触发元素 + 延迟绘制的弹出内容，自带窗口边缘避让与遮挡）。
+pub use gpui_kit::base::Popup;
 /// 组件库的“取消”动作（Esc）：向焦点所在的下拉浮层派发即可关闭它。
 pub use gpui_kit::base::actions::Cancel;
+pub use gpui_kit::prelude::FluentBuilder;
+pub use gpui_kit::{
+    Anchor, Animation, AnimationExt, AnyElement, App, AppContext, Bounds, ClickEvent, Context,
+    CursorStyle, DispatchPhase, Div, Element, ElementId, ElementInputHandler, Entity,
+    EntityInputHandler, FocusHandle, Focusable, FontWeight, Hsla, ImageSource, InteractiveElement,
+    IntoElement, KeyDownEvent, KeyUpEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, ObjectFit, ParentElement, PathBuilder, Pixels, Point, QuitMode, Render,
+    RenderImage, RenderOnce, Rgba, ScrollDelta, ScrollStrategy, ScrollWheelEvent, ShapedLine,
+    SharedString, Size, StatefulInteractiveElement, Styled, StyledImage, Task, TextAlign, TextRun,
+    UTF16Selection, UnderlineStyle, UniformListScrollHandle, ViewElement, WeakEntity, Window,
+    WindowControlArea, actions, canvas, component, div, hsla, img, linear_color_stop,
+    linear_gradient, point, px, radians, rgb, rgba, size, uniform_list,
+};
 
 /// 用窗口当前文本样式（字体、字重）量出单行文字的宽度。
 ///
@@ -76,15 +75,15 @@ pub fn uniform_list_offset_y(handle: &UniformListScrollHandle) -> f32 {
     f32::from(handle.0.borrow().base_handle.offset().y)
 }
 
-pub use crate::selection::{
-    DEFAULT_EDGE_TOLERANCE, DEFAULT_HANDLE_SIZE, DEFAULT_MINIMUM_SELECTION_SIZE,
-    SelectionDragMode, SelectionState, bounded_selection_rect, dragged_selection_rect,
-    handle_rects, hit_test_drag_mode, marquee_selection_rect, selection_size_label,
-};
 pub use crate::pinned_geometry::{
     PinnedDragHandle, ScaleAnchor, anchored_scale_rect, handle_rects as pinned_handle_rects,
-    hit_test_handle as hit_test_pinned_handle, proportional_resize_rect, scaled_size,
-    step_opacity, step_zoom,
+    hit_test_handle as hit_test_pinned_handle, proportional_resize_rect, scaled_size, step_opacity,
+    step_zoom,
+};
+pub use crate::selection::{
+    DEFAULT_EDGE_TOLERANCE, DEFAULT_HANDLE_SIZE, DEFAULT_MINIMUM_SELECTION_SIZE, SelectionDragMode,
+    SelectionState, bounded_selection_rect, dragged_selection_rect, handle_rects,
+    hit_test_drag_mode, marquee_selection_rect, selection_size_label,
 };
 
 /// 已打开的窗口句柄（不暴露 gpui 类型的部分见各方法）。
@@ -398,7 +397,8 @@ impl ShellContext<'_> {
             let focus = spec.focus;
             self.app
                 .spawn(async move |_cx| {
-                    if let Err(e) = finalize_native_placement(id, rect, topmost, borderless, focus) {
+                    if let Err(e) = finalize_native_placement(id, rect, topmost, borderless, focus)
+                    {
                         tracing::warn!(error = %e, "窗口物理落位失败");
                     }
                 })
@@ -590,7 +590,10 @@ mod tests {
         use gpui_kit::AssetSource;
         let src = gpui_kit::assets::Assets;
         assert!(src.load("").unwrap().is_none());
-        assert!(src.load("icons/__no_such_icon__.svg").map_or(true, |d| d.is_none()));
+        assert!(
+            src.load("icons/__no_such_icon__.svg")
+                .map_or(true, |d| d.is_none())
+        );
         let listed = src.list("icons/").unwrap();
         assert!(listed.iter().any(|p| p.as_ref() == "icons/check.svg"));
     }

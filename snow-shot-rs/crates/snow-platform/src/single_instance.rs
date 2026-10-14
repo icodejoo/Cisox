@@ -220,7 +220,9 @@ pub fn encode_frame(command: &IpcCommand) -> Result<Vec<u8>, IpcProtocolError> {
 /// assert_eq!(parse_frame_length([0, 0, 0, 5]), Ok(5));
 /// assert!(parse_frame_length([0, 0, 0, 0]).is_err());
 /// ```
-pub fn parse_frame_length(header: [u8; IPC_LENGTH_HEADER_BYTES]) -> Result<usize, IpcProtocolError> {
+pub fn parse_frame_length(
+    header: [u8; IPC_LENGTH_HEADER_BYTES],
+) -> Result<usize, IpcProtocolError> {
     let len = u32::from_be_bytes(header) as usize;
     if len == 0 || len > MAX_IPC_MESSAGE_BYTES {
         return Err(IpcProtocolError::BadLength(len));
@@ -494,7 +496,10 @@ mod tests {
     /// 非法长度：0 与超限都被拒绝。
     #[test]
     fn rejects_bad_length() {
-        assert_eq!(parse_frame_length([0, 0, 0, 0]), Err(IpcProtocolError::BadLength(0)));
+        assert_eq!(
+            parse_frame_length([0, 0, 0, 0]),
+            Err(IpcProtocolError::BadLength(0))
+        );
         let too_big = ((MAX_IPC_MESSAGE_BYTES + 1) as u32).to_be_bytes();
         assert!(parse_frame_length(too_big).is_err());
         assert!(parse_frame_length((MAX_IPC_MESSAGE_BYTES as u32).to_be_bytes()).is_ok());
@@ -507,9 +512,18 @@ mod tests {
         assert_eq!(decode_body(&[0xff, 0xfe]), Err(IpcProtocolError::BadUtf8));
         assert_eq!(decode_body(b"CISOX2 SHOW"), Err(IpcProtocolError::BadTag));
         assert_eq!(decode_body(b"CISOX1SHOW"), Err(IpcProtocolError::BadTag));
-        assert_eq!(decode_body(b"CISOX1 FORMAT_C"), Err(IpcProtocolError::UnknownCommand));
-        assert_eq!(decode_body(b"CISOX1 CUSTOM:"), Err(IpcProtocolError::UnknownCommand));
-        assert_eq!(decode_body(b"CISOX1 CUSTOM:a\x07b"), Err(IpcProtocolError::UnknownCommand));
+        assert_eq!(
+            decode_body(b"CISOX1 FORMAT_C"),
+            Err(IpcProtocolError::UnknownCommand)
+        );
+        assert_eq!(
+            decode_body(b"CISOX1 CUSTOM:"),
+            Err(IpcProtocolError::UnknownCommand)
+        );
+        assert_eq!(
+            decode_body(b"CISOX1 CUSTOM:a\x07b"),
+            Err(IpcProtocolError::UnknownCommand)
+        );
         assert!(encode_frame(&IpcCommand::Custom(String::new())).is_err());
         assert!(encode_frame(&IpcCommand::Custom("x".repeat(MAX_IPC_MESSAGE_BYTES))).is_err());
     }
@@ -517,10 +531,19 @@ mod tests {
     /// 命令行名称解析。
     #[test]
     fn cli_names() {
-        assert_eq!(IpcCommand::from_cli_name("Screenshot"), Some(IpcCommand::TriggerScreenshot));
+        assert_eq!(
+            IpcCommand::from_cli_name("Screenshot"),
+            Some(IpcCommand::TriggerScreenshot)
+        );
         assert_eq!(IpcCommand::from_cli_name(" quit "), Some(IpcCommand::Quit));
-        assert_eq!(IpcCommand::from_cli_name("Pin-Clipboard"), Some(IpcCommand::PinClipboard));
-        assert_eq!(IpcCommand::from_payload("PINCLIP"), Some(IpcCommand::PinClipboard));
+        assert_eq!(
+            IpcCommand::from_cli_name("Pin-Clipboard"),
+            Some(IpcCommand::PinClipboard)
+        );
+        assert_eq!(
+            IpcCommand::from_payload("PINCLIP"),
+            Some(IpcCommand::PinClipboard)
+        );
         assert_eq!(IpcCommand::from_cli_name("nope"), None);
     }
 

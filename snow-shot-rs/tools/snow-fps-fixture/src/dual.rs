@@ -8,7 +8,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use snow_fps_fixture::content::{Load, build_scene_at};
-use snow_fps_fixture::{FrameRecord, bar_segment_for, MAX_SECONDS, Options, Rect};
+use snow_fps_fixture::{FrameRecord, MAX_SECONDS, Options, Rect, bar_segment_for};
 
 use crate::{WATCHDOG_EXTRA_S, gpu, win};
 
@@ -42,8 +42,9 @@ fn worker(
     let leader = index == 0;
     let setup = || -> Result<(win::FixtureWindow, gpu::Renderer), String> {
         let window = win::FixtureWindow::create(piece).map_err(|e| format!("创建窗口失败: {e}"))?;
-        let mut renderer = gpu::Renderer::new(&window, piece.w, piece.h, options.load == Load::Noise)
-            .map_err(|e| format!("初始化 GPU 失败: {e}"))?;
+        let mut renderer =
+            gpu::Renderer::new(&window, piece.w, piece.h, options.load == Load::Noise)
+                .map_err(|e| format!("初始化 GPU 失败: {e}"))?;
         let (offset, total) = bar_segment_for(index, piece);
         renderer.set_bar_segment(offset, total);
         Ok((window, renderer))
@@ -66,9 +67,18 @@ fn worker(
     }
     let origin = (piece.x, piece.y);
     let result = if leader {
-        crate::run_loop(&window, &mut renderer, options, piece.w, piece.h, origin, Some(shared))
+        crate::run_loop(
+            &window,
+            &mut renderer,
+            options,
+            piece.w,
+            piece.h,
+            origin,
+            Some(shared),
+        )
     } else {
-        let hard_limit = Duration::from_secs_f64(options.seconds.min(MAX_SECONDS) + WATCHDOG_EXTRA_S);
+        let hard_limit =
+            Duration::from_secs_f64(options.seconds.min(MAX_SECONDS) + WATCHDOG_EXTRA_S);
         let start = Instant::now();
         let mut outcome = Ok(Vec::new());
         while !shared.stop.load(Ordering::Acquire) && start.elapsed() < hard_limit {
@@ -101,7 +111,11 @@ fn worker(
 /// # 返回
 /// 主节拍的帧记录（序号单调、统计语义与单窗口一致）；任一窗口失败返回原因。
 pub fn run_dual(pieces: &[Rect], options: &Options) -> Result<Vec<FrameRecord>, String> {
-    let shared = Shared { seq: AtomicU32::new(0), stop: AtomicBool::new(false), go: AtomicU8::new(GO_WAIT) };
+    let shared = Shared {
+        seq: AtomicU32::new(0),
+        stop: AtomicBool::new(false),
+        go: AtomicU8::new(GO_WAIT),
+    };
     let (tx, rx) = mpsc::channel();
     std::thread::scope(|scope| {
         let handles: Vec<_> = pieces
@@ -113,8 +127,16 @@ pub fn run_dual(pieces: &[Rect], options: &Options) -> Result<Vec<FrameRecord>, 
             })
             .collect();
         drop(tx);
-        let init_errors: Vec<String> = rx.iter().take(pieces.len()).filter_map(Result::err).collect();
-        let go = if init_errors.is_empty() { GO_RUN } else { GO_ABORT };
+        let init_errors: Vec<String> = rx
+            .iter()
+            .take(pieces.len())
+            .filter_map(Result::err)
+            .collect();
+        let go = if init_errors.is_empty() {
+            GO_RUN
+        } else {
+            GO_ABORT
+        };
         shared.go.store(go, Ordering::Release);
         let mut records = Vec::new();
         let mut errors = init_errors;

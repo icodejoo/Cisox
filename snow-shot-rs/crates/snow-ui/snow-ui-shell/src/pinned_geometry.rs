@@ -187,12 +187,7 @@ pub fn step_zoom(current: f32, delta_steps: f32, min_zoom: f32, max_zoom: f32) -
 /// let op = step_opacity(1.0, -2.0, 0.2, 1.0);
 /// assert!((op - 0.9).abs() < 1e-4);
 /// ```
-pub fn step_opacity(
-    current: f32,
-    delta_steps: f32,
-    min_opacity: f32,
-    max_opacity: f32,
-) -> f32 {
+pub fn step_opacity(current: f32, delta_steps: f32, min_opacity: f32, max_opacity: f32) -> f32 {
     let step = 0.05;
     let next = current + delta_steps * step;
     next.clamp(min_opacity, max_opacity)
@@ -248,21 +243,31 @@ pub fn proportional_resize_rect(
     };
 
     let (anchor, primary_delta) = match handle {
-        PinnedDragHandle::BottomRight => (ScaleAnchor::TopLeft, delta.x.max((delta.y as f32 * aspect) as i32)),
+        PinnedDragHandle::BottomRight => (
+            ScaleAnchor::TopLeft,
+            delta.x.max((delta.y as f32 * aspect) as i32),
+        ),
         PinnedDragHandle::Right => (ScaleAnchor::TopLeft, delta.x),
         PinnedDragHandle::Bottom => (ScaleAnchor::TopLeft, (delta.y as f32 * aspect) as i32),
-        PinnedDragHandle::BottomLeft => (ScaleAnchor::TopRight, (-delta.x).max((delta.y as f32 * aspect) as i32)),
+        PinnedDragHandle::BottomLeft => (
+            ScaleAnchor::TopRight,
+            (-delta.x).max((delta.y as f32 * aspect) as i32),
+        ),
         PinnedDragHandle::Left => (ScaleAnchor::TopRight, -delta.x),
-        PinnedDragHandle::TopRight => (ScaleAnchor::BottomLeft, delta.x.max((-delta.y as f32 * aspect) as i32)),
+        PinnedDragHandle::TopRight => (
+            ScaleAnchor::BottomLeft,
+            delta.x.max((-delta.y as f32 * aspect) as i32),
+        ),
         PinnedDragHandle::Top => (ScaleAnchor::BottomLeft, (-delta.y as f32 * aspect) as i32),
-        PinnedDragHandle::TopLeft => (ScaleAnchor::BottomRight, (-delta.x).max((-delta.y as f32 * aspect) as i32)),
+        PinnedDragHandle::TopLeft => (
+            ScaleAnchor::BottomRight,
+            (-delta.x).max((-delta.y as f32 * aspect) as i32),
+        ),
         PinnedDragHandle::Move => return reference,
     };
 
-    let target_w = (reference.width + primary_delta)
-        .clamp(min_size.x, max_size.x);
-    let target_h = ((target_w as f32 / aspect).round() as i32)
-        .clamp(min_size.y, max_size.y);
+    let target_w = (reference.width + primary_delta).clamp(min_size.x, max_size.x);
+    let target_h = ((target_w as f32 / aspect).round() as i32).clamp(min_size.y, max_size.y);
 
     anchored_scale_rect(reference, PhysicalPoint::new(target_w, target_h), anchor)
 }
@@ -284,7 +289,10 @@ pub fn proportional_resize_rect(
 /// let handles = handle_rects(bounds, 8);
 /// assert_eq!(handles.len(), 8);
 /// ```
-pub fn handle_rects(bounds: PhysicalRect, handle_size: i32) -> [(PinnedDragHandle, PhysicalRect); 8] {
+pub fn handle_rects(
+    bounds: PhysicalRect,
+    handle_size: i32,
+) -> [(PinnedDragHandle, PhysicalRect); 8] {
     let hs = handle_size.max(2);
     let half = hs / 2;
 
@@ -297,14 +305,35 @@ pub fn handle_rects(bounds: PhysicalRect, handle_size: i32) -> [(PinnedDragHandl
     let bottom = bounds.bottom() - half;
 
     [
-        (PinnedDragHandle::TopLeft, PhysicalRect::new(left, top, hs, hs)),
+        (
+            PinnedDragHandle::TopLeft,
+            PhysicalRect::new(left, top, hs, hs),
+        ),
         (PinnedDragHandle::Top, PhysicalRect::new(mid_x, top, hs, hs)),
-        (PinnedDragHandle::TopRight, PhysicalRect::new(right, top, hs, hs)),
-        (PinnedDragHandle::Right, PhysicalRect::new(right, mid_y, hs, hs)),
-        (PinnedDragHandle::BottomRight, PhysicalRect::new(right, bottom, hs, hs)),
-        (PinnedDragHandle::Bottom, PhysicalRect::new(mid_x, bottom, hs, hs)),
-        (PinnedDragHandle::BottomLeft, PhysicalRect::new(left, bottom, hs, hs)),
-        (PinnedDragHandle::Left, PhysicalRect::new(left, mid_y, hs, hs)),
+        (
+            PinnedDragHandle::TopRight,
+            PhysicalRect::new(right, top, hs, hs),
+        ),
+        (
+            PinnedDragHandle::Right,
+            PhysicalRect::new(right, mid_y, hs, hs),
+        ),
+        (
+            PinnedDragHandle::BottomRight,
+            PhysicalRect::new(right, bottom, hs, hs),
+        ),
+        (
+            PinnedDragHandle::Bottom,
+            PhysicalRect::new(mid_x, bottom, hs, hs),
+        ),
+        (
+            PinnedDragHandle::BottomLeft,
+            PhysicalRect::new(left, bottom, hs, hs),
+        ),
+        (
+            PinnedDragHandle::Left,
+            PhysicalRect::new(left, mid_y, hs, hs),
+        ),
     ]
 }
 
@@ -381,7 +410,11 @@ mod tests {
     fn test_anchored_mouse() {
         let rect = PhysicalRect::new(100, 100, 200, 200);
         let mouse = PhysicalPoint::new(200, 200); // 正中心
-        let scaled = anchored_scale_rect(rect, PhysicalPoint::new(400, 400), ScaleAnchor::MousePoint(mouse));
+        let scaled = anchored_scale_rect(
+            rect,
+            PhysicalPoint::new(400, 400),
+            ScaleAnchor::MousePoint(mouse),
+        );
         assert_eq!(scaled, PhysicalRect::new(0, 0, 400, 400));
     }
 

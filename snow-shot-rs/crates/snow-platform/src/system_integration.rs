@@ -124,8 +124,9 @@ mod imp {
     use std::path::Path;
     use windows::Win32::Foundation::ERROR_FILE_NOT_FOUND;
     use windows::Win32::System::Registry::{
-        HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE, REG_ROUTINE_FLAGS, REG_SZ, RRF_RT_REG_DWORD,
-        RRF_RT_REG_SZ, RegCloseKey, RegDeleteValueW, RegGetValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
+        HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE, REG_ROUTINE_FLAGS, REG_SZ,
+        RRF_RT_REG_DWORD, RRF_RT_REG_SZ, RegCloseKey, RegDeleteValueW, RegGetValueW, RegOpenKeyExW,
+        RegQueryValueExW, RegSetValueExW,
     };
     use windows::Win32::System::Threading::{
         ABOVE_NORMAL_PRIORITY_CLASS, GetCurrentProcess, HIGH_PRIORITY_CLASS, NORMAL_PRIORITY_CLASS,
@@ -145,7 +146,8 @@ mod imp {
             PriorityLevel::RealTime => REALTIME_PRIORITY_CLASS,
         };
         // SAFETY: 当前进程伪句柄恒有效；参数为纯值。
-        unsafe { SetPriorityClass(GetCurrentProcess(), class) }.map_err(|e| format!("SetPriorityClass: {e}"))
+        unsafe { SetPriorityClass(GetCurrentProcess(), class) }
+            .map_err(|e| format!("SetPriorityClass: {e}"))
     }
 
     /// 已打开的 `Run` 子键，Drop 时关闭。
@@ -155,10 +157,22 @@ mod imp {
         /// 打开 `Run` 子键；`write` 决定访问权限。
         fn open(write: bool) -> Result<Self, String> {
             let mut key = HKEY::default();
-            let access = if write { KEY_SET_VALUE | KEY_READ } else { KEY_READ };
+            let access = if write {
+                KEY_SET_VALUE | KEY_READ
+            } else {
+                KEY_READ
+            };
             let path = HSTRING::from(RUN_KEY);
             // SAFETY: path 是以 0 结尾的宽字符串，key 是有效输出位置。
-            let status = unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, PCWSTR(path.as_ptr()), None, access, &mut key) };
+            let status = unsafe {
+                RegOpenKeyExW(
+                    HKEY_CURRENT_USER,
+                    PCWSTR(path.as_ptr()),
+                    None,
+                    access,
+                    &mut key,
+                )
+            };
             if status.is_err() {
                 return Err(format!("打开 Run 注册表项失败: {status:?}"));
             }
@@ -187,10 +201,17 @@ mod imp {
                     PCWSTR(value_name.as_ptr()),
                     None,
                     REG_SZ,
-                    Some(std::slice::from_raw_parts(command.as_ptr().cast::<u8>(), command.len() * 2)),
+                    Some(std::slice::from_raw_parts(
+                        command.as_ptr().cast::<u8>(),
+                        command.len() * 2,
+                    )),
                 )
             };
-            if status.is_err() { Err(format!("写入自启项失败: {status:?}")) } else { Ok(()) }
+            if status.is_err() {
+                Err(format!("写入自启项失败: {status:?}"))
+            } else {
+                Ok(())
+            }
         } else {
             // SAFETY: key 已打开且有写权限。
             let status = unsafe { RegDeleteValueW(key.0, PCWSTR(value_name.as_ptr())) };
@@ -209,7 +230,8 @@ mod imp {
         };
         let value_name = HSTRING::from(name);
         // SAFETY: key 已打开；只查询是否存在，不取数据。
-        let status = unsafe { RegQueryValueExW(key.0, PCWSTR(value_name.as_ptr()), None, None, None, None) };
+        let status =
+            unsafe { RegQueryValueExW(key.0, PCWSTR(value_name.as_ptr()), None, None, None, None) };
         status.is_ok()
     }
 
@@ -311,7 +333,10 @@ mod tests {
     fn priority_parsing() {
         assert_eq!(PriorityLevel::parse("normal"), Some(PriorityLevel::Normal));
         assert_eq!(PriorityLevel::parse("high"), Some(PriorityLevel::High));
-        assert_eq!(PriorityLevel::parse("real_time"), Some(PriorityLevel::RealTime));
+        assert_eq!(
+            PriorityLevel::parse("real_time"),
+            Some(PriorityLevel::RealTime)
+        );
         assert_eq!(PriorityLevel::parse(""), None);
     }
 

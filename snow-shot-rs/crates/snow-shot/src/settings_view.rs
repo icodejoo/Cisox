@@ -865,27 +865,23 @@ impl SettingsView {
         cx: &mut Context<Self>,
     ) {
         let state = cx.new(|cx| SelectState::new(SearchableVec::new(items), index, window, cx));
-            cx.subscribe_in(
-                &state,
-                window,
-                move |this,
-                      _state,
-                      event: &SelectEvent<SearchableVec<DropdownItem>>,
-                      window,
-                      cx| {
-                    if let SelectEvent::Confirm(Some(value)) = event {
-                        this.act(
-                            SettingsAction::Change {
-                                key,
-                                value: json!(value),
-                            },
-                            window,
-                            cx,
-                        );
-                    }
-                },
-            )
-            .detach();
+        cx.subscribe_in(
+            &state,
+            window,
+            move |this, _state, event: &SelectEvent<SearchableVec<DropdownItem>>, window, cx| {
+                if let SelectEvent::Confirm(Some(value)) = event {
+                    this.act(
+                        SettingsAction::Change {
+                            key,
+                            value: json!(value),
+                        },
+                        window,
+                        cx,
+                    );
+                }
+            },
+        )
+        .detach();
         self.dropdowns.insert(key, Dropdown { state, locale });
     }
 
@@ -2432,9 +2428,7 @@ impl SettingsView {
         let panel = update_panel(self.state.prefs().locale, &self.update_state);
         match Self::panel_row(UPDATE_PANEL_LINES, row_index) {
             None => Self::panel_frame().into_any_element(),
-            Some(Hymt2Row::Text { .. }) => {
-                Self::panel_text_row(p, panel.title, panel.current_line)
-            }
+            Some(Hymt2Row::Text { .. }) => Self::panel_text_row(p, panel.title, panel.current_line),
             Some(Hymt2Row::Actions) => {
                 let running = matches!(
                     self.update_state,
@@ -3468,8 +3462,8 @@ impl Render for SettingsView {
                 let key = event.keystroke.key.as_str();
                 let paste = (crate::shared_keys::resolve(key, m.control)
                     == Some(crate::shared_keys::SharedKeyAction::Paste))
-                    .then(|| cx.read_from_clipboard().and_then(|item| item.text()))
-                    .flatten();
+                .then(|| cx.read_from_clipboard().and_then(|item| item.text()))
+                .flatten();
                 let handled = this.state.on_key(
                     key,
                     event.keystroke.key_char.as_deref(),

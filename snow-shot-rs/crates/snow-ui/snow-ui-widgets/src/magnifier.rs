@@ -167,7 +167,10 @@ impl MagnifierGrid {
         if col >= self.dimension || row >= self.dimension {
             return None;
         }
-        let px = self.pixels.get((row * self.dimension + col) * 4..)?.get(..4)?;
+        let px = self
+            .pixels
+            .get((row * self.dimension + col) * 4..)?
+            .get(..4)?;
         Some((px[0], px[1], px[2], px[3]))
     }
 
@@ -469,6 +472,9 @@ mod tests {
         assert_eq!(grid.pixel_at(0, 0), (1, 2, 3, 4));
         assert_eq!(grid.pixel_at(2, 2), (0, 0, 0, 0));
         assert_eq!(grid.center_pixel(), (0, 0, 0, 255));
-        assert_eq!(MagnifierGrid::new_solid(0, (9, 9, 9, 9)).center_pixel(), (0, 0, 0, 255));
+        assert_eq!(
+            MagnifierGrid::new_solid(0, (9, 9, 9, 9)).center_pixel(),
+            (0, 0, 0, 255)
+        );
     }
 }

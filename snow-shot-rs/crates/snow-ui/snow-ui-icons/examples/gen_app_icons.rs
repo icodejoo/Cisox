@@ -52,13 +52,22 @@ fn build_ico(frames: &[(u32, Vec<u8>)]) -> Vec<u8> {
 fn main() {
     let mut args = std::env::args().skip(1);
     let assets = PathBuf::from(DEFAULT_ASSETS);
-    let svg_path = args.next().map(PathBuf::from).unwrap_or(assets.join("logo.svg"));
+    let svg_path = args
+        .next()
+        .map(PathBuf::from)
+        .unwrap_or(assets.join("logo.svg"));
     let out_dir = args.next().map(PathBuf::from).unwrap_or(assets);
     let data = std::fs::read(&svg_path).expect("读取 SVG 失败");
     let tree = usvg::Tree::from_data(&data, &usvg::Options::default()).expect("解析 SVG 失败");
 
-    write(&out_dir.join("tray-icon.png"), &render_png(&tree, TRAY_SIZE));
-    let frames: Vec<_> = ICO_SIZES.iter().map(|&s| (s, render_png(&tree, s))).collect();
+    write(
+        &out_dir.join("tray-icon.png"),
+        &render_png(&tree, TRAY_SIZE),
+    );
+    let frames: Vec<_> = ICO_SIZES
+        .iter()
+        .map(|&s| (s, render_png(&tree, s)))
+        .collect();
     write(&out_dir.join("app.ico"), &build_ico(&frames));
 }
 

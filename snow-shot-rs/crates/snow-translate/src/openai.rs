@@ -59,7 +59,10 @@ impl OpenAiCompatibleConfig {
     /// assert_eq!(cfg.endpoint(), "http://localhost:11434/v1/chat/completions");
     /// ```
     pub fn endpoint(&self) -> String {
-        format!("{}{CHAT_ENDPOINT_SUFFIX}", self.base_url.trim().trim_end_matches('/'))
+        format!(
+            "{}{CHAT_ENDPOINT_SUFFIX}",
+            self.base_url.trim().trim_end_matches('/')
+        )
     }
 
     /// 生成符合 OpenAI Chat 格式的翻译请求体。
@@ -80,9 +83,16 @@ impl OpenAiCompatibleConfig {
     /// ```
     pub fn format_request(&self, text: &str, src: Lang, tgt: Lang) -> String {
         let direction = if src == Lang::Auto {
-            format!("Translate the text into {}. Detect the source language automatically.", tgt.display_name())
+            format!(
+                "Translate the text into {}. Detect the source language automatically.",
+                tgt.display_name()
+            )
         } else {
-            format!("Translate the text from {} to {}.", src.display_name(), tgt.display_name())
+            format!(
+                "Translate the text from {} to {}.",
+                src.display_name(),
+                tgt.display_name()
+            )
         };
         let system = format!(
             "You are a professional translator. {direction} Output ONLY the translated text without explanations."
@@ -132,15 +142,21 @@ fn snippet(body: &str) -> String {
 /// assert!(parse_chat_response(r#"{"error":{"message":"bad key"}}"#).is_err());
 /// ```
 pub fn parse_chat_response(body: &str) -> Result<String, TranslateError> {
-    let value: serde_json::Value = serde_json::from_str(body)
-        .map_err(|e| TranslateError::Network(format!("响应不是有效 JSON ({e}): {}", snippet(body))))?;
+    let value: serde_json::Value = serde_json::from_str(body).map_err(|e| {
+        TranslateError::Network(format!("响应不是有效 JSON ({e}): {}", snippet(body)))
+    })?;
     if let Some(message) = value.pointer("/error/message").and_then(|m| m.as_str()) {
         return Err(TranslateError::Network(format!("服务端报错: {message}")));
     }
     let content = value
         .pointer("/choices/0/message/content")
         .and_then(|c| c.as_str())
-        .ok_or_else(|| TranslateError::Network(format!("响应缺少 choices[0].message.content: {}", snippet(body))))?;
+        .ok_or_else(|| {
+            TranslateError::Network(format!(
+                "响应缺少 choices[0].message.content: {}",
+                snippet(body)
+            ))
+        })?;
     let text = strip_reasoning(content);
     if text.is_empty() {
         return Err(TranslateError::Inference("模型返回了空译文".into()));
@@ -169,7 +185,13 @@ pub trait HttpPost: Send + Sync {
     ///
     /// # 返回
     /// 响应；连接失败、超时等传输层问题返回错误说明（不含密钥）。
-    fn post_json(&self, url: &str, api_key: &str, body: &str, timeout: Duration) -> Result<HttpResponse, String>;
+    fn post_json(
+        &self,
+        url: &str,
+        api_key: &str,
+        body: &str,
+        timeout: Duration,
+    ) -> Result<HttpResponse, String>;
 }
 
 /// 转义 curl 配置文件里双引号字符串的内容（反斜杠、双引号与控制字符）。
@@ -208,10 +230,16 @@ pub fn curl_config_text(url: &str, api_key: &str, body_path: &Path, max_time_sec
     text.push_str("request = \"POST\"\n");
     text.push_str("header = \"Content-Type: application/json\"\n");
     if !api_key.is_empty() {
-        text.push_str(&format!("header = \"Authorization: Bearer {}\"\n", escape_curl_value(api_key)));
+        text.push_str(&format!(
+            "header = \"Authorization: Bearer {}\"\n",
+            escape_curl_value(api_key)
+        ));
     }
     let path = body_path.to_string_lossy().replace('\\', "/");
-    text.push_str(&format!("data-binary = \"@{}\"\n", escape_curl_value(&path)));
+    text.push_str(&format!(
+        "data-binary = \"@{}\"\n",
+        escape_curl_value(&path)
+    ));
     text.push_str(&format!("max-time = {max_time_secs}\n"));
     text.push_str("write-out = \"\\n%{http_code}\"\n");
     text
@@ -257,7 +285,10 @@ impl TempBody {
     /// 写入请求体到临时目录。
     fn create(body: &str) -> Result<Self, String> {
         let seq = REQUEST_SEQ.fetch_add(1, Ordering::SeqCst);
-        let path = std::env::temp_dir().join(format!("snow-translate-req-{}-{seq}.json", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "snow-translate-req-{}-{seq}.json",
+            std::process::id()
+        ));
         std::fs::write(&path, body.as_bytes()).map_err(|e| format!("无法写入临时请求文件: {e}"))?;
         Ok(Self { path })
     }
@@ -272,12 +303,24 @@ impl Drop for TempBody {
 
 impl HttpPost for CurlHttp {
     /// 经 curl 发送；配置走 stdin，请求体走临时文件。
-    fn post_json(&self, url: &str, api_key: &str, body: &str, timeout: Duration) -> Result<HttpResponse, String> {
+    fn post_json(
+        &self,
+        url: &str,
+        api_key: &str,
+        body: &str,
+        timeout: Duration,
+    ) -> Result<HttpResponse, String> {
         let temp = TempBody::create(body)?;
         let config = curl_config_text(url, api_key, &temp.path, timeout.as_secs().max(1));
         let mut command = Command::new(curl_program());
         command
-            .args(["--silent", "--show-error", "--ssl-no-revoke", "--connect-timeout", CONNECT_TIMEOUT_SECS])
+            .args([
+                "--silent",
+                "--show-error",
+                "--ssl-no-revoke",
+                "--connect-timeout",
+                CONNECT_TIMEOUT_SECS,
+            ])
             .args(["-K", "-"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -289,14 +332,23 @@ impl HttpPost for CurlHttp {
         }
         let mut child = command.spawn().map_err(|e| format!("无法运行 curl: {e}"))?;
         if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(config.as_bytes()).map_err(|e| format!("无法向 curl 传入配置: {e}"))?;
+            stdin
+                .write_all(config.as_bytes())
+                .map_err(|e| format!("无法向 curl 传入配置: {e}"))?;
         }
-        let output = child.wait_with_output().map_err(|e| format!("等待 curl 结束失败: {e}"))?;
+        let output = child
+            .wait_with_output()
+            .map_err(|e| format!("等待 curl 结束失败: {e}"))?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("curl 失败 ({}): {}", output.status, snippet(&stderr)));
+            return Err(format!(
+                "curl 失败 ({}): {}",
+                output.status,
+                snippet(&stderr)
+            ));
         }
-        let (status, body) = split_curl_output(&output.stdout).ok_or_else(|| "curl 输出缺少状态码".to_string())?;
+        let (status, body) =
+            split_curl_output(&output.stdout).ok_or_else(|| "curl 输出缺少状态码".to_string())?;
         Ok(HttpResponse { status, body })
     }
 }
@@ -338,8 +390,16 @@ impl OpenAiEngine {
     /// - `config`：端点配置。
     /// - `http`：传输实现。
     /// - `timeout`：单次请求超时。
-    pub fn with_http(config: OpenAiCompatibleConfig, http: Box<dyn HttpPost>, timeout: Duration) -> Self {
-        Self { config, http, timeout }
+    pub fn with_http(
+        config: OpenAiCompatibleConfig,
+        http: Box<dyn HttpPost>,
+        timeout: Duration,
+    ) -> Self {
+        Self {
+            config,
+            http,
+            timeout,
+        }
     }
 }
 
@@ -363,7 +423,12 @@ impl TranslationEngine for OpenAiEngine {
         let body = self.config.format_request(text, src, tgt);
         let response = self
             .http
-            .post_json(&self.config.endpoint(), &self.config.api_key, &body, self.timeout)
+            .post_json(
+                &self.config.endpoint(),
+                &self.config.api_key,
+                &body,
+                self.timeout,
+            )
             .map_err(TranslateError::Network)?;
         if !(200..300).contains(&response.status) {
             return Err(status_error(response.status, &response.body));
@@ -372,7 +437,12 @@ impl TranslationEngine for OpenAiEngine {
     }
 
     /// 逐段请求（最多 [`MAX_BATCH_SEGMENTS`] 段，超出返回错误而不是静默截断）。
-    fn translate_batch(&self, texts: &[String], src: Lang, tgt: Lang) -> Result<Vec<String>, TranslateError> {
+    fn translate_batch(
+        &self,
+        texts: &[String],
+        src: Lang,
+        tgt: Lang,
+    ) -> Result<Vec<String>, TranslateError> {
         if texts.len() > MAX_BATCH_SEGMENTS {
             return Err(TranslateError::InvalidRequest(format!(
                 "文本段数过多（{}，上限 {MAX_BATCH_SEGMENTS}）",
@@ -415,8 +485,17 @@ mod tests {
     }
 
     impl HttpPost for FakeHttp {
-        fn post_json(&self, url: &str, api_key: &str, body: &str, _timeout: Duration) -> Result<HttpResponse, String> {
-            self.seen.lock().unwrap().push((url.into(), api_key.into(), body.into()));
+        fn post_json(
+            &self,
+            url: &str,
+            api_key: &str,
+            body: &str,
+            _timeout: Duration,
+        ) -> Result<HttpResponse, String> {
+            self.seen
+                .lock()
+                .unwrap()
+                .push((url.into(), api_key.into(), body.into()));
             self.replies.lock().unwrap().remove(0)
         }
     }
@@ -439,10 +518,18 @@ mod tests {
     }
 
     /// 造引擎并返回请求记录。
-    fn engine(replies: Vec<Result<HttpResponse, String>>) -> (OpenAiEngine, Arc<Mutex<Vec<SeenRequest>>>) {
+    fn engine(
+        replies: Vec<Result<HttpResponse, String>>,
+    ) -> (OpenAiEngine, Arc<Mutex<Vec<SeenRequest>>>) {
         let seen = Arc::new(Mutex::new(Vec::new()));
-        let http = FakeHttp { replies: Mutex::new(replies), seen: Arc::clone(&seen) };
-        (OpenAiEngine::with_http(config(), Box::new(http), Duration::from_secs(5)), seen)
+        let http = FakeHttp {
+            replies: Mutex::new(replies),
+            seen: Arc::clone(&seen),
+        };
+        (
+            OpenAiEngine::with_http(config(), Box::new(http), Duration::from_secs(5)),
+            seen,
+        )
     }
 
     /// 请求体：模型名、文本、语言方向；`Auto` 让模型自行判断。
@@ -450,49 +537,77 @@ mod tests {
     fn request_body_shape() {
         let cfg = config();
         let body: serde_json::Value =
-            serde_json::from_str(&cfg.format_request("Hello world", Lang::En, Lang::ZhHans)).unwrap();
+            serde_json::from_str(&cfg.format_request("Hello world", Lang::En, Lang::ZhHans))
+                .unwrap();
         assert_eq!(body["model"], "qwen2.5");
         assert_eq!(body["messages"][1]["content"], "Hello world");
         let system = body["messages"][0]["content"].as_str().unwrap();
         assert!(system.contains("from 英语 to 简体中文"), "{system}");
-        let auto: serde_json::Value = serde_json::from_str(&cfg.format_request("x", Lang::Auto, Lang::Ja)).unwrap();
-        assert!(auto["messages"][0]["content"].as_str().unwrap().contains("Detect the source language"));
+        let auto: serde_json::Value =
+            serde_json::from_str(&cfg.format_request("x", Lang::Auto, Lang::Ja)).unwrap();
+        assert!(
+            auto["messages"][0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("Detect the source language")
+        );
     }
 
     /// 端点拼接去掉多余斜杠。
     #[test]
     fn endpoint_joins_cleanly() {
-        assert_eq!(config().endpoint(), "http://localhost:11434/v1/chat/completions");
+        assert_eq!(
+            config().endpoint(),
+            "http://localhost:11434/v1/chat/completions"
+        );
         let mut cfg = config();
         cfg.base_url = " https://api.example.com/v1 ".into();
-        assert_eq!(cfg.endpoint(), "https://api.example.com/v1/chat/completions");
+        assert_eq!(
+            cfg.endpoint(),
+            "https://api.example.com/v1/chat/completions"
+        );
     }
 
     /// 响应解析：成功、思考块、服务端错误、缺字段、空内容、非 JSON。
     #[test]
     fn response_parsing() {
-        assert_eq!(parse_chat_response(r#"{"choices":[{"message":{"content":"\n你好\n"}}]}"#).unwrap(), "你好");
+        assert_eq!(
+            parse_chat_response(r#"{"choices":[{"message":{"content":"\n你好\n"}}]}"#).unwrap(),
+            "你好"
+        );
         let think = r#"{"choices":[{"message":{"content":"<think>hmm\nplan</think>\n\n你好"}}]}"#;
         assert_eq!(parse_chat_response(think).unwrap(), "你好");
         assert!(matches!(
             parse_chat_response(r#"{"error":{"message":"invalid key"}}"#),
             Err(TranslateError::Network(m)) if m.contains("invalid key")
         ));
-        assert!(matches!(parse_chat_response(r#"{"choices":[]}"#), Err(TranslateError::Network(_))));
+        assert!(matches!(
+            parse_chat_response(r#"{"choices":[]}"#),
+            Err(TranslateError::Network(_))
+        ));
         assert!(matches!(
             parse_chat_response(r#"{"choices":[{"message":{"content":"  "}}]}"#),
             Err(TranslateError::Inference(_))
         ));
-        assert!(matches!(parse_chat_response("<html>502</html>"), Err(TranslateError::Network(_))));
+        assert!(matches!(
+            parse_chat_response("<html>502</html>"),
+            Err(TranslateError::Network(_))
+        ));
     }
 
     /// 引擎：成功路径带密钥与完整端点；空白文本不发请求。
     #[test]
     fn engine_translates_and_skips_blank() {
         let (engine, seen) = engine(vec![ok("你好")]);
-        assert_eq!(engine.translate("  ", Lang::En, Lang::ZhHans).unwrap(), "  ");
+        assert_eq!(
+            engine.translate("  ", Lang::En, Lang::ZhHans).unwrap(),
+            "  "
+        );
         assert!(seen.lock().unwrap().is_empty());
-        assert_eq!(engine.translate("hello", Lang::En, Lang::ZhHans).unwrap(), "你好");
+        assert_eq!(
+            engine.translate("hello", Lang::En, Lang::ZhHans).unwrap(),
+            "你好"
+        );
         let seen = seen.lock().unwrap();
         assert_eq!(seen[0].0, "http://localhost:11434/v1/chat/completions");
         assert_eq!(seen[0].1, "sk-secret");
@@ -501,21 +616,37 @@ mod tests {
     /// HTTP 错误状态映射为可读错误，且错误文本不泄露密钥。
     #[test]
     fn http_errors_are_readable_and_do_not_leak_the_key() {
-        for (status, needle) in [(401, "认证失败"), (404, "端点不存在"), (429, "额度"), (500, "HTTP 500")] {
-            let (engine, _) = engine(vec![Ok(HttpResponse { status, body: "boom".into() })]);
-            let err = engine.translate("x", Lang::En, Lang::ZhHans).unwrap_err().to_string();
+        for (status, needle) in [
+            (401, "认证失败"),
+            (404, "端点不存在"),
+            (429, "额度"),
+            (500, "HTTP 500"),
+        ] {
+            let (engine, _) = engine(vec![Ok(HttpResponse {
+                status,
+                body: "boom".into(),
+            })]);
+            let err = engine
+                .translate("x", Lang::En, Lang::ZhHans)
+                .unwrap_err()
+                .to_string();
             assert!(err.contains(needle), "{err}");
             assert!(!err.contains("sk-secret"));
         }
         let (engine, _) = engine(vec![Err("无法运行 curl".into())]);
-        assert!(matches!(engine.translate("x", Lang::En, Lang::ZhHans), Err(TranslateError::Network(_))));
+        assert!(matches!(
+            engine.translate("x", Lang::En, Lang::ZhHans),
+            Err(TranslateError::Network(_))
+        ));
     }
 
     /// 批量：逐段请求且保持顺序；超过上限直接报错。
     #[test]
     fn batch_is_sequential_and_bounded() {
         let (engine, seen) = engine(vec![ok("一"), ok("二")]);
-        let out = engine.translate_batch(&["a".into(), "b".into()], Lang::En, Lang::ZhHans).unwrap();
+        let out = engine
+            .translate_batch(&["a".into(), "b".into()], Lang::En, Lang::ZhHans)
+            .unwrap();
         assert_eq!(out, ["一", "二"]);
         assert_eq!(seen.lock().unwrap().len(), 2);
         let many: Vec<String> = (0..=MAX_BATCH_SEGMENTS).map(|i| i.to_string()).collect();
@@ -531,7 +662,14 @@ mod tests {
         let (a, _) = engine(vec![]);
         let mut cfg = config();
         cfg.model = "other".into();
-        let b = OpenAiEngine::with_http(cfg, Box::new(FakeHttp { replies: Mutex::new(vec![]), seen: Arc::default() }), DEFAULT_TIMEOUT);
+        let b = OpenAiEngine::with_http(
+            cfg,
+            Box::new(FakeHttp {
+                replies: Mutex::new(vec![]),
+                seen: Arc::default(),
+            }),
+            DEFAULT_TIMEOUT,
+        );
         assert_ne!(a.cache_id(), b.cache_id());
         assert_eq!(a.engine_name(), "OpenAiCompatible");
     }
@@ -539,7 +677,12 @@ mod tests {
     /// curl 配置：密钥在配置里而不是命令行；路径反斜杠被规整；特殊字符被转义。
     #[test]
     fn curl_config_layout() {
-        let text = curl_config_text("http://h/v1/chat/completions", "k\"ey", Path::new("C:\\Temp\\a b\\req.json"), 30);
+        let text = curl_config_text(
+            "http://h/v1/chat/completions",
+            "k\"ey",
+            Path::new("C:\\Temp\\a b\\req.json"),
+            30,
+        );
         assert!(text.contains("url = \"http://h/v1/chat/completions\"\n"));
         assert!(text.contains("header = \"Authorization: Bearer k\\\"ey\"\n"));
         assert!(text.contains("data-binary = \"@C:/Temp/a b/req.json\"\n"));

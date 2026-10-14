@@ -863,8 +863,11 @@ mod tests {
         let key = "screenshot_translation/target_language";
         let version = crate::schema::current_version();
         let write = |v: Value| {
-            load(&json!({"storage": {"schema_version": version},
-                         "screenshot_translation": {"target_language": v}}).to_string())
+            load(
+                &json!({"storage": {"schema_version": version},
+                         "screenshot_translation": {"target_language": v}})
+                .to_string(),
+            )
         };
         assert_eq!(write(json!("zh-Hant")).value(key), json!(""));
         assert_eq!(write(json!("")).value(key), json!(""));

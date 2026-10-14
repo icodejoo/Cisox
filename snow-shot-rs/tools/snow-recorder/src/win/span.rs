@@ -17,7 +17,8 @@ use snow_d3d11::SharedDevice;
 use windows::Win32::Graphics::Direct3D11::*;
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Dxgi::{
-    DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO, IDXGIAdapter, IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource,
+    DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO, IDXGIAdapter,
+    IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource,
 };
 use windows::core::Interface;
 
@@ -26,8 +27,9 @@ use crate::geom::{Rect, scale_coordinate};
 use crate::pipeline::{CaptureDiag, CaptureFault, CaptureSource, CaptureStats, Captured};
 use crate::timeline::QpcAnchor;
 use crate::win::dda::{
-    CursorTracker, FrameGuard, GpuFrame, POLL_SLEEP, POOL_SIZE, SharedSlot, Tile, classify_poll, configure_gpu_priorities, copy_into_slot, create_slot,
-    flush_device, free_slot, list_adapters, present_time, push_sample,
+    CursorTracker, FrameGuard, GpuFrame, POLL_SLEEP, POOL_SIZE, SharedSlot, Tile, classify_poll,
+    configure_gpu_priorities, copy_into_slot, create_slot, flush_device, free_slot, list_adapters,
+    present_time, push_sample,
 };
 
 /// 一个显示器输出的几何与归属（规划用，不含 COM 对象）。
@@ -74,7 +76,12 @@ fn intersect(a: Rect, b: Rect) -> Option<Rect> {
     if left >= right || top >= bottom {
         return None;
     }
-    Some(Rect { x: left as i32, y: top as i32, width: (right - left) as u32, height: (bottom - top) as u32 })
+    Some(Rect {
+        x: left as i32,
+        y: top as i32,
+        width: (right - left) as u32,
+        height: (bottom - top) as u32,
+    })
 }
 
 /// 把选区按显示器切分成子矩形，并判定能否走跨屏硬件路径。
@@ -95,7 +102,9 @@ fn intersect(a: Rect, b: Rect) -> Option<Rect> {
 pub fn plan_span(region: Rect, outputs: &[OutputInfo]) -> Result<Option<SpanPlan>, String> {
     let mut parts: Vec<SpanPart> = Vec::new();
     for (index, output) in outputs.iter().enumerate() {
-        let Some(tile_abs) = intersect(region, output.rect) else { continue };
+        let Some(tile_abs) = intersect(region, output.rect) else {
+            continue;
+        };
         if tile_abs == region {
             return Ok(None);
         }
@@ -105,8 +114,16 @@ pub fn plan_span(region: Rect, outputs: &[OutputInfo]) -> Result<Option<SpanPlan
         }
         parts.push(SpanPart {
             output: index,
-            crop: Rect { x: tile_abs.x - output.rect.x, y: tile_abs.y - output.rect.y, ..tile_abs },
-            tile: Rect { x: tile_abs.x - region.x, y: tile_abs.y - region.y, ..tile_abs },
+            crop: Rect {
+                x: tile_abs.x - output.rect.x,
+                y: tile_abs.y - output.rect.y,
+                ..tile_abs
+            },
+            tile: Rect {
+                x: tile_abs.x - region.x,
+                y: tile_abs.y - region.y,
+                ..tile_abs
+            },
         });
     }
     if parts.len() < 2 {
@@ -124,11 +141,21 @@ pub fn plan_span(region: Rect, outputs: &[OutputInfo]) -> Result<Option<SpanPlan
     }
     if adapters.len() > 1 {
         let names: Vec<&str> = adapters.iter().map(|(_, name)| *name).collect();
-        return Err(format!("跨适配器选区暂不支持硬件路径（适配器: {}）", names.join(" / ")));
+        return Err(format!(
+            "跨适配器选区暂不支持硬件路径（适配器: {}）",
+            names.join(" / ")
+        ));
     }
-    let covered: u64 = parts.iter().map(|p| u64::from(p.tile.width) * u64::from(p.tile.height)).sum();
+    let covered: u64 = parts
+        .iter()
+        .map(|p| u64::from(p.tile.width) * u64::from(p.tile.height))
+        .sum();
     let has_hole = covered < u64::from(region.width) * u64::from(region.height);
-    Ok(Some(SpanPlan { adapter: adapters[0].0, parts, has_hole }))
+    Ok(Some(SpanPlan {
+        adapter: adapters[0].0,
+        parts,
+        has_hole,
+    }))
 }
 
 /// 块在输出画面里的目标矩形：相邻块共用同一条边界坐标（各自只取整一次），不会出现 1px 缝或重叠。
@@ -149,9 +176,20 @@ pub fn plan_span(region: Rect, outputs: &[OutputInfo]) -> Result<Option<SpanPlan
 pub fn tile_destination(tile: Rect, src_size: (u32, u32), out_size: (u32, u32)) -> Rect {
     let right = i32::try_from(i64::from(tile.x) + i64::from(tile.width)).unwrap_or(i32::MAX);
     let bottom = i32::try_from(i64::from(tile.y) + i64::from(tile.height)).unwrap_or(i32::MAX);
-    let (l, r) = (scale_coordinate(tile.x, src_size.0, out_size.0), scale_coordinate(right, src_size.0, out_size.0));
-    let (t, b) = (scale_coordinate(tile.y, src_size.1, out_size.1), scale_coordinate(bottom, src_size.1, out_size.1));
-    Rect { x: l, y: t, width: (r - l).max(1) as u32, height: (b - t).max(1) as u32 }
+    let (l, r) = (
+        scale_coordinate(tile.x, src_size.0, out_size.0),
+        scale_coordinate(right, src_size.0, out_size.0),
+    );
+    let (t, b) = (
+        scale_coordinate(tile.y, src_size.1, out_size.1),
+        scale_coordinate(bottom, src_size.1, out_size.1),
+    );
+    Rect {
+        x: l,
+        y: t,
+        width: (r - l).max(1) as u32,
+        height: (b - t).max(1) as u32,
+    }
 }
 
 /// 检查视频处理器的输入流是否够用：每块显示器一层，外加一层光标。
@@ -231,7 +269,10 @@ impl SpanCapture {
     ///
     /// # 返回
     /// `Ok(Some((采集器, 合成设备 B)))`；`Ok(None)` 表示应走单屏流程；`Err` 为不支持/失败的回落原因。
-    pub fn open(region: (i32, i32, u32, u32), anchor: Option<QpcAnchor>) -> Result<Option<(Self, SharedDevice)>, String> {
+    pub fn open(
+        region: (i32, i32, u32, u32),
+        anchor: Option<QpcAnchor>,
+    ) -> Result<Option<(Self, SharedDevice)>, String> {
         let adapters = list_adapters()?;
         let mut infos: Vec<OutputInfo> = Vec::new();
         let mut handles = Vec::new();
@@ -241,40 +282,73 @@ impl SpanCapture {
             while let Ok(output) = unsafe { adapter.EnumOutputs(o) } {
                 o += 1;
                 // SAFETY: 同上。
-                let Ok(desc) = (unsafe { output.GetDesc() }) else { continue };
+                let Ok(desc) = (unsafe { output.GetDesc() }) else {
+                    continue;
+                };
                 let r = desc.DesktopCoordinates;
                 infos.push(OutputInfo {
                     adapter: adapter_index,
                     adapter_name: info.description.clone(),
-                    rect: Rect { x: r.left, y: r.top, width: (r.right - r.left).max(0) as u32, height: (r.bottom - r.top).max(0) as u32 },
+                    rect: Rect {
+                        x: r.left,
+                        y: r.top,
+                        width: (r.right - r.left).max(0) as u32,
+                        height: (r.bottom - r.top).max(0) as u32,
+                    },
                     rotated: desc.Rotation.0 > 1,
                 });
                 handles.push(output);
             }
         }
-        let rect = Rect { x: region.0, y: region.1, width: region.2, height: region.3 };
-        let Some(plan) = plan_span(rect, &infos)? else { return Ok(None) };
+        let rect = Rect {
+            x: region.0,
+            y: region.1,
+            width: region.2,
+            height: region.3,
+        };
+        let Some(plan) = plan_span(rect, &infos)? else {
+            return Ok(None);
+        };
         let base: IDXGIAdapter = adapters[plan.adapter].0.cast().map_err(|e| e.to_string())?;
-        let compose = SharedDevice::create(&base).map_err(|e| format!("创建合成设备失败: {e:#}"))?;
+        let compose =
+            SharedDevice::create(&base).map_err(|e| format!("创建合成设备失败: {e:#}"))?;
         let device = SharedDevice::create(&base).map_err(|e| format!("创建采集设备失败: {e:#}"))?;
         configure_gpu_priorities(&compose, &device);
         let mut outputs = Vec::with_capacity(plan.parts.len());
         for (n, part) in plan.parts.iter().enumerate() {
-            let output: IDXGIOutput1 = handles[part.output].cast().map_err(|e| format!("显示器 {n} 不支持桌面复制: {e}"))?;
-            let slots = (0..POOL_SIZE).map(|_| create_slot(&device, &compose, (part.tile.width, part.tile.height)).map(Arc::new)).collect::<Result<Vec<_>, _>>()?;
+            let output: IDXGIOutput1 = handles[part.output]
+                .cast()
+                .map_err(|e| format!("显示器 {n} 不支持桌面复制: {e}"))?;
+            let slots = (0..POOL_SIZE)
+                .map(|_| {
+                    create_slot(&device, &compose, (part.tile.width, part.tile.height))
+                        .map(Arc::new)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
             // SAFETY: 设备由 SharedDevice 持有，复制接口随采集器存续。
-            let duplication = unsafe { output.DuplicateOutput(device.device()) }.map_err(|e| format!("显示器 {n} DuplicateOutput 失败: {e}"))?;
+            let duplication = unsafe { output.DuplicateOutput(device.device()) }
+                .map_err(|e| format!("显示器 {n} DuplicateOutput 失败: {e}"))?;
             let (left, top) = (part.crop.x as u32, part.crop.y as u32);
             outputs.push(SpanOutput {
                 output,
                 duplication,
                 slots,
-                crop: D3D11_BOX { left, top, front: 0, right: left + part.crop.width, bottom: top + part.crop.height, back: 1 },
+                crop: D3D11_BOX {
+                    left,
+                    top,
+                    front: 0,
+                    right: left + part.crop.width,
+                    bottom: top + part.crop.height,
+                    back: 1,
+                },
                 rect: part.tile,
                 current: None,
             });
         }
-        let context4: ID3D11DeviceContext4 = device.context().cast().map_err(|e| format!("上下文不支持栅栏: {e}"))?;
+        let context4: ID3D11DeviceContext4 = device
+            .context()
+            .cast()
+            .map_err(|e| format!("上下文不支持栅栏: {e}"))?;
         let capture = Self {
             device,
             context4,
@@ -291,7 +365,15 @@ impl SpanCapture {
             last_acquire: None,
             trace: TraceBuf::new(Thread::Capture),
         };
-        eprintln!("跨屏选区：{} 块显示器，空洞{}", capture.outputs.len(), if plan.has_hole { "（黑色填充）" } else { "无" });
+        eprintln!(
+            "跨屏选区：{} 块显示器，空洞{}",
+            capture.outputs.len(),
+            if plan.has_hole {
+                "（黑色填充）"
+            } else {
+                "无"
+            }
+        );
         Ok(Some((capture, compose)))
     }
 
@@ -313,44 +395,90 @@ impl SpanCapture {
     }
 
     /// 处理第 `index` 路输出刚取到的一次更新：复制进该路的空闲槽，并和其余各路的最近一块组成一帧。
-    fn on_acquired(&mut self, index: usize, info: DXGI_OUTDUPL_FRAME_INFO, resource: Option<IDXGIResource>, want: bool) -> Result<Option<Captured<GpuFrame>>, CaptureFault> {
+    fn on_acquired(
+        &mut self,
+        index: usize,
+        info: DXGI_OUTDUPL_FRAME_INFO,
+        resource: Option<IDXGIResource>,
+        want: bool,
+    ) -> Result<Option<Captured<GpuFrame>>, CaptureFault> {
         let captured_at = Instant::now();
         let duplication = self.outputs[index].duplication.clone();
         let guard = FrameGuard(&duplication);
         let src = source_id(index);
         if !want {
-            self.trace.acquire(src, captured_at, None, info.AccumulatedFrames, 0, code::ACQ_UNWANTED);
+            self.trace.acquire(
+                src,
+                captured_at,
+                None,
+                info.AccumulatedFrames,
+                0,
+                code::ACQ_UNWANTED,
+            );
             self.release_frame(index, guard);
             return Ok(None);
         }
         if info.LastPresentTime == 0 {
             self.release_frame(index, guard);
-            self.trace.acquire(src, captured_at, None, info.AccumulatedFrames, 0, code::ACQ_CURSOR_ONLY);
+            self.trace.acquire(
+                src,
+                captured_at,
+                None,
+                info.AccumulatedFrames,
+                0,
+                code::ACQ_CURSOR_ONLY,
+            );
             let cursor = self.sample_cursor();
             // 只有光标移动：沿用上一张桌面图
-            return Ok(self.latest.as_ref().map(|f| Captured { cursor, captured_at, fresh: false, ..f.clone() }));
+            return Ok(self.latest.as_ref().map(|f| Captured {
+                cursor,
+                captured_at,
+                fresh: false,
+                ..f.clone()
+            }));
         }
         self.stats.coalesced += u64::from(info.AccumulatedFrames.saturating_sub(1));
-        let Some(resource) = resource else { return Ok(None) };
-        let source: ID3D11Texture2D = resource.cast().map_err(|e| CaptureFault::Other(format!("桌面资源不是纹理: {e}")))?;
+        let Some(resource) = resource else {
+            return Ok(None);
+        };
+        let source: ID3D11Texture2D = resource
+            .cast()
+            .map_err(|e| CaptureFault::Other(format!("桌面资源不是纹理: {e}")))?;
         let mut desc = D3D11_TEXTURE2D_DESC::default();
         // SAFETY: desc 是局部变量。
         unsafe { source.GetDesc(&mut desc) };
         if desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM {
-            return Err(CaptureFault::Other(format!("显示器 {index} 桌面格式 {:?} 不是 BGRA8（HDR 走软件路径）", desc.Format)));
+            return Err(CaptureFault::Other(format!(
+                "显示器 {index} 桌面格式 {:?} 不是 BGRA8（HDR 走软件路径）",
+                desc.Format
+            )));
         }
         let copy_started = Instant::now();
         let Some(slot) = free_slot(&self.outputs[index].slots) else {
             self.stats.pool_drops += 1;
             if self.trace.enabled() {
                 let present = present_time(self.anchor, info.LastPresentTime, captured_at);
-                self.trace.acquire(src, captured_at, Some(present), info.AccumulatedFrames, 0, code::ACQ_POOL_DROP);
+                self.trace.acquire(
+                    src,
+                    captured_at,
+                    Some(present),
+                    info.AccumulatedFrames,
+                    0,
+                    code::ACQ_POOL_DROP,
+                );
             }
             self.release_frame(index, guard);
             return Ok(None);
         };
         let traced = self.trace.enabled();
-        let lock_wait = copy_into_slot(&self.device, &self.context4, &slot, &source, &self.outputs[index].crop, traced)?;
+        let lock_wait = copy_into_slot(
+            &self.device,
+            &self.context4,
+            &slot,
+            &source,
+            &self.outputs[index].crop,
+            traced,
+        )?;
         push_sample(&mut self.copy_ms, copy_started.elapsed());
         if traced {
             self.trace.iter_add(IterStage::Copy, copy_started.elapsed());
@@ -363,12 +491,38 @@ impl SpanCapture {
         self.trace.iter_since(IterStage::Copy, flush_started);
         self.trace.iter_add(IterStage::Lock, flush_wait);
         self.outputs[index].current = Some(slot);
-        let tiles: Arc<[Tile]> = self.outputs.iter().filter_map(|o| o.current.as_ref().map(|slot| Tile { slot: Arc::clone(slot), rect: o.rect })).collect();
+        let tiles: Arc<[Tile]> = self
+            .outputs
+            .iter()
+            .filter_map(|o| {
+                o.current.as_ref().map(|slot| Tile {
+                    slot: Arc::clone(slot),
+                    rect: o.rect,
+                })
+            })
+            .collect();
         let cursor = self.sample_cursor();
         let present = present_time(self.anchor, info.LastPresentTime, captured_at);
-        let frame = GpuFrame { slot: Arc::clone(&tiles[0].slot), tiles: Some(tiles) };
-        let captured = Captured { frame, cursor, present, captured_at, fresh: true, id: self.stats.frames + 1 };
-        self.trace.acquire(src, captured_at, Some(captured.present), info.AccumulatedFrames, captured.id, code::ACQ_FRESH);
+        let frame = GpuFrame {
+            slot: Arc::clone(&tiles[0].slot),
+            tiles: Some(tiles),
+        };
+        let captured = Captured {
+            frame,
+            cursor,
+            present,
+            captured_at,
+            fresh: true,
+            id: self.stats.frames + 1,
+        };
+        self.trace.acquire(
+            src,
+            captured_at,
+            Some(captured.present),
+            info.AccumulatedFrames,
+            captured.id,
+            code::ACQ_FRESH,
+        );
         self.stats.frames += 1;
         self.latest = Some(captured.clone());
         Ok(Some(captured))
@@ -377,14 +531,21 @@ impl SpanCapture {
 
 impl SpanCapture {
     /// 轮询取帧主体（`next` 的实现）：每圈开始/睡眠前由慢迭代追踪计时，返回前的收尾由 `next` 负责。
-    fn next_poll(&mut self, timeout: Duration, want: bool) -> Result<Option<Captured<GpuFrame>>, CaptureFault> {
+    fn next_poll(
+        &mut self,
+        timeout: Duration,
+        want: bool,
+    ) -> Result<Option<Captured<GpuFrame>>, CaptureFault> {
         let deadline = Instant::now() + timeout;
         let count = self.outputs.len();
         loop {
             let now = Instant::now();
             self.trace.iter_begin(now, u8::MAX);
             if let Some(prev) = self.last_acquire.replace(now) {
-                push_sample(&mut self.acquire_gap_ms, now.saturating_duration_since(prev));
+                push_sample(
+                    &mut self.acquire_gap_ms,
+                    now.saturating_duration_since(prev),
+                );
             }
             for step in 0..count {
                 let index = (self.next_output + step) % count;
@@ -392,13 +553,19 @@ impl SpanCapture {
                 let mut resource: Option<IDXGIResource> = None;
                 let acquire_started = self.trace.mark();
                 // SAFETY: 输出指针指向局部变量。
-                let call = unsafe { self.outputs[index].duplication.AcquireNextFrame(0, &mut info, &mut resource) };
+                let call = unsafe {
+                    self.outputs[index]
+                        .duplication
+                        .AcquireNextFrame(0, &mut info, &mut resource)
+                };
                 if let Some(started) = acquire_started {
                     let took = started.elapsed();
                     self.trace.iter_add(IterStage::Acquire, took);
                     if self.trace.poll_enabled() {
-                        let (outcome, sample) = classify_poll(&call, &info, self.anchor, started + took);
-                        self.trace.poll(source_id(index), started, took, outcome, sample);
+                        let (outcome, sample) =
+                            classify_poll(&call, &info, self.anchor, started + took);
+                        self.trace
+                            .poll(source_id(index), started, took, outcome, sample);
                     }
                 }
                 match call {
@@ -412,7 +579,11 @@ impl SpanCapture {
                         self.trace.lost(source_id(index));
                         return Err(CaptureFault::Lost);
                     }
-                    Err(e) => return Err(CaptureFault::Other(format!("显示器 {index} AcquireNextFrame 失败: {e}"))),
+                    Err(e) => {
+                        return Err(CaptureFault::Other(format!(
+                            "显示器 {index} AcquireNextFrame 失败: {e}"
+                        )));
+                    }
                 }
             }
             if Instant::now() >= deadline {
@@ -429,7 +600,11 @@ impl CaptureSource for SpanCapture {
     type Frame = GpuFrame;
 
     /// 零超时轮流取各路输出，任一路有更新就出帧；全部无更新则亚毫秒睡眠后重试，直到超时。
-    fn next(&mut self, timeout: Duration, want: bool) -> Result<Option<Captured<GpuFrame>>, CaptureFault> {
+    fn next(
+        &mut self,
+        timeout: Duration,
+        want: bool,
+    ) -> Result<Option<Captured<GpuFrame>>, CaptureFault> {
         let result = self.next_poll(timeout, want);
         self.trace.iter_finish();
         result
@@ -437,7 +612,9 @@ impl CaptureSource for SpanCapture {
 
     /// 只重建权限丢失的那一路，其余保持。
     fn recreate(&mut self) -> Result<(), String> {
-        let Some(index) = self.lost.take() else { return Ok(()) };
+        let Some(index) = self.lost.take() else {
+            return Ok(());
+        };
         let unit = &mut self.outputs[index];
         // SAFETY: 设备与输出在采集器存续期间有效。
         let result = unsafe { unit.output.DuplicateOutput(self.device.device()) };
@@ -477,17 +654,30 @@ mod tests {
 
     /// 构造矩形。
     fn r(x: i32, y: i32, w: u32, h: u32) -> Rect {
-        Rect { x, y, width: w, height: h }
+        Rect {
+            x,
+            y,
+            width: w,
+            height: h,
+        }
     }
 
     /// 构造输出。
     fn out(adapter: usize, rect: Rect, rotated: bool) -> OutputInfo {
-        OutputInfo { adapter, adapter_name: format!("GPU{adapter}"), rect, rotated }
+        OutputInfo {
+            adapter,
+            adapter_name: format!("GPU{adapter}"),
+            rect,
+            rotated,
+        }
     }
 
     /// 两块并排的 2560x1440 屏（同适配器）。
     fn dual() -> Vec<OutputInfo> {
-        vec![out(0, r(0, 0, 2560, 1440), false), out(0, r(2560, 0, 2560, 1440), false)]
+        vec![
+            out(0, r(0, 0, 2560, 1440), false),
+            out(0, r(2560, 0, 2560, 1440), false),
+        ]
     }
 
     /// 选区跨接缝：按显示器切成两块，裁剪框是输出本地坐标，块偏移是选区坐标。
@@ -495,8 +685,14 @@ mod tests {
     fn splits_region_across_two_monitors() {
         let plan = plan_span(r(1280, 0, 2560, 1440), &dual()).unwrap().unwrap();
         assert_eq!(plan.parts.len(), 2);
-        assert_eq!((plan.parts[0].crop, plan.parts[0].tile), (r(1280, 0, 1280, 1440), r(0, 0, 1280, 1440)));
-        assert_eq!((plan.parts[1].crop, plan.parts[1].tile), (r(0, 0, 1280, 1440), r(1280, 0, 1280, 1440)));
+        assert_eq!(
+            (plan.parts[0].crop, plan.parts[0].tile),
+            (r(1280, 0, 1280, 1440), r(0, 0, 1280, 1440))
+        );
+        assert_eq!(
+            (plan.parts[1].crop, plan.parts[1].tile),
+            (r(0, 0, 1280, 1440), r(1280, 0, 1280, 1440))
+        );
         assert!(!plan.has_hole);
         assert_eq!(plan.adapter, 0);
     }
@@ -504,10 +700,19 @@ mod tests {
     /// 副屏在主屏左侧（负坐标）也能切分。
     #[test]
     fn splits_with_negative_origin() {
-        let outputs = vec![out(0, r(-1920, 0, 1920, 1080), false), out(0, r(0, 0, 2560, 1440), false)];
+        let outputs = vec![
+            out(0, r(-1920, 0, 1920, 1080), false),
+            out(0, r(0, 0, 2560, 1440), false),
+        ];
         let plan = plan_span(r(-100, 10, 300, 200), &outputs).unwrap().unwrap();
-        assert_eq!((plan.parts[0].crop, plan.parts[0].tile), (r(1820, 10, 100, 200), r(0, 0, 100, 200)));
-        assert_eq!((plan.parts[1].crop, plan.parts[1].tile), (r(0, 10, 200, 200), r(100, 0, 200, 200)));
+        assert_eq!(
+            (plan.parts[0].crop, plan.parts[0].tile),
+            (r(1820, 10, 100, 200), r(0, 0, 100, 200))
+        );
+        assert_eq!(
+            (plan.parts[1].crop, plan.parts[1].tile),
+            (r(0, 10, 200, 200), r(100, 0, 200, 200))
+        );
     }
 
     /// 单屏选区（被某个输出完整包含）或只和一块相交，都不是跨屏。
@@ -521,26 +726,45 @@ mod tests {
     /// 两屏不齐：选区伸出较矮屏的下缘，判为含空洞但仍可走硬件。
     #[test]
     fn detects_hole_when_monitors_misaligned() {
-        let outputs = vec![out(0, r(0, 0, 2560, 1440), false), out(0, r(2560, 0, 1920, 1080), false)];
-        let plan = plan_span(r(2000, 0, 1000, 1440), &outputs).unwrap().unwrap();
+        let outputs = vec![
+            out(0, r(0, 0, 2560, 1440), false),
+            out(0, r(2560, 0, 1920, 1080), false),
+        ];
+        let plan = plan_span(r(2000, 0, 1000, 1440), &outputs)
+            .unwrap()
+            .unwrap();
         assert!(plan.has_hole);
         assert_eq!(plan.parts[1].tile, r(560, 0, 440, 1080));
-        let aligned = plan_span(r(2000, 0, 1000, 1080), &outputs).unwrap().unwrap();
+        let aligned = plan_span(r(2000, 0, 1000, 1080), &outputs)
+            .unwrap()
+            .unwrap();
         assert!(!aligned.has_hole);
     }
 
     /// 镜像显示（两输出矩形相同）只取一块。
     #[test]
     fn mirrored_outputs_counted_once() {
-        let outputs = vec![out(0, r(0, 0, 1920, 1080), false), out(0, r(0, 0, 1920, 1080), false), out(0, r(1920, 0, 1920, 1080), false)];
-        let plan = plan_span(r(1000, 0, 1800, 1080), &outputs).unwrap().unwrap();
-        assert_eq!(plan.parts.iter().map(|p| p.output).collect::<Vec<_>>(), vec![0, 2]);
+        let outputs = vec![
+            out(0, r(0, 0, 1920, 1080), false),
+            out(0, r(0, 0, 1920, 1080), false),
+            out(0, r(1920, 0, 1920, 1080), false),
+        ];
+        let plan = plan_span(r(1000, 0, 1800, 1080), &outputs)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            plan.parts.iter().map(|p| p.output).collect::<Vec<_>>(),
+            vec![0, 2]
+        );
     }
 
     /// 相关输出分属不同适配器：回落并给出带适配器名的原因。
     #[test]
     fn different_adapters_fall_back_with_reason() {
-        let outputs = vec![out(0, r(0, 0, 2560, 1440), false), out(1, r(2560, 0, 2560, 1440), false)];
+        let outputs = vec![
+            out(0, r(0, 0, 2560, 1440), false),
+            out(1, r(2560, 0, 2560, 1440), false),
+        ];
         let error = plan_span(r(1280, 0, 2560, 1440), &outputs).unwrap_err();
         assert_eq!(error, "跨适配器选区暂不支持硬件路径（适配器: GPU0 / GPU1）");
     }
@@ -550,7 +774,11 @@ mod tests {
     fn unrelated_adapter_is_ignored() {
         let mut outputs = dual();
         outputs.push(out(1, r(5120, 0, 1920, 1080), false));
-        assert!(plan_span(r(1280, 0, 2560, 1440), &outputs).unwrap().is_some());
+        assert!(
+            plan_span(r(1280, 0, 2560, 1440), &outputs)
+                .unwrap()
+                .is_some()
+        );
     }
 
     /// 参与拼接的输出中有旋转屏：整体回落；不参与的旋转屏不影响。
@@ -566,7 +794,10 @@ mod tests {
     /// 目标矩形：同尺寸 1:1 带偏移；缩放时相邻块共用边界，无缝无叠。
     #[test]
     fn tile_destinations_share_edges() {
-        assert_eq!(tile_destination(r(1280, 0, 1280, 1440), (2560, 1440), (2560, 1440)), r(1280, 0, 1280, 1440));
+        assert_eq!(
+            tile_destination(r(1280, 0, 1280, 1440), (2560, 1440), (2560, 1440)),
+            r(1280, 0, 1280, 1440)
+        );
         // 5120x1440 缩到 1920x540，接缝 x=2000 不落在整数倍上
         let (src, out) = ((5120, 1440), (1920, 540));
         let left = tile_destination(r(0, 0, 2000, 1440), src, out);
@@ -587,6 +818,9 @@ mod tests {
     #[test]
     fn stream_check_reserves_cursor_layer() {
         assert!(check_streams(2, 3).is_ok());
-        assert_eq!(check_streams(3, 3).unwrap_err(), "视频处理器输入流不足以拼接 3 块显示器");
+        assert_eq!(
+            check_streams(3, 3).unwrap_err(),
+            "视频处理器输入流不足以拼接 3 块显示器"
+        );
     }
 }

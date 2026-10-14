@@ -543,12 +543,7 @@ impl TextCache {
 }
 
 /// 把一个文字元素与 `rect` 相交的部分画进图层（预乘 RGBA）。
-fn draw_text(
-    layer: &mut [u8],
-    rect: IntRect,
-    item: &TextDisplayItem,
-    cache: &mut TextCache,
-) {
+fn draw_text(layer: &mut [u8], rect: IntRect, item: &TextDisplayItem, cache: &mut TextCache) {
     if item.text.trim().is_empty() {
         return;
     }

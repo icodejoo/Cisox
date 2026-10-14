@@ -390,7 +390,11 @@ fn transcode_to(input: &Path, tmp: &Path, op: EditOp, ctl: &TaskCtl) -> Result<u
     let total = info.frames;
     // 进度上报：消费数封顶到 total - 1，完成那一次由收尾单独发
     let report = |consumed: u64| {
-        ctl.report(consumed.min(total.saturating_sub(1)), total, STAGE_TRANSCODE);
+        ctl.report(
+            consumed.min(total.saturating_sub(1)),
+            total,
+            STAGE_TRANSCODE,
+        );
     };
     let (mut consumed, mut written) = (0u64, 0u64);
     let mut base: Option<i64> = None;

@@ -5,9 +5,9 @@
 
 use std::path::PathBuf;
 
-use snow_recorder_protocol::StartRequest;
 #[cfg(windows)]
 use snow_recorder_protocol::MediaFormat;
+use snow_recorder_protocol::StartRequest;
 
 use crate::pipeline::Running;
 use crate::settings::{self, HardwareMode};
@@ -43,7 +43,10 @@ pub trait RecordingBackend: Send {
 }
 
 /// 一次装配尝试：名称与延迟执行的启动闭包。
-pub type Attempt = (&'static str, Box<dyn FnOnce() -> Result<Box<dyn RecordingBackend>, String>>);
+pub type Attempt = (
+    &'static str,
+    Box<dyn FnOnce() -> Result<Box<dyn RecordingBackend>, String>>,
+);
 
 /// 自建流水线适配器：`Running` + 输出路径（取消时清理）。
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -105,7 +108,10 @@ impl RecordingBackend for PipelineBackend {
 /// ```ignore
 /// let backend = start_first_available(attempts, &mut |line| eprintln!("{line}"))?;
 /// ```
-pub fn start_first_available(attempts: Vec<Attempt>, log: &mut dyn FnMut(&str)) -> Result<Box<dyn RecordingBackend>, String> {
+pub fn start_first_available(
+    attempts: Vec<Attempt>,
+    log: &mut dyn FnMut(&str),
+) -> Result<Box<dyn RecordingBackend>, String> {
     let mut reasons = Vec::new();
     for (name, attempt) in attempts {
         match attempt() {
@@ -116,7 +122,11 @@ pub fn start_first_available(attempts: Vec<Attempt>, log: &mut dyn FnMut(&str)) 
             }
         }
     }
-    Err(if reasons.is_empty() { "没有可用的录制后端".to_string() } else { reasons.join("; ") })
+    Err(if reasons.is_empty() {
+        "没有可用的录制后端".to_string()
+    } else {
+        reasons.join("; ")
+    })
 }
 
 /// 按请求与硬件模式排出装配顺序（只排序，不执行）。
@@ -129,7 +139,11 @@ pub fn start_first_available(attempts: Vec<Attempt>, log: &mut dyn FnMut(&str)) 
 /// # 返回
 /// 装配尝试列表：自建硬件流水线（仅 Windows + MP4 + `Gpu` 模式）在前，软件编码在后；
 /// `Upstream` 模式只有上游 GPU 路径；`Off` 只有软件编码。
-pub fn plan_attempts(request: &StartRequest, partial: &std::path::Path, mode: HardwareMode) -> Vec<Attempt> {
+pub fn plan_attempts(
+    request: &StartRequest,
+    partial: &std::path::Path,
+    mode: HardwareMode,
+) -> Vec<Attempt> {
     let mut attempts: Vec<Attempt> = Vec::new();
     // 自建硬件流水线暂不叠加输入特效：任一特效打开就只走能叠加特效的软件路径
     #[cfg(windows)]
@@ -138,7 +152,10 @@ pub fn plan_attempts(request: &StartRequest, partial: &std::path::Path, mode: Ha
         let hardware: &[(&'static str, bool)] = match mode {
             HardwareMode::Gpu => &[("windows-hardware", false)],
             HardwareMode::MediaFoundation => &[("windows-media-foundation", true)],
-            HardwareMode::Auto => &[("windows-media-foundation", true), ("windows-hardware", false)],
+            HardwareMode::Auto => &[
+                ("windows-media-foundation", true),
+                ("windows-hardware", false),
+            ],
             HardwareMode::Off | HardwareMode::Upstream => &[],
         };
         for &(name, media_foundation) in hardware {
@@ -152,7 +169,11 @@ pub fn plan_attempts(request: &StartRequest, partial: &std::path::Path, mode: Ha
                     match crate::win::assemble::start_hardware(&spec) {
                         Ok(running) => {
                             let name = running.backend_name().to_string();
-                            Ok(Box::new(PipelineBackend { running, output, name }) as Box<dyn RecordingBackend>)
+                            Ok(Box::new(PipelineBackend {
+                                running,
+                                output,
+                                name,
+                            }) as Box<dyn RecordingBackend>)
                         }
                         Err(e) => {
                             // 探测阶段可能已创建输出文件，回落前清掉
@@ -167,7 +188,11 @@ pub fn plan_attempts(request: &StartRequest, partial: &std::path::Path, mode: Ha
     let upstream_gpu = mode == HardwareMode::Upstream;
     let (request, partial) = (request.clone(), partial.to_path_buf());
     attempts.push((
-        if upstream_gpu { "upstream-gpu" } else { "software-x264" },
+        if upstream_gpu {
+            "upstream-gpu"
+        } else {
+            "software-x264"
+        },
         Box::new(move || soft::start_software(&request, partial, upstream_gpu)),
     ));
     attempts
@@ -175,10 +200,23 @@ pub fn plan_attempts(request: &StartRequest, partial: &std::path::Path, mode: Ha
 
 /// 由请求构造 Windows 硬件装配参数（输出尺寸按产品上限缩放，环境变量可调编码参数）。
 #[cfg(windows)]
-fn windows_spec(request: &StartRequest, partial: &std::path::Path) -> Result<crate::win::assemble::HardwareSpec, String> {
+fn windows_spec(
+    request: &StartRequest,
+    partial: &std::path::Path,
+) -> Result<crate::win::assemble::HardwareSpec, String> {
     use snow_screen_recorder::{ExportFormat, scaled_output_dimensions};
-    let (max_w, max_h) = settings::oriented_limit(settings::size_limit_for(request.quality.max_size), request.width, request.height);
-    let out = scaled_output_dimensions(request.width, request.height, max_w, max_h, ExportFormat::Mp4);
+    let (max_w, max_h) = settings::oriented_limit(
+        settings::size_limit_for(request.quality.max_size),
+        request.width,
+        request.height,
+    );
+    let out = scaled_output_dimensions(
+        request.width,
+        request.height,
+        max_w,
+        max_h,
+        ExportFormat::Mp4,
+    );
     let mut spec = crate::win::assemble::HardwareSpec::new(
         (request.x, request.y, request.width, request.height),
         out,
@@ -186,10 +224,18 @@ fn windows_spec(request: &StartRequest, partial: &std::path::Path) -> Result<cra
         request.show_cursor,
         partial.to_path_buf(),
     );
-    if let Some(d) = std::env::var(settings::ENV_QSV_ASYNC_DEPTH).ok().and_then(|v| v.parse::<u32>().ok()).filter(|d| (1..=8).contains(d)) {
+    if let Some(d) = std::env::var(settings::ENV_QSV_ASYNC_DEPTH)
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .filter(|d| (1..=8).contains(d))
+    {
         spec.async_depth = d;
     }
-    if let Some(q) = std::env::var(settings::ENV_QSV_QUALITY).ok().and_then(|v| v.parse::<u32>().ok()).filter(|q| (1..=51).contains(q)) {
+    if let Some(q) = std::env::var(settings::ENV_QSV_QUALITY)
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .filter(|q| (1..=51).contains(q))
+    {
         spec.quality = q;
     }
     if let Ok(p) = std::env::var(settings::ENV_QSV_PRESET) {
@@ -211,9 +257,17 @@ fn windows_spec(request: &StartRequest, partial: &std::path::Path) -> Result<cra
 ///
 /// # 返回
 /// 运行中的后端；全部失败返回原因。
-pub fn start(request: &StartRequest, partial: &std::path::Path) -> Result<Box<dyn RecordingBackend>, String> {
-    let mode = settings::resolve_hardware_mode(std::env::var(settings::ENV_PREFER_HARDWARE).ok().as_deref(), request.quality.hardware);
-    start_first_available(plan_attempts(request, partial, mode), &mut |line| eprintln!("{line}"))
+pub fn start(
+    request: &StartRequest,
+    partial: &std::path::Path,
+) -> Result<Box<dyn RecordingBackend>, String> {
+    let mode = settings::resolve_hardware_mode(
+        std::env::var(settings::ENV_PREFER_HARDWARE).ok().as_deref(),
+        request.quality.hardware,
+    );
+    start_first_available(plan_attempts(request, partial, mode), &mut |line| {
+        eprintln!("{line}")
+    })
 }
 
 #[cfg(test)]
@@ -239,14 +293,30 @@ mod tests {
             Ok(())
         }
         fn stop(self: Box<Self>) -> Result<BackendReport, String> {
-            Ok(BackendReport { frames: 1, dropped: 0, diagnostics: String::new() })
+            Ok(BackendReport {
+                frames: 1,
+                dropped: 0,
+                diagnostics: String::new(),
+            })
         }
         fn cancel(self: Box<Self>) {}
     }
 
     /// 构造测试请求。
     fn request(format: MediaFormat) -> StartRequest {
-        StartRequest { x: 0, y: 0, width: 64, height: 64, format, fps: 30, show_cursor: true, output: PathBuf::from("o.mp4"), audio: Default::default(), effects: Default::default(), quality: Default::default() }
+        StartRequest {
+            x: 0,
+            y: 0,
+            width: 64,
+            height: 64,
+            format,
+            fps: 30,
+            show_cursor: true,
+            output: PathBuf::from("o.mp4"),
+            audio: Default::default(),
+            effects: Default::default(),
+            quality: Default::default(),
+        }
     }
 
     /// 首个装配成功就不再尝试后面的。
@@ -255,7 +325,10 @@ mod tests {
         let ran = Rc::new(RefCell::new(false));
         let ran2 = Rc::clone(&ran);
         let attempts: Vec<Attempt> = vec![
-            ("hardware", Box::new(|| Ok(Box::new(Fake("hardware")) as Box<dyn RecordingBackend>))),
+            (
+                "hardware",
+                Box::new(|| Ok(Box::new(Fake("hardware")) as Box<dyn RecordingBackend>)),
+            ),
             (
                 "software",
                 Box::new(move || {
@@ -275,20 +348,33 @@ mod tests {
     #[test]
     fn capability_failure_falls_back_to_software() {
         let attempts: Vec<Attempt> = vec![
-            ("windows-hardware", Box::new(|| Err("视频处理器不支持 BGRA→NV12".to_string()))),
-            ("software-x264", Box::new(|| Ok(Box::new(Fake("software-x264")) as Box<dyn RecordingBackend>))),
+            (
+                "windows-hardware",
+                Box::new(|| Err("视频处理器不支持 BGRA→NV12".to_string())),
+            ),
+            (
+                "software-x264",
+                Box::new(|| Ok(Box::new(Fake("software-x264")) as Box<dyn RecordingBackend>)),
+            ),
         ];
         let mut logs = Vec::new();
         let backend = start_first_available(attempts, &mut |l| logs.push(l.to_string())).unwrap();
         assert_eq!(backend.name(), "software-x264");
         assert_eq!(logs.len(), 1);
-        assert!(logs[0].contains("windows-hardware") && logs[0].contains("BGRA→NV12") && logs[0].contains("回落"));
+        assert!(
+            logs[0].contains("windows-hardware")
+                && logs[0].contains("BGRA→NV12")
+                && logs[0].contains("回落")
+        );
     }
 
     /// 全部失败：返回拼接的原因；没有任何装配也返回错误。
     #[test]
     fn all_failures_are_reported_together() {
-        let attempts: Vec<Attempt> = vec![("a", Box::new(|| Err("原因甲".to_string()))), ("b", Box::new(|| Err("原因乙".to_string())))];
+        let attempts: Vec<Attempt> = vec![
+            ("a", Box::new(|| Err("原因甲".to_string()))),
+            ("b", Box::new(|| Err("原因乙".to_string()))),
+        ];
         let error = start_first_available(attempts, &mut |_| {}).err().unwrap();
         assert!(error.contains("a: 原因甲") && error.contains("b: 原因乙"));
         assert!(start_first_available(Vec::new(), &mut |_| {}).is_err());
@@ -297,23 +383,65 @@ mod tests {
     /// 装配顺序：Gpu/MF 模式（MP4）硬件在前软件在后，Auto 为 MF -> FFmpeg 厂商硬编 -> 软编（非 Windows 只有软件）；其余模式与格式只有软件/上游。
     #[test]
     fn attempt_order_follows_mode_and_format() {
-        let names = |format, mode| plan_attempts(&request(format), std::path::Path::new("p.mp4"), mode).iter().map(|a| a.0).collect::<Vec<_>>();
+        let names = |format, mode| {
+            plan_attempts(&request(format), std::path::Path::new("p.mp4"), mode)
+                .iter()
+                .map(|a| a.0)
+                .collect::<Vec<_>>()
+        };
         if cfg!(windows) {
-            assert_eq!(names(MediaFormat::Mp4, HardwareMode::Gpu), vec!["windows-hardware", "software-x264"]);
+            assert_eq!(
+                names(MediaFormat::Mp4, HardwareMode::Gpu),
+                vec!["windows-hardware", "software-x264"]
+            );
         } else {
-            assert_eq!(names(MediaFormat::Mp4, HardwareMode::Gpu), vec!["software-x264"]);
+            assert_eq!(
+                names(MediaFormat::Mp4, HardwareMode::Gpu),
+                vec!["software-x264"]
+            );
         }
         if cfg!(windows) {
-            assert_eq!(names(MediaFormat::Mp4, HardwareMode::MediaFoundation), vec!["windows-media-foundation", "software-x264"]);
-            assert_eq!(names(MediaFormat::Mp4, HardwareMode::Auto), vec!["windows-media-foundation", "windows-hardware", "software-x264"]);
+            assert_eq!(
+                names(MediaFormat::Mp4, HardwareMode::MediaFoundation),
+                vec!["windows-media-foundation", "software-x264"]
+            );
+            assert_eq!(
+                names(MediaFormat::Mp4, HardwareMode::Auto),
+                vec![
+                    "windows-media-foundation",
+                    "windows-hardware",
+                    "software-x264"
+                ]
+            );
         } else {
-            assert_eq!(names(MediaFormat::Mp4, HardwareMode::Auto), vec!["software-x264"]);
+            assert_eq!(
+                names(MediaFormat::Mp4, HardwareMode::Auto),
+                vec!["software-x264"]
+            );
         }
-        assert_eq!(names(MediaFormat::Webp, HardwareMode::Auto), vec!["software-x264"]);
-        assert_eq!(names(MediaFormat::Webp, HardwareMode::Gpu), vec!["software-x264"]);
-        assert_eq!(names(MediaFormat::Gif, HardwareMode::Gpu), vec!["software-x264"]);
-        assert_eq!(names(MediaFormat::Apng, HardwareMode::Gpu), vec!["software-x264"]);
-        assert_eq!(names(MediaFormat::Mp4, HardwareMode::Off), vec!["software-x264"]);
-        assert_eq!(names(MediaFormat::Mp4, HardwareMode::Upstream), vec!["upstream-gpu"]);
+        assert_eq!(
+            names(MediaFormat::Webp, HardwareMode::Auto),
+            vec!["software-x264"]
+        );
+        assert_eq!(
+            names(MediaFormat::Webp, HardwareMode::Gpu),
+            vec!["software-x264"]
+        );
+        assert_eq!(
+            names(MediaFormat::Gif, HardwareMode::Gpu),
+            vec!["software-x264"]
+        );
+        assert_eq!(
+            names(MediaFormat::Apng, HardwareMode::Gpu),
+            vec!["software-x264"]
+        );
+        assert_eq!(
+            names(MediaFormat::Mp4, HardwareMode::Off),
+            vec!["software-x264"]
+        );
+        assert_eq!(
+            names(MediaFormat::Mp4, HardwareMode::Upstream),
+            vec!["upstream-gpu"]
+        );
     }
 }

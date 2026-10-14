@@ -3,14 +3,20 @@
 use snow_fps_fixture::{MonitorInfo, Rect};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1};
-use windows::Win32::Graphics::Gdi::{EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO, MONITORINFOEXW};
+use windows::Win32::Graphics::Gdi::{
+    EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO, MONITORINFOEXW,
+};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::System::Power::{ES_CONTINUOUS, ES_DISPLAY_REQUIRED, ES_SYSTEM_REQUIRED, SetThreadExecutionState};
-use windows::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext};
+use windows::Win32::System::Power::{
+    ES_CONTINUOUS, ES_DISPLAY_REQUIRED, ES_SYSTEM_REQUIRED, SetThreadExecutionState,
+};
+use windows::Win32::UI::HiDpi::{
+    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, MSG, PM_REMOVE, PeekMessageW,
-    RegisterClassExW, SW_SHOWNOACTIVATE, ShowWindow, TranslateMessage, UnregisterClassW, WM_ERASEBKGND,
-    WNDCLASSEXW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    RegisterClassExW, SW_SHOWNOACTIVATE, ShowWindow, TranslateMessage, UnregisterClassW,
+    WM_ERASEBKGND, WNDCLASSEXW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::{PCWSTR, w};
 
@@ -42,15 +48,30 @@ fn wide_to_string(buf: &[u16]) -> String {
 }
 
 /// 枚举回调：把显示器信息追加进 `LPARAM` 指向的向量。
-unsafe extern "system" fn enum_proc(monitor: HMONITOR, _: HDC, _: *mut RECT, data: LPARAM) -> windows::core::BOOL {
+unsafe extern "system" fn enum_proc(
+    monitor: HMONITOR,
+    _: HDC,
+    _: *mut RECT,
+    data: LPARAM,
+) -> windows::core::BOOL {
     // SAFETY: data 是 enumerate_monitors 传入的 &mut Vec<MonitorInfo>，回调期间有效。
     let list = unsafe { &mut *(data.0 as *mut Vec<MonitorInfo>) };
     let mut info = MONITORINFOEXW {
-        monitorInfo: MONITORINFO { cbSize: size_of::<MONITORINFOEXW>() as u32, ..Default::default() },
+        monitorInfo: MONITORINFO {
+            cbSize: size_of::<MONITORINFOEXW>() as u32,
+            ..Default::default()
+        },
         ..Default::default()
     };
     // SAFETY: MONITORINFOEXW 以 MONITORINFO 开头，cbSize 已按扩展结构设置。
-    if unsafe { GetMonitorInfoW(monitor, (&mut info as *mut MONITORINFOEXW).cast::<MONITORINFO>()) }.as_bool() {
+    if unsafe {
+        GetMonitorInfoW(
+            monitor,
+            (&mut info as *mut MONITORINFOEXW).cast::<MONITORINFO>(),
+        )
+    }
+    .as_bool()
+    {
         let r = info.monitorInfo.rcMonitor;
         list.push(MonitorInfo {
             device: wide_to_string(&info.szDevice),
@@ -71,7 +92,12 @@ pub fn enumerate_monitors() -> Vec<MonitorInfo> {
     let mut list: Vec<MonitorInfo> = Vec::new();
     // SAFETY: 回调在本调用返回前执行完毕，list 在此期间存活且仅被回调独占访问。
     unsafe {
-        let _ = EnumDisplayMonitors(None, None, Some(enum_proc), LPARAM((&mut list as *mut Vec<MonitorInfo>) as isize));
+        let _ = EnumDisplayMonitors(
+            None,
+            None,
+            Some(enum_proc),
+            LPARAM((&mut list as *mut Vec<MonitorInfo>) as isize),
+        );
     }
     list
 }
@@ -100,7 +126,10 @@ impl FixtureWindow {
     /// # 返回
     /// 窗口；Win32 失败返回原因。
     pub fn create(rect: Rect) -> Result<Self, String> {
-        let (w, h) = (i32::try_from(rect.w).map_err(|e| e.to_string())?, i32::try_from(rect.h).map_err(|e| e.to_string())?);
+        let (w, h) = (
+            i32::try_from(rect.w).map_err(|e| e.to_string())?,
+            i32::try_from(rect.h).map_err(|e| e.to_string())?,
+        );
         // SAFETY: 全部为 Win32 对象创建，参数在本函数内构造且有效；失败路径返回错误。
         unsafe {
             let instance = GetModuleHandleW(None).map_err(|e| e.to_string())?;

@@ -13,7 +13,10 @@
 /// assert_eq!(snow_ocr_compare::cer::normalize("a b\n中 文"), vec!['a', 'b', '中', '文']);
 /// ```
 pub fn normalize(text: &str) -> Vec<char> {
-    text.chars().filter(|c| !c.is_whitespace()).map(fold_width).collect()
+    text.chars()
+        .filter(|c| !c.is_whitespace())
+        .map(fold_width)
+        .collect()
 }
 
 /// 全角 ASCII 折成半角（`：`→`:`、`，`→`,`），`￥` 折成 `¥`：宽度变体不算识别错误。

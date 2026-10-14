@@ -53,8 +53,7 @@ pub fn write(data_root: &Path, descriptor: &Descriptor<'_>) -> Result<PathBuf, S
         "generation": descriptor.generation,
         "scopes": descriptor.scopes.iter().map(|s| s.name()).collect::<Vec<_>>(),
     });
-    atomic_write(&path, body.to_string().as_bytes())
-        .map_err(|e| format!("写描述符失败: {e}"))?;
+    atomic_write(&path, body.to_string().as_bytes()).map_err(|e| format!("写描述符失败: {e}"))?;
     Ok(path)
 }
 

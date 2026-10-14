@@ -34,24 +34,44 @@ const DEFAULT_ASYNC: bool = true;
 /// assert_eq!(resolve_tuning(false, None, None), (2, true));
 /// assert_eq!(resolve_tuning(true, Some("4"), Some("1")), (0, false));
 /// ```
-pub fn resolve_tuning(upstream_gpu: bool, conv: Option<&str>, asynchronous: Option<&str>) -> (u8, bool) {
+pub fn resolve_tuning(
+    upstream_gpu: bool,
+    conv: Option<&str>,
+    asynchronous: Option<&str>,
+) -> (u8, bool) {
     if upstream_gpu {
         return (0, false);
     }
-    let threads = conv.and_then(|v| v.parse::<u8>().ok()).unwrap_or(DEFAULT_CONV_THREADS);
+    let threads = conv
+        .and_then(|v| v.parse::<u8>().ok())
+        .unwrap_or(DEFAULT_CONV_THREADS);
     let asynchronous = asynchronous.map_or(DEFAULT_ASYNC, |v| v == "1");
     (threads, asynchronous)
 }
 
 /// 按环境变量调优会话（性能实验用；默认值见常量）。
 fn tune_session(session: &mut DirectRecordingSession, upstream_gpu: bool) -> Result<(), String> {
-    let (threads, asynchronous) = resolve_tuning(upstream_gpu, std::env::var(ENV_CONV_THREADS).ok().as_deref(), std::env::var(ENV_ASYNC).ok().as_deref());
-    if let Some(n) = std::env::var(ENV_ENCODE_THREADS).ok().and_then(|v| v.parse::<u8>().ok()).filter(|n| (1..=16).contains(n)) {
+    let (threads, asynchronous) = resolve_tuning(
+        upstream_gpu,
+        std::env::var(ENV_CONV_THREADS).ok().as_deref(),
+        std::env::var(ENV_ASYNC).ok().as_deref(),
+    );
+    if let Some(n) = std::env::var(ENV_ENCODE_THREADS)
+        .ok()
+        .and_then(|v| v.parse::<u8>().ok())
+        .filter(|n| (1..=16).contains(n))
+    {
         session.set_encode_threads(n).map_err(|e| e.to_string())?;
     }
-    session.set_bench_encoding(threads, false).map_err(|e| e.to_string())?;
-    session.set_bench_async_encoding(asynchronous).map_err(|e| e.to_string())?;
-    session.set_bench_automatic_policies(true).map_err(|e| e.to_string())
+    session
+        .set_bench_encoding(threads, false)
+        .map_err(|e| e.to_string())?;
+    session
+        .set_bench_async_encoding(asynchronous)
+        .map_err(|e| e.to_string())?;
+    session
+        .set_bench_automatic_policies(true)
+        .map_err(|e| e.to_string())
 }
 
 /// 上游会话适配器。
@@ -103,16 +123,35 @@ impl RecordingBackend for SoftBackend {
 ///
 /// # 返回
 /// 适配后的后端；配置非法或会话启动失败返回原因。
-pub fn start_software(request: &StartRequest, partial: PathBuf, upstream_gpu: bool) -> Result<Box<dyn RecordingBackend>, String> {
-    let mut config = plan::build_config(request, partial, upstream_gpu, settings::size_limit_for(request.quality.max_size));
-    if let Some(p) = std::env::var(plan::ENV_PRESET).ok().and_then(|v| plan::parse_preset(&v)) {
+pub fn start_software(
+    request: &StartRequest,
+    partial: PathBuf,
+    upstream_gpu: bool,
+) -> Result<Box<dyn RecordingBackend>, String> {
+    let mut config = plan::build_config(
+        request,
+        partial,
+        upstream_gpu,
+        settings::size_limit_for(request.quality.max_size),
+    );
+    if let Some(p) = std::env::var(plan::ENV_PRESET)
+        .ok()
+        .and_then(|v| plan::parse_preset(&v))
+    {
         config.preset = p;
     }
     config.validate()?;
     let mut session = DirectRecordingSession::create(config).map_err(|e| e.to_string())?;
     tune_session(&mut session, upstream_gpu)?;
     session.start().map_err(|e| e.to_string())?;
-    Ok(Box::new(SoftBackend { session, name: if upstream_gpu { "upstream-gpu" } else { "software-x264" } }))
+    Ok(Box::new(SoftBackend {
+        session,
+        name: if upstream_gpu {
+            "upstream-gpu"
+        } else {
+            "software-x264"
+        },
+    }))
 }
 
 #[cfg(test)]

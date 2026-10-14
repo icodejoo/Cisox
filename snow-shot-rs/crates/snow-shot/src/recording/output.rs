@@ -163,8 +163,7 @@ pub fn build_recording_config(
     home: Option<&Path>,
     now: LocalDateTime,
 ) -> Result<RecordingConfig, String> {
-    let format =
-        RecordingFormat::from_config(document.str_or(KEY_FORMAT, ""));
+    let format = RecordingFormat::from_config(document.str_or(KEY_FORMAT, ""));
     // 视频与动图各有一套帧率配置
     let fps_key = if format == RecordingFormat::Mp4 {
         KEY_FPS

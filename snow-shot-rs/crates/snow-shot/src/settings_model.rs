@@ -1059,7 +1059,10 @@ mod tests {
         assert_eq!(parse_hex_color("#中文中文"), None);
         // 带 trim，与 pinned 版（u32 大端 RRGGBBAA）语义一致
         assert_eq!(parse_hex_color(" #112233 "), Some([0x11, 0x22, 0x33, 0xFF]));
-        assert_eq!(crate::pinned_model::parse_hex_color("#11223344"), Some(0x11223344));
+        assert_eq!(
+            crate::pinned_model::parse_hex_color("#11223344"),
+            Some(0x11223344)
+        );
     }
 
     /// 按键转快捷键文本。

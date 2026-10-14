@@ -1163,10 +1163,7 @@ impl Event {
                 path,
                 frames,
                 dropped,
-            } => format!(
-                "{EVT_FINISHED} {frames} {dropped} {}",
-                line_path(path)
-            ),
+            } => format!("{EVT_FINISHED} {frames} {dropped} {}", line_path(path)),
             Self::Error { reason } => format!("{EVT_ERROR} {}", single_line(reason)),
             Self::EditProgress { done, total, stage } => {
                 format!(

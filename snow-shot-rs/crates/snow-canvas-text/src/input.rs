@@ -54,7 +54,12 @@ pub enum EditKeyOutcome {
 /// assert_eq!(apply_edit_key(&mut d, "enter", true, false), EditKeyOutcome::Handled);
 /// assert_eq!(d.text(), "a\n");
 /// ```
-pub fn apply_edit_key(draft: &mut TextDraft, key: &str, shift: bool, control: bool) -> EditKeyOutcome {
+pub fn apply_edit_key(
+    draft: &mut TextDraft,
+    key: &str,
+    shift: bool,
+    control: bool,
+) -> EditKeyOutcome {
     // 各分支返回的“是否有变化”不影响结果：即使内容没变（例如光标已在边界）也算已处理，
     // 避免按键冒泡触发外层快捷键
     let _ = match (key, control) {
@@ -198,11 +203,8 @@ impl CanvasTextInput {
 
     /// 重新计算排版结果。
     pub fn relayout(&mut self) {
-        self.layout = TextLayoutResult::layout_text(
-            &self.draft.display_text(),
-            &self.style,
-            self.max_width,
-        );
+        self.layout =
+            TextLayoutResult::layout_text(&self.draft.display_text(), &self.style, self.max_width);
     }
 
     /// 替换并重设输入文本。
@@ -369,10 +371,7 @@ impl CanvasTextInput {
 
     /// 显示文本字节偏移对应的框内坐标（相对输入框左上角）。
     fn position_of(&self, lines: &[VisualLine], offset: usize) -> (Pixels, Pixels) {
-        let index = lines
-            .iter()
-            .rposition(|l| l.start <= offset)
-            .unwrap_or(0);
+        let index = lines.iter().rposition(|l| l.start <= offset).unwrap_or(0);
         let Some(line) = lines.get(index) else {
             return (px(0.0), px(0.0));
         };
@@ -512,10 +511,14 @@ impl EntityInputHandler for CanvasTextInput {
         let bounds = self.last_bounds?;
         let lines = self.shape_lines(window);
         let rel_y = (pt.y - bounds.top()).max(px(0.0));
-        let row = ((rel_y / self.line_height()).floor() as usize).min(lines.len().saturating_sub(1));
+        let row =
+            ((rel_y / self.line_height()).floor() as usize).min(lines.len().saturating_sub(1));
         let line = lines.get(row)?;
         let column = line.shaped.closest_index_for_x(pt.x - bounds.left());
-        Some(self.draft.display_to_utf16(line.start + column.min(line.len)))
+        Some(
+            self.draft
+                .display_to_utf16(line.start + column.min(line.len)),
+        )
     }
 }
 
@@ -644,9 +647,18 @@ mod tests {
     #[test]
     fn enter_and_escape_semantics() {
         let mut d = TextDraft::with_text("hi");
-        assert_eq!(apply_edit_key(&mut d, "enter", false, false), EditKeyOutcome::Commit);
-        assert_eq!(apply_edit_key(&mut d, "escape", false, false), EditKeyOutcome::Cancel);
-        assert_eq!(apply_edit_key(&mut d, "enter", true, false), EditKeyOutcome::Handled);
+        assert_eq!(
+            apply_edit_key(&mut d, "enter", false, false),
+            EditKeyOutcome::Commit
+        );
+        assert_eq!(
+            apply_edit_key(&mut d, "escape", false, false),
+            EditKeyOutcome::Cancel
+        );
+        assert_eq!(
+            apply_edit_key(&mut d, "enter", true, false),
+            EditKeyOutcome::Handled
+        );
         assert_eq!(d.text(), "hi\n");
     }
 
@@ -672,8 +684,14 @@ mod tests {
     #[test]
     fn unrelated_keys_are_ignored() {
         let mut d = TextDraft::new();
-        assert_eq!(apply_edit_key(&mut d, "f5", false, false), EditKeyOutcome::Ignored);
-        assert_eq!(apply_edit_key(&mut d, "c", false, true), EditKeyOutcome::Ignored);
+        assert_eq!(
+            apply_edit_key(&mut d, "f5", false, false),
+            EditKeyOutcome::Ignored
+        );
+        assert_eq!(
+            apply_edit_key(&mut d, "c", false, true),
+            EditKeyOutcome::Ignored
+        );
     }
 
     /// 预编辑存在时：标记区间、选区都在显示文本（含预编辑）坐标下。
@@ -683,7 +701,10 @@ mod tests {
         d.ime_replace_and_mark(None, "ni", None);
         // 显示文本 "abni"：预编辑 2..4（UTF-16 亦是 2..4），不能被夹成 2..2
         let marked = d.display_marked_range().unwrap();
-        assert_eq!(d.display_to_utf16(marked.start)..d.display_to_utf16(marked.end), 2..4);
+        assert_eq!(
+            d.display_to_utf16(marked.start)..d.display_to_utf16(marked.end),
+            2..4
+        );
         // 插入点在预编辑末尾
         let sel = d.display_selection_range();
         assert_eq!(d.display_to_utf16(sel.start), 4);
@@ -720,7 +741,10 @@ mod tests {
         d.ime_replace_and_mark(None, "你好吗", None);
         for r in [0..1, 2..3, 3..3, 5..2, 0..99, 99..100] {
             let c = d.committed_range_from_display_utf16(&r);
-            assert!(c.start <= c.end && c.end <= d.text().len(), "{r:?} -> {c:?}");
+            assert!(
+                c.start <= c.end && c.end <= d.text().len(),
+                "{r:?} -> {c:?}"
+            );
             assert!(d.text().is_char_boundary(c.start) && d.text().is_char_boundary(c.end));
         }
     }

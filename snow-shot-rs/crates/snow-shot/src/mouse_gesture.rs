@@ -59,7 +59,11 @@ pub fn binding_from_value(action: &str, value: &Value) -> Option<Binding> {
         return None;
     }
     let button = MouseKey::parse(value.get("mouse_button")?.as_str()?)?;
-    Some(Binding { action: action.to_string(), modifiers, button })
+    Some(Binding {
+        action: action.to_string(),
+        modifiers,
+        button,
+    })
 }
 
 /// 读取全部有效的手势绑定。
@@ -69,7 +73,9 @@ pub fn binding_from_value(action: &str, value: &Value) -> Option<Binding> {
 pub fn bindings_from_document(document: &ConfigDocument) -> Vec<Binding> {
     ACTIONS
         .iter()
-        .filter_map(|action| binding_from_value(action, &document.value(&format!("global_mouse/{action}"))))
+        .filter_map(|action| {
+            binding_from_value(action, &document.value(&format!("global_mouse/{action}")))
+        })
         .collect()
 }
 
@@ -104,17 +110,43 @@ mod tests {
         assert_eq!(find("screenshot_copy").button, MouseKey::Left);
         assert_eq!(find("screenshot_fixed").button, MouseKey::Middle);
         assert_eq!(find("screenshot_ocr").button, MouseKey::Right);
-        assert!(bindings.iter().all(|b| b.modifiers.win && !b.modifiers.ctrl));
+        assert!(
+            bindings
+                .iter()
+                .all(|b| b.modifiers.win && !b.modifiers.ctrl)
+        );
     }
 
     /// 无效配置不产生绑定：空对象、没有修饰键、未知键名、未知按键。
     #[test]
     fn invalid_values_are_rejected() {
         assert!(binding_from_value("a", &json!({})).is_none());
-        assert!(binding_from_value("a", &json!({"activation_key": [], "mouse_button": "left_drag"})).is_none());
-        assert!(binding_from_value("a", &json!({"activation_key": ["hyper"], "mouse_button": "left_drag"})).is_none());
-        assert!(binding_from_value("a", &json!({"activation_key": ["alt"], "mouse_button": "double"})).is_none());
-        let ok = binding_from_value("a", &json!({"activation_key": ["ctrl", "alt"], "mouse_button": "side_button_1_drag"})).unwrap();
+        assert!(
+            binding_from_value(
+                "a",
+                &json!({"activation_key": [], "mouse_button": "left_drag"})
+            )
+            .is_none()
+        );
+        assert!(
+            binding_from_value(
+                "a",
+                &json!({"activation_key": ["hyper"], "mouse_button": "left_drag"})
+            )
+            .is_none()
+        );
+        assert!(
+            binding_from_value(
+                "a",
+                &json!({"activation_key": ["alt"], "mouse_button": "double"})
+            )
+            .is_none()
+        );
+        let ok = binding_from_value(
+            "a",
+            &json!({"activation_key": ["ctrl", "alt"], "mouse_button": "side_button_1_drag"}),
+        )
+        .unwrap();
         assert!(ok.modifiers.ctrl && ok.modifiers.alt && ok.button == MouseKey::Back);
     }
 

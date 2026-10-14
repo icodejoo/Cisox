@@ -203,7 +203,11 @@ impl RawSpec {
         if self.files.is_empty() {
             return Err(format!("{}: 文件清单为空", self.id));
         }
-        if self.model_type.as_deref().is_some_and(|t| t.trim().is_empty()) {
+        if self
+            .model_type
+            .as_deref()
+            .is_some_and(|t| t.trim().is_empty())
+        {
             return Err(format!("{}: model_type 不能为空串", self.id));
         }
         Ok(SttModelSpec {
@@ -410,9 +414,13 @@ mod tests {
     #[test]
     fn model_type_is_optional_and_validated() {
         let with = |extra: &str| {
-            let mut v: serde_json::Value = serde_json::from_str(MANIFEST_JSON).expect("清单是 JSON");
+            let mut v: serde_json::Value =
+                serde_json::from_str(MANIFEST_JSON).expect("清单是 JSON");
             let first = &mut v["models"][0];
-            first.as_object_mut().expect("条目是对象").remove("model_type");
+            first
+                .as_object_mut()
+                .expect("条目是对象")
+                .remove("model_type");
             if !extra.is_empty() {
                 first["model_type"] = serde_json::Value::String(extra.into());
             }
@@ -420,7 +428,9 @@ mod tests {
         };
         assert_eq!(with("").expect("缺省可解析").models[0].model_type, None);
         assert_eq!(
-            with("zipformer2").expect("可解析").models[0].model_type.as_deref(),
+            with("zipformer2").expect("可解析").models[0]
+                .model_type
+                .as_deref(),
             Some("zipformer2")
         );
         assert!(with(" ").unwrap_err().contains("model_type"));

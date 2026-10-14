@@ -20,5 +20,6 @@ fn embed_windows_resources() {
     // 与 snow_app_core::PRODUCT_NAME 保持同值（构建脚本不能依赖本工作区 crate）
     res.set("ProductName", "Cisox");
     res.set("FileDescription", "Cisox UI");
-    res.compile().expect("嵌入 Windows 资源失败（需要 MSVC 环境里的 rc.exe）");
+    res.compile()
+        .expect("嵌入 Windows 资源失败（需要 MSVC 环境里的 rc.exe）");
 }

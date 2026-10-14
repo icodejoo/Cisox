@@ -13,8 +13,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use snow_fps_fixture::content::{Load, build_scene_at};
 use snow_fps_fixture::{
-    FrameRecord, MAX_SECONDS, Mode, MonitorInfo, Options, frames_to_csv, parse_args, pick_target, resolve_region,
-    resolve_span_region, split_region_by_monitors, summarize,
+    FrameRecord, MAX_SECONDS, Mode, MonitorInfo, Options, frames_to_csv, parse_args, pick_target,
+    resolve_region, resolve_span_region, split_region_by_monitors, summarize,
 };
 
 /// 退出码：参数或显示器校验失败。
@@ -73,7 +73,8 @@ fn run_loop(
     let seconds = options.seconds.min(MAX_SECONDS);
     let deadline = Duration::from_secs_f64(seconds);
     let hard_limit = Duration::from_secs_f64(seconds + WATCHDOG_EXTRA_S);
-    let mut records: Vec<FrameRecord> = Vec::with_capacity(seconds as usize * RECORDS_PER_SECOND + 16);
+    let mut records: Vec<FrameRecord> =
+        Vec::with_capacity(seconds as usize * RECORDS_PER_SECOND + 16);
     let mut seq: u32 = 0;
     let mut pending_vsyncs: u32 = 0;
     while start.elapsed() < deadline && start.elapsed() < hard_limit {
@@ -95,8 +96,15 @@ fn run_loop(
         if pending_vsyncs + 1 == options.divisor {
             // 只在序号首次提交时记录一次，时间戳取 Present 返回时刻
             let now_ns = start.elapsed().as_nanos() as u64;
-            let unix_us = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_micros() as u64);
-            records.push(FrameRecord { seq, submit_ns: now_ns, flush_ns: now_ns, unix_us });
+            let unix_us = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |d| d.as_micros() as u64);
+            records.push(FrameRecord {
+                seq,
+                submit_ns: now_ns,
+                flush_ns: now_ns,
+                unix_us,
+            });
             if seq == 1
                 && let Some(path) = &options.ready
             {
@@ -142,7 +150,10 @@ fn main() {
             reject(e)
         });
         let rect = resolve_region(target, &options).unwrap_or_else(|e| reject(e));
-        println!("target={} primary={} monitor={:?} window={:?}", target.device, target.primary, target.rect, rect);
+        println!(
+            "target={} primary={} monitor={:?} window={:?}",
+            target.device, target.primary, target.rect, rect
+        );
         rect
     };
     // 双窗口：按显示器切分区域；只落在一块屏上时退化为单窗口
@@ -169,15 +180,25 @@ fn main() {
         finish(&options, result);
         return;
     }
-    let window = win::FixtureWindow::create(rect).unwrap_or_else(|e| fail(format_args!("创建窗口失败: {e}")));
-    let mut renderer = match gpu::Renderer::new(&window, rect.w, rect.h, options.load == Load::Noise) {
-        Ok(r) => r,
-        Err(e) => {
-            drop(window);
-            fail(format_args!("初始化 GPU 失败: {e}"))
-        }
-    };
-    let result = run_loop(&window, &mut renderer, &options, rect.w, rect.h, (rect.x, rect.y), None);
+    let window = win::FixtureWindow::create(rect)
+        .unwrap_or_else(|e| fail(format_args!("创建窗口失败: {e}")));
+    let mut renderer =
+        match gpu::Renderer::new(&window, rect.w, rect.h, options.load == Load::Noise) {
+            Ok(r) => r,
+            Err(e) => {
+                drop(window);
+                fail(format_args!("初始化 GPU 失败: {e}"))
+            }
+        };
+    let result = run_loop(
+        &window,
+        &mut renderer,
+        &options,
+        rect.w,
+        rect.h,
+        (rect.x, rect.y),
+        None,
+    );
     drop(renderer);
     drop(window);
     finish(&options, result);

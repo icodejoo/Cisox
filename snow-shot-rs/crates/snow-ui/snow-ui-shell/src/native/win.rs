@@ -226,7 +226,11 @@ pub(crate) fn set_capture_excluded(hwnd: isize, excluded: bool) -> Result<(), Sh
     use windows::Win32::UI::WindowsAndMessaging::{
         SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE, WDA_NONE,
     };
-    let affinity = if excluded { WDA_EXCLUDEFROMCAPTURE } else { WDA_NONE };
+    let affinity = if excluded {
+        WDA_EXCLUDEFROMCAPTURE
+    } else {
+        WDA_NONE
+    };
     // SAFETY: 纯值参数。
     unsafe { SetWindowDisplayAffinity(to_hwnd(hwnd), affinity) }
         .map_err(|e| platform_err("SetWindowDisplayAffinity", e))
@@ -265,7 +269,11 @@ pub(crate) fn set_input_transparent(hwnd: isize, transparent: bool) -> Result<()
     let mask = (WS_EX_LAYERED.0 | WS_EX_TRANSPARENT.0 | WS_EX_NOACTIVATE.0) as isize;
     // SAFETY: 纯值参数；句柄无效时返回 0 并设置错误，下面按样式读回结果判断。
     let current = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) };
-    let wanted = if transparent { current | mask } else { current & !mask };
+    let wanted = if transparent {
+        current | mask
+    } else {
+        current & !mask
+    };
     // SAFETY: 同上。
     unsafe { SetWindowLongPtrW(hwnd, GWL_EXSTYLE, wanted) };
     // SAFETY: 同上。
@@ -387,8 +395,8 @@ pub(crate) fn set_window_dark_title(hwnd: isize, dark: bool) -> Result<(), Shell
 mod tests {
     use super::*;
     use windows::Win32::UI::WindowsAndMessaging::{
-        CreateWindowExW, DestroyWindow, GWL_EXSTYLE, GetWindowLongPtrW, WINDOW_EX_STYLE, WINDOW_STYLE,
-        WS_EX_LAYERED, WS_EX_TRANSPARENT,
+        CreateWindowExW, DestroyWindow, GWL_EXSTYLE, GetWindowLongPtrW, WINDOW_EX_STYLE,
+        WINDOW_STYLE, WS_EX_LAYERED, WS_EX_TRANSPARENT,
     };
     use windows::core::w;
 

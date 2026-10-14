@@ -210,22 +210,35 @@ mod tests {
         collector.begin(2, a.id);
         assert!(collector.push(payload(&a)).is_none());
         let all = collector.push(payload(&b)).expect("到齐");
-        assert_eq!(all.iter().map(|p| p.monitor.id).collect::<Vec<_>>(), vec![b.id, a.id]);
+        assert_eq!(
+            all.iter().map(|p| p.monitor.id).collect::<Vec<_>>(),
+            vec![b.id, a.id]
+        );
         assert!(!collector.is_active());
 
         collector.begin(2, b.id);
         collector.push(payload(&a));
         collector.cancel();
-        assert!(collector.push(payload(&b)).is_none(), "取消后迟到的载荷丢弃");
+        assert!(
+            collector.push(payload(&b)).is_none(),
+            "取消后迟到的载荷丢弃"
+        );
     }
 
     /// 光标在哪块屏就选哪块，含负坐标副屏。
     #[test]
     fn picks_monitor_under_cursor() {
         let ms = two();
-        assert_eq!(pick_monitor(&ms, Some(PhysicalPoint::new(10, 10))).unwrap().id, MonitorId(1));
         assert_eq!(
-            pick_monitor(&ms, Some(PhysicalPoint::new(-500, 300))).unwrap().id,
+            pick_monitor(&ms, Some(PhysicalPoint::new(10, 10)))
+                .unwrap()
+                .id,
+            MonitorId(1)
+        );
+        assert_eq!(
+            pick_monitor(&ms, Some(PhysicalPoint::new(-500, 300)))
+                .unwrap()
+                .id,
             MonitorId(2)
         );
     }
@@ -236,7 +249,9 @@ mod tests {
         let ms = two();
         assert_eq!(pick_monitor(&ms, None).unwrap().id, MonitorId(1));
         assert_eq!(
-            pick_monitor(&ms, Some(PhysicalPoint::new(-500, 50))).unwrap().id,
+            pick_monitor(&ms, Some(PhysicalPoint::new(-500, 50)))
+                .unwrap()
+                .id,
             MonitorId(1)
         );
         assert!(pick_monitor(&Monitors::default(), None).is_none());

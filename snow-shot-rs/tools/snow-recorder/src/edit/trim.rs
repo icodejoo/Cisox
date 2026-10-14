@@ -203,8 +203,8 @@ fn trim_to(params: &TrimParams<'_>, ctl: &TaskCtl, tmp: &Path) -> Result<u64, Ed
 mod tests {
     use super::*;
     use crate::edit::testclip::{self, Clip};
-    use snow_recorder_protocol::ProbeInfo;
     use crate::edit::testclip::{no_scratch, quiet_ctl as ctl};
+    use snow_recorder_protocol::ProbeInfo;
 
     /// 探测文件。
     fn probe(path: &Path) -> ProbeInfo {

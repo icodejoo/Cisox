@@ -121,7 +121,13 @@ impl FrameProbe {
     /// - `compute`：引擎 + 光栅化 + 合成耗时。
     /// - `upload`：脏块转图像资源耗时。
     /// - `tiles` / `bytes`：本次输出的脏块数与像素字节数。
-    pub fn record_annotation(&mut self, compute: Duration, upload: Duration, tiles: usize, bytes: usize) {
+    pub fn record_annotation(
+        &mut self,
+        compute: Duration,
+        upload: Duration,
+        tiles: usize,
+        bytes: usize,
+    ) {
         push_capped(&mut self.annotation_compute, micros(compute));
         push_capped(&mut self.annotation_upload, micros(upload));
         self.tiles_total += tiles as u64;
@@ -211,8 +217,18 @@ mod tests {
     #[test]
     fn annotation_series() {
         let mut p = FrameProbe::new();
-        p.record_annotation(Duration::from_micros(400), Duration::from_micros(100), 2, 2048);
-        p.record_annotation(Duration::from_micros(600), Duration::from_micros(300), 4, 4096);
+        p.record_annotation(
+            Duration::from_micros(400),
+            Duration::from_micros(100),
+            2,
+            2048,
+        );
+        p.record_annotation(
+            Duration::from_micros(600),
+            Duration::from_micros(300),
+            4,
+            4096,
+        );
         let (compute, upload, tiles, bytes) = p.annotation_summary();
         assert_eq!((compute.count, upload.count), (2, 2));
         assert_eq!(compute.max_us, 600);

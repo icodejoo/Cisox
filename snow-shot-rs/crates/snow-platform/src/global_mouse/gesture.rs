@@ -226,7 +226,10 @@ impl Gesture {
     pub fn handle(&mut self, input: Input, bindings: &[Binding]) -> Outcome {
         match input {
             Input::Cancel => match self.active.take() {
-                Some((id, _, _)) => Outcome { consumed: true, event: Some(DragEvent::Cancel { id }) },
+                Some((id, _, _)) => Outcome {
+                    consumed: true,
+                    event: Some(DragEvent::Cancel { id }),
+                },
                 None => Outcome::default(),
             },
             Input::Release { button, pos } => {
@@ -240,28 +243,44 @@ impl Gesture {
                         }
                         _ => None,
                     };
-                    return Outcome { consumed: true, event };
+                    return Outcome {
+                        consumed: true,
+                        event,
+                    };
                 }
                 Outcome::default()
             }
             Input::Move { pos } => match &self.active {
                 // 光标必须继续移动，所以不吞；按键序列已被吞掉，前台应用不会把它当成拖动
-                Some((id, _, _)) => Outcome { consumed: false, event: Some(DragEvent::Update { id: *id, pos }) },
+                Some((id, _, _)) => Outcome {
+                    consumed: false,
+                    event: Some(DragEvent::Update { id: *id, pos }),
+                },
                 None => Outcome::default(),
             },
-            Input::Press { button, pos, modifiers, others_held } => {
+            Input::Press {
+                button,
+                pos,
+                modifiers,
+                others_held,
+            } => {
                 if self.active.is_some() || !self.consumed.is_empty() {
                     // 手势期间的其它按下：一并吞掉，松开时再吞
                     if self.active.is_some() {
                         self.consumed.insert(button);
-                        return Outcome { consumed: true, event: None };
+                        return Outcome {
+                            consumed: true,
+                            event: None,
+                        };
                     }
                     return Outcome::default();
                 }
                 if others_held {
                     return Outcome::default();
                 }
-                let mut matched = bindings.iter().filter(|b| b.button == button && b.modifiers == modifiers);
+                let mut matched = bindings
+                    .iter()
+                    .filter(|b| b.button == button && b.modifiers == modifiers);
                 let Some(first) = matched.next() else {
                     return Outcome::default();
                 };
@@ -272,7 +291,14 @@ impl Gesture {
                 let id = self.last_id;
                 self.active = Some((id, first.action.clone(), button));
                 self.consumed.insert(button);
-                Outcome { consumed: true, event: Some(DragEvent::Begin { id, action: first.action.clone(), pos }) }
+                Outcome {
+                    consumed: true,
+                    event: Some(DragEvent::Begin {
+                        id,
+                        action: first.action.clone(),
+                        pos,
+                    }),
+                }
             }
         }
     }
@@ -283,16 +309,30 @@ mod tests {
     use super::*;
 
     /// Win 修饰键。
-    const WIN: Modifiers = Modifiers { win: true, ctrl: false, alt: false, shift: false };
+    const WIN: Modifiers = Modifiers {
+        win: true,
+        ctrl: false,
+        alt: false,
+        shift: false,
+    };
 
     /// 造一条绑定。
     fn bind(action: &str, modifiers: Modifiers, button: MouseKey) -> Binding {
-        Binding { action: action.into(), modifiers, button }
+        Binding {
+            action: action.into(),
+            modifiers,
+            button,
+        }
     }
 
     /// 造一次按下。
     fn press(button: MouseKey, modifiers: Modifiers) -> Input {
-        Input::Press { button, pos: Point { x: 1, y: 2 }, modifiers, others_held: false }
+        Input::Press {
+            button,
+            pos: Point { x: 1, y: 2 },
+            modifiers,
+            others_held: false,
+        }
     }
 
     /// 完整手势：按下吞掉并开始，移动给出更新但不吞，松开吞掉并结束。
@@ -302,14 +342,39 @@ mod tests {
         let mut g = Gesture::new();
         let begin = g.handle(press(MouseKey::Left, WIN), &bindings);
         assert!(begin.consumed);
-        assert!(matches!(begin.event, Some(DragEvent::Begin { id: 1, ref action, .. }) if action == "copy"));
+        assert!(
+            matches!(begin.event, Some(DragEvent::Begin { id: 1, ref action, .. }) if action == "copy")
+        );
         assert!(g.active() && g.needs_mouse_input());
-        let moved = g.handle(Input::Move { pos: Point { x: 9, y: 9 } }, &bindings);
+        let moved = g.handle(
+            Input::Move {
+                pos: Point { x: 9, y: 9 },
+            },
+            &bindings,
+        );
         assert!(!moved.consumed);
-        assert_eq!(moved.event, Some(DragEvent::Update { id: 1, pos: Point { x: 9, y: 9 } }));
-        let done = g.handle(Input::Release { button: MouseKey::Left, pos: Point { x: 20, y: 30 } }, &bindings);
+        assert_eq!(
+            moved.event,
+            Some(DragEvent::Update {
+                id: 1,
+                pos: Point { x: 9, y: 9 }
+            })
+        );
+        let done = g.handle(
+            Input::Release {
+                button: MouseKey::Left,
+                pos: Point { x: 20, y: 30 },
+            },
+            &bindings,
+        );
         assert!(done.consumed);
-        assert_eq!(done.event, Some(DragEvent::Finish { id: 1, pos: Point { x: 20, y: 30 } }));
+        assert_eq!(
+            done.event,
+            Some(DragEvent::Finish {
+                id: 1,
+                pos: Point { x: 20, y: 30 }
+            })
+        );
         assert!(!g.active() && !g.needs_mouse_input());
     }
 
@@ -318,20 +383,40 @@ mod tests {
     fn modifiers_must_match_exactly() {
         let bindings = vec![bind("copy", WIN, MouseKey::Left)];
         let mut g = Gesture::new();
-        assert_eq!(g.handle(press(MouseKey::Left, Modifiers::default()), &bindings), Outcome::default());
+        assert_eq!(
+            g.handle(press(MouseKey::Left, Modifiers::default()), &bindings),
+            Outcome::default()
+        );
         let extra = Modifiers { ctrl: true, ..WIN };
-        assert_eq!(g.handle(press(MouseKey::Left, extra), &bindings), Outcome::default());
-        assert_eq!(g.handle(press(MouseKey::Right, WIN), &bindings), Outcome::default());
+        assert_eq!(
+            g.handle(press(MouseKey::Left, extra), &bindings),
+            Outcome::default()
+        );
+        assert_eq!(
+            g.handle(press(MouseKey::Right, WIN), &bindings),
+            Outcome::default()
+        );
     }
 
     /// 按下时已有别的鼠标键按着：不触发；重复匹配的绑定放弃。
     #[test]
     fn ambiguity_and_chords_are_ignored() {
-        let bindings = vec![bind("a", WIN, MouseKey::Left), bind("b", WIN, MouseKey::Left)];
+        let bindings = vec![
+            bind("a", WIN, MouseKey::Left),
+            bind("b", WIN, MouseKey::Left),
+        ];
         let mut g = Gesture::new();
-        assert_eq!(g.handle(press(MouseKey::Left, WIN), &bindings), Outcome::default());
+        assert_eq!(
+            g.handle(press(MouseKey::Left, WIN), &bindings),
+            Outcome::default()
+        );
         let single = vec![bind("a", WIN, MouseKey::Left)];
-        let held = Input::Press { button: MouseKey::Left, pos: Point::default(), modifiers: WIN, others_held: true };
+        let held = Input::Press {
+            button: MouseKey::Left,
+            pos: Point::default(),
+            modifiers: WIN,
+            others_held: true,
+        };
         assert_eq!(g.handle(held, &single), Outcome::default());
     }
 
@@ -343,7 +428,13 @@ mod tests {
         g.handle(press(MouseKey::Left, WIN), &bindings);
         let right = g.handle(press(MouseKey::Right, Modifiers::default()), &bindings);
         assert!(right.consumed && right.event.is_none());
-        let right_up = g.handle(Input::Release { button: MouseKey::Right, pos: Point::default() }, &bindings);
+        let right_up = g.handle(
+            Input::Release {
+                button: MouseKey::Right,
+                pos: Point::default(),
+            },
+            &bindings,
+        );
         assert!(right_up.consumed && right_up.event.is_none());
         assert!(g.active(), "右键松开不结束手势");
     }
@@ -357,7 +448,13 @@ mod tests {
         let cancel = g.handle(Input::Cancel, &bindings);
         assert_eq!(cancel.event, Some(DragEvent::Cancel { id: 1 }));
         assert!(!g.active());
-        let up = g.handle(Input::Release { button: MouseKey::Left, pos: Point::default() }, &bindings);
+        let up = g.handle(
+            Input::Release {
+                button: MouseKey::Left,
+                pos: Point::default(),
+            },
+            &bindings,
+        );
         assert!(up.consumed && up.event.is_none());
         assert!(!g.needs_mouse_input());
     }
@@ -366,7 +463,10 @@ mod tests {
     #[test]
     fn config_names_parse() {
         assert_eq!(Modifiers::parse::<&str>(&[]), Some(Modifiers::default()));
-        assert_eq!(MouseKey::parse("side_button_2_drag"), Some(MouseKey::Forward));
+        assert_eq!(
+            MouseKey::parse("side_button_2_drag"),
+            Some(MouseKey::Forward)
+        );
         assert_eq!(MouseKey::parse("click"), None);
     }
 }

@@ -32,10 +32,10 @@ use snow_ui_shell::window::WindowSpec;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEINPUT, SendInput,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
 use windows::Win32::UI::WindowsAndMessaging::SetCursorPos;
 
 /// 整个探针的最长运行时间（超时强制退出）。
@@ -151,7 +151,11 @@ impl Render for ProbeView {
 
 /// 发一个左键按下 / 松开。
 fn click_button(down: bool) {
-    let flags = if down { MOUSEEVENTF_LEFTDOWN } else { MOUSEEVENTF_LEFTUP };
+    let flags = if down {
+        MOUSEEVENTF_LEFTDOWN
+    } else {
+        MOUSEEVENTF_LEFTUP
+    };
     let input = INPUT {
         r#type: INPUT_MOUSE,
         Anonymous: INPUT_0 {
@@ -336,6 +340,9 @@ fn main() {
     } else {
         "INCONCLUSIVE（行为不一致，见上面的轮次数据）"
     };
-    p.log(&format!("EVENTS total={total} raw_down={} raw_up={}", p.raw_down, p.raw_up));
+    p.log(&format!(
+        "EVENTS total={total} raw_down={} raw_up={}",
+        p.raw_down, p.raw_up
+    ));
     p.log(&format!("VERDICT {verdict}"));
 }

@@ -93,6 +93,9 @@ mod tests {
         clock.pause(t0 + Duration::from_secs(3));
         clock.pause(t0 + Duration::from_secs(9));
         assert!(!clock.is_running());
-        assert_eq!(clock.elapsed(t0 + Duration::from_secs(20)), Duration::from_secs(3));
+        assert_eq!(
+            clock.elapsed(t0 + Duration::from_secs(20)),
+            Duration::from_secs(3)
+        );
     }
 }

@@ -720,10 +720,7 @@ mod tests {
             format_size(1024 * 1024 * 1024 - 1).as_deref(),
             Some("1024.0 MiB")
         );
-        assert_eq!(
-            format_size(1024 * 1024 * 1024).as_deref(),
-            Some("1.0 GiB")
-        );
+        assert_eq!(format_size(1024 * 1024 * 1024).as_deref(), Some("1.0 GiB"));
         assert_eq!(format_size_or_zero(0), "0.0 MiB");
         assert_eq!(format_size_or_zero(7_758_305), "7.4 MiB");
         assert_eq!(format_size(7_758_305).as_deref(), Some("7.4 MiB"));

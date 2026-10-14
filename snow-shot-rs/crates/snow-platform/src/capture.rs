@@ -234,7 +234,17 @@ mod win32_capture {
 
             // 执行截屏拷贝（包含 CAPTUREBLT 以捕捉半透明与分层窗口）
             let rop = SRCCOPY | CAPTUREBLT;
-            let bitblt_ok = BitBlt(mem.hdc(), 0, 0, width, height, Some(screen.hdc()), x, y, rop);
+            let bitblt_ok = BitBlt(
+                mem.hdc(),
+                0,
+                0,
+                width,
+                height,
+                Some(screen.hdc()),
+                x,
+                y,
+                rop,
+            );
 
             let mut bmi = BITMAPINFO {
                 bmiHeader: BITMAPINFOHEADER {

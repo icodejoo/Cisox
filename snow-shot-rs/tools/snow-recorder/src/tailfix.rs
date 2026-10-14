@@ -65,7 +65,10 @@ pub struct TailReport {
 
 /// 读取小端 24 位整数。
 fn read_u24(bytes: &[u8]) -> u64 {
-    bytes.iter().rev().fold(0u64, |acc, b| (acc << 8) | u64::from(*b))
+    bytes
+        .iter()
+        .rev()
+        .fold(0u64, |acc, b| (acc << 8) | u64::from(*b))
 }
 
 /// 读取小端 32 位块长度；不足 4 字节返回 `None`。
@@ -89,7 +92,11 @@ fn crc32(data: &[u8]) -> u32 {
     for byte in data {
         crc ^= u32::from(*byte);
         for _ in 0..8 {
-            crc = if crc & 1 != 0 { (crc >> 1) ^ CRC32_POLY } else { crc >> 1 };
+            crc = if crc & 1 != 0 {
+                (crc >> 1) ^ CRC32_POLY
+            } else {
+                crc >> 1
+            };
         }
     }
     !crc
@@ -105,7 +112,9 @@ fn webp_frames(bytes: &[u8]) -> Result<Vec<(usize, u64)>, TailError> {
     while pos + CHUNK_HEADER_LEN <= bytes.len() {
         let len = read_u32_le(&bytes[pos + 4..]).ok_or(TailError::Malformed("块长度"))?;
         let payload = pos + CHUNK_HEADER_LEN;
-        let end = payload.checked_add(len).ok_or(TailError::Malformed("块长度溢出"))?;
+        let end = payload
+            .checked_add(len)
+            .ok_or(TailError::Malformed("块长度溢出"))?;
         if end > bytes.len() {
             return Err(TailError::Malformed("块越界"));
         }
@@ -158,11 +167,17 @@ pub fn extend_webp_tail(bytes: &mut [u8], target_ms: u64) -> Result<TailReport, 
         return Err(TailError::Malformed("没有 ANMF 帧"));
     };
     if target_ms <= before_ms {
-        return Ok(TailReport { before_ms, after_ms: before_ms });
+        return Ok(TailReport {
+            before_ms,
+            after_ms: before_ms,
+        });
     }
     let new_last = (last_ms + (target_ms - before_ms)).min(WEBP_MAX_DURATION_MS);
     bytes[at..at + ANMF_DURATION_LEN].copy_from_slice(&new_last.to_le_bytes()[..ANMF_DURATION_LEN]);
-    Ok(TailReport { before_ms, after_ms: before_ms - last_ms + new_last })
+    Ok(TailReport {
+        before_ms,
+        after_ms: before_ms - last_ms + new_last,
+    })
 }
 
 /// 一个 fcTL 块的位置与时长。
@@ -200,7 +215,10 @@ fn apng_frames(bytes: &[u8]) -> Result<Vec<FctlInfo>, TailError> {
                 0 => APNG_DEFAULT_DEN,
                 d => u64::from(d),
             };
-            frames.push(FctlInfo { chunk_start: pos, delay_ms: num * MS_PER_SEC / den });
+            frames.push(FctlInfo {
+                chunk_start: pos,
+                delay_ms: num * MS_PER_SEC / den,
+            });
         }
         pos = end;
     }
@@ -244,7 +262,10 @@ pub fn extend_apng_tail(bytes: &mut [u8], target_ms: u64) -> Result<TailReport, 
         return Err(TailError::Malformed("没有 fcTL 帧"));
     };
     if target_ms <= before_ms {
-        return Ok(TailReport { before_ms, after_ms: before_ms });
+        return Ok(TailReport {
+            before_ms,
+            after_ms: before_ms,
+        });
     }
     let want_ms = last.delay_ms + (target_ms - before_ms);
     // 选精度最高且分子不越界的分母；都放不下就取最大可表示值
@@ -257,14 +278,18 @@ pub fn extend_apng_tail(bytes: &mut [u8], target_ms: u64) -> Result<TailReport, 
     // 上面的候选保证 num、den 都能放进 u16
     let num16 = u16::try_from(num).unwrap_or(u16::MAX);
     let den16 = u16::try_from(den).unwrap_or(1);
-    bytes[data + FCTL_DELAY_OFFSET..data + FCTL_DELAY_OFFSET + 2].copy_from_slice(&num16.to_be_bytes());
+    bytes[data + FCTL_DELAY_OFFSET..data + FCTL_DELAY_OFFSET + 2]
+        .copy_from_slice(&num16.to_be_bytes());
     bytes[data + FCTL_DELAY_OFFSET + 2..data + FCTL_DELAY_OFFSET + 4]
         .copy_from_slice(&den16.to_be_bytes());
     let crc = crc32(&bytes[last.chunk_start + 4..data + FCTL_DATA_LEN]);
     let crc_at = data + FCTL_DATA_LEN;
     bytes[crc_at..crc_at + PNG_CRC_LEN].copy_from_slice(&crc.to_be_bytes());
     let new_ms = u64::from(num16) * MS_PER_SEC / u64::from(den16);
-    Ok(TailReport { before_ms, after_ms: before_ms - last.delay_ms + new_ms })
+    Ok(TailReport {
+        before_ms,
+        after_ms: before_ms - last.delay_ms + new_ms,
+    })
 }
 
 /// 对成品文件做尾段修补；非 WebP/APNG 格式直接返回 `Ok(None)`。
@@ -327,8 +352,11 @@ mod tests {
 
     /// 用真实编码器导出已知时间戳的帧序列，返回文件内容。
     fn export_sequence(format: ExportFormat, tag: &str) -> Vec<u8> {
-        let path = std::env::temp_dir()
-            .join(format!("snow-tailfix-{tag}-{}.{}", std::process::id(), format.file_extension()));
+        let path = std::env::temp_dir().join(format!(
+            "snow-tailfix-{tag}-{}.{}",
+            std::process::id(),
+            format.file_extension()
+        ));
         let config = StreamingEncoderConfig {
             loop_animated_images: true,
             output_path: path.clone(),
@@ -347,7 +375,9 @@ mod tests {
         let mut encoder = StreamingEncoder::create(config).expect("创建编码器");
         for (i, pts) in CHANGE_PTS.iter().enumerate() {
             let shade = u8::try_from(i * 40).unwrap_or(200);
-            encoder.push_rgba_frame_at_pts(*pts, &solid(shade)).expect("推帧");
+            encoder
+                .push_rgba_frame_at_pts(*pts, &solid(shade))
+                .expect("推帧");
         }
         encoder.finish_at_pts(END_PTS).expect("收尾");
         let bytes = std::fs::read(&path).expect("读成品");
@@ -360,10 +390,16 @@ mod tests {
     fn webp_total_duration_matches_recording() {
         let mut bytes = export_sequence(ExportFormat::Webp, "webp");
         let raw = webp_total_ms(&bytes).expect("解析");
-        assert!(raw + TOLERANCE_MS < EXPECTED_MS, "未修补时应偏短，实际 {raw}ms");
+        assert!(
+            raw + TOLERANCE_MS < EXPECTED_MS,
+            "未修补时应偏短，实际 {raw}ms"
+        );
         extend_webp_tail(&mut bytes, EXPECTED_MS).expect("修补");
         let fixed = webp_total_ms(&bytes).expect("再解析");
-        assert!(fixed.abs_diff(EXPECTED_MS) <= TOLERANCE_MS, "修补后 {fixed}ms");
+        assert!(
+            fixed.abs_diff(EXPECTED_MS) <= TOLERANCE_MS,
+            "修补后 {fixed}ms"
+        );
     }
 
     /// 回归：APNG 成品经修补后总时长等于期望（±一帧），CRC 有效，且修补前偏短。
@@ -371,10 +407,16 @@ mod tests {
     fn apng_total_duration_matches_recording() {
         let mut bytes = export_sequence(ExportFormat::Apng, "apng");
         let raw = apng_total_ms(&bytes).expect("解析");
-        assert!(raw + TOLERANCE_MS < EXPECTED_MS, "未修补时应偏短，实际 {raw}ms");
+        assert!(
+            raw + TOLERANCE_MS < EXPECTED_MS,
+            "未修补时应偏短，实际 {raw}ms"
+        );
         extend_apng_tail(&mut bytes, EXPECTED_MS).expect("修补");
         let fixed = apng_total_ms(&bytes).expect("再解析");
-        assert!(fixed.abs_diff(EXPECTED_MS) <= TOLERANCE_MS, "修补后 {fixed}ms");
+        assert!(
+            fixed.abs_diff(EXPECTED_MS) <= TOLERANCE_MS,
+            "修补后 {fixed}ms"
+        );
         assert!(png_crcs_valid(&bytes), "块 CRC 应全部有效");
     }
 
@@ -382,7 +424,9 @@ mod tests {
     fn png_crcs_valid(bytes: &[u8]) -> bool {
         let mut pos = PNG_SIGNATURE.len();
         while pos + CHUNK_HEADER_LEN <= bytes.len() {
-            let Some(len) = read_u32_be(&bytes[pos..]) else { return false };
+            let Some(len) = read_u32_be(&bytes[pos..]) else {
+                return false;
+            };
             let end = pos + CHUNK_HEADER_LEN + len;
             let Some(stored) = bytes.get(end..end + PNG_CRC_LEN).and_then(read_u32_be) else {
                 return false;

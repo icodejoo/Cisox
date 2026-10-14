@@ -83,7 +83,12 @@ pub struct Scene {
 /// 调色板第 `idx` 项（避开纯黑白以免与序号条混淆）。
 fn palette(idx: usize) -> [f32; 4] {
     let i = (idx % PALETTE_LEN) as f32;
-    [0.15 + 0.05 * i, 0.9 - 0.045 * i, 0.3 + 0.03 * ((i * 5.0) % PALETTE_LEN as f32), 1.0]
+    [
+        0.15 + 0.05 * i,
+        0.9 - 0.045 * i,
+        0.3 + 0.03 * ((i * 5.0) % PALETTE_LEN as f32),
+        1.0,
+    ]
 }
 
 /// 构造某一帧的背景描述（不含序号条）。
@@ -124,7 +129,13 @@ pub fn build_scene(width: u32, height: u32, load: Load, frame: u32) -> Scene {
 /// let s = build_scene_at(1920, 1080, Load::Grid, 1, (1600, 0));
 /// assert!(s.fills[1].rects.contains(&(960, 67, 961, 1080)));
 /// ```
-pub fn build_scene_at(width: u32, height: u32, load: Load, frame: u32, origin: (i32, i32)) -> Scene {
+pub fn build_scene_at(
+    width: u32,
+    height: u32,
+    load: Load,
+    frame: u32,
+    origin: (i32, i32),
+) -> Scene {
     let (w, h) = (width as i32, height as i32);
     let top = bar_height(height) as i32;
     match load {
@@ -143,8 +154,14 @@ pub fn build_scene_at(width: u32, height: u32, load: Load, frame: u32, origin: (
             lines.push((0, h / 2, w, h / 2 + 1));
             Scene {
                 fills: vec![
-                    Fill { color: GRID_BACKGROUND, rects: vec![(0, top, w, h)] },
-                    Fill { color: GRID_LINE, rects: lines },
+                    Fill {
+                        color: GRID_BACKGROUND,
+                        rects: vec![(0, top, w, h)],
+                    },
+                    Fill {
+                        color: GRID_LINE,
+                        rects: lines,
+                    },
                 ],
                 noise: None,
             }
@@ -158,8 +175,14 @@ pub fn build_scene_at(width: u32, height: u32, load: Load, frame: u32, origin: (
             let y = top + (f * BOX_STEP / 2) % span_y;
             Scene {
                 fills: vec![
-                    Fill { color: LIGHT_BACKGROUND, rects: vec![(0, top, w, h)] },
-                    Fill { color: LIGHT_BOX, rects: vec![(x, y, x + size, y + size)] },
+                    Fill {
+                        color: LIGHT_BACKGROUND,
+                        rects: vec![(0, top, w, h)],
+                    },
+                    Fill {
+                        color: LIGHT_BOX,
+                        rects: vec![(x, y, x + size, y + size)],
+                    },
                 ],
                 noise: None,
             }
@@ -168,13 +191,20 @@ pub fn build_scene_at(width: u32, height: u32, load: Load, frame: u32, origin: (
             let shift = frame as i32 * STRIPE_STEP;
             let phase = shift % STRIPE_WIDTH;
             let base = (shift / STRIPE_WIDTH) as usize;
-            let mut fills: Vec<Fill> = (0..PALETTE_LEN).map(|i| Fill { color: palette(i), rects: Vec::new() }).collect();
+            let mut fills: Vec<Fill> = (0..PALETTE_LEN)
+                .map(|i| Fill {
+                    color: palette(i),
+                    rects: Vec::new(),
+                })
+                .collect();
             let count = (w + phase + STRIPE_WIDTH - 1) / STRIPE_WIDTH;
             for i in 0..count {
                 let left = (i * STRIPE_WIDTH - phase).max(0);
                 let right = ((i + 1) * STRIPE_WIDTH - phase).min(w);
                 if right > left {
-                    fills[(base + i as usize) % PALETTE_LEN].rects.push((left, top, right, h));
+                    fills[(base + i as usize) % PALETTE_LEN]
+                        .rects
+                        .push((left, top, right, h));
                 }
             }
             fills.retain(|f| !f.rects.is_empty());
@@ -248,7 +278,10 @@ mod tests {
         for frame in 1..300 {
             let scene = build_scene(w, h, Load::Light, frame);
             let (l, t, r, b) = scene.fills[1].rects[0];
-            assert!(l >= 0 && t >= top && r <= w as i32 && b <= h as i32, "frame {frame}");
+            assert!(
+                l >= 0 && t >= top && r <= w as i32 && b <= h as i32,
+                "frame {frame}"
+            );
             seen.insert((l, t));
         }
         assert!(seen.len() > 100);
@@ -295,7 +328,12 @@ mod tests {
     #[test]
     fn grid_offset_origin() {
         let s = build_scene_at(200, 200, Load::Grid, 1, (10, 0));
-        let cols: Vec<i32> = s.fills[1].rects.iter().filter(|r| r.3 == 200).map(|r| r.0).collect();
+        let cols: Vec<i32> = s.fills[1]
+            .rects
+            .iter()
+            .filter(|r| r.3 == 200)
+            .map(|r| r.0)
+            .collect();
         assert_eq!(cols, vec![54, 118, 182]);
     }
 

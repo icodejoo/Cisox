@@ -1,6 +1,8 @@
 //! 平台相关的小工具：计时器精度与线程优先级。非 Windows 平台是空实现。
 
-use crate::settings::{CaptureSched, ENV_CAPTURE_SCHED, ENV_MMCSS_TASK, parse_capture_sched, parse_mmcss_task};
+use crate::settings::{
+    CaptureSched, ENV_CAPTURE_SCHED, ENV_MMCSS_TASK, parse_capture_sched, parse_mmcss_task,
+};
 
 /// 把进程设为 per-monitor DPI 感知，使选区与采集坐标都是物理像素（缩放显示器上否则会被虚拟化成逻辑尺寸）。
 ///
@@ -13,7 +15,9 @@ use crate::settings::{CaptureSched, ENV_CAPTURE_SCHED, ENV_MMCSS_TASK, parse_cap
 pub fn enable_dpi_awareness() {
     #[cfg(windows)]
     {
-        use windows::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext};
+        use windows::Win32::UI::HiDpi::{
+            DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
+        };
         // SAFETY: 仅设置进程级 DPI 标志，无指针参数。
         unsafe {
             let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -46,7 +50,9 @@ impl TimerGuard {
             use windows::Win32::Media::{TIMERR_NOERROR, timeBeginPeriod};
             // SAFETY: 仅设置进程级计时器精度请求，drop 时成对释放。
             let ok = unsafe { timeBeginPeriod(ms) } == TIMERR_NOERROR;
-            Self { requested: ok.then_some(ms) }
+            Self {
+                requested: ok.then_some(ms),
+            }
         }
         #[cfg(not(windows))]
         {
@@ -73,7 +79,9 @@ impl Drop for TimerGuard {
 pub fn raise_thread_priority() {
     #[cfg(windows)]
     {
-        use windows::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_HIGHEST};
+        use windows::Win32::System::Threading::{
+            GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_HIGHEST,
+        };
         // SAFETY: 只修改当前线程的优先级。
         unsafe {
             let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
@@ -114,7 +122,12 @@ impl Drop for SchedGuard {
 /// let s = describe_sched(CaptureSched::Mmcss, "Capture", "HIGHEST", Some(&Ok(3)));
 /// assert!(s.contains("mmcss(Capture) 已生效"));
 /// ```
-pub fn describe_sched(sched: CaptureSched, task: &str, priority: &str, mmcss: Option<&Result<u32, String>>) -> String {
+pub fn describe_sched(
+    sched: CaptureSched,
+    task: &str,
+    priority: &str,
+    mmcss: Option<&Result<u32, String>>,
+) -> String {
     if sched == CaptureSched::Default {
         return "default (线程优先级 HIGHEST，未用 MMCSS)".to_string();
     }
@@ -147,12 +160,16 @@ pub fn apply_capture_sched(sched: CaptureSched, task: &str) -> (SchedGuard, Stri
     #[cfg(windows)]
     {
         use windows::Win32::System::Threading::{
-            AvSetMmThreadCharacteristicsW, GetCurrentThread, GetThreadPriority, SetThreadPriority, THREAD_PRIORITY_TIME_CRITICAL,
+            AvSetMmThreadCharacteristicsW, GetCurrentThread, GetThreadPriority, SetThreadPriority,
+            THREAD_PRIORITY_TIME_CRITICAL,
         };
         use windows::core::PCWSTR;
         if sched == CaptureSched::Default {
             raise_thread_priority();
-            return (SchedGuard { mmcss: None }, describe_sched(sched, task, "", None));
+            return (
+                SchedGuard { mmcss: None },
+                describe_sched(sched, task, "", None),
+            );
         }
         let priority = if sched.uses_time_critical() {
             // SAFETY: 只修改当前线程的优先级。
@@ -182,7 +199,12 @@ pub fn apply_capture_sched(sched: CaptureSched, task: &str) -> (SchedGuard, Stri
         });
         // SAFETY: 只读取当前线程的优先级。
         let readback = unsafe { GetThreadPriority(GetCurrentThread()) };
-        let text = describe_sched(sched, task, &format!("{priority}（读回 {readback}）"), mmcss.as_ref());
+        let text = describe_sched(
+            sched,
+            task,
+            &format!("{priority}（读回 {readback}）"),
+            mmcss.as_ref(),
+        );
         (guard, text)
     }
     #[cfg(not(windows))]
@@ -230,9 +252,19 @@ mod tests {
         assert!(describe_sched(CaptureSched::Default, "Capture", "", None).starts_with("default"));
         let ok = describe_sched(CaptureSched::Mmcss, "Capture", "HIGHEST", Some(&Ok(7)));
         assert!(ok.starts_with("mmcss:") && ok.contains("mmcss(Capture) 已生效 (taskIndex=7)"));
-        let bad = describe_sched(CaptureSched::MmcssTimeCritical, "Games", "TIME_CRITICAL 已生效", Some(&Err("拒绝访问".into())));
+        let bad = describe_sched(
+            CaptureSched::MmcssTimeCritical,
+            "Games",
+            "TIME_CRITICAL 已生效",
+            Some(&Err("拒绝访问".into())),
+        );
         assert!(bad.contains("mmcss+timecritical") && bad.contains("mmcss(Games) 失败: 拒绝访问"));
-        let tc = describe_sched(CaptureSched::TimeCritical, "Capture", "TIME_CRITICAL 已生效", None);
+        let tc = describe_sched(
+            CaptureSched::TimeCritical,
+            "Capture",
+            "TIME_CRITICAL 已生效",
+            None,
+        );
         assert!(!tc.contains("mmcss("));
     }
 

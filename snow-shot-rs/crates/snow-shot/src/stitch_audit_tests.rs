@@ -26,7 +26,8 @@ type PixelFn<'a> = &'a dyn Fn(u32, u32) -> [u8; 4];
 
 /// 二维整数哈希（与库测试同款混合，带盐）。
 fn hash(x: u32, y: u32, salt: u32) -> u32 {
-    let mut h = x.wrapping_mul(0xc2b2_ae35) ^ y.wrapping_mul(0x27d4_eb2d) ^ salt.wrapping_mul(0x1656_67b1);
+    let mut h =
+        x.wrapping_mul(0xc2b2_ae35) ^ y.wrapping_mul(0x27d4_eb2d) ^ salt.wrapping_mul(0x1656_67b1);
     h ^= h >> 16;
     h = h.wrapping_mul(0x7feb_352d);
     h ^= h >> 15;
@@ -156,7 +157,15 @@ fn audit_01_duplicate_frames() {
     let (h, bytes) = canvas(&st);
     let exact = is_doc_prefix(&bytes, h, 0, &doc);
     let ok = h == FH + 300 && exact && branches(&d) == "FSSAS";
-    report("1", ok, &format!("branches={} height={h} expect={} bytes_equal={exact}", branches(&d), FH + 300));
+    report(
+        "1",
+        ok,
+        &format!(
+            "branches={} height={h} expect={} bytes_equal={exact}",
+            branches(&d),
+            FH + 300
+        ),
+    );
     assert!(ok);
 
     // 近似重复：右下角 1 像素抖动
@@ -164,13 +173,18 @@ fn audit_01_duplicate_frames() {
     let mut f1 = f0.clone();
     let last = f1.len() - 4;
     f1[last] ^= 0x10;
-    let (st, d) = raw_run(
-        vec![frame_of(W, FH, f0), frame_of(W, FH, f1)],
-        opts(),
-    );
+    let (st, d) = raw_run(vec![frame_of(W, FH, f0), frame_of(W, FH, f1)], opts());
     let (h2, _) = canvas(&st);
     let ok2 = h2 == FH;
-    report("1b", ok2, &format!("branches={} height={h2} stages={}", branches(&d), stages(&d)));
+    report(
+        "1b",
+        ok2,
+        &format!(
+            "branches={} height={h2} stages={}",
+            branches(&d),
+            stages(&d)
+        ),
+    );
     assert!(ok2);
 }
 
@@ -181,10 +195,21 @@ fn audit_02a_large_overlap() {
     let (st, d) = raw_run(vertical_frames(W, FH, &scrolls, &doc), opts());
     let (h, bytes) = canvas(&st);
     let exact = is_doc_prefix(&bytes, h, 0, &doc);
-    let offsets: Vec<i32> = d.iter().flatten().filter_map(|x| x.accepted_offset).collect();
+    let offsets: Vec<i32> = d
+        .iter()
+        .flatten()
+        .filter_map(|x| x.accepted_offset)
+        .collect();
     let all_240 = offsets.iter().all(|o| o.unsigned_abs() == STEP_30);
     let ok = exact && all_240 && h == FH + 11 * STEP_30 && branches(&d) == "FAAAAAAAAAAA";
-    report("2a", ok, &format!("branches={} height={h} offsets_abs_all_{STEP_30}={all_240} bytes_equal={exact}", branches(&d)));
+    report(
+        "2a",
+        ok,
+        &format!(
+            "branches={} height={h} offsets_abs_all_{STEP_30}={all_240} bytes_equal={exact}",
+            branches(&d)
+        ),
+    );
     assert!(ok);
 }
 
@@ -197,7 +222,11 @@ fn audit_02b_step_limits() {
     let (h, bytes) = canvas(&st);
     let exact = is_doc_prefix(&bytes, h, 0, &doc);
     let ok = exact && branches(&d) == "FAAAAA";
-    report("2b-0.5", ok, &format!("branches={} height={h} bytes_equal={exact}", branches(&d)));
+    report(
+        "2b-0.5",
+        ok,
+        &format!("branches={} height={h} bytes_equal={exact}", branches(&d)),
+    );
     assert!(ok);
 
     let fast = FH * 7 / 10;
@@ -207,7 +236,15 @@ fn audit_02b_step_limits() {
     let prefix = is_doc_prefix(&bytes, h, 0, &doc);
     let grew = h > FH;
     let ok = prefix;
-    report("2b-0.7", ok, &format!("branches={} height={h} (frame={FH}) prefix_ok={prefix} grew={grew} stages={}", branches(&d), stages(&d)));
+    report(
+        "2b-0.7",
+        ok,
+        &format!(
+            "branches={} height={h} (frame={FH}) prefix_ok={prefix} grew={grew} stages={}",
+            branches(&d),
+            stages(&d)
+        ),
+    );
     assert!(ok, "0.7 倍步长不允许产生错位内容");
 }
 
@@ -230,12 +267,23 @@ fn audit_03_single_channel_texture() {
     };
     let scrolls: Vec<u32> = (0..8).map(|i| i * STEP_30).collect();
     let expected_h = FH + 7 * STEP_30;
-    for (id, f) in [("3-G", &g_only as PixelFn<'_>), ("3-R-rgba", &r_only_rgba as PixelFn<'_>)] {
+    for (id, f) in [
+        ("3-G", &g_only as PixelFn<'_>),
+        ("3-R-rgba", &r_only_rgba as PixelFn<'_>),
+    ] {
         let (st, d) = raw_run(vertical_frames(W, FH, &scrolls, f), opts());
         let (h, bytes) = canvas(&st);
         let exact = is_doc_prefix(&bytes, h, 0, f);
         let ok = exact && h == expected_h;
-        report(id, ok, &format!("branches={} height={h} bytes_equal={exact} offsets={:?}", branches(&d), offsets(&d)));
+        report(
+            id,
+            ok,
+            &format!(
+                "branches={} height={h} bytes_equal={exact} offsets={:?}",
+                branches(&d),
+                offsets(&d)
+            ),
+        );
         assert!(ok, "{id}");
     }
     // 对照：BGRA 直接当 RGBA 喂库，R 权重被当成 B（77 -> 29），红色纹理会被判为无特征
@@ -244,7 +292,10 @@ fn audit_03_single_channel_texture() {
     report(
         "3-R-bgra-raw",
         h == expected_h,
-        &format!("已知限制(库按 RGBA 计亮度): branches={} height={h} expected={expected_h}", branches(&d)),
+        &format!(
+            "已知限制(库按 RGBA 计亮度): branches={} height={h} expected={expected_h}",
+            branches(&d)
+        ),
     );
     // 适配层：push_captured 先对调 R/B，红色纹理应当能拼
     let mut svc = StitchService::new();
@@ -260,7 +311,15 @@ fn audit_03_single_channel_texture() {
     let mut expected = render(W, 0, svc.height(), &r_only_bgra);
     crate::stitch_service::swap_red_blue(&mut expected);
     let ok = svc.height() == expected_h && rgba == expected;
-    report("3-R-adapter", ok, &format!("height={} expected={expected_h} bytes_equal={}", svc.height(), rgba == expected));
+    report(
+        "3-R-adapter",
+        ok,
+        &format!(
+            "height={} expected={expected_h} bytes_equal={}",
+            svc.height(),
+            rgba == expected
+        ),
+    );
     assert!(ok);
 }
 
@@ -278,7 +337,15 @@ fn audit_04_periodic_stripes() {
         let prefix = is_doc_prefix(&bytes, h, 0, &stripes);
         let correct = h == expected;
         let ok = prefix && h <= expected;
-        report(id, ok, &format!("step={step} branches={} height={h} expected={expected} correct={correct} stages={}", branches(&d), stages(&d)));
+        report(
+            id,
+            ok,
+            &format!(
+                "step={step} branches={} height={h} expected={expected} correct={correct} stages={}",
+                branches(&d),
+                stages(&d)
+            ),
+        );
         assert!(ok, "{id}: 不允许比期望更高（多贴内容）");
     }
 }
@@ -290,18 +357,36 @@ fn audit_05_flat_content() {
     let (st, d) = raw_run(vertical_frames(W, FH, &[0; 5], &white), opts());
     let (h, _) = canvas(&st);
     let ok = h == FH;
-    report("5a", ok, &format!("branches={} height={h} stages={}", branches(&d), stages(&d)));
+    report(
+        "5a",
+        ok,
+        &format!("branches={} height={h} stages={}", branches(&d), stages(&d)),
+    );
     assert!(ok);
 
     // 全白 + 文档第 1000 行处一条 2 像素黑线，随滚动移动
-    let line = |_x: u32, y: u32| if (1000..1002).contains(&y) { [0, 0, 0, 255] } else { [255, 255, 255, 255] };
+    let line = |_x: u32, y: u32| {
+        if (1000..1002).contains(&y) {
+            [0, 0, 0, 255]
+        } else {
+            [255, 255, 255, 255]
+        }
+    };
     let scrolls: Vec<u32> = (0..8).map(|i| i * STEP_30).collect();
     let (st, d) = raw_run(vertical_frames(W, FH, &scrolls, &line), opts());
     let (h, bytes) = canvas(&st);
     let prefix = is_doc_prefix(&bytes, h, 0, &line);
     let expected = FH + 7 * STEP_30;
     let ok = prefix && h <= expected;
-    report("5b", ok, &format!("branches={} height={h} expected={expected} prefix_ok={prefix} stages={}", branches(&d), stages(&d)));
+    report(
+        "5b",
+        ok,
+        &format!(
+            "branches={} height={h} expected={expected} prefix_ok={prefix} stages={}",
+            branches(&d),
+            stages(&d)
+        ),
+    );
     assert!(ok);
 
     // 竖向线性渐变（每行一个灰度，水平方向不变）
@@ -313,7 +398,15 @@ fn audit_05_flat_content() {
     let (h, bytes) = canvas(&st);
     let prefix = is_doc_prefix(&bytes, h, 0, &gradient);
     let ok = prefix && h <= expected;
-    report("5c", ok, &format!("branches={} height={h} expected={expected} prefix_ok={prefix} stages={}", branches(&d), stages(&d)));
+    report(
+        "5c",
+        ok,
+        &format!(
+            "branches={} height={h} expected={expected} prefix_ok={prefix} stages={}",
+            branches(&d),
+            stages(&d)
+        ),
+    );
     assert!(ok);
 }
 
@@ -325,7 +418,15 @@ fn audit_06a_reverse_scroll() {
     let (h, bytes) = canvas(&st);
     let exact = is_doc_prefix(&bytes, h, 700, &doc);
     let ok = exact && h == 900 + FH && branches(&d) == "FPPP";
-    report("6a", ok, &format!("branches={} height={h} expect={} bytes_equal={exact}", branches(&d), 900 + FH));
+    report(
+        "6a",
+        ok,
+        &format!(
+            "branches={} height={h} expect={} bytes_equal={exact}",
+            branches(&d),
+            900 + FH
+        ),
+    );
     assert!(ok);
 }
 
@@ -336,9 +437,19 @@ fn audit_06b_round_trip() {
     let (st, d) = raw_run(vertical_frames(W, FH, &scrolls, &doc), opts());
     let (h, bytes) = canvas(&st);
     let exact = is_doc_prefix(&bytes, h, 0, &doc);
-    let has_contained = d.iter().flatten().any(|x| x.branch == StitchBranch::Contained);
+    let has_contained = d
+        .iter()
+        .flatten()
+        .any(|x| x.branch == StitchBranch::Contained);
     let ok = exact && has_contained && h == 900 + FH;
-    report("6b", ok, &format!("branches={} height={h} bytes_equal={exact} contained={has_contained}", branches(&d)));
+    report(
+        "6b",
+        ok,
+        &format!(
+            "branches={} height={h} bytes_equal={exact} contained={has_contained}",
+            branches(&d)
+        ),
+    );
     assert!(ok);
 }
 
@@ -371,8 +482,18 @@ fn audit_06c_horizontal() {
             expected.extend_from_slice(&doc(x, y));
         }
     }
-    let exact = image.width() == total_w && image.height() == fh && image.pixels() == expected.as_slice();
-    report("6c", exact, &format!("branches={} size={}x{} expect={total_w}x{fh} bytes_equal={exact}", branches(&d), image.width(), image.height()));
+    let exact =
+        image.width() == total_w && image.height() == fh && image.pixels() == expected.as_slice();
+    report(
+        "6c",
+        exact,
+        &format!(
+            "branches={} size={}x{} expect={total_w}x{fh} bytes_equal={exact}",
+            branches(&d),
+            image.width(),
+            image.height()
+        ),
+    );
     assert!(exact);
 }
 
@@ -387,14 +508,26 @@ fn audit_07_small_and_mismatched_sizes() {
     assert!(a);
     // (b) 5x5 两帧不同
     let mut s = Stitcher::new(opts()).expect("options");
-    s.push(frame_of(5, 5, render(5, 0, 5, &doc))).expect("first");
+    s.push(frame_of(5, 5, render(5, 0, 5, &doc)))
+        .expect("first");
     let r = s.push(frame_of(5, 5, render(5, 1, 5, &doc)));
-    report("7b", r.is_ok(), &format!("result_ok={} branch={:?}", r.is_ok(), r.as_ref().ok().and_then(|d| d.as_ref().map(|d| d.branch))));
+    report(
+        "7b",
+        r.is_ok(),
+        &format!(
+            "result_ok={} branch={:?}",
+            r.is_ok(),
+            r.as_ref().ok().and_then(|d| d.as_ref().map(|d| d.branch))
+        ),
+    );
     assert!(r.is_ok());
     // (c) 第二帧尺寸不同
     let mut s = Stitcher::new(opts()).expect("options");
-    s.push(frame_of(40, 40, render(40, 0, 40, &doc))).expect("first");
-    let e = s.push(frame_of(41, 40, render(41, 0, 40, &doc))).unwrap_err();
+    s.push(frame_of(40, 40, render(40, 0, 40, &doc)))
+        .expect("first");
+    let e = s
+        .push(frame_of(41, 40, render(41, 0, 40, &doc)))
+        .unwrap_err();
     let c = matches!(e, StitchError::ViewportMismatch { .. });
     report("7c", c, &format!("err={e}"));
     assert!(c);
@@ -402,11 +535,22 @@ fn audit_07_small_and_mismatched_sizes() {
     let scrolls: Vec<u32> = (0..6).collect();
     let (st, d) = raw_run(vertical_frames(32, 6, &scrolls, &doc), opts());
     let h = st.image().expect("画布").height();
-    report("7d", true, &format!("branches={} height={h} (no panic, overflow-checks on)", branches(&d)));
+    report(
+        "7d",
+        true,
+        &format!(
+            "branches={} height={h} (no panic, overflow-checks on)",
+            branches(&d)
+        ),
+    );
 }
 
 /// 固定页眉 / 页脚 / 干扰共用：在滚动内容上叠一块固定位图。
-fn with_fixed(scroll_doc: PixelFn<'_>, header: u32, footer: u32) -> impl Fn(u32, u32, u32) -> [u8; 4] + '_ {
+fn with_fixed(
+    scroll_doc: PixelFn<'_>,
+    header: u32,
+    footer: u32,
+) -> impl Fn(u32, u32, u32) -> [u8; 4] + '_ {
     move |x, y_in_frame, scroll| {
         if y_in_frame < header {
             noise_px(x, y_in_frame, FIXED_SALT)
@@ -419,7 +563,12 @@ fn with_fixed(scroll_doc: PixelFn<'_>, header: u32, footer: u32) -> impl Fn(u32,
 }
 
 /// 用带固定区的帧序列跑一遍，返回画布高度、画布字节与决策。
-fn fixed_run(header: u32, footer: u32, step: u32, count: u32) -> (u32, Vec<u8>, Vec<Option<StitchDecision>>) {
+fn fixed_run(
+    header: u32,
+    footer: u32,
+    step: u32,
+    count: u32,
+) -> (u32, Vec<u8>, Vec<Option<StitchDecision>>) {
     let f = with_fixed(&doc, header, footer);
     let frames: Vec<Frame> = (0..count)
         .map(|i| {
@@ -449,12 +598,24 @@ fn audit_08a_fixed_header() {
     let mut expected = Vec::new();
     for y in 0..h {
         for x in 0..W {
-            expected.extend_from_slice(&if y < header { noise_px(x, y, FIXED_SALT) } else { doc(x, y) });
+            expected.extend_from_slice(&if y < header {
+                noise_px(x, y, FIXED_SALT)
+            } else {
+                doc(x, y)
+            });
         }
     }
     let exact = bytes == expected;
     let ok = occurrences == 1 && exact;
-    report("8a", ok, &format!("branches={} height={h} expect={} header_occurrences={occurrences} bytes_equal={exact}", branches(&d), FH + 9 * STEP_30));
+    report(
+        "8a",
+        ok,
+        &format!(
+            "branches={} height={h} expect={} header_occurrences={occurrences} bytes_equal={exact}",
+            branches(&d),
+            FH + 9 * STEP_30
+        ),
+    );
     assert!(ok);
 }
 
@@ -464,9 +625,18 @@ fn audit_08b_fixed_footer() {
     for (id, pct) in [("8b-20", 20u32), ("8b-30", 30u32)] {
         let footer = FH * pct / 100;
         let (h, bytes, d) = fixed_run(0, footer, STEP_30, 10);
-        let footer_row0: Vec<u8> = (0..W).flat_map(|x| noise_px(x, 0, FIXED_SALT + 1)).collect();
+        let footer_row0: Vec<u8> = (0..W)
+            .flat_map(|x| noise_px(x, 0, FIXED_SALT + 1))
+            .collect();
         let occurrences = count_row(&bytes, W, &footer_row0);
-        report(id, pct != 20 || occurrences == 1, &format!("branches={} height={h} footer_occurrences={occurrences} (expect 1)", branches(&d)));
+        report(
+            id,
+            pct != 20 || occurrences == 1,
+            &format!(
+                "branches={} height={h} footer_occurrences={occurrences} (expect 1)",
+                branches(&d)
+            ),
+        );
         if pct == 20 {
             assert_eq!(occurrences, 1, "20% 页脚应只出现一次");
         }
@@ -513,7 +683,15 @@ fn audit_08c_cursor_and_scrollbar() {
         }
     }
     let ok = equal && h == FH + 9 * STEP_30;
-    report("8c", ok, &format!("branches={} height={h} expect={} masked_equal={equal}", branches(&d), FH + 9 * STEP_30));
+    report(
+        "8c",
+        ok,
+        &format!(
+            "branches={} height={h} expect={} masked_equal={equal}",
+            branches(&d),
+            FH + 9 * STEP_30
+        ),
+    );
     assert!(ok);
 }
 
@@ -525,7 +703,16 @@ fn audit_08d_big_shift_with_header() {
     let (h, bytes, d) = fixed_run(header, 0, step, 6);
     let header_row0: Vec<u8> = (0..W).flat_map(|x| noise_px(x, 0, FIXED_SALT)).collect();
     let occurrences = count_row(&bytes, W, &header_row0);
-    report("8d", true, &format!("branches={} height={h} expected_if_all_ok={} header_occurrences={occurrences} stages={}", branches(&d), FH + 5 * step, stages(&d)));
+    report(
+        "8d",
+        true,
+        &format!(
+            "branches={} height={h} expected_if_all_ok={} header_occurrences={occurrences} stages={}",
+            branches(&d),
+            FH + 5 * step,
+            stages(&d)
+        ),
+    );
     assert!(bytes.len() == h as usize * W as usize * BPP);
 }
 
@@ -544,7 +731,11 @@ fn audit_09b_height_cap() {
         assert!(svc.height() <= 2000);
     }
     let ok = limit > 0 && svc.height() <= 2000;
-    report("9b", ok, &format!("cap=2000 final_height={} limit_hits={limit}", svc.height()));
+    report(
+        "9b",
+        ok,
+        &format!("cap=2000 final_height={} limit_hits={limit}", svc.height()),
+    );
     assert!(ok);
 }
 
@@ -556,23 +747,52 @@ fn audit_10a_failure_visibility() {
     silent.push(far(0)).expect("first");
     let silent_result = silent.push(far(1)).expect("push");
     let a = silent_result.is_none();
-    report("10a-a", a, &format!("record_decisions=false push()=Ok({}) height={:?}", if a { "None" } else { "Some" }, silent.image_dimensions()));
+    report(
+        "10a-a",
+        a,
+        &format!(
+            "record_decisions=false push()=Ok({}) height={:?}",
+            if a { "None" } else { "Some" },
+            silent.image_dimensions()
+        ),
+    );
     assert!(a);
 
     let (_, d) = raw_run(vec![far(0), far(1)], opts());
-    let b = d[1].as_ref().is_some_and(|x| x.branch == StitchBranch::NoMovement);
-    let stage = d[1].as_ref().and_then(|x| x.motion_diagnostics.as_ref()).map(|m| m.stage);
-    report("10a-b", b, &format!("record_decisions=true branch={} stage={stage:?}", branches(&d)));
+    let b = d[1]
+        .as_ref()
+        .is_some_and(|x| x.branch == StitchBranch::NoMovement);
+    let stage = d[1]
+        .as_ref()
+        .and_then(|x| x.motion_diagnostics.as_ref())
+        .map(|m| m.stage);
+    report(
+        "10a-b",
+        b,
+        &format!(
+            "record_decisions=true branch={} stage={stage:?}",
+            branches(&d)
+        ),
+    );
     assert!(b);
     assert!(matches!(
         stage,
-        Some(MotionStage::NoMatches | MotionStage::LowConfidence | MotionStage::SceneCut | MotionStage::EmptyDescriptors | MotionStage::NoCandidates)
+        Some(
+            MotionStage::NoMatches
+                | MotionStage::LowConfidence
+                | MotionStage::SceneCut
+                | MotionStage::EmptyDescriptors
+                | MotionStage::NoCandidates
+        )
     ));
 
     // 适配层把它变成可见事件
     let mut svc = StitchService::new();
-    svc.push_frame(W, FH, render(W, 0, FH, &doc)).expect("first");
-    let out = svc.push_frame(W, FH, render(W, 7000, FH, &doc)).expect("push");
+    svc.push_frame(W, FH, render(W, 0, FH, &doc))
+        .expect("first");
+    let out = svc
+        .push_frame(W, FH, render(W, 7000, FH, &doc))
+        .expect("push");
     let visible = matches!(out, FrameOutcome::Rejected(_));
     report("10a-adapter", visible, &format!("outcome={out:?}"));
     assert!(visible);
@@ -591,9 +811,19 @@ fn audit_10b_content_jump() {
     let (h, bytes) = canvas(&st);
     let prefix = is_doc_prefix(&bytes, h, 0, &doc);
     let recovered = h == FH + 1200;
-    let junk_rejected = d[junk_index].as_ref().is_some_and(|x| x.branch == StitchBranch::NoMovement);
+    let junk_rejected = d[junk_index]
+        .as_ref()
+        .is_some_and(|x| x.branch == StitchBranch::NoMovement);
     let ok = prefix && junk_rejected;
-    report("10b", ok, &format!("branches={} height={h} expected_if_recovered={} recovered={recovered} prefix_ok={prefix} junk_rejected={junk_rejected}", branches(&d), FH + 1200));
+    report(
+        "10b",
+        ok,
+        &format!(
+            "branches={} height={h} expected_if_recovered={} recovered={recovered} prefix_ok={prefix} junk_rejected={junk_rejected}",
+            branches(&d),
+            FH + 1200
+        ),
+    );
     assert!(ok);
 }
 
@@ -631,7 +861,13 @@ fn audit_10c_pixel_formats() {
     let bgra_exact = is_doc_prefix(&b_bgra, h_bgra, 0, &doc);
     let rgba_exact = is_doc_prefix(&b_rgba, h_rgba, 0, &rgba_doc);
     let ok = h_rgba == h_rgb && h_rgb == h_bgra && bgra_exact && rgba_exact;
-    report("10c", ok, &format!("heights rgba={h_rgba} rgb={h_rgb} bgra={h_bgra} rgba_exact={rgba_exact} bgra_exact={bgra_exact}"));
+    report(
+        "10c",
+        ok,
+        &format!(
+            "heights rgba={h_rgba} rgb={h_rgb} bgra={h_bgra} rgba_exact={rgba_exact} bgra_exact={bgra_exact}"
+        ),
+    );
     assert!(ok);
 }
 
@@ -659,13 +895,20 @@ fn audit_10d_strided_input() {
     let (ha, ba) = canvas(&st_a);
     let (hb, bb) = canvas(&st_b);
     let ok = ha == hb && ba == bb;
-    report("10d", ok, &format!("heights strided={ha} packed={hb} bytes_equal={}", ba == bb));
+    report(
+        "10d",
+        ok,
+        &format!("heights strided={ha} packed={hb} bytes_equal={}", ba == bb),
+    );
     assert!(ok);
 }
 
 /// 读取环境变量里的整数，缺省用默认值。
 fn env_u32(name: &str, default: u32) -> u32 {
-    std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 
 /// 探针 9a / 9c：长序列峰值内存与每帧耗时（`--ignored`，单独进程运行，模式由 `STITCH_PROBE_MODE` 指定）。
@@ -677,7 +920,10 @@ fn env_u32(name: &str, default: u32) -> u32 {
 fn probe_09a_peak_memory_and_timing() {
     use snow_platform::process_mem::current_process_memory;
     let mode = std::env::var("STITCH_PROBE_MODE").unwrap_or_else(|_| "stream".into());
-    let (w, fh) = (env_u32("STITCH_PROBE_W", 1920), env_u32("STITCH_PROBE_H", 1080));
+    let (w, fh) = (
+        env_u32("STITCH_PROBE_W", 1920),
+        env_u32("STITCH_PROBE_H", 1080),
+    );
     let frames = env_u32("STITCH_PROBE_FRAMES", 40);
     let step = fh * 3 / 10;
     let base = current_process_memory().expect("内存快照");
@@ -732,7 +978,12 @@ fn probe_09a_peak_memory_and_timing() {
     let end = current_process_memory().expect("内存快照");
     let total_ms = started.elapsed().as_secs_f64() * 1000.0;
     times_ms.sort_by(|a, b| a.total_cmp(b));
-    let pct = |p: f64| times_ms.get(((times_ms.len() as f64 - 1.0) * p) as usize).copied().unwrap_or(0.0);
+    let pct = |p: f64| {
+        times_ms
+            .get(((times_ms.len() as f64 - 1.0) * p) as usize)
+            .copied()
+            .unwrap_or(0.0)
+    };
     let canvas_mb = (w as f64 * height as f64 * 4.0) / 1048576.0;
     let mb = |v: u64| v as f64 / 1048576.0;
     println!(
@@ -750,5 +1001,9 @@ fn probe_09a_peak_memory_and_timing() {
 
 /// 决策序列里被接受的位移列表（诊断用）。
 fn offsets(decisions: &[Option<StitchDecision>]) -> Vec<i32> {
-    decisions.iter().flatten().filter_map(|d| d.accepted_offset).collect()
+    decisions
+        .iter()
+        .flatten()
+        .filter_map(|d| d.accepted_offset)
+        .collect()
 }

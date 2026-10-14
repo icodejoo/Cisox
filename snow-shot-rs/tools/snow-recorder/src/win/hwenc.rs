@@ -9,8 +9,8 @@
 use std::ffi::c_void;
 use std::path::PathBuf;
 use std::ptr;
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use ffmpeg::ffi::*;
 use ffmpeg_next as ffmpeg;
@@ -23,8 +23,8 @@ pub type HwResult<T> = Result<T, String>;
 
 use crate::audio::AudioSink;
 use crate::pipeline::{EncoderStats, VideoEncoder};
-use crate::win::aacsink::{AacEncoder, AacSink};
 use crate::settings::HwCodec;
+use crate::win::aacsink::{AacEncoder, AacSink};
 
 /// 帧池默认容量（送编中 2~3 帧 + 编码器驱动引用 + 正在合成 1 帧，再留出吸收编码耗时尖峰的余量）。
 pub const DEFAULT_POOL_CAPACITY: usize = 12;
@@ -39,7 +39,11 @@ pub const SURFACE_ALIGN: u32 = 16;
 
 /// 把 FFmpeg 返回码转成错误文本。
 fn check(code: i32, what: &str) -> HwResult<()> {
-    if code < 0 { Err(format!("{what}: {}", ffmpeg::Error::from(code))) } else { Ok(()) }
+    if code < 0 {
+        Err(format!("{what}: {}", ffmpeg::Error::from(code)))
+    } else {
+        Ok(())
+    }
 }
 
 /// AVBufferRef 的所有者（析构时解引用）。
@@ -48,14 +52,22 @@ struct Buf(*mut AVBufferRef);
 impl Buf {
     /// 包装非空指针。
     fn new(p: *mut AVBufferRef, what: &str) -> HwResult<Self> {
-        if p.is_null() { Err(format!("{what} 分配失败")) } else { Ok(Self(p)) }
+        if p.is_null() {
+            Err(format!("{what} 分配失败"))
+        } else {
+            Ok(Self(p))
+        }
     }
 
     /// 新增一份引用。
     fn reference(&self) -> HwResult<*mut AVBufferRef> {
         // SAFETY: self.0 是持有中的有效 AVBufferRef，ref 只增加引用计数。
         let r = unsafe { av_buffer_ref(self.0) };
-        if r.is_null() { Err("av_buffer_ref 失败".into()) } else { Ok(r) }
+        if r.is_null() {
+            Err("av_buffer_ref 失败".into())
+        } else {
+            Ok(r)
+        }
     }
 }
 
@@ -167,7 +179,12 @@ impl HwContext {
     /// # 返回
     /// 上下文；FFmpeg 没编进该编码器或初始化失败返回原因。
     #[cfg(test)]
-    pub fn new(device: SharedDevice, size: (u32, u32), capacity: usize, codec: HwCodec) -> HwResult<Self> {
+    pub fn new(
+        device: SharedDevice,
+        size: (u32, u32),
+        capacity: usize,
+        codec: HwCodec,
+    ) -> HwResult<Self> {
         Self::with_align(device, size, capacity, codec, SURFACE_ALIGN, true)
     }
 
@@ -176,7 +193,14 @@ impl HwContext {
     /// # 参数
     /// - `align`：纹理宽高向上对齐的倍数。
     /// - `require_encoder`：是否要求 FFmpeg 编进了 `codec` 对应的编码器（Media Foundation 只借帧池，传 `false`）。
-    pub fn with_align(device: SharedDevice, size: (u32, u32), capacity: usize, codec: HwCodec, align: u32, require_encoder: bool) -> HwResult<Self> {
+    pub fn with_align(
+        device: SharedDevice,
+        size: (u32, u32),
+        capacity: usize,
+        codec: HwCodec,
+        align: u32,
+        require_encoder: bool,
+    ) -> HwResult<Self> {
         let codec_name = codec.ffmpeg_name();
         ffmpeg::init().map_err(|e| e.to_string())?;
         // 先探测编码器是否编进了 FFmpeg，缺失时不必创建设备与帧池
@@ -184,7 +208,10 @@ impl HwContext {
             return Err(format!("FFmpeg 没有编进 {codec_name}"));
         }
         // SAFETY: 只分配未初始化的设备上下文，空指针由 `Buf::new` 拒绝。
-        let device_ref = Buf::new(unsafe { av_hwdevice_ctx_alloc(AVHWDeviceType::AV_HWDEVICE_TYPE_D3D11VA) }, "hwdevice")?;
+        let device_ref = Buf::new(
+            unsafe { av_hwdevice_ctx_alloc(AVHWDeviceType::AV_HWDEVICE_TYPE_D3D11VA) },
+            "hwdevice",
+        )?;
         // SAFETY: device_ref 刚分配且未初始化；字段按 FFmpeg 约定填写后再 init。
         unsafe {
             let context = (*device_ref.0).data.cast::<AVHWDeviceContext>();
@@ -206,8 +233,10 @@ impl HwContext {
             let context = (*native.0).data.cast::<AVHWFramesContext>();
             (*context).format = AVPixelFormat::AV_PIX_FMT_D3D11;
             (*context).sw_format = AVPixelFormat::AV_PIX_FMT_NV12;
-            (*context).width = i32::try_from(size.0.div_ceil(align) * align).map_err(|e| e.to_string())?;
-            (*context).height = i32::try_from(size.1.div_ceil(align) * align).map_err(|e| e.to_string())?;
+            (*context).width =
+                i32::try_from(size.0.div_ceil(align) * align).map_err(|e| e.to_string())?;
+            (*context).height =
+                i32::try_from(size.1.div_ceil(align) * align).map_err(|e| e.to_string())?;
             // 每帧独立纹理，避免 AMF 数组索引元数据共享。
             (*context).initial_pool_size = 0;
             let d3d = (*context).hwctx.cast::<AVD3D11VAFramesContext>();
@@ -218,7 +247,14 @@ impl HwContext {
             let mut qsv = ptr::null_mut();
             // SAFETY: 输出指针指向局部变量，device_ref 已初始化。
             check(
-                unsafe { av_hwdevice_ctx_create_derived(&mut qsv, AVHWDeviceType::AV_HWDEVICE_TYPE_QSV, device_ref.0, 0) },
+                unsafe {
+                    av_hwdevice_ctx_create_derived(
+                        &mut qsv,
+                        AVHWDeviceType::AV_HWDEVICE_TYPE_QSV,
+                        device_ref.0,
+                        0,
+                    )
+                },
                 "派生 QSV 设备",
             )?;
             let qsv = Buf::new(qsv, "QSV 设备")?;
@@ -266,14 +302,20 @@ impl HwContext {
 
     /// 编码器输入像素格式。
     fn pixel_format(&self) -> ffmpeg::format::Pixel {
-        if self.mapped.is_some() { AVPixelFormat::AV_PIX_FMT_QSV.into() } else { AVPixelFormat::AV_PIX_FMT_D3D11.into() }
+        if self.mapped.is_some() {
+            AVPixelFormat::AV_PIX_FMT_QSV.into()
+        } else {
+            AVPixelFormat::AV_PIX_FMT_D3D11.into()
+        }
     }
 
     /// 从池中取一张 NV12 表面；池耗尽返回 `None`（调用方丢帧）。
     pub fn allocate(&self) -> HwResult<Option<Surface>> {
         if self
             .outstanding
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| (n < self.capacity).then_some(n + 1))
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                (n < self.capacity).then_some(n + 1)
+            })
             .is_err()
         {
             return Ok(None);
@@ -289,7 +331,13 @@ impl HwContext {
         }
         // SAFETY: permit 指向有效 Permit，释放回调负责销毁。
         let reference = unsafe {
-            av_buffer_create(permit, size_of::<Permit>(), Some(free_permit), ptr::null_mut(), 0)
+            av_buffer_create(
+                permit,
+                size_of::<Permit>(),
+                Some(free_permit),
+                ptr::null_mut(),
+                0,
+            )
         };
         if reference.is_null() {
             // SAFETY: 引用创建失败，许可仍归此处所有。
@@ -303,10 +351,16 @@ impl HwContext {
         // SAFETY: data[0] 是 D3D11 纹理指针，data[1] 是数组切片号（D3D11VA 约定）。
         let (texture, slice) = unsafe {
             let raw = (*native.as_ptr()).data[0].cast::<c_void>();
-            let texture = ID3D11Texture2D::from_raw_borrowed(&raw).cloned().ok_or("帧缺少 D3D11 纹理")?;
+            let texture = ID3D11Texture2D::from_raw_borrowed(&raw)
+                .cloned()
+                .ok_or("帧缺少 D3D11 纹理")?;
             (texture, (*native.as_ptr()).data[1] as usize as u32)
         };
-        Ok(Some(Surface { native, texture, slice }))
+        Ok(Some(Surface {
+            native,
+            texture,
+            slice,
+        }))
     }
 
     /// 预热帧池：先取出再放回 `count` 张表面，让驱动提前分配纹理（首次分配 NV12 纹理可能耗时数十毫秒，
@@ -332,17 +386,26 @@ impl HwContext {
 
     /// 把表面转换成可送编码器的帧（QSV 需映射）。
     fn encode_frame(&self, surface: Surface) -> HwResult<ffmpeg::frame::Video> {
-        let Some(mapped) = &self.mapped else { return Ok(surface.native) };
+        let Some(mapped) = &self.mapped else {
+            return Ok(surface.native);
+        };
         let mut out = ffmpeg::frame::Video::empty();
         // SAFETY: out 是空帧；映射会持有源帧引用直到 out 释放。
         unsafe {
             (*out.as_mut_ptr()).format = AVPixelFormat::AV_PIX_FMT_QSV as i32;
             (*out.as_mut_ptr()).hw_frames_ctx = mapped.reference()?;
             check(
-                av_hwframe_map(out.as_mut_ptr(), surface.native.as_ptr(), AV_HWFRAME_MAP_READ as i32 | AV_HWFRAME_MAP_DIRECT as i32),
+                av_hwframe_map(
+                    out.as_mut_ptr(),
+                    surface.native.as_ptr(),
+                    AV_HWFRAME_MAP_READ as i32 | AV_HWFRAME_MAP_DIRECT as i32,
+                ),
                 "hwframe 映射",
             )?;
-            check(av_frame_copy_props(out.as_mut_ptr(), surface.native.as_ptr()), "复制帧属性")?;
+            check(
+                av_frame_copy_props(out.as_mut_ptr(), surface.native.as_ptr()),
+                "复制帧属性",
+            )?;
         }
         Ok(out)
     }
@@ -400,7 +463,9 @@ impl<T> DurationStitcher<T> {
     /// assert_eq!(s.push(3, "b"), Some(("a", 3)));
     /// ```
     pub fn push(&mut self, pts: i64, item: T) -> Option<(T, i64)> {
-        self.held.replace((pts, item)).map(|(p, t)| (t, (pts - p).max(1)))
+        self.held
+            .replace((pts, item))
+            .map(|(p, t)| (t, (pts - p).max(1)))
     }
 
     /// 结束：吐出最后一项及其时长。
@@ -531,9 +596,14 @@ impl HwEncoder {
     /// 编码器；编码器缺失/打开失败（含 AAC）返回原因。
     pub fn open_with_audio(ctx: Arc<HwContext>, cfg: &HwConfig, audio: bool) -> HwResult<Self> {
         ffmpeg::init().map_err(|e| e.to_string())?;
-        let codec = ffmpeg::encoder::find_by_name(ctx.codec_name()).ok_or_else(|| format!("FFmpeg 缺少 {}", ctx.codec_name()))?;
-        let mut output = ffmpeg::format::output(&cfg.path).map_err(|e| format!("创建输出失败 {}: {e}", cfg.path.display()))?;
-        let global_header = output.format().flags().contains(ffmpeg::format::Flags::GLOBAL_HEADER);
+        let codec = ffmpeg::encoder::find_by_name(ctx.codec_name())
+            .ok_or_else(|| format!("FFmpeg 缺少 {}", ctx.codec_name()))?;
+        let mut output = ffmpeg::format::output(&cfg.path)
+            .map_err(|e| format!("创建输出失败 {}: {e}", cfg.path.display()))?;
+        let global_header = output
+            .format()
+            .flags()
+            .contains(ffmpeg::format::Flags::GLOBAL_HEADER);
         let fps = i32::try_from(cfg.fps).map_err(|e| e.to_string())?;
         let mut video = ffmpeg::codec::context::Context::new_with_codec(codec)
             .encoder()
@@ -548,7 +618,11 @@ impl HwEncoder {
         // SAFETY: 编码器上下文尚未打开；引用计数的硬件上下文交给它持有。
         unsafe {
             let c = video.as_mut_ptr();
-            (*c).hw_device_ctx = ctx.qsv_device.as_ref().unwrap_or(&ctx.device_ref).reference()?;
+            (*c).hw_device_ctx = ctx
+                .qsv_device
+                .as_ref()
+                .unwrap_or(&ctx.device_ref)
+                .reference()?;
             (*c).hw_frames_ctx = ctx.mapped.as_ref().unwrap_or(&ctx.native).reference()?;
             (*c).max_b_frames = 0;
             (*c).color_range = AVColorRange::AVCOL_RANGE_MPEG;
@@ -563,7 +637,9 @@ impl HwEncoder {
             .open_as_with(codec, encoder_options(ctx.codec, cfg))
             .map_err(|e| format!("打开 {} 失败: {e}", ctx.codec_name()))?;
         let stream_index = {
-            let mut stream = output.add_stream(codec).map_err(|e| format!("添加视频轨失败: {e}"))?;
+            let mut stream = output
+                .add_stream(codec)
+                .map_err(|e| format!("添加视频轨失败: {e}"))?;
             stream.set_time_base(ffmpeg::Rational(1, fps));
             stream.set_rate(ffmpeg::Rational(fps, 1));
             stream.set_avg_frame_rate(ffmpeg::Rational(fps, 1));
@@ -574,7 +650,9 @@ impl HwEncoder {
             let aac = AacEncoder::open(global_header)?;
             let codec = aac.codec().ok_or("AAC 编码器缺少编解码器信息")?;
             let index = {
-                let mut stream = output.add_stream(codec).map_err(|e| format!("添加音频轨失败: {e}"))?;
+                let mut stream = output
+                    .add_stream(codec)
+                    .map_err(|e| format!("添加音频轨失败: {e}"))?;
                 stream.set_time_base(ffmpeg::Rational(1, crate::audio::SAMPLE_RATE as i32));
                 stream.set_parameters(aac.encoder());
                 stream.index()
@@ -583,14 +661,26 @@ impl HwEncoder {
         } else {
             None
         };
-        output.write_header().map_err(|e| format!("写文件头失败: {e}"))?;
-        let stream_time_base = output.stream(stream_index).map(|s| s.time_base()).ok_or("写头后视频轨丢失")?;
+        output
+            .write_header()
+            .map_err(|e| format!("写文件头失败: {e}"))?;
+        let stream_time_base = output
+            .stream(stream_index)
+            .map(|s| s.time_base())
+            .ok_or("写头后视频轨丢失")?;
         let audio_time_base = match &aac {
-            Some((_, index)) => Some(output.stream(*index).map(|s| s.time_base()).ok_or("写头后音频轨丢失")?),
+            Some((_, index)) => Some(
+                output
+                    .stream(*index)
+                    .map(|s| s.time_base())
+                    .ok_or("写头后音频轨丢失")?,
+            ),
             None => None,
         };
         let output = Arc::new(Mutex::new(output));
-        let audio = aac.zip(audio_time_base).map(|((enc, index), tb)| AacSink::new(enc, Arc::clone(&output), index, tb));
+        let audio = aac
+            .zip(audio_time_base)
+            .map(|((enc, index), tb)| AacSink::new(enc, Arc::clone(&output), index, tb));
         Ok(Self {
             ctx,
             encoder,
@@ -624,13 +714,17 @@ impl HwEncoder {
             Ok(()) => {}
             Err(e) if is_eagain(&e) => {
                 self.drain()?;
-                self.encoder.send_frame(&frame).map_err(|e| format!("送帧重试失败: {e}"))?;
+                self.encoder
+                    .send_frame(&frame)
+                    .map_err(|e| format!("送帧重试失败: {e}"))?;
             }
             Err(e) => return Err(format!("送帧失败: {e}")),
         }
         self.stats.frames += 1;
         if self.stats.send_ms.len() < STAT_SAMPLE_LIMIT {
-            self.stats.send_ms.push(started.elapsed().as_secs_f32() * 1000.0);
+            self.stats
+                .send_ms
+                .push(started.elapsed().as_secs_f32() * 1000.0);
         }
         self.drain()
     }
@@ -659,7 +753,9 @@ impl HwEncoder {
         packet.set_stream(self.stream_index);
         packet.rescale_ts(self.encoder.time_base(), self.stream_time_base);
         let mut output = self.output.lock().map_err(|_| "封装锁已损坏".to_string())?;
-        packet.write_interleaved(&mut output).map_err(|e| format!("写包失败: {e}"))?;
+        packet
+            .write_interleaved(&mut output)
+            .map_err(|e| format!("写包失败: {e}"))?;
         Ok(())
     }
 
@@ -668,12 +764,18 @@ impl HwEncoder {
     /// # 参数
     /// - `end_pts`：排他终点槽号（末帧时长 = 终点 - 末帧 pts）。
     pub fn finish_stream(mut self, end_pts: i64) -> HwResult<HwStats> {
-        self.encoder.send_eof().map_err(|e| format!("送 EOF 失败: {e}"))?;
+        self.encoder
+            .send_eof()
+            .map_err(|e| format!("送 EOF 失败: {e}"))?;
         self.drain()?;
         if let Some((last, duration)) = self.stitcher.finish(end_pts) {
             self.write(last, duration)?;
         }
-        self.output.lock().map_err(|_| "封装锁已损坏".to_string())?.write_trailer().map_err(|e| format!("写文件尾失败: {e}"))?;
+        self.output
+            .lock()
+            .map_err(|_| "封装锁已损坏".to_string())?
+            .write_trailer()
+            .map_err(|e| format!("写文件尾失败: {e}"))?;
         Ok(self.stats)
     }
 
@@ -696,7 +798,10 @@ impl VideoEncoder for HwEncoder {
     /// 冲刷编码器、写末包与文件尾。
     fn finish(self, end_pts: i64) -> Result<EncoderStats, String> {
         let stats = self.finish_stream(end_pts)?;
-        Ok(EncoderStats { frames: stats.frames, send_ms: stats.send_ms })
+        Ok(EncoderStats {
+            frames: stats.frames,
+            send_ms: stats.send_ms,
+        })
     }
 }
 
@@ -754,7 +859,15 @@ mod tests {
 
     /// 构造测试配置。
     fn config() -> HwConfig {
-        HwConfig { path: PathBuf::from("a.mp4"), width: 64, height: 64, fps: 60, quality: 20, async_depth: 2, preset: "veryfast".into() }
+        HwConfig {
+            path: PathBuf::from("a.mp4"),
+            width: 64,
+            height: 64,
+            fps: 60,
+            quality: 20,
+            async_depth: 2,
+            preset: "veryfast".into(),
+        }
     }
 
     /// NVENC 选项：恒定 QP、超低延迟调优、无前瞻/无 B 帧，且不带 QSV/AMF 专属项。
@@ -787,7 +900,10 @@ mod tests {
     #[test]
     fn codec_mapping_matches_snow_d3d11() {
         for codec in [HwCodec::Qsv, HwCodec::Nvenc, HwCodec::Amf] {
-            assert_eq!(snow_d3d11::h264_encoder(codec.vendor()), Some(codec.ffmpeg_name()));
+            assert_eq!(
+                snow_d3d11::h264_encoder(codec.vendor()),
+                Some(codec.ffmpeg_name())
+            );
         }
     }
 }

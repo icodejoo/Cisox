@@ -248,7 +248,19 @@ pub struct Rec {
 impl Rec {
     /// 创建只带时刻的空记录。
     fn new(event: Event, thread: Thread, t_ns: i64) -> Self {
-        Self { t_ns, present_ns: NONE, cap_id: 0, slot: NONE, n: 0, dur_us: 0, event, thread, src: 0, code: 0, x: [0; 6] }
+        Self {
+            t_ns,
+            present_ns: NONE,
+            cap_id: 0,
+            slot: NONE,
+            n: 0,
+            dur_us: 0,
+            event,
+            thread,
+            src: 0,
+            code: 0,
+            x: [0; 6],
+        }
     }
 }
 
@@ -306,8 +318,21 @@ impl Tracer {
     /// - `path`：输出 CSV 路径。
     pub fn new(path: PathBuf) -> Self {
         let origin = Instant::now();
-        let origin_unix_us = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| i64::try_from(d.as_micros()).unwrap_or(i64::MAX));
-        Self { path, origin, origin_unix_us, shared: Mutex::new(Vec::with_capacity(CAPACITY_SHARED)), merged: Mutex::new(Vec::new()), overflow: AtomicU64::new(0), notes: Mutex::new(Vec::new()), slow_iter_us: DEFAULT_SLOW_ITER_US, poll: false, poll_overflow: AtomicU64::new(0) }
+        let origin_unix_us = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| i64::try_from(d.as_micros()).unwrap_or(i64::MAX));
+        Self {
+            path,
+            origin,
+            origin_unix_us,
+            shared: Mutex::new(Vec::with_capacity(CAPACITY_SHARED)),
+            merged: Mutex::new(Vec::new()),
+            overflow: AtomicU64::new(0),
+            notes: Mutex::new(Vec::new()),
+            slow_iter_us: DEFAULT_SLOW_ITER_US,
+            poll: false,
+            poll_overflow: AtomicU64::new(0),
+        }
     }
 
     /// 开关逐调用追踪（`poll`/`release` 事件）。
@@ -355,7 +380,8 @@ impl Tracer {
     pub fn ns_of(&self, at: Instant) -> i64 {
         match at.checked_duration_since(self.origin) {
             Some(d) => i64::try_from(d.as_nanos()).unwrap_or(i64::MAX),
-            None => -i64::try_from(self.origin.saturating_duration_since(at).as_nanos()).unwrap_or(i64::MAX),
+            None => -i64::try_from(self.origin.saturating_duration_since(at).as_nanos())
+                .unwrap_or(i64::MAX),
         }
     }
 
@@ -405,7 +431,11 @@ impl Tracer {
 
     /// 取走全部记录并按时刻稳定排序（写盘前调用；测试也用它读回记录）。
     pub fn collect(&self) -> Vec<Rec> {
-        let mut all: Vec<Rec> = self.merged.lock().map(|mut v| std::mem::take(&mut *v)).unwrap_or_default();
+        let mut all: Vec<Rec> = self
+            .merged
+            .lock()
+            .map(|mut v| std::mem::take(&mut *v))
+            .unwrap_or_default();
         if let Ok(mut v) = self.shared.lock() {
             all.append(&mut v);
         }
@@ -435,19 +465,43 @@ impl Tracer {
         let _ = writeln!(out, "# overflow={}", self.overflow.load(Ordering::Relaxed));
         if self.poll {
             let _ = writeln!(out, "# poll_trace=1");
-            let _ = writeln!(out, "# poll_overflow={}", self.poll_overflow.load(Ordering::Relaxed));
+            let _ = writeln!(
+                out,
+                "# poll_overflow={}",
+                self.poll_overflow.load(Ordering::Relaxed)
+            );
         }
         let _ = writeln!(out, "{CSV_HEADER}");
         for r in recs {
-            let present = if r.present_ns == NONE { String::new() } else { self.unix_us(r.present_ns).to_string() };
-            let slot = if r.slot == NONE { String::new() } else { r.slot.to_string() };
-            let cell = |v: u32| if v == NA { String::new() } else { v.to_string() };
+            let present = if r.present_ns == NONE {
+                String::new()
+            } else {
+                self.unix_us(r.present_ns).to_string()
+            };
+            let slot = if r.slot == NONE {
+                String::new()
+            } else {
+                r.slot.to_string()
+            };
+            let cell = |v: u32| {
+                if v == NA {
+                    String::new()
+                } else {
+                    v.to_string()
+                }
+            };
             let ext = match r.event {
                 Event::SlowIter => {
                     let [a, b, c, d, e, f] = r.x;
                     format!("{a},{b},{c},{d},{e},{f}")
                 }
-                Event::Poll => format!("{},{},{},{},,", cell(r.x[0]), cell(r.x[1]), cell(r.x[2]), cell(r.x[3])),
+                Event::Poll => format!(
+                    "{},{},{},{},,",
+                    cell(r.x[0]),
+                    cell(r.x[1]),
+                    cell(r.x[2]),
+                    cell(r.x[3])
+                ),
                 _ => ",,,,,".to_string(),
             };
             let _ = writeln!(
@@ -478,7 +532,12 @@ impl Tracer {
         let recs = self.collect();
         let text = self.render(&recs, fps, backend);
         match std::fs::write(&self.path, text) {
-            Ok(()) => eprintln!("帧追踪已写出: {} ({} 条, 缓冲溢出 {})", self.path.display(), recs.len(), self.overflow.load(Ordering::Relaxed)),
+            Ok(()) => eprintln!(
+                "帧追踪已写出: {} ({} 条, 缓冲溢出 {})",
+                self.path.display(),
+                recs.len(),
+                self.overflow.load(Ordering::Relaxed)
+            ),
             Err(e) => eprintln!("帧追踪写出失败: {}: {e}", self.path.display()),
         }
     }
@@ -497,8 +556,12 @@ fn tracer_from_env(value: Option<OsString>) -> Option<Arc<Tracer>> {
     value.filter(|v| !v.is_empty()).map(|v| {
         Arc::new(
             Tracer::new(PathBuf::from(v))
-                .with_slow_iter_us(parse_slow_iter_us(std::env::var(ENV_SLOW_ITER_US).ok().as_deref()))
-                .with_poll_trace(poll_trace_requested(std::env::var(ENV_POLL_TRACE).ok().as_deref())),
+                .with_slow_iter_us(parse_slow_iter_us(
+                    std::env::var(ENV_SLOW_ITER_US).ok().as_deref(),
+                ))
+                .with_poll_trace(poll_trace_requested(
+                    std::env::var(ENV_POLL_TRACE).ok().as_deref(),
+                )),
         )
     })
 }
@@ -510,7 +573,9 @@ fn tracer_from_env(value: Option<OsString>) -> Option<Arc<Tracer>> {
 /// let buf = TraceBuf::attach(global().cloned(), Thread::Capture);
 /// ```
 pub fn global() -> Option<&'static Arc<Tracer>> {
-    TRACER.get_or_init(|| tracer_from_env(std::env::var_os(ENV_FRAME_TRACE))).as_ref()
+    TRACER
+        .get_or_init(|| tracer_from_env(std::env::var_os(ENV_FRAME_TRACE)))
+        .as_ref()
 }
 
 /// 写入一条帧追踪文件头元数据（`# 键=值`；未开启时什么也不做，同名覆盖）。
@@ -628,9 +693,15 @@ struct IterState {
 impl IterState {
     /// 一圈开始：算出与上一圈结束的间隔与睡眠超额，清空分段累加。
     fn begin(&mut self, now: Instant) {
-        self.gap = self.prev_end.map_or(Duration::ZERO, |end| now.saturating_duration_since(end));
+        self.gap = self
+            .prev_end
+            .map_or(Duration::ZERO, |end| now.saturating_duration_since(end));
         self.req = std::mem::take(&mut self.pending_req);
-        self.over = if self.req.is_zero() { Duration::ZERO } else { self.gap.saturating_sub(self.req) };
+        self.over = if self.req.is_zero() {
+            Duration::ZERO
+        } else {
+            self.gap.saturating_sub(self.req)
+        };
         self.acq = Duration::ZERO;
         self.lock = Duration::ZERO;
         self.copy = Duration::ZERO;
@@ -725,13 +796,29 @@ impl TraceBuf {
     }
 
     /// 绑定指定追踪器并分别指定普通缓冲与逐调用缓冲的容量（逐调用只在采集线程且追踪器开启时分配）。
-    fn attach_full(tracer: Option<Arc<Tracer>>, thread: Thread, limit: usize, poll_limit: usize) -> Self {
+    fn attach_full(
+        tracer: Option<Arc<Tracer>>,
+        thread: Thread,
+        limit: usize,
+        poll_limit: usize,
+    ) -> Self {
         Self {
             inner: tracer.map(|tracer| {
                 let slow = Duration::from_micros(u64::from(tracer.slow_iter_us));
                 let poll = tracer.poll && thread == Thread::Capture;
                 let poll_buf = Vec::with_capacity(if poll { poll_limit } else { 0 });
-                Inner { tracer, thread, buf: Vec::with_capacity(limit), limit, iter: IterState::default(), slow, poll, poll_buf, poll_limit, last_release_end: None }
+                Inner {
+                    tracer,
+                    thread,
+                    buf: Vec::with_capacity(limit),
+                    limit,
+                    iter: IterState::default(),
+                    slow,
+                    poll,
+                    poll_buf,
+                    poll_limit,
+                    last_release_end: None,
+                }
             }),
         }
     }
@@ -757,7 +844,10 @@ impl TraceBuf {
     /// 逐调用追踪开启时返回当前时刻（给 [`TraceBuf::release`] 当起点），否则 `None`，不读时钟。
     #[inline]
     pub fn poll_mark(&self) -> Option<Instant> {
-        self.inner.as_ref().filter(|i| i.poll).map(|_| Instant::now())
+        self.inner
+            .as_ref()
+            .filter(|i| i.poll)
+            .map(|_| Instant::now())
     }
 
     /// 记录一次 `AcquireNextFrame` 调用（逐调用追踪未开启时什么也不做）。
@@ -769,7 +859,14 @@ impl TraceBuf {
     /// - `outcome`：`code::POLL_*`。
     /// - `sample`：成功时的帧信息摘要，失败为 `None`。
     #[inline]
-    pub fn poll(&mut self, src: u8, start: Instant, dur: Duration, outcome: u8, sample: Option<PollSample>) {
+    pub fn poll(
+        &mut self,
+        src: u8,
+        start: Instant,
+        dur: Duration,
+        outcome: u8,
+        sample: Option<PollSample>,
+    ) {
         let Some(inner) = &mut self.inner else { return };
         if !inner.poll {
             return;
@@ -779,7 +876,9 @@ impl TraceBuf {
         rec.dur_us = micros(dur);
         rec.code = outcome;
         rec.x = [NA; 6];
-        rec.x[3] = inner.last_release_end.map_or(NA, |end| micros(start.saturating_duration_since(end)));
+        rec.x[3] = inner
+            .last_release_end
+            .map_or(NA, |end| micros(start.saturating_duration_since(end)));
         if let Some(s) = sample {
             rec.n = s.accumulated;
             rec.present_ns = s.present.map_or(NONE, |p| inner.tracer.ns_of(p));
@@ -797,7 +896,9 @@ impl TraceBuf {
     /// - `started`：调用前由 [`TraceBuf::poll_mark`] 取得的起点。
     #[inline]
     pub fn release(&mut self, src: u8, started: Option<Instant>) {
-        let (Some(inner), Some(s)) = (&mut self.inner, started) else { return };
+        let (Some(inner), Some(s)) = (&mut self.inner, started) else {
+            return;
+        };
         let dur = s.elapsed();
         inner.last_release_end = Some(s + dur);
         let mut rec = Rec::new(Event::Release, inner.thread, inner.tracer.ns_of(s));
@@ -880,7 +981,14 @@ impl TraceBuf {
             let mut rec = Rec::new(Event::SlowIter, inner.thread, inner.tracer.ns_of(s.start));
             rec.src = inner.iter.src;
             rec.dur_us = micros(s.total);
-            rec.x = [micros(s.sleep_req), micros(s.sleep_over), micros(s.acq), micros(s.lock), micros(s.copy), micros(s.gap)];
+            rec.x = [
+                micros(s.sleep_req),
+                micros(s.sleep_over),
+                micros(s.acq),
+                micros(s.lock),
+                micros(s.copy),
+                micros(s.gap),
+            ];
             inner.push(rec);
         }
     }
@@ -895,7 +1003,15 @@ impl TraceBuf {
     /// - `cap_id`：分配的捕获序号（没有产出帧为 0）。
     /// - `outcome`：`code::ACQ_*`。
     #[inline]
-    pub fn acquire(&mut self, src: u8, at: Instant, present: Option<Instant>, accumulated: u32, cap_id: u64, outcome: u8) {
+    pub fn acquire(
+        &mut self,
+        src: u8,
+        at: Instant,
+        present: Option<Instant>,
+        accumulated: u32,
+        cap_id: u64,
+        outcome: u8,
+    ) {
         self.emit(Event::Acquire, Some(at), |t, r| {
             r.src = src;
             r.present_ns = present.map_or(NONE, |p| t.ns_of(p));
@@ -1105,13 +1221,28 @@ mod tests {
         assert_eq!(recs.len(), 3);
         assert!(recs.windows(2).all(|w| w[0].t_ns <= w[1].t_ns));
         let text = t.render(&recs, 60, "mock");
-        assert!(text.contains("# fps=60") && text.contains("# backend=mock") && text.contains("# records=3") && text.contains("# overflow=0"));
-        let rows: Vec<&str> = text.lines().skip_while(|l| !l.starts_with("mono_ns")).skip(1).collect();
+        assert!(
+            text.contains("# fps=60")
+                && text.contains("# backend=mock")
+                && text.contains("# records=3")
+                && text.contains("# overflow=0")
+        );
+        let rows: Vec<&str> = text
+            .lines()
+            .skip_while(|l| !l.starts_with("mono_ns"))
+            .skip(1)
+            .collect();
         assert_eq!(rows.len(), 3);
-        assert!(rows.iter().all(|r| r.split(',').count() == CSV_HEADER.split(',').count()));
+        assert!(
+            rows.iter()
+                .all(|r| r.split(',').count() == CSV_HEADER.split(',').count())
+        );
         let acquire = rows.iter().find(|r| r.contains(",acquire,")).unwrap();
         let cells: Vec<&str> = acquire.split(',').collect();
-        assert_eq!((cells[4], cells[5], cells[6], cells[8], cells[10]), ("1", "7", "", "2", "0"));
+        assert_eq!(
+            (cells[4], cells[5], cells[6], cells[8], cells[10]),
+            ("1", "7", "", "2", "0")
+        );
         assert!(!cells[7].is_empty(), "acquire 应带 present_unix_us");
         let slot_row = rows.iter().find(|r| r.contains(",slot,")).unwrap();
         assert_eq!(slot_row.split(',').nth(6), Some("5"));
@@ -1127,25 +1258,63 @@ mod tests {
         let mut it = IterState::default();
         // 首圈没有间隔；0.5ms 的正常迭代不报，并请求睡 400us
         it.begin(t0);
-        assert!(it.end(t0 + Duration::from_micros(500), Duration::from_micros(400), thr).is_none());
+        assert!(
+            it.end(
+                t0 + Duration::from_micros(500),
+                Duration::from_micros(400),
+                thr
+            )
+            .is_none()
+        );
         // 睡了 7ms 才醒（请求 0.4ms）：间隔 7ms >= 4ms，睡眠超额 ≈ 6.6ms
         it.begin(t0 + Duration::from_micros(500) + ms(7));
         it.add(IterStage::Acquire, Duration::from_micros(30));
         it.add(IterStage::Lock, Duration::from_micros(10));
         it.add(IterStage::Copy, Duration::from_micros(80));
         it.add(IterStage::Copy, Duration::from_micros(20));
-        let s = it.end(t0 + ms(7) + Duration::from_micros(700), Duration::ZERO, thr).expect("应为慢迭代");
-        assert_eq!((s.gap, s.sleep_req, s.sleep_over), (ms(7), Duration::from_micros(400), Duration::from_micros(6600)));
-        assert_eq!((s.acq, s.lock, s.copy), (Duration::from_micros(30), Duration::from_micros(10), Duration::from_micros(100)));
+        let s = it
+            .end(t0 + ms(7) + Duration::from_micros(700), Duration::ZERO, thr)
+            .expect("应为慢迭代");
+        assert_eq!(
+            (s.gap, s.sleep_req, s.sleep_over),
+            (
+                ms(7),
+                Duration::from_micros(400),
+                Duration::from_micros(6600)
+            )
+        );
+        assert_eq!(
+            (s.acq, s.lock, s.copy),
+            (
+                Duration::from_micros(30),
+                Duration::from_micros(10),
+                Duration::from_micros(100)
+            )
+        );
         assert_eq!(s.total, Duration::from_micros(200));
         // 上一圈以返回结束：请求时长为 0，间隔大也不算睡眠超额，但仍记为慢迭代
         it.begin(t0 + ms(20));
-        let s = it.end(t0 + ms(20) + Duration::from_micros(100), Duration::ZERO, thr).expect("间隔过大");
-        assert_eq!((s.sleep_req, s.sleep_over, s.gap), (Duration::ZERO, Duration::ZERO, ms(12) + Duration::from_micros(300)));
+        let s = it
+            .end(
+                t0 + ms(20) + Duration::from_micros(100),
+                Duration::ZERO,
+                thr,
+            )
+            .expect("间隔过大");
+        assert_eq!(
+            (s.sleep_req, s.sleep_over, s.gap),
+            (
+                Duration::ZERO,
+                Duration::ZERO,
+                ms(12) + Duration::from_micros(300)
+            )
+        );
         // 迭代自身耗时过长（间隔正常）：取帧调用卡了 5ms
         it.begin(t0 + ms(20) + Duration::from_micros(200));
         it.add(IterStage::Acquire, ms(5));
-        let s = it.end(t0 + ms(26), Duration::ZERO, thr).expect("总耗时过长");
+        let s = it
+            .end(t0 + ms(26), Duration::ZERO, thr)
+            .expect("总耗时过长");
         assert!(s.gap < thr && s.total >= thr && s.acq == ms(5));
         // 没有未结束的迭代时 end 不产出
         assert!(it.end(t0 + ms(30), Duration::ZERO, thr).is_none());
@@ -1173,8 +1342,14 @@ mod tests {
         let recs = t.collect();
         assert_eq!(recs.len(), 1, "只有睡过头的那一圈该落记录");
         let r = &recs[0];
-        assert_eq!((r.event, r.src, r.x[0], r.x[2]), (Event::SlowIter, 0, 400, 77));
-        assert!(r.x[1] >= 3000 && r.x[5] >= 4000, "睡眠超额与间隔应反映 5ms 睡眠");
+        assert_eq!(
+            (r.event, r.src, r.x[0], r.x[2]),
+            (Event::SlowIter, 0, 400, 77)
+        );
+        assert!(
+            r.x[1] >= 3000 && r.x[5] >= 4000,
+            "睡眠超额与间隔应反映 5ms 睡眠"
+        );
         let text = t.render(&recs, 60, "mock");
         assert!(text.contains("# slow_iter_us=2000"));
         let row = text.lines().find(|l| l.contains(",slow_iter,")).unwrap();
@@ -1184,7 +1359,11 @@ mod tests {
     /// 逐调用开关：仅 `1` 开启。
     #[test]
     fn poll_trace_flag_parsing() {
-        assert!(!poll_trace_requested(None) && !poll_trace_requested(Some("")) && !poll_trace_requested(Some("0")));
+        assert!(
+            !poll_trace_requested(None)
+                && !poll_trace_requested(Some(""))
+                && !poll_trace_requested(Some("0"))
+        );
         assert!(poll_trace_requested(Some("1")) && poll_trace_requested(Some(" 1 ")));
     }
 
@@ -1195,7 +1374,13 @@ mod tests {
         {
             let mut buf = TraceBuf::attach(Some(Arc::clone(&t)), Thread::Capture);
             assert!(!buf.poll_enabled() && buf.poll_mark().is_none());
-            buf.poll(0, Instant::now(), Duration::from_millis(1), code::POLL_OK, None);
+            buf.poll(
+                0,
+                Instant::now(),
+                Duration::from_millis(1),
+                code::POLL_OK,
+                None,
+            );
             buf.release(0, buf.poll_mark());
         }
         let recs = t.collect();
@@ -1214,32 +1399,76 @@ mod tests {
             // 超时调用：没有帧信息，也没有上一次释放
             buf.poll(0, t0, Duration::from_micros(4400), code::POLL_TIMEOUT, None);
             // 成功调用，随后释放，再来一次调用以验证释放间隔
-            let sample = PollSample { accumulated: 2, present: Some(t0), flags: poll_flag::PRESENT | poll_flag::MOUSE_UPDATE, pointer_bytes: 7, meta_bytes: 9 };
-            buf.poll(0, t0, Duration::from_micros(30), code::POLL_OK, Some(sample));
+            let sample = PollSample {
+                accumulated: 2,
+                present: Some(t0),
+                flags: poll_flag::PRESENT | poll_flag::MOUSE_UPDATE,
+                pointer_bytes: 7,
+                meta_bytes: 9,
+            };
+            buf.poll(
+                0,
+                t0,
+                Duration::from_micros(30),
+                code::POLL_OK,
+                Some(sample),
+            );
             let started = buf.poll_mark();
             buf.release(0, started);
             std::thread::sleep(Duration::from_millis(2));
-            buf.poll(0, Instant::now(), Duration::from_micros(10), code::POLL_TIMEOUT, None);
+            buf.poll(
+                0,
+                Instant::now(),
+                Duration::from_micros(10),
+                code::POLL_TIMEOUT,
+                None,
+            );
             // 第 5 条超出容量 4
-            buf.poll(0, Instant::now(), Duration::from_micros(10), code::POLL_TIMEOUT, None);
+            buf.poll(
+                0,
+                Instant::now(),
+                Duration::from_micros(10),
+                code::POLL_TIMEOUT,
+                None,
+            );
         }
         let recs = t.collect();
         assert_eq!(recs.len(), 4);
         let text = t.render(&recs, 60, "x");
         assert!(text.contains("# poll_trace=1\n") && text.contains("# poll_overflow=1\n"));
-        let rows: Vec<Vec<&str>> = text.lines().skip_while(|l| !l.starts_with("mono_ns")).skip(1).map(|l| l.split(',').collect()).collect();
-        assert!(rows.iter().all(|c| c.len() == CSV_HEADER.split(',').count()));
+        let rows: Vec<Vec<&str>> = text
+            .lines()
+            .skip_while(|l| !l.starts_with("mono_ns"))
+            .skip(1)
+            .map(|l| l.split(',').collect())
+            .collect();
+        assert!(
+            rows.iter()
+                .all(|c| c.len() == CSV_HEADER.split(',').count())
+        );
         let by_event = |name: &str| rows.iter().filter(|c| c[2] == name).collect::<Vec<_>>();
         assert_eq!(by_event("poll").len(), 3);
         assert_eq!(by_event("release").len(), 1);
         let timeout = by_event("poll")[0].clone();
-        assert_eq!((timeout[9], timeout[10], timeout[8], timeout[7]), ("4400", "1", "0", ""));
-        assert_eq!((timeout[11], timeout[12], timeout[13], timeout[14]), ("", "", "", ""));
+        assert_eq!(
+            (timeout[9], timeout[10], timeout[8], timeout[7]),
+            ("4400", "1", "0", "")
+        );
+        assert_eq!(
+            (timeout[11], timeout[12], timeout[13], timeout[14]),
+            ("", "", "", "")
+        );
         let ok = by_event("poll")[1].clone();
-        assert_eq!((ok[8], ok[10], ok[11], ok[12], ok[13]), ("2", "0", "3", "7", "9"));
+        assert_eq!(
+            (ok[8], ok[10], ok[11], ok[12], ok[13]),
+            ("2", "0", "3", "7", "9")
+        );
         assert!(!ok[7].is_empty());
         let later = by_event("poll")[2].clone();
-        assert!(later[14].parse::<u32>().unwrap() >= 1500, "释放结束到下次调用约 2ms");
+        assert!(
+            later[14].parse::<u32>().unwrap() >= 1500,
+            "释放结束到下次调用约 2ms"
+        );
     }
 
     /// 元数据行：同名覆盖、换行被替换。
@@ -1250,7 +1479,10 @@ mod tests {
         t.set_note("capture_sched", "timecritical");
         t.set_note("capture_sched_detail", "a\nb");
         let text = t.render(&[], 60, "x");
-        assert!(text.contains("# capture_sched=timecritical\n") && !text.contains("# capture_sched=mmcss"));
+        assert!(
+            text.contains("# capture_sched=timecritical\n")
+                && !text.contains("# capture_sched=mmcss")
+        );
         assert!(text.contains("# capture_sched_detail=a b\n"));
     }
 
@@ -1286,7 +1518,10 @@ mod tests {
         let t = tracer();
         t.push_consumed(9, Instant::now());
         let recs = t.collect();
-        assert_eq!((recs.len(), recs[0].event, recs[0].slot), (1, Event::Consumed, 9));
+        assert_eq!(
+            (recs.len(), recs[0].event, recs[0].slot),
+            (1, Event::Consumed, 9)
+        );
     }
 
     /// `reset` 清掉上一次尝试的残留。

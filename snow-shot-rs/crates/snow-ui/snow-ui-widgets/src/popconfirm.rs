@@ -382,9 +382,7 @@ impl RenderOnce for Popconfirm {
         }
 
         let trigger_btn = self.trigger.unwrap_or_else(|| {
-            let label = self
-                .trigger_label
-                .unwrap_or_else(|| "确认操作".into());
+            let label = self.trigger_label.unwrap_or_else(|| "确认操作".into());
             component::button::Button::new("popconfirm-trigger").label(label)
         });
 

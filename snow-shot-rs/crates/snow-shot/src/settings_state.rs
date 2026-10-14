@@ -6,8 +6,8 @@
 use crate::settings_model::{
     Control, EditOutcome, GLOBAL_SHORTCUT_GROUP, LANGUAGE_KEY, ReadOnlyReason, THEME_COLOR_KEY,
     THEME_MODE_KEY, TextBuffer, apply_edit_key, control_for, describe_input_error, edit_text,
-    find_shortcut_conflict, group_id_of, groups, is_modifier_key, parse_hex_color,
-    parse_input, portable_to_hotkey_text, shortcut_from_keystroke, shortcut_texts, with_shortcut,
+    find_shortcut_conflict, group_id_of, groups, is_modifier_key, parse_hex_color, parse_input,
+    portable_to_hotkey_text, shortcut_from_keystroke, shortcut_texts, with_shortcut,
     without_shortcut,
 };
 use crate::settings_text::{Lang, Text, group_title, item_label, t};

@@ -11,9 +11,9 @@
 //! 背压语义全部是"有界 + 丢弃并计数"：采集池耗尽丢新帧、待输出队列溢出/被更新的帧取代时丢旧帧、
 //! 编码表面池耗尽丢当前帧、落后的槽直接跳过（不补发）。
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -103,7 +103,11 @@ pub trait CaptureSource: Send + 'static {
     ///
     /// # 返回
     /// `Some(帧)`：有新内容；`None`：超时、被丢弃或没有可用画面。
-    fn next(&mut self, timeout: Duration, want: bool) -> Result<Option<Captured<Self::Frame>>, CaptureFault>;
+    fn next(
+        &mut self,
+        timeout: Duration,
+        want: bool,
+    ) -> Result<Option<Captured<Self::Frame>>, CaptureFault>;
 
     /// 重建采集会话（[`CaptureFault::Lost`] 之后调用）。
     fn recreate(&mut self) -> Result<(), String>;
@@ -133,7 +137,12 @@ pub trait FrameComposer: Send + 'static {
     /// - `frame`：采集帧。
     /// - `cursor`：光标采样；`None` 不画光标。
     /// - `surface`：输出表面。
-    fn compose(&mut self, frame: &Self::Frame, cursor: Option<&AttachedCursorSample>, surface: &mut Self::Surface) -> Result<(), String>;
+    fn compose(
+        &mut self,
+        frame: &Self::Frame,
+        cursor: Option<&AttachedCursorSample>,
+        surface: &mut Self::Surface,
+    ) -> Result<(), String>;
 
     /// 在用的表面数（诊断用）。
     fn in_flight(&self) -> usize {
@@ -204,7 +213,13 @@ impl Samples {
 
     /// 摘要文本：`n=.. p50=.. p95=.. max=..`。
     pub fn summary(&self) -> String {
-        format!("n={} p50={:.2} p95={:.2} max={:.2}", self.0.len(), self.percentile(0.5), self.percentile(0.95), self.percentile(1.0))
+        format!(
+            "n={} p50={:.2} p95={:.2} max={:.2}",
+            self.0.len(),
+            self.percentile(0.5),
+            self.percentile(0.95),
+            self.percentile(1.0)
+        )
     }
 }
 
@@ -266,7 +281,10 @@ impl PipelineReport {
             self.present_dt_ms.summary(),
             self.arrive_lag_ms.summary()
         );
-        text.push_str(&format!("\n  启动ms 等首帧 {:.1} / 首帧合成 {:.1} / 首帧送编码 {:.1}", self.startup_ms.0, self.startup_ms.1, self.startup_ms.2));
+        text.push_str(&format!(
+            "\n  启动ms 等首帧 {:.1} / 首帧合成 {:.1} / 首帧送编码 {:.1}",
+            self.startup_ms.0, self.startup_ms.1, self.startup_ms.2
+        ));
         for (name, samples) in &self.capture_diag {
             text.push_str(&format!("\n  {name} {}", samples.summary()));
         }
@@ -348,11 +366,18 @@ fn cursor_key(c: &AttachedCursorSample) -> (i32, i32, bool, Option<u64>) {
 
 /// 槽号对应的有效时长。
 pub fn slot_time(slot: u64, fps: u32) -> Duration {
-    Duration::from_nanos((u128::from(slot) * u128::from(NANOS_PER_SEC) / u128::from(fps.max(1))).min(u128::from(u64::MAX)) as u64)
+    Duration::from_nanos(
+        (u128::from(slot) * u128::from(NANOS_PER_SEC) / u128::from(fps.max(1)))
+            .min(u128::from(u64::MAX)) as u64,
+    )
 }
 
 /// 采集线程主循环：阻塞取帧并转交合成线程，会话失效时重建。
-fn capture_loop<C: CaptureSource>(mut source: C, tx: Sender<CaptureMsg<C::Frame>>, shared: Arc<CaptureShared>) -> CaptureDiag {
+fn capture_loop<C: CaptureSource>(
+    mut source: C,
+    tx: Sender<CaptureMsg<C::Frame>>,
+    shared: Arc<CaptureShared>,
+) -> CaptureDiag {
     // 调度方式由环境变量决定（缺省与历史一致：HIGHEST）；守卫持有到线程退出，退出 MMCSS 须在本线程完成
     let _sched = apply_capture_sched_from_env();
     let mut trace = TraceBuf::new(Thread::Capture);
@@ -393,7 +418,10 @@ fn capture_loop<C: CaptureSource>(mut source: C, tx: Sender<CaptureMsg<C::Frame>
 }
 
 /// 编码线程主循环：送帧、取包、收尾。
-fn encode_loop<E: VideoEncoder>(mut encoder: E, rx: Receiver<EncodeMsg<E::Surface>>) -> Result<EncoderStats, String> {
+fn encode_loop<E: VideoEncoder>(
+    mut encoder: E,
+    rx: Receiver<EncodeMsg<E::Surface>>,
+) -> Result<EncoderStats, String> {
     let mut failure: Option<String> = None;
     let mut trace = TraceBuf::new(Thread::Encode);
     while let Ok(msg) = rx.recv() {
@@ -482,12 +510,17 @@ struct ComposeContext<C: CaptureSource, P, S> {
 }
 
 /// 距离下一个输出槽的等待时间（上限 [`COMPOSE_WAIT`]）。
-fn wait_until_next_slot<C: CaptureSource, P, S>(c: &ComposeContext<C, P, S>, paused: bool) -> Duration {
+fn wait_until_next_slot<C: CaptureSource, P, S>(
+    c: &ComposeContext<C, P, S>,
+    paused: bool,
+) -> Duration {
     if paused {
         return COMPOSE_WAIT;
     }
     let active = c.timeline.active_at(Instant::now());
-    (slot_time(c.ticks.next_slot(), c.config.fps) + c.phase.offset() + c.hold).saturating_sub(active).min(COMPOSE_WAIT)
+    (slot_time(c.ticks.next_slot(), c.config.fps) + c.phase.offset() + c.hold)
+        .saturating_sub(active)
+        .min(COMPOSE_WAIT)
 }
 
 /// 合成线程主循环。
@@ -549,7 +582,12 @@ where
                 }
             }
         }
-        let due = slot_of(c.timeline.active_at(Instant::now()).saturating_sub(c.hold + c.phase.offset()), c.config.fps);
+        let due = slot_of(
+            c.timeline
+                .active_at(Instant::now())
+                .saturating_sub(c.hold + c.phase.offset()),
+            c.config.fps,
+        );
         if !c.warmed && (c.phase.ready() || c.started.elapsed() >= WARMUP_TIMEOUT) {
             c.warmed = true;
             // 预热期间积压的槽依次补齐（不跳槽），避免开头丢帧
@@ -597,12 +635,18 @@ where
         return Err(e);
     }
     let end = end.unwrap_or(1).max(c.last_slot.map_or(1, |l| l + 1));
-    c.frames.send(EncodeMsg::Finish(i64::try_from(end).unwrap_or(i64::MAX))).map_err(|_| "编码线程已退出".to_string())?;
+    c.frames
+        .send(EncodeMsg::Finish(i64::try_from(end).unwrap_or(i64::MAX)))
+        .map_err(|_| "编码线程已退出".to_string())?;
     Ok(report)
 }
 
 /// 吸收一次采集：更新最近帧与光标；有新桌面内容的帧进入待输出队列。
-fn absorb_frame<C: CaptureSource, P, S>(c: &mut ComposeContext<C, P, S>, captured: Captured<C::Frame>, paused: bool) {
+fn absorb_frame<C: CaptureSource, P, S>(
+    c: &mut ComposeContext<C, P, S>,
+    captured: Captured<C::Frame>,
+    paused: bool,
+) {
     if paused || c.timeline.in_pause(captured.captured_at) {
         return;
     }
@@ -615,12 +659,25 @@ fn absorb_frame<C: CaptureSource, P, S>(c: &mut ComposeContext<C, P, S>, capture
         // 暂停期间呈现、恢复后才取到的帧仍是当前画面：有效时长自然冻结在暂停点，下个槽就会取用
         let active = c.timeline.active_at(captured.present);
         if let Some(prev) = c.last_present.replace(captured.present) {
-            c.present_dt.push(captured.present.saturating_duration_since(prev).as_secs_f32() * 1000.0);
+            c.present_dt.push(
+                captured
+                    .present
+                    .saturating_duration_since(prev)
+                    .as_secs_f32()
+                    * 1000.0,
+            );
         }
-        c.arrive_lag.push(Instant::now().saturating_duration_since(captured.present).as_secs_f32() * 1000.0);
+        c.arrive_lag.push(
+            Instant::now()
+                .saturating_duration_since(captured.present)
+                .as_secs_f32()
+                * 1000.0,
+        );
         c.phase.observe(active);
         c.trace.absorb(captured.id, true);
-        c.queue.push_with(active, captured.clone(), |evicted| c.trace.discard(evicted.id, None, code::DISCARD_OVERFLOW));
+        c.queue.push_with(active, captured.clone(), |evicted| {
+            c.trace.discard(evicted.id, None, code::DISCARD_OVERFLOW)
+        });
     }
     if captured.fresh || c.latest.is_none() {
         c.latest = Some(captured);
@@ -628,7 +685,11 @@ fn absorb_frame<C: CaptureSource, P, S>(c: &mut ComposeContext<C, P, S>, capture
 }
 
 /// 输出一个槽：取切点之前最新的待输出帧（没有则在光标移动时用最近帧补一帧），合成并交给编码线程。
-fn emit_slot<C, P, S>(c: &mut ComposeContext<C, P, S>, report: &mut PipelineReport, slot: u64) -> Result<(), String>
+fn emit_slot<C, P, S>(
+    c: &mut ComposeContext<C, P, S>,
+    report: &mut PipelineReport,
+    slot: u64,
+) -> Result<(), String>
 where
     C: CaptureSource,
     P: FrameComposer<Frame = C::Frame, Surface = S>,
@@ -642,10 +703,18 @@ where
         c.traced_missed = c.ticks.missed;
     }
     let mut slot_kind = code::SLOT_NEW;
-    let captured = match c.queue.take_for_slot_with(cutoff, |old| c.trace.discard(old.id, Some(slot), code::DISCARD_SUPERSEDED)) {
+    let captured = match c.queue.take_for_slot_with(cutoff, |old| {
+        c.trace
+            .discard(old.id, Some(slot), code::DISCARD_SUPERSEDED)
+    }) {
         Some(f) => f,
-        None if c.config.show_cursor && cursor_key_now.is_some() && cursor_key_now != c.last_emitted_cursor => {
-            let Some(f) = c.latest.clone() else { return Ok(()) };
+        None if c.config.show_cursor
+            && cursor_key_now.is_some()
+            && cursor_key_now != c.last_emitted_cursor =>
+        {
+            let Some(f) = c.latest.clone() else {
+                return Ok(());
+            };
             report.cursor_frames += 1;
             slot_kind = code::SLOT_CURSOR_REUSE;
             f
@@ -656,20 +725,37 @@ where
         }
     };
     let Some(mut surface) = c.composer.acquire_surface()? else {
-        c.trace.slot(slot, captured.id, code::SLOT_SURFACE_EXHAUSTED);
+        c.trace
+            .slot(slot, captured.id, code::SLOT_SURFACE_EXHAUSTED);
         report.pool_dropped += 1;
         return Ok(());
     };
     c.trace.slot(slot, captured.id, slot_kind);
     report.pool_peak = report.pool_peak.max(c.composer.in_flight());
-    report.queue_ms.push(Instant::now().saturating_duration_since(captured.captured_at).as_secs_f32() * 1000.0);
+    report.queue_ms.push(
+        Instant::now()
+            .saturating_duration_since(captured.captured_at)
+            .as_secs_f32()
+            * 1000.0,
+    );
     let started = Instant::now();
-    c.composer.compose(&captured.frame, c.latest_cursor.as_ref().filter(|_| c.config.show_cursor), &mut surface)?;
-    report.compose_ms.push(started.elapsed().as_secs_f32() * 1000.0);
+    c.composer.compose(
+        &captured.frame,
+        c.latest_cursor.as_ref().filter(|_| c.config.show_cursor),
+        &mut surface,
+    )?;
+    report
+        .compose_ms
+        .push(started.elapsed().as_secs_f32() * 1000.0);
     c.trace.compose(slot, captured.id, started);
     c.last_emitted_cursor = cursor_key_now;
     c.last_slot = Some(slot);
-    c.frames.send(EncodeMsg::Frame(surface, i64::try_from(slot).unwrap_or(i64::MAX))).map_err(|_| "编码线程已退出".to_string())?;
+    c.frames
+        .send(EncodeMsg::Frame(
+            surface,
+            i64::try_from(slot).unwrap_or(i64::MAX),
+        ))
+        .map_err(|_| "编码线程已退出".to_string())?;
     c.trace.send(slot);
     report.encoded_frames += 1;
     Ok(())
@@ -689,7 +775,13 @@ where
 /// # 返回
 /// 运行中的流水线句柄；首帧探测失败返回原因。
 #[cfg_attr(not(test), allow(dead_code))]
-pub fn start<C, P, E>(config: PipelineConfig, backend: &str, capture: C, composer: P, encoder: E) -> Result<Running, String>
+pub fn start<C, P, E>(
+    config: PipelineConfig,
+    backend: &str,
+    capture: C,
+    composer: P,
+    encoder: E,
+) -> Result<Running, String>
 where
     C: CaptureSource,
     P: FrameComposer<Frame = C::Frame, Surface = E::Surface>,
@@ -752,7 +844,11 @@ where
         let mut surface = composer.acquire_surface()?.ok_or("编码表面池为空")?;
         probe_trace.slot(0, first.id, code::SLOT_PROBE);
         let compose_started = Instant::now();
-        composer.compose(&first.frame, first.cursor.as_ref().filter(|_| config.show_cursor), &mut surface)?;
+        composer.compose(
+            &first.frame,
+            first.cursor.as_ref().filter(|_| config.show_cursor),
+            &mut surface,
+        )?;
         compose_took = compose_started.elapsed();
         probe_trace.compose(0, first.id, compose_started);
         let submit_started = probe_trace.mark();
@@ -852,13 +948,34 @@ impl Running {
         let now = Instant::now();
         // 音频先收尾：容器收尾（Finalize / 写尾）之前，音轨必须已写完
         if let Some(report) = self.audio.take().and_then(|a| a.stop(now)) {
-            eprintln!("音频: 写入 {} 个 10ms 槽，丢弃 {} 帧{}", report.slots, report.dropped_frames, report.error.map_or(String::new(), |e| format!("，收尾错误: {e}")));
+            eprintln!(
+                "音频: 写入 {} 个 10ms 槽，丢弃 {} 帧{}",
+                report.slots,
+                report.dropped_frames,
+                report
+                    .error
+                    .map_or(String::new(), |e| format!("，收尾错误: {e}"))
+            );
         }
         let _ = self.control.send(Control::Stop(now));
-        let compose = self.compose.take().ok_or("录制已结束")?.join().map_err(|_| "合成线程崩溃".to_string())?;
+        let compose = self
+            .compose
+            .take()
+            .ok_or("录制已结束")?
+            .join()
+            .map_err(|_| "合成线程崩溃".to_string())?;
         self.shared.stop.store(true, Ordering::Release);
-        let diag = self.capture.take().and_then(|t| t.join().ok()).unwrap_or_default();
-        let encode = self.encode.take().ok_or("录制已结束")?.join().map_err(|_| "编码线程崩溃".to_string())?;
+        let diag = self
+            .capture
+            .take()
+            .and_then(|t| t.join().ok())
+            .unwrap_or_default();
+        let encode = self
+            .encode
+            .take()
+            .ok_or("录制已结束")?
+            .join()
+            .map_err(|_| "编码线程崩溃".to_string())?;
         // 各线程都已退出，追踪缓冲已并入全局记录（未开启追踪时什么也不做）
         frametrace::finish(self.fps, &self.backend);
         let mut report = compose?;
@@ -872,7 +989,11 @@ impl Running {
             pool_drops: self.shared.pool_drops.load(Ordering::Relaxed),
             coalesced: self.shared.coalesced.load(Ordering::Relaxed),
         };
-        report.capture_diag = diag.samples.into_iter().map(|(n, v)| (n, Samples(v))).collect();
+        report.capture_diag = diag
+            .samples
+            .into_iter()
+            .map(|(n, v)| (n, Samples(v)))
+            .collect();
         Ok(report)
     }
 
@@ -929,14 +1050,24 @@ mod tests {
     impl MockCapture {
         /// 创建以 `hz` 出帧、最多 `limit` 帧的模拟采集。
         fn new(hz: u64, limit: u64) -> Self {
-            Self { seq: 0, period: Duration::from_nanos(NANOS_PER_SEC / hz), origin: Instant::now(), limit, stats: CaptureStats::default() }
+            Self {
+                seq: 0,
+                period: Duration::from_nanos(NANOS_PER_SEC / hz),
+                origin: Instant::now(),
+                limit,
+                stats: CaptureStats::default(),
+            }
         }
     }
 
     impl CaptureSource for MockCapture {
         type Frame = u64;
 
-        fn next(&mut self, timeout: Duration, want: bool) -> Result<Option<Captured<u64>>, CaptureFault> {
+        fn next(
+            &mut self,
+            timeout: Duration,
+            want: bool,
+        ) -> Result<Option<Captured<u64>>, CaptureFault> {
             let due = self.origin + self.period * self.seq as u32;
             let now = Instant::now();
             if self.seq >= self.limit {
@@ -955,7 +1086,14 @@ mod tests {
                 return Ok(None);
             }
             self.stats.frames += 1;
-            Ok(Some(Captured { frame: seq, cursor: None, present: due, captured_at: Instant::now(), fresh: true, id: seq + 1 }))
+            Ok(Some(Captured {
+                frame: seq,
+                cursor: None,
+                present: due,
+                captured_at: Instant::now(),
+                fresh: true,
+                id: seq + 1,
+            }))
         }
 
         fn recreate(&mut self) -> Result<(), String> {
@@ -989,7 +1127,12 @@ mod tests {
             Ok(Some(0))
         }
 
-        fn compose(&mut self, frame: &u64, _cursor: Option<&AttachedCursorSample>, surface: &mut u64) -> Result<(), String> {
+        fn compose(
+            &mut self,
+            frame: &u64,
+            _cursor: Option<&AttachedCursorSample>,
+            surface: &mut u64,
+        ) -> Result<(), String> {
             if self.fail_compose {
                 return Err("模拟合成失败".into());
             }
@@ -1018,7 +1161,10 @@ mod tests {
         fn finish(self, end_pts: i64) -> Result<EncoderStats, String> {
             *self.end.lock().unwrap() = Some(end_pts);
             let frames = self.log.lock().unwrap().len() as u64;
-            Ok(EncoderStats { frames, send_ms: Vec::new() })
+            Ok(EncoderStats {
+                frames,
+                send_ms: Vec::new(),
+            })
         }
     }
 
@@ -1028,15 +1174,30 @@ mod tests {
     type EndMark = Arc<Mutex<Option<i64>>>;
 
     /// 装配一条模拟流水线。
-    fn mock_pipeline(hz: u64, fps: u32, limit: u64, fail_compose: bool) -> (Result<Running, String>, EmitLog, EndMark) {
+    fn mock_pipeline(
+        hz: u64,
+        fps: u32,
+        limit: u64,
+        fail_compose: bool,
+    ) -> (Result<Running, String>, EmitLog, EndMark) {
         let log = Arc::new(Mutex::new(Vec::new()));
         let end = Arc::new(Mutex::new(None));
         let running = start(
-            PipelineConfig { fps, show_cursor: false },
+            PipelineConfig {
+                fps,
+                show_cursor: false,
+            },
             "mock",
             MockCapture::new(hz, limit),
-            MockComposer { fail_compose, used: 0, capacity: 100 },
-            MockEncoder { log: Arc::clone(&log), end: Arc::clone(&end) },
+            MockComposer {
+                fail_compose,
+                used: 0,
+                capacity: 100,
+            },
+            MockEncoder {
+                log: Arc::clone(&log),
+                end: Arc::clone(&end),
+            },
         );
         (running, log, end)
     }
@@ -1050,9 +1211,15 @@ mod tests {
         let report = running.stop().expect("stop");
         let log = log.lock().unwrap();
         assert!(log.len() >= 85, "emitted {}", log.len());
-        assert!(log.windows(2).all(|w| w[1].1 > w[0].1 && w[1].0 > w[0].0), "顺序或 pts 异常: {:?}", &log[..log.len().min(12)]);
+        assert!(
+            log.windows(2).all(|w| w[1].1 > w[0].1 && w[1].0 > w[0].0),
+            "顺序或 pts 异常: {:?}",
+            &log[..log.len().min(12)]
+        );
         let seqs: Vec<u64> = log.iter().map(|p| p.0).collect();
-        let missing = (seqs[0]..=*seqs.last().unwrap()).filter(|s| !seqs.contains(s)).count();
+        let missing = (seqs[0]..=*seqs.last().unwrap())
+            .filter(|s| !seqs.contains(s))
+            .count();
         assert!(missing <= 1, "missing {missing}");
         assert!(end.lock().unwrap().unwrap() > log.last().unwrap().1);
         assert_eq!(report.backend, "mock");
@@ -1105,8 +1272,15 @@ mod tests {
         let mut report = PipelineReport::default();
         {
             let mut ctx = ComposeContext::<MockCapture, MockComposer, u64> {
-                config: PipelineConfig { fps, show_cursor: false },
-                composer: MockComposer { fail_compose: false, used: 0, capacity: 100 },
+                config: PipelineConfig {
+                    fps,
+                    show_cursor: false,
+                },
+                composer: MockComposer {
+                    fail_compose: false,
+                    used: 0,
+                    capacity: 100,
+                },
                 timeline: Timeline::new(base, fps),
                 ticks: TickClock::starting_at(1),
                 queue: TimedQueue::default(),
@@ -1129,7 +1303,14 @@ mod tests {
             };
             let frame = |id: u64, ms: u64| {
                 let at = base + Duration::from_millis(ms);
-                Captured { frame: id, cursor: None, present: at, captured_at: at, fresh: true, id }
+                Captured {
+                    frame: id,
+                    cursor: None,
+                    present: at,
+                    captured_at: at,
+                    fresh: true,
+                    id,
+                }
             };
             absorb_frame(&mut ctx, frame(1, 2), false);
             absorb_frame(&mut ctx, frame(2, 4), false);
@@ -1145,12 +1326,36 @@ mod tests {
         let of = |event: Event| recs.iter().filter(|r| r.event == event).collect::<Vec<_>>();
         assert_eq!(of(Event::Absorb).len(), 3);
         let discard = of(Event::Discard);
-        assert_eq!((discard.len(), discard[0].cap_id, discard[0].slot, discard[0].code), (1, 1, 1, code::DISCARD_SUPERSEDED));
-        let slots: Vec<(i64, u64, u8)> = of(Event::Slot).iter().map(|r| (r.slot, r.cap_id, r.code)).collect();
-        assert_eq!(slots, vec![(1, 2, code::SLOT_NEW), (2, 0, code::SLOT_EMPTY), (5, 3, code::SLOT_NEW)]);
+        assert_eq!(
+            (
+                discard.len(),
+                discard[0].cap_id,
+                discard[0].slot,
+                discard[0].code
+            ),
+            (1, 1, 1, code::DISCARD_SUPERSEDED)
+        );
+        let slots: Vec<(i64, u64, u8)> = of(Event::Slot)
+            .iter()
+            .map(|r| (r.slot, r.cap_id, r.code))
+            .collect();
+        assert_eq!(
+            slots,
+            vec![
+                (1, 2, code::SLOT_NEW),
+                (2, 0, code::SLOT_EMPTY),
+                (5, 3, code::SLOT_NEW)
+            ]
+        );
         let skip = of(Event::Skip);
         assert_eq!((skip.len(), skip[0].slot, skip[0].n), (1, 1, 4));
-        assert_eq!(of(Event::Compose).iter().map(|r| (r.slot, r.cap_id)).collect::<Vec<_>>(), vec![(1, 2), (5, 3)]);
+        assert_eq!(
+            of(Event::Compose)
+                .iter()
+                .map(|r| (r.slot, r.cap_id))
+                .collect::<Vec<_>>(),
+            vec![(1, 2), (5, 3)]
+        );
         assert_eq!(of(Event::Send).len(), 2);
         assert_eq!(report.encoded_frames, 2);
     }
@@ -1183,7 +1388,10 @@ mod tests {
         assert_eq!(slot_time(30, 30), Duration::from_secs(1));
         assert_eq!(slot_time(5, 0), Duration::from_secs(5));
         let s = Samples(vec![5.0, 1.0, 3.0, 2.0, 4.0]);
-        assert_eq!((s.percentile(0.0), s.percentile(0.5), s.percentile(1.0)), (1.0, 3.0, 5.0));
+        assert_eq!(
+            (s.percentile(0.0), s.percentile(0.5), s.percentile(1.0)),
+            (1.0, 3.0, 5.0)
+        );
         assert_eq!(Samples::default().percentile(0.5), 0.0);
         let mut bounded = Samples::default();
         for i in 0..SAMPLE_LIMIT + 5 {

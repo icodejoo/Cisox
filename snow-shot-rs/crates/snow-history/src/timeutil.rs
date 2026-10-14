@@ -1,6 +1,5 @@
 //! 极简 UTC 时间工具：解析 `Qt::ISODateWithMs` 文本，避免引入时间库。
 
-
 /// 一天的毫秒数。
 pub const MILLIS_PER_DAY: i64 = 86_400_000;
 

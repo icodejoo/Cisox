@@ -35,7 +35,11 @@ impl Timeline {
     /// let t = Timeline::new(Instant::now(), 60);
     /// ```
     pub fn new(start: Instant, fps: u32) -> Self {
-        Self { start, fps: fps.max(1), pauses: Vec::new() }
+        Self {
+            start,
+            fps: fps.max(1),
+            pauses: Vec::new(),
+        }
     }
 
     /// 标记暂停开始（已在暂停则忽略）。
@@ -68,7 +72,9 @@ impl Timeline {
     /// # 参数
     /// - `t`：查询时刻。
     pub fn in_pause(&self, t: Instant) -> bool {
-        self.pauses.iter().any(|&(from, to)| t >= from && to.is_none_or(|to| t < to))
+        self.pauses
+            .iter()
+            .any(|&(from, to)| t >= from && to.is_none_or(|to| t < to))
     }
 
     /// 某时刻的有效录制时长（不含暂停；早于起点返回 0）。
@@ -93,7 +99,9 @@ impl Timeline {
     /// - `t`：停止时刻。
     pub fn endpoint(&self, t: Instant) -> u64 {
         let nanos = self.active_at(t).as_nanos() * u128::from(self.fps);
-        nanos.div_ceil(u128::from(NANOS_PER_SEC)).min(u128::from(u64::MAX)) as u64
+        nanos
+            .div_ceil(u128::from(NANOS_PER_SEC))
+            .min(u128::from(u64::MAX)) as u64
     }
 }
 
@@ -104,7 +112,8 @@ impl Timeline {
 /// assert_eq!(slot_of(Duration::from_millis(100), 30), 3);
 /// ```
 pub fn slot_of(active: Duration, fps: u32) -> u64 {
-    (active.as_nanos() * u128::from(fps.max(1)) / u128::from(NANOS_PER_SEC)).min(u128::from(u64::MAX)) as u64
+    (active.as_nanos() * u128::from(fps.max(1)) / u128::from(NANOS_PER_SEC))
+        .min(u128::from(u64::MAX)) as u64
 }
 
 /// 待输出队列容量上限（按有效时间排序的帧；溢出丢最旧）。
@@ -126,7 +135,10 @@ pub struct TimedQueue<T> {
 impl<T> Default for TimedQueue<T> {
     /// 空队列。
     fn default() -> Self {
-        Self { pending: VecDeque::new(), dropped: 0 }
+        Self {
+            pending: VecDeque::new(),
+            dropped: 0,
+        }
     }
 }
 
@@ -160,7 +172,11 @@ impl<T> TimedQueue<T> {
     /// q.push_with(Duration::from_millis(10), "a", |old| println!("evicted {old}"));
     /// ```
     pub fn push_with(&mut self, at: Duration, item: T, mut on_evict: impl FnMut(&T)) {
-        let index = self.pending.iter().rposition(|(t, _)| *t <= at).map_or(0, |i| i + 1);
+        let index = self
+            .pending
+            .iter()
+            .rposition(|(t, _)| *t <= at)
+            .map_or(0, |i| i + 1);
         self.pending.insert(index, (at, item));
         while self.pending.len() > MAX_PENDING_FRAMES {
             if let Some((_, old)) = self.pending.pop_front() {
@@ -190,8 +206,16 @@ impl<T> TimedQueue<T> {
     /// ```ignore
     /// let chosen = q.take_for_slot_with(Duration::from_millis(20), |old| println!("dropped {old}"));
     /// ```
-    pub fn take_for_slot_with(&mut self, slot_time: Duration, mut on_discard: impl FnMut(&T)) -> Option<T> {
-        let count = self.pending.iter().take_while(|(t, _)| *t <= slot_time).count();
+    pub fn take_for_slot_with(
+        &mut self,
+        slot_time: Duration,
+        mut on_discard: impl FnMut(&T),
+    ) -> Option<T> {
+        let count = self
+            .pending
+            .iter()
+            .take_while(|(t, _)| *t <= slot_time)
+            .count();
         if count == 0 {
             return None;
         }
@@ -224,13 +248,19 @@ pub struct QpcAnchor {
 impl QpcAnchor {
     /// 用给定的（时刻，计数，频率）构造。
     pub fn new(instant: Instant, ticks: i64, frequency: i64) -> Self {
-        Self { instant, ticks, frequency: frequency.max(1) }
+        Self {
+            instant,
+            ticks,
+            frequency: frequency.max(1),
+        }
     }
 
     /// 读取当前的 QPC 与 `Instant` 建立锚点；失败返回 `None`。
     #[cfg(windows)]
     pub fn capture_now() -> Option<Self> {
-        use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
+        use windows::Win32::System::Performance::{
+            QueryPerformanceCounter, QueryPerformanceFrequency,
+        };
         let (mut ticks, mut frequency) = (0i64, 0i64);
         // SAFETY: 两个输出都是局部变量。
         unsafe {
@@ -255,7 +285,11 @@ impl QpcAnchor {
         let delta = i128::from(ticks) - i128::from(self.ticks);
         let nanos = delta.unsigned_abs() * u128::from(NANOS_PER_SEC) / self.frequency as u128;
         let d = Duration::from_nanos(nanos.min(u128::from(u64::MAX)) as u64);
-        if delta >= 0 { self.instant + d } else { self.instant.checked_sub(d).unwrap_or(self.instant) }
+        if delta >= 0 {
+            self.instant + d
+        } else {
+            self.instant.checked_sub(d).unwrap_or(self.instant)
+        }
     }
 }
 
@@ -294,7 +328,12 @@ impl PhaseTracker {
     /// # 参数
     /// - `period`：槽周期（`1/fps`）。
     pub fn new(period: Duration) -> Self {
-        Self { period, phases: VecDeque::new(), offset: 0.0, primed: false }
+        Self {
+            period,
+            phases: VecDeque::new(),
+            offset: 0.0,
+            primed: false,
+        }
     }
 
     /// 预热是否完成（已有足够样本，切点可信）。
@@ -354,7 +393,11 @@ fn nearest_candidate(phases: &VecDeque<f64>, current: f64) -> f64 {
         .iter()
         .enumerate()
         .map(|(i, &p)| {
-            let next = if i + 1 < sorted.len() { sorted[i + 1] } else { sorted[0] + 1.0 };
+            let next = if i + 1 < sorted.len() {
+                sorted[i + 1]
+            } else {
+                sorted[0] + 1.0
+            };
             ((p + (next - p) / 2.0).rem_euclid(1.0), next - p)
         })
         .collect();
@@ -362,7 +405,11 @@ fn nearest_candidate(phases: &VecDeque<f64>, current: f64) -> f64 {
     gaps.iter()
         .filter(|g| g.1 >= widest * PHASE_CANDIDATE_RATIO)
         .map(|g| g.0)
-        .min_by(|a, b| wrap_signed(a - current).abs().total_cmp(&wrap_signed(b - current).abs()))
+        .min_by(|a, b| {
+            wrap_signed(a - current)
+                .abs()
+                .total_cmp(&wrap_signed(b - current).abs())
+        })
         .unwrap_or(current)
 }
 
@@ -381,7 +428,10 @@ impl TickClock {
     /// # 参数
     /// - `first`：第一个待触发的槽号。
     pub fn starting_at(first: u64) -> Self {
-        Self { next: first, missed: 0 }
+        Self {
+            next: first,
+            missed: 0,
+        }
     }
 
     /// 下一个待触发的槽号。
@@ -543,8 +593,14 @@ mod tests {
     fn qpc_anchor_converts_both_directions() {
         let base = Instant::now() + Duration::from_secs(10);
         let a = QpcAnchor::new(base, 5_000, 10_000_000);
-        assert_eq!(a.to_instant(5_000 + 10_000_000), base + Duration::from_secs(1));
-        assert_eq!(a.to_instant(5_000 - 5_000_000), base - Duration::from_millis(500));
+        assert_eq!(
+            a.to_instant(5_000 + 10_000_000),
+            base + Duration::from_secs(1)
+        );
+        assert_eq!(
+            a.to_instant(5_000 - 5_000_000),
+            base - Duration::from_millis(500)
+        );
         assert_eq!(a.to_instant(5_000), base);
         #[cfg(windows)]
         assert!(QpcAnchor::capture_now().is_some());
@@ -561,7 +617,15 @@ mod tests {
         assert_eq!(c.missed, 2);
         assert_eq!(c.next_slot(), 5);
         let mut c = TickClock::starting_at(1);
-        assert_eq!((c.fire_next(3), c.fire_next(3), c.fire_next(3), c.fire_next(3)), (Some(1), Some(2), Some(3), None));
+        assert_eq!(
+            (
+                c.fire_next(3),
+                c.fire_next(3),
+                c.fire_next(3),
+                c.fire_next(3)
+            ),
+            (Some(1), Some(2), Some(3), None)
+        );
         assert_eq!(c.missed, 0);
     }
 
@@ -579,7 +643,15 @@ mod tests {
 
     /// 仿真：`src_hz` 的源（每个序号连发 `twin` 帧，呈现时间带 `jitter_ns` 抖动）按 `out_hz` 输出，
     /// 槽在 `槽时刻 + hold` 后触发；返回输出的序号列表。
-    fn simulate(src_hz: u64, out_hz: u64, twin: u64, seconds: u64, phase_ns: u64, jitter_ns: i64, drift_ppm: i64) -> Vec<u64> {
+    fn simulate(
+        src_hz: u64,
+        out_hz: u64,
+        twin: u64,
+        seconds: u64,
+        phase_ns: u64,
+        jitter_ns: i64,
+        drift_ppm: i64,
+    ) -> Vec<u64> {
         let hold_ns = NANOS_PER_SEC / (out_hz * 2) + 2_000_000;
         let mut state = 99u64;
         let mut queue = TimedQueue::default();
@@ -591,9 +663,19 @@ mod tests {
         let mut next_frame = 0u64;
         let mut t = 0u64;
         let present = |i: u64, state: &mut u64| -> u64 {
-            *state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-            let j = if jitter_ns == 0 { 0 } else { ((*state >> 33) as i64 % (2 * jitter_ns + 1)) - jitter_ns };
-            (i as i128 * i128::from(NANOS_PER_SEC) * (1_000_000 + i128::from(drift_ppm)) / (src_hz as i128 * 1_000_000) + i128::from(j) + i128::from(phase_ns)).max(0) as u64
+            *state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let j = if jitter_ns == 0 {
+                0
+            } else {
+                ((*state >> 33) as i64 % (2 * jitter_ns + 1)) - jitter_ns
+            };
+            (i as i128 * i128::from(NANOS_PER_SEC) * (1_000_000 + i128::from(drift_ppm))
+                / (src_hz as i128 * 1_000_000)
+                + i128::from(j)
+                + i128::from(phase_ns))
+            .max(0) as u64
         };
         let mut upcoming = present(0, &mut state);
         while t < end_ns {
@@ -607,7 +689,8 @@ mod tests {
             let offset = phase.offset().as_nanos() as u64;
             let slot = t.saturating_sub(hold_ns + offset) * out_hz / NANOS_PER_SEC;
             if let Some(slot) = clock.fire(slot)
-                && let Some(seq) = queue.take_for_slot(Duration::from_nanos(slot * NANOS_PER_SEC / out_hz + offset))
+                && let Some(seq) = queue
+                    .take_for_slot(Duration::from_nanos(slot * NANOS_PER_SEC / out_hz + offset))
             {
                 out.push(seq);
             }
@@ -638,13 +721,18 @@ mod tests {
             two.observe(Duration::from_millis(i * 50 + 10));
         }
         let off = two.offset().as_secs_f64() / period.as_secs_f64();
-        let dist = [0.1f64, 0.6].iter().map(|p| (off - p).abs().min(1.0 - (off - p).abs())).fold(1.0, f64::min);
+        let dist = [0.1f64, 0.6]
+            .iter()
+            .map(|p| (off - p).abs().min(1.0 - (off - p).abs()))
+            .fold(1.0, f64::min);
         assert!(dist > 0.2, "off={off}");
     }
 
     /// 输出序号区间内缺失的序号数。
     fn missing(seqs: &[u64]) -> u64 {
-        let (Some(&first), Some(&last)) = (seqs.first(), seqs.last()) else { return 0 };
+        let (Some(&first), Some(&last)) = (seqs.first(), seqs.last()) else {
+            return 0;
+        };
         let set: std::collections::BTreeSet<u64> = seqs.iter().copied().collect();
         (first..=last).filter(|s| !set.contains(s)).count() as u64
     }
@@ -654,7 +742,11 @@ mod tests {
     fn equal_rate_loses_no_sequence() {
         for phase in [0, 3_000_000, 8_000_000, 15_000_000, 16_600_000] {
             let out = simulate(60, 60, 1, 10, phase, 100_000, 0);
-            assert!(missing(&out) <= 1, "phase={phase} missing={}", missing(&out));
+            assert!(
+                missing(&out) <= 1,
+                "phase={phase} missing={}",
+                missing(&out)
+            );
         }
     }
 
@@ -663,7 +755,12 @@ mod tests {
     fn twin_present_at_half_rate_loses_no_sequence() {
         for phase in [0, 5_000_000, 12_000_000, 16_000_000, 25_000_000, 33_000_000] {
             let out = simulate(60, 30, 2, 10, phase, 100_000, 0);
-            assert!(missing(&out) <= 1, "phase={phase} missing={} out={:?}", missing(&out), &out[..out.len().min(40)]);
+            assert!(
+                missing(&out) <= 1,
+                "phase={phase} missing={} out={:?}",
+                missing(&out),
+                &out[..out.len().min(40)]
+            );
             assert!(out.len() >= 290, "len={}", out.len());
         }
     }
@@ -671,11 +768,20 @@ mod tests {
     /// 源与输出有微小频差（±0.2%，相位缓慢扫过切点）且呈现时间抖动 ±2ms：30 秒内跳号不超过 1%。
     #[test]
     fn slow_drift_with_jitter_stays_under_one_percent() {
-        for (src, out, twin, ppm) in [(60, 60, 1, -800), (60, 60, 1, 1700), (60, 30, 2, -1700), (60, 30, 2, 900)] {
+        for (src, out, twin, ppm) in [
+            (60, 60, 1, -800),
+            (60, 60, 1, 1700),
+            (60, 30, 2, -1700),
+            (60, 30, 2, 900),
+        ] {
             for phase in [0, 7_000_000, 14_000_000] {
                 let seqs = simulate(src, out, twin, 30, phase, 2_000_000, ppm);
                 let span = seqs.last().unwrap() - seqs.first().unwrap() + 1;
-                assert!(missing(&seqs) * 100 <= span, "src={src} out={out} ppm={ppm} phase={phase} missing={} span={span}", missing(&seqs));
+                assert!(
+                    missing(&seqs) * 100 <= span,
+                    "src={src} out={out} ppm={ppm} phase={phase} missing={} span={span}",
+                    missing(&seqs)
+                );
             }
         }
     }
@@ -684,6 +790,10 @@ mod tests {
     #[test]
     fn double_rate_source_is_thinned() {
         let out = simulate(60, 30, 1, 10, 4_000_000, 100_000, 0);
-        assert!((290..=305).contains(&(out.len() as u64)), "len={}", out.len());
+        assert!(
+            (290..=305).contains(&(out.len() as u64)),
+            "len={}",
+            out.len()
+        );
     }
 }

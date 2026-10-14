@@ -66,8 +66,10 @@ pub fn effects_request(document: &ConfigDocument) -> EffectsRequest {
         record_clicks: document.bool_or(KEY_RECORD_CLICKS, false),
         keyboard: document.bool_or(KEY_SHOW_KEYBOARD, false),
         keyboard_size: int_of(document, KEY_KEYBOARD_SIZE, defaults.keyboard_size, 32, 128),
-        keyboard_background: color_of(document, KEY_KEYBOARD_BACKGROUND).unwrap_or(defaults.keyboard_background),
-        keyboard_text: color_of(document, KEY_KEYBOARD_FOREGROUND).unwrap_or(defaults.keyboard_text),
+        keyboard_background: color_of(document, KEY_KEYBOARD_BACKGROUND)
+            .unwrap_or(defaults.keyboard_background),
+        keyboard_text: color_of(document, KEY_KEYBOARD_FOREGROUND)
+            .unwrap_or(defaults.keyboard_text),
     }
 }
 
@@ -94,7 +96,8 @@ mod tests {
         let mut doc = ConfigDocument::from_bytes(None);
         doc.set_value(KEY_TRAIL_COLOR, json!("#FF000080")).unwrap();
         doc.set_value(KEY_CLICK_COLOR, json!("#00FF00FF")).unwrap();
-        doc.set_value(KEY_HIGHLIGHT_COLOR, json!("#0000FFFF")).unwrap();
+        doc.set_value(KEY_HIGHLIGHT_COLOR, json!("#0000FFFF"))
+            .unwrap();
         doc.set_value(KEY_RECORD_CLICKS, json!(true)).unwrap();
         doc.set_value(KEY_SHOW_KEYBOARD, json!(true)).unwrap();
         let e = effects_request(&doc);
@@ -105,7 +108,15 @@ mod tests {
 
         doc.set_value(KEY_HIGHLIGHT_ENABLED, json!(true)).unwrap();
         assert_eq!(effects_request(&doc).highlight, [0, 0, 255, 255]);
-        assert!(doc.set_value(KEY_TRAIL_COLOR, json!("not a colour")).is_err(), "非法颜色应被配置层拒绝");
-        assert_eq!(effects_request(&doc).trail, [255, 0, 0, 128], "被拒绝的写入不改变已有值");
+        assert!(
+            doc.set_value(KEY_TRAIL_COLOR, json!("not a colour"))
+                .is_err(),
+            "非法颜色应被配置层拒绝"
+        );
+        assert_eq!(
+            effects_request(&doc).trail,
+            [255, 0, 0, 128],
+            "被拒绝的写入不改变已有值"
+        );
     }
 }

@@ -159,7 +159,10 @@ pub enum ImportError {
 
 /// 原子写文件：必要时先建父目录，再用同目录临时文件写完并落盘后改名覆盖，失败时清理临时文件。
 pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
         fs::create_dir_all(parent)?;
     }
     atomic_write(path, bytes)
@@ -363,7 +366,9 @@ mod tests {
         let dir = temp_dir("import");
         let path = dir.join("config.json");
         let mut store = ConfigStore::open(&path);
-        store.set_value("screenshot/image_quality", json!(50)).unwrap();
+        store
+            .set_value("screenshot/image_quality", json!(50))
+            .unwrap();
         store.flush().unwrap();
         let original = fs::read(&path).unwrap();
 
@@ -376,7 +381,10 @@ mod tests {
 
         store.import_snapshot(&values, 0).unwrap();
         assert!(!store.is_dirty());
-        assert_eq!(ConfigStore::open(&path).value("screenshot/image_quality"), json!(90));
+        assert_eq!(
+            ConfigStore::open(&path).value("screenshot/image_quality"),
+            json!(90)
+        );
         fs::remove_dir_all(dir).unwrap();
     }
 }

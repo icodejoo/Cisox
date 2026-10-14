@@ -3,10 +3,10 @@
 
 use crate::ocr_backend::i18n_for;
 use crate::ocr_download::{FetchError, sha256_file};
-use snow_net::curl_command;
 use snow_config::document::ConfigDocument;
 use snow_config::extensions::KEY_UPDATE_MANIFEST_URL;
 use snow_i18n::Args;
+use snow_net::curl_command;
 use snow_update::{
     AUTO_CHECK_MIN_INTERVAL_SECS, MAX_MANIFEST_BYTES, ManifestError, UpdateConfigError, UpdateMode,
     UpdateStatus, check_manifest, resolve_manifest_url, should_auto_check,
@@ -383,9 +383,8 @@ fn fetch_package(info: &UpdateInfo, dest: &Path) -> Result<bool, FetchError> {
             actual,
         })
     };
-    let fetch = || {
-        snow_net::fetch_resumable::<FetchError>(&info.url, &part, dest, None, |_| {}, &verify)
-    };
+    let fetch =
+        || snow_net::fetch_resumable::<FetchError>(&info.url, &part, dest, None, |_| {}, &verify);
     // 已有 `.part` 就续传（curl `-C -`）；续传被拒（残留已完整 / 源已变）时删掉残留从头再下一次
     let resumed = part.is_file();
     let mut result = fetch();

@@ -420,7 +420,15 @@ mod tests {
     /// 字节展开与旧的逐元素 flat_map 实现逐字节一致。
     #[test]
     fn f32s_to_le_bytes_matches_flat_map() {
-        let values = [0.0f32, -0.0, 1.5, -2.25, f32::MAX, f32::MIN_POSITIVE, f32::INFINITY];
+        let values = [
+            0.0f32,
+            -0.0,
+            1.5,
+            -2.25,
+            f32::MAX,
+            f32::MIN_POSITIVE,
+            f32::INFINITY,
+        ];
         let old: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
         assert_eq!(f32s_to_le_bytes(&values), old);
         assert!(f32s_to_le_bytes(&[]).is_empty());

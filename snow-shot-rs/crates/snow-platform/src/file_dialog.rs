@@ -112,7 +112,10 @@ pub fn show_open_dialog(request: &OpenDialogRequest) -> Result<Option<PathBuf>, 
 
 #[cfg(windows)]
 mod imp {
-    use super::{FileFilter, OpenDialogRequest, SaveDialogChoice, SaveDialogRequest, clamp_filter_index, to_wide};
+    use super::{
+        FileFilter, OpenDialogRequest, SaveDialogChoice, SaveDialogRequest, clamp_filter_index,
+        to_wide,
+    };
     use std::path::{Path, PathBuf};
     use windows::Win32::Foundation::{HWND, RPC_E_CHANGED_MODE};
     use windows::Win32::System::Com::{
@@ -190,10 +193,14 @@ mod imp {
                 .SetOptions(options | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST | extra_options)
                 .map_err(|e| e.to_string())?;
             if let Some(title) = title {
-                dialog.SetTitle(PCWSTR(title.as_ptr())).map_err(|e| e.to_string())?;
+                dialog
+                    .SetTitle(PCWSTR(title.as_ptr()))
+                    .map_err(|e| e.to_string())?;
             }
             if !filters.specs.is_empty() {
-                dialog.SetFileTypes(&filters.specs).map_err(|e| e.to_string())?;
+                dialog
+                    .SetFileTypes(&filters.specs)
+                    .map_err(|e| e.to_string())?;
                 let index = clamp_filter_index(filter_index, filters.specs.len()) as u32 + 1;
                 dialog.SetFileTypeIndex(index).map_err(|e| e.to_string())?;
             }

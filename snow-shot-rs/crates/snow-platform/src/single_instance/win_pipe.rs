@@ -4,9 +4,9 @@ use super::{
     IPC_LENGTH_HEADER_BYTES, IPC_RESPONSE_OK, IPC_RESPONSE_REJECT, IpcCommand, decode_body,
     parse_frame_length,
 };
+use snow_light_thread::LightThread;
 use std::ffi::c_void;
 use std::sync::Arc;
-use snow_light_thread::LightThread;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{
@@ -18,8 +18,8 @@ use windows::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
 };
 use windows::Win32::Security::{
-    PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenUser,
-    GetTokenInformation,
+    GetTokenInformation, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER,
+    TokenUser,
 };
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED, FILE_SHARE_NONE,
@@ -29,14 +29,15 @@ use windows::Win32::Storage::FileSystem::{
 use windows::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 use windows::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeClientProcessId,
-    GetNamedPipeServerProcessId, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT, WaitNamedPipeW,
+    GetNamedPipeServerProcessId, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE,
+    PIPE_WAIT, WaitNamedPipeW,
 };
 use windows::Win32::System::RemoteDesktop::ProcessIdToSessionId;
-use windows::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow;
 use windows::Win32::System::Threading::{
     CreateEventW, GetCurrentProcess, GetCurrentProcessId, OpenProcessToken, ResetEvent, SetEvent,
     WaitForMultipleObjects,
 };
+use windows::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow;
 use windows::core::{HSTRING, PCWSTR, PWSTR};
 
 pub mod line_pipe;
@@ -196,11 +197,7 @@ impl Drop for UserOnlyAcl {
 
 /// 创建（仅一个实例的）服务端管道；`first` 为真时带 `FILE_FLAG_FIRST_PIPE_INSTANCE`，
 /// 名字已被占用会失败，从而发现抢占。
-fn create_pipe_instance(
-    name: &str,
-    first: bool,
-    acl: &UserOnlyAcl,
-) -> Result<OwnedHandle, String> {
+fn create_pipe_instance(name: &str, first: bool, acl: &UserOnlyAcl) -> Result<OwnedHandle, String> {
     let mut open_mode = PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED;
     if first {
         open_mode |= FILE_FLAG_FIRST_PIPE_INSTANCE;
@@ -502,7 +499,11 @@ fn handle_connection(
                 pipe,
                 event,
                 stop,
-                if delivered { IPC_RESPONSE_OK } else { IPC_RESPONSE_REJECT },
+                if delivered {
+                    IPC_RESPONSE_OK
+                } else {
+                    IPC_RESPONSE_REJECT
+                },
             );
         }
         Err(e) => {
@@ -584,8 +585,14 @@ pub(super) fn send_frame(name: &str, frame: &[u8]) -> Result<(), String> {
     let remaining = deadline
         .saturating_duration_since(Instant::now())
         .max(Duration::from_millis(200));
-    write_all(pipe.0, event.0, never.0, frame, remaining.as_millis() as u32)
-        .map_err(|o| format!("向主实例发送失败: {}", outcome_text(&o)))?;
+    write_all(
+        pipe.0,
+        event.0,
+        never.0,
+        frame,
+        remaining.as_millis() as u32,
+    )
+    .map_err(|o| format!("向主实例发送失败: {}", outcome_text(&o)))?;
     let mut answer = [0u8; 1];
     let answer_deadline =
         Instant::now() + Duration::from_millis(u64::from(CLIENT_RESPONSE_TIMEOUT_MS));
@@ -664,7 +671,10 @@ mod tests {
         assert_eq!(sddl.matches("(A;").count(), 1, "ACE 数量异常: {sddl}");
         assert!(sddl.contains(&sid), "DACL 应包含当前用户 SID: {sddl}");
         assert!(sddl.contains("D:P"), "DACL 应为受保护: {sddl}");
-        assert!(!sddl.contains(";;;WD)") && !sddl.contains(";;;BU)"), "不应授权 Everyone/Users: {sddl}");
+        assert!(
+            !sddl.contains(";;;WD)") && !sddl.contains(";;;BU)"),
+            "不应授权 Everyone/Users: {sddl}"
+        );
     }
 
     /// 名字被占用时首实例创建失败（不降级）。

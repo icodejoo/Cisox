@@ -434,9 +434,14 @@ pub fn fetch_verified(item: &DownloadItem, cancel: &AtomicBool) -> Result<PathBu
     let part = item
         .dest_dir
         .join(format!("{}{PART_SUFFIX}", item.file.name));
-    snow_net::fetch_resumable::<FetchError>(&item.file.url, &part, &dest, None, |_| {}, |p| {
-        verify_file(p, &item.file)
-    })?;
+    snow_net::fetch_resumable::<FetchError>(
+        &item.file.url,
+        &part,
+        &dest,
+        None,
+        |_| {},
+        |p| verify_file(p, &item.file),
+    )?;
     Ok(dest)
 }
 

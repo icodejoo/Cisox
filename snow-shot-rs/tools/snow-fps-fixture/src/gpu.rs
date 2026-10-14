@@ -8,14 +8,17 @@ use snow_fps_fixture::seqbar::{bar_height, paint_bar_segment};
 use windows::Win32::Foundation::{HMODULE, RECT};
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11_BIND_SHADER_RESOURCE, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC,
-    D3D11_USAGE_DEFAULT, D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11DeviceContext1,
-    ID3D11RenderTargetView, ID3D11Resource, ID3D11Texture2D, ID3D11View,
+    D3D11_BIND_SHADER_RESOURCE, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION,
+    D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11CreateDevice, ID3D11Device,
+    ID3D11DeviceContext, ID3D11DeviceContext1, ID3D11RenderTargetView, ID3D11Resource,
+    ID3D11Texture2D, ID3D11View,
 };
-use windows::Win32::Graphics::Dxgi::Common::{DXGI_ALPHA_MODE_IGNORE, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
+use windows::Win32::Graphics::Dxgi::Common::{
+    DXGI_ALPHA_MODE_IGNORE, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC,
+};
 use windows::Win32::Graphics::Dxgi::{
-    DXGI_SCALING_NONE, DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT,
-    IDXGIDevice1, IDXGIFactory2, IDXGISwapChain1,
+    DXGI_SCALING_NONE, DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_EFFECT_FLIP_DISCARD,
+    DXGI_USAGE_RENDER_TARGET_OUTPUT, IDXGIDevice1, IDXGIFactory2, IDXGISwapChain1,
 };
 use windows::core::Interface;
 
@@ -68,7 +71,10 @@ fn make_texture(device: &ID3D11Device, width: u32, height: u32) -> Result<ID3D11
         MipLevels: 1,
         ArraySize: 1,
         Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+        SampleDesc: DXGI_SAMPLE_DESC {
+            Count: 1,
+            Quality: 0,
+        },
         Usage: D3D11_USAGE_DEFAULT,
         BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
         ..Default::default()
@@ -89,7 +95,12 @@ impl Renderer {
     ///
     /// # 返回
     /// 渲染器；D3D/DXGI 失败返回原因。
-    pub fn new(window: &FixtureWindow, width: u32, height: u32, with_noise: bool) -> Result<Self, String> {
+    pub fn new(
+        window: &FixtureWindow,
+        width: u32,
+        height: u32,
+        with_noise: bool,
+    ) -> Result<Self, String> {
         let mut device = None;
         let mut ctx = None;
         // SAFETY: 输出指针均指向局部 Option；默认适配器、硬件驱动。
@@ -113,14 +124,23 @@ impl Renderer {
         let dxgi_device: IDXGIDevice1 = device.cast().map_err(|e| e.to_string())?;
         // SAFETY: 简单的 DXGI 查询/设置调用。
         let factory: IDXGIFactory2 = unsafe {
-            dxgi_device.SetMaximumFrameLatency(MAX_FRAME_LATENCY).map_err(|e| e.to_string())?;
-            dxgi_device.GetAdapter().map_err(|e| e.to_string())?.GetParent().map_err(|e| e.to_string())?
+            dxgi_device
+                .SetMaximumFrameLatency(MAX_FRAME_LATENCY)
+                .map_err(|e| e.to_string())?;
+            dxgi_device
+                .GetAdapter()
+                .map_err(|e| e.to_string())?
+                .GetParent()
+                .map_err(|e| e.to_string())?
         };
         let desc = DXGI_SWAP_CHAIN_DESC1 {
             Width: width,
             Height: height,
             Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
             BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
             BufferCount: BUFFER_COUNT,
             Scaling: DXGI_SCALING_NONE,
@@ -129,20 +149,29 @@ impl Renderer {
             ..Default::default()
         };
         // SAFETY: 窗口句柄在 window 存活期间有效；desc 有效。
-        let swap = unsafe { factory.CreateSwapChainForHwnd(&device, window.hwnd(), &desc, None, None) }
-            .map_err(|e| format!("CreateSwapChainForHwnd: {e}"))?;
+        let swap =
+            unsafe { factory.CreateSwapChainForHwnd(&device, window.hwnd(), &desc, None, None) }
+                .map_err(|e| format!("CreateSwapChainForHwnd: {e}"))?;
         // SAFETY: 取缓冲 0 并创建视图。
         let (back, rtv) = unsafe {
             let back: ID3D11Texture2D = swap.GetBuffer(0).map_err(|e| e.to_string())?;
             let mut rtv = None;
-            device.CreateRenderTargetView(&back, None, Some(&mut rtv)).map_err(|e| e.to_string())?;
-            (back.cast::<ID3D11Resource>().map_err(|e| e.to_string())?, rtv.ok_or("RTV 为空")?)
+            device
+                .CreateRenderTargetView(&back, None, Some(&mut rtv))
+                .map_err(|e| e.to_string())?;
+            (
+                back.cast::<ID3D11Resource>().map_err(|e| e.to_string())?,
+                rtv.ok_or("RTV 为空")?,
+            )
         };
         let bar_h = bar_height(height);
         let bar_tex = make_texture(&device, width, bar_h)?;
         let noise = if with_noise {
             let (nw, nh) = (width / NOISE_DIVISOR, height / NOISE_DIVISOR);
-            Some((make_texture(&device, nw, nh)?, vec![0u32; (nw * nh) as usize]))
+            Some((
+                make_texture(&device, nw, nh)?,
+                vec![0u32; (nw * nh) as usize],
+            ))
         } else {
             None
         };
@@ -185,28 +214,64 @@ impl Renderer {
     pub fn draw_and_present(&mut self, scene: &Scene, seq: u32) -> Result<(), String> {
         let view: ID3D11View = self.rtv.cast().map_err(|e| e.to_string())?;
         for Fill { color, rects } in &scene.fills {
-            let rc: Vec<RECT> = rects.iter().map(|&(l, t, r, b)| RECT { left: l, top: t, right: r, bottom: b }).collect();
+            let rc: Vec<RECT> = rects
+                .iter()
+                .map(|&(l, t, r, b)| RECT {
+                    left: l,
+                    top: t,
+                    right: r,
+                    bottom: b,
+                })
+                .collect();
             // SAFETY: view 与 rc 在调用期间有效。
             unsafe { self.ctx1.ClearView(&view, color, Some(&rc)) };
         }
         // 序号条：CPU 画到小缓冲后上传，再拷贝到后备缓冲顶部
-        paint_bar_segment(&mut self.bar_px, self.width, self.height, seq, self.bar_offset, self.bar_total_w);
+        paint_bar_segment(
+            &mut self.bar_px,
+            self.width,
+            self.height,
+            seq,
+            self.bar_offset,
+            self.bar_total_w,
+        );
         let bar_res: ID3D11Resource = self.bar_tex.cast().map_err(|e| e.to_string())?;
         // SAFETY: 缓冲大小 = 宽*条高*4，行距与之一致；资源均存活。
         unsafe {
-            self.ctx.UpdateSubresource(&bar_res, 0, None, self.bar_px.as_ptr().cast(), self.width * BYTES_PER_PIXEL, 0);
-            self.ctx.CopySubresourceRegion(&self.back, 0, 0, 0, 0, &bar_res, 0, None);
+            self.ctx.UpdateSubresource(
+                &bar_res,
+                0,
+                None,
+                self.bar_px.as_ptr().cast(),
+                self.width * BYTES_PER_PIXEL,
+                0,
+            );
+            self.ctx
+                .CopySubresourceRegion(&self.back, 0, 0, 0, 0, &bar_res, 0, None);
         }
         if let (Some((tex, px)), Some((x, y, nw, _))) = (self.noise.as_mut(), scene.noise) {
             fill_noise(px, &mut self.noise_state);
             let res: ID3D11Resource = tex.cast().map_err(|e| e.to_string())?;
             // SAFETY: 噪声缓冲大小 = nw*nh*4。
             unsafe {
-                self.ctx.UpdateSubresource(&res, 0, None, px.as_ptr().cast(), nw * BYTES_PER_PIXEL, 0);
-                self.ctx.CopySubresourceRegion(&self.back, 0, x as u32, y as u32, 0, &res, 0, None);
+                self.ctx.UpdateSubresource(
+                    &res,
+                    0,
+                    None,
+                    px.as_ptr().cast(),
+                    nw * BYTES_PER_PIXEL,
+                    0,
+                );
+                self.ctx
+                    .CopySubresourceRegion(&self.back, 0, x as u32, y as u32, 0, &res, 0, None);
             }
         }
         // SAFETY: 交换链存活。
-        unsafe { self.swap.Present(1, windows::Win32::Graphics::Dxgi::DXGI_PRESENT(0)) }.ok().map_err(|e| format!("Present: {e}"))
+        unsafe {
+            self.swap
+                .Present(1, windows::Win32::Graphics::Dxgi::DXGI_PRESENT(0))
+        }
+        .ok()
+        .map_err(|e| format!("Present: {e}"))
     }
 }

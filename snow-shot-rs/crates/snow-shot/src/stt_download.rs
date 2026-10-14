@@ -728,7 +728,10 @@ mod tests {
         assert_eq!(meta["id"], "pack-stream");
         assert_eq!(meta["kind"], "online-transducer");
         assert_eq!(meta["mode"], "streaming");
-        assert_eq!(meta["model_type"], "zipformer2", "清单里的 model_type 要写进 model.json");
+        assert_eq!(
+            meta["model_type"], "zipformer2",
+            "清单里的 model_type 要写进 model.json"
+        );
         let models = stt_models::models_root(&root);
         assert!(!models.join("pack-stream.extracting").exists());
         assert!(
@@ -760,10 +763,9 @@ mod tests {
         );
         assert!(vad_installed_with(&vad, &root));
         assert!(plan_with(&spec, &vad, &root).is_empty());
-        let meta = std::fs::read_to_string(
-            stt_models::model_dir(&spec, &root).join(MODEL_META_FILE),
-        )
-        .expect("读");
+        let meta =
+            std::fs::read_to_string(stt_models::model_dir(&spec, &root).join(MODEL_META_FILE))
+                .expect("读");
         assert!(!meta.contains("model_type"), "没核对过的不写 model_type");
         for d in [src, root] {
             let _ = std::fs::remove_dir_all(&d);

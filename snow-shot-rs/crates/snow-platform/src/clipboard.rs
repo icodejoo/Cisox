@@ -541,12 +541,30 @@ mod tests {
     #[test]
     fn drop_files_layout() {
         assert!(build_drop_files(&[]).is_none());
-        let data = build_drop_files(&[std::path::PathBuf::from("a.mp4"), std::path::PathBuf::from("b")]).unwrap();
+        let data = build_drop_files(&[
+            std::path::PathBuf::from("a.mp4"),
+            std::path::PathBuf::from("b"),
+        ])
+        .unwrap();
         assert_eq!(u32::from_le_bytes(data[0..4].try_into().unwrap()), 20);
         assert_eq!(u32::from_le_bytes(data[16..20].try_into().unwrap()), 1);
-        let units: Vec<u16> = data[20..].chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
-        let text: Vec<String> = units.split(|&u| u == 0).map(String::from_utf16_lossy).collect();
-        assert_eq!(text, vec!["a.mp4".to_string(), "b".to_string(), String::new(), String::new()]);
+        let units: Vec<u16> = data[20..]
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        let text: Vec<String> = units
+            .split(|&u| u == 0)
+            .map(String::from_utf16_lossy)
+            .collect();
+        assert_eq!(
+            text,
+            vec![
+                "a.mp4".to_string(),
+                "b".to_string(),
+                String::new(),
+                String::new()
+            ]
+        );
     }
 
     /// 校验数据有效性检查。

@@ -161,8 +161,17 @@ impl Chord {
             Some(pos) => (&text[..pos], &text[pos + 1..]),
             None => ("", text),
         };
-        let mut chord = Chord { key: String::new(), ctrl: false, shift: false, alt: false };
-        for token in mods_part.split('+').map(str::trim).filter(|t| !t.is_empty()) {
+        let mut chord = Chord {
+            key: String::new(),
+            ctrl: false,
+            shift: false,
+            alt: false,
+        };
+        for token in mods_part
+            .split('+')
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+        {
             match token.to_ascii_lowercase().as_str() {
                 "ctrl" | "control" => chord.ctrl = true,
                 "shift" => chord.shift = true,
@@ -171,7 +180,12 @@ impl Chord {
             }
         }
         let key = key_part.trim();
-        if key.is_empty() || matches!(key.to_ascii_lowercase().as_str(), "ctrl" | "control" | "shift" | "alt" | "meta" | "win" | "windows" | "cmd") {
+        if key.is_empty()
+            || matches!(
+                key.to_ascii_lowercase().as_str(),
+                "ctrl" | "control" | "shift" | "alt" | "meta" | "win" | "windows" | "cmd"
+            )
+        {
             return None;
         }
         chord.key = normalize_key(key);
@@ -186,33 +200,105 @@ impl Chord {
 
 /// 截图键位表：配置键 → 动作，顺序即优先级（截图键位先于绘制键位）。
 const SCREENSHOT_KEYS: &[(&str, OverlayKeyAction)] = &[
-    ("screenshot_shortcuts/cancel_screenshot", OverlayKeyAction::Cancel),
-    ("screenshot_shortcuts/copy_to_clipboard", OverlayKeyAction::CopyToClipboard),
-    ("screenshot_shortcuts/save_as_file", OverlayKeyAction::SaveAsFile),
-    ("screenshot_shortcuts/quick_save", OverlayKeyAction::QuickSave),
-    ("screenshot_shortcuts/pin_to_screen", OverlayKeyAction::PinToScreen),
-    ("screenshot_shortcuts/video_recording", OverlayKeyAction::VideoRecording),
-    ("screenshot_shortcuts/text_recognition", OverlayKeyAction::TextRecognition),
-    ("screenshot_shortcuts/text_translation", OverlayKeyAction::TextTranslation),
-    ("screenshot_shortcuts/scrolling_screenshot", OverlayKeyAction::ScrollingScreenshot),
-    ("screenshot_shortcuts/table_recognition", OverlayKeyAction::TableRecognition),
-    ("screenshot_shortcuts/latex_recognition", OverlayKeyAction::LatexRecognition),
-    ("screenshot_shortcuts/qr_code_recognition", OverlayKeyAction::QrCodeRecognition),
+    (
+        "screenshot_shortcuts/cancel_screenshot",
+        OverlayKeyAction::Cancel,
+    ),
+    (
+        "screenshot_shortcuts/copy_to_clipboard",
+        OverlayKeyAction::CopyToClipboard,
+    ),
+    (
+        "screenshot_shortcuts/save_as_file",
+        OverlayKeyAction::SaveAsFile,
+    ),
+    (
+        "screenshot_shortcuts/quick_save",
+        OverlayKeyAction::QuickSave,
+    ),
+    (
+        "screenshot_shortcuts/pin_to_screen",
+        OverlayKeyAction::PinToScreen,
+    ),
+    (
+        "screenshot_shortcuts/video_recording",
+        OverlayKeyAction::VideoRecording,
+    ),
+    (
+        "screenshot_shortcuts/text_recognition",
+        OverlayKeyAction::TextRecognition,
+    ),
+    (
+        "screenshot_shortcuts/text_translation",
+        OverlayKeyAction::TextTranslation,
+    ),
+    (
+        "screenshot_shortcuts/scrolling_screenshot",
+        OverlayKeyAction::ScrollingScreenshot,
+    ),
+    (
+        "screenshot_shortcuts/table_recognition",
+        OverlayKeyAction::TableRecognition,
+    ),
+    (
+        "screenshot_shortcuts/latex_recognition",
+        OverlayKeyAction::LatexRecognition,
+    ),
+    (
+        "screenshot_shortcuts/qr_code_recognition",
+        OverlayKeyAction::QrCodeRecognition,
+    ),
     ("screenshot_shortcuts/undo", OverlayKeyAction::Undo),
     ("screenshot_shortcuts/redo", OverlayKeyAction::Redo),
-    ("screenshot_shortcuts/copy_color", OverlayKeyAction::CopyColor),
+    (
+        "screenshot_shortcuts/copy_color",
+        OverlayKeyAction::CopyColor,
+    ),
     ("screenshot_shortcuts/move_tool", OverlayKeyAction::MoveTool),
-    ("screenshot_shortcuts/move_cursor_up", OverlayKeyAction::MoveCursor(Dir::Up)),
-    ("screenshot_shortcuts/move_cursor_down", OverlayKeyAction::MoveCursor(Dir::Down)),
-    ("screenshot_shortcuts/move_cursor_left", OverlayKeyAction::MoveCursor(Dir::Left)),
-    ("screenshot_shortcuts/move_cursor_right", OverlayKeyAction::MoveCursor(Dir::Right)),
-    ("screenshot_shortcuts/move_entire_selection", OverlayKeyAction::MoveEntireSelection),
-    ("screenshot_shortcuts/switch_selection_between_window_and_window_sub_element", OverlayKeyAction::ToggleSelectionTarget),
-    ("screenshot_shortcuts/previous_screenshot_history", OverlayKeyAction::PreviousHistory),
-    ("screenshot_shortcuts/next_screenshot_history", OverlayKeyAction::NextHistory),
-    ("screenshot_shortcuts/select_previously_selected_area", OverlayKeyAction::SelectPreviousSelection),
-    ("screenshot_shortcuts/recapture", OverlayKeyAction::Recapture),
-    ("screenshot_shortcuts/toggle_coordinate_mode", OverlayKeyAction::ToggleCoordinateMode),
+    (
+        "screenshot_shortcuts/move_cursor_up",
+        OverlayKeyAction::MoveCursor(Dir::Up),
+    ),
+    (
+        "screenshot_shortcuts/move_cursor_down",
+        OverlayKeyAction::MoveCursor(Dir::Down),
+    ),
+    (
+        "screenshot_shortcuts/move_cursor_left",
+        OverlayKeyAction::MoveCursor(Dir::Left),
+    ),
+    (
+        "screenshot_shortcuts/move_cursor_right",
+        OverlayKeyAction::MoveCursor(Dir::Right),
+    ),
+    (
+        "screenshot_shortcuts/move_entire_selection",
+        OverlayKeyAction::MoveEntireSelection,
+    ),
+    (
+        "screenshot_shortcuts/switch_selection_between_window_and_window_sub_element",
+        OverlayKeyAction::ToggleSelectionTarget,
+    ),
+    (
+        "screenshot_shortcuts/previous_screenshot_history",
+        OverlayKeyAction::PreviousHistory,
+    ),
+    (
+        "screenshot_shortcuts/next_screenshot_history",
+        OverlayKeyAction::NextHistory,
+    ),
+    (
+        "screenshot_shortcuts/select_previously_selected_area",
+        OverlayKeyAction::SelectPreviousSelection,
+    ),
+    (
+        "screenshot_shortcuts/recapture",
+        OverlayKeyAction::Recapture,
+    ),
+    (
+        "screenshot_shortcuts/toggle_coordinate_mode",
+        OverlayKeyAction::ToggleCoordinateMode,
+    ),
 ];
 
 /// 「保持选区宽高一致」的配置键（默认绑定 Shift，只有修饰键，不进键位表）。
@@ -253,10 +339,11 @@ impl OverlayKeymap {
     /// ```
     pub fn from_document(document: &ConfigDocument) -> Self {
         let mut bindings = Vec::new();
-        let rows = SCREENSHOT_KEYS
-            .iter()
-            .map(|(k, a)| (*k, *a))
-            .chain(DRAWING_KEYS.iter().map(|(k, t)| (*k, OverlayKeyAction::Tool(*t))));
+        let rows = SCREENSHOT_KEYS.iter().map(|(k, a)| (*k, *a)).chain(
+            DRAWING_KEYS
+                .iter()
+                .map(|(k, t)| (*k, OverlayKeyAction::Tool(*t))),
+        );
         for (key, action) in rows {
             for text in shortcut_strings(&document.value(key)) {
                 if let Some(chord) = Chord::parse(&text) {
@@ -267,7 +354,10 @@ impl OverlayKeymap {
         let shift_keeps_ratio = shortcut_strings(&document.value(KEEP_RATIO_KEY))
             .iter()
             .any(|text| text.trim().eq_ignore_ascii_case("shift"));
-        Self { bindings, shift_keeps_ratio }
+        Self {
+            bindings,
+            shift_keeps_ratio,
+        }
     }
 
     /// 按住 Shift 是否应当锁定选区宽高关系（配置 `keep_selection_width_and_height_consistent` 绑在 Shift 上）。
@@ -283,7 +373,13 @@ impl OverlayKeymap {
     ///
     /// # 返回
     /// 命中的动作；没有绑定返回 `None`。
-    pub fn resolve(&self, key: &str, ctrl: bool, shift: bool, alt: bool) -> Option<OverlayKeyAction> {
+    pub fn resolve(
+        &self,
+        key: &str,
+        ctrl: bool,
+        shift: bool,
+        alt: bool,
+    ) -> Option<OverlayKeyAction> {
         self.bindings
             .iter()
             .find(|(chord, _)| chord.matches(key, ctrl, shift, alt))
@@ -317,7 +413,15 @@ mod tests {
         assert!(c.ctrl && c.shift && !c.alt && c.key == "s");
         assert_eq!(Chord::parse("Esc").unwrap().key, "escape");
         assert_eq!(Chord::parse(",").unwrap().key, ",");
-        assert_eq!(Chord::parse("Alt+R").unwrap(), Chord { key: "r".into(), ctrl: false, shift: false, alt: true });
+        assert_eq!(
+            Chord::parse("Alt+R").unwrap(),
+            Chord {
+                key: "r".into(),
+                ctrl: false,
+                shift: false,
+                alt: true
+            }
+        );
         assert!(Chord::parse("Shift").is_none());
         assert!(Chord::parse("Win+A").is_none());
         assert!(Chord::parse("").is_none());
@@ -367,18 +471,36 @@ mod tests {
     #[test]
     fn config_overrides_and_missing_keys() {
         let mut doc = ConfigDocument::from_bytes(None);
-        doc.set_value("screenshot_shortcuts/cancel_screenshot", serde_json::json!([{"portable": "Q"}]))
-            .unwrap();
-        doc.set_value("drawing_shortcuts/arrow", serde_json::json!([{"portable": "Ctrl+2"}]))
-            .unwrap();
+        doc.set_value(
+            "screenshot_shortcuts/cancel_screenshot",
+            serde_json::json!([{"portable": "Q"}]),
+        )
+        .unwrap();
+        doc.set_value(
+            "drawing_shortcuts/arrow",
+            serde_json::json!([{"portable": "Ctrl+2"}]),
+        )
+        .unwrap();
         let map = OverlayKeymap::from_document(&doc);
-        assert_eq!(map.resolve("q", false, false, false), Some(OverlayKeyAction::Cancel));
+        assert_eq!(
+            map.resolve("q", false, false, false),
+            Some(OverlayKeyAction::Cancel)
+        );
         assert_eq!(map.resolve("escape", false, false, false), None);
-        assert_eq!(map.resolve("2", true, false, false), Some(OverlayKeyAction::Tool(DrawingKey::Arrow)));
-        assert_eq!(map.resolve("c", true, false, false), Some(OverlayKeyAction::CopyToClipboard));
+        assert_eq!(
+            map.resolve("2", true, false, false),
+            Some(OverlayKeyAction::Tool(DrawingKey::Arrow))
+        );
+        assert_eq!(
+            map.resolve("c", true, false, false),
+            Some(OverlayKeyAction::CopyToClipboard)
+        );
         let defaults = ConfigDocument::from_bytes(None);
         for key in wired_config_keys() {
-            assert!(!shortcut_strings(&defaults.value(key)).is_empty(), "{key} 缺默认值");
+            assert!(
+                !shortcut_strings(&defaults.value(key)).is_empty(),
+                "{key} 缺默认值"
+            );
         }
         assert_eq!(wired_config_keys().len(), 28 + 10);
     }

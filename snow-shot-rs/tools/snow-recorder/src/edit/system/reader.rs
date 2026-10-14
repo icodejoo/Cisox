@@ -13,8 +13,8 @@ use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
 use windows::core::{GUID, Interface, PCWSTR};
 
 use super::{mf_err, mf_init_err};
-use crate::edit::yuv::HD_MIN_HEIGHT;
 use crate::edit::EditError;
+use crate::edit::yuv::HD_MIN_HEIGHT;
 use crate::win::mfenc::wide_path;
 
 /// 每毫秒的 hns 数。

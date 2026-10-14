@@ -34,7 +34,9 @@ impl GlobalMouseService {
     /// service.set_bindings(Vec::new());
     /// ```
     pub fn start(handler: DragHandler) -> Result<Self, String> {
-        Ok(Self { inner: imp::Inner::start(handler)? })
+        Ok(Self {
+            inner: imp::Inner::start(handler)?,
+        })
     }
 
     /// 替换全部绑定（配置变化时调用）；进行中的手势会被取消。
@@ -63,26 +65,28 @@ impl GlobalMouseService {
 mod imp {
     use super::held_keys::{is_modifier_key, modifiers_from_keys, reconcile_held};
     use super::{Binding, DragEvent, DragHandler, Gesture, Input, Modifiers, MouseKey, Point};
+    use snow_light_thread::LightThread;
     use std::collections::BTreeSet;
     use std::sync::mpsc::channel;
     use std::sync::{Arc, Mutex, MutexGuard};
-    use snow_light_thread::LightThread;
     use windows::Win32::Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM};
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::System::Threading::GetCurrentThreadId;
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        GetAsyncKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput, VIRTUAL_KEY, VK_LBUTTON,
-        VK_MBUTTON, VK_RBUTTON, VK_XBUTTON1, VK_XBUTTON2,
+        GetAsyncKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput,
+        VIRTUAL_KEY, VK_LBUTTON, VK_MBUTTON, VK_RBUTTON, VK_XBUTTON1, VK_XBUTTON2,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        CallNextHookEx, DispatchMessageW, GetMessageW, HHOOK, KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT, PostThreadMessageW,
-        SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_APP, WM_KEYDOWN,
-        WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_QUIT, WM_RBUTTONDOWN,
-        WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN, WM_XBUTTONUP,
+        CallNextHookEx, DispatchMessageW, GetMessageW, HHOOK, KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT,
+        PostThreadMessageW, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx,
+        WH_KEYBOARD_LL, WH_MOUSE_LL, WM_APP, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP,
+        WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP,
+        WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN, WM_XBUTTONUP,
     };
 
     /// 是否接受注入的输入（仅测试 / 自动化验证打开）。
-    static ACCEPT_INJECTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    static ACCEPT_INJECTED: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
 
     /// 设置是否接受注入的输入。
     pub fn set_accept_injected(accept: bool) {
@@ -97,7 +101,9 @@ mod imp {
     /// 当前进程主模块的实例句柄（安装钩子用）；取不到时退回空句柄。
     fn module_instance() -> HINSTANCE {
         // SAFETY: 无前置条件。
-        unsafe { GetModuleHandleW(None) }.map(|m| HINSTANCE(m.0)).unwrap_or_default()
+        unsafe { GetModuleHandleW(None) }
+            .map(|m| HINSTANCE(m.0))
+            .unwrap_or_default()
     }
 
     /// 让钩子线程重新评估是否需要鼠标钩子的私有消息。
@@ -143,7 +149,11 @@ mod imp {
 
         /// 是否需要鼠标钩子：手势进行中，或当前修饰键恰好匹配某条绑定。
         fn mouse_hook_needed(&self) -> bool {
-            self.gesture.needs_mouse_input() || self.bindings.iter().any(|b| b.modifiers == self.modifiers())
+            self.gesture.needs_mouse_input()
+                || self
+                    .bindings
+                    .iter()
+                    .any(|b| b.modifiers == self.modifiers())
         }
     }
 
@@ -163,10 +173,14 @@ mod imp {
             }
             let (tx, rx) = channel::<Result<u32, String>>();
             let handler: Arc<dyn Fn(DragEvent) + Send + Sync> = Arc::from(handler);
-            let thread = LightThread::spawn("platform-global-mouse", move || run_thread(handler, tx))
-                .map_err(|e| format!("创建钩子线程失败: {e}"))?;
+            let thread =
+                LightThread::spawn("platform-global-mouse", move || run_thread(handler, tx))
+                    .map_err(|e| format!("创建钩子线程失败: {e}"))?;
             match rx.recv() {
-                Ok(Ok(thread_id)) => Ok(Self { thread: Some(thread), thread_id }),
+                Ok(Ok(thread_id)) => Ok(Self {
+                    thread: Some(thread),
+                    thread_id,
+                }),
                 Ok(Err(e)) => {
                     thread.join();
                     Err(e)
@@ -207,9 +221,19 @@ mod imp {
     }
 
     /// 钩子线程主体：装键盘钩子、跑消息循环、退出时卸载。
-    fn run_thread(handler: Arc<dyn Fn(DragEvent) + Send + Sync>, ready: std::sync::mpsc::Sender<Result<u32, String>>) {
+    fn run_thread(
+        handler: Arc<dyn Fn(DragEvent) + Send + Sync>,
+        ready: std::sync::mpsc::Sender<Result<u32, String>>,
+    ) {
         // SAFETY: 回调是本模块的 `extern "system"` 函数；hmod 为本进程模块。
-        let keyboard = unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_proc), Some(module_instance()), 0) };
+        let keyboard = unsafe {
+            SetWindowsHookExW(
+                WH_KEYBOARD_LL,
+                Some(keyboard_proc),
+                Some(module_instance()),
+                0,
+            )
+        };
         let keyboard = match keyboard {
             Ok(h) => h,
             Err(e) => {
@@ -233,7 +257,9 @@ mod imp {
             match msg.message {
                 WM_REFRESH => sync_mouse_hook(),
                 WM_CANCEL => {
-                    let event = lock().as_mut().and_then(|s| s.gesture.handle(Input::Cancel, &[]).event);
+                    let event = lock()
+                        .as_mut()
+                        .and_then(|s| s.gesture.handle(Input::Cancel, &[]).event);
                     dispatch(event);
                     sync_mouse_hook();
                 }
@@ -247,7 +273,10 @@ mod imp {
             }
         }
         if let Some(state) = lock().take() {
-            for hook in [state.mouse_hook, state.keyboard_hook].into_iter().flatten() {
+            for hook in [state.mouse_hook, state.keyboard_hook]
+                .into_iter()
+                .flatten()
+            {
                 // SAFETY: 钩子句柄由本线程安装。
                 let _ = unsafe { UnhookWindowsHookEx(HHOOK(hook as *mut _)) };
             }
@@ -275,7 +304,9 @@ mod imp {
         match (needed, state.mouse_hook) {
             (true, None) => {
                 // SAFETY: 回调是本模块的 `extern "system"` 函数；hmod 为本进程模块。
-                match unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), Some(module_instance()), 0) } {
+                match unsafe {
+                    SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), Some(module_instance()), 0)
+                } {
                     Ok(h) => state.mouse_hook = Some(h.0 as isize),
                     Err(e) => tracing::warn!(error = %e, "安装鼠标钩子失败"),
                 }
@@ -345,7 +376,8 @@ mod imp {
     /// 请求本线程稍后（回到消息循环时）重新评估鼠标钩子，不在钩子回调里直接装 / 卸钩子。
     fn request_refresh() {
         // SAFETY: 给当前线程自己投递私有消息。
-        let _ = unsafe { PostThreadMessageW(GetCurrentThreadId(), WM_REFRESH, WPARAM(0), LPARAM(0)) };
+        let _ =
+            unsafe { PostThreadMessageW(GetCurrentThreadId(), WM_REFRESH, WPARAM(0), LPARAM(0)) };
     }
 
     /// 除 `except` 外是否还有鼠标键按着。
@@ -368,7 +400,13 @@ mod imp {
         let key = |flags| INPUT {
             r#type: INPUT_KEYBOARD,
             Anonymous: INPUT_0 {
-                ki: KEYBDINPUT { wVk: VIRTUAL_KEY(VK_NOOP), wScan: 0, dwFlags: flags, time: 0, dwExtraInfo: 0 },
+                ki: KEYBDINPUT {
+                    wVk: VIRTUAL_KEY(VK_NOOP),
+                    wScan: 0,
+                    dwFlags: flags,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
             },
         };
         let inputs = [key(Default::default()), key(KEYEVENTF_KEYUP)];
@@ -382,8 +420,17 @@ mod imp {
             // SAFETY: code>=0 时 lparam 指向有效的 MSLLHOOKSTRUCT。
             let info = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
             if !ignore(info.flags & LLMHF_INJECTED != 0) {
-                let pos = Point { x: info.pt.x, y: info.pt.y };
-                let xbutton = || if (info.mouseData >> 16) & 0xFFFF == 1 { MouseKey::Back } else { MouseKey::Forward };
+                let pos = Point {
+                    x: info.pt.x,
+                    y: info.pt.y,
+                };
+                let xbutton = || {
+                    if (info.mouseData >> 16) & 0xFFFF == 1 {
+                        MouseKey::Back
+                    } else {
+                        MouseKey::Forward
+                    }
+                };
                 let (press, release): (Option<MouseKey>, Option<MouseKey>) = match wparam.0 as u32 {
                     WM_LBUTTONDOWN => (Some(MouseKey::Left), None),
                     WM_RBUTTONDOWN => (Some(MouseKey::Right), None),
@@ -422,10 +469,13 @@ mod imp {
                             Some(state) => {
                                 // 分字段借用，免得每个鼠标事件都克隆整份绑定表
                                 let outcome = {
-                                    let State { bindings, gesture, .. } = &mut *state;
+                                    let State {
+                                        bindings, gesture, ..
+                                    } = &mut *state;
                                     gesture.handle(input, bindings)
                                 };
-                                let win = matches!(outcome.event, Some(DragEvent::Begin { .. })) && state.modifiers().win;
+                                let win = matches!(outcome.event, Some(DragEvent::Begin { .. }))
+                                    && state.modifiers().win;
                                 (outcome, win)
                             }
                             None => (Default::default(), false),
@@ -434,7 +484,10 @@ mod imp {
                     if win_gesture {
                         suppress_start_menu();
                     }
-                    let finished = matches!(outcome.event, Some(DragEvent::Finish { .. } | DragEvent::Cancel { .. }));
+                    let finished = matches!(
+                        outcome.event,
+                        Some(DragEvent::Finish { .. } | DragEvent::Cancel { .. })
+                    );
                     dispatch(outcome.event);
                     if finished || press.is_some() || release.is_some() {
                         sync_mouse_hook();
@@ -480,17 +533,29 @@ mod real_hook_tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
-        MOUSEINPUT, SendInput, VIRTUAL_KEY, VK_LCONTROL,
+        INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP,
+        MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEINPUT, SendInput, VIRTUAL_KEY, VK_LCONTROL,
     };
-    use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN, SetCursorPos};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN, SetCursorPos,
+    };
 
     /// 发一个键盘事件。
     fn key(vk: VIRTUAL_KEY, up: bool) {
         let input = INPUT {
             r#type: INPUT_KEYBOARD,
             Anonymous: INPUT_0 {
-                ki: KEYBDINPUT { wVk: vk, wScan: 0, dwFlags: if up { KEYEVENTF_KEYUP } else { Default::default() }, time: 0, dwExtraInfo: 0 },
+                ki: KEYBDINPUT {
+                    wVk: vk,
+                    wScan: 0,
+                    dwFlags: if up {
+                        KEYEVENTF_KEYUP
+                    } else {
+                        Default::default()
+                    },
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
             },
         };
         // SAFETY: 单个有效 INPUT。
@@ -506,7 +571,11 @@ mod real_hook_tests {
                     dx: 0,
                     dy: 0,
                     mouseData: 0,
-                    dwFlags: if up { MOUSEEVENTF_LEFTUP } else { MOUSEEVENTF_LEFTDOWN },
+                    dwFlags: if up {
+                        MOUSEEVENTF_LEFTUP
+                    } else {
+                        MOUSEEVENTF_LEFTDOWN
+                    },
                     time: 0,
                     dwExtraInfo: 0,
                 },
@@ -523,11 +592,15 @@ mod real_hook_tests {
     fn ctrl_left_drag_produces_gesture_events() {
         let events = Arc::new(Mutex::new(Vec::<DragEvent>::new()));
         let sink = Arc::clone(&events);
-        let service = GlobalMouseService::start(Box::new(move |e| sink.lock().unwrap().push(e))).unwrap();
+        let service =
+            GlobalMouseService::start(Box::new(move |e| sink.lock().unwrap().push(e))).unwrap();
         service.accept_injected_input(true);
         service.set_bindings(vec![Binding {
             action: "copy".into(),
-            modifiers: Modifiers { ctrl: true, ..Default::default() },
+            modifiers: Modifiers {
+                ctrl: true,
+                ..Default::default()
+            },
             button: MouseKey::Left,
         }]);
         std::thread::sleep(Duration::from_millis(200));
@@ -553,8 +626,17 @@ mod real_hook_tests {
         std::thread::sleep(Duration::from_millis(200));
         drop(service);
         let got = events.lock().unwrap().clone();
-        assert!(matches!(got.first(), Some(DragEvent::Begin { id: 1, action, .. }) if action == "copy"), "{got:?}");
-        assert!(got.iter().any(|e| matches!(e, DragEvent::Update { .. })), "{got:?}");
-        assert!(matches!(got.last(), Some(DragEvent::Finish { id: 1, pos }) if pos.x >= base_x + 100), "{got:?}");
+        assert!(
+            matches!(got.first(), Some(DragEvent::Begin { id: 1, action, .. }) if action == "copy"),
+            "{got:?}"
+        );
+        assert!(
+            got.iter().any(|e| matches!(e, DragEvent::Update { .. })),
+            "{got:?}"
+        );
+        assert!(
+            matches!(got.last(), Some(DragEvent::Finish { id: 1, pos }) if pos.x >= base_x + 100),
+            "{got:?}"
+        );
     }
 }

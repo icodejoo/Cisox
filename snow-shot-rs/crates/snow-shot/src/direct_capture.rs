@@ -114,10 +114,16 @@ pub fn spawn_direct_capture(
             let result = snow_platform::capture::capture_display(Some(region)).map(|screen| {
                 let rgba = screen.to_rgba();
                 let mut sink = SystemOutput::new(save_dir);
-                let result = apply_direct_output(plan, &mut sink, screen.width, screen.height, &rgba);
+                let result =
+                    apply_direct_output(plan, &mut sink, screen.width, screen.height, &rgba);
                 if let Some(h) = history.as_ref().filter(|_| result.any_success()) {
-                    h.recorder
-                        .submit(h.policy.clone(), h.source, screen.width, screen.height, &rgba);
+                    h.recorder.submit(
+                        h.policy.clone(),
+                        h.source,
+                        screen.width,
+                        screen.height,
+                        &rgba,
+                    );
                 }
                 result
             });

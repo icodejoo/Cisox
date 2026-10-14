@@ -29,8 +29,9 @@ mod imp {
     };
     use windows::Win32::System::Variant::{VARIANT, VT_I4};
     use windows::Win32::UI::Shell::{
-        IFolderView2, IShellBrowser, IShellItemArray, IShellView, IShellWindows, IWebBrowserApp, SID_STopLevelBrowser,
-        SIGDN_FILESYSPATH, SVGIO_SELECTION, SWC_DESKTOP, SWFO_NEEDDISPATCH, ShellWindows,
+        IFolderView2, IShellBrowser, IShellItemArray, IShellView, IShellWindows, IWebBrowserApp,
+        SID_STopLevelBrowser, SIGDN_FILESYSPATH, SVGIO_SELECTION, SWC_DESKTOP, SWFO_NEEDDISPATCH,
+        ShellWindows,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         EnumChildWindows, GetClassNameW, GetForegroundWindow, IsChild, IsWindowVisible,
@@ -72,15 +73,26 @@ mod imp {
     fn visible_child(parent: HWND, name: &str) -> Option<HWND> {
         let mut search = Search { name, result: None };
         // SAFETY: 回调只访问 search，枚举同步完成，指针在此期间有效。
-        let _ = unsafe { EnumChildWindows(Some(parent), Some(visit), LPARAM(&mut search as *mut Search as isize)) };
+        let _ = unsafe {
+            EnumChildWindows(
+                Some(parent),
+                Some(visit),
+                LPARAM(&mut search as *mut Search as isize),
+            )
+        };
         search.result
     }
 
     /// 从一个资源管理器视图读取选中项路径；视图窗口不是目标可见视图时返回 `None`。
-    fn files_from_view(dispatch: &IDispatch, target_view: HWND, target_tab: Option<HWND>) -> Option<Vec<PathBuf>> {
+    fn files_from_view(
+        dispatch: &IDispatch,
+        target_view: HWND,
+        target_tab: Option<HWND>,
+    ) -> Option<Vec<PathBuf>> {
         let provider: windows::Win32::System::Com::IServiceProvider = dispatch.cast().ok()?;
         // SAFETY: COM 调用，参数均为有效接口 / 常量。
-        let browser: IShellBrowser = unsafe { provider.QueryService(&SID_STopLevelBrowser) }.ok()?;
+        let browser: IShellBrowser =
+            unsafe { provider.QueryService(&SID_STopLevelBrowser) }.ok()?;
         // SAFETY: 同上。
         let view: IShellView = unsafe { browser.QueryActiveShellView() }.ok()?;
         // SAFETY: 同上。
@@ -158,8 +170,15 @@ mod imp {
             let root = VARIANT::default();
             let mut handle = 0i32;
             // SAFETY: COM 调用，输出参数为有效局部变量。
-            let found =
-                unsafe { shell_windows.FindWindowSW(&location, &root, SWC_DESKTOP, &mut handle, SWFO_NEEDDISPATCH) };
+            let found = unsafe {
+                shell_windows.FindWindowSW(
+                    &location,
+                    &root,
+                    SWC_DESKTOP,
+                    &mut handle,
+                    SWFO_NEEDDISPATCH,
+                )
+            };
             return found
                 .ok()
                 .and_then(|d| files_from_view(&d, view, tab))

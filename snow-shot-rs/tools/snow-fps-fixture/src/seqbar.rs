@@ -26,7 +26,9 @@ pub const DECODE_THRESHOLD: u8 = 128;
 /// assert_eq!(snow_fps_fixture::seqbar::bar_height(1440), 90);
 /// ```
 pub fn bar_height(height: u32) -> u32 {
-    (height / BAR_HEIGHT_DIVISOR).max(BAR_MIN_HEIGHT).min(height)
+    (height / BAR_HEIGHT_DIVISOR)
+        .max(BAR_MIN_HEIGHT)
+        .min(height)
 }
 
 /// 把序号展开为 32 位（高位在前）。
@@ -65,11 +67,9 @@ pub fn decode_samples(samples: &[u8]) -> Option<u32> {
     if samples.len() < SEQ_BITS {
         return None;
     }
-    Some(
-        samples[..SEQ_BITS]
-            .iter()
-            .fold(0u32, |acc, &v| (acc << 1) | u32::from(v >= DECODE_THRESHOLD)),
-    )
+    Some(samples[..SEQ_BITS].iter().fold(0u32, |acc, &v| {
+        (acc << 1) | u32::from(v >= DECODE_THRESHOLD)
+    }))
 }
 
 /// 把序号条画进 BGRA 缓冲的顶部。
@@ -99,7 +99,14 @@ pub fn paint_bar(pixels: &mut [u32], width: u32, height: u32, seq: u32) {
 /// paint_bar_segment(&mut right, 320, 64, 0xA5, 320, 640);
 /// assert_eq!(&whole[320..640], &right[..320]);
 /// ```
-pub fn paint_bar_segment(pixels: &mut [u32], width: u32, height: u32, seq: u32, offset_x: u32, total_w: u32) {
+pub fn paint_bar_segment(
+    pixels: &mut [u32],
+    width: u32,
+    height: u32,
+    seq: u32,
+    offset_x: u32,
+    total_w: u32,
+) {
     let w = width as usize;
     let total = total_w as usize;
     let bar_h = bar_height(height) as usize;
@@ -182,7 +189,11 @@ mod tests {
         let bar_h = bar_height(h) as usize;
         let first = buf[..w as usize].to_vec();
         for row in 1..bar_h {
-            assert_eq!(&buf[row * w as usize..(row + 1) * w as usize], &first[..], "row {row}");
+            assert_eq!(
+                &buf[row * w as usize..(row + 1) * w as usize],
+                &first[..],
+                "row {row}"
+            );
         }
         assert!(buf[bar_h * w as usize..].iter().all(|&p| p == 7));
     }

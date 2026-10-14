@@ -24,7 +24,12 @@ impl Rect {
     /// # 参数
     /// - `size`：`(宽, 高)`。
     pub fn full(size: (u32, u32)) -> Self {
-        Self { x: 0, y: 0, width: size.0, height: size.1 }
+        Self {
+            x: 0,
+            y: 0,
+            width: size.0,
+            height: size.1,
+        }
     }
 }
 
@@ -43,7 +48,8 @@ pub fn scale_coordinate(value: i32, from: u32, to: u32) -> i32 {
     if from == 0 {
         return value;
     }
-    let scaled = (i64::from(value) * i64::from(to) * 2 + i64::from(from)).div_euclid(i64::from(from) * 2);
+    let scaled =
+        (i64::from(value) * i64::from(to) * 2 + i64::from(from)).div_euclid(i64::from(from) * 2);
     scaled.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
 }
 
@@ -84,8 +90,18 @@ pub fn clip_layer(source: Rect, dest: Rect, bounds: (u32, u32)) -> Option<(Rect,
     let sy0 = map(ct, dt, dh, i64::from(source.y), sh);
     let sy1 = map(cb, dt, dh, i64::from(source.y), sh).max(sy0 + 1);
     Some((
-        Rect { x: sx0 as i32, y: sy0 as i32, width: (sx1 - sx0) as u32, height: (sy1 - sy0) as u32 },
-        Rect { x: cl as i32, y: ct as i32, width: (cr - cl) as u32, height: (cb - ct) as u32 },
+        Rect {
+            x: sx0 as i32,
+            y: sy0 as i32,
+            width: (sx1 - sx0) as u32,
+            height: (sy1 - sy0) as u32,
+        },
+        Rect {
+            x: cl as i32,
+            y: ct as i32,
+            width: (cr - cl) as u32,
+            height: (cb - ct) as u32,
+        },
     ))
 }
 
@@ -99,7 +115,9 @@ pub fn clip_layer(source: Rect, dest: Rect, bounds: (u32, u32)) -> Option<(Rect,
 /// assert_eq!(rgba_to_bgra(&[1, 2, 3, 4]), vec![3, 2, 1, 4]);
 /// ```
 pub fn rgba_to_bgra(rgba: &[u8]) -> Vec<u8> {
-    rgba.chunks_exact(4).flat_map(|p| [p[2], p[1], p[0], p[3]]).collect()
+    rgba.chunks_exact(4)
+        .flat_map(|p| [p[2], p[1], p[0], p[3]])
+        .collect()
 }
 
 /// 光标图层的源/目标矩形（已缩放并裁剪到输出范围）。
@@ -121,14 +139,38 @@ pub fn cursor_geometry(
     if !sample.visible || shape.width == 0 || shape.height == 0 {
         return None;
     }
-    let left = sample.x.saturating_sub(i32::try_from(shape.hotspot_x).unwrap_or(0));
-    let top = sample.y.saturating_sub(i32::try_from(shape.hotspot_y).unwrap_or(0));
+    let left = sample
+        .x
+        .saturating_sub(i32::try_from(shape.hotspot_x).unwrap_or(0));
+    let top = sample
+        .y
+        .saturating_sub(i32::try_from(shape.hotspot_y).unwrap_or(0));
     let right = left.saturating_add(i32::try_from(shape.width).unwrap_or(i32::MAX));
     let bottom = top.saturating_add(i32::try_from(shape.height).unwrap_or(i32::MAX));
-    let (l, r) = (scale_coordinate(left, src_size.0, out_size.0), scale_coordinate(right, src_size.0, out_size.0));
-    let (t, b) = (scale_coordinate(top, src_size.1, out_size.1), scale_coordinate(bottom, src_size.1, out_size.1));
-    let dest = Rect { x: l, y: t, width: (r - l).max(1) as u32, height: (b - t).max(1) as u32 };
-    clip_layer(Rect { x: 0, y: 0, width: shape.width, height: shape.height }, dest, out_size)
+    let (l, r) = (
+        scale_coordinate(left, src_size.0, out_size.0),
+        scale_coordinate(right, src_size.0, out_size.0),
+    );
+    let (t, b) = (
+        scale_coordinate(top, src_size.1, out_size.1),
+        scale_coordinate(bottom, src_size.1, out_size.1),
+    );
+    let dest = Rect {
+        x: l,
+        y: t,
+        width: (r - l).max(1) as u32,
+        height: (b - t).max(1) as u32,
+    };
+    clip_layer(
+        Rect {
+            x: 0,
+            y: 0,
+            width: shape.width,
+            height: shape.height,
+        },
+        dest,
+        out_size,
+    )
 }
 
 #[cfg(test)]
@@ -137,7 +179,12 @@ mod tests {
 
     /// 构造矩形。
     fn r(x: i32, y: i32, w: u32, h: u32) -> Rect {
-        Rect { x, y, width: w, height: h }
+        Rect {
+            x,
+            y,
+            width: w,
+            height: h,
+        }
     }
 
     /// 缩放坐标四舍五入，且同尺寸不变。
@@ -179,7 +226,10 @@ mod tests {
     /// RGBA 到 BGRA：交换 R/B，alpha 不变，尾部残余忽略。
     #[test]
     fn rgba_to_bgra_swaps_channels() {
-        assert_eq!(rgba_to_bgra(&[1, 2, 3, 4, 5, 6, 7, 8]), vec![3, 2, 1, 4, 7, 6, 5, 8]);
+        assert_eq!(
+            rgba_to_bgra(&[1, 2, 3, 4, 5, 6, 7, 8]),
+            vec![3, 2, 1, 4, 7, 6, 5, 8]
+        );
         assert_eq!(rgba_to_bgra(&[1, 2, 3, 4, 9]), vec![3, 2, 1, 4]);
         assert!(rgba_to_bgra(&[]).is_empty());
     }
@@ -188,8 +238,20 @@ mod tests {
     #[test]
     fn cursor_geometry_applies_hotspot_and_scale() {
         use snow_cursor::{CursorCompositionMode, CursorShapeState};
-        let shape = CursorShape::from_rgba(2, 3, 32, 32, CursorCompositionMode::AlphaBlend, vec![0u8; 32 * 32 * 4]);
-        let mut sample = AttachedCursorSample { x: 100, y: 100, visible: true, shape: CursorShapeState::Embedded(shape.clone()) };
+        let shape = CursorShape::from_rgba(
+            2,
+            3,
+            32,
+            32,
+            CursorCompositionMode::AlphaBlend,
+            vec![0u8; 32 * 32 * 4],
+        );
+        let mut sample = AttachedCursorSample {
+            x: 100,
+            y: 100,
+            visible: true,
+            shape: CursorShapeState::Embedded(shape.clone()),
+        };
         let (s, d) = cursor_geometry(&sample, &shape, (200, 200), (200, 200)).unwrap();
         assert_eq!((s, d), (r(0, 0, 32, 32), r(98, 97, 32, 32)));
         let (_, half) = cursor_geometry(&sample, &shape, (200, 200), (100, 100)).unwrap();

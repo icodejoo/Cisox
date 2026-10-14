@@ -22,9 +22,18 @@ pub enum RecordKeyAction {
 /// 键位表：配置键 → 动作，顺序即优先级。
 const RECORD_KEYS: &[(&str, RecordKeyAction)] = &[
     ("screen_recording_shortcuts/export", RecordKeyAction::Export),
-    ("screen_recording_shortcuts/toggle_recording", RecordKeyAction::ToggleRecording),
-    ("screen_recording_shortcuts/copy_to_clipboard", RecordKeyAction::CopyToClipboard),
-    ("screen_recording_shortcuts/end_recording", RecordKeyAction::EndRecording),
+    (
+        "screen_recording_shortcuts/toggle_recording",
+        RecordKeyAction::ToggleRecording,
+    ),
+    (
+        "screen_recording_shortcuts/copy_to_clipboard",
+        RecordKeyAction::CopyToClipboard,
+    ),
+    (
+        "screen_recording_shortcuts/end_recording",
+        RecordKeyAction::EndRecording,
+    ),
 ];
 
 /// 录屏键位表（由配置构造）。
@@ -64,7 +73,13 @@ impl RecordKeymap {
     ///
     /// # 返回
     /// 命中的动作；没有绑定返回 `None`。
-    pub fn resolve(&self, key: &str, ctrl: bool, shift: bool, alt: bool) -> Option<RecordKeyAction> {
+    pub fn resolve(
+        &self,
+        key: &str,
+        ctrl: bool,
+        shift: bool,
+        alt: bool,
+    ) -> Option<RecordKeyAction> {
         self.bindings
             .iter()
             .find(|(chord, _)| chord.matches(key, ctrl, shift, alt))
@@ -81,15 +96,34 @@ mod tests {
     fn defaults_and_overrides() {
         let mut doc = ConfigDocument::from_bytes(None);
         let map = RecordKeymap::from_document(&doc);
-        assert_eq!(map.resolve("e", true, false, false), Some(RecordKeyAction::Export));
-        assert_eq!(map.resolve("s", true, false, false), Some(RecordKeyAction::ToggleRecording));
-        assert_eq!(map.resolve("c", true, false, false), Some(RecordKeyAction::CopyToClipboard));
-        assert_eq!(map.resolve("escape", false, false, false), Some(RecordKeyAction::EndRecording));
+        assert_eq!(
+            map.resolve("e", true, false, false),
+            Some(RecordKeyAction::Export)
+        );
+        assert_eq!(
+            map.resolve("s", true, false, false),
+            Some(RecordKeyAction::ToggleRecording)
+        );
+        assert_eq!(
+            map.resolve("c", true, false, false),
+            Some(RecordKeyAction::CopyToClipboard)
+        );
+        assert_eq!(
+            map.resolve("escape", false, false, false),
+            Some(RecordKeyAction::EndRecording)
+        );
         assert_eq!(map.resolve("e", false, false, false), None);
 
-        doc.set_value("screen_recording_shortcuts/export", serde_json::json!([{"portable": "F9"}])).unwrap();
+        doc.set_value(
+            "screen_recording_shortcuts/export",
+            serde_json::json!([{"portable": "F9"}]),
+        )
+        .unwrap();
         let map = RecordKeymap::from_document(&doc);
-        assert_eq!(map.resolve("f9", false, false, false), Some(RecordKeyAction::Export));
+        assert_eq!(
+            map.resolve("f9", false, false, false),
+            Some(RecordKeyAction::Export)
+        );
         assert_eq!(map.resolve("e", true, false, false), None);
     }
 }

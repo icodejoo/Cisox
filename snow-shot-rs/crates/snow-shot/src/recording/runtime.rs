@@ -203,7 +203,11 @@ impl ScreenRecordingSession {
     pub fn poll(&mut self, now: Instant) -> bool {
         let before = self.state.clone();
         let before_audio = self.audio.clone();
-        let events = self.link.as_mut().map(|link| link.poll()).unwrap_or_default();
+        let events = self
+            .link
+            .as_mut()
+            .map(|link| link.poll())
+            .unwrap_or_default();
         for event in events {
             self.apply(event);
         }

@@ -2,9 +2,9 @@
 //!
 //! 样片由 `testclip` 现生成，放系统临时目录。需要硬件 H.264 MFT 的测试在没有硬件时直接跳过。
 
-use std::path::{Path, PathBuf};
 use ffmpeg_next::format::Pixel;
 use snow_recorder_protocol::{EditOp, EditRequest, EngineKind, ExtractMode, ImageFormat};
+use std::path::{Path, PathBuf};
 
 use super::reader::{MfSource, scan};
 use super::{MfSession, SystemEngine, has_hardware_h264};

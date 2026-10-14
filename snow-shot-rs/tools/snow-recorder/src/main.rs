@@ -142,7 +142,11 @@ fn finish(active: Active) -> ! {
         fail(format!("移动输出文件失败: {e}"), &final_path);
     }
     remove_scratch(&final_path);
-    emit(&Event::Finished { path: final_path, frames: report.frames, dropped: report.dropped });
+    emit(&Event::Finished {
+        path: final_path,
+        frames: report.frames,
+        dropped: report.dropped,
+    });
     std::process::exit(EXIT_OK);
 }
 
@@ -169,13 +173,19 @@ fn run_edit(req: &EditRequest, cancel: Arc<AtomicBool>) -> ! {
     let ctl = edit::TaskCtl::new(cancel, Box::new(emit));
     match edit::execute(req, &ctl) {
         Ok((report, engine)) => {
-            emit(&Event::EditFinished { path: report.path, frames: report.frames, engine });
+            emit(&Event::EditFinished {
+                path: report.path,
+                frames: report.frames,
+                engine,
+            });
             std::process::exit(EXIT_OK);
         }
         // 取消不是错误：抽帧模块已清掉中间目录，直接正常退出
         Err(e) if e.is_cancelled() => std::process::exit(EXIT_OK),
         Err(e) => {
-            emit(&Event::Error { reason: e.to_string() });
+            emit(&Event::Error {
+                reason: e.to_string(),
+            });
             std::process::exit(EXIT_FAILED);
         }
     }
@@ -197,7 +207,9 @@ fn start_edit(req: EditRequest, job: &mut Option<EditJob>, recording: bool) {
     #[cfg(not(windows))]
     {
         let _ = req;
-        emit(&Event::Error { reason: "视频编辑目前只支持 Windows".to_string() });
+        emit(&Event::Error {
+            reason: "视频编辑目前只支持 Windows".to_string(),
+        });
         std::process::exit(EXIT_FAILED);
     }
 }
@@ -208,14 +220,18 @@ fn probe_input(input: &Path) {
     match edit::probe(input) {
         Ok(info) => emit(&Event::ProbeResult(info)),
         Err(e) => {
-            emit(&Event::Error { reason: e.to_string() });
+            emit(&Event::Error {
+                reason: e.to_string(),
+            });
             std::process::exit(EXIT_FAILED);
         }
     }
     #[cfg(not(windows))]
     {
         let _ = input;
-        emit(&Event::Error { reason: "视频探测目前只支持 Windows".to_string() });
+        emit(&Event::Error {
+            reason: "视频探测目前只支持 Windows".to_string(),
+        });
         std::process::exit(EXIT_FAILED);
     }
 }
@@ -277,8 +293,8 @@ fn main() {
         if let Some(a) = &active
             && a.clock.is_running()
         {
-            let elapsed_ms = u64::try_from(a.clock.elapsed(Instant::now()).as_millis())
-                .unwrap_or(u64::MAX);
+            let elapsed_ms =
+                u64::try_from(a.clock.elapsed(Instant::now()).as_millis()).unwrap_or(u64::MAX);
             emit(&Event::Recording {
                 elapsed_ms,
                 frames: elapsed_ms.saturating_mul(u64::from(a.fps)) / 1000,

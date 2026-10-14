@@ -83,7 +83,11 @@ fn natural(width: u32, height: u32, variant: u32) -> Vec<u8> {
             let mut g = (50 + y * 120 / h) as i32;
             let mut r = (70 + (x + y) * 90 / (w + h)) as i32;
             // 文字状细条：每 24 行一行"文字"，条宽随列伪随机
-            if (y % 24) >= 6 && (y % 24) < 16 && ((x + shift) / 5 % 7) < 4 && !((x / 5 * 2654435761usize) >> 7).is_multiple_of(3) {
+            if (y % 24) >= 6
+                && (y % 24) < 16
+                && ((x + shift) / 5 % 7) < 4
+                && !((x / 5 * 2654435761usize) >> 7).is_multiple_of(3)
+            {
                 b = 235;
                 g = 235;
                 r = 235;
@@ -121,27 +125,57 @@ impl SyntheticCapture {
     /// - `size`：画面尺寸。
     /// - `fps`：出帧速率。
     /// - `with_cursor`：是否附带移动的合成光标。
-    pub fn new(a: SharedDevice, b: &SharedDevice, size: (u32, u32), fps: u32, with_cursor: bool) -> Result<Self, String> {
-        let slots = (0..SLOTS).map(|_| create_slot(&a, b, size).map(Arc::new)).collect::<Result<Vec<_>, _>>()?;
+    pub fn new(
+        a: SharedDevice,
+        b: &SharedDevice,
+        size: (u32, u32),
+        fps: u32,
+        with_cursor: bool,
+    ) -> Result<Self, String> {
+        let slots = (0..SLOTS)
+            .map(|_| create_slot(&a, b, size).map(Arc::new))
+            .collect::<Result<Vec<_>, _>>()?;
         let binds = (D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET).0 as u32;
         let mut content = Vec::new();
         for i in 0..VARIANTS {
-            let texture = a.texture(size.0, size.1, DXGI_FORMAT_B8G8R8A8_UNORM, binds).map_err(|e| format!("{e:#}"))?;
-            let pixels = if std::env::var("SNOW_RECORDER_SYNTH_CONTENT").as_deref() == Ok("natural") {
+            let texture = a
+                .texture(size.0, size.1, DXGI_FORMAT_B8G8R8A8_UNORM, binds)
+                .map_err(|e| format!("{e:#}"))?;
+            let pixels = if std::env::var("SNOW_RECORDER_SYNTH_CONTENT").as_deref() == Ok("natural")
+            {
                 natural(size.0, size.1, i as u32)
             } else {
-                noise((size.0 * size.1 * 4) as usize, 0x9E37_79B9_7F4A_7C15 ^ (i as u64 + 1))
+                noise(
+                    (size.0 * size.1 * 4) as usize,
+                    0x9E37_79B9_7F4A_7C15 ^ (i as u64 + 1),
+                )
             };
             // 画质对照用：把各变体原始像素按序追加到参考文件（ffmpeg 据此重建参考序列）
             if let Ok(dir) = std::env::var(ENV_SYNTH_KEEP) {
                 use std::io::Write;
-                let path = std::path::Path::new(&dir).join(format!("ref-{}x{}.bgra", size.0, size.1));
-                let mut file = std::fs::OpenOptions::new().create(true).append(i > 0).write(true).truncate(i == 0).open(path).map_err(|e| e.to_string())?;
+                let path =
+                    std::path::Path::new(&dir).join(format!("ref-{}x{}.bgra", size.0, size.1));
+                let mut file = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(i > 0)
+                    .write(true)
+                    .truncate(i == 0)
+                    .open(path)
+                    .map_err(|e| e.to_string())?;
                 file.write_all(&pixels).map_err(|e| e.to_string())?;
             }
             let _lock = a.lock();
             // SAFETY: 缓冲长度 = 宽*高*4，行距 = 宽*4。
-            unsafe { a.context().UpdateSubresource(texture.raw(), 0, None, pixels.as_ptr().cast(), size.0 * 4, 0) };
+            unsafe {
+                a.context().UpdateSubresource(
+                    texture.raw(),
+                    0,
+                    None,
+                    pixels.as_ptr().cast(),
+                    size.0 * 4,
+                    0,
+                )
+            };
             content.push(texture.raw().clone());
         }
         let context4: ID3D11DeviceContext4 = a.context().cast().map_err(|e| e.to_string())?;
@@ -150,13 +184,27 @@ impl SyntheticCapture {
             context4,
             slots,
             content,
-            crop: D3D11_BOX { left: 0, top: 0, front: 0, right: size.0, bottom: size.1, back: 1 },
+            crop: D3D11_BOX {
+                left: 0,
+                top: 0,
+                front: 0,
+                right: size.0,
+                bottom: size.1,
+                back: 1,
+            },
             origin: None,
             period: Duration::from_secs_f64(1.0 / f64::from(fps)),
             seq: 0,
             stats: CaptureStats::default(),
             with_cursor,
-            cursor_shape: CursorShape::from_rgba(2, 2, 24, 24, CursorCompositionMode::AlphaBlend, noise(24 * 24 * 4, 7)),
+            cursor_shape: CursorShape::from_rgba(
+                2,
+                2,
+                24,
+                24,
+                CursorCompositionMode::AlphaBlend,
+                noise(24 * 24 * 4, 7),
+            ),
             size,
         })
     }
@@ -166,7 +214,11 @@ impl CaptureSource for SyntheticCapture {
     type Frame = GpuFrame;
 
     /// 等到下一个计划时刻，把噪声纹理复制进空闲槽。
-    fn next(&mut self, timeout: Duration, want: bool) -> Result<Option<Captured<GpuFrame>>, CaptureFault> {
+    fn next(
+        &mut self,
+        timeout: Duration,
+        want: bool,
+    ) -> Result<Option<Captured<GpuFrame>>, CaptureFault> {
         let origin = *self.origin.get_or_insert_with(Instant::now);
         let due = origin + self.period.mul_f64(self.seq as f64);
         let now = Instant::now();
@@ -181,11 +233,23 @@ impl CaptureSource for SyntheticCapture {
         if !want {
             return Ok(None);
         }
-        let Some(slot) = self.slots.iter().find(|s| Arc::strong_count(s) == 1).cloned() else {
+        let Some(slot) = self
+            .slots
+            .iter()
+            .find(|s| Arc::strong_count(s) == 1)
+            .cloned()
+        else {
             self.stats.pool_drops += 1;
             return Ok(None);
         };
-        copy_into_slot(&self.device, &self.context4, &slot, &self.content[variant], &self.crop, false)?;
+        copy_into_slot(
+            &self.device,
+            &self.context4,
+            &slot,
+            &self.content[variant],
+            &self.crop,
+            false,
+        )?;
         {
             let _lock = self.device.lock();
             // SAFETY: 持有设备锁。
@@ -202,7 +266,14 @@ impl CaptureSource for SyntheticCapture {
                 shape: CursorShapeState::Embedded(self.cursor_shape.clone()),
             }
         });
-        Ok(Some(Captured { frame: GpuFrame::single(slot), cursor, present: due, captured_at: Instant::now(), fresh: true, id: self.seq }))
+        Ok(Some(Captured {
+            frame: GpuFrame::single(slot),
+            cursor,
+            present: due,
+            captured_at: Instant::now(),
+            fresh: true,
+            id: self.seq,
+        }))
     }
 
     /// 合成源不会失效。
@@ -227,9 +298,13 @@ mod tests {
 
     use super::*;
     use crate::pipeline::{self, PipelineConfig};
-    use crate::settings::{AdapterInfo, ENV_ENCODER, EncoderPreference, parse_encoder_preference, select_encoder};
+    use crate::settings::{
+        AdapterInfo, ENV_ENCODER, EncoderPreference, parse_encoder_preference, select_encoder,
+    };
     use crate::win::compose::GpuComposer;
-    use crate::win::hwenc::{DEFAULT_POOL_CAPACITY, HwConfig, HwContext, HwEncoder, QSV_ASYNC_DEPTH, QSV_PRESET};
+    use crate::win::hwenc::{
+        DEFAULT_POOL_CAPACITY, HwConfig, HwContext, HwEncoder, QSV_ASYNC_DEPTH, QSV_PRESET,
+    };
     use crate::win::mfenc::{ENV_MF_QUALITY, MF_POOL_CAPACITY, MfEncoder, parse_rate_control};
 
     /// 噪声发生器：长度精确、alpha 不透明、不同种子内容不同。
@@ -246,7 +321,12 @@ mod tests {
     /// 读回成品：`(视频包数, 封装里的总时长秒)`；读不了返回错误。
     fn inspect(path: &std::path::Path) -> Result<(u64, f64), String> {
         let mut input = ffmpeg_next::format::input(path).map_err(|e| e.to_string())?;
-        let packets = input.packets().filter(|(s, p)| s.parameters().medium() == ffmpeg_next::media::Type::Video && p.size() > 0).count() as u64;
+        let packets = input
+            .packets()
+            .filter(|(s, p)| {
+                s.parameters().medium() == ffmpeg_next::media::Type::Video && p.size() > 0
+            })
+            .count() as u64;
         let seconds = input.duration() as f64 / f64::from(ffmpeg_next::ffi::AV_TIME_BASE);
         Ok((packets, seconds))
     }
@@ -257,7 +337,8 @@ mod tests {
 
     /// 解析质量参数覆盖值；缺省或非法取默认值。
     fn parse_synth_quality(raw: Option<&str>) -> u32 {
-        raw.and_then(|v| v.trim().parse().ok()).unwrap_or(SYNTH_DEFAULT_QUALITY)
+        raw.and_then(|v| v.trim().parse().ok())
+            .unwrap_or(SYNTH_DEFAULT_QUALITY)
     }
 
     /// 合成基准的编码质量参数，可用 `SNOW_RECORDER_SYNTH_QUALITY` 覆盖。
@@ -274,15 +355,25 @@ mod tests {
     }
 
     /// 跑一档无屏流水线，返回（诊断摘要, 编码帧数, 期望帧数, 成品包数, 成品时长秒）。
-    fn run_tier(size: (u32, u32), out: (u32, u32), fps: u32, seconds: f64, cursor: bool) -> Result<(String, u64, u64, u64, f64), String> {
+    fn run_tier(
+        size: (u32, u32),
+        out: (u32, u32),
+        fps: u32,
+        seconds: f64,
+        cursor: bool,
+    ) -> Result<(String, u64, u64, u64, f64), String> {
         // 编码器偏好沿用环境变量；适配器按它挑（多显卡机器可用 SNOW_RECORDER_ENCODER=nvenc 指定独显）
-        let preference = parse_encoder_preference(std::env::var(ENV_ENCODER).ok().as_deref()).unwrap_or(EncoderPreference::Auto);
+        let preference = parse_encoder_preference(std::env::var(ENV_ENCODER).ok().as_deref())
+            .unwrap_or(EncoderPreference::Auto);
         if std::env::var("SNOW_RECORDER_FFLOG").is_ok() {
             ffmpeg_next::util::log::set_level(ffmpeg_next::util::log::Level::Debug);
         }
         let (a, b) = create_device_pair(preference)?;
         let identity = b.identity();
-        let adapter = AdapterInfo { vendor: identity.vendor, description: identity.description.clone() };
+        let adapter = AdapterInfo {
+            vendor: identity.vendor,
+            description: identity.description.clone(),
+        };
         let codec = select_encoder(&adapter, preference)?;
         let capture = SyntheticCapture::new(a, &b, size, fps, cursor)?;
         let use_mf = std::env::var("SNOW_RECORDER_SYNTH_ENCODER").as_deref() == Ok("mf");
@@ -295,20 +386,54 @@ mod tests {
         hw.prewarm(8)?;
         let composer = GpuComposer::new(b, Arc::clone(&hw), size, out, fps)?;
         let rate = parse_rate_control(std::env::var(ENV_MF_QUALITY).ok().as_deref());
-        let tag = if use_mf { format!("mf-{rate:?}") } else { format!("{}-q{}", codec.ffmpeg_name(), synth_quality()) };
+        let tag = if use_mf {
+            format!("mf-{rate:?}")
+        } else {
+            format!("{}-q{}", codec.ffmpeg_name(), synth_quality())
+        };
         let path: PathBuf = match &keep {
-            Some(dir) => std::path::Path::new(dir).join(format!("{tag}-{}x{}-{}.mp4", out.0, out.1, fps)),
-            None => std::env::temp_dir().join(format!("snow-synth-{}x{}-{}.mp4", size.0, size.1, fps)),
+            Some(dir) => {
+                std::path::Path::new(dir).join(format!("{tag}-{}x{}-{}.mp4", out.0, out.1, fps))
+            }
+            None => {
+                std::env::temp_dir().join(format!("snow-synth-{}x{}-{}.mp4", size.0, size.1, fps))
+            }
         };
         let running = if use_mf {
             let encoder = MfEncoder::open(Arc::clone(&hw), &path, out, fps, rate)?;
-            pipeline::start(PipelineConfig { fps, show_cursor: cursor }, "synthetic+videoprocessor+media-foundation", capture, composer, encoder)?
+            pipeline::start(
+                PipelineConfig {
+                    fps,
+                    show_cursor: cursor,
+                },
+                "synthetic+videoprocessor+media-foundation",
+                capture,
+                composer,
+                encoder,
+            )?
         } else {
             let encoder = HwEncoder::open(
                 Arc::clone(&hw),
-                &HwConfig { path: path.clone(), width: out.0, height: out.1, fps, quality: synth_quality(), async_depth: QSV_ASYNC_DEPTH, preset: QSV_PRESET.into() },
+                &HwConfig {
+                    path: path.clone(),
+                    width: out.0,
+                    height: out.1,
+                    fps,
+                    quality: synth_quality(),
+                    async_depth: QSV_ASYNC_DEPTH,
+                    preset: QSV_PRESET.into(),
+                },
             )?;
-            pipeline::start(PipelineConfig { fps, show_cursor: cursor }, &format!("synthetic+videoprocessor+{}", codec.ffmpeg_name()), capture, composer, encoder)?
+            pipeline::start(
+                PipelineConfig {
+                    fps,
+                    show_cursor: cursor,
+                },
+                &format!("synthetic+videoprocessor+{}", codec.ffmpeg_name()),
+                capture,
+                composer,
+                encoder,
+            )?
         };
         std::thread::sleep(Duration::from_secs_f64(seconds));
         let report = running.stop()?;
@@ -316,7 +441,13 @@ mod tests {
         if keep.is_none() {
             let _ = std::fs::remove_file(&path);
         }
-        Ok((report.describe(), report.encoded_frames, (seconds * f64::from(fps)) as u64, packets, duration))
+        Ok((
+            report.describe(),
+            report.encoded_frames,
+            (seconds * f64::from(fps)) as u64,
+            packets,
+            duration,
+        ))
     }
 
     /// 最小编码烟测：合成源 -> VideoProcessor -> 当前适配器的硬件编码器 -> MP4，成品必须有视频包；
@@ -360,7 +491,10 @@ mod tests {
                     "== {}x{}->{}x{}@{} 光标={cursor}: 编码 {frames} 帧 / 期望 {expected}；成品包数 {packets}，封装时长 {duration:.2}s\n{text}",
                     size.0, size.1, out.0, out.1, fps
                 ),
-                Err(e) => eprintln!("== {}x{}->{}x{}@{}: 跳过/失败: {e}", size.0, size.1, out.0, out.1, fps),
+                Err(e) => eprintln!(
+                    "== {}x{}->{}x{}@{}: 跳过/失败: {e}",
+                    size.0, size.1, out.0, out.1, fps
+                ),
             }
         }
     }

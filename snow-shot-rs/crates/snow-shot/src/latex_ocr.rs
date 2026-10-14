@@ -153,8 +153,8 @@ pub fn pad_to_content(src: &Gray) -> Option<Gray> {
     let span = f64::from(max - min);
     // 按需归一化到 0..255，不再整图落一份 f64 副本
     let norm = |v: u8| f64::from(v - min) / span * 255.0;
-    let dark_text = src.data.iter().map(|v| norm(*v)).sum::<f64>() / src.data.len() as f64
-        > THRESHOLD;
+    let dark_text =
+        src.data.iter().map(|v| norm(*v)).sum::<f64>() / src.data.len() as f64 > THRESHOLD;
     let is_ink = |v: f64| {
         if dark_text {
             v < THRESHOLD

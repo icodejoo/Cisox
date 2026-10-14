@@ -104,7 +104,10 @@ pub fn target_bitrate(size: (u32, u32), fps: u32, bpp: f64) -> u32 {
 
 /// 读取生效的码率系数：环境变量（限制在 0.02..=0.5）优先，否则默认值。
 pub fn configured_bpp() -> f64 {
-    std::env::var(ENV_MF_BPP).ok().and_then(|v| v.trim().parse::<f64>().ok()).map_or(BITS_PER_PIXEL, |v| v.clamp(0.02, 0.5))
+    std::env::var(ENV_MF_BPP)
+        .ok()
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .map_or(BITS_PER_PIXEL, |v| v.clamp(0.02, 0.5))
 }
 
 /// 槽号换算成 100ns 时间戳。
@@ -186,14 +189,24 @@ impl LatencyProbe {
             }
             log
         });
-        Self { submits: Vec::new(), stop, poller: Some(poller) }
+        Self {
+            submits: Vec::new(),
+            stop,
+            poller: Some(poller),
+        }
     }
 
     /// 停止轮询并按成品里每个视频包的结束偏移算出延迟样本（毫秒）。
     fn finish(mut self, path: &std::path::Path) -> Vec<f32> {
         self.stop.store(true, std::sync::atomic::Ordering::Release);
-        let log = self.poller.take().and_then(|h| h.join().ok()).unwrap_or_default();
-        let Ok(mut input) = ffmpeg_next::format::input(path) else { return Vec::new() };
+        let log = self
+            .poller
+            .take()
+            .and_then(|h| h.join().ok())
+            .unwrap_or_default();
+        let Ok(mut input) = ffmpeg_next::format::input(path) else {
+            return Vec::new();
+        };
         let mut ends: Vec<u64> = input
             .packets()
             .filter(|(s, _)| s.parameters().medium() == ffmpeg_next::media::Type::Video)
@@ -203,7 +216,11 @@ impl LatencyProbe {
         ends.truncate(self.submits.len());
         ends.iter()
             .zip(&self.submits)
-            .filter_map(|(end, sent)| log.iter().find(|(_, len)| len >= end).map(|(t, _)| t.saturating_duration_since(*sent).as_secs_f32() * 1000.0))
+            .filter_map(|(end, sent)| {
+                log.iter()
+                    .find(|(_, len)| len >= end)
+                    .map(|(t, _)| t.saturating_duration_since(*sent).as_secs_f32() * 1000.0)
+            })
             .collect()
     }
 }
@@ -217,24 +234,61 @@ fn add_audio_stream(writer: &IMFSinkWriter) -> Result<u32, String> {
     // SAFETY: 都是 Media Foundation 对象创建与属性设置，参数为局部有效值。
     unsafe {
         let output = MFCreateMediaType().map_err(|e| e.to_string())?;
-        output.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio).map_err(|e| e.to_string())?;
-        output.SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_AAC).map_err(|e| e.to_string())?;
-        output.SetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE, 16).map_err(|e| e.to_string())?;
-        output.SetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND, SAMPLE_RATE).map_err(|e| e.to_string())?;
-        output.SetUINT32(&MF_MT_AUDIO_NUM_CHANNELS, channels).map_err(|e| e.to_string())?;
-        output.SetUINT32(&MF_MT_AUDIO_AVG_BYTES_PER_SECOND, AAC_BITRATE / 8).map_err(|e| e.to_string())?;
-        output.SetUINT32(&MF_MT_AAC_PAYLOAD_TYPE, 0).map_err(|e| e.to_string())?;
-        output.SetUINT32(&MF_MT_AAC_AUDIO_PROFILE_LEVEL_INDICATION, AAC_PROFILE_LEVEL).map_err(|e| e.to_string())?;
-        let stream = writer.AddStream(&output).map_err(|e| fail("添加音频流(AAC)", e))?;
+        output
+            .SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio)
+            .map_err(|e| e.to_string())?;
+        output
+            .SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_AAC)
+            .map_err(|e| e.to_string())?;
+        output
+            .SetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE, 16)
+            .map_err(|e| e.to_string())?;
+        output
+            .SetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND, SAMPLE_RATE)
+            .map_err(|e| e.to_string())?;
+        output
+            .SetUINT32(&MF_MT_AUDIO_NUM_CHANNELS, channels)
+            .map_err(|e| e.to_string())?;
+        output
+            .SetUINT32(&MF_MT_AUDIO_AVG_BYTES_PER_SECOND, AAC_BITRATE / 8)
+            .map_err(|e| e.to_string())?;
+        output
+            .SetUINT32(&MF_MT_AAC_PAYLOAD_TYPE, 0)
+            .map_err(|e| e.to_string())?;
+        output
+            .SetUINT32(&MF_MT_AAC_AUDIO_PROFILE_LEVEL_INDICATION, AAC_PROFILE_LEVEL)
+            .map_err(|e| e.to_string())?;
+        let stream = writer
+            .AddStream(&output)
+            .map_err(|e| fail("添加音频流(AAC)", e))?;
         let input = MFCreateMediaType().map_err(|e| e.to_string())?;
-        input.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio).map_err(|e| e.to_string())?;
-        input.SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_PCM).map_err(|e| e.to_string())?;
-        input.SetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE, 16).map_err(|e| e.to_string())?;
-        input.SetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND, SAMPLE_RATE).map_err(|e| e.to_string())?;
-        input.SetUINT32(&MF_MT_AUDIO_NUM_CHANNELS, channels).map_err(|e| e.to_string())?;
-        input.SetUINT32(&MF_MT_AUDIO_BLOCK_ALIGNMENT, channels * 2).map_err(|e| e.to_string())?;
-        input.SetUINT32(&MF_MT_AUDIO_AVG_BYTES_PER_SECOND, SAMPLE_RATE * channels * 2).map_err(|e| e.to_string())?;
-        writer.SetInputMediaType(stream, &input, None).map_err(|e| fail("设置音频输入类型(PCM)", e))?;
+        input
+            .SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio)
+            .map_err(|e| e.to_string())?;
+        input
+            .SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_PCM)
+            .map_err(|e| e.to_string())?;
+        input
+            .SetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE, 16)
+            .map_err(|e| e.to_string())?;
+        input
+            .SetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND, SAMPLE_RATE)
+            .map_err(|e| e.to_string())?;
+        input
+            .SetUINT32(&MF_MT_AUDIO_NUM_CHANNELS, channels)
+            .map_err(|e| e.to_string())?;
+        input
+            .SetUINT32(&MF_MT_AUDIO_BLOCK_ALIGNMENT, channels * 2)
+            .map_err(|e| e.to_string())?;
+        input
+            .SetUINT32(
+                &MF_MT_AUDIO_AVG_BYTES_PER_SECOND,
+                SAMPLE_RATE * channels * 2,
+            )
+            .map_err(|e| e.to_string())?;
+        writer
+            .SetInputMediaType(stream, &input, None)
+            .map_err(|e| fail("设置音频输入类型(PCM)", e))?;
         Ok(stream)
     }
 }
@@ -260,21 +314,28 @@ impl AudioSink for MfAudioSink {
             self.com_ready = true;
         }
         let bytes = u32::try_from(std::mem::size_of_val(pcm)).map_err(|e| e.to_string())?;
-        let slots = i64::try_from(pcm.len() / (CHANNELS * crate::audio::SLOT_FRAMES as usize)).map_err(|e| e.to_string())?;
+        let slots = i64::try_from(pcm.len() / (CHANNELS * crate::audio::SLOT_FRAMES as usize))
+            .map_err(|e| e.to_string())?;
         let time = i64::try_from(first_slot).map_err(|e| e.to_string())? * AUDIO_SLOT_HNS;
         // SAFETY: 缓冲按字节数分配并在 Lock 期间拷贝，样本与缓冲都是局部对象。
         unsafe {
             let buffer = MFCreateMemoryBuffer(bytes).map_err(|e| fail("创建音频缓冲", e))?;
             let mut data: *mut u8 = std::ptr::null_mut();
-            buffer.Lock(&mut data, None, None).map_err(|e| fail("锁定音频缓冲", e))?;
+            buffer
+                .Lock(&mut data, None, None)
+                .map_err(|e| fail("锁定音频缓冲", e))?;
             std::ptr::copy_nonoverlapping(pcm.as_ptr().cast::<u8>(), data, bytes as usize);
             buffer.Unlock().map_err(|e| e.to_string())?;
             buffer.SetCurrentLength(bytes).map_err(|e| e.to_string())?;
             let sample = MFCreateSample().map_err(|e| e.to_string())?;
             sample.AddBuffer(&buffer).map_err(|e| e.to_string())?;
             sample.SetSampleTime(time).map_err(|e| e.to_string())?;
-            sample.SetSampleDuration(slots * AUDIO_SLOT_HNS).map_err(|e| e.to_string())?;
-            self.writer.WriteSample(self.stream, &sample).map_err(|e| fail("写音频样本", e))
+            sample
+                .SetSampleDuration(slots * AUDIO_SLOT_HNS)
+                .map_err(|e| e.to_string())?;
+            self.writer
+                .WriteSample(self.stream, &sample)
+                .map_err(|e| fail("写音频样本", e))
         }
     }
 
@@ -340,7 +401,10 @@ fn init_com() {
 /// # 参数
 /// - `path`：路径。
 pub(crate) fn wide_path(path: &std::path::Path) -> Vec<u16> {
-    path.to_string_lossy().encode_utf16().chain(std::iter::once(0)).collect()
+    path.to_string_lossy()
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect()
 }
 
 /// 读取属性存储（MFT 本体或激活对象）里的友好名称，读不到返回 `(未知)`。
@@ -358,7 +422,13 @@ fn friendly_name(attrs: &IMFAttributes) -> String {
 fn adapter_luid(ctx: &HwContext) -> Option<LUID> {
     let dxgi: IDXGIDevice = ctx.device().device().cast().ok()?;
     // SAFETY: 只读查询。
-    unsafe { dxgi.GetAdapter().ok()?.GetDesc().ok().map(|d| d.AdapterLuid) }
+    unsafe {
+        dxgi.GetAdapter()
+            .ok()?
+            .GetDesc()
+            .ok()
+            .map(|d| d.AdapterLuid)
+    }
 }
 
 /// 枚举给定适配器上的硬件 H.264 编码 MFT。
@@ -369,7 +439,10 @@ fn adapter_luid(ctx: &HwContext) -> Option<LUID> {
 /// # 返回
 /// 硬件 MFT 友好名称列表（按系统排序，空表示没有）。需先 `MFStartup`。
 pub fn enumerate_hardware_h264(luid: Option<LUID>) -> Result<Vec<String>, String> {
-    let output = MFT_REGISTER_TYPE_INFO { guidMajorType: MFMediaType_Video, guidSubtype: MFVideoFormat_H264 };
+    let output = MFT_REGISTER_TYPE_INFO {
+        guidMajorType: MFMediaType_Video,
+        guidSubtype: MFVideoFormat_H264,
+    };
     let mut list: *mut Option<IMFActivate> = std::ptr::null_mut();
     let mut count = 0u32;
     // SAFETY: 输出指针指向局部变量；返回的数组由 CoTaskMem 分配，下面负责释放。
@@ -378,10 +451,22 @@ pub fn enumerate_hardware_h264(luid: Option<LUID>) -> Result<Vec<String>, String
         if let Some(l) = luid {
             MFCreateAttributes(&mut attrs, 1).map_err(|e| fail("创建枚举属性", e))?;
             if let Some(a) = &attrs {
-                a.SetUINT64(&MFT_ENUM_ADAPTER_LUID, u64::from(l.LowPart) | (u64::from(l.HighPart as u32) << 32)).map_err(|e| e.to_string())?;
+                a.SetUINT64(
+                    &MFT_ENUM_ADAPTER_LUID,
+                    u64::from(l.LowPart) | (u64::from(l.HighPart as u32) << 32),
+                )
+                .map_err(|e| e.to_string())?;
             }
         }
-        MFTEnum2(MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER, None, Some(&output), attrs.as_ref(), &mut list, &mut count)
+        MFTEnum2(
+            MFT_CATEGORY_VIDEO_ENCODER,
+            MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER,
+            None,
+            Some(&output),
+            attrs.as_ref(),
+            &mut list,
+            &mut count,
+        )
     };
     result.map_err(|e| fail("MFTEnum2(HARDWARE)", e))?;
     let mut names = Vec::new();
@@ -398,13 +483,18 @@ pub fn enumerate_hardware_h264(luid: Option<LUID>) -> Result<Vec<String>, String
 }
 
 /// 核对 SinkWriter 实际选中的视频编码 MFT 是硬件 MFT；软件 MFT 或查询不到返回原因。
-pub(crate) fn verify_hardware_transform(writer: &IMFSinkWriter, stream: u32) -> Result<(String, IMFTransform), String> {
+pub(crate) fn verify_hardware_transform(
+    writer: &IMFSinkWriter,
+    stream: u32,
+) -> Result<(String, IMFTransform), String> {
     let ex: IMFSinkWriterEx = writer.cast().map_err(|e| fail("SinkWriterEx", e))?;
     for index in 0..8 {
         let mut category = GUID::zeroed();
         let mut transform: Option<IMFTransform> = None;
         // SAFETY: 输出指针指向局部变量。
-        if unsafe { ex.GetTransformForStream(stream, index, Some(&mut category), &mut transform) }.is_err() {
+        if unsafe { ex.GetTransformForStream(stream, index, Some(&mut category), &mut transform) }
+            .is_err()
+        {
             break;
         }
         if category != MFT_CATEGORY_VIDEO_ENCODER {
@@ -437,12 +527,25 @@ impl MfEncoder {
     /// # 返回
     /// 编码器；系统没有匹配适配器的硬件 H.264 MFT、选中了软件 MFT 或初始化失败返回原因。
     #[cfg_attr(not(test), allow(dead_code))]
-    pub fn open(ctx: Arc<HwContext>, path: &std::path::Path, size: (u32, u32), fps: u32, rate_control: RateControl) -> HwResult<Self> {
+    pub fn open(
+        ctx: Arc<HwContext>,
+        path: &std::path::Path,
+        size: (u32, u32),
+        fps: u32,
+        rate_control: RateControl,
+    ) -> HwResult<Self> {
         Self::open_with_audio(ctx, path, size, fps, rate_control, false)
     }
 
     /// 同 [`MfEncoder::open`]；`audio` 为真时额外添加 AAC 音轨（经 [`MfEncoder::take_audio_sink`] 取走后驱动）。
-    pub fn open_with_audio(ctx: Arc<HwContext>, path: &std::path::Path, size: (u32, u32), fps: u32, rate_control: RateControl, audio: bool) -> HwResult<Self> {
+    pub fn open_with_audio(
+        ctx: Arc<HwContext>,
+        path: &std::path::Path,
+        size: (u32, u32),
+        fps: u32,
+        rate_control: RateControl,
+        audio: bool,
+    ) -> HwResult<Self> {
         if std::env::var_os(ENV_MF_DISABLE).is_some() {
             return Err(format!("{ENV_MF_DISABLE} 已禁用 Media Foundation 编码"));
         }
@@ -457,48 +560,96 @@ impl MfEncoder {
                 return Err("系统没有硬件 H.264 编码 MFT".into());
             }
             if std::env::var_os(ENV_MF_LATENCY).is_some() {
-                eprintln!("硬件 H.264 MFT 枚举(LUID {:?}): {names:?}", luid.map(|l| (l.HighPart, l.LowPart)));
+                eprintln!(
+                    "硬件 H.264 MFT 枚举(LUID {:?}): {names:?}",
+                    luid.map(|l| (l.HighPart, l.LowPart))
+                );
             }
             let mut token = 0u32;
             let mut manager = None;
-            MFCreateDXGIDeviceManager(&mut token, &mut manager).map_err(|e| fail("创建 DXGI 设备管理器", e))?;
+            MFCreateDXGIDeviceManager(&mut token, &mut manager)
+                .map_err(|e| fail("创建 DXGI 设备管理器", e))?;
             let manager = manager.ok_or("DXGI 设备管理器为空")?;
-            manager.ResetDevice(ctx.device().device(), token).map_err(|e| fail("设备管理器绑定设备", e))?;
+            manager
+                .ResetDevice(ctx.device().device(), token)
+                .map_err(|e| fail("设备管理器绑定设备", e))?;
 
             let mut attrs = None;
             MFCreateAttributes(&mut attrs, 4).map_err(|e| fail("创建属性", e))?;
             let attrs: IMFAttributes = attrs.ok_or("属性为空")?;
-            attrs.SetUINT32(&MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, 1).map_err(|e| e.to_string())?;
-            attrs.SetUINT32(&MF_LOW_LATENCY, 1).map_err(|e| e.to_string())?;
-            attrs.SetUINT32(&MF_SINK_WRITER_DISABLE_THROTTLING, 1).map_err(|e| e.to_string())?;
-            attrs.SetUnknown(&MF_SINK_WRITER_D3D_MANAGER, &manager).map_err(|e| e.to_string())?;
+            attrs
+                .SetUINT32(&MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, 1)
+                .map_err(|e| e.to_string())?;
+            attrs
+                .SetUINT32(&MF_LOW_LATENCY, 1)
+                .map_err(|e| e.to_string())?;
+            attrs
+                .SetUINT32(&MF_SINK_WRITER_DISABLE_THROTTLING, 1)
+                .map_err(|e| e.to_string())?;
+            attrs
+                .SetUnknown(&MF_SINK_WRITER_D3D_MANAGER, &manager)
+                .map_err(|e| e.to_string())?;
 
             let wide = wide_path(path);
-            let writer = MFCreateSinkWriterFromURL(PCWSTR(wide.as_ptr()), None, &attrs).map_err(|e| fail("创建 SinkWriter", e))?;
+            let writer = MFCreateSinkWriterFromURL(PCWSTR(wide.as_ptr()), None, &attrs)
+                .map_err(|e| fail("创建 SinkWriter", e))?;
 
             let common = |media: &IMFMediaType, subtype: &GUID| -> Result<(), String> {
-                media.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video).map_err(|e| e.to_string())?;
-                media.SetGUID(&MF_MT_SUBTYPE, subtype).map_err(|e| e.to_string())?;
-                media.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32).map_err(|e| e.to_string())?;
-                media.SetUINT64(&MF_MT_FRAME_SIZE, pack_pair(size.0, size.1)).map_err(|e| e.to_string())?;
-                media.SetUINT64(&MF_MT_FRAME_RATE, pack_pair(fps, 1)).map_err(|e| e.to_string())?;
-                media.SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, pack_pair(1, 1)).map_err(|e| e.to_string())?;
+                media
+                    .SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
+                    .map_err(|e| e.to_string())?;
+                media
+                    .SetGUID(&MF_MT_SUBTYPE, subtype)
+                    .map_err(|e| e.to_string())?;
+                media
+                    .SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)
+                    .map_err(|e| e.to_string())?;
+                media
+                    .SetUINT64(&MF_MT_FRAME_SIZE, pack_pair(size.0, size.1))
+                    .map_err(|e| e.to_string())?;
+                media
+                    .SetUINT64(&MF_MT_FRAME_RATE, pack_pair(fps, 1))
+                    .map_err(|e| e.to_string())?;
+                media
+                    .SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, pack_pair(1, 1))
+                    .map_err(|e| e.to_string())?;
                 // 色彩标记：与 VideoProcessor 输出（限幅 BT.709）一致。缺省时 MFT 会按全幅输入再压一次范围，画面偏灰
-                media.SetUINT32(&MF_MT_VIDEO_NOMINAL_RANGE, MFNominalRange_16_235.0 as u32).map_err(|e| e.to_string())?;
-                media.SetUINT32(&MF_MT_YUV_MATRIX, MFVideoTransferMatrix_BT709.0 as u32).map_err(|e| e.to_string())?;
-                media.SetUINT32(&MF_MT_VIDEO_PRIMARIES, MFVideoPrimaries_BT709.0 as u32).map_err(|e| e.to_string())?;
-                media.SetUINT32(&MF_MT_TRANSFER_FUNCTION, MFVideoTransFunc_709.0 as u32).map_err(|e| e.to_string())
+                media
+                    .SetUINT32(&MF_MT_VIDEO_NOMINAL_RANGE, MFNominalRange_16_235.0 as u32)
+                    .map_err(|e| e.to_string())?;
+                media
+                    .SetUINT32(&MF_MT_YUV_MATRIX, MFVideoTransferMatrix_BT709.0 as u32)
+                    .map_err(|e| e.to_string())?;
+                media
+                    .SetUINT32(&MF_MT_VIDEO_PRIMARIES, MFVideoPrimaries_BT709.0 as u32)
+                    .map_err(|e| e.to_string())?;
+                media
+                    .SetUINT32(&MF_MT_TRANSFER_FUNCTION, MFVideoTransFunc_709.0 as u32)
+                    .map_err(|e| e.to_string())
             };
             let output = MFCreateMediaType().map_err(|e| e.to_string())?;
             common(&output, &MFVideoFormat_H264)?;
-            output.SetUINT32(&MF_MT_AVG_BITRATE, target_bitrate(size, fps, configured_bpp())).map_err(|e| e.to_string())?;
-            output.SetUINT32(&MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_High.0 as u32).map_err(|e| e.to_string())?;
-            output.SetUINT32(&MF_MT_MAX_KEYFRAME_SPACING, fps * GOP_SECONDS).map_err(|e| e.to_string())?;
-            let stream = writer.AddStream(&output).map_err(|e| fail("添加视频流", e))?;
+            output
+                .SetUINT32(
+                    &MF_MT_AVG_BITRATE,
+                    target_bitrate(size, fps, configured_bpp()),
+                )
+                .map_err(|e| e.to_string())?;
+            output
+                .SetUINT32(&MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_High.0 as u32)
+                .map_err(|e| e.to_string())?;
+            output
+                .SetUINT32(&MF_MT_MAX_KEYFRAME_SPACING, fps * GOP_SECONDS)
+                .map_err(|e| e.to_string())?;
+            let stream = writer
+                .AddStream(&output)
+                .map_err(|e| fail("添加视频流", e))?;
             let mut described = "平均码率".to_string();
             let input = MFCreateMediaType().map_err(|e| e.to_string())?;
             common(&input, &MFVideoFormat_NV12)?;
-            writer.SetInputMediaType(stream, &input, None).map_err(|e| fail("设置输入类型(NV12)", e))?;
+            writer
+                .SetInputMediaType(stream, &input, None)
+                .map_err(|e| fail("设置输入类型(NV12)", e))?;
             let (name, transform) = verify_hardware_transform(&writer, stream)?;
             if let RateControl::Quality(quality) = rate_control {
                 match Self::apply_quality(&transform, quality) {
@@ -506,9 +657,15 @@ impl MfEncoder {
                     Err(e) => eprintln!("MF 恒定质量不可用，沿用平均码率: {e}"),
                 }
             }
-            let audio_stream = if audio { Some(add_audio_stream(&writer)?) } else { None };
+            let audio_stream = if audio {
+                Some(add_audio_stream(&writer)?)
+            } else {
+                None
+            };
             writer.BeginWriting().map_err(|e| fail("BeginWriting", e))?;
-            let probe = std::env::var_os(ENV_MF_LATENCY).is_some().then(|| LatencyProbe::start(path.to_path_buf()));
+            let probe = std::env::var_os(ENV_MF_LATENCY)
+                .is_some()
+                .then(|| LatencyProbe::start(path.to_path_buf()));
             Ok(Self {
                 _ctx: ctx,
                 _manager: manager,
@@ -533,7 +690,9 @@ impl MfEncoder {
     ///
     /// NVIDIA MFT（驱动 566.26）对这些设置返回成功但读回仍是 CBR，此时返回错误让调用方沿用平均码率。
     fn apply_quality(transform: &IMFTransform, quality: u32) -> Result<(), String> {
-        let api: ICodecAPI = transform.cast().map_err(|e| fail("MFT 不支持 ICodecAPI", e))?;
+        let api: ICodecAPI = transform
+            .cast()
+            .map_err(|e| fail("MFT 不支持 ICodecAPI", e))?;
         let set = |key: &GUID, value: u32, what: &str| -> Result<(), String> {
             let variant = VARIANT::from(value);
             // SAFETY: variant 是局部有效值。
@@ -541,21 +700,33 @@ impl MfEncoder {
         };
         let read = |key: &GUID| -> Option<u32> {
             // SAFETY: 只读查询。
-            unsafe { api.GetValue(key) }.ok().and_then(|v| u32::try_from(&v).ok())
+            unsafe { api.GetValue(key) }
+                .ok()
+                .and_then(|v| u32::try_from(&v).ok())
         };
         let mode = eAVEncCommonRateControlMode_Quality.0 as u32;
-        set(&CODECAPI_AVEncCommonRateControlMode, mode, "设置码率控制=质量")?;
+        set(
+            &CODECAPI_AVEncCommonRateControlMode,
+            mode,
+            "设置码率控制=质量",
+        )?;
         set(&CODECAPI_AVEncCommonQuality, quality, "设置质量值")?;
         match read(&CODECAPI_AVEncCommonRateControlMode) {
             Some(m) if m == mode => Ok(()),
-            other => Err(format!("MFT 接受了设置但码率控制读回为 {other:?}（不是质量模式）")),
+            other => Err(format!(
+                "MFT 接受了设置但码率控制读回为 {other:?}（不是质量模式）"
+            )),
         }
     }
 
     /// 取走音频轨（交给音频线程驱动）；没有音轨返回 `None`。音轨须在 `finish` 之前结束。
     pub fn take_audio_sink(&mut self) -> Option<Box<dyn AudioSink>> {
         let stream = self.audio_stream.take()?;
-        Some(Box::new(MfAudioSink { writer: self.writer.clone(), stream, com_ready: false }))
+        Some(Box::new(MfAudioSink {
+            writer: self.writer.clone(),
+            stream,
+            com_ready: false,
+        }))
     }
 
     /// 把表面包成样本写入 SinkWriter；表面随样本释放才归还帧池。
@@ -569,18 +740,36 @@ impl MfEncoder {
         let sent = Instant::now();
         // SAFETY: 纹理有效；表面挂在样本上，样本被释放前纹理不会被复用。
         unsafe {
-            let buffer = MFCreateDXGISurfaceBuffer(&ID3D11Texture2D::IID, texture, slice, false).map_err(|e| fail("包装 DXGI 缓冲", e))?;
-            buffer.SetCurrentLength(self.frame_bytes).map_err(|e| e.to_string())?;
+            let buffer = MFCreateDXGISurfaceBuffer(&ID3D11Texture2D::IID, texture, slice, false)
+                .map_err(|e| fail("包装 DXGI 缓冲", e))?;
+            buffer
+                .SetCurrentLength(self.frame_bytes)
+                .map_err(|e| e.to_string())?;
             let sample = MFCreateSample().map_err(|e| e.to_string())?;
             sample.AddBuffer(&buffer).map_err(|e| e.to_string())?;
-            sample.SetSampleTime(slot_to_hns(pts, self.fps)).map_err(|e| e.to_string())?;
-            sample.SetSampleDuration(HNS_PER_SECOND / i64::from(self.fps)).map_err(|e| e.to_string())?;
-            let holder: IUnknown = SurfaceHolder { _surface: surface, sent, consumed_ms: Arc::clone(&self.consumed_ms), slot: pts, trace: self.trace.clone() }.into();
-            sample.SetUnknown(&HOLDER_KEY, &holder).map_err(|e| e.to_string())?;
+            sample
+                .SetSampleTime(slot_to_hns(pts, self.fps))
+                .map_err(|e| e.to_string())?;
+            sample
+                .SetSampleDuration(HNS_PER_SECOND / i64::from(self.fps))
+                .map_err(|e| e.to_string())?;
+            let holder: IUnknown = SurfaceHolder {
+                _surface: surface,
+                sent,
+                consumed_ms: Arc::clone(&self.consumed_ms),
+                slot: pts,
+                trace: self.trace.clone(),
+            }
+            .into();
+            sample
+                .SetUnknown(&HOLDER_KEY, &holder)
+                .map_err(|e| e.to_string())?;
             if let Some(probe) = &mut self.probe {
                 probe.submits.push(sent);
             }
-            self.writer.WriteSample(self.stream, &sample).map_err(|e| fail("WriteSample", e))?;
+            self.writer
+                .WriteSample(self.stream, &sample)
+                .map_err(|e| fail("WriteSample", e))?;
         }
         Ok(())
     }
@@ -594,7 +783,13 @@ fn summarize(label: &str, samples: &[f32]) -> String {
     let mut v = samples.to_vec();
     v.sort_by(|a, b| a.total_cmp(b));
     let at = |q: f32| v[((v.len() - 1) as f32 * q).round() as usize];
-    format!("{label}: n={} p50={:.2} p95={:.2} max={:.2} (ms)", v.len(), at(0.5), at(0.95), at(1.0))
+    format!(
+        "{label}: n={} p50={:.2} p95={:.2} max={:.2} (ms)",
+        v.len(),
+        at(0.5),
+        at(0.95),
+        at(1.0)
+    )
 }
 
 impl VideoEncoder for MfEncoder {
@@ -618,13 +813,19 @@ impl VideoEncoder for MfEncoder {
         unsafe { self.writer.Finalize() }.map_err(|e| fail("Finalize", e))?;
         eprintln!("MF 编码器: {}", self.description);
         if let Ok(consumed) = self.consumed_ms.lock() {
-            eprintln!("  {}", summarize("MF 输入被消费(送帧到样本释放)", &consumed));
+            eprintln!(
+                "  {}",
+                summarize("MF 输入被消费(送帧到样本释放)", &consumed)
+            );
         }
         if let Some(probe) = self.probe.take() {
             let latency = probe.finish(&self.path);
             eprintln!("  {}", summarize("MF 端到端(送帧到成品文件写入)", &latency));
         }
-        Ok(EncoderStats { frames: self.frames, send_ms: std::mem::take(&mut self.send_ms) })
+        Ok(EncoderStats {
+            frames: self.frames,
+            send_ms: std::mem::take(&mut self.send_ms),
+        })
     }
 }
 
@@ -635,7 +836,10 @@ mod tests {
     /// 宽字符路径：以 NUL 结尾，非 ASCII 字符按 UTF-16 展开。
     #[test]
     fn wide_path_is_nul_terminated_utf16() {
-        assert_eq!(wide_path(std::path::Path::new("a.mp4")), vec![97, 46, 109, 112, 52, 0]);
+        assert_eq!(
+            wide_path(std::path::Path::new("a.mp4")),
+            vec![97, 46, 109, 112, 52, 0]
+        );
         assert_eq!(wide_path(std::path::Path::new("录")), vec![0x5f55, 0]);
     }
 
@@ -664,20 +868,30 @@ mod tests {
                 MFStartup(MF_VERSION, MFSTARTUP_FULL).map_err(|e| e.to_string())?;
                 let path = std::env::temp_dir().join("snow-mf-soft-check.mp4");
                 let wide = wide_path(&path);
-                let writer = MFCreateSinkWriterFromURL(PCWSTR(wide.as_ptr()), None, None).map_err(|e| e.to_string())?;
+                let writer = MFCreateSinkWriterFromURL(PCWSTR(wide.as_ptr()), None, None)
+                    .map_err(|e| e.to_string())?;
                 let media = |subtype: &GUID| -> Result<IMFMediaType, String> {
                     let m = MFCreateMediaType().map_err(|e| e.to_string())?;
-                    m.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video).map_err(|e| e.to_string())?;
-                    m.SetGUID(&MF_MT_SUBTYPE, subtype).map_err(|e| e.to_string())?;
-                    m.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32).map_err(|e| e.to_string())?;
-                    m.SetUINT64(&MF_MT_FRAME_SIZE, pack_pair(640, 480)).map_err(|e| e.to_string())?;
-                    m.SetUINT64(&MF_MT_FRAME_RATE, pack_pair(30, 1)).map_err(|e| e.to_string())?;
+                    m.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
+                        .map_err(|e| e.to_string())?;
+                    m.SetGUID(&MF_MT_SUBTYPE, subtype)
+                        .map_err(|e| e.to_string())?;
+                    m.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)
+                        .map_err(|e| e.to_string())?;
+                    m.SetUINT64(&MF_MT_FRAME_SIZE, pack_pair(640, 480))
+                        .map_err(|e| e.to_string())?;
+                    m.SetUINT64(&MF_MT_FRAME_RATE, pack_pair(30, 1))
+                        .map_err(|e| e.to_string())?;
                     Ok(m)
                 };
                 let output = media(&MFVideoFormat_H264)?;
-                output.SetUINT32(&MF_MT_AVG_BITRATE, 2_000_000).map_err(|e| e.to_string())?;
+                output
+                    .SetUINT32(&MF_MT_AVG_BITRATE, 2_000_000)
+                    .map_err(|e| e.to_string())?;
                 let stream = writer.AddStream(&output).map_err(|e| e.to_string())?;
-                writer.SetInputMediaType(stream, &media(&MFVideoFormat_NV12)?, None).map_err(|e| e.to_string())?;
+                writer
+                    .SetInputMediaType(stream, &media(&MFVideoFormat_NV12)?, None)
+                    .map_err(|e| e.to_string())?;
                 writer.BeginWriting().map_err(|e| e.to_string())?;
                 let verdict = verify_hardware_transform(&writer, stream).map(|(name, _)| name);
                 drop(writer);
@@ -716,8 +930,14 @@ mod tests {
     /// 码率：随像素与帧率线性增长，且不低于 1Mbps。
     #[test]
     fn bitrate_scales_with_pixels_and_fps() {
-        assert!(target_bitrate((2560, 1440), 60, BITS_PER_PIXEL) > target_bitrate((1920, 1080), 60, BITS_PER_PIXEL));
-        assert!(target_bitrate((1920, 1080), 60, BITS_PER_PIXEL) > target_bitrate((1920, 1080), 30, BITS_PER_PIXEL));
+        assert!(
+            target_bitrate((2560, 1440), 60, BITS_PER_PIXEL)
+                > target_bitrate((1920, 1080), 60, BITS_PER_PIXEL)
+        );
+        assert!(
+            target_bitrate((1920, 1080), 60, BITS_PER_PIXEL)
+                > target_bitrate((1920, 1080), 30, BITS_PER_PIXEL)
+        );
         assert_eq!(target_bitrate((16, 16), 1, BITS_PER_PIXEL), 1_000_000);
         assert_eq!(target_bitrate((1920, 1080), 60, 0.12), 14_929_920);
     }

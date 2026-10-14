@@ -305,7 +305,12 @@ mod tests {
     fn factor_one_copies() {
         let small = small_image(9, 3);
         let mut big = OwnedImage::new(9, 3);
-        assert!(!upsample_bilinear(small.as_ref(), &mut big.as_mut(), 1, true));
+        assert!(!upsample_bilinear(
+            small.as_ref(),
+            &mut big.as_mut(),
+            1,
+            true
+        ));
         assert_eq!(big, small);
     }
 

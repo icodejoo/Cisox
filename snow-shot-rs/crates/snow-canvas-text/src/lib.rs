@@ -9,12 +9,8 @@ pub mod style;
 
 pub use draft::TextDraft;
 pub use input::{CanvasTextInput, EditKeyOutcome, apply_edit_key};
-pub use layout::{
-    TextCharMetric, TextLayoutResult, TextLineLayout, TextPoint, TextRect, TextSize,
-};
-pub use style::{
-    CanvasTextStyle, FONT_SIZE_STEPS, TextAlignment, stepped_font_size, style_mask,
-};
+pub use layout::{TextCharMetric, TextLayoutResult, TextLineLayout, TextPoint, TextRect, TextSize};
+pub use style::{CanvasTextStyle, FONT_SIZE_STEPS, TextAlignment, stepped_font_size, style_mask};
 
 /// 本 crate 的阶段标记。
 pub const PHASE: &str = "P2";
@@ -187,8 +183,14 @@ mod tests {
         assert_eq!(s3, 18.0);
 
         // 边界限制
-        assert_eq!(CanvasTextStyle::clamp_font_size(5.0), CanvasTextStyle::MIN_FONT_SIZE);
-        assert_eq!(CanvasTextStyle::clamp_font_size(500.0), CanvasTextStyle::MAX_FONT_SIZE);
+        assert_eq!(
+            CanvasTextStyle::clamp_font_size(5.0),
+            CanvasTextStyle::MIN_FONT_SIZE
+        );
+        assert_eq!(
+            CanvasTextStyle::clamp_font_size(500.0),
+            CanvasTextStyle::MAX_FONT_SIZE
+        );
     }
 
     /// 测试文本样式局部修补。

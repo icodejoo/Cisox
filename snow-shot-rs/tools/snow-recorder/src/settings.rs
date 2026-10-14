@@ -69,7 +69,9 @@ impl HwCodec {
     /// # 参数
     /// - `vendor`：DXGI `VendorId`。
     pub fn for_vendor(vendor: u32) -> Option<Self> {
-        [Self::Qsv, Self::Nvenc, Self::Amf].into_iter().find(|c| c.vendor() == vendor)
+        [Self::Qsv, Self::Nvenc, Self::Amf]
+            .into_iter()
+            .find(|c| c.vendor() == vendor)
     }
 }
 
@@ -107,7 +109,10 @@ pub struct AdapterInfo {
 /// assert_eq!(parse_encoder_preference(None), Ok(EncoderPreference::Auto));
 /// ```
 pub fn parse_encoder_preference(text: Option<&str>) -> Result<EncoderPreference, String> {
-    let Some(t) = text.map(|t| t.trim().to_ascii_lowercase()).filter(|t| !t.is_empty()) else {
+    let Some(t) = text
+        .map(|t| t.trim().to_ascii_lowercase())
+        .filter(|t| !t.is_empty())
+    else {
         return Ok(EncoderPreference::Auto);
     };
     match t.as_str() {
@@ -116,7 +121,9 @@ pub fn parse_encoder_preference(text: Option<&str>) -> Result<EncoderPreference,
         "nvenc" | "h264_nvenc" => Ok(EncoderPreference::Force(HwCodec::Nvenc)),
         "amf" | "h264_amf" => Ok(EncoderPreference::Force(HwCodec::Amf)),
         "off" | "none" | "soft" | "software" | "0" => Ok(EncoderPreference::Software),
-        _ => Err(format!("{ENV_ENCODER}={t:?} 不认识（可选 auto/qsv/nvenc/amf/off），按 auto 处理")),
+        _ => Err(format!(
+            "{ENV_ENCODER}={t:?} 不认识（可选 auto/qsv/nvenc/amf/off），按 auto 处理"
+        )),
     }
 }
 
@@ -134,11 +141,18 @@ pub fn parse_encoder_preference(text: Option<&str>) -> Result<EncoderPreference,
 /// let gpu = AdapterInfo { vendor: VENDOR_NVIDIA, description: "RTX".into() };
 /// assert_eq!(select_encoder(&gpu, EncoderPreference::Auto), Ok(HwCodec::Nvenc));
 /// ```
-pub fn select_encoder(adapter: &AdapterInfo, preference: EncoderPreference) -> Result<HwCodec, String> {
+pub fn select_encoder(
+    adapter: &AdapterInfo,
+    preference: EncoderPreference,
+) -> Result<HwCodec, String> {
     match preference {
         EncoderPreference::Software => Err(format!("{ENV_ENCODER} 已关闭硬件编码")),
-        EncoderPreference::Auto => HwCodec::for_vendor(adapter.vendor)
-            .ok_or_else(|| format!("适配器 {} (VendorId 0x{:04x}) 没有受支持的硬件编码器", adapter.description, adapter.vendor)),
+        EncoderPreference::Auto => HwCodec::for_vendor(adapter.vendor).ok_or_else(|| {
+            format!(
+                "适配器 {} (VendorId 0x{:04x}) 没有受支持的硬件编码器",
+                adapter.description, adapter.vendor
+            )
+        }),
         // 编码必须与采集/合成同适配器（零拷贝）；强制项不同厂商需要跨适配器传输，目前未实现
         EncoderPreference::Force(codec) if codec.vendor() == adapter.vendor => Ok(codec),
         EncoderPreference::Force(codec) => Err(format!(
@@ -159,7 +173,8 @@ pub fn select_encoder(adapter: &AdapterInfo, preference: EncoderPreference) -> R
 /// # 返回
 /// 候选下标，按尝试优先级排列。
 pub fn rank_adapters(adapters: &[AdapterInfo], preference: EncoderPreference) -> Vec<usize> {
-    let (usable, rest): (Vec<usize>, Vec<usize>) = (0..adapters.len()).partition(|&i| select_encoder(&adapters[i], preference).is_ok());
+    let (usable, rest): (Vec<usize>, Vec<usize>) =
+        (0..adapters.len()).partition(|&i| select_encoder(&adapters[i], preference).is_ok());
     usable.into_iter().chain(rest).collect()
 }
 
@@ -262,7 +277,9 @@ pub fn parse_capture_sched(text: Option<&str>) -> Result<CaptureSched, String> {
         "" | "default" => Ok(CaptureSched::Default),
         "mmcss" => Ok(CaptureSched::Mmcss),
         "timecritical" | "time_critical" | "tc" => Ok(CaptureSched::TimeCritical),
-        "mmcss+timecritical" | "mmcss+time_critical" | "mmcss+tc" => Ok(CaptureSched::MmcssTimeCritical),
+        "mmcss+timecritical" | "mmcss+time_critical" | "mmcss+tc" => {
+            Ok(CaptureSched::MmcssTimeCritical)
+        }
         _ => Err(raw.to_string()),
     }
 }
@@ -295,7 +312,9 @@ pub fn parse_mmcss_task(text: Option<&str>) -> String {
 /// assert_eq!(parse_slow_iter_us(Some("0")), DEFAULT_SLOW_ITER_US);
 /// ```
 pub fn parse_slow_iter_us(text: Option<&str>) -> u32 {
-    text.and_then(|t| t.trim().parse::<u32>().ok()).filter(|v| SLOW_ITER_US_RANGE.contains(v)).unwrap_or(DEFAULT_SLOW_ITER_US)
+    text.and_then(|t| t.trim().parse::<u32>().ok())
+        .filter(|v| SLOW_ITER_US_RANGE.contains(v))
+        .unwrap_or(DEFAULT_SLOW_ITER_US)
 }
 
 /// 产品默认输出上限的长边（1080p）。
@@ -402,8 +421,14 @@ mod tests {
         assert_eq!(parse_hardware_mode(Some("1")), HardwareMode::Gpu);
         assert_eq!(parse_hardware_mode(Some(" GPU ")), HardwareMode::Gpu);
         assert_eq!(parse_hardware_mode(Some("0")), HardwareMode::Off);
-        assert_eq!(parse_hardware_mode(Some("upstream")), HardwareMode::Upstream);
-        assert_eq!(parse_hardware_mode(Some(" MF ")), HardwareMode::MediaFoundation);
+        assert_eq!(
+            parse_hardware_mode(Some("upstream")),
+            HardwareMode::Upstream
+        );
+        assert_eq!(
+            parse_hardware_mode(Some(" MF ")),
+            HardwareMode::MediaFoundation
+        );
         assert_eq!(parse_hardware_mode(Some("auto")), HardwareMode::Auto);
         assert_eq!(parse_hardware_mode(Some("??")), DEFAULT_HARDWARE_MODE);
         assert_eq!(parse_hardware_mode(None), DEFAULT_HARDWARE_MODE);
@@ -413,18 +438,34 @@ mod tests {
 
     /// 构造测试用适配器。
     fn adapter(vendor: u32, name: &str) -> AdapterInfo {
-        AdapterInfo { vendor, description: name.to_string() }
+        AdapterInfo {
+            vendor,
+            description: name.to_string(),
+        }
     }
 
     /// 自动选择：三大厂商（含 AMD 独显/集显同为 AMF）各得其编码器，未知厂商报错。
     #[test]
     fn auto_selects_by_vendor() {
         let auto = EncoderPreference::Auto;
-        assert_eq!(select_encoder(&adapter(VENDOR_NVIDIA, "RTX 4060"), auto), Ok(HwCodec::Nvenc));
-        assert_eq!(select_encoder(&adapter(VENDOR_AMD, "RX 7600"), auto), Ok(HwCodec::Amf));
-        assert_eq!(select_encoder(&adapter(VENDOR_AMD, "Radeon 780M"), auto), Ok(HwCodec::Amf));
-        assert_eq!(select_encoder(&adapter(VENDOR_INTEL, "UHD 770"), auto), Ok(HwCodec::Qsv));
-        let error = select_encoder(&adapter(0x1414, "Microsoft Basic Render Driver"), auto).unwrap_err();
+        assert_eq!(
+            select_encoder(&adapter(VENDOR_NVIDIA, "RTX 4060"), auto),
+            Ok(HwCodec::Nvenc)
+        );
+        assert_eq!(
+            select_encoder(&adapter(VENDOR_AMD, "RX 7600"), auto),
+            Ok(HwCodec::Amf)
+        );
+        assert_eq!(
+            select_encoder(&adapter(VENDOR_AMD, "Radeon 780M"), auto),
+            Ok(HwCodec::Amf)
+        );
+        assert_eq!(
+            select_encoder(&adapter(VENDOR_INTEL, "UHD 770"), auto),
+            Ok(HwCodec::Qsv)
+        );
+        let error =
+            select_encoder(&adapter(0x1414, "Microsoft Basic Render Driver"), auto).unwrap_err();
         assert!(error.contains("没有受支持") && error.contains("0x1414"));
         assert_eq!(HwCodec::Nvenc.ffmpeg_name(), "h264_nvenc");
         assert_eq!(HwCodec::for_vendor(0), None);
@@ -435,9 +476,15 @@ mod tests {
     fn request_overrides_resolve() {
         assert_eq!(resolve_size_limit(None, None), Some((1920, 1080)));
         assert_eq!(resolve_size_limit(None, Some((854, 480))), Some((854, 480)));
-        assert_eq!(resolve_size_limit(Some("1280x720"), Some((854, 480))), Some((1280, 720)));
+        assert_eq!(
+            resolve_size_limit(Some("1280x720"), Some((854, 480))),
+            Some((1280, 720))
+        );
         assert_eq!(resolve_size_limit(Some("none"), Some((854, 480))), None);
-        assert_eq!(resolve_size_limit(Some("junk"), Some((854, 480))), Some((854, 480)));
+        assert_eq!(
+            resolve_size_limit(Some("junk"), Some((854, 480))),
+            Some((854, 480))
+        );
         assert_eq!(resolve_hardware_mode(None, true), DEFAULT_HARDWARE_MODE);
         assert_eq!(resolve_hardware_mode(None, false), HardwareMode::Off);
         assert_eq!(resolve_hardware_mode(Some("gpu"), false), HardwareMode::Gpu);
@@ -447,12 +494,30 @@ mod tests {
     #[test]
     fn encoder_preference_parsing() {
         assert_eq!(parse_encoder_preference(None), Ok(EncoderPreference::Auto));
-        assert_eq!(parse_encoder_preference(Some("  ")), Ok(EncoderPreference::Auto));
-        assert_eq!(parse_encoder_preference(Some("AUTO")), Ok(EncoderPreference::Auto));
-        assert_eq!(parse_encoder_preference(Some("NVENC")), Ok(EncoderPreference::Force(HwCodec::Nvenc)));
-        assert_eq!(parse_encoder_preference(Some("h264_amf")), Ok(EncoderPreference::Force(HwCodec::Amf)));
-        assert_eq!(parse_encoder_preference(Some("qsv")), Ok(EncoderPreference::Force(HwCodec::Qsv)));
-        assert_eq!(parse_encoder_preference(Some("off")), Ok(EncoderPreference::Software));
+        assert_eq!(
+            parse_encoder_preference(Some("  ")),
+            Ok(EncoderPreference::Auto)
+        );
+        assert_eq!(
+            parse_encoder_preference(Some("AUTO")),
+            Ok(EncoderPreference::Auto)
+        );
+        assert_eq!(
+            parse_encoder_preference(Some("NVENC")),
+            Ok(EncoderPreference::Force(HwCodec::Nvenc))
+        );
+        assert_eq!(
+            parse_encoder_preference(Some("h264_amf")),
+            Ok(EncoderPreference::Force(HwCodec::Amf))
+        );
+        assert_eq!(
+            parse_encoder_preference(Some("qsv")),
+            Ok(EncoderPreference::Force(HwCodec::Qsv))
+        );
+        assert_eq!(
+            parse_encoder_preference(Some("off")),
+            Ok(EncoderPreference::Software)
+        );
         assert!(parse_encoder_preference(Some("x264")).is_err());
     }
 
@@ -460,19 +525,40 @@ mod tests {
     #[test]
     fn override_and_fallback_paths() {
         let nvidia = adapter(VENDOR_NVIDIA, "RTX 4060");
-        assert_eq!(select_encoder(&nvidia, EncoderPreference::Force(HwCodec::Nvenc)), Ok(HwCodec::Nvenc));
+        assert_eq!(
+            select_encoder(&nvidia, EncoderPreference::Force(HwCodec::Nvenc)),
+            Ok(HwCodec::Nvenc)
+        );
         let mismatch = select_encoder(&nvidia, EncoderPreference::Force(HwCodec::Qsv)).unwrap_err();
-        assert!(mismatch.contains("h264_qsv") && mismatch.contains("RTX 4060") && mismatch.contains("跨适配器"));
-        assert!(select_encoder(&nvidia, EncoderPreference::Software).unwrap_err().contains(ENV_ENCODER));
+        assert!(
+            mismatch.contains("h264_qsv")
+                && mismatch.contains("RTX 4060")
+                && mismatch.contains("跨适配器")
+        );
+        assert!(
+            select_encoder(&nvidia, EncoderPreference::Software)
+                .unwrap_err()
+                .contains(ENV_ENCODER)
+        );
     }
 
     /// 多适配器排序：能出编码器的优先，强制项按厂商把匹配的提前，同类保持原序。
     #[test]
     fn adapter_ranking() {
-        let list = [adapter(0x1414, "WARP"), adapter(VENDOR_INTEL, "iGPU"), adapter(VENDOR_NVIDIA, "dGPU")];
+        let list = [
+            adapter(0x1414, "WARP"),
+            adapter(VENDOR_INTEL, "iGPU"),
+            adapter(VENDOR_NVIDIA, "dGPU"),
+        ];
         assert_eq!(rank_adapters(&list, EncoderPreference::Auto), vec![1, 2, 0]);
-        assert_eq!(rank_adapters(&list, EncoderPreference::Force(HwCodec::Nvenc)), vec![2, 0, 1]);
-        assert_eq!(rank_adapters(&list, EncoderPreference::Software), vec![0, 1, 2]);
+        assert_eq!(
+            rank_adapters(&list, EncoderPreference::Force(HwCodec::Nvenc)),
+            vec![2, 0, 1]
+        );
+        assert_eq!(
+            rank_adapters(&list, EncoderPreference::Software),
+            vec![0, 1, 2]
+        );
         assert!(rank_adapters(&[], EncoderPreference::Auto).is_empty());
     }
 
@@ -481,13 +567,34 @@ mod tests {
     fn capture_sched_parsing() {
         assert_eq!(parse_capture_sched(None), Ok(CaptureSched::Default));
         assert_eq!(parse_capture_sched(Some("  ")), Ok(CaptureSched::Default));
-        assert_eq!(parse_capture_sched(Some("default")), Ok(CaptureSched::Default));
-        assert_eq!(parse_capture_sched(Some(" MMCSS ")), Ok(CaptureSched::Mmcss));
-        assert_eq!(parse_capture_sched(Some("TimeCritical")), Ok(CaptureSched::TimeCritical));
-        assert_eq!(parse_capture_sched(Some("tc")), Ok(CaptureSched::TimeCritical));
-        assert_eq!(parse_capture_sched(Some("mmcss+timecritical")), Ok(CaptureSched::MmcssTimeCritical));
-        assert_eq!(parse_capture_sched(Some("mmcss+tc")), Ok(CaptureSched::MmcssTimeCritical));
-        assert_eq!(parse_capture_sched(Some("realtime")), Err("realtime".to_string()));
+        assert_eq!(
+            parse_capture_sched(Some("default")),
+            Ok(CaptureSched::Default)
+        );
+        assert_eq!(
+            parse_capture_sched(Some(" MMCSS ")),
+            Ok(CaptureSched::Mmcss)
+        );
+        assert_eq!(
+            parse_capture_sched(Some("TimeCritical")),
+            Ok(CaptureSched::TimeCritical)
+        );
+        assert_eq!(
+            parse_capture_sched(Some("tc")),
+            Ok(CaptureSched::TimeCritical)
+        );
+        assert_eq!(
+            parse_capture_sched(Some("mmcss+timecritical")),
+            Ok(CaptureSched::MmcssTimeCritical)
+        );
+        assert_eq!(
+            parse_capture_sched(Some("mmcss+tc")),
+            Ok(CaptureSched::MmcssTimeCritical)
+        );
+        assert_eq!(
+            parse_capture_sched(Some("realtime")),
+            Err("realtime".to_string())
+        );
     }
 
     /// 调度方式的能力位与名字互相一致。
@@ -495,9 +602,20 @@ mod tests {
     fn capture_sched_flags_match_names() {
         assert!(!CaptureSched::Default.uses_mmcss() && !CaptureSched::Default.uses_time_critical());
         assert!(CaptureSched::Mmcss.uses_mmcss() && !CaptureSched::Mmcss.uses_time_critical());
-        assert!(!CaptureSched::TimeCritical.uses_mmcss() && CaptureSched::TimeCritical.uses_time_critical());
-        assert!(CaptureSched::MmcssTimeCritical.uses_mmcss() && CaptureSched::MmcssTimeCritical.uses_time_critical());
-        for s in [CaptureSched::Default, CaptureSched::Mmcss, CaptureSched::TimeCritical, CaptureSched::MmcssTimeCritical] {
+        assert!(
+            !CaptureSched::TimeCritical.uses_mmcss()
+                && CaptureSched::TimeCritical.uses_time_critical()
+        );
+        assert!(
+            CaptureSched::MmcssTimeCritical.uses_mmcss()
+                && CaptureSched::MmcssTimeCritical.uses_time_critical()
+        );
+        for s in [
+            CaptureSched::Default,
+            CaptureSched::Mmcss,
+            CaptureSched::TimeCritical,
+            CaptureSched::MmcssTimeCritical,
+        ] {
             assert_eq!(parse_capture_sched(Some(s.name())), Ok(s));
         }
     }
@@ -524,7 +642,10 @@ mod tests {
         assert_eq!(parse_size_limit("none"), Some(None));
         assert_eq!(parse_size_limit("bad"), None);
         assert_eq!(parse_size_limit("0x10"), None);
-        assert_eq!(oriented_limit(Some((1920, 1080)), 1440, 2560), (Some(1080), Some(1920)));
+        assert_eq!(
+            oriented_limit(Some((1920, 1080)), 1440, 2560),
+            (Some(1080), Some(1920))
+        );
         assert_eq!(oriented_limit(None, 1, 1), (None, None));
     }
 }

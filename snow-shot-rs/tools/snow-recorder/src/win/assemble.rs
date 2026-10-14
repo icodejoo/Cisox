@@ -16,9 +16,12 @@ use crate::settings::{AdapterInfo, ENV_ENCODER, EncoderPreference, HwCodec, sele
 use crate::timeline::QpcAnchor;
 use crate::win::compose::GpuComposer;
 use crate::win::dda::{DdaCapture, GpuFrame};
-use crate::win::span::SpanCapture;
+use crate::win::hwenc::{
+    DEFAULT_POOL_CAPACITY, HwConfig, HwContext, HwEncoder, QSV_ASYNC_DEPTH, QSV_PRESET,
+    SURFACE_ALIGN,
+};
 use crate::win::mfenc::{ENV_MF_QUALITY, MF_POOL_CAPACITY, MfEncoder, parse_rate_control};
-use crate::win::hwenc::{SURFACE_ALIGN, DEFAULT_POOL_CAPACITY, HwConfig, HwContext, HwEncoder, QSV_ASYNC_DEPTH, QSV_PRESET};
+use crate::win::span::SpanCapture;
 
 /// Media Foundation 纹理对齐（与编码尺寸严格一致，只需偶数）。
 const MF_SURFACE_ALIGN: u32 = 2;
@@ -63,7 +66,13 @@ impl HardwareSpec {
     /// - `fps`：帧率。
     /// - `show_cursor`：是否叠加光标。
     /// - `output`：输出路径。
-    pub fn new(region: (i32, i32, u32, u32), out_size: (u32, u32), fps: u32, show_cursor: bool, output: PathBuf) -> Self {
+    pub fn new(
+        region: (i32, i32, u32, u32),
+        out_size: (u32, u32),
+        fps: u32,
+        show_cursor: bool,
+        output: PathBuf,
+    ) -> Self {
         Self {
             region,
             out_size,
@@ -138,28 +147,62 @@ pub fn start_hardware(spec: &HardwareSpec) -> Result<Running, String> {
 /// - `capture`：采集源（单屏或跨屏）。
 /// - `device`：合成设备 B。
 /// - `tiles`：显示器块数（单屏为 1）。
-fn run_pipeline<C: CaptureSource<Frame = GpuFrame>>(spec: &HardwareSpec, capture: C, device: SharedDevice, tiles: usize) -> Result<Running, String> {
+fn run_pipeline<C: CaptureSource<Frame = GpuFrame>>(
+    spec: &HardwareSpec,
+    capture: C,
+    device: SharedDevice,
+    tiles: usize,
+) -> Result<Running, String> {
     let (_, _, w, h) = spec.region;
     let identity = device.identity();
-    let adapter = AdapterInfo { vendor: identity.vendor, description: identity.description.clone() };
+    let adapter = AdapterInfo {
+        vendor: identity.vendor,
+        description: identity.description.clone(),
+    };
     // Media Foundation 不依赖 FFmpeg 编码器：厂商不认识也能用（帧池借用非 QSV 的 D3D11 路径）
     let codec = match select_encoder(&adapter, spec.encoder) {
         Ok(codec) => codec,
         Err(_) if spec.media_foundation => HwCodec::Nvenc,
         Err(e) => return Err(e),
     };
-    let backend = if spec.media_foundation { "Media Foundation 硬件 MFT" } else { codec.ffmpeg_name() };
-    eprintln!("硬件编码：适配器 {} (VendorId 0x{:04x}) -> {backend}", adapter.description, adapter.vendor);
+    let backend = if spec.media_foundation {
+        "Media Foundation 硬件 MFT"
+    } else {
+        codec.ffmpeg_name()
+    };
+    eprintln!(
+        "硬件编码：适配器 {} (VendorId 0x{:04x}) -> {backend}",
+        adapter.description, adapter.vendor
+    );
     // Media Foundation 要求纹理尺寸与编码尺寸严格一致（对齐取 2），其余厂商编码器沿用 16 对齐
-    let align = if spec.media_foundation { MF_SURFACE_ALIGN } else { SURFACE_ALIGN };
-    let hw = Arc::new(HwContext::with_align(device.clone(), spec.out_size, if spec.media_foundation { MF_POOL_CAPACITY } else { DEFAULT_POOL_CAPACITY }, codec, align, !spec.media_foundation)?);
+    let align = if spec.media_foundation {
+        MF_SURFACE_ALIGN
+    } else {
+        SURFACE_ALIGN
+    };
+    let hw = Arc::new(HwContext::with_align(
+        device.clone(),
+        spec.out_size,
+        if spec.media_foundation {
+            MF_POOL_CAPACITY
+        } else {
+            DEFAULT_POOL_CAPACITY
+        },
+        codec,
+        align,
+        !spec.media_foundation,
+    )?);
     hw.prewarm(PREWARM_SURFACES)?;
     let composer = GpuComposer::new(device, Arc::clone(&hw), (w, h), spec.out_size, spec.fps)?;
     if tiles > 1 {
         composer.ensure_tile_streams(tiles)?;
     }
     // 音频：先打开采集，至少有一路可用才给容器加音轨；编码器打开失败时采集随之丢弃
-    let audio_capture = spec.audio.enabled().then(|| AudioCapture::open(&spec.audio, audio::stdout_reporter())).flatten();
+    let audio_capture = spec
+        .audio
+        .enabled()
+        .then(|| AudioCapture::open(&spec.audio, audio::stdout_reporter()))
+        .flatten();
     if spec.media_foundation {
         let mut encoder = MfEncoder::open_with_audio(
             hw,
@@ -169,9 +212,14 @@ fn run_pipeline<C: CaptureSource<Frame = GpuFrame>>(spec: &HardwareSpec, capture
             parse_rate_control(std::env::var(ENV_MF_QUALITY).ok().as_deref()),
             audio_capture.is_some(),
         )?;
-        let recorder = audio_capture.zip(encoder.take_audio_sink()).map(|(capture, sink)| capture.run(sink));
+        let recorder = audio_capture
+            .zip(encoder.take_audio_sink())
+            .map(|(capture, sink)| capture.run(sink));
         return pipeline::start_with_audio(
-            PipelineConfig { fps: spec.fps, show_cursor: spec.show_cursor },
+            PipelineConfig {
+                fps: spec.fps,
+                show_cursor: spec.show_cursor,
+            },
             "dxgi+videoprocessor+media-foundation",
             capture,
             composer,
@@ -193,9 +241,14 @@ fn run_pipeline<C: CaptureSource<Frame = GpuFrame>>(spec: &HardwareSpec, capture
         },
         audio_capture.is_some(),
     )?;
-    let recorder = audio_capture.zip(encoder.take_audio_sink()).map(|(capture, sink)| capture.run(sink));
+    let recorder = audio_capture
+        .zip(encoder.take_audio_sink())
+        .map(|(capture, sink)| capture.run(sink));
     pipeline::start_with_audio(
-        PipelineConfig { fps: spec.fps, show_cursor: spec.show_cursor },
+        PipelineConfig {
+            fps: spec.fps,
+            show_cursor: spec.show_cursor,
+        },
         &format!("dxgi+videoprocessor+{codec}"),
         capture,
         composer,
@@ -211,7 +264,13 @@ mod tests {
     /// 配置校验：零尺寸、奇数尺寸、零帧率都拒绝。
     #[test]
     fn spec_validation() {
-        let ok = HardwareSpec::new((0, 0, 1920, 1080), (1920, 1080), 30, true, PathBuf::from("a.mp4"));
+        let ok = HardwareSpec::new(
+            (0, 0, 1920, 1080),
+            (1920, 1080),
+            30,
+            true,
+            PathBuf::from("a.mp4"),
+        );
         assert!(ok.validate().is_ok());
         let mut bad = ok.clone();
         bad.region.2 = 0;
@@ -229,7 +288,13 @@ mod tests {
     fn region_outside_every_display_fails_cleanly() {
         let path = std::env::temp_dir().join("snow-recorder-assemble-test.mp4");
         let _ = std::fs::remove_file(&path);
-        let spec = HardwareSpec::new((100_000, 100_000, 64, 64), (64, 64), 30, false, path.clone());
+        let spec = HardwareSpec::new(
+            (100_000, 100_000, 64, 64),
+            (64, 64),
+            30,
+            false,
+            path.clone(),
+        );
         let error = start_hardware(&spec).err().expect("应当失败");
         assert!(!error.is_empty());
         assert!(!path.exists());

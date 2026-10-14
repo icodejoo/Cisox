@@ -4,9 +4,9 @@
 //! 由调用方回退到标量实现。
 
 use crate::image::{AlphaRef, ImageMut, ImageRef};
+use crate::pixel::{blend_premultiplied, q_alpha, q_blue, q_green, q_red, q_rgba};
 #[cfg(target_arch = "x86_64")]
 use crate::pixel::{grayscale_pixel, inversion_pixel};
-use crate::pixel::{blend_premultiplied, q_alpha, q_blue, q_green, q_red, q_rgba};
 
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;

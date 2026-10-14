@@ -97,9 +97,9 @@ mod win {
     use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT, WPARAM};
     use windows::Win32::Graphics::Gdi::ScreenToClient;
     use windows::Win32::UI::WindowsAndMessaging::{
-        CWP_SKIPDISABLED, CWP_SKIPINVISIBLE, CWP_SKIPTRANSPARENT, ChildWindowFromPointEx, GW_HWNDNEXT,
-        GWL_STYLE, GetTopWindow, GetWindow, GetWindowLongPtrW, GetWindowRect, GetWindowThreadProcessId,
-        IsWindowVisible, PostMessageW, WM_MOUSEWHEEL, WS_DISABLED,
+        CWP_SKIPDISABLED, CWP_SKIPINVISIBLE, CWP_SKIPTRANSPARENT, ChildWindowFromPointEx,
+        GW_HWNDNEXT, GWL_STYLE, GetTopWindow, GetWindow, GetWindowLongPtrW, GetWindowRect,
+        GetWindowThreadProcessId, IsWindowVisible, PostMessageW, WM_MOUSEWHEEL, WS_DISABLED,
     };
 
     /// 子窗口下钻的最大层数（防止异常窗口树导致死循环）。
@@ -126,7 +126,8 @@ mod win {
                         rect: (rect.left, rect.top, rect.right, rect.bottom),
                         pid,
                         visible: IsWindowVisible(window).as_bool(),
-                        disabled: (GetWindowLongPtrW(window, GWL_STYLE) as u32 & WS_DISABLED.0) != 0,
+                        disabled: (GetWindowLongPtrW(window, GWL_STYLE) as u32 & WS_DISABLED.0)
+                            != 0,
                     });
                 }
                 current = GetWindow(window, GW_HWNDNEXT).ok();
@@ -144,7 +145,10 @@ mod win {
         // SAFETY: 句柄来自上面的枚举；下钻与投递失败都以错误返回。
         unsafe {
             for _ in 0..MAX_DESCENT {
-                let mut client = POINT { x: point.0, y: point.1 };
+                let mut client = POINT {
+                    x: point.0,
+                    y: point.1,
+                };
                 if !ScreenToClient(target, &mut client).as_bool() {
                     break;
                 }
@@ -170,19 +174,31 @@ mod tests {
     use super::*;
 
     /// 构造候选。
-    fn window(handle: isize, rect: (i32, i32, i32, i32), pid: u32, visible: bool, disabled: bool) -> WindowCandidate {
-        WindowCandidate { handle, rect, pid, visible, disabled }
+    fn window(
+        handle: isize,
+        rect: (i32, i32, i32, i32),
+        pid: u32,
+        visible: bool,
+        disabled: bool,
+    ) -> WindowCandidate {
+        WindowCandidate {
+            handle,
+            rect,
+            pid,
+            visible,
+            disabled,
+        }
     }
 
     /// 挑选规则：跳过本进程、不可见、已禁用与不含该点的窗口；取 Z 序最靠上的。
     #[test]
     fn picks_first_eligible_window() {
         let list = [
-            window(1, (0, 0, 500, 500), 7, true, false),   // 本进程覆盖窗
-            window(2, (0, 0, 500, 500), 8, false, false),  // 不可见
-            window(3, (0, 0, 500, 500), 8, true, true),    // 已禁用
+            window(1, (0, 0, 500, 500), 7, true, false), // 本进程覆盖窗
+            window(2, (0, 0, 500, 500), 8, false, false), // 不可见
+            window(3, (0, 0, 500, 500), 8, true, true),  // 已禁用
             window(4, (600, 0, 900, 500), 8, true, false), // 不含该点
-            window(5, (0, 0, 500, 500), 8, true, false),   // 命中
+            window(5, (0, 0, 500, 500), 8, true, false), // 命中
             window(6, (0, 0, 500, 500), 9, true, false),
         ];
         assert_eq!(pick_target_window(&list, (100, 100), 7), Some(5));

@@ -522,7 +522,13 @@ mod tests {
         let gray = FastColor::parse("#808080");
         assert_eq!(gray.lighten(12.0).to_hex_string(), "#9f9f9f");
         assert_eq!(gray.darken(12.0).to_hex_string(), "#616161");
-        assert_eq!(FastColor::parse("#ffffff").lighten(50.0).to_hex_string(), "#ffffff");
-        assert_eq!(FastColor::parse("#000000").darken(50.0).to_hex_string(), "#000000");
+        assert_eq!(
+            FastColor::parse("#ffffff").lighten(50.0).to_hex_string(),
+            "#ffffff"
+        );
+        assert_eq!(
+            FastColor::parse("#000000").darken(50.0).to_hex_string(),
+            "#000000"
+        );
     }
 }

@@ -869,7 +869,11 @@ mod tests {
     /// 快捷动作命令不属于 MCP 截图域，且能还原为对应种类。
     #[test]
     fn quick_action_is_not_an_mcp_tool() {
-        assert!(MCP_TOOL_MAP.iter().all(|(_, k)| *k != CommandKind::QuickAction));
+        assert!(
+            MCP_TOOL_MAP
+                .iter()
+                .all(|(_, k)| *k != CommandKind::QuickAction)
+        );
         assert_eq!(
             AppCommand::QuickAction(QuickAction::OpenSettings).kind(),
             CommandKind::QuickAction

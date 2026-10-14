@@ -121,12 +121,8 @@ mod win {
                     true,
                 ),
             };
-            let ok = GetProcessMemoryInfo(
-                handle,
-                std::ptr::addr_of_mut!(counters).cast(),
-                size,
-            )
-            .is_ok();
+            let ok =
+                GetProcessMemoryInfo(handle, std::ptr::addr_of_mut!(counters).cast(), size).is_ok();
             if owned {
                 let _ = CloseHandle(handle);
             }

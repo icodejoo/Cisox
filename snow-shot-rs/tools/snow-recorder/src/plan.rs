@@ -8,8 +8,8 @@ use crate::settings::{SizeLimit, oriented_limit};
 #[cfg(test)]
 use snow_recorder_protocol::scratch_file;
 use snow_screen_recorder::{
-    CaptureBackendKind, DirectRecordingConfig, ExportFormat, KeyboardOverlayConfig, RecordingRegion, VideoCodec,
-    VideoEncodingSpeed,
+    CaptureBackendKind, DirectRecordingConfig, ExportFormat, KeyboardOverlayConfig,
+    RecordingRegion, VideoCodec, VideoEncodingSpeed,
 };
 
 /// 环境变量：覆盖 x264 预设（ultrafast 到 placebo，与协议 `preset` 令牌同一套名字）。
@@ -94,7 +94,12 @@ pub fn build_config(
         maximum_width,
         maximum_height,
         codec: VideoCodec::H264,
-        preset: request.quality.preset.as_deref().and_then(parse_preset).unwrap_or(VideoEncodingSpeed::SuperFast),
+        preset: request
+            .quality
+            .preset
+            .as_deref()
+            .and_then(parse_preset)
+            .unwrap_or(VideoEncodingSpeed::SuperFast),
         prefer_hardware_encoder: prefer_hardware,
         // 音频只在 MP4 启用；软件路径用上游会话自带的混音，音量与设备选择由自建路径支持
         enable_microphone: request.audio.microphone && request.format == MediaFormat::Mp4,
@@ -136,7 +141,12 @@ mod tests {
     /// 生成的配置通过运行时自带校验，四种格式均可。
     #[test]
     fn built_config_passes_runtime_validation() {
-        for format in [MediaFormat::Mp4, MediaFormat::Gif, MediaFormat::Apng, MediaFormat::Webp] {
+        for format in [
+            MediaFormat::Mp4,
+            MediaFormat::Gif,
+            MediaFormat::Apng,
+            MediaFormat::Webp,
+        ] {
             let final_path = PathBuf::from(format!("out.{}", format.as_str()));
             let req = request(format, final_path.to_str().unwrap_or("out.mp4"));
             let config = build_config(&req, scratch_file(&final_path, 1), false, None);
@@ -149,14 +159,28 @@ mod tests {
     /// 音频开关只在 MP4 透传，动图格式一律关闭。
     #[test]
     fn audio_flags_follow_request_and_format() {
-        for (format, expect) in [(MediaFormat::Mp4, true), (MediaFormat::Gif, false), (MediaFormat::Apng, false), (MediaFormat::Webp, false)] {
+        for (format, expect) in [
+            (MediaFormat::Mp4, true),
+            (MediaFormat::Gif, false),
+            (MediaFormat::Apng, false),
+            (MediaFormat::Webp, false),
+        ] {
             let mut req = request(format, "o.mp4");
             req.audio.microphone = true;
             req.audio.system = true;
             let config = build_config(&req, scratch_file(&req.output, 1), false, None);
-            assert_eq!((config.enable_microphone, config.enable_system_audio), (expect, expect), "格式 {format:?}");
+            assert_eq!(
+                (config.enable_microphone, config.enable_system_audio),
+                (expect, expect),
+                "格式 {format:?}"
+            );
         }
-        let config = build_config(&request(MediaFormat::Mp4, "o.mp4"), scratch_file(std::path::Path::new("o.mp4"), 1), false, None);
+        let config = build_config(
+            &request(MediaFormat::Mp4, "o.mp4"),
+            scratch_file(std::path::Path::new("o.mp4"), 1),
+            false,
+            None,
+        );
         assert!(!config.enable_microphone && !config.enable_system_audio);
     }
 
@@ -169,16 +193,27 @@ mod tests {
         req.quality.preset = Some("medium".into());
         req.quality.loop_animated = false;
         let config = build_config(&req, scratch_file(&req.output, 1), false, None);
-        assert!(matches!(config.preset, VideoEncodingSpeed::Medium) && !config.loop_animated_images);
+        assert!(
+            matches!(config.preset, VideoEncodingSpeed::Medium) && !config.loop_animated_images
+        );
         assert_eq!(config.validate(), Ok(()));
     }
 
     /// 预设名解析。
     #[test]
     fn preset_parsing_cases() {
-        assert!(matches!(parse_preset(" UltraFast "), Some(VideoEncodingSpeed::UltraFast)));
-        assert!(matches!(parse_preset("placebo"), Some(VideoEncodingSpeed::Placebo)));
-        assert!(matches!(parse_preset("veryslow"), Some(VideoEncodingSpeed::VerySlow)));
+        assert!(matches!(
+            parse_preset(" UltraFast "),
+            Some(VideoEncodingSpeed::UltraFast)
+        ));
+        assert!(matches!(
+            parse_preset("placebo"),
+            Some(VideoEncodingSpeed::Placebo)
+        ));
+        assert!(matches!(
+            parse_preset("veryslow"),
+            Some(VideoEncodingSpeed::VerySlow)
+        ));
         assert!(parse_preset("turbo").is_none());
         assert!(parse_preset("").is_none());
     }

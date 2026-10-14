@@ -239,7 +239,10 @@ pub fn hit_test_drag_mode(
 /// let handles = handle_rects(sel, 8);
 /// assert_eq!(handles.len(), 8);
 /// ```
-pub fn handle_rects(selection: PhysicalRect, handle_size: i32) -> [(SelectionDragMode, PhysicalRect); 8] {
+pub fn handle_rects(
+    selection: PhysicalRect,
+    handle_size: i32,
+) -> [(SelectionDragMode, PhysicalRect); 8] {
     let half = handle_size / 2;
     let cx = selection.x + selection.width / 2;
     let cy = selection.y + selection.height / 2;
@@ -487,7 +490,9 @@ impl SelectionState {
     pub fn current_rect(&self) -> Option<PhysicalRect> {
         match self {
             Self::Idle => None,
-            Self::MarqueeDragging { start, current } => Some(marquee_selection_rect(*start, *current)),
+            Self::MarqueeDragging { start, current } => {
+                Some(marquee_selection_rect(*start, *current))
+            }
             Self::Selected { rect } => Some(*rect),
             Self::Reshaping {
                 mode,
@@ -609,15 +614,8 @@ mod tests {
         assert_eq!(r, PhysicalRect::new(100, 100, 250, 250));
 
         // 整体平移
-        let r_move = dragged_selection_rect(
-            SelectionDragMode::All,
-            origin,
-            start,
-            cur,
-            None,
-            8,
-            None,
-        );
+        let r_move =
+            dragged_selection_rect(SelectionDragMode::All, origin, start, cur, None, 8, None);
         assert_eq!(r_move, PhysicalRect::new(150, 150, 200, 200));
     }
 
@@ -637,18 +635,43 @@ mod tests {
         let start = PhysicalPoint::new(0, 0);
         let cur = PhysicalPoint::new(10, 20);
         let run = |mode| dragged_selection_rect(mode, origin, start, cur, None, 8, None);
-        assert_eq!(run(SelectionDragMode::TopLeft), PhysicalRect::new(110, 120, 190, 180));
-        assert_eq!(run(SelectionDragMode::Top), PhysicalRect::new(100, 120, 200, 180));
-        assert_eq!(run(SelectionDragMode::TopRight), PhysicalRect::new(100, 120, 210, 180));
-        assert_eq!(run(SelectionDragMode::Right), PhysicalRect::new(100, 100, 210, 200));
-        assert_eq!(run(SelectionDragMode::BottomRight), PhysicalRect::new(100, 100, 210, 220));
-        assert_eq!(run(SelectionDragMode::Bottom), PhysicalRect::new(100, 100, 200, 220));
-        assert_eq!(run(SelectionDragMode::BottomLeft), PhysicalRect::new(110, 100, 190, 220));
-        assert_eq!(run(SelectionDragMode::Left), PhysicalRect::new(110, 100, 190, 200));
+        assert_eq!(
+            run(SelectionDragMode::TopLeft),
+            PhysicalRect::new(110, 120, 190, 180)
+        );
+        assert_eq!(
+            run(SelectionDragMode::Top),
+            PhysicalRect::new(100, 120, 200, 180)
+        );
+        assert_eq!(
+            run(SelectionDragMode::TopRight),
+            PhysicalRect::new(100, 120, 210, 180)
+        );
+        assert_eq!(
+            run(SelectionDragMode::Right),
+            PhysicalRect::new(100, 100, 210, 200)
+        );
+        assert_eq!(
+            run(SelectionDragMode::BottomRight),
+            PhysicalRect::new(100, 100, 210, 220)
+        );
+        assert_eq!(
+            run(SelectionDragMode::Bottom),
+            PhysicalRect::new(100, 100, 200, 220)
+        );
+        assert_eq!(
+            run(SelectionDragMode::BottomLeft),
+            PhysicalRect::new(110, 100, 190, 220)
+        );
+        assert_eq!(
+            run(SelectionDragMode::Left),
+            PhysicalRect::new(110, 100, 190, 200)
+        );
         assert_eq!(run(SelectionDragMode::None), origin);
         // 右边拖过左边：翻转
         let far = PhysicalPoint::new(-250, 0);
-        let flipped = dragged_selection_rect(SelectionDragMode::Right, origin, start, far, None, 8, None);
+        let flipped =
+            dragged_selection_rect(SelectionDragMode::Right, origin, start, far, None, 8, None);
         assert_eq!(flipped, PhysicalRect::new(50, 100, 50, 200));
     }
 }
