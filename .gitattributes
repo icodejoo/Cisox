@@ -1,2 +1,10 @@
+# 行尾统一 LF（与 .editorconfig 一致）；不受各人 core.autocrlf 影响
+* text=auto eol=lf
+
+# Windows 批处理必须 CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 二进制
 *.onnx binary
 *.dll binary
