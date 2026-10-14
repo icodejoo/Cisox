@@ -62,6 +62,8 @@ pub struct Timeouts {
     pub request_max: Duration,
     /// 卸载时等待进程自行退出的宽限，超过则强杀。
     pub unload_grace: Duration,
+    /// 预热后一直没被真实请求用上时，最多保留多久（兜底，比空闲卸载短；取消通知丢失时靠它回收）。
+    pub warm_unused_ttl: Duration,
 }
 
 impl Default for Timeouts {
@@ -74,6 +76,7 @@ impl Default for Timeouts {
             request_per_char: Duration::from_millis(30),
             request_max: Duration::from_secs(900),
             unload_grace: Duration::from_secs(3),
+            warm_unused_ttl: Duration::from_secs(30),
         }
     }
 }
@@ -376,8 +379,8 @@ impl Transport for ProcessTransport {
 struct Session {
     /// 通信通道。
     transport: Box<dyn Transport>,
-    /// 已加载的语言对。
-    loaded: Option<(Lang, Lang)>,
+    /// 模型是否已加载（一个引擎只对应一个模型目录，进程加载一次后任意语言对都可翻译）。
+    loaded: bool,
     /// worker 进程 ID。
     pid: u32,
 }
@@ -392,6 +395,8 @@ struct Inner {
     monitor_running: bool,
     /// 下一个请求编号。
     next_id: u64,
+    /// 会话由预热建立（或预热换了语言对），且还没有真实请求用过。
+    warm_unused: bool,
 }
 
 /// 引擎与监视线程共享的部分。
@@ -471,6 +476,7 @@ impl WorkerEngine {
                     last_used: Instant::now(),
                     monitor_running: false,
                     next_id: 1,
+                    warm_unused: false,
                 }),
                 launches: AtomicU32::new(0),
             }),
@@ -524,6 +530,85 @@ impl WorkerEngine {
         let mut inner = lock(&self.shared.inner);
         self.shared.unload_session(&mut inner);
     }
+
+    /// 预热：提前拉起 worker 并加载模型，让随后的真实请求省掉冷启动。
+    ///
+    /// 只加载模型、不涉及语言对（语言对随翻译请求指定），所以源语言为 `Auto` 时也能预热。
+    /// 与真实请求共用同一把锁，所以同一时刻只会有一个在飞；已拉起且已加载时什么都不做，
+    /// 并发的预热与翻译不会重复拉进程或重复加载。预热出来的会话在被真实请求用上之前
+    /// 带“未使用”标记，可被 [`WorkerEngine::cancel_warm`] 立即回收，兜底超时见 `Timeouts::warm_unused_ttl`。
+    ///
+    /// # 参数
+    /// - `abort`：放弃判定；为真时在加载前停手（本次拉起的进程随之结束），已加载的不受影响。
+    ///
+    /// # 返回
+    /// 成功（含无事可做、被放弃）返回 `Ok`；拉起或加载失败返回对应错误（会话已复位）。
+    ///
+    /// # 示例
+    /// ```ignore
+    /// let engine = WorkerEngine::new(config);
+    /// engine.warm(&|| false).ok();
+    /// // 用不上时：engine.cancel_warm();
+    /// ```
+    pub fn warm(&self, abort: &dyn Fn() -> bool) -> Result<(), TranslateError> {
+        let mut inner = lock(&self.shared.inner);
+        if abort() {
+            return Ok(());
+        }
+        let launched = inner.session.is_none();
+        if launched {
+            inner.session = Some(self.shared.start_session()?);
+        }
+        let Some(mut session) = inner.session.take() else {
+            return Err(TranslateError::WorkerDied("会话丢失".into()));
+        };
+        let needs_load = !session.loaded;
+        if needs_load && abort() {
+            // 拉起之后才被放弃：不加载，本次拉起的进程直接结束
+            inner.session = Some(session);
+            if launched {
+                self.shared.unload_session(&mut inner);
+            }
+            return Ok(());
+        }
+        if needs_load && let Err(e) = self.shared.ensure_loaded(&mut session) {
+            // 本次拉起的进程没加载成功就不留着；复用的会话只在致命错误时丢弃
+            if launched || Shared::is_fatal(&e) {
+                session.transport.terminate();
+            } else {
+                inner.session = Some(session);
+            }
+            inner.warm_unused = false;
+            return Err(e);
+        }
+        inner.session = Some(session);
+        if launched || needs_load {
+            inner.warm_unused = true;
+            inner.last_used = Instant::now();
+            tracing::info!(launched, "翻译 worker 已预热");
+        }
+        if !inner.monitor_running {
+            inner.monitor_running = true;
+            spawn_idle_monitor(Arc::clone(&self.shared));
+        }
+        Ok(())
+    }
+
+    /// 回收没被用上的预热：会话由预热建立且还没有真实请求用过，就立刻卸载；其余情况什么都不做。
+    ///
+    /// 会等预热（或正在飞的请求）释放锁，调用方应在后台线程里调用。
+    pub fn cancel_warm(&self) {
+        let mut inner = lock(&self.shared.inner);
+        if inner.warm_unused {
+            tracing::info!("预热的翻译 worker 没有被用上，立即卸载");
+            self.shared.unload_session(&mut inner);
+        }
+    }
+
+    /// 会话是否处于“预热后尚未被使用”的状态（探针与测试用）。
+    pub fn warm_unused(&self) -> bool {
+        lock(&self.shared.inner).warm_unused
+    }
 }
 
 impl Drop for WorkerEngine {
@@ -538,15 +623,22 @@ impl Drop for WorkerEngine {
 /// # 参数
 /// - `kind`：错误类别。
 /// - `message`：worker 给出的原因。
-/// - `src` / `tgt`：本次语言对。
-fn map_worker_error(kind: ErrorKind, message: String, src: Lang, tgt: Lang) -> TranslateError {
+/// - `pair`：出错请求的语言对；加载阶段没有语言对，传 `None`（此时 `UnsupportedPair` 按加载失败处理）。
+fn map_worker_error(
+    kind: ErrorKind,
+    message: String,
+    pair: Option<(Lang, Lang)>,
+) -> TranslateError {
     match kind {
         ErrorKind::RuntimeMissing => TranslateError::RuntimeMissing(message),
         ErrorKind::ModelMissing
         | ErrorKind::ManifestInvalid
         | ErrorKind::LoadFailed
         | ErrorKind::ChecksumMismatch => TranslateError::ModelLoad(message),
-        ErrorKind::UnsupportedPair => TranslateError::UnsupportedLanguagePair(src, tgt),
+        ErrorKind::UnsupportedPair => match pair {
+            Some((src, tgt)) => TranslateError::UnsupportedLanguagePair(src, tgt),
+            None => TranslateError::ModelLoad(message),
+        },
         ErrorKind::OutOfMemory => TranslateError::OutOfMemory(message),
         ErrorKind::DecodeFailed | ErrorKind::BadRequest | ErrorKind::NotLoaded => {
             TranslateError::Inference(message)
@@ -554,9 +646,20 @@ fn map_worker_error(kind: ErrorKind, message: String, src: Lang, tgt: Lang) -> T
     }
 }
 
+/// 协议版本对不上时给用户看的说明：指出哪一边过旧，要更新哪一边。
+fn version_mismatch_message(worker_protocol: u32) -> String {
+    let hint = if worker_protocol < PROTOCOL_VERSION {
+        "翻译组件版本过旧，请把翻译组件更新到与主程序同一版本"
+    } else {
+        "主程序版本过旧，请把主程序更新到与翻译组件同一版本"
+    };
+    format!("翻译组件协议版本不符（组件 {worker_protocol}，主程序 {PROTOCOL_VERSION}）：{hint}")
+}
+
 impl Shared {
     /// 结束当前会话：先礼貌卸载，超过宽限则强杀。
     fn unload_session(&self, inner: &mut Inner) {
+        inner.warm_unused = false;
         let Some(mut session) = inner.session.take() else {
             return;
         };
@@ -611,7 +714,7 @@ impl Shared {
         self.launches.fetch_add(1, Ordering::SeqCst);
         let mut session = Session {
             transport,
-            loaded: None,
+            loaded: false,
             pid: 0,
         };
         let ready = self.wait_event(
@@ -620,7 +723,7 @@ impl Shared {
             |event| match event {
                 Event::Ready { protocol, pid } if protocol == PROTOCOL_VERSION => Some(Ok(pid)),
                 Event::Ready { protocol, .. } => Some(Err(TranslateError::WorkerUnavailable(
-                    format!("翻译组件协议版本不符（组件 {protocol}，主程序 {PROTOCOL_VERSION}）"),
+                    version_mismatch_message(protocol),
                 ))),
                 _ => None,
             },
@@ -642,20 +745,15 @@ impl Shared {
         }
     }
 
-    /// 确保已加载所需语言对（换语言对会让 worker 重新加载）。
-    fn ensure_loaded(
-        &self,
-        session: &mut Session,
-        src: Lang,
-        tgt: Lang,
-    ) -> Result<(), TranslateError> {
-        if session.loaded == Some((src, tgt)) {
+    /// 确保模型已加载；按模型只加载一次，之后换语言对不再发 `load`（语言对随翻译请求指定）。
+    fn ensure_loaded(&self, session: &mut Session) -> Result<(), TranslateError> {
+        if session.loaded {
             return Ok(());
         }
         let command = Command::Load {
             model_dir: self.config.model_dir.to_string_lossy().into_owned(),
-            src: src.code().to_string(),
-            tgt: tgt.code().to_string(),
+            src: None,
+            tgt: None,
             trim_after_request: self.config.trim_after_request.then_some(true),
         };
         let line = encode_command(&command).map_err(TranslateError::Inference)?;
@@ -670,13 +768,11 @@ impl Shared {
                 tracing::info!(load_ms, mem_bytes, "翻译模型已加载");
                 Some(Ok(()))
             }
-            Event::Error { kind, message, .. } => {
-                Some(Err(map_worker_error(kind, message, src, tgt)))
-            }
+            Event::Error { kind, message, .. } => Some(Err(map_worker_error(kind, message, None))),
             _ => None,
         });
         if outcome.is_ok() {
-            session.loaded = Some((src, tgt));
+            session.loaded = true;
         }
         outcome
     }
@@ -696,6 +792,8 @@ impl Shared {
             id,
             texts,
             num_beams: Some(self.config.num_beams),
+            src: Some(src.code().to_string()),
+            tgt: Some(tgt.code().to_string()),
         };
         let line = encode_command(&command).map_err(TranslateError::Inference)?;
         session
@@ -716,7 +814,7 @@ impl Shared {
                 kind,
                 message,
             } if got.is_none() || got == Some(id) => {
-                Some(Err(map_worker_error(kind, message, src, tgt)))
+                Some(Err(map_worker_error(kind, message, Some((src, tgt)))))
             }
             // 其它编号的结果是过期应答，忽略
             _ => None,
@@ -736,7 +834,7 @@ impl Shared {
         )
     }
 
-    /// 一次完整尝试：确保会话与模型 → 分块发请求。出现致命错误时丢弃会话。
+    /// 一次完整尝试：确保会话与模型（只加载一次）→ 分块发请求（每个请求带语言对）。出现致命错误时丢弃会话。
     fn attempt(
         &self,
         inner: &mut Inner,
@@ -751,7 +849,7 @@ impl Shared {
             return Err(TranslateError::WorkerDied("会话丢失".into()));
         };
         let mut out: Vec<String> = Vec::new();
-        let mut result = self.ensure_loaded(&mut session, src, tgt);
+        let mut result = self.ensure_loaded(&mut session);
         if result.is_ok() {
             for chunk in chunks {
                 let id = inner.next_id;
@@ -818,7 +916,8 @@ fn chunk_texts(texts: &[String], limit: usize) -> Result<Vec<Vec<String>>, Trans
 /// 启动空闲监视线程：空闲超过阈值就卸载 worker，然后自己退出（不常驻）。
 fn spawn_idle_monitor(shared: Arc<Shared>) {
     let idle = shared.config.idle_timeout;
-    let tick = (idle / 4).clamp(MONITOR_MIN_TICK, MONITOR_MAX_TICK);
+    let tick = (idle.min(shared.config.timeouts.warm_unused_ttl) / 4)
+        .clamp(MONITOR_MIN_TICK, MONITOR_MAX_TICK);
     let spawned = thread::Builder::new()
         .name("snow-translate-idle".into())
         .spawn({
@@ -831,7 +930,12 @@ fn spawn_idle_monitor(shared: Arc<Shared>) {
                         inner.monitor_running = false;
                         return;
                     }
-                    if inner.last_used.elapsed() >= idle {
+                    let limit = if inner.warm_unused {
+                        idle.min(shared.config.timeouts.warm_unused_ttl)
+                    } else {
+                        idle
+                    };
+                    if inner.last_used.elapsed() >= limit {
                         tracing::info!("翻译 worker 空闲超时，卸载");
                         shared.unload_session(&mut inner);
                         inner.monitor_running = false;
@@ -874,6 +978,8 @@ impl TranslationEngine for WorkerEngine {
         let payload: Vec<String> = work.iter().map(|&i| texts[i].clone()).collect();
         let chunks = chunk_texts(&payload, MAX_REQUEST_BYTES)?;
         let mut inner = lock(&self.shared.inner);
+        // 真实请求接手了会话（含预热出来的），不再属于“没用上的预热”
+        inner.warm_unused = false;
         let mut retried = false;
         let translated = loop {
             let reused = inner.session.is_some();
@@ -1127,6 +1233,7 @@ mod tests {
                 request_per_char: Duration::from_micros(10),
                 request_max: Duration::from_millis(500),
                 unload_grace: Duration::from_millis(100),
+                warm_unused_ttl: Duration::from_secs(30),
             },
         }
     }
@@ -1142,7 +1249,7 @@ mod tests {
         launcher.state(n).lock().unwrap().sent.clone()
     }
 
-    /// 懒拉起：构造引擎不启动进程；首次翻译才拉起、加载并翻译；同语言对不重复加载。
+    /// 懒拉起：构造引擎不启动进程；首次翻译才拉起、加载并翻译；模型只加载一次，加载不带语言对。
     #[test]
     fn lazy_launch_load_and_translate() {
         let (engine, launcher) = engine_with(vec![normal()], config());
@@ -1158,9 +1265,15 @@ mod tests {
         );
         assert_eq!(launcher.launches(), 1);
         let commands = sent(&launcher, 0);
-        assert!(
-            matches!(commands[0], Command::Load { ref src, ref tgt, trim_after_request: Some(true), .. } if src == "en" && tgt == "zh-CN")
-        );
+        assert!(matches!(
+            commands[0],
+            Command::Load {
+                src: None,
+                tgt: None,
+                trim_after_request: Some(true),
+                ..
+            }
+        ));
         assert_eq!(
             commands
                 .iter()
@@ -1169,34 +1282,113 @@ mod tests {
             1
         );
         assert!(matches!(
-            commands[1],
+            &commands[1],
             Command::Translate {
                 id: 1,
                 num_beams: Some(4),
+                src: Some(src),
+                tgt: Some(tgt),
                 ..
-            }
+            } if src == "en" && tgt == "zh-CN"
         ));
         assert!(matches!(commands[2], Command::Translate { id: 2, .. }));
         assert!(engine.is_running());
     }
 
-    /// 换语言对会重新发 load；`Auto` 源语言被解析为清单里的具体源语言。
+    /// 同一个模型换语言对不再发 load，语言对随每个请求走；`Auto` 源语言被解析为清单里的具体源语言。
     #[test]
-    fn language_change_reloads_and_auto_is_resolved() {
+    fn language_change_does_not_reload_and_auto_is_resolved() {
         let (engine, launcher) = engine_with(vec![normal()], config());
         engine.translate("a", Lang::Auto, Lang::ZhHans).unwrap();
         engine.translate("a", Lang::En, Lang::ZhHant).unwrap();
-        let loads: Vec<(String, String)> = sent(&launcher, 0)
+        engine.translate("a", Lang::En, Lang::ZhHans).unwrap();
+        assert_eq!((launcher.launches(), load_count(&launcher, 0)), (1, 1));
+        let pairs: Vec<(String, String)> = sent(&launcher, 0)
             .into_iter()
             .filter_map(|c| match c {
-                Command::Load { src, tgt, .. } => Some((src, tgt)),
+                Command::Translate {
+                    src: Some(src),
+                    tgt: Some(tgt),
+                    ..
+                } => Some((src, tgt)),
                 _ => None,
             })
             .collect();
         assert_eq!(
-            loads,
-            [("en".into(), "zh-CN".into()), ("en".into(), "zh-TW".into())]
+            pairs,
+            [
+                ("en".into(), "zh-CN".into()),
+                ("en".into(), "zh-TW".into()),
+                ("en".into(), "zh-CN".into())
+            ]
         );
+    }
+
+    /// worker 对某个请求回 unsupported_pair：映射成带该请求语言对的错误，会话保留、下一个请求照常。
+    #[test]
+    fn unsupported_pair_from_worker_is_per_request() {
+        let script: Script = Arc::new(|command, state| match command {
+            Command::Load { .. } => push(
+                state,
+                &Event::Loaded {
+                    model_id: "fake".into(),
+                    load_ms: 1,
+                    mem_bytes: 10,
+                },
+            ),
+            Command::Translate { id, texts, tgt, .. } => {
+                let event = if tgt.as_deref() == Some("zh-TW") {
+                    Event::Error {
+                        id: Some(*id),
+                        kind: ErrorKind::UnsupportedPair,
+                        message: "no".into(),
+                    }
+                } else {
+                    Event::Result {
+                        id: *id,
+                        texts: texts.clone(),
+                        elapsed_ms: 1,
+                    }
+                };
+                push(state, &event);
+            }
+            _ => {}
+        });
+        let (engine, launcher) = engine_with(vec![script], config());
+        assert_eq!(
+            engine.translate("a", Lang::En, Lang::ZhHant),
+            Err(TranslateError::UnsupportedLanguagePair(
+                Lang::En,
+                Lang::ZhHant
+            ))
+        );
+        assert!(engine.is_running(), "语言对不支持不是致命错误");
+        assert_eq!(engine.translate("a", Lang::En, Lang::ZhHans).unwrap(), "a");
+        assert_eq!((launcher.launches(), load_count(&launcher, 0)), (1, 1));
+    }
+
+    /// 加载阶段 worker 回 unsupported_pair（本不该发生）按模型加载失败处理，会话被丢弃。
+    #[test]
+    fn unsupported_pair_during_load_is_a_load_error() {
+        let script: Script = Arc::new(|command, state| {
+            if matches!(command, Command::Load { .. }) {
+                push(
+                    state,
+                    &Event::Error {
+                        id: None,
+                        kind: ErrorKind::UnsupportedPair,
+                        message: "weird".into(),
+                    },
+                );
+            }
+        });
+        let (engine, launcher) = engine_with(vec![script], config());
+        assert_eq!(
+            engine.translate("a", Lang::En, Lang::ZhHans),
+            Err(TranslateError::ModelLoad("weird".into()))
+        );
+        assert!(!engine.is_running());
+        assert!(launcher.state(0).lock().unwrap().terminated);
     }
 
     /// 不支持的语言对在拉起前就被拒绝；空白与空批量不占用 worker。
@@ -1367,7 +1559,6 @@ mod tests {
             (ErrorKind::ModelMissing, "model"),
             (ErrorKind::ManifestInvalid, "model"),
             (ErrorKind::OutOfMemory, "oom"),
-            (ErrorKind::UnsupportedPair, "pair"),
         ] {
             let script: Script = Arc::new(move |command, state| {
                 if matches!(command, Command::Load { .. }) {
@@ -1385,8 +1576,7 @@ mod tests {
             let err = engine.translate("x", Lang::En, Lang::ZhHans).unwrap_err();
             match check {
                 "model" => assert!(matches!(err, TranslateError::ModelLoad(_)), "{kind:?}"),
-                "oom" => assert!(matches!(err, TranslateError::OutOfMemory(_))),
-                _ => assert!(matches!(err, TranslateError::UnsupportedLanguagePair(..))),
+                _ => assert!(matches!(err, TranslateError::OutOfMemory(_))),
             }
         }
     }
@@ -1420,6 +1610,16 @@ mod tests {
         assert_eq!(launcher.launches(), 1);
     }
 
+    /// 协议版本对不上时的说明指出哪一边过旧。
+    #[test]
+    fn version_mismatch_message_names_the_old_side() {
+        let old_worker = version_mismatch_message(PROTOCOL_VERSION - 1);
+        assert!(old_worker.contains("翻译组件版本过旧"), "{old_worker}");
+        assert!(old_worker.contains("协议版本"), "{old_worker}");
+        let old_host = version_mismatch_message(PROTOCOL_VERSION + 1);
+        assert!(old_host.contains("主程序版本过旧"), "{old_host}");
+    }
+
     /// 协议版本不符、没有 ready、启动即崩溃都给出明确错误。
     #[test]
     fn handshake_failures() {
@@ -1432,6 +1632,13 @@ mod tests {
             Err(TranslateError::WorkerUnavailable(m)) if m.contains("协议版本")
         ));
         assert!(launcher.state(0).lock().unwrap().terminated);
+        // 旧版（协议 1）worker 同样被拒绝，且不会收到任何命令
+        launcher.protocol.store(1, Ordering::SeqCst);
+        assert!(matches!(
+            engine.translate("x", Lang::En, Lang::ZhHans),
+            Err(TranslateError::WorkerUnavailable(m)) if m.contains("翻译组件版本过旧")
+        ));
+        assert!(sent(&launcher, 1).is_empty());
         launcher.protocol.store(PROTOCOL_VERSION, Ordering::SeqCst);
         launcher.send_ready.store(false, Ordering::SeqCst);
         assert!(matches!(
@@ -1540,6 +1747,145 @@ mod tests {
             "T:b"
         );
         assert_eq!(launcher.launches(), 2);
+    }
+
+    /// 取假会话里收到的 `Load` 命令条数。
+    fn load_count(launcher: &FakeLauncher, n: usize) -> usize {
+        sent(launcher, n)
+            .iter()
+            .filter(|c| matches!(c, Command::Load { .. }))
+            .count()
+    }
+
+    /// 预热：拉起并加载一次、带“未使用”标记；随后的真实请求不再拉起也不再加载，并接手会话。
+    #[test]
+    fn warm_preloads_and_translate_reuses() {
+        let (engine, launcher) = engine_with(vec![normal()], config());
+        engine.warm(&|| false).unwrap();
+        assert_eq!((launcher.launches(), load_count(&launcher, 0)), (1, 1));
+        assert!(engine.is_running() && engine.warm_unused());
+        assert_eq!(
+            engine.translate("Hello", Lang::En, Lang::ZhHans).unwrap(),
+            "T:Hello"
+        );
+        assert_eq!((launcher.launches(), load_count(&launcher, 0)), (1, 1));
+        assert!(!engine.warm_unused(), "真实请求接手后不再算没用上的预热");
+        engine.cancel_warm();
+        assert!(engine.is_running(), "用上了就不会被回收");
+    }
+
+    /// 重复预热、对已加载的模型预热都是空操作；已被使用的会话不会被预热重新打上标记。
+    #[test]
+    fn warm_is_idempotent() {
+        let (engine, launcher) = engine_with(vec![normal()], config());
+        engine.warm(&|| false).unwrap();
+        engine.warm(&|| false).unwrap();
+        assert_eq!((launcher.launches(), load_count(&launcher, 0)), (1, 1));
+        engine.translate("a", Lang::En, Lang::ZhHans).unwrap();
+        engine.warm(&|| false).unwrap();
+        assert_eq!((launcher.launches(), load_count(&launcher, 0)), (1, 1));
+        assert!(!engine.warm_unused());
+    }
+
+    /// 没用上的预热被 cancel_warm 立刻卸载（发 unload，进程退出），之后仍能正常拉起翻译。
+    #[test]
+    fn cancel_warm_unloads_unused_session() {
+        let (engine, launcher) = engine_with(vec![normal()], config());
+        engine.cancel_warm();
+        assert_eq!(launcher.launches(), 0, "没预热时取消不会拉起任何东西");
+        engine.warm(&|| false).unwrap();
+        engine.cancel_warm();
+        assert!(!engine.is_running() && !engine.warm_unused());
+        assert!(launcher.state(0).lock().unwrap().unloaded);
+        assert_eq!(
+            engine.translate("b", Lang::En, Lang::ZhHans).unwrap(),
+            "T:b"
+        );
+        assert_eq!(launcher.launches(), 2);
+    }
+
+    /// 放弃判定：拉起前就放弃不会拉进程；拉起后放弃不发 Load 且进程被结束；已加载的会话不受影响。
+    #[test]
+    fn warm_abort_stops_before_load() {
+        let (engine, launcher) = engine_with(vec![normal()], config());
+        engine.warm(&|| true).unwrap();
+        assert_eq!(launcher.launches(), 0);
+        let calls = AtomicU32::new(0);
+        engine
+            .warm(&|| calls.fetch_add(1, Ordering::SeqCst) >= 1)
+            .unwrap();
+        assert_eq!((launcher.launches(), load_count(&launcher, 0)), (1, 0));
+        assert!(!engine.is_running(), "拉起后被放弃，进程应被结束");
+        assert!(launcher.state(0).lock().unwrap().unloaded);
+        engine.translate("a", Lang::En, Lang::ZhHans).unwrap();
+        engine.warm(&|| true).unwrap();
+        assert!(engine.is_running(), "放弃不动已在用的会话");
+        assert_eq!(load_count(&launcher, 1), 1);
+    }
+
+    /// 加载失败时返回映射后的错误且不留进程，也不留“未使用”标记。
+    #[test]
+    fn warm_errors_leave_no_process() {
+        for kind in [ErrorKind::LoadFailed, ErrorKind::UnsupportedPair] {
+            let script: Script = Arc::new(move |command, state| {
+                if matches!(command, Command::Load { .. }) {
+                    push(
+                        state,
+                        &Event::Error {
+                            id: None,
+                            kind,
+                            message: "m".into(),
+                        },
+                    );
+                }
+            });
+            let (engine, launcher) = engine_with(vec![script], config());
+            assert!(engine.warm(&|| false).is_err());
+            assert!(!engine.is_running() && !engine.warm_unused(), "{kind:?}");
+            assert!(launcher.state(0).lock().unwrap().terminated, "{kind:?}");
+        }
+    }
+
+    /// 兜底 TTL 会回收没用上的预热；被真实请求用过的会话不受 TTL 影响，仍按空闲时间走。
+    #[test]
+    fn warm_unused_ttl_reclaims_only_unused() {
+        let mut cfg = config();
+        cfg.timeouts.warm_unused_ttl = Duration::from_millis(60);
+        let (engine, launcher) = engine_with(vec![normal()], cfg.clone());
+        engine.warm(&|| false).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while engine.is_running() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!engine.is_running(), "没用上的预热应在 TTL 后卸载");
+        assert!(launcher.state(0).lock().unwrap().unloaded);
+        let (used, _) = engine_with(vec![normal()], cfg);
+        used.warm(&|| false).unwrap();
+        used.translate("a", Lang::En, Lang::ZhHans).unwrap();
+        thread::sleep(Duration::from_millis(300));
+        assert!(used.is_running(), "用过的会话不按预热 TTL 回收");
+    }
+
+    /// 预热与多个真实请求并发：只拉一次进程、只加载一次，请求编号仍唯一递增。
+    #[test]
+    fn warm_and_requests_race_without_duplicates() {
+        let (engine, launcher) = engine_with(vec![normal()], config());
+        let engine = Arc::new(engine);
+        let mut handles = Vec::new();
+        for i in 0..4 {
+            let engine = Arc::clone(&engine);
+            handles.push(thread::spawn(move || {
+                if i % 2 == 0 {
+                    engine.warm(&|| false).map(|()| None)
+                } else {
+                    engine.translate("x", Lang::En, Lang::ZhHans).map(Some)
+                }
+            }));
+        }
+        for handle in handles {
+            handle.join().unwrap().unwrap();
+        }
+        assert_eq!((launcher.launches(), load_count(&launcher, 0)), (1, 1));
     }
 
     /// 持续使用期间不会被空闲卸载。

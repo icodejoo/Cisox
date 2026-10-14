@@ -110,6 +110,14 @@ pub trait PooledEngine: TranslationEngine {
 
     /// 运行中引擎的内存快照；未运行返回 `None`。
     fn memory_snapshot(&self) -> Option<MemorySnapshot>;
+
+    /// 预热：提前把模型加载好（不涉及语言对，语言对随翻译请求指定）；`abort` 为真时尽早放弃。默认什么都不做。
+    fn warm(&self, _abort: &dyn Fn() -> bool) -> Result<(), TranslateError> {
+        Ok(())
+    }
+
+    /// 回收没被真实请求用上的预热。默认什么都不做。
+    fn cancel_warm(&self) {}
 }
 
 impl PooledEngine for WorkerEngine {
@@ -131,6 +139,16 @@ impl PooledEngine for WorkerEngine {
     /// worker 内存快照。
     fn memory_snapshot(&self) -> Option<MemorySnapshot> {
         WorkerEngine::memory_snapshot(self)
+    }
+
+    /// 拉起 worker 并加载模型。
+    fn warm(&self, abort: &dyn Fn() -> bool) -> Result<(), TranslateError> {
+        WorkerEngine::warm(self, abort)
+    }
+
+    /// 没用上的预热立即卸载。
+    fn cancel_warm(&self) {
+        WorkerEngine::cancel_warm(self);
     }
 }
 
@@ -190,6 +208,37 @@ pub fn pick_index(
         .filter(|&i| manifests[i].is_specialized())
         .min_by_key(|&i| (manifests[i].supported_pairs().len(), i))
         .or(Some(first))
+}
+
+/// 不看文本就能确定要预热哪个包时，给出包下标；有歧义返回 `None`（宁可不预热也不乱猜）。
+///
+/// 预热只加载模型、不涉及语言对（语言对随翻译请求指定），所以源语言为 `Auto` 时也能预热，
+/// 只要能确定用哪个**包**，不再要求语言对唯一：
+/// - 非混合拆分：按 [`pick_index`] 选包（尊重指定包与专用包优先）；
+/// - 混合拆分：文本会被切给多个包，只有恰好一个包能覆盖该语言对时才预热。
+///
+/// # 参数
+/// - `manifests`：全部包的清单（顺序即路由器里的顺序）。
+/// - `policy`：当前路由策略。
+/// - `src` / `tgt`：配置里的语言对（`src` 可为 `Auto`，`tgt` 不能是 `Auto`）。
+///
+/// # 返回
+/// 要预热的包下标；无法确定返回 `None`。
+pub fn warm_target(
+    manifests: &[&ModelManifest],
+    policy: &RoutePolicy,
+    src: Lang,
+    tgt: Lang,
+) -> Option<usize> {
+    if tgt == Lang::Auto {
+        return None;
+    }
+    if policy.mode == RouteMode::MixedSplit {
+        let mut covering = (0..manifests.len()).filter(|&i| manifests[i].supports(src, tgt));
+        let only = covering.next()?;
+        return covering.next().is_none().then_some(only);
+    }
+    pick_index(manifests, &policy.preferred_id, src, tgt, policy.mode)
 }
 
 /// 路由器里的一个包。
@@ -419,6 +468,50 @@ impl RoutedEngine {
             .find_map(|i| self.slots[i].engine.memory_snapshot())
     }
 
+    /// 预热：不看文本就能确定该用哪个包时，提前把它拉起并加载好（选包规则见 [`warm_target`]）。
+    ///
+    /// 与真实请求走同一套占用与驱逐记账：预热期间该包算“忙”，不会被别的请求驱逐，
+    /// 同一个包上的真实请求会排在预热后面，不会重复拉进程或重复加载；预热不计入 [`Self::used_ids`]。
+    ///
+    /// # 参数
+    /// - `src` / `tgt`：配置里的语言对（`src` 可为 `Auto`）。
+    /// - `abort`：放弃判定，为真时尽早停手（见 [`WorkerEngine::warm`]）。
+    ///
+    /// # 返回
+    /// `Ok(Some(包 ID))` 表示已预热该包；`Ok(None)` 表示选不出包、被放弃或无事可做；
+    /// 路由器已关闭或预热失败返回错误（调用方可忽略，真实请求会走正常路径）。
+    ///
+    /// # 示例
+    /// ```ignore
+    /// let warmed = router.warm(Lang::Auto, Lang::ZhHans, &|| false)?;
+    /// ```
+    pub fn warm(
+        &self,
+        src: Lang,
+        tgt: Lang,
+        abort: &dyn Fn() -> bool,
+    ) -> Result<Option<String>, TranslateError> {
+        if abort() {
+            return Ok(None);
+        }
+        let policy = self.policy();
+        let Some(index) = warm_target(&self.manifests(), &policy, src, tgt) else {
+            return Ok(None);
+        };
+        let lease = self.acquire_with(index, policy.max_resident, false)?;
+        lease.engine().warm(abort)?;
+        Ok(Some(self.slots[index].manifest.id.clone()))
+    }
+
+    /// 回收没被真实请求用上的预热（各包上没有预热标记的什么都不做）。
+    ///
+    /// 会等正在进行的预热或请求释放引擎，应在后台线程里调用。
+    pub fn cancel_warm(&self) {
+        for slot in &self.slots {
+            slot.engine.cancel_warm();
+        }
+    }
+
     /// 关闭路由器并卸载全部包（应用退出时调用）。
     ///
     /// 关闭后新请求立即报 `WorkerUnavailable`，不会再拉起 worker；各包并行卸载，
@@ -474,6 +567,16 @@ impl RoutedEngine {
     /// # 错误
     /// 路由器已关闭时返回 `WorkerUnavailable`。
     fn acquire(&self, index: usize, max_resident: usize) -> Result<Lease<'_>, TranslateError> {
+        self.acquire_with(index, max_resident, true)
+    }
+
+    /// [`Self::acquire`] 的底层：`record_use` 为假时不计入“实际参与翻译的包”（预热用，免得污染结果标签）。
+    fn acquire_with(
+        &self,
+        index: usize,
+        max_resident: usize,
+        record_use: bool,
+    ) -> Result<Lease<'_>, TranslateError> {
         let busy_elsewhere;
         {
             let mut pool = self.lock_pool();
@@ -493,7 +596,7 @@ impl RoutedEngine {
             pool.in_flight[index] += 1;
             pool.touch(index);
         }
-        {
+        if record_use {
             let mut used = self.used.lock().unwrap_or_else(PoisonError::into_inner);
             if !used.contains(&index) {
                 used.push(index);
@@ -839,6 +942,10 @@ mod tests {
         unloading_now: AtomicBool,
         /// 翻译时的回调（测试里用来在“忙”的时候触发别的请求）。
         on_translate: Mutex<Option<Box<dyn FnMut() + Send>>>,
+        /// 收到的预热次数。
+        warms: AtomicU32,
+        /// `cancel_warm` 被调用的次数。
+        cancels: AtomicU32,
     }
 
     impl FakeEngine {
@@ -855,6 +962,8 @@ mod tests {
                 unload_delay_ms: AtomicU64::new(0),
                 unloading_now: AtomicBool::new(false),
                 on_translate: Mutex::new(None),
+                warms: AtomicU32::new(0),
+                cancels: AtomicU32::new(0),
             })
         }
 
@@ -932,6 +1041,18 @@ mod tests {
 
         fn memory_snapshot(&self) -> Option<MemorySnapshot> {
             None
+        }
+
+        fn warm(&self, _abort: &dyn Fn() -> bool) -> Result<(), TranslateError> {
+            self.warms.fetch_add(1, Ordering::SeqCst);
+            if !self.resident.swap(true, Ordering::SeqCst) {
+                self.launches.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(())
+        }
+
+        fn cancel_warm(&self) {
+            self.cancels.fetch_add(1, Ordering::SeqCst);
         }
     }
 
@@ -1698,6 +1819,141 @@ mod tests {
         assert_eq!(
             run(&engine, "123 !?", Lang::Auto, Lang::ZhHans).unwrap(),
             "123 !?"
+        );
+    }
+
+    /// 预热选包：不看文本就能定的才预热；指定包、专用包优先、混合拆分、Auto 的歧义都按规则处理。
+    #[test]
+    fn warm_target_rules() {
+        let general = general();
+        let special = specialized();
+        let ja_zh = manifest("opus-ja", &["ja", "zh-CN"], &[("ja", "zh-CN")]);
+        let both = [&general, &special];
+        let policy = RoutePolicy::default();
+        // Auto + 专用包：专用包优先
+        assert_eq!(
+            warm_target(&both, &policy, Lang::Auto, Lang::ZhHans),
+            Some(1)
+        );
+        // Auto + 只有通用多语包能到目标语言：源语言有多个也预热（预热只加载模型，不需要语言对）
+        assert_eq!(warm_target(&both, &policy, Lang::Auto, Lang::Ja), Some(0));
+        // 固定源语言：专用包优先；专用包不支持时落到通用包
+        assert_eq!(warm_target(&both, &policy, Lang::En, Lang::ZhHans), Some(1));
+        assert_eq!(warm_target(&both, &policy, Lang::Ja, Lang::ZhHans), Some(0));
+        // 指定包优先，single 取第一个
+        let pinned = RoutePolicy {
+            preferred_id: "nllb".into(),
+            ..RoutePolicy::default()
+        };
+        assert_eq!(warm_target(&both, &pinned, Lang::En, Lang::ZhHans), Some(0));
+        // 指定包 + Auto：同样能确定包
+        assert_eq!(
+            warm_target(&both, &pinned, Lang::Auto, Lang::ZhHans),
+            Some(0)
+        );
+        let single = RoutePolicy {
+            mode: RouteMode::Single,
+            ..RoutePolicy::default()
+        };
+        assert_eq!(warm_target(&both, &single, Lang::En, Lang::ZhHans), Some(0));
+        assert_eq!(warm_target(&both, &single, Lang::Auto, Lang::Ja), Some(0));
+        // 多个专用包都到目标语言：按默认选包规则猜一个（窄的、靠前的）
+        let two = [&special, &ja_zh];
+        assert_eq!(
+            warm_target(&two, &policy, Lang::Auto, Lang::ZhHans),
+            Some(0)
+        );
+        // 混合拆分：只有恰好一个包覆盖才预热
+        let mixed = mixed_policy(1);
+        assert_eq!(warm_target(&both, &mixed, Lang::Auto, Lang::ZhHans), None);
+        assert_eq!(
+            warm_target(&[&special], &mixed, Lang::Auto, Lang::ZhHans),
+            Some(0)
+        );
+        // 混合拆分 + Auto：只有通用包覆盖日语，源语言不唯一也预热
+        assert_eq!(warm_target(&both, &mixed, Lang::Auto, Lang::Ja), Some(0));
+        // 没有包覆盖、目标为 Auto：不预热
+        assert_eq!(warm_target(&both, &policy, Lang::Auto, Lang::Fr), None);
+        assert_eq!(warm_target(&both, &policy, Lang::En, Lang::Auto), None);
+        assert_eq!(warm_target(&[], &policy, Lang::En, Lang::ZhHans), None);
+    }
+
+    /// 预热只动选中的包，不计入“实际参与翻译的包”；随后同一包上的真实请求不再重新拉起；
+    /// 常驻上限为 1 时预热会腾掉别的空闲包。
+    #[test]
+    fn warm_loads_chosen_pack_only() {
+        let (engine, general_engine, special_engine) = router(RoutePolicy::default());
+        run(&engine, "x", Lang::Ja, Lang::ZhHans).unwrap();
+        engine.reset_used();
+        assert_eq!(
+            engine.warm(Lang::Auto, Lang::ZhHans, &|| false).unwrap(),
+            Some("opus".to_string())
+        );
+        assert_eq!(special_engine.warms.load(Ordering::SeqCst), 1);
+        assert_eq!(general_engine.warms.load(Ordering::SeqCst), 0);
+        assert!(engine.used_ids().is_empty(), "预热不污染结果标签");
+        assert_eq!(engine.resident_ids(), ["opus"], "上限 1：通用包被腾出");
+        assert_eq!(
+            run(&engine, "hello", Lang::En, Lang::ZhHans).unwrap(),
+            "opus:en:hello"
+        );
+        assert_eq!(special_engine.launch_count(), 1, "预热过的包不再重新拉起");
+        assert_eq!(engine.used_ids(), ["opus"]);
+    }
+
+    /// 选不出包、被放弃、路由器已关闭：不碰任何引擎；关闭后报错而不是拉起。
+    #[test]
+    fn warm_skips_when_ambiguous_aborted_or_closed() {
+        let (engine, general_engine, special_engine) = router(RoutePolicy::default());
+        assert_eq!(engine.warm(Lang::Auto, Lang::Fr, &|| false).unwrap(), None);
+        assert_eq!(
+            engine.warm(Lang::Auto, Lang::Auto, &|| false).unwrap(),
+            None
+        );
+        assert_eq!(
+            engine.warm(Lang::Auto, Lang::ZhHans, &|| true).unwrap(),
+            None
+        );
+        assert_eq!(engine.launch_total(), 0);
+        assert!(!engine.any_resident());
+        engine.shutdown();
+        assert!(matches!(
+            engine.warm(Lang::Auto, Lang::ZhHans, &|| false),
+            Err(TranslateError::WorkerUnavailable(_))
+        ));
+        assert_eq!(general_engine.warms.load(Ordering::SeqCst), 0);
+        assert_eq!(special_engine.warms.load(Ordering::SeqCst), 0);
+    }
+
+    /// 源语言为 Auto 且目标语言只有多语通用包覆盖（源语言不唯一）：照样预热该包，真实请求不再重新拉起。
+    #[test]
+    fn warm_auto_source_with_multilingual_pack() {
+        let (engine, general_engine, special_engine) = router(RoutePolicy::default());
+        assert_eq!(
+            engine.warm(Lang::Auto, Lang::Ja, &|| false).unwrap(),
+            Some("nllb".to_string())
+        );
+        assert_eq!(general_engine.warms.load(Ordering::SeqCst), 1);
+        assert_eq!(special_engine.warms.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            run(&engine, "hello", Lang::En, Lang::Ja).unwrap(),
+            "nllb:en:hello"
+        );
+        assert_eq!(general_engine.launch_count(), 1, "预热过的包不再重新拉起");
+    }
+
+    /// 取消预热会通知每个包；预热结束即释放占用（不留在飞计数）。
+    #[test]
+    fn cancel_warm_notifies_every_pack_and_warm_releases_lease() {
+        let (engine, general_engine, special_engine) = router(RoutePolicy::default());
+        engine.cancel_warm();
+        assert_eq!(general_engine.cancels.load(Ordering::SeqCst), 1);
+        assert_eq!(special_engine.cancels.load(Ordering::SeqCst), 1);
+        assert!(engine.warm(Lang::Auto, Lang::ZhHans, &|| false).is_ok());
+        assert_eq!(
+            engine.pool.lock().unwrap().in_flight,
+            [0, 0],
+            "预热结束即释放占用"
         );
     }
 

@@ -7,18 +7,20 @@
 //! 分组表、悬停状态机与尺寸计算见 [`crate::toolbar_groups`]。
 
 use crate::menu_button::MenuEntry;
+use crate::submenu_placement::{SubmenuInput, SubmenuSide, place_submenu};
 use crate::text_measure::{LABEL_FONT_PX, ROW_ICON, max_label_width, menu_outer_width};
 use crate::toolbar_groups::{
     ARROW_GAP, ARROW_ICON, BAR_BORDER, BAR_PADDING_X, BAR_PADDING_Y, BUTTON_SIZE, CHECK_ICON,
     CHECK_ICON_SIZE, COLOR_CHECK_GREEN, DIVIDER_WIDTH, GroupMemory, ITEM_GAP, MENU_PADDING,
     MENU_ROW_HEIGHT, POPUP_OFFSET, PopupEffect, PopupMachine, SECTION_GAP, ToolbarGroup,
-    ToolbarItem, group_width, toolbar_logical_size,
+    ToolbarItem, group_width, menu_outer_height, toolbar_logical_size,
 };
 use snow_ui_shell::geometry::{PhysicalPoint, PhysicalRect};
 use snow_ui_shell::ui::component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use snow_ui_shell::ui::component::tooltip::Tooltip;
 use snow_ui_shell::ui::component::{Disableable, Icon, Sizable, Size as ComponentSize};
 use snow_ui_shell::ui::*;
+use std::cell::Cell;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -300,6 +302,9 @@ fn translate_menu_after_hover(hovered: bool, is_translate: bool) -> Option<bool>
     hovered.then_some(is_translate)
 }
 
+/// 二级菜单与窗口边缘保持的距离（与 `Popup` 的窗口边距一致）。
+const SUBMENU_WINDOW_MARGIN: f32 = 8.0;
+
 /// 右箭头图标（Lucide），翻译行末尾的语言二级菜单入口。
 const SUBMENU_ARROW_ICON: &str = "icons/chevron-right.svg";
 
@@ -480,6 +485,8 @@ pub struct ToolbarGroups {
     machine: PopupMachine,
     /// 翻译目标语言二级菜单是否展开（随分组菜单收起而复位）。
     translate_menu_open: bool,
+    /// 主菜单左上角在窗口中的位置（上一帧量到的），供二级菜单换边 / 夹边用；菜单收起后清空。
+    menu_origin: Rc<Cell<Option<Point<Pixels>>>>,
 }
 
 impl Default for ToolbarGroups {
@@ -495,7 +502,13 @@ impl ToolbarGroups {
             memory: GroupMemory::default(),
             machine: PopupMachine::default(),
             translate_menu_open: false,
+            menu_origin: Rc::new(Cell::new(None)),
         }
+    }
+
+    /// 主菜单左上角位置的共享记录（弹出层定位后写入，渲染二级菜单时读取）。
+    fn menu_origin(&self) -> Rc<Cell<Option<Point<Pixels>>>> {
+        self.menu_origin.clone()
     }
 
     /// 翻译目标语言二级菜单是否展开。
@@ -531,6 +544,7 @@ impl ToolbarGroups {
         // 分组菜单收起后，二级菜单一并复位
         if self.machine.open().is_none() {
             self.translate_menu_open = false;
+            self.menu_origin.set(None);
         }
         match effect {
             PopupEffect::Idle => {}
@@ -559,6 +573,12 @@ impl ToolbarGroups {
     /// 鼠标进出弹出菜单。
     pub fn menu_hover(&mut self, hovered: bool, cx: &mut Context<Self>) {
         let effect = self.machine.menu_hover(hovered);
+        self.apply(effect, cx);
+    }
+
+    /// 鼠标进出翻译二级菜单。
+    pub fn submenu_hover(&mut self, hovered: bool, cx: &mut Context<Self>) {
+        let effect = self.machine.submenu_hover(hovered);
         self.apply(effect, cx);
     }
 
@@ -912,9 +932,13 @@ impl ScreenshotToolbar {
             })
             .offset(px(POPUP_OFFSET));
         if let Some(groups) = self.groups.clone() {
-            popup = popup.on_hover(move |hovered, _, cx| {
-                groups.update(cx, |state, gcx| state.trigger_hover(group, *hovered, gcx));
-            });
+            // 记下主菜单定位后的左上角，二级菜单据此换边 / 夹边
+            let origin = groups.read(cx).menu_origin();
+            popup = popup
+                .on_position(move |position, _| origin.set(Some(position.bounds.origin)))
+                .on_hover(move |hovered, _, cx| {
+                    groups.update(cx, |state, gcx| state.trigger_hover(group, *hovered, gcx));
+                });
         }
         if is_open {
             popup = popup.content(self.menu_view(window, group, current, cx));
@@ -1007,17 +1031,19 @@ impl ScreenshotToolbar {
             }
             menu = menu.child(cell);
         }
+        // wrap 里只有主菜单参与布局，大小与位置只由主菜单决定
         let mut wrap = div()
             .id(SharedString::from(format!("tb-menu-wrap-{key}")))
+            .relative()
             .flex()
             .flex_row()
             .items_start()
-            .gap(px(ITEM_GAP))
             .child(menu);
         if has_languages && translate_open {
-            wrap = wrap.child(self.language_menu(window, cx));
+            let menu_size = (width, menu_outer_height(group.items().len()));
+            wrap = wrap.child(self.language_submenu(window, menu_size, cx));
         }
-        // 悬停判定覆盖主菜单与二级菜单，鼠标移进二级菜单时不会收起
+        // 悬停判定覆盖主菜单；二级菜单脱离文档流，自带悬停容器保持菜单不收起
         if let Some(groups) = self.groups.clone() {
             wrap = wrap.on_hover(move |hovered, _, cx| {
                 groups.update(cx, |state, gcx| state.menu_hover(*hovered, gcx));
@@ -1026,14 +1052,54 @@ impl ScreenshotToolbar {
         wrap.into_any_element()
     }
 
-    /// 目标语言二级菜单：选中后先收起菜单，再回调语言序号。
-    fn language_menu(&self, window: &Window, cx: &App) -> AnyElement {
+    /// 目标语言二级菜单（含悬停容器）：绝对定位在主菜单旁，不影响主菜单布局。
+    ///
+    /// # 参数
+    /// - `menu_size`: 主菜单外框尺寸（宽, 高）。
+    fn language_submenu(&self, window: &Window, menu_size: (f32, f32), cx: &App) -> AnyElement {
         let labels: Vec<String> = self
             .translate_languages
             .iter()
             .map(|e| e.label.clone())
             .collect();
         let width = menu_outer_width(max_label_width(window, &labels, LABEL_FONT_PX));
+        let viewport = window.viewport_size();
+        let placement = place_submenu(&SubmenuInput {
+            menu_origin: self
+                .groups
+                .as_ref()
+                .and_then(|g| g.read(cx).menu_origin.get())
+                .map(|origin| (f32::from(origin.x), f32::from(origin.y))),
+            menu_size,
+            sub_size: (width, menu_outer_height(self.translate_languages.len())),
+            viewport: (f32::from(viewport.width), f32::from(viewport.height)),
+            margin: SUBMENU_WINDOW_MARGIN,
+            gap: ITEM_GAP,
+            bottom_aligned: self.popup_up,
+        });
+        let mut holder = div()
+            .id("tb-translate-lang-holder")
+            .absolute()
+            .left(px(placement.left))
+            .top(px(placement.top))
+            .occlude();
+        // 间隔也属于悬停容器，鼠标从翻译行移向二级菜单途中不会收起
+        holder = match placement.side {
+            SubmenuSide::Right => holder.pl(px(ITEM_GAP)),
+            SubmenuSide::Left => holder.pr(px(ITEM_GAP)),
+        };
+        if let Some(groups) = self.groups.clone() {
+            holder = holder.on_hover(move |hovered, _, cx| {
+                groups.update(cx, |state, gcx| state.submenu_hover(*hovered, gcx));
+            });
+        }
+        holder
+            .child(self.language_menu(width, cx))
+            .into_any_element()
+    }
+
+    /// 目标语言二级菜单本体：选中后先收起菜单，再回调语言序号。
+    fn language_menu(&self, width: f32, cx: &App) -> AnyElement {
         let mut menu = div()
             .id("tb-translate-lang-menu")
             .flex()

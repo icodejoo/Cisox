@@ -4,11 +4,11 @@
 //! 语言选项复用翻译页的 [`choices_for`]；这里只补浮窗特有的规则（语言集合、自动检测结果参与交换）。
 //! 不依赖 GPUI，全部可离屏单测；窗口与控件见 [`crate::translate_input_view`]。
 
-use crate::translate_input::{InputError, TranslateInputModel};
+use crate::translate_input::{InputError, TranslateInputModel, request_config};
 use crate::translate_page::{
-    AUTO_LANGUAGE_ID, AutoDecision, AutoTranslate, LangChoice, choices_for, lang_code,
+    AUTO_LANGUAGE_ID, AutoDecision, AutoTranslate, LangChoice, choices_for, lang_code, page_config,
 };
-use crate::translate_service::{TOOLBAR_TARGET_LANGS, Translated};
+use crate::translate_service::{TOOLBAR_TARGET_LANGS, TranslateConfig, Translated};
 use snow_translate::Lang;
 use snow_translate::script_split::ScriptSplitter;
 use snow_translate::segment::{dominant_language, same_language};
@@ -34,21 +34,41 @@ pub fn target_choices(locale: &str) -> Vec<LangChoice> {
     choices_for(input_languages(), false, locale)
 }
 
-/// 输入框里按下回车时是否立即翻译：Enter 翻译，Shift+Enter 留给换行。
+/// 回车键在输入框里该做的事。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnterAction {
+    /// 立即翻译。
+    Submit,
+    /// 由我们在光标处插入换行（Ctrl+Enter）。
+    InsertNewline,
+    /// 什么都不做（Shift+Enter 组件已自行换行）。
+    Ignore,
+}
+
+/// 按修饰键裁决输入框里回车的行为：Enter 翻译；Ctrl+Enter 由我们插入换行；
+/// Shift+Enter 组件已自行换行，这里忽略以免多插一次。
 ///
 /// # 参数
 /// - `shift`：是否同时按着 Shift。
+/// - `secondary`：是否同时按着次要修饰键（Windows 上是 Ctrl）。
 ///
 /// # 返回
-/// 为真表示应立即翻译。
+/// 该执行的动作；Shift 优先于 Ctrl。
 ///
 /// # 示例
 /// ```ignore
-/// assert!(enter_submits(false));
-/// assert!(!enter_submits(true));
+/// assert_eq!(enter_action(false, false), EnterAction::Submit);
+/// assert_eq!(enter_action(false, true), EnterAction::InsertNewline);
+/// assert_eq!(enter_action(true, false), EnterAction::Ignore);
 /// ```
-pub fn enter_submits(shift: bool) -> bool {
-    !shift
+pub fn enter_action(shift: bool, secondary: bool) -> EnterAction {
+    if shift {
+        EnterAction::Ignore
+    } else if secondary {
+        EnterAction::InsertNewline
+    } else {
+        EnterAction::Submit
+    }
 }
 
 /// 把语言收敛进浮窗的语言集合（简繁视为同一种，取集合里的写法）；不在集合内返回 `None`。
@@ -77,6 +97,28 @@ fn in_list(lang: Lang) -> Option<Lang> {
 /// ```
 pub fn detect_language(text: &str) -> Option<Lang> {
     dominant_language(&ScriptSplitter, text).and_then(in_list)
+}
+
+/// 浮窗新建时用于预热本地翻译 worker 的配置：与浮窗初始选择发出的第一次真实请求完全一致
+/// （源语言自动检测、目标语言取默认值、包选“自动”），由会话构造器与真实请求同一组函数得出。
+///
+/// # 参数
+/// - `base`：全局翻译配置（目标语言默认值取自这里的截图翻译目标语言）。
+///
+/// # 返回
+/// 交给 `WarmHandle::start` 的配置；用户之后改语言或包不需要重新预热。
+///
+/// # 示例
+/// ```ignore
+/// let warm_config = initial_warm_config(&translate_config);
+/// let warm = WarmHandle::start(translator, warm_config, cancel);
+/// ```
+pub fn initial_warm_config(base: &TranslateConfig) -> TranslateConfig {
+    let session = TranslateInputSession::new(base.target);
+    request_config(
+        &page_config(base, session.source, session.target),
+        &session.pack_id,
+    )
 }
 
 /// 输入框翻译浮窗的会话状态。
@@ -499,11 +541,13 @@ mod tests {
         assert_eq!(s.effective_source(), Some(Lang::En));
     }
 
-    /// 回车决策：Enter 翻译、Shift+Enter 不翻译（留给换行）。
+    /// 回车决策：Enter 翻译；Ctrl+Enter 由我们插入换行；Shift+Enter（含 Shift+Ctrl）忽略。
     #[test]
-    fn enter_and_shift_enter() {
-        assert!(enter_submits(false));
-        assert!(!enter_submits(true));
+    fn enter_action_by_modifiers() {
+        assert_eq!(enter_action(false, false), EnterAction::Submit);
+        assert_eq!(enter_action(false, true), EnterAction::InsertNewline);
+        assert_eq!(enter_action(true, false), EnterAction::Ignore);
+        assert_eq!(enter_action(true, true), EnterAction::Ignore);
     }
 
     /// 防抖：输入停顿到点才翻译；新输入作废旧一轮；Enter 立即翻译后到点的防抖不重复翻译。
@@ -535,5 +579,40 @@ mod tests {
         assert_eq!(detect_language("こんにちは"), Some(Lang::Ja));
         assert_eq!(detect_language("12345 !?"), None);
         assert_eq!(detect_language(""), None);
+    }
+
+    /// 预热配置：源语言自动检测、目标语言同浮窗默认、包选“自动”不改全局路由；其余字段原样沿用。
+    #[test]
+    fn initial_warm_config_matches_first_request() {
+        let base = crate::translate_service::TranslateConfig::from_document(
+            &ConfigDocument::from_bytes(None),
+            "ja-JP",
+        );
+        let session = TranslateInputSession::new(base.target);
+        let warm = initial_warm_config(&base);
+        assert_eq!((warm.source, warm.target), (session.source, session.target));
+        assert_eq!((warm.source, warm.target), (Lang::Auto, Lang::Ja));
+        // 与浮窗发第一次真实请求用的配置逐字段相等
+        let first_request = request_config(
+            &page_config(&base, session.source, session.target),
+            &session.pack_id,
+        );
+        assert_eq!(warm, first_request);
+        // 自动选包不指定包 ID、不改路由模式
+        assert_eq!(warm.model_id, base.model_id);
+        assert_eq!(warm.route_mode, base.route_mode);
+    }
+
+    /// 预热配置：默认目标语言不在浮窗语言集合里时与会话一样收敛（自动 → 英语，繁体 → 简体）。
+    #[test]
+    fn initial_warm_config_normalizes_target_like_session() {
+        let mut base = crate::translate_service::TranslateConfig::from_document(
+            &ConfigDocument::from_bytes(None),
+            "zh-CN",
+        );
+        base.target = Lang::Auto;
+        assert_eq!(initial_warm_config(&base).target, Lang::En);
+        base.target = Lang::ZhHant;
+        assert_eq!(initial_warm_config(&base).target, Lang::ZhHans);
     }
 }

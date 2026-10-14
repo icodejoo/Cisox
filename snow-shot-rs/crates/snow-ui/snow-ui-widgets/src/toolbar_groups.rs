@@ -252,6 +252,15 @@ pub const MENU_ROW_HEIGHT: f32 = 28.0;
 /// 弹出菜单内边距（单侧）。
 pub const MENU_PADDING: f32 = 4.0;
 
+/// 弹出菜单外框高度：`rows` 行 + 行间距 + 内边距 + 边框。
+///
+/// # 参数
+/// - `rows`: 菜单行数。
+pub fn menu_outer_height(rows: usize) -> f32 {
+    let rows = rows as f32;
+    rows * MENU_ROW_HEIGHT + (rows - 1.0).max(0.0) * ITEM_GAP + 2.0 * (MENU_PADDING + BAR_BORDER)
+}
+
 /// 一个分组占用的宽度：主按钮 + 下箭头（只有一项时只有主按钮）。
 pub fn group_width(group: ToolbarGroup) -> f32 {
     if group.has_menu() {
@@ -345,6 +354,8 @@ pub struct PopupMachine {
     hover_trigger: Option<ToolbarGroup>,
     /// 鼠标是否悬在弹出菜单上。
     hover_menu: bool,
+    /// 鼠标是否悬在翻译二级菜单上（与主菜单分开记，两者进出事件的先后顺序不影响结果）。
+    hover_submenu: bool,
     /// 计时器令牌；每次事件递增使旧计时器作废。
     token: u64,
 }
@@ -361,9 +372,14 @@ impl PopupMachine {
         self.token
     }
 
+    /// 鼠标是否悬在主菜单或二级菜单上。
+    fn hovering_menus(&self) -> bool {
+        self.hover_menu || self.hover_submenu
+    }
+
     /// 鼠标已全部离开且还开着菜单时，安排一次延迟收起。
     fn close_if_idle(&mut self) -> PopupEffect {
-        if self.open.is_some() && self.hover_trigger.is_none() && !self.hover_menu {
+        if self.open.is_some() && self.hover_trigger.is_none() && !self.hovering_menus() {
             PopupEffect::Timer {
                 token: self.bump(),
                 delay_ms: HOVER_CLOSE_DELAY_MS,
@@ -410,6 +426,17 @@ impl PopupMachine {
         }
     }
 
+    /// 鼠标进出翻译二级菜单：规则同 [`Self::menu_hover`]，用独立标记，不受主菜单进出顺序影响。
+    pub fn submenu_hover(&mut self, hovered: bool) -> PopupEffect {
+        self.bump();
+        self.hover_submenu = hovered;
+        if hovered {
+            PopupEffect::Idle
+        } else {
+            self.close_if_idle()
+        }
+    }
+
     /// 点击下箭头：立即切换本组菜单的开 / 关。
     pub fn click_arrow(&mut self, group: ToolbarGroup) -> PopupEffect {
         self.bump();
@@ -420,6 +447,7 @@ impl PopupMachine {
         };
         if self.open.is_none() {
             self.hover_menu = false;
+            self.hover_submenu = false;
         }
         PopupEffect::Redraw
     }
@@ -428,6 +456,7 @@ impl PopupMachine {
     pub fn close(&mut self) -> PopupEffect {
         self.bump();
         self.hover_menu = false;
+        self.hover_submenu = false;
         if self.open.take().is_some() {
             PopupEffect::Redraw
         } else {
@@ -445,7 +474,7 @@ impl PopupMachine {
                 self.open = Some(g);
                 PopupEffect::Redraw
             }
-            (None, Some(_)) if !self.hover_menu => {
+            (None, Some(_)) if !self.hovering_menus() => {
                 self.open = None;
                 PopupEffect::Redraw
             }
@@ -708,6 +737,57 @@ mod tests {
         m.click_arrow(ToolbarGroup::Mark);
         let (t, _) = timer(m.trigger_hover(ToolbarGroup::Mark, false));
         assert_eq!(m.fire(t), PopupEffect::Redraw);
+    }
+
+    /// 主菜单与二级菜单的进出事件先后不定：无论哪个先到，移向二级菜单都不会收起。
+    #[test]
+    fn submenu_hover_is_order_independent() {
+        for submenu_first in [true, false] {
+            let mut m = PopupMachine::default();
+            m.click_arrow(ToolbarGroup::Output);
+            m.menu_hover(true);
+            m.trigger_hover(ToolbarGroup::Output, false);
+            // 鼠标从主菜单移进二级菜单：离开主菜单与进入二级菜单同帧到达
+            let leave_menu;
+            if submenu_first {
+                m.submenu_hover(true);
+                leave_menu = m.menu_hover(false);
+            } else {
+                leave_menu = m.menu_hover(false);
+                m.submenu_hover(true);
+            }
+            if let PopupEffect::Timer { token, .. } = leave_menu {
+                assert_eq!(m.fire(token), PopupEffect::Idle);
+            }
+            let (t, _) = timer(m.submenu_hover(false));
+            assert_eq!(m.fire(t), PopupEffect::Redraw);
+            assert_eq!(m.open(), None);
+        }
+    }
+
+    /// 关闭后二级菜单悬停标记一并清空。
+    #[test]
+    fn close_resets_submenu_hover() {
+        let mut m = PopupMachine::default();
+        m.click_arrow(ToolbarGroup::Output);
+        m.submenu_hover(true);
+        m.close();
+        m.click_arrow(ToolbarGroup::Output);
+        let (t, _) = timer(m.trigger_hover(ToolbarGroup::Output, false));
+        assert_eq!(m.fire(t), PopupEffect::Redraw);
+    }
+
+    /// 菜单外框高度与逐项相加一致。
+    #[test]
+    fn menu_outer_height_adds_up() {
+        assert_eq!(
+            menu_outer_height(1),
+            MENU_ROW_HEIGHT + 2.0 * (MENU_PADDING + BAR_BORDER)
+        );
+        assert_eq!(
+            menu_outer_height(3),
+            3.0 * MENU_ROW_HEIGHT + 2.0 * ITEM_GAP + 2.0 * (MENU_PADDING + BAR_BORDER)
+        );
     }
 
     /// 鼠标仍在触发区时，菜单不会被误收起。

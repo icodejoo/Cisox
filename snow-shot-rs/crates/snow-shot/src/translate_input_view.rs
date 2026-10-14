@@ -3,7 +3,7 @@
 //!
 //! 状态与逻辑都在 [`crate::translate_input_session`] 与 [`crate::translate_input`]（可离屏单测），
 //! 这里只负责把它画出来、把操作转成事件。输入停顿后自动翻译（防抖，同翻译页），按 Enter 立即翻译，
-//! Shift+Enter 换行。窗口失焦不会关闭；只有 Esc 与标题栏的关闭按钮关闭它。
+//! Ctrl+Enter / Shift+Enter 换行。窗口失焦不会关闭；只有 Esc 与标题栏的关闭按钮关闭它。
 //! 翻译在后台线程执行，结果经收件箱回到 [`TranslateInputView::finish`]。
 
 use crate::app_runtime::UiEvent;
@@ -13,7 +13,7 @@ use crate::settings_state::UiPrefs;
 use crate::settings_view::{Palette, palette};
 use crate::translate_input::{InputError, PackChoice, Phase};
 use crate::translate_input_session::{
-    TranslateInputSession, enter_submits, source_choices, target_choices,
+    EnterAction, TranslateInputSession, enter_action, source_choices, target_choices,
 };
 use crate::translate_page::{AUTO_TRANSLATE_DEBOUNCE_MS, AutoDecision};
 use crate::translate_page_view::{ChoiceItem, ChoiceSelect, index_of, lang_items, pack_items};
@@ -32,17 +32,23 @@ use std::time::Duration;
 /// 浮窗逻辑宽度。
 pub const WINDOW_WIDTH: f32 = 660.0;
 /// 浮窗逻辑高度。
-pub const WINDOW_HEIGHT: f32 = 400.0;
+pub const WINDOW_HEIGHT: f32 = 552.0;
 /// 标题栏高度。
 const TITLE_BAR_HEIGHT: f32 = 28.0;
 /// 输入框的行数（超过后框内滚动）。
-const INPUT_ROWS: usize = 3;
-/// 译文框的高度，与三行输入框大致等高。
-const RESULT_BOX_HEIGHT: f32 = 76.0;
-/// 语言下拉宽度。
-const LANG_SELECT_WIDTH: f32 = 150.0;
-/// 模型下拉宽度。
-const PACK_SELECT_WIDTH: f32 = 200.0;
+const INPUT_ROWS: usize = 6;
+/// 译文框的高度，与六行输入框大致等高。
+const RESULT_BOX_HEIGHT: f32 = 152.0;
+/// 语言下拉菜单宽度（触发器宽度随文字自适应，菜单不跟着变窄）。
+const LANG_MENU_WIDTH: f32 = 150.0;
+/// 模型下拉菜单宽度（同上）。
+const PACK_MENU_WIDTH: f32 = 200.0;
+/// 下拉触发器的文字字号（组件小号尺寸的字号）。
+const SELECT_TEXT_SIZE: f32 = 14.0;
+/// 下拉触发器文字以外的占宽：左右内边距 16 + 边框 2 + 文字与箭头间距 4 + 箭头 16 + 余量 4。
+const SELECT_CHROME_WIDTH: f32 = 42.0;
+/// 下拉触发器的最小宽度，避免选项文字很短时过窄。
+const SELECT_MIN_WIDTH: f32 = 48.0;
 /// 下拉高度。
 const SELECT_HEIGHT: f32 = 28.0;
 /// 下拉浮层最大高度。
@@ -94,6 +100,12 @@ pub struct TranslateInputView {
     target_select: Entity<ChoiceSelect>,
     /// 翻译模型下拉（只影响本窗口内的请求）。
     pack_select: Entity<ChoiceSelect>,
+    /// 源语言下拉的全部选项（量触发器文字宽度用）。
+    source_items: Vec<ChoiceItem>,
+    /// 目标语言下拉的全部选项。
+    target_items: Vec<ChoiceItem>,
+    /// 翻译模型下拉的全部选项。
+    pack_entries: Vec<ChoiceItem>,
     /// 界面偏好（深浅色、语言、主色）。
     prefs: UiPrefs,
     /// 主线程收件箱（发翻译请求用）。
@@ -146,15 +158,21 @@ impl TranslateInputView {
             index_of(&target_items, session.target_code()),
             app,
         );
-        let pack_select = make_select(pack_entries, Some(IndexPath::default()), app);
+        let pack_select = make_select(pack_entries.clone(), Some(IndexPath::default()), app);
         let view = app.new(|cx| {
             cx.subscribe_in(
                 &input,
                 window,
-                |this: &mut Self, _state, event: &InputEvent, _window, cx| match event {
-                    // Enter 立即翻译；Shift+Enter 留给换行
-                    InputEvent::PressEnter { shift, .. } if enter_submits(*shift) => {
-                        this.submit(cx)
+                |this: &mut Self, state, event: &InputEvent, window, cx| match event {
+                    // Enter 立即翻译；Ctrl+Enter 由我们在光标处插入换行；Shift+Enter 组件已自行换行
+                    InputEvent::PressEnter { shift, secondary } => {
+                        match enter_action(*shift, *secondary) {
+                            EnterAction::Submit => this.submit(cx),
+                            EnterAction::InsertNewline => {
+                                state.update(cx, |s, cx| s.replace("\n", window, cx))
+                            }
+                            EnterAction::Ignore => {}
+                        }
                     }
                     InputEvent::Change => this.on_input_changed(cx),
                     _ => {}
@@ -204,6 +222,9 @@ impl TranslateInputView {
                 source_select: source_select.clone(),
                 target_select: target_select.clone(),
                 pack_select: pack_select.clone(),
+                source_items,
+                target_items,
+                pack_entries,
                 prefs,
                 inbox,
                 focused_once: false,
@@ -339,14 +360,57 @@ impl TranslateInputView {
         cx.notify();
     }
 
-    /// 无边框的语言下拉。
-    fn lang_select(select: &Entity<ChoiceSelect>) -> Div {
-        div().w(px(LANG_SELECT_WIDTH)).h(px(SELECT_HEIGHT)).child(
-            Select::new(select)
-                .appearance(false)
-                .with_size(ComponentSize::Small)
-                .menu_max_h(px(SELECT_MENU_MAX_HEIGHT)),
-        )
+    /// 按当前选中项的文字量出下拉触发器的宽度（含内边距与箭头，不小于最小宽度）。
+    ///
+    /// # 参数
+    /// - `select`：下拉状态。
+    /// - `items`：该下拉的全部选项（用选中值反查展示名）。
+    /// - `window` / `cx`：量字与读状态用。
+    ///
+    /// # 返回
+    /// 触发器宽度（逻辑像素）；无选中项时按空文字取最小宽度。
+    fn select_width(
+        select: &Entity<ChoiceSelect>,
+        items: &[ChoiceItem],
+        window: &Window,
+        cx: &App,
+    ) -> f32 {
+        let label = select
+            .read(cx)
+            .selected_value()
+            .and_then(|id| items.iter().find(|item| &item.id == id))
+            .map(|item| item.label.to_string())
+            .unwrap_or_default();
+        (measure_text_width(window, &label, SELECT_TEXT_SIZE) + SELECT_CHROME_WIDTH)
+            .max(SELECT_MIN_WIDTH)
+    }
+
+    /// 小号下拉：触发器宽度随选中文字自适应，弹出菜单保持固定宽度。
+    ///
+    /// # 参数
+    /// - `select` / `items`：下拉状态与它的全部选项。
+    /// - `menu_width`：弹出菜单宽度。
+    /// - `bordered`：是否画边框和底色（语言下拉不画，模型下拉画）。
+    /// - `window` / `cx`：量字与读状态用。
+    fn sized_select(
+        select: &Entity<ChoiceSelect>,
+        items: &[ChoiceItem],
+        menu_width: f32,
+        bordered: bool,
+        window: &Window,
+        cx: &App,
+    ) -> Div {
+        div()
+            .flex_none()
+            .w(px(Self::select_width(select, items, window, cx)))
+            .h(px(SELECT_HEIGHT))
+            .child(
+                Select::new(select)
+                    .appearance(bordered)
+                    .with_size(ComponentSize::Small)
+                    .menu_width(px(menu_width))
+                    .menu_max_h(px(SELECT_MENU_MAX_HEIGHT)),
+            )
     }
 
     /// 图标按钮（幽灵样式，悬停有文字提示）。
@@ -433,7 +497,14 @@ impl Render for TranslateInputView {
                 .flex()
                 .items_center()
                 .gap(px(GAP))
-                .child(Self::lang_select(&self.source_select))
+                .child(Self::sized_select(
+                    &self.source_select,
+                    &self.source_items,
+                    LANG_MENU_WIDTH,
+                    false,
+                    window,
+                    cx,
+                ))
                 .child(
                     Self::icon_button(
                         "translate-input-clear",
@@ -461,13 +532,14 @@ impl Render for TranslateInputView {
                     .text_color(p.dim)
                     .child(text(locale, "translate-input-model-label")),
             )
-            .child(
-                div().w(px(PACK_SELECT_WIDTH)).h(px(SELECT_HEIGHT)).child(
-                    Select::new(&self.pack_select)
-                        .with_size(ComponentSize::Small)
-                        .menu_max_h(px(SELECT_MENU_MAX_HEIGHT)),
-                ),
-            )
+            .child(Self::sized_select(
+                &self.pack_select,
+                &self.pack_entries,
+                PACK_MENU_WIDTH,
+                true,
+                window,
+                cx,
+            ))
             .child(div().flex_1())
             .child(
                 Self::icon_button(
@@ -502,7 +574,14 @@ impl Render for TranslateInputView {
                 .flex()
                 .items_center()
                 .gap(px(GAP))
-                .child(Self::lang_select(&self.target_select))
+                .child(Self::sized_select(
+                    &self.target_select,
+                    &self.target_items,
+                    LANG_MENU_WIDTH,
+                    false,
+                    window,
+                    cx,
+                ))
                 .child(
                     Self::icon_button(
                         "translate-input-copy",

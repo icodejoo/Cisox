@@ -34,6 +34,10 @@ dbg_macro = "deny"
 todo = "deny"
 unimplemented = "deny"
 
+# debug 不优化时模型加载和解码循环各要 5~6 s，开发时也开优化
+[profile.dev]
+opt-level = 2
+
 [profile.release]
 opt-level = 3
 codegen-units = 16

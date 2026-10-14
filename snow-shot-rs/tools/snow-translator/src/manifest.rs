@@ -16,8 +16,6 @@ use std::path::{Component, Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::checksum;
-
 /// 当前唯一支持的清单版本。
 pub const SUPPORTED_SCHEMA_VERSION: u32 = 1;
 /// 清单文件名。
@@ -74,8 +72,6 @@ pub enum ManifestError {
     Missing(String),
     /// 内容非法（解析失败、版本不符、路径越界等）。
     Invalid(String),
-    /// 文件 SHA-256 与清单声明不符（或无法读取以校验）。
-    Checksum(String),
 }
 
 /// 生成参数（全部可选，缺省值由 `generation_config.json` / `config.json` 补齐）。
@@ -214,8 +210,9 @@ pub struct Manifest {
     /// 文件表：编解码族 `encoder`/`decoder`/`tokenizer` 必需，`encoder_data`/`decoder_data` 可选；
     /// `hunyuan_chat` 要 `model`/`tokenizer`，`model_data` 可选。值为相对模型目录的路径。
     pub files: HashMap<String, String>,
-    /// 可选的文件 SHA-256（十六进制）：文件键 → 摘要，声明了就在加载前校验。
+    /// 可选的文件 SHA-256（十六进制）：文件键 → 摘要。加载时不校验，仅供参考（保留是为了旧清单仍能解析）。
     #[serde(default)]
+    #[allow(dead_code)]
     pub sha256: HashMap<String, String>,
     /// 支持的语言列表（`pairs` 缺省时取其有向全排列）。
     #[serde(default)]
@@ -359,18 +356,6 @@ impl Manifest {
                 self.execution.opt_level
             )));
         }
-        for (key, digest) in &self.sha256 {
-            if !self.files.contains_key(key) {
-                return Err(ManifestError::Invalid(format!(
-                    "sha256.{key} refers to a file not listed in `files`"
-                )));
-            }
-            if !checksum::is_valid_hex(digest) {
-                return Err(ManifestError::Invalid(format!(
-                    "sha256.{key} is not a 64-digit hex digest"
-                )));
-            }
-        }
         let (required, optional_keys) = if self.is_hunyuan_chat() {
             (
                 [FILE_MODEL, FILE_TOKENIZER].as_slice(),
@@ -475,29 +460,6 @@ impl Manifest {
         all.extend(from_pairs);
         for lang in all {
             self.lang_token_for(lang).map_err(ManifestError::Invalid)?;
-        }
-        Ok(())
-    }
-
-    /// 按清单声明的 `sha256` 流式校验模型文件（未声明的文件跳过）。
-    ///
-    /// # 参数
-    /// - `dir`：模型目录。
-    ///
-    /// # 返回
-    /// 全部一致返回 `Ok(())`；任一不符返回 [`ManifestError::Checksum`]（说明文件、期望与实际摘要）。
-    ///
-    /// # 示例
-    /// ```ignore
-    /// manifest.verify_checksums(dir)?;
-    /// ```
-    pub fn verify_checksums(&self, dir: &Path) -> Result<(), ManifestError> {
-        // 排序保证多文件不符时报错顺序稳定
-        let mut keys: Vec<&String> = self.sha256.keys().collect();
-        keys.sort();
-        for key in keys {
-            let path = self.resolve_file(dir, key)?;
-            checksum::verify_file(&path, &self.sha256[key]).map_err(ManifestError::Checksum)?;
         }
         Ok(())
     }
@@ -726,36 +688,26 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
-    /// sha256 声明：格式非法/引用未知文件被拒；一致通过；不符给出 Checksum 错误。
+    /// sha256 声明只是参考：任意内容（含与文件不符、格式不规范、引用未知文件）都能解析，不做校验。
     #[test]
-    fn sha256_declarations() {
+    fn sha256_declarations_are_accepted_but_not_verified() {
         let dir = temp_model_dir("sha");
-        // 三个占位文件内容都是 "x"
         let x_digest = "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881";
         let ok = manifest_json(&format!(r#","sha256":{{"encoder":"{x_digest}"}}"#));
         let m = Manifest::parse(&ok, &dir).unwrap();
-        assert!(m.verify_checksums(&dir).is_ok());
+        assert_eq!(m.sha256["encoder"], x_digest);
 
-        let bad = manifest_json(&format!(r#","sha256":{{"decoder":"{}"}}"#, "0".repeat(64)));
-        let m = Manifest::parse(&bad, &dir).unwrap();
-        assert!(matches!(
-            m.verify_checksums(&dir),
-            Err(ManifestError::Checksum(msg)) if msg.contains("sha256 mismatch")
-        ));
-
-        let short = manifest_json(r#","sha256":{"encoder":"abc"}"#);
-        assert!(matches!(
-            Manifest::parse(&short, &dir),
-            Err(ManifestError::Invalid(_))
-        ));
-        let unknown = manifest_json(&format!(r#","sha256":{{"nope":"{x_digest}"}}"#));
-        assert!(matches!(
-            Manifest::parse(&unknown, &dir),
-            Err(ManifestError::Invalid(_))
-        ));
-        // 未声明 sha256 时直接通过
-        let none = Manifest::parse(&manifest_json(""), &dir).unwrap();
-        assert!(none.verify_checksums(&dir).is_ok());
+        // 与文件内容不符、格式不规范、引用 files 里没有的键，都不报错
+        for extra in [
+            format!(r#","sha256":{{"decoder":"{}"}}"#, "0".repeat(64)),
+            r#","sha256":{"encoder":"abc"}"#.to_string(),
+            format!(r#","sha256":{{"nope":"{x_digest}"}}"#),
+        ] {
+            assert!(
+                Manifest::parse(&manifest_json(&extra), &dir).is_ok(),
+                "{extra}"
+            );
+        }
         let _ = fs::remove_dir_all(dir);
     }
 

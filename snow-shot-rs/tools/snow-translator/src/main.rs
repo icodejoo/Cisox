@@ -2,7 +2,6 @@
 
 mod beam;
 mod chat;
-mod checksum;
 mod engine;
 mod manifest;
 mod protocol;

@@ -7,7 +7,9 @@
 use serde::{Deserialize, Serialize};
 
 /// 客户端支持的协议版本，`ready` 携带的版本不同则拒绝使用。
-pub const PROTOCOL_VERSION: u32 = 1;
+///
+/// 版本 2：模型只按目录加载一次，语言对随 `translate` 请求指定。
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// 束宽上限（与 worker 的 `MAX_BEAMS` 一致，越界请求会被 worker 拒绝）。
 pub const MAX_BEAMS: usize = 8;
@@ -16,14 +18,19 @@ pub const MAX_BEAMS: usize = 8;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum Command {
-    /// 加载模型并指定语言对。
+    /// 按目录加载模型（语言对不属于加载，随每个翻译请求指定）。
+    ///
+    /// `src` 与 `tgt` 要么都给要么都不给：都给时 worker 先校验模型支持该语言对，并作为之后
+    /// `translate` 缺省的语言对。宿主只加载模型，两者都不给。
     Load {
         /// 模型目录（含 `model.json`）。
         model_dir: String,
-        /// 源语言代码，例如 `en`。
-        src: String,
-        /// 目标语言代码，例如 `zh-CN`。
-        tgt: String,
+        /// 缺省源语言代码，例如 `en`。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        src: Option<String>,
+        /// 缺省目标语言代码，例如 `zh-CN`。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tgt: Option<String>,
         /// 覆盖清单的“请求后收缩内存”开关。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         trim_after_request: Option<bool>,
@@ -37,6 +44,12 @@ pub enum Command {
         /// 束宽，缺省取模型清单值。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         num_beams: Option<usize>,
+        /// 源语言代码（必须是具体语言）；缺省沿用 `load` 给的，两边都没有 worker 报 `bad_request`。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        src: Option<String>,
+        /// 目标语言代码；缺省沿用 `load` 给的，两边都没有 worker 报 `bad_request`。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tgt: Option<String>,
     },
     /// 卸载并退出进程。
     Unload,
@@ -166,31 +179,63 @@ mod tests {
     fn encodes_commands_like_the_worker_expects() {
         let load = Command::Load {
             model_dir: "D:/m".into(),
-            src: "en".into(),
-            tgt: "zh-CN".into(),
+            src: None,
+            tgt: None,
             trim_after_request: None,
         };
         assert_eq!(
             encode_command(&load).unwrap(),
+            r#"{"cmd":"load","model_dir":"D:/m"}"#
+        );
+        // 带缺省语言对的加载（worker 侧支持，宿主不用）
+        let with_pair = Command::Load {
+            model_dir: "D:/m".into(),
+            src: Some("en".into()),
+            tgt: Some("zh-CN".into()),
+            trim_after_request: None,
+        };
+        assert_eq!(
+            encode_command(&with_pair).unwrap(),
             r#"{"cmd":"load","model_dir":"D:/m","src":"en","tgt":"zh-CN"}"#
         );
         let trimmed = Command::Load {
             model_dir: "m".into(),
-            src: "en".into(),
-            tgt: "zh-CN".into(),
+            src: None,
+            tgt: None,
             trim_after_request: Some(true),
         };
-        assert!(encode_command(&trimmed).unwrap().ends_with(r#""trim_after_request":true}"#));
+        assert!(
+            encode_command(&trimmed)
+                .unwrap()
+                .ends_with(r#""trim_after_request":true}"#)
+        );
         let translate = Command::Translate {
             id: 7,
             texts: vec!["a\"b\n".into(), "中文".into()],
             num_beams: Some(4),
+            src: Some("en".into()),
+            tgt: Some("zh-CN".into()),
         };
         assert_eq!(
             encode_command(&translate).unwrap(),
-            r#"{"cmd":"translate","id":7,"texts":["a\"b\n","中文"],"num_beams":4}"#
+            r#"{"cmd":"translate","id":7,"texts":["a\"b\n","中文"],"num_beams":4,"src":"en","tgt":"zh-CN"}"#
         );
-        assert_eq!(encode_command(&Command::Unload).unwrap(), r#"{"cmd":"unload"}"#);
+        // 语言缺省时不输出（沿用 load 的缺省语言对）
+        let bare = Command::Translate {
+            id: 8,
+            texts: vec!["a".into()],
+            num_beams: None,
+            src: None,
+            tgt: None,
+        };
+        assert_eq!(
+            encode_command(&bare).unwrap(),
+            r#"{"cmd":"translate","id":8,"texts":["a"]}"#
+        );
+        assert_eq!(
+            encode_command(&Command::Unload).unwrap(),
+            r#"{"cmd":"unload"}"#
+        );
     }
 
     /// 编码结果不含换行与 BOM（行协议的前提）。
@@ -200,6 +245,8 @@ mod tests {
             id: 1,
             texts: vec!["第一行\n第二行\r\n".into()],
             num_beams: None,
+            src: None,
+            tgt: None,
         };
         let line = encode_command(&cmd).unwrap();
         assert!(!line.contains('\n') && !line.contains('\r'));
@@ -210,12 +257,17 @@ mod tests {
     #[test]
     fn decodes_worker_events() {
         assert_eq!(
-            decode_event(r#"{"evt":"ready","protocol":1,"pid":4242}"#).unwrap(),
-            Event::Ready { protocol: 1, pid: 4242 }
+            decode_event(r#"{"evt":"ready","protocol":2,"pid":4242}"#).unwrap(),
+            Event::Ready {
+                protocol: 2,
+                pid: 4242
+            }
         );
         assert_eq!(
-            decode_event(r#"{"evt":"loaded","model_id":"opus","load_ms":921,"mem_bytes":309997568}"#)
-                .unwrap(),
+            decode_event(
+                r#"{"evt":"loaded","model_id":"opus","load_ms":921,"mem_bytes":309997568}"#
+            )
+            .unwrap(),
             Event::Loaded {
                 model_id: "opus".into(),
                 load_ms: 921,

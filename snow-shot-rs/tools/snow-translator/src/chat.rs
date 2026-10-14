@@ -18,6 +18,7 @@ use tokenizers::Tokenizer;
 use crate::engine::{
     DEFAULT_MAX_NEW_TOKENS, EngineError, TranslateOptions, build_session, decode_err,
     fill_empty_past, init_runtime, json_i64, kv_dims, load_tokenizer, read_json_opt,
+    unsupported_pair,
 };
 use crate::manifest::{
     FILE_MODEL, FILE_TOKENIZER, HUNYUAN_DEFAULT_REPETITION_PENALTY, Manifest, PromptSpec,
@@ -370,7 +371,7 @@ impl LogitsSource for ChatSession {
     }
 }
 
-/// 已加载的对话式翻译引擎（绑定一个目标语言）。
+/// 已加载的对话式翻译引擎（与语言对无关，目标语言写进每次请求的提示词）。
 pub struct ChatEngine {
     /// 带 KV 的会话。
     model: ChatSession,
@@ -378,16 +379,14 @@ pub struct ChatEngine {
     tokenizer: Tokenizer,
     /// 提示词描述。
     prompt: PromptSpec,
-    /// 目标语言码（应用侧写法）。
-    tgt: String,
+    /// 模型清单（按请求校验语言对用）。
+    manifest: Manifest,
     /// 分词器全部特殊 token 的字面文本（用于清洗原文）。
     specials: Vec<String>,
     /// 解码参数缺省值。
     params: DecodeParams,
     /// 单次请求最大输入 token 数（只统计原文，不含提示词模板）。
     max_input_tokens: usize,
-    /// 目标语言是否为 CJK。
-    cjk_target: bool,
     /// 模型 ID。
     model_id: String,
 }
@@ -398,26 +397,21 @@ impl ChatEngine {
     /// # 参数
     /// - `manifest`：已通过校验的清单（`family == hunyuan_chat`）。
     /// - `dir`：模型目录。
-    /// - `tgt`：目标语言码。
     ///
     /// # 返回
-    /// 就绪的引擎；目标语言没有提示词语言名返回 `UnsupportedPair`，其余加载问题返回 `LoadFailed`/`ManifestInvalid`。
+    /// 就绪的引擎（语言对随每次翻译指定）；其余加载问题返回 `LoadFailed`/`ManifestInvalid`。
     ///
     /// # 示例
     /// ```ignore
-    /// let engine = ChatEngine::load(&manifest, dir, "zh-CN")?;
+    /// let engine = ChatEngine::load(&manifest, dir)?;
     /// ```
-    pub fn load(manifest: &Manifest, dir: &Path, tgt: &str) -> Result<Self, EngineError> {
+    pub fn load(manifest: &Manifest, dir: &Path) -> Result<Self, EngineError> {
         let prompt = manifest.prompt.clone().ok_or_else(|| {
             EngineError::new(
                 ErrorKind::ManifestInvalid,
                 "family hunyuan_chat requires `prompt`",
             )
         })?;
-        prompt
-            .render("", tgt)
-            .map_err(|m| EngineError::new(ErrorKind::UnsupportedPair, m))?;
-        manifest.verify_checksums(dir)?;
         init_runtime()?;
         let params = resolve_decode_params(manifest, dir)?;
         let tokenizer = load_tokenizer(&manifest.resolve_file(dir, FILE_TOKENIZER)?)?;
@@ -478,14 +472,19 @@ impl ChatEngine {
             },
             tokenizer,
             prompt,
-            tgt: tgt.to_string(),
+            manifest: manifest.clone(),
             specials,
             params,
             max_input_tokens: manifest.max_input_tokens,
-            cjk_target: crate::text::is_cjk_lang(tgt),
             model_id: manifest.id.clone(),
         };
-        engine.encode_prompt("Hello world")?;
+        // 自检：用清单里任一目标语言走一遍提示词拼装与分词
+        let probe_tgt = (manifest.pairs.iter().flatten().map(|(_, t)| t))
+            .chain(manifest.languages.iter())
+            .next();
+        if let Some(tgt) = probe_tgt {
+            engine.encode_prompt("Hello world", tgt)?;
+        }
         Ok(engine)
     }
 
@@ -502,12 +501,12 @@ impl ChatEngine {
         &self.model_id
     }
 
-    /// 拼提示词并分词（原文先清洗特殊符号）。
-    fn encode_prompt(&self, text: &str) -> Result<Vec<u32>, EngineError> {
+    /// 拼提示词并分词（原文先清洗特殊符号）；目标语言没有提示词语言名返回 `UnsupportedPair`。
+    fn encode_prompt(&self, text: &str, tgt: &str) -> Result<Vec<u32>, EngineError> {
         let clean = strip_specials(text, &self.specials);
         let prompt = self
             .prompt
-            .render(&clean, &self.tgt)
+            .render(&clean, tgt)
             .map_err(|m| EngineError::new(ErrorKind::UnsupportedPair, m))?;
         let enc = self.tokenizer.encode(prompt, false).map_err(|e| {
             EngineError::new(ErrorKind::DecodeFailed, format!("tokenize failed: {e}"))
@@ -527,41 +526,52 @@ impl ChatEngine {
     ///
     /// # 参数
     /// - `text`：原文。
+    /// - `src`/`tgt`：本次的语言对（应用侧写法）。
     /// - `opts`：`max_len` 覆盖最大新 token 数；`num_beams` 对本族无效（忽略）。
     ///
     /// # 返回
-    /// 去首尾空白的译文；空白文本原样返回。
+    /// 去首尾空白的译文；空白文本原样返回；清单不支持该语言对返回 `UnsupportedPair`。
     ///
     /// # 示例
     /// ```ignore
-    /// let zh = engine.translate("Hello world.", &TranslateOptions::default())?;
+    /// let zh = engine.translate("Hello world.", "en", "zh-CN", &TranslateOptions::default())?;
     /// ```
     pub fn translate(
         &mut self,
         text: &str,
+        src: &str,
+        tgt: &str,
         opts: &TranslateOptions,
     ) -> Result<String, EngineError> {
+        if !self.manifest.supports_pair(src, tgt) {
+            return Err(unsupported_pair(&self.manifest, src, tgt));
+        }
         if text.trim().is_empty() {
             return Ok(text.to_string());
         }
         let max_new = opts.max_len.unwrap_or(self.params.max_new).max(1);
         let whole = text.trim();
         if self.count_tokens(whole) <= self.max_input_tokens {
-            return self.translate_one(whole, max_new);
+            return self.translate_one(whole, tgt, max_new);
         }
         let segments = split_sentences(text);
         let limit = self.max_input_tokens;
         let groups = pack_segments(&segments, limit, |t| self.count_tokens(t));
         let mut parts = Vec::with_capacity(groups.len());
         for (group, sep) in groups {
-            parts.push((self.translate_one(&group, max_new)?, sep));
+            parts.push((self.translate_one(&group, tgt, max_new)?, sep));
         }
-        Ok(join_translated(&parts, self.cjk_target))
+        Ok(join_translated(&parts, crate::text::is_cjk_lang(tgt)))
     }
 
     /// 翻译一个请求：编码、贪心解码、还原文本并去首尾空白。
-    fn translate_one(&mut self, text: &str, max_new: usize) -> Result<String, EngineError> {
-        let prompt = self.encode_prompt(text)?;
+    fn translate_one(
+        &mut self,
+        text: &str,
+        tgt: &str,
+        max_new: usize,
+    ) -> Result<String, EngineError> {
+        let prompt = self.encode_prompt(text, tgt)?;
         let params = DecodeParams {
             max_new,
             ..self.params

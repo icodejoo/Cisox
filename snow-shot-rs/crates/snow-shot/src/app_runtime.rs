@@ -58,6 +58,7 @@ use crate::sys_prefs::system_ui_language;
 use crate::translate_flow::TranslateUiState;
 use crate::translate_history::history_path;
 use crate::translate_input::{InputError, translate_text};
+use crate::translate_input_session::initial_warm_config;
 use crate::translate_input_view::{
     TranslateInputView, WINDOW_HEIGHT as TRANSLATE_INPUT_HEIGHT,
     WINDOW_WIDTH as TRANSLATE_INPUT_WIDTH,
@@ -68,8 +69,8 @@ use crate::translate_page_view::{
     WINDOW_WIDTH as TRANSLATE_PAGE_WIDTH,
 };
 use crate::translate_service::{
-    TranslateConfig, TranslateFlowError, TranslateHost, TranslateOutcome, TranslateStage,
-    Translated, run_flow,
+    CancelSlot, TranslateConfig, TranslateFlowError, TranslateHost, TranslateOutcome,
+    TranslateStage, Translated, WarmHandle, run_flow_cancellable,
 };
 use crate::window_geometry::{
     MAIN_MIN_HEIGHT, MAIN_MIN_WIDTH, MAIN_WINDOW_GEOMETRY_KEY, TRANSLATE_MIN_HEIGHT,
@@ -289,6 +290,8 @@ pub enum UiEvent {
     DirectCapture(DirectCaptureRequest),
     /// 打开（或激活）输入框翻译浮窗。
     OpenTranslateInput,
+    /// 有窗口关闭了（主线程）：输入框翻译浮窗据此回收没用上的预热。
+    WindowClosed,
     /// 打开（或激活）翻译页窗口（主窗口导航等入口投递此事件）。
     OpenTranslatePage,
     /// 翻译页请求翻译（在后台线程执行）。
@@ -589,6 +592,11 @@ pub enum UiEvent {
         rgba: Vec<u8>,
         /// 本次翻译的目标语言（会话里选的或设置默认值）。
         target: snow_translate::Lang,
+    },
+    /// 覆盖窗取消了在飞的翻译（浮层被撤销或覆盖窗关闭）。
+    TranslateCancelled {
+        /// 被取消的请求序号。
+        serial: u64,
     },
     /// 翻译流程进入新阶段。
     TranslateProgress {
@@ -1503,6 +1511,8 @@ pub struct AppState {
     settings_view: Option<Entity<SettingsView>>,
     /// 输入框翻译浮窗（若已打开）与其视图。
     translate_input: Option<(ShellWindow, Entity<TranslateInputView>)>,
+    /// 输入框翻译浮窗新建时启动的翻译预热（与浮窗同生命周期；关闭、重开、退出时回收）。
+    translate_input_warm: Option<WarmHandle>,
     /// 翻译页窗口（若已打开）与其视图。
     translate_page: Option<(ShellWindow, Entity<TranslatePageView>)>,
     /// 截图历史后台写入器（启动失败时为 `None`，历史功能降级）。
@@ -1536,6 +1546,8 @@ pub struct AppState {
     ocr: Arc<OcrService>,
     /// 文字翻译宿主（本地 NMT worker / OpenAI 兼容，按配置装配）。
     translator: Arc<TranslateHost>,
+    /// 在飞的那次文字翻译的取消标志（覆盖窗撤销 / 关闭时置位）。
+    translate_cancel: CancelSlot,
     /// 应用数据根目录（OCR 组件下载位置等）。
     data_root: PathBuf,
     /// 截图会话的共享视图（所有显示器上的覆盖窗共用；OCR 结果回写、导出命令用）。
@@ -1630,6 +1642,7 @@ impl AppState {
             pins,
             ocr: Arc::new(OcrService::new(data_root)),
             translator: Arc::clone(&translator),
+            translate_cancel: CancelSlot::default(),
             data_root: data_root.to_path_buf(),
             overlay_view: None,
             overlay_windows: Vec::new(),
@@ -1647,6 +1660,7 @@ impl AppState {
             settings: None,
             settings_view: None,
             translate_input: None,
+            translate_input_warm: None,
             translate_page: None,
             history,
             history_window: None,
@@ -2105,6 +2119,7 @@ fn open_overlays(cx: &mut ShellContext, state: &mut AppState, payloads: Vec<Capt
     let latex_download_inbox = state.inbox.clone();
     let recognition_inbox = state.inbox.clone();
     let translate_inbox = state.inbox.clone();
+    let translate_cancel_inbox = state.inbox.clone();
     let translate_download_inbox = state.inbox.clone();
     let scroll_inbox = state.inbox.clone();
     let scroll_monitors = monitors.clone();
@@ -2172,6 +2187,9 @@ fn open_overlays(cx: &mut ShellContext, state: &mut AppState, payloads: Vec<Capt
                     rgba,
                     target,
                 });
+            })
+            .with_translate_cancel(move |serial| {
+                translate_cancel_inbox.push(UiEvent::TranslateCancelled { serial });
             })
             .with_translate_download(move || {
                 translate_download_inbox.push(UiEvent::TranslateDownloadRequested);
@@ -2798,13 +2816,16 @@ fn spawn_pin_ocr(state: &AppState, id: String, width: u32, height: u32, rgba: Ve
 
 /// 在后台线程执行“识别 + 翻译”（阻塞调用不进主线程），阶段与结果经收件箱回到主线程。
 ///
+/// 同时与 OCR 并行预热本地翻译 worker（见 [`WarmHandle`]），让首次拉起与加载的耗时被 OCR 盖住；
+/// 流程结束（成功、失败、被撤销）后没被用上的预热立刻卸载。
+///
 /// # 参数
-/// - `state`：运行时状态（取 OCR 服务、翻译宿主、配置与收件箱）。
+/// - `state`：运行时状态（取 OCR 服务、翻译宿主、配置与收件箱，登记取消标志）。
 /// - `serial`：请求序号。
 /// - `width` / `height` / `rgba`：选区图像。
 /// - `target`：本次目标语言，覆盖设置里的值（仅本次请求，不写回设置）。
 fn spawn_translate(
-    state: &AppState,
+    state: &mut AppState,
     serial: u64,
     width: u32,
     height: u32,
@@ -2816,10 +2837,16 @@ fn spawn_translate(
         TranslateConfig::from_document(state.config.borrow().document(), &system_ui_language());
     translate_config.target = target;
     let translator = Arc::clone(&state.translator);
+    let cancel = state.translate_cancel.begin(serial);
+    let warm = WarmHandle::start(
+        Arc::clone(&translator),
+        translate_config.clone(),
+        Arc::clone(&cancel),
+    );
     let inbox = state.inbox.clone();
     let spawned = state.spawn_guarded(reason::TRANSLATE_JOB, "snow-translate-request", move || {
         let progress_inbox = inbox.clone();
-        let result = run_flow(
+        let result = run_flow_cancellable(
             || {
                 ocr.recognize(&OcrInput {
                     width,
@@ -2832,7 +2859,9 @@ fn spawn_translate(
             |stage| {
                 progress_inbox.push(UiEvent::TranslateProgress { serial, stage });
             },
+            || cancel.load(std::sync::atomic::Ordering::SeqCst),
         );
+        warm.finish(translator.as_ref());
         inbox.push(UiEvent::TranslateFinished { serial, result });
     });
     if let Err(e) = spawned {
@@ -4121,10 +4150,13 @@ fn open_or_focus_translate_input(cx: &mut ShellContext, state: &mut AppState) {
         cx.activate_window(window);
         return;
     }
+    // 上一个浮窗已关但还没来得及回收的预热，先收掉再建新的
+    release_translate_input_warm(state);
     let prefs = ui_prefs_from_config(&state.config);
     // 目标语言默认取截图翻译设置里的目标语言；源语言默认自动检测
     let translate_config =
         TranslateConfig::from_document(state.config.borrow().document(), &system_ui_language());
+    let warm_config = initial_warm_config(&translate_config);
     let packs =
         crate::translate_input::installed_packs(&state.translator.scan(&translate_config).models);
     let size = LogicalSize::new(TRANSLATE_INPUT_WIDTH, TRANSLATE_INPUT_HEIGHT);
@@ -4149,9 +4181,61 @@ fn open_or_focus_translate_input(cx: &mut ShellContext, state: &mut AppState) {
     }) {
         Ok((window, view)) => {
             state.translate_input = Some((window, view));
+            // 浮窗已建成才预热：用户多半马上输入，首次翻译不必再等进程拉起与模型加载
+            state.translate_input_warm = Some(WarmHandle::start(
+                Arc::clone(&state.translator),
+                warm_config,
+                Arc::new(AtomicBool::new(false)),
+            ));
             tracing::info!("输入框翻译窗口已打开");
         }
         Err(e) => tracing::error!(error = %e, "打开输入框翻译窗口失败"),
+    }
+}
+
+/// 是否该回收输入框翻译浮窗的预热：手上有预热句柄，且浮窗已不在了。
+///
+/// # 参数
+/// - `has_warm`：是否持有预热句柄。
+/// - `window_open`：浮窗是否仍然打开。
+fn should_release_input_warm(has_warm: bool, window_open: bool) -> bool {
+    has_warm && !window_open
+}
+
+/// 回收输入框翻译浮窗的预热：在后台线程里卸载没被真实请求用上的预热（会等预热线程放锁，不能占主线程）。
+///
+/// 被浮窗翻译用过的 worker 不受影响，继续按空闲时间卸载；没有预热时什么都不做。
+/// 线程创建失败时句柄随闭包丢弃，预热线程自己放弃，worker 侧的兜底超时会卸载它。
+///
+/// # 参数
+/// - `state`：运行时状态。
+fn release_translate_input_warm(state: &mut AppState) {
+    let Some(warm) = state.translate_input_warm.take() else {
+        return;
+    };
+    let translator = Arc::clone(&state.translator);
+    let spawned = state.spawn_guarded(
+        reason::TRANSLATE_JOB,
+        "snow-translate-warm-release",
+        move || warm.finish(translator.as_ref()),
+    );
+    if let Err(e) = spawned {
+        tracing::warn!(error = %e, "无法创建预热回收线程，交给兜底超时卸载");
+    }
+}
+
+/// 有窗口关闭后：输入框翻译浮窗不在了就回收它的预热（Esc、关闭按钮、系统关闭等路径都经这里）。
+///
+/// # 参数
+/// - `cx`：外壳上下文。
+/// - `state`：运行时状态。
+fn on_window_closed(cx: &ShellContext, state: &mut AppState) {
+    let window_open = state
+        .translate_input
+        .as_ref()
+        .is_some_and(|(window, _)| cx.is_window_open(window));
+    if should_release_input_warm(state.translate_input_warm.is_some(), window_open) {
+        release_translate_input_warm(state);
     }
 }
 
@@ -5033,6 +5117,7 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
             }
         }
         UiEvent::OpenTranslateInput => open_or_focus_translate_input(cx, state),
+        UiEvent::WindowClosed => on_window_closed(cx, state),
         UiEvent::OpenTranslatePage => open_or_focus_translate_page(cx, state),
         UiEvent::TranslatePageRequested {
             serial,
@@ -5285,6 +5370,11 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
             rgba,
             target,
         } => spawn_translate(state, serial, width, height, rgba, target),
+        UiEvent::TranslateCancelled { serial } => {
+            if state.translate_cancel.cancel(serial) {
+                tracing::info!(serial, "文字翻译已被撤销");
+            }
+        }
         UiEvent::TranslateProgress { serial, stage } => {
             if let Some(view) = &state.overlay_view {
                 view.update(cx.app(), |v, vcx| {
@@ -5429,6 +5519,8 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
 /// - `state`：运行时状态。
 fn shutdown_app(cx: &mut ShellContext, state: &mut AppState) {
     tracing::info!("quit requested, shutting down");
+    // 先丢预热句柄让预热线程放弃，再关翻译宿主（worker 随之整体结束）
+    state.translate_input_warm.take();
     state.ocr.shutdown();
     state.translator.shutdown();
     state.dictation.shutdown();
@@ -5574,6 +5666,15 @@ mod tests {
         );
         assert_eq!(map_ipc_command(&IpcCommand::Quit), Some(UiEvent::Quit));
         assert_eq!(map_ipc_command(&IpcCommand::Custom("x".into())), None);
+    }
+
+    /// 输入框翻译预热回收判定：有句柄且浮窗已关才回收；浮窗还开着或没有句柄都不动。
+    #[test]
+    fn input_warm_released_only_when_window_gone() {
+        assert!(should_release_input_warm(true, false));
+        assert!(!should_release_input_warm(true, true));
+        assert!(!should_release_input_warm(false, false));
+        assert!(!should_release_input_warm(false, true));
     }
 
     /// 设置窗口追加页 / 几何动作映射成对应的主线程事件。

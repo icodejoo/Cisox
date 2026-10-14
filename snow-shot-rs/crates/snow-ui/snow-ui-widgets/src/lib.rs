@@ -7,23 +7,22 @@ mod magnifier;
 mod menu_button;
 mod popconfirm;
 mod result_bar;
+mod submenu_placement;
 mod text_measure;
 mod toolbar;
 mod toolbar_groups;
 
-pub use magnifier::{
-    ColorFormat, Magnifier, MagnifierGrid, calculate_magnifier_placement,
-};
+pub use magnifier::{ColorFormat, Magnifier, MagnifierGrid, calculate_magnifier_placement};
 pub use menu_button::{
     IconMenuButton, MenuEntry, calculate_region_bar_placement, menu_button_menu_height,
     menu_button_size,
 };
-pub use result_bar::{ResultBar, ResultBarItem, calculate_outer_first_bar_placement, result_bar_size};
+pub use popconfirm::{Popconfirm, PopconfirmHandler, PopconfirmPlacement};
+pub use result_bar::{
+    ResultBar, ResultBarItem, calculate_outer_first_bar_placement, result_bar_size,
+};
 pub use text_measure::{
     LABEL_FONT_PX, max_label_width, max_width, menu_button_outer_width, menu_outer_width,
-};
-pub use popconfirm::{
-    Popconfirm, PopconfirmHandler, PopconfirmPlacement,
 };
 pub use toolbar::{
     AnnotationTool, ScreenshotToolbar, ToolbarAction, ToolbarGroups, ToolbarLabel,

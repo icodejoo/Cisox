@@ -1187,6 +1187,13 @@ pub trait OutputSink {
         Err(ERR_TRANSLATE_NOT_WIRED.to_string())
     }
 
+    /// 在飞的文字翻译被取消（浮层被撤销或覆盖窗关闭）时通知后台：放弃识别后的工作并回收预热的翻译进程；
+    /// 默认什么都不做。
+    ///
+    /// # 参数
+    /// - `serial`：被取消的请求序号（即 [`Self::start_translate`] 传过的那个）。
+    fn cancel_translate(&mut self, _serial: u64) {}
+
     /// 触发 onnxruntime 运行时下载（异步）；默认不支持。
     fn start_translate_download(&mut self) -> Result<(), String> {
         Err(ERR_TRANSLATE_DOWNLOAD_NOT_WIRED.to_string())
@@ -1331,6 +1338,8 @@ pub struct SystemOutput {
     on_recognition_window: Option<Box<dyn Fn(crate::recognition_view::RecognitionData)>>,
     /// 文字翻译回调：`(序号, 宽, 高, RGBA, 目标语言)`。
     on_translate: Option<TranslateCallback>,
+    /// 翻译取消回调：参数为被取消的请求序号。
+    on_translate_cancel: Option<Box<dyn Fn(u64)>>,
     /// 翻译运行时下载回调。
     on_translate_download: Option<Box<dyn Fn()>>,
     /// 长截图回调（参数为覆盖窗底图坐标下的选区）。
@@ -1371,6 +1380,7 @@ impl SystemOutput {
             on_latex_download: None,
             on_recognition_window: None,
             on_translate: None,
+            on_translate_cancel: None,
             on_translate_download: None,
             on_scroll: None,
             on_history: None,
@@ -1494,6 +1504,15 @@ impl SystemOutput {
         callback: impl Fn(u64, u32, u32, Vec<u8>, Lang) + 'static,
     ) -> Self {
         self.on_translate = Some(Box::new(callback));
+        self
+    }
+
+    /// 设置翻译取消回调：在飞的翻译被撤销或覆盖窗关闭时触发（回调应只做投递，不阻塞）。
+    ///
+    /// # 参数
+    /// - `callback`：接收被取消的请求序号。
+    pub fn with_translate_cancel(mut self, callback: impl Fn(u64) + 'static) -> Self {
+        self.on_translate_cancel = Some(Box::new(callback));
         self
     }
 
@@ -1763,6 +1782,13 @@ impl OutputSink for SystemOutput {
         invoke_callback(&self.on_translate, ERR_TRANSLATE_NOT_WIRED, |callback| {
             callback(serial, width, height, rgba, target)
         })
+    }
+
+    /// 触发翻译取消回调；未设置回调时什么都不做。
+    fn cancel_translate(&mut self, serial: u64) {
+        if let Some(callback) = &self.on_translate_cancel {
+            callback(serial);
+        }
     }
 
     /// 触发翻译运行时下载回调；未设置回调时报错。
@@ -5193,8 +5219,16 @@ impl ScreenshotOverlayView {
         self.translate = state;
     }
 
-    /// 退出翻译界面（回到框选状态）；翻译仍在进行时，其结果会因序号过期被丢弃。
+    /// 翻译还在进行时通知后台取消（放弃识别后的工作、回收预热的翻译进程）；其它状态什么都不做。
+    fn cancel_running_translate(&mut self) {
+        if matches!(self.translate, TranslateUiState::Running(_)) {
+            self.output.cancel_translate(self.translate_serial);
+        }
+    }
+
+    /// 退出翻译界面（回到框选状态）；翻译仍在进行时通知后台取消，其结果会因序号过期被丢弃。
     fn dismiss_translate(&mut self) {
+        self.cancel_running_translate();
         self.translate_serial += 1;
         self.translate = TranslateUiState::Idle;
         self.link_hover.clear();
@@ -6275,6 +6309,8 @@ impl ScreenshotOverlayView {
                 tracing::warn!(error = %e, "释放标注分块图集失败");
             }
         }
+        // 翻译还没出结果就关窗：别让后台白跑，预热的翻译进程也随之回收
+        self.cancel_running_translate();
         // 截图结束后选区方式回到矩形，下次截图从矩形开始
         if self.region_type != RegionType::Rectangle {
             self.region_type = RegionType::Rectangle;
@@ -8036,6 +8072,8 @@ mod tests {
         translate_targets: Vec<Lang>,
         /// 翻译运行时下载请求次数。
         translate_downloads: u32,
+        /// 收到的翻译取消通知（被取消的请求序号）。
+        translate_cancels: Vec<u64>,
         /// 长截图选区。
         scrolls: Vec<PhysicalRect>,
         /// 打开识别结果窗的次数。
@@ -8198,6 +8236,10 @@ mod tests {
             rec.translates.push((serial, w, h, rgba));
             rec.translate_targets.push(target);
             Ok(())
+        }
+        /// 记录翻译取消通知。
+        fn cancel_translate(&mut self, serial: u64) {
+            self.rec.borrow_mut().translate_cancels.push(serial);
         }
         /// 记录翻译运行时下载请求。
         fn start_translate_download(&mut self) -> Result<(), String> {
@@ -10367,6 +10409,32 @@ mod tests {
         assert!(view.translate_source.is_none(), "失败后副本立即释放");
         view.dismiss_translate();
         assert!(view.translate_source.is_none());
+    }
+
+    /// 翻译进行中撤销 / 关窗才通知后台取消（带在飞的序号）；完成后、空闲时、下载中都不通知。
+    #[test]
+    fn cancelling_running_translate_notifies_background() {
+        let (mut view, rec) = view_with(100, 80, 1.0, false);
+        drag(&mut view, (5, 5), (44, 34));
+        view.cancel_running_translate();
+        assert!(rec.borrow().translate_cancels.is_empty(), "空闲时不通知");
+        view.apply_action(ToolbarAction::Translate);
+        let first = view.translate_serial;
+        view.dismiss_translate();
+        assert_eq!(rec.borrow().translate_cancels, [first]);
+        view.apply_action(ToolbarAction::Translate);
+        let second = view.translate_serial;
+        view.finish_translate(second, Ok(translate_outcome("你好")));
+        view.dismiss_translate();
+        assert_eq!(rec.borrow().translate_cancels, [first], "已出结果不再通知");
+        view.apply_action(ToolbarAction::Translate);
+        let third = view.translate_serial;
+        view.cancel_running_translate();
+        assert_eq!(
+            rec.borrow().translate_cancels,
+            [first, third],
+            "关窗走同一入口"
+        );
     }
 
     /// 三方联动在视图里的滚动：详情展开后悬停识别区，另两方请求被取走（不重复）。

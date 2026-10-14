@@ -21,7 +21,8 @@ use snow_translate::openai::{OpenAiCompatibleConfig, OpenAiEngine};
 use snow_translate::protocol::MAX_BEAMS;
 use snow_translate::router::{PooledEngine, RouteMode, RoutePolicy, RoutedEngine, RoutedSlot};
 use snow_translate::worker::{
-    MemorySnapshot, Timeouts, WORKER_EXE_NAME, WorkerConfig, WorkerEngine,
+    MemorySnapshot, ProcessLauncher, Timeouts, WORKER_EXE_NAME, WorkerConfig, WorkerEngine,
+    WorkerLauncher,
 };
 use snow_translate::{
     Lang, ManifestIssue, ModelScanner, ScanReport, ScannedModel, TranslateError, TranslationEngine,
@@ -30,8 +31,9 @@ use snow_translate::{
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// 配置键：源语言。
 pub const KEY_SOURCE_LANGUAGE: &str = "screenshot_translation/source_language";
@@ -283,6 +285,9 @@ pub trait Translator {
         config: &TranslateConfig,
         texts: &[String],
     ) -> Result<Translated, TranslateError>;
+
+    /// 回收没被真实请求用上的预热（默认什么都不做）；会等进行中的预热结束，应在后台线程里调用。
+    fn release_unused_warm(&self) {}
 }
 
 /// 已装配好的引擎。
@@ -315,6 +320,8 @@ pub struct TranslateHost {
     ort_env: Option<String>,
     /// `SNOW_TRANSLATOR_EXE` 的值。
     exe_env: Option<PathBuf>,
+    /// worker 的拉起方式（生产用子进程，测试注入假 worker）。
+    launcher: Arc<dyn WorkerLauncher>,
 }
 
 /// 本地模型不可用时的技术细节（英文，界面层再套上本地化的引导语）：目录与有问题的清单。
@@ -458,7 +465,15 @@ impl TranslateHost {
             built: Mutex::new(None),
             ort_env,
             exe_env,
+            launcher: Arc::new(ProcessLauncher),
         }
+    }
+
+    /// 换上自定义的 worker 拉起方式（测试注入假 worker）。
+    #[cfg(test)]
+    fn with_launcher(mut self, launcher: Arc<dyn WorkerLauncher>) -> Self {
+        self.launcher = launcher;
+        self
     }
 
     /// 模型根目录（配置为空用默认位置）。
@@ -544,17 +559,20 @@ impl TranslateHost {
             .models
             .iter()
             .map(|model| {
-                let worker = WorkerEngine::new(WorkerConfig {
-                    exe: exe.clone(),
-                    model_dir: model.dir.clone(),
-                    model_id: model.manifest.id.clone(),
-                    pairs: model.manifest.supported_pairs(),
-                    ort_dylib: Some(dylib.clone()),
-                    num_beams: beams,
-                    trim_after_request: true,
-                    idle_timeout: config.idle,
-                    timeouts: Timeouts::default(),
-                });
+                let worker = WorkerEngine::with_launcher(
+                    WorkerConfig {
+                        exe: exe.clone(),
+                        model_dir: model.dir.clone(),
+                        model_id: model.manifest.id.clone(),
+                        pairs: model.manifest.supported_pairs(),
+                        ort_dylib: Some(dylib.clone()),
+                        num_beams: beams,
+                        trim_after_request: true,
+                        idle_timeout: config.idle,
+                        timeouts: Timeouts::default(),
+                    },
+                    Arc::clone(&self.launcher),
+                );
                 let engine: Arc<dyn PooledEngine> = Arc::new(worker);
                 RoutedSlot {
                     manifest: model.manifest.clone(),
@@ -684,6 +702,47 @@ impl TranslateHost {
         self.router().map_or(0, |r| r.launch_total())
     }
 
+    /// 预热本地翻译 worker：不看 OCR 文本就能定包时，提前拉起进程并加载模型（与 OCR 并行）。
+    ///
+    /// 只在本地后端预热；选包规则见 [`snow_translate::router::warm_target`]（能确定用哪个包就预热，
+    /// 源语言为自动时也一样，因为预热只加载模型、语言对随翻译请求指定；选不出包就不猜）。
+    /// 装配或加载失败只记日志，真实请求会走正常路径并给出明确错误；
+    /// 猜错包不会出错（真实请求按实际语种选包，旧包按常驻上限被换掉）。
+    /// 阻塞调用，应在后台线程里执行；同一个包上的真实请求会排在预热后面，不会重复拉进程或重复加载。
+    ///
+    /// # 参数
+    /// - `config`：本次翻译配置。
+    /// - `abort`：放弃判定；为真时尽早停手，预热完成后才发现被放弃则立刻回收。
+    ///
+    /// # 返回
+    /// 预热成功的包 ID；没预热（非本地后端、选不出包、被放弃、失败）返回 `None`。
+    ///
+    /// ```ignore
+    /// let warmed = host.warm(&config, &|| cancelled.load(Ordering::Relaxed));
+    /// ```
+    pub fn warm(&self, config: &TranslateConfig, abort: &dyn Fn() -> bool) -> Option<String> {
+        if config.backend != Backend::Local || abort() {
+            return None;
+        }
+        if let Err(error) = self.prepare(config) {
+            tracing::debug!(%error, "翻译预热跳过：装配失败");
+            return None;
+        }
+        let router = self.router()?;
+        let warmed = match router.warm(config.source, config.target, abort) {
+            Ok(warmed) => warmed,
+            Err(error) => {
+                tracing::debug!(%error, "翻译预热失败，真实请求将走正常路径");
+                None
+            }
+        };
+        if abort() {
+            router.cancel_warm();
+            return None;
+        }
+        warmed
+    }
+
     /// 结束全部 worker 并丢弃引擎（应用退出时调用）。
     pub fn shutdown(&self) {
         let taken = self
@@ -719,6 +778,116 @@ impl Translator for TranslateHost {
             None => label,
         };
         Ok(Translated { texts, label })
+    }
+
+    /// 没被用上的预热立刻卸载（用上了的不动）。
+    fn release_unused_warm(&self) {
+        if let Some(router) = self.router() {
+            router.cancel_warm();
+        }
+    }
+}
+
+/// 一次翻译请求的预热句柄：与 OCR 并行预热本地翻译 worker，流程结束后回收没用上的预热。
+pub struct WarmHandle {
+    /// 流程已结束（或取消）：预热线程据此放弃。
+    done: Arc<AtomicBool>,
+}
+
+impl WarmHandle {
+    /// 在后台线程开始预热（非本地后端不开线程）。
+    ///
+    /// # 参数
+    /// - `host`：翻译宿主。
+    /// - `config`：本次翻译配置。
+    /// - `cancel`：用户取消标志；为真时预热放弃并回收。
+    ///
+    /// ```ignore
+    /// let warm = WarmHandle::start(Arc::clone(&host), config.clone(), Arc::clone(&cancel));
+    /// // ……跑完整个流程后：
+    /// warm.finish(host.as_ref());
+    /// ```
+    pub fn start(
+        host: Arc<TranslateHost>,
+        config: TranslateConfig,
+        cancel: Arc<AtomicBool>,
+    ) -> Self {
+        let done = Arc::new(AtomicBool::new(false));
+        if config.backend == Backend::Local {
+            let finished = Arc::clone(&done);
+            let spawned = std::thread::Builder::new()
+                .name("snow-translate-warm".into())
+                .spawn(move || {
+                    let started = Instant::now();
+                    let abort = || finished.load(Ordering::SeqCst) || cancel.load(Ordering::SeqCst);
+                    match host.warm(&config, &abort) {
+                        Some(model) => tracing::info!(
+                            model,
+                            warm_ms = started.elapsed().as_millis() as u64,
+                            "翻译模型已预热"
+                        ),
+                        None => tracing::debug!("本次未预热翻译模型"),
+                    }
+                });
+            if let Err(error) = spawned {
+                tracing::warn!(%error, "无法创建翻译预热线程，跳过预热");
+            }
+        }
+        Self { done }
+    }
+
+    /// 流程结束（成功、失败或取消）：让还没开始的预热放弃，并把已预热却没用上的 worker 立刻卸载。
+    ///
+    /// 会等进行中的预热释放引擎，应在后台线程里调用。
+    ///
+    /// # 参数
+    /// - `translator`：本次用的翻译后端。
+    pub fn finish(&self, translator: &dyn Translator) {
+        self.done.store(true, Ordering::SeqCst);
+        translator.release_unused_warm();
+    }
+}
+
+impl Drop for WarmHandle {
+    /// 句柄被丢弃（含作业线程没起来、panic）时至少让预热线程放弃，免得它白占内存。
+    fn drop(&mut self) {
+        self.done.store(true, Ordering::SeqCst);
+    }
+}
+
+/// 在飞的那一次翻译请求的取消标志（同一时刻界面只有一次翻译，所以只记最近一次）。
+#[derive(Default)]
+pub struct CancelSlot {
+    /// 最近一次请求的序号与取消标志。
+    current: Option<(u64, Arc<AtomicBool>)>,
+}
+
+impl CancelSlot {
+    /// 登记新请求，返回它的取消标志（取代上一次登记）。
+    ///
+    /// # 参数
+    /// - `serial`：请求序号。
+    pub fn begin(&mut self, serial: u64) -> Arc<AtomicBool> {
+        let flag = Arc::new(AtomicBool::new(false));
+        self.current = Some((serial, Arc::clone(&flag)));
+        flag
+    }
+
+    /// 取消指定序号的请求；序号不是最近一次登记的（已被新请求取代）就忽略。
+    ///
+    /// # 参数
+    /// - `serial`：被取消的请求序号。
+    ///
+    /// # 返回
+    /// 是否命中并置位。
+    pub fn cancel(&mut self, serial: u64) -> bool {
+        match &self.current {
+            Some((current, flag)) if *current == serial => {
+                flag.store(true, Ordering::SeqCst);
+                true
+            }
+            _ => false,
+        }
     }
 }
 
@@ -772,6 +941,8 @@ pub enum TranslateFlowError {
     AlreadyTarget(Lang),
     /// 翻译失败。
     Translate(TranslateError),
+    /// 用户在识别期间撤销了翻译（结果不会展示）。
+    Cancelled,
 }
 
 /// 文本里汉字占字母类字符的比例是否已过半（用于识别“原文已是中文”）。
@@ -812,10 +983,35 @@ pub fn run_flow(
     recognize: impl FnOnce() -> Result<OcrResult, OcrError>,
     translator: &dyn Translator,
     config: &TranslateConfig,
+    on_stage: impl FnMut(TranslateStage),
+) -> Result<TranslateOutcome, TranslateFlowError> {
+    run_flow_cancellable(recognize, translator, config, on_stage, || false)
+}
+
+/// 同 [`run_flow`]，多一个取消判定：识别完成后若已被取消就不再翻译，返回 `Cancelled`。
+///
+/// # 参数
+/// - `recognize` / `translator` / `config` / `on_stage`：同 [`run_flow`]。
+/// - `cancelled`：取消判定（识别结束后检查一次）。
+///
+/// # 返回
+/// 同 [`run_flow`]；被取消返回 `Cancelled`（不调用翻译后端）。
+///
+/// ```ignore
+/// let outcome = run_flow_cancellable(|| ocr.recognize_rgba(&cfg, w, h, &rgba), &host, &tcfg, |_| {}, || flag.load(Ordering::Relaxed));
+/// ```
+pub fn run_flow_cancellable(
+    recognize: impl FnOnce() -> Result<OcrResult, OcrError>,
+    translator: &dyn Translator,
+    config: &TranslateConfig,
     mut on_stage: impl FnMut(TranslateStage),
+    cancelled: impl Fn() -> bool,
 ) -> Result<TranslateOutcome, TranslateFlowError> {
     on_stage(TranslateStage::Recognizing);
     let ocr = recognize().map_err(TranslateFlowError::Ocr)?;
+    if cancelled() {
+        return Err(TranslateFlowError::Cancelled);
+    }
     let paragraphs_with_indices = paragraphs_from_boxes(&ocr.boxes, config.layout);
     if paragraphs_with_indices.is_empty() {
         return Err(TranslateFlowError::NoText);
@@ -1532,6 +1728,426 @@ mod tests {
             run_flow(|| Ok(ocr(&[("Hello", 0)])), &failing, &cfg, |_| {}).unwrap_err(),
             TranslateFlowError::Translate(TranslateError::Timeout)
         );
+    }
+
+    /// 假 worker 的可观察状态。
+    #[derive(Default)]
+    struct FakeWorkerState {
+        /// 待接收的行。
+        queue: std::collections::VecDeque<String>,
+        /// 收到过的命令。
+        sent: Vec<snow_translate::protocol::Command>,
+        /// 通道已关闭（进程退出）。
+        closed: bool,
+        /// 是否收到过 unload。
+        unloaded: bool,
+    }
+
+    /// 假 worker 通道：同步应答，不开线程。
+    struct FakeWorkerTransport {
+        /// 共享状态。
+        state: Arc<Mutex<FakeWorkerState>>,
+        /// 处理到 `Load` 时置位的标志（测试里模拟“加载期间用户取消”）。
+        load_flag: Option<Arc<AtomicBool>>,
+    }
+
+    impl snow_translate::worker::Transport for FakeWorkerTransport {
+        fn send(&mut self, line: &str) -> std::io::Result<()> {
+            use snow_translate::protocol::{Command, Event};
+            let command: Command = serde_json::from_str(line).map_err(std::io::Error::other)?;
+            let mut state = self.state.lock().unwrap();
+            state.sent.push(command.clone());
+            let event = match command {
+                Command::Load { .. } => {
+                    if let Some(flag) = &self.load_flag {
+                        flag.store(true, Ordering::SeqCst);
+                    }
+                    Some(Event::Loaded {
+                        model_id: "fake".into(),
+                        load_ms: 1,
+                        mem_bytes: 10,
+                    })
+                }
+                Command::Translate { id, texts, .. } => Some(Event::Result {
+                    id,
+                    texts: texts.iter().map(|t| format!("译:{t}")).collect(),
+                    elapsed_ms: 1,
+                }),
+                Command::Ping => Some(Event::Pong {
+                    loaded: true,
+                    mem_bytes: 5,
+                    peak_bytes: 9,
+                }),
+                Command::Unload => {
+                    state.unloaded = true;
+                    state.closed = true;
+                    Some(Event::Unloaded)
+                }
+            };
+            if let Some(event) = event {
+                state
+                    .queue
+                    .push_back(serde_json::to_string(&event).unwrap());
+            }
+            Ok(())
+        }
+
+        fn recv(&mut self, timeout: Duration) -> snow_translate::worker::Recv {
+            use snow_translate::worker::Recv;
+            let mut state = self.state.lock().unwrap();
+            if let Some(line) = state.queue.pop_front() {
+                return Recv::Line(line);
+            }
+            if state.closed {
+                return Recv::Closed;
+            }
+            drop(state);
+            std::thread::sleep(timeout.min(Duration::from_millis(10)));
+            Recv::Timeout
+        }
+
+        fn diagnostics(&mut self) -> String {
+            "fake exit".into()
+        }
+
+        fn terminate(&mut self) {
+            self.state.lock().unwrap().closed = true;
+        }
+
+        fn wait_exit(&mut self, _timeout: Duration) -> bool {
+            self.state.lock().unwrap().closed
+        }
+    }
+
+    /// 假拉起方式：每次拉起建一个假 worker 并记下它的状态。
+    #[derive(Default)]
+    struct FakeWorkers {
+        /// 已拉起会话的状态。
+        states: Mutex<Vec<Arc<Mutex<FakeWorkerState>>>>,
+        /// 传给每个假通道的 `Load` 标志。
+        load_flag: Option<Arc<AtomicBool>>,
+    }
+
+    impl FakeWorkers {
+        /// 拉起次数。
+        fn launches(&self) -> usize {
+            self.states.lock().unwrap().len()
+        }
+
+        /// 全部会话收到的 `Load` 条数。
+        fn loads(&self) -> usize {
+            self.states
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|s| {
+                    s.lock()
+                        .unwrap()
+                        .sent
+                        .iter()
+                        .filter(|c| matches!(c, snow_translate::protocol::Command::Load { .. }))
+                        .count()
+                })
+                .sum()
+        }
+
+        /// 第 n 次拉起的会话是否收到过 unload。
+        fn unloaded(&self, n: usize) -> bool {
+            self.states.lock().unwrap()[n].lock().unwrap().unloaded
+        }
+    }
+
+    impl WorkerLauncher for FakeWorkers {
+        fn launch(
+            &self,
+            _config: &WorkerConfig,
+        ) -> Result<Box<dyn snow_translate::worker::Transport>, TranslateError> {
+            let mut state = FakeWorkerState::default();
+            let ready = snow_translate::protocol::Event::Ready {
+                protocol: snow_translate::protocol::PROTOCOL_VERSION,
+                pid: 4242,
+            };
+            state
+                .queue
+                .push_back(serde_json::to_string(&ready).unwrap());
+            let state = Arc::new(Mutex::new(state));
+            self.states.lock().unwrap().push(Arc::clone(&state));
+            Ok(Box::new(FakeWorkerTransport {
+                state,
+                load_flag: self.load_flag.clone(),
+            }))
+        }
+    }
+
+    /// 造带假 worker 的宿主：只有一个英→中专用包，返回宿主、假拉起器与模型根。
+    fn warm_host(
+        root: &Path,
+        load_flag: Option<Arc<AtomicBool>>,
+    ) -> (Arc<TranslateHost>, Arc<FakeWorkers>) {
+        let (host, models) = host_with_files(root);
+        write_model(&models, "z-opus", r#"[["en","zh-CN"]]"#);
+        let workers = Arc::new(FakeWorkers {
+            load_flag,
+            ..FakeWorkers::default()
+        });
+        let host = host.with_launcher(workers.clone());
+        (Arc::new(host), workers)
+    }
+
+    /// 默认目标简体中文、源语言自动的本地配置（装一个英→中包时目标语言能唯一定包）。
+    fn warm_config() -> TranslateConfig {
+        let mut cfg = config();
+        cfg.target = Lang::ZhHans;
+        cfg
+    }
+
+    /// 轮询等条件成立（最多 3 秒）。
+    fn wait_until(mut condition: impl FnMut() -> bool) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline {
+            if condition() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        condition()
+    }
+
+    /// 预热：能确定用哪个包时提前拉起并加载；随后的真实翻译不再拉起也不再加载，且不会被回收。
+    #[test]
+    fn warm_preloads_and_translate_reuses_worker() {
+        let root = temp_root("warm-reuse");
+        let (host, workers) = warm_host(&root, None);
+        let cfg = warm_config();
+        assert_eq!(host.warm(&cfg, &|| false), Some("z-opus".to_string()));
+        assert_eq!((workers.launches(), workers.loads()), (1, 1));
+        assert!(host.worker_running());
+        let out = host.translate(&cfg, &["Hello".to_string()]).expect("翻译");
+        assert_eq!(out.texts, ["译:Hello"]);
+        assert_eq!(out.label, "Model z-opus");
+        assert_eq!(
+            (workers.launches(), workers.loads()),
+            (1, 1),
+            "沿用预热的进程"
+        );
+        host.release_unused_warm();
+        assert!(host.worker_running(), "用上了就不回收");
+        host.shutdown();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 预热后从没被用上：release_unused_warm 立刻卸载，进程退出。
+    #[test]
+    fn release_unused_warm_unloads_worker() {
+        let root = temp_root("warm-release");
+        let (host, workers) = warm_host(&root, None);
+        host.warm(&warm_config(), &|| false);
+        assert!(host.worker_running());
+        host.release_unused_warm();
+        assert!(!host.worker_running());
+        assert!(workers.unloaded(0));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 不该预热的情况都不拉进程：OpenAI 后端、没有模型、已放弃。
+    #[test]
+    fn warm_skips_when_not_applicable() {
+        let root = temp_root("warm-skip");
+        let (host, workers) = warm_host(&root, None);
+        let mut cfg = warm_config();
+        assert_eq!(host.warm(&cfg, &|| true), None, "已放弃");
+        cfg.backend = Backend::OpenAi;
+        assert_eq!(host.warm(&cfg, &|| false), None, "非本地后端");
+        let empty_root = temp_root("warm-skip-empty");
+        let (empty_host, empty_workers) = warm_host(&empty_root, None);
+        std::fs::remove_dir_all(empty_host.models_dir(&warm_config())).expect("清空模型");
+        assert_eq!(empty_host.warm(&warm_config(), &|| false), None, "没有模型");
+        assert_eq!((workers.launches(), empty_workers.launches()), (0, 0));
+        for dir in [root, empty_root] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    /// 通用多语包 + 自动源语言（语言对不唯一）：照样预热该包；随后换语言对翻译也不重新加载。
+    #[test]
+    fn warm_auto_source_with_general_pack() {
+        let root = temp_root("warm-general");
+        let (host, models) = host_with_files(&root);
+        write_general_model(&models, "a-nllb");
+        let workers = Arc::new(FakeWorkers::default());
+        let host = host.with_launcher(workers.clone());
+        assert_eq!(
+            host.warm(&warm_config(), &|| false),
+            Some("a-nllb".to_string())
+        );
+        assert_eq!((workers.launches(), workers.loads()), (1, 1));
+        let mut cfg = warm_config();
+        cfg.source = Lang::En;
+        host.translate(&cfg, &["Hello".to_string()]).expect("翻译");
+        cfg.source = Lang::Ja;
+        host.translate(&cfg, &["こんにちは".to_string()])
+            .expect("换语言对翻译");
+        assert_eq!(
+            (workers.launches(), workers.loads()),
+            (1, 1),
+            "换语言对不重新拉起也不重新加载"
+        );
+        host.shutdown();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 源语言固定时按配置定包；目标语言没有任何包覆盖时不预热。
+    #[test]
+    fn warm_respects_fixed_source_and_uncovered_target() {
+        let root = temp_root("warm-fixed");
+        let (host, workers) = warm_host(&root, None);
+        let mut cfg = warm_config();
+        cfg.source = Lang::En;
+        assert_eq!(host.warm(&cfg, &|| false), Some("z-opus".to_string()));
+        assert_eq!(workers.launches(), 1);
+        cfg.target = Lang::Ja;
+        assert_eq!(host.warm(&cfg, &|| false), None, "没有包覆盖日语");
+        assert_eq!(workers.launches(), 1);
+        host.shutdown();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 加载期间被放弃：预热完成后立刻发现并卸载，不留进程。
+    #[test]
+    fn warm_aborted_during_load_is_recycled() {
+        let root = temp_root("warm-abort");
+        let flag = Arc::new(AtomicBool::new(false));
+        let (host, workers) = warm_host(&root, Some(Arc::clone(&flag)));
+        let abort_flag = Arc::clone(&flag);
+        let warmed = host.warm(&warm_config(), &|| abort_flag.load(Ordering::SeqCst));
+        assert_eq!(warmed, None);
+        assert!(!host.worker_running());
+        assert!(workers.unloaded(0));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// WarmHandle：与流程并行预热；流程结束时没用上的预热被卸载。
+    #[test]
+    fn warm_handle_recycles_unused_warm_on_finish() {
+        let root = temp_root("warm-handle");
+        let (host, workers) = warm_host(&root, None);
+        let handle = WarmHandle::start(
+            Arc::clone(&host),
+            warm_config(),
+            Arc::new(AtomicBool::new(false)),
+        );
+        assert!(wait_until(|| host.worker_running()), "应在后台预热起来");
+        handle.finish(host.as_ref());
+        assert!(!host.worker_running());
+        assert!(workers.unloaded(0));
+        assert_eq!((workers.launches(), workers.loads()), (1, 1));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// WarmHandle：预热被真实翻译用上后，流程结束不回收。
+    #[test]
+    fn warm_handle_keeps_worker_that_was_used() {
+        let root = temp_root("warm-handle-used");
+        let (host, workers) = warm_host(&root, None);
+        let cfg = warm_config();
+        let handle = WarmHandle::start(
+            Arc::clone(&host),
+            cfg.clone(),
+            Arc::new(AtomicBool::new(false)),
+        );
+        // 翻译与预热并发：谁先到都只有一次拉起、一次加载
+        host.translate(&cfg, &["Hi".to_string()]).expect("翻译");
+        handle.finish(host.as_ref());
+        assert!(host.worker_running());
+        assert_eq!((workers.launches(), workers.loads()), (1, 1));
+        host.shutdown();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// WarmHandle：已取消的请求不预热；流程一结束就 finish，不论预热线程跑到哪一步都不会留下进程。
+    #[test]
+    fn warm_handle_cancelled_or_finished_early_leaves_nothing() {
+        let root = temp_root("warm-handle-cancel");
+        let (host, workers) = warm_host(&root, None);
+        let cancelled = WarmHandle::start(
+            Arc::clone(&host),
+            warm_config(),
+            Arc::new(AtomicBool::new(true)),
+        );
+        cancelled.finish(host.as_ref());
+        let early = WarmHandle::start(
+            Arc::clone(&host),
+            warm_config(),
+            Arc::new(AtomicBool::new(false)),
+        );
+        early.finish(host.as_ref());
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(!host.worker_running());
+        assert!(workers.launches() <= 1, "最多因抢在 finish 前而拉起一次");
+        let dropped = WarmHandle::start(
+            Arc::clone(&host),
+            warm_config(),
+            Arc::new(AtomicBool::new(true)),
+        );
+        drop(dropped);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 非本地后端不开预热线程。
+    #[test]
+    fn warm_handle_skips_openai_backend() {
+        let root = temp_root("warm-handle-openai");
+        let (host, workers) = warm_host(&root, None);
+        let mut cfg = warm_config();
+        cfg.backend = Backend::OpenAi;
+        let handle = WarmHandle::start(Arc::clone(&host), cfg, Arc::new(AtomicBool::new(false)));
+        handle.finish(host.as_ref());
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(workers.launches(), 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 取消标志登记：只认最近一次登记的序号；序号对不上（已被新请求取代）的取消被忽略。
+    #[test]
+    fn cancel_slot_matches_latest_serial_only() {
+        let mut slot = CancelSlot::default();
+        assert!(!slot.cancel(1), "没登记过");
+        let first = slot.begin(1);
+        let second = slot.begin(2);
+        assert!(!slot.cancel(1), "1 已被 2 取代");
+        assert!(!first.load(Ordering::SeqCst) && !second.load(Ordering::SeqCst));
+        assert!(slot.cancel(2));
+        assert!(second.load(Ordering::SeqCst) && !first.load(Ordering::SeqCst));
+    }
+
+    /// 取消的流程：识别结束后发现已取消就不调用翻译，返回 Cancelled；未取消照常。
+    #[test]
+    fn flow_cancelled_after_recognition_skips_translation() {
+        let translator = FakeTranslator {
+            seen: Mutex::new(Vec::new()),
+            fail: None,
+        };
+        let cfg = warm_config();
+        let mut stages = Vec::new();
+        let err = run_flow_cancellable(
+            || Ok(ocr(&[("Hello", 0)])),
+            &translator,
+            &cfg,
+            |s| stages.push(s),
+            || true,
+        )
+        .unwrap_err();
+        assert_eq!(err, TranslateFlowError::Cancelled);
+        assert_eq!(stages, [TranslateStage::Recognizing]);
+        assert!(translator.seen.lock().unwrap().is_empty());
+        let ok = run_flow_cancellable(
+            || Ok(ocr(&[("Hello", 0)])),
+            &translator,
+            &cfg,
+            |_| {},
+            || false,
+        );
+        assert!(ok.is_ok());
     }
 
     /// 探针（环境变量齐全才运行）：真实模型下的拉起 / 首次加载 / 单句延迟 / 翻译期间内存 / 空闲卸载后的回收。

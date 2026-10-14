@@ -8,6 +8,8 @@ translate-flow-ocr-hint = { $message } Click the "OCR" button and press D to dow
 
 translate-flow-no-text = No translatable text was found.
 
+translate-flow-cancelled = Translation was cancelled.
+
 translate-flow-already-target = The text is already in { $lang }, so there is nothing to translate (you can change the target language in Settings).
 
 translate-flow-done-copied = Translated; the translation was copied to the clipboard

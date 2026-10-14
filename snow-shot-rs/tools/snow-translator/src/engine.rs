@@ -11,10 +11,11 @@
 //! 译文解码前剔除特殊符号与语言码。
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::fmt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use ort::ep;
 use ort::session::{
@@ -101,7 +102,6 @@ impl From<ManifestError> for EngineError {
         match e {
             ManifestError::Missing(m) => Self::new(ErrorKind::ModelMissing, m),
             ManifestError::Invalid(m) => Self::new(ErrorKind::ManifestInvalid, m),
-            ManifestError::Checksum(m) => Self::new(ErrorKind::ChecksumMismatch, m),
         }
     }
 }
@@ -561,7 +561,64 @@ pub fn resolve_gen_params(manifest: &Manifest, dir: &Path) -> Result<GenParams, 
     })
 }
 
-/// 已加载的翻译引擎。
+/// 一个语言对的解码计划：语言 token 前缀、M2M100 配置与 CJK 标记。
+///
+/// 由 [`build_plan`] 按请求计算（很便宜），[`Engine`] 按语言对缓存；会话本身与语言无关。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LangPlan {
+    /// 每个源文本片段前置的语言 token id（Marian：目标语言；M2M100：源语言）。
+    prefix_ids: Vec<u32>,
+    /// M2M100 族的语言配置，`None` 表示 Marian。
+    m2m: Option<M2mConfig>,
+    /// 目标语言是否为 CJK。
+    cjk_target: bool,
+}
+
+/// 计算一个语言对的解码计划。
+///
+/// # 参数
+/// - `manifest`：模型清单。
+/// - `tokenizer`：分词器（取语言 token 的 id）。
+/// - `src`/`tgt`：语言对（应用侧写法）。
+///
+/// # 返回
+/// 清单不支持该语言对返回 `UnsupportedPair`，词表缺语言 token 返回 `ManifestInvalid`。
+///
+/// # 示例
+/// ```ignore
+/// let plan = build_plan(&manifest, &tokenizer, "en", "zh-CN")?;
+/// ```
+pub fn build_plan(
+    manifest: &Manifest,
+    tokenizer: &Tokenizer,
+    src: &str,
+    tgt: &str,
+) -> Result<LangPlan, EngineError> {
+    if !manifest.supports_pair(src, tgt) {
+        return Err(unsupported_pair(manifest, src, tgt));
+    }
+    let (prefix_ids, m2m) = if manifest.is_m2m100() {
+        let (prefix, cfg) = resolve_m2m_langs(manifest, tokenizer, src, tgt)?;
+        (prefix, Some(cfg))
+    } else {
+        (resolve_prefix_ids(manifest, tokenizer, tgt)?, None)
+    };
+    Ok(LangPlan {
+        prefix_ids,
+        m2m,
+        cjk_target: is_cjk_lang(tgt),
+    })
+}
+
+/// 构造“模型不支持该语言对”的错误（引擎与对话式引擎共用措辞）。
+pub(crate) fn unsupported_pair(manifest: &Manifest, src: &str, tgt: &str) -> EngineError {
+    EngineError::new(
+        ErrorKind::UnsupportedPair,
+        format!("model `{}` does not support {src} -> {tgt}", manifest.id),
+    )
+}
+
+/// 已加载的翻译引擎（与语言对无关，语言对随每次翻译指定）。
 pub struct Engine {
     /// 编码器会话。
     encoder: Session,
@@ -571,10 +628,10 @@ pub struct Engine {
     tokenizer: Tokenizer,
     /// 解码参数。
     gen_params: GenParams,
-    /// 每个源文本片段前置的语言 token id（Marian：目标语言；M2M100：源语言）。
-    prefix_ids: Vec<u32>,
-    /// M2M100 族的语言配置，`None` 表示 Marian。
-    m2m: Option<M2mConfig>,
+    /// 模型清单（按请求解析语言对时用）。
+    manifest: Manifest,
+    /// 已解析的语言对计划缓存（键为小写 `(src, tgt)`；只缓存清单支持的语言对，数量有界）。
+    plans: HashMap<(String, String), Arc<LangPlan>>,
     /// 解码器的 `past_key_values.*` 输入名（保持模型顺序）。
     past_names: Vec<String>,
     /// KV 头数。
@@ -585,8 +642,6 @@ pub struct Engine {
     encoder_takes_mask: bool,
     /// 最大输入 token 数。
     max_input_tokens: usize,
-    /// 目标语言是否为 CJK。
-    cjk_target: bool,
     /// 模型 ID。
     model_id: String,
     /// 编码器隐层维度（从解码器输入形状读出，用于收缩内存的空跑）。
@@ -745,38 +800,29 @@ fn store_present(
 }
 
 impl Engine {
-    /// 加载模型并做自检。
+    /// 加载模型并做自检；会话只建一次，之后任意语言对都用同一个引擎。
     ///
     /// # 参数
     /// - `dir`：模型目录（含 `model.json`）。
-    /// - `src`/`tgt`：语言对。
+    /// - `pair`：可选的 `(src, tgt)`，给了就先校验清单支持它（早失败）并预解析其计划；`None` 只加载模型。
     ///
     /// # 返回
     /// 就绪的引擎；缺文件/清单非法/不支持的语言对/ORT 失败/OOM 均返回带类别的错误。
     ///
     /// # 示例
     /// ```ignore
-    /// let mut engine = Engine::load(Path::new("D:/models/opus-mt-en-zh"), "en", "zh-CN")?;
+    /// let mut engine = Engine::load(Path::new("D:/models/opus-mt-en-zh"), Some(("en", "zh-CN")))?;
     /// ```
-    pub fn load(dir: &Path, src: &str, tgt: &str) -> Result<Self, EngineError> {
+    pub fn load(dir: &Path, pair: Option<(&str, &str)>) -> Result<Self, EngineError> {
         let manifest = Manifest::load(dir)?;
-        if !manifest.supports_pair(src, tgt) {
-            return Err(EngineError::new(
-                ErrorKind::UnsupportedPair,
-                format!("model `{}` does not support {src} -> {tgt}", manifest.id),
-            ));
+        if let Some((src, tgt)) = pair
+            && !manifest.supports_pair(src, tgt)
+        {
+            return Err(unsupported_pair(&manifest, src, tgt));
         }
-        // 先校验文件再加载：流式读取，不额外占内存
-        manifest.verify_checksums(dir)?;
         init_runtime()?;
         let gen_params = resolve_gen_params(&manifest, dir)?;
         let tokenizer = load_tokenizer(&manifest.resolve_file(dir, FILE_TOKENIZER)?)?;
-        let (prefix_ids, m2m) = if manifest.is_m2m100() {
-            let (prefix, cfg) = resolve_m2m_langs(&manifest, &tokenizer, src, tgt)?;
-            (prefix, Some(cfg))
-        } else {
-            (resolve_prefix_ids(&manifest, &tokenizer, tgt)?, None)
-        };
         let encoder = build_session(
             &manifest.resolve_file(dir, FILE_ENCODER)?,
             &manifest.execution,
@@ -831,25 +877,41 @@ impl Engine {
             .iter()
             .any(|o| o.name() == "attention_mask");
 
-        let engine = Self {
+        let mut engine = Self {
             encoder,
             decoder,
             tokenizer,
             gen_params,
-            prefix_ids,
-            m2m,
+            max_input_tokens: manifest.max_input_tokens,
+            model_id: manifest.id.clone(),
+            trim_after_request: manifest.execution.trim_after_request,
+            manifest,
+            plans: HashMap::new(),
             past_names,
             kv_heads,
             kv_head_dim,
             encoder_takes_mask,
-            max_input_tokens: manifest.max_input_tokens,
-            cjk_target: is_cjk_lang(tgt),
-            model_id: manifest.id.clone(),
             hidden_dim,
-            trim_after_request: manifest.execution.trim_after_request,
         };
         engine.self_check()?;
+        if let Some((src, tgt)) = pair {
+            // 带了语言对就提前解析（词表缺语言 token 等问题在加载时暴露）
+            engine.plan_for(src, tgt)?;
+        }
         Ok(engine)
+    }
+
+    /// 取（必要时计算并缓存）一个语言对的解码计划。
+    ///
+    /// 只有清单支持的语言对才会进缓存，所以缓存大小有界。
+    fn plan_for(&mut self, src: &str, tgt: &str) -> Result<Arc<LangPlan>, EngineError> {
+        let key = (src.to_ascii_lowercase(), tgt.to_ascii_lowercase());
+        if let Some(plan) = self.plans.get(&key) {
+            return Ok(Arc::clone(plan));
+        }
+        let plan = Arc::new(build_plan(&self.manifest, &self.tokenizer, src, tgt)?);
+        self.plans.insert(key, Arc::clone(&plan));
+        Ok(plan)
     }
 
     /// 模型 ID。
@@ -947,21 +1009,26 @@ impl Engine {
     ///
     /// # 参数
     /// - `text`：原文，可含多句与换行。
+    /// - `src`/`tgt`：本次的语言对（应用侧写法）。
     /// - `opts`：最大生成长度与束宽（`None` 取模型缺省）。
     ///
     /// # 返回
-    /// 译文；空白文本原样返回。束宽越界返回 `BadRequest`，推理失败返回 `DecodeFailed`/`OutOfMemory`。
+    /// 译文；空白文本原样返回。束宽越界返回 `BadRequest`，清单不支持该语言对返回 `UnsupportedPair`，
+    /// 推理失败返回 `DecodeFailed`/`OutOfMemory`。
     ///
     /// # 示例
     /// ```ignore
-    /// let zh = engine.translate("Hello world. How are you?", &TranslateOptions::default())?;
+    /// let zh = engine.translate("Hello world. How are you?", "en", "zh-CN", &TranslateOptions::default())?;
     /// ```
     pub fn translate(
         &mut self,
         text: &str,
+        src: &str,
+        tgt: &str,
         opts: &TranslateOptions,
     ) -> Result<String, EngineError> {
         let beams = resolve_beams(opts.num_beams, self.gen_params.num_beams)?;
+        let plan = self.plan_for(src, tgt)?;
         let segments = split_sentences(text);
         if segments.is_empty() {
             return Ok(text.to_string());
@@ -971,14 +1038,14 @@ impl Engine {
         // 全角标点后处理在片段间共享引号计数，跨句的引号才能成对
         let mut quotes = 0usize;
         for seg in segments {
-            let translated = self.translate_segment(&seg.text, cap, beams)?;
-            let translated = match &self.m2m {
+            let translated = self.translate_segment(&seg.text, cap, beams, &plan)?;
+            let translated = match &plan.m2m {
                 Some(cfg) => postprocess_m2m(&translated, cfg, &mut quotes),
                 None => translated,
             };
             parts.push((translated, seg.sep));
         }
-        Ok(join_translated(&parts, self.cjk_target))
+        Ok(join_translated(&parts, plan.cjk_target))
     }
 
     /// 翻译一个句级片段；超过输入上限时按 token 切块分别翻译。
@@ -987,6 +1054,7 @@ impl Engine {
         text: &str,
         cap: usize,
         beams: usize,
+        plan: &LangPlan,
     ) -> Result<String, EngineError> {
         let ids: Vec<u32> = self
             .tokenizer
@@ -1002,7 +1070,7 @@ impl Engine {
         // 预留 eos 与语言前缀的位置
         let limit = self
             .max_input_tokens
-            .saturating_sub(1 + self.prefix_ids.len())
+            .saturating_sub(1 + plan.prefix_ids.len())
             .max(1);
         let tokenizer = &self.tokenizer;
         let chunks = chunk_ids(&ids, limit, |id| {
@@ -1013,36 +1081,37 @@ impl Engine {
         let eos = self.gen_params.eos as u32;
         let mut pieces = Vec::with_capacity(chunks.len());
         for chunk in chunks {
-            let mut input = self.prefix_ids.clone();
+            let mut input = plan.prefix_ids.clone();
             input.extend_from_slice(&chunk);
             input.push(eos);
             // M2M100 的强制语言码占第一个生成步
-            let budget = output_token_budget(chunk.len(), cap) + usize::from(self.m2m.is_some());
+            let budget = output_token_budget(chunk.len(), cap) + usize::from(plan.m2m.is_some());
+            let forced = plan.m2m.as_ref().map(|c| c.forced_first);
             let out = if beams > 1 {
-                self.generate_beam(&input, budget, beams)?
+                self.generate_beam(&input, budget, beams, forced)?
             } else {
-                self.generate(&input, budget)?
+                self.generate(&input, budget, forced)?
             };
-            let decoded = self.detokenize(&out)?;
+            let decoded = self.detokenize(&out, plan.m2m.as_ref())?;
             let decoded = decoded.trim();
             // NLLB 的标点后处理放在整条文本层面（见 `translate`）；Marian 做空格/标点整理
-            pieces.push(if self.cjk_target && self.m2m.is_none() {
+            pieces.push(if plan.cjk_target && plan.m2m.is_none() {
                 tidy_cjk_spacing(decoded)
             } else {
                 decoded.to_string()
             });
         }
-        let joiner = if self.cjk_target { "" } else { " " };
+        let joiner = if plan.cjk_target { "" } else { " " };
         Ok(pieces.join(joiner))
     }
 
     /// 把生成的 id 还原成文本：M2M100 先剔除特殊符号与语言码（`drop_ids` 已升序去重，二分查找），
     /// Marian 由分词器跳过特殊符号。
-    fn detokenize(&self, ids: &[u32]) -> Result<String, EngineError> {
+    fn detokenize(&self, ids: &[u32], m2m: Option<&M2mConfig>) -> Result<String, EngineError> {
         let fail = |e: tokenizers::Error| {
             EngineError::new(ErrorKind::DecodeFailed, format!("detokenize failed: {e}"))
         };
-        match &self.m2m {
+        match m2m {
             Some(cfg) => {
                 let kept: Vec<u32> = ids
                     .iter()
@@ -1090,6 +1159,7 @@ impl Engine {
         input_ids: &[u32],
         max_new: usize,
         width: usize,
+        forced: Option<u32>,
     ) -> Result<Vec<u32>, EngineError> {
         let src_len = input_ids.len();
         let (hidden1, hidden_dim) = self.run_encoder(input_ids)?;
@@ -1114,7 +1184,6 @@ impl Engine {
         };
 
         let gp = &self.gen_params;
-        let forced = self.m2m.as_ref().map(|c| c.forced_first);
         let min_len = min_output_len(gp.min_length_ratio, src_len).min(max_new.saturating_sub(1));
         let mut search = BeamSearch::new(
             width,
@@ -1167,7 +1236,12 @@ impl Engine {
     }
 
     /// 贪心生成：encoder 一次，decoder 循环直到 eos / 预算 / 退化重复。
-    fn generate(&mut self, input_ids: &[u32], max_new: usize) -> Result<Vec<u32>, EngineError> {
+    fn generate(
+        &mut self,
+        input_ids: &[u32],
+        max_new: usize,
+        forced: Option<u32>,
+    ) -> Result<Vec<u32>, EngineError> {
         let src_len = input_ids.len();
         let mask = vec![1i64; src_len];
         let (hidden, hidden_dim) = self.run_encoder(input_ids)?;
@@ -1190,7 +1264,6 @@ impl Engine {
         };
 
         let gp = &self.gen_params;
-        let forced = self.m2m.as_ref().map(|c| c.forced_first);
         let min_len = min_output_len(gp.min_length_ratio, src_len).min(max_new.saturating_sub(1));
         // 最小长度内额外禁止结束符：不变量，提到循环外只建一次
         let mut banned_no_eos = gp.banned.clone();
@@ -1319,7 +1392,7 @@ pub(crate) fn build_session(path: &Path, exec: &ExecutionOptions) -> Result<Sess
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::manifest::GenerationOverride;
+    use crate::manifest::{GenerationOverride, TGT_TOKEN_PLACEHOLDER};
     use std::collections::HashMap;
 
     /// 构造最小清单。
@@ -1511,30 +1584,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    /// 清单声明的 sha256 不符时加载前即报 ChecksumMismatch（不会去初始化 ORT）。
-    #[test]
-    fn load_rejects_checksum_mismatch() {
-        let dir = temp_dir_with(
-            "sha-bad",
-            &[
-                ("encoder.onnx", "x"),
-                ("decoder.onnx", "x"),
-                ("tokenizer.json", "x"),
-            ],
-        );
-        let bad = "0".repeat(64);
-        let json = format!(
-            r#"{{"schema_version":1,"id":"m","family":"marian","languages":["en","zh-CN"],
-            "files":{{"encoder":"encoder.onnx","decoder":"decoder.onnx","tokenizer":"tokenizer.json"}},
-            "sha256":{{"encoder":"{bad}"}}}}"#
-        );
-        std::fs::write(dir.join("model.json"), json).unwrap();
-        let e = Engine::load(&dir, "en", "zh-CN").err().unwrap();
-        assert_eq!(e.kind, ErrorKind::ChecksumMismatch);
-        assert!(e.message.contains("sha256 mismatch"), "{}", e.message);
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
     /// 极小的 BPE 分词器：含 4 个特殊符号与两个语言码，用于语言 id 解析测试。
     fn tiny_m2m_tokenizer() -> Tokenizer {
         let json = r#"{"version":"1.0","truncation":null,"padding":null,"added_tokens":[],
@@ -1573,6 +1622,62 @@ mod tests {
         let e = resolve_m2m_langs(&m, &tk, "en", "fr").unwrap_err();
         assert_eq!(e.kind, ErrorKind::ManifestInvalid);
         assert!(e.message.contains("fra_Latn"), "{}", e.message);
+    }
+
+    /// 语言计划按请求计算：同一份清单与词表下，不同语言对得到不同的前缀、强制位与 CJK 标记；
+    /// 不支持的语言对（含相同语言、有向 pairs 的反向）返回 `UnsupportedPair` 而不是 panic。
+    #[test]
+    fn build_plan_is_per_pair_and_rejects_unsupported() {
+        let tk = tiny_m2m_tokenizer();
+        let mut m = m2m_manifest();
+        m.languages = vec!["zh-CN".into(), "en".into()];
+        let to_zh = build_plan(&m, &tk, "en", "zh-CN").unwrap();
+        let to_en = build_plan(&m, &tk, "zh-CN", "en").unwrap();
+        assert_eq!(to_zh.prefix_ids, vec![5]);
+        assert_eq!(to_zh.m2m.as_ref().unwrap().forced_first, 6);
+        assert!(to_zh.cjk_target);
+        assert_eq!(to_en.prefix_ids, vec![6]);
+        assert_eq!(to_en.m2m.as_ref().unwrap().forced_first, 5);
+        assert!(!to_en.cjk_target);
+        // 大小写不敏感，相同语言与清单外的语言都不支持
+        assert!(build_plan(&m, &tk, "EN", "zh-cn").is_ok());
+        for (s, t) in [("en", "en"), ("en", "fr"), ("de", "en")] {
+            let e = build_plan(&m, &tk, s, t).unwrap_err();
+            assert_eq!(e.kind, ErrorKind::UnsupportedPair, "{s}->{t}");
+        }
+        // 显式 pairs 有向：反向不支持
+        m.pairs = Some(vec![("en".into(), "zh-CN".into())]);
+        assert!(build_plan(&m, &tk, "en", "zh-CN").is_ok());
+        assert_eq!(
+            build_plan(&m, &tk, "zh-CN", "en").unwrap_err().kind,
+            ErrorKind::UnsupportedPair
+        );
+    }
+
+    /// Marian：前缀只取决于目标语言（单向包照样可用），源语言只参与支持性校验。
+    #[test]
+    fn build_plan_marian_prefix_follows_target() {
+        let tk = tiny_m2m_tokenizer();
+        let mut m = manifest_with(GenerationOverride::default());
+        m.languages = vec!["en".into(), "zh-CN".into()];
+        m.pairs = Some(vec![("en".into(), "zh-CN".into())]);
+        m.lang_tokens = HashMap::from([("zh-CN".to_string(), "zho_Hans".to_string())]);
+        m.source_prefix = format!("{TGT_TOKEN_PLACEHOLDER} ");
+        let plan = build_plan(&m, &tk, "en", "zh-CN").unwrap();
+        assert_eq!(plan.prefix_ids, vec![6]);
+        assert!(plan.m2m.is_none() && plan.cjk_target);
+        assert_eq!(
+            build_plan(&m, &tk, "zh-CN", "en").unwrap_err().kind,
+            ErrorKind::UnsupportedPair
+        );
+        // 无前缀的单向包：前缀为空
+        m.source_prefix = String::new();
+        assert!(
+            build_plan(&m, &tk, "en", "zh-CN")
+                .unwrap()
+                .prefix_ids
+                .is_empty()
+        );
     }
 
     /// 强制位：束搜索首步只能选目标语言码，随后自由生成直到结束符；最终序列首项是语言码。
@@ -1792,7 +1897,11 @@ mod tests {
     /// 缺失模型目录与缺失动态库都给出明确类别（无需真实模型）。
     #[test]
     fn load_reports_missing_model() {
-        let e = Engine::load(Path::new("Z:/definitely/not/here"), "en", "zh-CN")
+        let e = Engine::load(Path::new("Z:/definitely/not/here"), None)
+            .err()
+            .unwrap();
+        assert_eq!(e.kind, ErrorKind::ModelMissing);
+        let e = Engine::load(Path::new("Z:/definitely/not/here"), Some(("en", "zh-CN")))
             .err()
             .unwrap();
         assert_eq!(e.kind, ErrorKind::ModelMissing);
@@ -1806,9 +1915,10 @@ mod tests {
             eprintln!("skip: SNOW_TRANSLATOR_TEST_MODEL_DIR not set");
             return;
         };
-        let mut engine = Engine::load(&dir, "en", "zh-CN").unwrap();
+        // 不带语言对加载，语言对随请求指定
+        let mut engine = Engine::load(&dir, None).unwrap();
         let zh = engine
-            .translate("Hello world.", &TranslateOptions::default())
+            .translate("Hello world.", "en", "zh-CN", &TranslateOptions::default())
             .unwrap();
         assert!(
             zh.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)),
@@ -1816,7 +1926,7 @@ mod tests {
         );
         assert_eq!(
             engine
-                .translate("   ", &TranslateOptions::default())
+                .translate("   ", "en", "zh-CN", &TranslateOptions::default())
                 .unwrap(),
             "   "
         );
@@ -1826,7 +1936,7 @@ mod tests {
             ..Default::default()
         };
         let zh4 = engine
-            .translate("Where is the nearest train station?", &beam)
+            .translate("Where is the nearest train station?", "en", "zh-CN", &beam)
             .unwrap();
         assert!(
             zh4.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)),
@@ -1838,8 +1948,21 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            engine.translate("Hi.", &bad).unwrap_err().kind,
+            engine
+                .translate("Hi.", "en", "zh-CN", &bad)
+                .unwrap_err()
+                .kind,
             ErrorKind::BadRequest
+        );
+        // 不支持的语言对按请求报错，引擎仍可继续翻译
+        let unsupported = engine
+            .translate("Hi.", "xx", "zh-CN", &TranslateOptions::default())
+            .unwrap_err();
+        assert_eq!(unsupported.kind, ErrorKind::UnsupportedPair);
+        assert!(
+            engine
+                .translate("Hi.", "en", "zh-CN", &TranslateOptions::default())
+                .is_ok()
         );
     }
 }

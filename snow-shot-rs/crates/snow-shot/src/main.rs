@@ -438,6 +438,7 @@ fn run_primary(ctx: &AppBootstrap, guard: &SingleInstanceGuard) -> ExitCode {
         app_runtime::register_bus_handlers(&bus, &inbox);
         let state_inbox = inbox.clone();
         let restore_inbox = inbox.clone();
+        let window_inbox = inbox.clone();
         let config = app_runtime::open_shared_config(&data_root);
         system_settings::apply(config.borrow().document());
         net_settings::apply_proxy(config.borrow().document());
@@ -454,6 +455,10 @@ fn run_primary(ctx: &AppBootstrap, guard: &SingleInstanceGuard) -> ExitCode {
         );
         app_runtime::start_mouse_gesture(&mut state);
         state.sync_mcp();
+        // 窗口关闭转成事件：输入框翻译浮窗据此回收没用上的预热
+        cx.on_window_closed(move || {
+            window_inbox.push(app_runtime::UiEvent::WindowClosed);
+        });
         tracing::info!("event loop started (resident, QuitMode::Explicit)");
         cx.run_inbox(inbox, move |cx, event| {
             app_runtime::handle_event(cx, &mut state, event);
@@ -551,6 +556,8 @@ fn run_ui(ctx: &AppBootstrap, launch: &UiLaunch) -> ExitCode {
         ));
         state.sync_mcp();
         cx.on_window_closed(move || {
+            // 先投 WindowClosed：回收预热的守卫要在“能否退出”的判断之前拿到
+            window_inbox.push(UiEvent::WindowClosed);
             window_inbox.push(UiEvent::Host(HostEvent::WindowsChanged));
         });
         tracing::info!("event loop started (ui session, QuitMode::Explicit)");

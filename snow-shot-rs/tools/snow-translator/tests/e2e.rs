@@ -14,6 +14,8 @@ const ENV_MODEL_DIR: &str = "SNOW_TRANSLATOR_TEST_MODEL_DIR";
 /// 评测机上的 ORT 1.28.0 动态库（环境变量都没设时使用）。
 const DEFAULT_ORT_DYLIB: &str =
     "E:/workspaces/Cisox/build/mt-quant/ort128/onnxruntime/capi/onnxruntime.dll";
+/// worker 的协议版本（与 `src/protocol.rs` 的 `PROTOCOL_VERSION` 一致）。
+const PROTOCOL: u64 = 2;
 /// 等待进程退出的最长时间。
 const EXIT_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -53,7 +55,7 @@ impl Proc {
         };
         let ready = p.recv();
         assert_eq!(ready["evt"], "ready");
-        assert_eq!(ready["protocol"], 1);
+        assert_eq!(ready["protocol"], PROTOCOL);
         p
     }
 
@@ -103,12 +105,22 @@ fn offline_error_paths() {
         (Some("error"), Some("not_loaded"))
     );
     assert_eq!(r["id"], 1);
+    // 带了语言对也一样先报未加载
+    let r = p.call(json!({"cmd":"translate","id":2,"text":"hi","src":"en","tgt":"zh-CN"}));
+    assert_eq!(r["kind"], "not_loaded");
+    assert_eq!(r["id"], 2);
 
     p.send_raw("this is not json");
     assert_eq!(p.recv()["kind"], "bad_request");
 
     let r = p.call(json!({"cmd":"load","model_dir":"Z:/no/such/dir","src":"en","tgt":"zh-CN"}));
     assert_eq!(r["kind"], "model_missing");
+    // 语言对可省
+    let r = p.call(json!({"cmd":"load","model_dir":"Z:/no/such/dir"}));
+    assert_eq!(r["kind"], "model_missing");
+    // 只给一边是坏请求（在碰模型目录之前就拒绝）
+    let r = p.call(json!({"cmd":"load","model_dir":"Z:/no/such/dir","src":"en"}));
+    assert_eq!(r["kind"], "bad_request");
 
     let r = p.call(json!({"cmd":"ping"}));
     assert_eq!(
@@ -142,6 +154,7 @@ fn real_model_roundtrip() {
     let r = p.call(json!({"cmd":"load","model_dir":dir,"src":"en","tgt":"zh-CN"}));
     assert_eq!(r["evt"], "loaded", "{r}");
 
+    // 沿用 load 给的缺省语言对
     let r = p.call(json!({"cmd":"translate","id":5,"texts":["Where is the nearest train station?","Thank you."]}));
     assert_eq!(r["evt"], "result", "{r}");
     let texts = r["texts"].as_array().expect("texts");
@@ -154,8 +167,27 @@ fn real_model_roundtrip() {
     };
     assert!(texts.iter().all(has_cjk), "{texts:?}");
 
+    // 语言对随请求指定；不支持的语言对按请求报错，模型仍可用
+    let r = p.call(json!({"cmd":"translate","id":6,"text":"Thank you.","src":"en","tgt":"zh-CN"}));
+    assert_eq!(r["evt"], "result", "{r}");
+    let r = p.call(json!({"cmd":"translate","id":7,"text":"Merci.","src":"fr","tgt":"zh-CN"}));
+    assert_eq!(
+        (r["kind"].as_str(), r["id"].as_u64()),
+        (Some("unsupported_pair"), Some(7))
+    );
+    let r = p.call(json!({"cmd":"translate","id":8,"text":"Thank you."}));
+    assert_eq!(r["evt"], "result", "{r}");
+
+    // load 带不支持的语言对仍然早失败（并释放模型）
     let r = p.call(json!({"cmd":"load","model_dir":dir,"src":"fr","tgt":"zh-CN"}));
     assert_eq!(r["kind"], "unsupported_pair");
+    // 不带语言对加载，翻译必须带语言对
+    let r = p.call(json!({"cmd":"load","model_dir":dir}));
+    assert_eq!(r["evt"], "loaded", "{r}");
+    let r = p.call(json!({"cmd":"translate","id":9,"text":"Thank you."}));
+    assert_eq!(r["kind"], "bad_request");
+    let r = p.call(json!({"cmd":"translate","id":10,"text":"Thank you.","src":"en","tgt":"zh-CN"}));
+    assert_eq!(r["evt"], "result", "{r}");
 
     assert_eq!(p.call(json!({"cmd":"unload"}))["evt"], "unloaded");
     assert!(p.wait_exit());

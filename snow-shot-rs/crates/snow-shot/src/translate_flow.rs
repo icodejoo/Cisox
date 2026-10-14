@@ -277,6 +277,7 @@ pub fn failure_message(error: &TranslateFlowError, i18n: &I18n) -> (String, bool
             }
         }
         TranslateFlowError::NoText => (i18n.tr("translate-flow-no-text"), false),
+        TranslateFlowError::Cancelled => (i18n.tr("translate-flow-cancelled"), false),
         TranslateFlowError::AlreadyTarget(lang) => (
             i18n.tr_with(
                 "translate-flow-already-target",
@@ -707,6 +708,8 @@ mod tests {
         assert!(msg.contains("简体中文") && !dl);
         let (msg, _) = failure_message(&TranslateFlowError::NoText, zh());
         assert!(msg.contains("文字"));
+        let (msg, dl) = failure_message(&TranslateFlowError::Cancelled, zh());
+        assert!(msg.contains("取消") && !dl);
         let timeout = TranslateUiState::from_error(
             &TranslateFlowError::Translate(TranslateError::Timeout),
             zh(),
@@ -715,6 +718,7 @@ mod tests {
         // 英文界面：结构化错误换成英文说明，没有中文残留
         for error in [
             TranslateFlowError::NoText,
+            TranslateFlowError::Cancelled,
             TranslateFlowError::Translate(TranslateError::NoCustomModel),
             TranslateFlowError::Translate(TranslateError::CustomModelNotSelected),
             TranslateFlowError::Translate(TranslateError::UnsupportedLanguagePair(

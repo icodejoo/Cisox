@@ -12,6 +12,20 @@
 | `m2m100` | NLLB-200-distilled-600M（裁剪词表 + int4） | 编码器输入 `[源语言码] 词… </s>`；解码器以 `</s>`（id 2）起步，第一个生成位强制为目标语言码，随后束搜索到 `</s>` |
 | `hunyuan_chat` | Hy-MT2-1.8B（int4，外部数据；用户自行下载的可选包） | 没有语言 token：目标语言名写进提示词（清单 `prompt`），单个 `model.onnx` 预填充 + 逐 token 解码共用，只做贪心 + repetition_penalty，**`num_beams` 被忽略（不报错）**，整段一次翻译（评测同口径），原文超过 `max_input_tokens` 才分句打包成多次请求 |
 
+## 行协议（版本 2）
+
+一行一条 JSON，定义见 `src/protocol.rs`（宿主侧镜像在 `crates/snow-translate/src/protocol.rs`，两边逐字段一致，版本号随 `ready` 事件下发，对不上宿主拒绝使用并提示哪一边过旧）。
+
+**模型只按目录加载一次，语言对随翻译请求指定**（版本 1 是按语言对加载，换语言对要整模型重载约 1.7 秒、工作集多约 85 MiB）：
+
+| 命令 | 字段 | 说明 |
+|---|---|---|
+| `load` | `model_dir`；可选 `src`、`tgt`；可选 `trim_after_request` | 只需要目录。`src` 与 `tgt` 要么都给要么都不给（只给一个是 `bad_request`，且不动已加载的模型）：都给时先校验模型支持该语言对（早失败，`unsupported_pair`），并作为之后 `translate` 缺省的语言对；不给也能加载。再次 `load` 会替换模型并清掉缺省语言对 |
+| `translate` | `id`；`text` / `texts`；可选 `src`、`tgt`、`max_len`、`num_beams` | 语言对随请求指定，缺哪个就沿用 `load` 给的缺省，两边都没有是 `bad_request`。模型不支持该语言对返回 `unsupported_pair`（带请求 `id`），模型与进程保持可用。`src` 必须是具体语言，宿主负责把「自动」按清单解析成具体源语言 |
+| `ping` / `unload` | 无 | 心跳（返回内存快照）/ 卸载并退出 |
+
+引擎侧：会话（编码器 / 解码器 / 分词器）只建一次；语言相关的部分（m2m100 的源 / 目标语言 token 与译文剔除表、marian 的 `source_prefix`、CJK 后处理、`hunyuan_chat` 提示词里的目标语言名）按请求计算，并按语言对缓存（只缓存清单支持的语言对，数量有界）。单向包（如 opus-mt 的 en→zh）照常工作，反向请求返回 `unsupported_pair`。
+
 ## 模型包（`model.json` schema_version=1）
 
 旧清单（marian）无需任何改动。新增的字段都是可选的：
@@ -21,7 +35,8 @@
 | `family` | `marian`、`m2m100` 或 `hunyuan_chat` |
 | `files.encoder` / `decoder` / `tokenizer` | 编解码族必需，相对模型目录的路径；`hunyuan_chat` 改要 `files.model` 与 `tokenizer`（不要 encoder/decoder） |
 | `files.model_data` | 仅 `hunyuan_chat`，可选：`model.onnx_data`，规则同下一行 |
-| `files.encoder_data` / `decoder_data` | 可选：外部数据权重（`.onnx_data`）。文件名必须与 ONNX 图里记录的 `location` 一致、与 `.onnx` 同目录；ORT 在 `commit_from_file` 时自动内存映射，无需额外代码。列出后会校验存在，`sha256` 也可覆盖它们 |
+| `files.encoder_data` / `decoder_data` | 可选：外部数据权重（`.onnx_data`）。文件名必须与 ONNX 图里记录的 `location` 一致、与 `.onnx` 同目录；ORT 在 `commit_from_file` 时自动内存映射，无需额外代码。列出后会校验存在 |
+| `sha256` | 可选：文件键 → SHA-256。**仅供参考，加载时不校验**（文件损坏、截断、缺失由 ORT 加载时自然报错）；保留是为了旧清单仍能解析 |
 | `languages` / `pairs` | 应用侧语言码（`zh-CN`、`en`…）；`pairs` 缺省时取 `languages` 的有向全排列 |
 | `lang_tokens` | 应用语言码 → 词表里的语言 token。`m2m100` 必须覆盖每一个出现的语言，值是 FLORES 码（`zho_Hans`、`eng_Latn`…），worker 用 `tokenizer.token_to_id` 取 id |
 | `generation.decoder_start_token_id` / `eos_token_id` / `pad_token_id` | 缺省回落到同目录 `generation_config.json`、`config.json`（NLLB：2 / 2 / 1） |

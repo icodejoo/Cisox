@@ -32,6 +32,10 @@ dbg_macro = "deny"
 todo = "deny"
 unimplemented = "deny"
 
+# debug 不优化时本 crate 的前后处理和解码循环会慢数倍，开发时也开优化
+[profile.dev]
+opt-level = 2
+
 [profile.release]
 opt-level = 3
 codegen-units = 16

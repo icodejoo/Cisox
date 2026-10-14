@@ -8,6 +8,8 @@ translate-flow-ocr-hint = { $message } 请先点击“OCR”按钮并按 D 下�
 
 translate-flow-no-text = 未识别到可翻译的文字。
 
+translate-flow-cancelled = 翻译已取消。
+
 translate-flow-already-target = 原文已经是{ $lang }，无需翻译（可在设置里更改目标语言）。
 
 translate-flow-done-copied = 已翻译，译文已复制到剪贴板

@@ -11,7 +11,9 @@ use std::io::{self, BufRead, Read, Write};
 use serde::{Deserialize, Serialize};
 
 /// 协议版本号，`ready` 事件携带，双方不一致时宿主应拒绝使用。
-pub const PROTOCOL_VERSION: u32 = 1;
+///
+/// 版本 2：模型只按目录加载一次，语言对随 `translate` 请求指定（`load` 的 `src`/`tgt` 变成可选）。
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// 单行最大字节数（1 MiB），超出视为坏请求。
 pub const MAX_LINE_BYTES: usize = 1024 * 1024;
@@ -23,14 +25,19 @@ const DISCARD_CHUNK_BYTES: u64 = 64 * 1024;
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum Command {
-    /// 加载模型：`model_dir` 含 `model.json`，`src`/`tgt` 为语言代码。
+    /// 加载模型：`model_dir` 含 `model.json`。
+    ///
+    /// 语言对不属于加载，随每个 `translate` 指定；`src` 与 `tgt` 要么都给要么都不给：
+    /// 都给时先校验模型支持该语言对（早失败），并作为之后 `translate` 缺省的语言对。
     Load {
         /// 模型目录。
         model_dir: String,
-        /// 源语言代码，例如 `en`。
-        src: String,
-        /// 目标语言代码，例如 `zh-CN`。
-        tgt: String,
+        /// 缺省源语言代码，例如 `en`；与 `tgt` 同时给。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        src: Option<String>,
+        /// 缺省目标语言代码，例如 `zh-CN`；与 `src` 同时给。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tgt: Option<String>,
         /// 覆盖清单的“请求后收缩内存”开关；缺省沿用清单（宿主的低内存策略用它）。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         trim_after_request: Option<bool>,
@@ -51,6 +58,12 @@ pub enum Command {
         /// 束宽，缺省取模型清单值（通常 1 即贪心）；范围 `1..=8`。
         #[serde(default)]
         num_beams: Option<usize>,
+        /// 源语言代码；缺省沿用 `load` 给的，两边都没有则报 `bad_request`。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        src: Option<String>,
+        /// 目标语言代码；缺省沿用 `load` 给的，两边都没有则报 `bad_request`。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tgt: Option<String>,
     },
     /// 卸载并退出进程（回收全部内存）。
     Unload,
@@ -78,7 +91,8 @@ pub enum ErrorKind {
     LoadFailed,
     /// 内存不足。
     OutOfMemory,
-    /// 模型文件 SHA-256 与清单声明不符。
+    /// 模型文件 SHA-256 与清单声明不符（协议值，与宿主侧保持一致；worker 加载时已不再校验，不会产生）。
+    #[allow(dead_code)]
     ChecksumMismatch,
     /// 推理或解码失败。
     DecodeFailed,
@@ -252,8 +266,18 @@ mod tests {
             parse_command(r#"{"cmd":"load","model_dir":"D:/m","src":"en","tgt":"zh-CN"}"#),
             Ok(Command::Load {
                 model_dir: "D:/m".into(),
-                src: "en".into(),
-                tgt: "zh-CN".into(),
+                src: Some("en".into()),
+                tgt: Some("zh-CN".into()),
+                trim_after_request: None
+            })
+        );
+        // 语言对可省：只按目录加载模型
+        assert_eq!(
+            parse_command(r#"{"cmd":"load","model_dir":"D:/m"}"#),
+            Ok(Command::Load {
+                model_dir: "D:/m".into(),
+                src: None,
+                tgt: None,
                 trim_after_request: None
             })
         );
@@ -263,8 +287,8 @@ mod tests {
             ),
             Ok(Command::Load {
                 model_dir: "D:/m".into(),
-                src: "en".into(),
-                tgt: "zh-CN".into(),
+                src: Some("en".into()),
+                tgt: Some("zh-CN".into()),
                 trim_after_request: Some(true)
             })
         );
@@ -276,9 +300,53 @@ mod tests {
                 text: None,
                 texts: Some(vec!["a".into(), "b".into()]),
                 max_len: Some(64),
-                num_beams: None
+                num_beams: None,
+                src: None,
+                tgt: None
             })
         );
+        // 语言对随请求指定
+        let t = parse_command(
+            r#"{"cmd":"translate","id":8,"text":"a","src":"en","tgt":"zh-CN","num_beams":2}"#,
+        );
+        assert_eq!(
+            t,
+            Ok(Command::Translate {
+                id: 8,
+                text: Some("a".into()),
+                texts: None,
+                max_len: None,
+                num_beams: Some(2),
+                src: Some("en".into()),
+                tgt: Some("zh-CN".into())
+            })
+        );
+    }
+
+    /// 命令序列化：缺省的语言对字段不输出，给了才输出（与宿主侧镜像一致）。
+    #[test]
+    fn commands_serialize_optional_langs_only_when_set() {
+        let load = Command::Load {
+            model_dir: "m".into(),
+            src: None,
+            tgt: None,
+            trim_after_request: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&load).unwrap(),
+            r#"{"cmd":"load","model_dir":"m"}"#
+        );
+        let tr = Command::Translate {
+            id: 1,
+            text: None,
+            texts: Some(vec!["a".into()]),
+            max_len: None,
+            num_beams: None,
+            src: Some("en".into()),
+            tgt: Some("ja".into()),
+        };
+        let s = serde_json::to_string(&tr).unwrap();
+        assert!(s.ends_with(r#""src":"en","tgt":"ja"}"#), "{s}");
     }
 
     /// 坏 JSON、未知命令、缺字段都返回错误而不 panic。
