@@ -16,6 +16,7 @@
 - **影响面**：`snow-stitch-images-c`（经 `snow_rust_ffi`）的 C++ 调用方同样受益；对其他内容行为不变。
 - **合并注意**：若 upstream 也改动 `stitcher.rs`，需人工合并；建议合并后重跑 `cargo test -p snow-stitch-images`。
 - **未解决（未在库内实现）**：固定页脚超过帧高 30% 时每个拼缝残留；周期性纹理位移存在歧义。
+- **2026-10-14 追加：只做 rustfmt 格式化**（3 处长行折行，+19/−5，不改逻辑）。原因：`snow-shot-rs` 经路径依赖把它纳入 `cargo fmt --all -- --check`，不格式化 CI 的 fmt 检查会失败。合并 upstream 时若在这几处冲突，以 upstream 逻辑为准再重跑 rustfmt。
 
 ## 待评估的上游反馈(非本仓库补丁)
 

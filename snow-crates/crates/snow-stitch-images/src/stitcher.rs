@@ -1027,7 +1027,9 @@ mod exact_refinement_tests {
     #[test]
     fn weak_contrast_sequence_stitches_exactly() {
         let (width, height, step) = (1280, 800, 240);
-        let frames: Vec<Frame> = (0..8).map(|i| frame(width, height, i * step, red_only)).collect();
+        let frames: Vec<Frame> = (0..8)
+            .map(|i| frame(width, height, i * step, red_only))
+            .collect();
         let result = stitch(&frames, StitchOptions::default()).unwrap();
         let expected = frame(width, height + 7 * step, 0, red_only);
         assert_eq!(result.image, expected);
@@ -1041,9 +1043,18 @@ mod exact_refinement_tests {
         let incoming = frame(width, height, shift, red_only);
         // 向下滚动 shift：incoming 的第 y 行对应 reference 的第 y + shift 行，位移为 -shift
         let truth = -(shift as i32);
-        assert_eq!(refine_offset_exactly(&reference, &incoming, StitchAxis::Vertical, truth), truth);
-        assert_eq!(refine_offset_exactly(&reference, &incoming, StitchAxis::Vertical, truth + 1), truth);
-        assert_eq!(refine_offset_exactly(&reference, &incoming, StitchAxis::Vertical, truth - 2), truth);
+        assert_eq!(
+            refine_offset_exactly(&reference, &incoming, StitchAxis::Vertical, truth),
+            truth
+        );
+        assert_eq!(
+            refine_offset_exactly(&reference, &incoming, StitchAxis::Vertical, truth + 1),
+            truth
+        );
+        assert_eq!(
+            refine_offset_exactly(&reference, &incoming, StitchAxis::Vertical, truth - 2),
+            truth
+        );
     }
 
     /// 周期内容出现平局时保持原估计。
@@ -1056,6 +1067,9 @@ mod exact_refinement_tests {
         let reference = frame(64, 64, 0, stripes);
         let incoming = frame(64, 64, 8, stripes);
         // 周期为 8：-8 与 -16 等价，估计 -8 时不应被改成别的
-        assert_eq!(refine_offset_exactly(&reference, &incoming, StitchAxis::Vertical, -8), -8);
+        assert_eq!(
+            refine_offset_exactly(&reference, &incoming, StitchAxis::Vertical, -8),
+            -8
+        );
     }
 }
