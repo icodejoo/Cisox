@@ -70,5 +70,7 @@ fn main() {
         if outcome.exit {
             return;
         }
+        // 结果已发出并 flush，再做内存收缩，下一条命令处理前完成
+        worker.after_send();
     }
 }

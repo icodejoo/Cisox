@@ -21,6 +21,7 @@ pub mod overlay_model;
 pub mod prespawn;
 pub mod status;
 pub mod text;
+pub mod timeline;
 pub mod translate;
 pub mod typing;
 pub mod view;

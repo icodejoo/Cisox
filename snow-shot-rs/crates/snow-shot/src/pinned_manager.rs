@@ -647,7 +647,7 @@ impl PinnedManager {
                 PinnedWindowView::create(window, app, shared, init)
             })
             .map_err(|e| format!("打开贴图窗口失败: {e}"))?;
-        view.update(cx.app(), |v, _| v.set_window(window));
+        view.update(cx.app(), |v, cx| v.set_window(window, cx));
         tracing::info!(
             id = %id,
             rect = ?geometry.rect(),

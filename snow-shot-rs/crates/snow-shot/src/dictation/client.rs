@@ -5,12 +5,13 @@
 //! 绝不按进程名查杀。
 
 use super::engine::{LinkEvent, SttLink};
+use super::timeline::{POINT_CLAIMED, POINT_START, SessionTimeline, Summary, is_worker_info_line};
 use snow_stt_protocol::{Command, Event};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Stdio};
-use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 /// 工作进程可执行文件名。
@@ -102,6 +103,36 @@ pub struct ProcessSttLink {
     events: Receiver<LinkEvent>,
     /// 是否已收尾。
     closed: bool,
+    /// 本次会话的时间线（读线程、stderr 线程与主线程共用）。
+    timeline: Arc<Mutex<SessionTimeline>>,
+}
+
+/// 对时间线加锁；毒锁不影响继续使用。
+fn lock_timeline(timeline: &Mutex<SessionTimeline>) -> MutexGuard<'_, SessionTimeline> {
+    timeline.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// 写一条会话时间点日志：`point` 是点名，`since_spawn_ms` 是距 worker 拉起的毫秒数。
+fn log_point(point: &str, since_spawn_ms: u64) {
+    tracing::info!(point, since_spawn_ms, "语音转文字时间点");
+}
+
+/// 写会话摘要日志（一次会话一行，字段含义见 [`Summary`]）。
+fn log_summary(s: &Summary) {
+    tracing::info!(
+        model = %s.model,
+        prespawned = s.prespawned,
+        claim_ms = s.claim_ms,
+        spawn_to_ready_ms = s.spawn_to_ready_ms,
+        spawn_to_start_ms = s.spawn_to_start_ms,
+        spawn_to_recording_ms = s.spawn_to_recording_ms,
+        spawn_to_pong_ms = s.spawn_to_pong_ms,
+        spawn_to_first_text_ms = s.spawn_to_first_text_ms,
+        claim_to_recording_ms = s.claim_to_recording_ms,
+        claim_to_pong_ms = s.claim_to_pong_ms,
+        load_ms = s.worker_load_ms,
+        "语音转文字会话摘要"
+    );
 }
 
 impl ProcessSttLink {
@@ -145,13 +176,17 @@ impl ProcessSttLink {
         let mut child = command
             .spawn()
             .map_err(|e| format!("{}: {e}", exe.display()))?;
+        let spawned_at = Instant::now();
+        let timeline = Arc::new(Mutex::new(SessionTimeline::new(spawned_at)));
         let stdin = child.stdin.take();
         let (tx, rx) = channel();
         if let Some(stdout) = child.stdout.take() {
-            std::thread::spawn(move || read_events(stdout, tx, wake));
+            let timeline = Arc::clone(&timeline);
+            std::thread::spawn(move || read_events(stdout, tx, wake, &timeline));
         }
         if let Some(stderr) = child.stderr.take() {
-            std::thread::spawn(move || drain_stderr(stderr));
+            let timeline = Arc::clone(&timeline);
+            std::thread::spawn(move || drain_stderr(stderr, &timeline));
         }
         tracing::info!(pid = child.id(), exe = %exe.display(), "语音转文字进程已启动");
         Ok(Self {
@@ -159,7 +194,13 @@ impl ProcessSttLink {
             stdin,
             events: rx,
             closed: false,
+            timeline,
         })
+    }
+
+    /// 标记这是预拉起的 worker：认领前不出会话摘要，摘要里记 `prespawned=true`。
+    pub fn mark_prespawned(&self) {
+        lock_timeline(&self.timeline).mark_prespawned();
     }
 
     /// 等待子进程退出并取得退出码（最多 `limit`）；仍在运行返回 `None`。
@@ -175,16 +216,22 @@ impl ProcessSttLink {
     }
 }
 
-/// 读线程：逐行解析 stdout，转发事件；EOF 时补一个 `Exited`。
+/// 读线程：逐行解析 stdout，转发事件（READY / RECORDING / PONG / 第一条文本到达时记时间点）；
+/// EOF 时补一个 `Exited`。
 fn read_events(
     stdout: impl std::io::Read,
     tx: Sender<LinkEvent>,
     wake: Arc<dyn Fn() + Send + Sync>,
+    timeline: &Mutex<SessionTimeline>,
 ) {
     for line in BufReader::new(stdout).lines() {
         let Ok(line) = line else { break };
         match Event::parse(&line) {
             Ok(event) => {
+                let point = lock_timeline(timeline).on_event(Instant::now(), &event);
+                if let Some((name, ms)) = point {
+                    log_point(name, ms);
+                }
                 if tx.send(LinkEvent::Event(event)).is_err() {
                     return;
                 }
@@ -197,11 +244,17 @@ fn read_events(
     wake();
 }
 
-/// stderr 排空线程：内容只进 debug 日志。
-fn drain_stderr(stderr: impl std::io::Read) {
+/// stderr 排空线程：加载耗时 / 加载计划 / 统计行（见 [`is_worker_info_line`]）提升为 info 日志，
+/// 并把 `load_ms` 记进时间线；其余内容只进 debug 日志。
+fn drain_stderr(stderr: impl std::io::Read, timeline: &Mutex<SessionTimeline>) {
     for line in BufReader::new(stderr).lines() {
         let Ok(line) = line else { break };
-        tracing::debug!(target: "snow_stt", "{line}");
+        if is_worker_info_line(&line) {
+            lock_timeline(timeline).on_worker_line(&line);
+            tracing::info!(target: "snow_stt", worker_line = %line.trim(), "语音转文字进程加载信息");
+        } else {
+            tracing::debug!(target: "snow_stt", "{line}");
+        }
     }
 }
 
@@ -211,7 +264,19 @@ impl SttLink for ProcessSttLink {
         let stdin = self.stdin.as_mut().ok_or("语音转文字进程输入已关闭")?;
         writeln!(stdin, "{}", command.to_line())
             .and_then(|()| stdin.flush())
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+        if let Command::Start(request) = command
+            && let Some(ms) = lock_timeline(&self.timeline).on_start_sent(Instant::now(), request)
+        {
+            log_point(POINT_START, ms);
+        }
+        Ok(())
+    }
+
+    /// 记录认领时间点。
+    fn note_claimed(&mut self) {
+        let ms = lock_timeline(&self.timeline).mark_claimed(Instant::now());
+        log_point(POINT_CLAIMED, ms);
     }
 
     /// 取走已收到的事件；`Exited` 事件补上真实退出码。
@@ -235,6 +300,9 @@ impl SttLink for ProcessSttLink {
             return;
         }
         self.closed = true;
+        if let Some(summary) = lock_timeline(&self.timeline).report() {
+            log_summary(&summary);
+        }
         drop(self.stdin.take());
         if self.wait_exit_code(grace).is_none() && matches!(self.child.try_wait(), Ok(None)) {
             tracing::warn!(

@@ -16,9 +16,10 @@ use crate::pinned_controls::revealed_rect;
 use crate::pinned_keymap::PinKeyAction;
 use crate::pinned_model::{
     EDGE_MARGIN, HANDLE_SIZE, PinClickAction, PinGeometry, apply_wheel, drag_rect,
-    premultiply_alpha_in_place, swap_rb_in_place, wheel_anchor, wheel_steps,
+    premultiply_alpha_in_place, swap_rb_in_place, wheel_anchor, wheel_steps, window_alpha,
 };
 use crate::pinned_shared::{PinControlEvent, PinInteraction, PinShared};
+use crate::scan_animation::scan_overlay;
 use crate::screenshot_output::encode_png;
 use serde::Deserialize;
 use snow_canvas_raster::TileKey;
@@ -334,6 +335,8 @@ pub struct PinnedWindowView {
     payload_bytes: u64,
     /// 原生窗口句柄（建窗后设置）。
     window: Option<ShellWindow>,
+    /// 窗口当前是否为分层窗口（设过整窗 alpha 或处于点击穿透）；不透明且未分层时不必设 alpha。
+    window_layered: bool,
     /// 进行中的拖动。
     drag: Option<DragState>,
     /// 鼠标是否悬停在窗口上。
@@ -416,6 +419,7 @@ impl PinnedWindowView {
             created_ms: init.created_ms,
             payload_bytes: init.payload_bytes,
             window: None,
+            window_layered: false,
             drag: None,
             hover: false,
             hover_handle: None,
@@ -488,9 +492,32 @@ impl PinnedWindowView {
         })
     }
 
-    /// 记录原生窗口句柄（建窗后由管理器调用）。
-    pub fn set_window(&mut self, window: ShellWindow) {
+    /// 记录原生窗口句柄（建窗后由管理器调用），并应用恢复出来的不透明度。
+    pub fn set_window(&mut self, window: ShellWindow, cx: &mut Context<Self>) {
         self.window = Some(window);
+        self.sync_window_alpha(cx);
+    }
+
+    /// 把当前不透明度交给系统整窗透明（分层窗口 alpha）。
+    ///
+    /// 不用 GPUI 的逐像素 `opacity`：贴图窗口的半透明部分在部分机器上会被合成成白底。
+    /// 原生样式调用会同步触发窗口消息，所以放到下一轮执行，避免在视图更新中重入。
+    fn sync_window_alpha(&mut self, cx: &mut Context<Self>) {
+        let Some(shell) = self.window else {
+            return;
+        };
+        let alpha = window_alpha(self.opacity);
+        if alpha == u8::MAX && !self.window_layered {
+            return;
+        }
+        self.window_layered = true;
+        let id = self.id.clone();
+        cx.spawn(async move |_, _| {
+            if let Err(e) = shell.set_window_alpha(alpha) {
+                tracing::warn!(id = %id, error = %e, alpha, "设置贴图透明度失败");
+            }
+        })
+        .detach();
     }
 
     /// 贴图 ID。
@@ -694,7 +721,10 @@ impl PinnedWindowView {
             return;
         }
         self.zoom = out.zoom;
-        self.opacity = out.opacity;
+        if out.opacity != self.opacity {
+            self.opacity = out.opacity;
+            self.sync_window_alpha(cx);
+        }
         if out.rect != self.bounds {
             self.set_bounds(out.rect, cx);
         }
@@ -1749,6 +1779,9 @@ impl PinnedWindowView {
             return;
         }
         self.click_through = enabled;
+        // 进入穿透会把整窗 alpha 重置为不透明，退出穿透会去掉分层样式；两种情况都要按当前不透明度重设
+        self.window_layered = enabled;
+        self.sync_window_alpha(cx);
         let event = if enabled {
             PinControlEvent::ClickThroughEntered {
                 id: self.id.clone(),
@@ -1953,7 +1986,6 @@ impl Render for PinnedWindowView {
             .relative()
             .size_full()
             .overflow_hidden()
-            .opacity(self.opacity)
             .cursor(self.cursor_style())
             .on_mouse_down(
                 MouseButton::Left,
@@ -2046,6 +2078,18 @@ impl Render for PinnedWindowView {
                     .h(px(sprite.h as f32 * k))
                     .object_fit(ObjectFit::Fill),
             );
+        }
+
+        // 用户打开了识别文字且识别中（含加载模型）：在整幅图像上扫描；不拦截鼠标，叠在图像与标注分块之上。
+        // 新建贴图的后台自动识别（ocr_visible 为假）静默进行，不扫
+        if self.ocr_visible && matches!(self.ocr, OcrPhase::Running) {
+            root = root.child(scan_overlay(
+                "pin-ocr-scan",
+                px(0.0),
+                px(0.0),
+                px(self.bounds.width as f32 / self.scale),
+                px(self.bounds.height as f32 / self.scale),
+            ));
         }
 
         // 识别出的文字框：点击复制该段文字（图像像素 -> 窗口逻辑像素）

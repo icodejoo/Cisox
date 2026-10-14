@@ -25,6 +25,7 @@ use crate::settings_state::{
 use crate::settings_text::{Lang, Text, group_title, item_desc, item_label, option_text, t};
 use crate::stt_download;
 use crate::stt_models::{self, mode_as_str};
+use crate::stt_optimize;
 use crate::stt_settings::{
     SttHooks, SttInputs, is_selector_key, is_translate_note_key, option_label as stt_option_label,
     option_value, rescans_translate_support, scan_translate_support, selector_note, translate_note,
@@ -624,6 +625,8 @@ pub struct SettingsView {
     pick_signature: HashMap<&'static str, (u64, String)>,
     /// 已安装的语音模型 ID 缓存（避免每帧访问磁盘）。
     stt_installed: HashSet<String>,
+    /// 本进程已尝试过后台生成 encoder 预优化缓存的语音模型 ID（每个模型只尝试一次）。
+    stt_optimize_tried: HashSet<String>,
     /// 共享 VAD 是否已安装（缓存）。
     stt_vad_installed: bool,
     /// 翻译后端能力缓存（避免每帧扫盘）；未扫描为 `None`。
@@ -805,6 +808,7 @@ impl SettingsView {
                 pick_cache: HashMap::new(),
                 pick_signature: HashMap::new(),
                 stt_installed: HashSet::new(),
+                stt_optimize_tried: HashSet::new(),
                 stt_vad_installed: false,
                 translate_support: None,
                 model_signature: String::new(),
@@ -1131,15 +1135,17 @@ impl SettingsView {
         self.refresh_stt_cache();
     }
 
-    /// 重新检查各模型与共享 VAD 的安装状态（访问磁盘，只在用户操作或下载结束时调用）。
+    /// 重新检查各模型与共享 VAD 的安装状态（访问磁盘，只在创建设置页、切换分组、宿主跳转分组时调用）；
+    /// 顺带对已装且还没有加载缓存的流式模型，在后台各拉起一次缓存生成（见 [`crate::stt_optimize`]）。
     fn refresh_stt_cache(&mut self) {
         let Some(hooks) = &self.stt_hooks else { return };
-        self.stt_installed = stt_models::manifest()
+        let installed: Vec<_> = stt_models::manifest()
             .models
             .iter()
             .filter(|spec| stt_download::is_installed(spec, &hooks.data_root))
-            .map(|spec| spec.id.clone())
             .collect();
+        stt_optimize::optimize_missing(&installed, &hooks.data_root, &mut self.stt_optimize_tried);
+        self.stt_installed = installed.iter().map(|spec| spec.id.clone()).collect();
         self.stt_vad_installed = stt_download::is_vad_installed(&hooks.data_root);
         self.refresh_translate_support();
     }

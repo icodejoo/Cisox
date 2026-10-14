@@ -383,7 +383,14 @@ struct Session {
     loaded: bool,
     /// worker 进程 ID。
     pid: u32,
+    /// 本进程从拉起到收到 `ready` 的毫秒数；只在第一次加载模型的日志里取走（`Some` 即新拉起的进程）。
+    ready_ms: Option<u64>,
 }
+
+/// 加载触发来源（日志 `trigger` 字段，保持稳定）：预热（输入浮窗 / 截图翻译提前加载）。
+const TRIGGER_WARM: &str = "warm";
+/// 加载触发来源：真实翻译请求触发（预热没赶上或没做）。
+const TRIGGER_REQUEST: &str = "request";
 
 /// 互斥保护的可变状态。
 struct Inner {
@@ -409,6 +416,11 @@ struct Shared {
     inner: Mutex<Inner>,
     /// 累计拉起次数（探针与测试用）。
     launches: AtomicU32,
+}
+
+/// 自 `start` 起经过的毫秒数（超出 `u64` 时饱和），日志里的 `*_ms` 字段统一用它。
+fn elapsed_ms(start: Instant) -> u64 {
+    u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 /// 加锁并忽略中毒（一次线程 panic 不应让翻译永久失效）。
@@ -555,6 +567,7 @@ impl WorkerEngine {
         if abort() {
             return Ok(());
         }
+        let warm_started = Instant::now();
         let launched = inner.session.is_none();
         if launched {
             inner.session = Some(self.shared.start_session()?);
@@ -571,7 +584,7 @@ impl WorkerEngine {
             }
             return Ok(());
         }
-        if needs_load && let Err(e) = self.shared.ensure_loaded(&mut session) {
+        if needs_load && let Err(e) = self.shared.ensure_loaded(&mut session, TRIGGER_WARM) {
             // 本次拉起的进程没加载成功就不留着；复用的会话只在致命错误时丢弃
             if launched || Shared::is_fatal(&e) {
                 session.transport.terminate();
@@ -585,7 +598,12 @@ impl WorkerEngine {
         if launched || needs_load {
             inner.warm_unused = true;
             inner.last_used = Instant::now();
-            tracing::info!(launched, "翻译 worker 已预热");
+            tracing::info!(
+                model_id = %self.shared.config.model_id,
+                launched,
+                warm_ms = elapsed_ms(warm_started),
+                "翻译 worker 已预热"
+            );
         }
         if !inner.monitor_running {
             inner.monitor_running = true;
@@ -710,12 +728,14 @@ impl Shared {
 
     /// 拉起 worker 并等待 `ready`。
     fn start_session(&self) -> Result<Session, TranslateError> {
+        let spawn_started = Instant::now();
         let transport = self.launcher.launch(&self.config)?;
         self.launches.fetch_add(1, Ordering::SeqCst);
         let mut session = Session {
             transport,
             loaded: false,
             pid: 0,
+            ready_ms: None,
         };
         let ready = self.wait_event(
             &mut session,
@@ -731,6 +751,7 @@ impl Shared {
         match ready {
             Ok(pid) => {
                 session.pid = pid;
+                session.ready_ms = Some(elapsed_ms(spawn_started));
                 Ok(session)
             }
             Err(e) => {
@@ -746,10 +767,18 @@ impl Shared {
     }
 
     /// 确保模型已加载；按模型只加载一次，之后换语言对不再发 `load`（语言对随翻译请求指定）。
-    fn ensure_loaded(&self, session: &mut Session) -> Result<(), TranslateError> {
+    ///
+    /// 加载成功时写一行 info 日志：`model_id`、`trigger`（`warm` / `request`）、`cold_start`（本次是否新拉起的进程）、
+    /// `ready_ms`（拉起到 ready，复用进程为空）、`load_ms`（worker 自报）、`wait_ms`（主程序发 load 到收到 loaded）、`mem_bytes`。
+    fn ensure_loaded(
+        &self,
+        session: &mut Session,
+        trigger: &'static str,
+    ) -> Result<(), TranslateError> {
         if session.loaded {
             return Ok(());
         }
+        let load_started = Instant::now();
         let command = Command::Load {
             model_dir: self.config.model_dir.to_string_lossy().into_owned(),
             src: None,
@@ -761,11 +790,21 @@ impl Shared {
             .transport
             .send(&line)
             .map_err(|e| TranslateError::WorkerDied(format!("发送加载命令失败: {e}")))?;
+        let ready_ms = session.ready_ms.take();
         let outcome = self.wait_event(session, self.config.timeouts.load, |event| match event {
             Event::Loaded {
                 load_ms, mem_bytes, ..
             } => {
-                tracing::info!(load_ms, mem_bytes, "翻译模型已加载");
+                tracing::info!(
+                    model_id = %self.config.model_id,
+                    trigger,
+                    cold_start = ready_ms.is_some(),
+                    ready_ms,
+                    load_ms,
+                    wait_ms = elapsed_ms(load_started),
+                    mem_bytes,
+                    "翻译模型已加载"
+                );
                 Some(Ok(()))
             }
             Event::Error { kind, message, .. } => Some(Err(map_worker_error(kind, message, None))),
@@ -849,7 +888,7 @@ impl Shared {
             return Err(TranslateError::WorkerDied("会话丢失".into()));
         };
         let mut out: Vec<String> = Vec::new();
-        let mut result = self.ensure_loaded(&mut session);
+        let mut result = self.ensure_loaded(&mut session, TRIGGER_REQUEST);
         if result.is_ok() {
             for chunk in chunks {
                 let id = inner.next_id;
@@ -1755,6 +1794,26 @@ mod tests {
             .iter()
             .filter(|c| matches!(c, Command::Load { .. }))
             .count()
+    }
+
+    /// 加载日志的辅助数据：新拉起的会话带 `ready_ms`，第一次加载取走后为空（复用不再报冷启动）。
+    #[test]
+    fn load_log_inputs_cold_flag() {
+        let (engine, _launcher) = engine_with(vec![normal()], config());
+        let mut session = engine.shared.start_session().unwrap();
+        assert!(session.ready_ms.is_some(), "新拉起的进程应记下 ready 耗时");
+        engine
+            .shared
+            .ensure_loaded(&mut session, TRIGGER_REQUEST)
+            .unwrap();
+        assert!(session.loaded);
+        assert_eq!(session.ready_ms, None, "第一次加载后取走");
+        // 已加载：再次调用什么都不做
+        engine
+            .shared
+            .ensure_loaded(&mut session, TRIGGER_WARM)
+            .unwrap();
+        session.transport.terminate();
     }
 
     /// 预热：拉起并加载一次、带“未使用”标记；随后的真实请求不再拉起也不再加载，并接手会话。

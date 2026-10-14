@@ -118,13 +118,26 @@ impl LinkHover {
         self.active_paragraph(pairs) == Some(index)
     }
 
+    /// 某个行框自己是否被悬停（OCR 结果弹窗里一行对应一个框，没有段落对照）。
+    ///
+    /// # 参数
+    /// - `box_ix`：行框下标。
+    ///
+    /// ```ignore
+    /// hover.set_box(2, true);
+    /// assert!(hover.box_hovered(2));
+    /// ```
+    pub fn box_hovered(&self, box_ix: usize) -> bool {
+        self.box_ix == Some(box_ix)
+    }
+
     /// 某个行框是否该高亮：它自己被悬停，或它属于被悬停条目对应的段落。
     ///
     /// # 参数
     /// - `pairs`：逐段对照。
     /// - `box_ix`：行框下标。
     pub fn box_active(&self, pairs: &[TranslatedParagraph], box_ix: usize) -> bool {
-        self.box_ix == Some(box_ix)
+        self.box_hovered(box_ix)
             || self
                 .paragraph
                 .or(self.source)
@@ -163,8 +176,13 @@ impl LinkHover {
 pub enum TranslateUiState {
     /// 未启用。
     Idle,
-    /// 进行中（附当前阶段文案）。
-    Running(String),
+    /// 进行中。
+    Running {
+        /// 当前阶段（识别阶段在识别区叠扫描动画，翻译阶段不叠）。
+        stage: TranslateStage,
+        /// 当前阶段的进度文案。
+        text: String,
+    },
     /// 完成。
     Done {
         /// 原文（按段落）。
@@ -293,6 +311,34 @@ pub fn failure_message(error: &TranslateFlowError, i18n: &I18n) -> (String, bool
 }
 
 impl TranslateUiState {
+    /// 进入某个阶段的“进行中”状态，文案取自该阶段。
+    ///
+    /// # 参数
+    /// - `stage`：流程阶段。
+    /// - `i18n`：界面语料。
+    ///
+    /// ```ignore
+    /// let state = TranslateUiState::running(TranslateStage::Recognizing, i18n);
+    /// assert!(state.is_recognizing());
+    /// ```
+    pub fn running(stage: TranslateStage, i18n: &I18n) -> Self {
+        Self::Running {
+            stage,
+            text: stage_text(stage, i18n),
+        }
+    }
+
+    /// 是否处于“识别文字”阶段（此时在识别区叠扫描动画）。
+    pub fn is_recognizing(&self) -> bool {
+        matches!(
+            self,
+            Self::Running {
+                stage: TranslateStage::Recognizing,
+                ..
+            }
+        )
+    }
+
     /// 是否有翻译界面需要显示（非 Idle）。
     pub fn is_visible(&self) -> bool {
         !matches!(self, Self::Idle)
@@ -300,7 +346,7 @@ impl TranslateUiState {
 
     /// 是否正忙（翻译或下载中，不接受新的翻译请求）。
     pub fn is_busy(&self) -> bool {
-        matches!(self, Self::Running(_) | Self::Downloading(_))
+        matches!(self, Self::Running { .. } | Self::Downloading(_))
     }
 
     /// 由流程产出得到完成态。
@@ -339,7 +385,7 @@ impl TranslateUiState {
     pub fn status_text(&self, i18n: &I18n) -> Option<String> {
         match self {
             Self::Idle => None,
-            Self::Running(step) | Self::Downloading(step) => Some(step.clone()),
+            Self::Running { text: step, .. } | Self::Downloading(step) => Some(step.clone()),
             Self::Done {
                 translated,
                 copied: true,
@@ -374,7 +420,7 @@ impl TranslateUiState {
 pub fn panel_lines(state: &TranslateUiState, i18n: &I18n) -> Vec<String> {
     match state {
         TranslateUiState::Idle => Vec::new(),
-        TranslateUiState::Running(step) => vec![step.clone()],
+        TranslateUiState::Running { text, .. } => vec![text.clone()],
         TranslateUiState::Downloading(step) => {
             vec![step.clone(), i18n.tr("translate-flow-downloading-hint")]
         }
@@ -507,6 +553,20 @@ mod tests {
         assert_eq!(hover, LinkHover::default());
     }
 
+    /// OCR 弹窗的行悬停：只亮自己对应的框（不依赖段落对照），晚到的“离开”不清新的“进入”。
+    #[test]
+    fn box_hovered_tracks_only_the_hovered_box() {
+        let mut hover = LinkHover::default();
+        assert!(!hover.box_hovered(0));
+        hover.set_box(0, true);
+        assert!(hover.box_hovered(0) && !hover.box_hovered(1));
+        hover.set_box(1, true);
+        hover.set_box(0, false);
+        assert!(hover.box_hovered(1) && !hover.box_hovered(0));
+        hover.clear();
+        assert!(!hover.box_hovered(1));
+    }
+
     /// 三方联动：悬停原文 / 译文条目 / 识别区任一方，另两方对应高亮；离开后清除。
     #[test]
     fn three_way_hover_highlights_the_other_two() {
@@ -594,7 +654,13 @@ mod tests {
     #[test]
     fn visibility_busy_and_stages() {
         assert!(!TranslateUiState::Idle.is_visible());
-        assert!(TranslateUiState::Running("x".into()).is_busy());
+        assert!(
+            TranslateUiState::Running {
+                stage: TranslateStage::Recognizing,
+                text: "x".into()
+            }
+            .is_busy()
+        );
         assert!(TranslateUiState::Downloading("x".into()).is_busy());
         assert!(!TranslateUiState::from_outcome(&outcome(&["a"]), true).is_busy());
         assert!(TranslateUiState::Idle.status_text(zh()).is_none());
@@ -733,13 +799,33 @@ mod tests {
         }
     }
 
+    /// 只有识别阶段的“进行中”才算识别中（驱动扫描动画）。
+    #[test]
+    fn recognizing_only_in_recognize_stage() {
+        let recognizing = TranslateUiState::running(TranslateStage::Recognizing, zh());
+        let translating = TranslateUiState::running(TranslateStage::Translating, zh());
+        assert!(recognizing.is_recognizing());
+        assert!(recognizing.is_busy());
+        assert!(!translating.is_recognizing());
+        assert!(translating.is_busy());
+        assert!(!TranslateUiState::Idle.is_recognizing());
+        assert!(!TranslateUiState::Downloading("x".into()).is_recognizing());
+        assert_eq!(
+            recognizing.status_text(zh()).as_deref(),
+            Some(stage_text(TranslateStage::Recognizing, zh()).as_str())
+        );
+    }
+
     /// 下载与运行中的文案。
     #[test]
     fn progress_states() {
         assert_eq!(
-            TranslateUiState::Running("正在翻译…".into())
-                .status_text(zh())
-                .as_deref(),
+            TranslateUiState::Running {
+                stage: TranslateStage::Translating,
+                text: "正在翻译…".into()
+            }
+            .status_text(zh())
+            .as_deref(),
             Some("正在翻译…")
         );
         let d = TranslateUiState::Downloading("正在下载 onnxruntime 运行时…".into());

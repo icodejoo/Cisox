@@ -78,6 +78,9 @@ pub trait SttLink {
 
     /// 结束进程：关闭 stdin，最多等 `grace` 让它自行退出，仍在则强制结束（只动自己拉起的那个进程）。
     fn shutdown(&mut self, grace: Duration);
+
+    /// 预拉起的通道被会话认领时调用，用于记录“认领”时间点（默认什么都不做）。
+    fn note_claimed(&mut self) {}
 }
 
 /// 一次启动所需的材料：已拉起的通道与 START 请求。

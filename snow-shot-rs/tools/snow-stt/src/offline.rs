@@ -325,6 +325,42 @@ pub fn build_offline_config(
     })
 }
 
+/// 并行建 VAD 与识别器：VAD 在新线程，识别器在当前线程，两者都完成才返回。
+///
+/// 错误优先级与旧的串行实现一致：VAD 失败优先于识别器失败。
+///
+/// # 参数
+/// - `make_vad`：建 VAD 的闭包，在新线程里执行。
+/// - `make_recognizer`：建识别器的闭包，在当前线程里执行。
+///
+/// # 返回
+/// `(VAD, 识别器)`；任一失败返回对应闭包给出的中文原因，线程创建失败也返回中文原因。
+///
+/// # 示例
+/// ```ignore
+/// let (vad, rec) = load_parallel(|| Ok::<_, String>(1), || Ok::<_, String>(2))?;
+/// ```
+fn load_parallel<V, R>(
+    make_vad: impl FnOnce() -> Result<V, String> + Send,
+    make_recognizer: impl FnOnce() -> Result<R, String>,
+) -> Result<(V, R), String>
+where
+    V: Send,
+{
+    std::thread::scope(|scope| {
+        let vad_job = std::thread::Builder::new()
+            .name("stt-vad-load".into())
+            .spawn_scoped(scope, make_vad)
+            .map_err(|e| format!("创建 VAD 加载线程失败: {e}"))?;
+        let recognizer = make_recognizer();
+        // 加载线程 panic 时原样重新抛出，别吞掉
+        let vad = vad_job
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+        Ok((vad?, recognizer?))
+    })
+}
+
 /// 最近输入的历史，用于给语音段补前导音频。
 #[derive(Default)]
 struct History {
@@ -444,14 +480,23 @@ impl OfflineSherpaBackend {
         let files = discover(dir, req.kind)?;
         let vad_model = find_vad_model(dir)?;
         let vad_cfg = build_vad_config(&vad_model, req.vad.unwrap_or_else(default_vad_params));
-        let vad = VoiceActivityDetector::create(&vad_cfg, VAD_BUFFER_SECONDS)
-            .ok_or_else(|| "sherpa 创建 VAD 失败（silero_vad.onnx 损坏或不兼容）".to_string())?;
-        let mut cfg = build_offline_config(req.kind, &files, req)?;
-        if opts.model_type && req.kind == ModelKind::OfflineTransducer {
-            cfg.model_config.model_type = optcache::read_model_type(dir, &OFFLINE_TRANSDUCER_TYPES);
-        }
-        let recognizer = OfflineRecognizer::create(&cfg)
-            .ok_or_else(|| "sherpa 创建离线识别器失败（模型文件损坏或不兼容）".to_string())?;
+        // VAD 建会话约 160~190 ms，与识别器加载并行（sherpa 两类对象都是 Send）
+        let (vad, recognizer) = load_parallel(
+            move || {
+                VoiceActivityDetector::create(&vad_cfg, VAD_BUFFER_SECONDS).ok_or_else(|| {
+                    "sherpa 创建 VAD 失败（silero_vad.onnx 损坏或不兼容）".to_string()
+                })
+            },
+            || {
+                let mut cfg = build_offline_config(req.kind, &files, req)?;
+                if opts.model_type && req.kind == ModelKind::OfflineTransducer {
+                    cfg.model_config.model_type =
+                        optcache::read_model_type(dir, &OFFLINE_TRANSDUCER_TYPES);
+                }
+                OfflineRecognizer::create(&cfg)
+                    .ok_or_else(|| "sherpa 创建离线识别器失败（模型文件损坏或不兼容）".to_string())
+            },
+        )?;
         Self::new(
             Box::new(SherpaVad { vad }),
             Box::new(SherpaRecognizer { recognizer }),
@@ -958,6 +1003,102 @@ mod tests {
         let r = StartRequest::default();
         assert!(build_offline_config(ModelKind::OfflineWhisper, &single(), &r).is_err());
         assert!(build_offline_config(ModelKind::OnlineTransducer, &single(), &r).is_err());
+    }
+
+    /// 等待对方信号的超时，超时当作“没有并行”判失败，避免测试挂死。
+    const PARALLEL_WAIT: Duration = Duration::from_secs(5);
+
+    /// 两个任务确实并发（且 VAD 不在当前线程）：互相等对方的信号，串行执行必超时。
+    #[test]
+    fn load_parallel_runs_both_jobs_concurrently() {
+        use std::sync::mpsc::channel;
+        let main_id = std::thread::current().id();
+        let (to_rec, from_vad) = channel::<()>();
+        let (to_vad, from_rec) = channel::<()>();
+        let r = load_parallel(
+            move || {
+                to_rec.send(()).unwrap();
+                from_rec
+                    .recv_timeout(PARALLEL_WAIT)
+                    .map(|_| std::thread::current().id())
+                    .map_err(|_| "VAD 没等到识别器信号".to_string())
+            },
+            move || {
+                to_vad.send(()).unwrap();
+                from_vad
+                    .recv_timeout(PARALLEL_WAIT)
+                    .map(|_| std::thread::current().id())
+                    .map_err(|_| "识别器没等到 VAD 信号".to_string())
+            },
+        );
+        let (vad_id, rec_id) = r.unwrap();
+        assert_ne!(vad_id, main_id, "VAD 在新线程");
+        assert_eq!(rec_id, main_id, "识别器在当前线程");
+    }
+
+    /// 错误优先级：两边都失败报 VAD 的；只有一边失败报那一边的。
+    #[test]
+    fn load_parallel_error_priority() {
+        let both = load_parallel(
+            || Err::<(), _>("VAD 失败".to_string()),
+            || Err::<(), _>("识别器失败".to_string()),
+        );
+        assert_eq!(both.unwrap_err(), "VAD 失败");
+        let rec_only = load_parallel(|| Ok(1), || Err::<(), _>("识别器失败".to_string()));
+        assert_eq!(rec_only.unwrap_err(), "识别器失败");
+        let vad_only = load_parallel(|| Err::<(), _>("VAD 失败".to_string()), || Ok(2));
+        assert_eq!(vad_only.unwrap_err(), "VAD 失败");
+    }
+
+    /// 建一个临时模型目录（可选放 paraformer 文件），返回目录路径。
+    fn temp_model_dir(tag: &str, with_model_files: bool) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("snow-stt-load-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let model = root.join("model");
+        std::fs::create_dir_all(&model).unwrap();
+        if with_model_files {
+            std::fs::write(model.join("model.onnx"), b"x").unwrap();
+            std::fs::write(model.join("tokens.txt"), b"x").unwrap();
+        }
+        model
+    }
+
+    /// 以给定模型目录构造离线 paraformer 的 START 请求。
+    fn offline_req(model_dir: &Path) -> StartRequest {
+        StartRequest {
+            mode: RecognitionMode::Offline,
+            kind: ModelKind::OfflineParaformer,
+            model_dir: model_dir.to_string_lossy().into_owned(),
+            threads: 1,
+            ..Default::default()
+        }
+    }
+
+    /// 缺识别器文件时，加载报的错与串行实现一致（识别器配置发现的原文）。
+    #[test]
+    fn load_reports_missing_recognizer_files_unchanged() {
+        let model = temp_model_dir("norec", false);
+        let req = offline_req(&model);
+        let expected = discover(&model, req.kind).unwrap_err();
+        let e = OfflineSherpaBackend::load(&req, LoadOpts::default())
+            .err()
+            .unwrap();
+        assert_eq!(e, expected);
+        let _ = std::fs::remove_dir_all(model.parent().unwrap());
+    }
+
+    /// 缺 VAD 模型时，加载报的错与串行实现一致（VAD 查找的原文）。
+    #[test]
+    fn load_reports_missing_vad_model_unchanged() {
+        let model = temp_model_dir("novad", true);
+        let req = offline_req(&model);
+        let expected = find_vad_model(&model).unwrap_err();
+        let e = OfflineSherpaBackend::load(&req, LoadOpts::default())
+            .err()
+            .unwrap();
+        assert_eq!(e, expected);
+        assert!(e.contains(VAD_MODEL_FILE_NAME), "{e}");
+        let _ = std::fs::remove_dir_all(model.parent().unwrap());
     }
 
     /// 真实模型冒烟：读环境变量 `SNOW_STT_TEST_MODEL_DIR`、`SNOW_STT_TEST_KIND`、`SNOW_STT_TEST_WAV`。

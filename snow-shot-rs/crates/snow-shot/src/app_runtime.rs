@@ -276,6 +276,8 @@ pub enum UiEvent {
     CaptureFailed(String),
     /// 覆盖窗关闭了：同一会话里其余显示器上的覆盖窗跟着关闭。
     OverlayClosed,
+    /// 输入框翻译浮窗里开始输入（空白 -> 有内容）：翻译包已不在内存就补一次预热。
+    TranslateInputTypingStarted,
     /// 打开（或激活）设置窗口。
     OpenSettings,
     /// MCP 请求：需要主线程数据或能力，处理后经请求自带的通道回复。
@@ -1511,8 +1513,9 @@ pub struct AppState {
     settings_view: Option<Entity<SettingsView>>,
     /// 输入框翻译浮窗（若已打开）与其视图。
     translate_input: Option<(ShellWindow, Entity<TranslateInputView>)>,
-    /// 输入框翻译浮窗新建时启动的翻译预热（与浮窗同生命周期；关闭、重开、退出时回收）。
-    translate_input_warm: Option<WarmHandle>,
+    /// 输入框翻译浮窗的翻译预热句柄：建窗时一个，开始输入时发现包被回收再补的也在里面
+    /// （与浮窗同生命周期；关闭、重开、退出时全部回收）。
+    translate_input_warm: Vec<WarmHandle>,
     /// 翻译页窗口（若已打开）与其视图。
     translate_page: Option<(ShellWindow, Entity<TranslatePageView>)>,
     /// 截图历史后台写入器（启动失败时为 `None`，历史功能降级）。
@@ -1660,7 +1663,7 @@ impl AppState {
             settings: None,
             settings_view: None,
             translate_input: None,
-            translate_input_warm: None,
+            translate_input_warm: Vec::new(),
             translate_page: None,
             history,
             history_window: None,
@@ -4182,7 +4185,7 @@ fn open_or_focus_translate_input(cx: &mut ShellContext, state: &mut AppState) {
         Ok((window, view)) => {
             state.translate_input = Some((window, view));
             // 浮窗已建成才预热：用户多半马上输入，首次翻译不必再等进程拉起与模型加载
-            state.translate_input_warm = Some(WarmHandle::start(
+            state.translate_input_warm.push(WarmHandle::start(
                 Arc::clone(&state.translator),
                 warm_config,
                 Arc::new(AtomicBool::new(false)),
@@ -4210,14 +4213,19 @@ fn should_release_input_warm(has_warm: bool, window_open: bool) -> bool {
 /// # 参数
 /// - `state`：运行时状态。
 fn release_translate_input_warm(state: &mut AppState) {
-    let Some(warm) = state.translate_input_warm.take() else {
+    let warms = std::mem::take(&mut state.translate_input_warm);
+    if warms.is_empty() {
         return;
-    };
+    }
     let translator = Arc::clone(&state.translator);
     let spawned = state.spawn_guarded(
         reason::TRANSLATE_JOB,
         "snow-translate-warm-release",
-        move || warm.finish(translator.as_ref()),
+        move || {
+            for warm in &warms {
+                warm.finish(translator.as_ref());
+            }
+        },
     );
     if let Err(e) = spawned {
         tracing::warn!(error = %e, "无法创建预热回收线程，交给兜底超时卸载");
@@ -4234,9 +4242,46 @@ fn on_window_closed(cx: &ShellContext, state: &mut AppState) {
         .translate_input
         .as_ref()
         .is_some_and(|(window, _)| cx.is_window_open(window));
-    if should_release_input_warm(state.translate_input_warm.is_some(), window_open) {
+    if should_release_input_warm(!state.translate_input_warm.is_empty(), window_open) {
         release_translate_input_warm(state);
     }
+}
+
+/// 输入框里开始输入时是否该补预热：浮窗还开着且走本地后端（其余情况预热没有意义，也避免和关窗回收打架）。
+///
+/// 翻译包还在不在内存由预热线程里判断（读引擎状态会等锁，不能在主线程做）。
+///
+/// # 参数
+/// - `window_open`：浮窗是否仍然打开（关窗时预热已被回收，过期事件直接丢弃）。
+/// - `local_backend`：是否为本地翻译后端。
+fn should_rewarm_input(window_open: bool, local_backend: bool) -> bool {
+    window_open && local_backend
+}
+
+/// 输入框翻译浮窗里开始输入：包已不在内存（预热被 TTL 回收或从未成功）就补一次预热，与防抖等待重叠。
+///
+/// 句柄放进浮窗的预热句柄列表，关窗时与建窗时那个预热一并回收；包还在内存时线程什么都不做。
+///
+/// # 参数
+/// - `cx`：外壳上下文。
+/// - `state`：运行时状态。
+fn rewarm_translate_input(cx: &ShellContext, state: &mut AppState) {
+    let window_open = state
+        .translate_input
+        .as_ref()
+        .is_some_and(|(window, _)| cx.is_window_open(window));
+    let translate_config =
+        TranslateConfig::from_document(state.config.borrow().document(), &system_ui_language());
+    let warm_config = initial_warm_config(&translate_config);
+    let local_backend = warm_config.backend == crate::translate_service::Backend::Local;
+    if !should_rewarm_input(window_open, local_backend) {
+        return;
+    }
+    state.translate_input_warm.push(WarmHandle::rewarm_on_input(
+        Arc::clone(&state.translator),
+        warm_config,
+        Arc::new(AtomicBool::new(false)),
+    ));
 }
 
 /// 在后台线程翻译输入框里的文本，结果经收件箱回到主线程。
@@ -5073,6 +5118,7 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
             }
         }
         UiEvent::OverlayClosed => close_all_overlays(cx, state),
+        UiEvent::TranslateInputTypingStarted => rewarm_translate_input(cx, state),
         UiEvent::CaptureFailed(reason) => {
             state.capture_collector.cancel();
             state.window_hover = None;
@@ -5520,7 +5566,7 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
 fn shutdown_app(cx: &mut ShellContext, state: &mut AppState) {
     tracing::info!("quit requested, shutting down");
     // 先丢预热句柄让预热线程放弃，再关翻译宿主（worker 随之整体结束）
-    state.translate_input_warm.take();
+    state.translate_input_warm.clear();
     state.ocr.shutdown();
     state.translator.shutdown();
     state.dictation.shutdown();
@@ -5675,6 +5721,15 @@ mod tests {
         assert!(!should_release_input_warm(true, true));
         assert!(!should_release_input_warm(false, false));
         assert!(!should_release_input_warm(false, true));
+    }
+
+    /// 输入框补预热判定：浮窗开着且本地后端才补；窗已关或非本地后端不补。
+    #[test]
+    fn input_rewarm_needs_open_window_and_local_backend() {
+        assert!(should_rewarm_input(true, true));
+        assert!(!should_rewarm_input(false, true));
+        assert!(!should_rewarm_input(true, false));
+        assert!(!should_rewarm_input(false, false));
     }
 
     /// 设置窗口追加页 / 几何动作映射成对应的主线程事件。

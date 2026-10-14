@@ -284,6 +284,10 @@ impl TranslateInputView {
     /// 输入内容变化：启动一轮防抖，到点再裁决是否翻译（防抖时长同翻译页）。
     fn on_input_changed(&mut self, cx: &mut Context<Self>) {
         let text = self.input.read(cx).value().to_string();
+        // 开始输入的那一下：通知运行时检查翻译包还在不在内存，不在就补预热（与下面的防抖等待重叠）
+        if self.session.note_edit(&text) {
+            self.inbox.push(UiEvent::TranslateInputTypingStarted);
+        }
         let Some(generation) = self.session.input_changed(&text) else {
             return;
         };

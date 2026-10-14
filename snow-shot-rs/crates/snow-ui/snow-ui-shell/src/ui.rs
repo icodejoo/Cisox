@@ -30,7 +30,7 @@ pub use gpui_kit::{
     StyledImage, Task, TextAlign, TextRun, UTF16Selection, UnderlineStyle, ViewElement, WeakEntity,
     Window, WindowControlArea, actions,
     DispatchPhase, ScrollDelta, ScrollStrategy, ScrollWheelEvent, ShapedLine, UniformListScrollHandle, canvas, component, div, hsla, img, point,
-    px, radians, rgb, rgba, size, uniform_list,
+    linear_color_stop, linear_gradient, px, radians, rgb, rgba, size, uniform_list,
 };
 pub use gpui_kit::prelude::FluentBuilder;
 /// 锚定弹层宿主（触发元素 + 延迟绘制的弹出内容，自带窗口边缘避让与遮挡）。

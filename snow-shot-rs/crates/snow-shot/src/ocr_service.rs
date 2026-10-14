@@ -8,7 +8,7 @@ use crate::ocr_assets::{
     ENV_OCR_ASSET_DIR, ENV_OCR_PROCESS_EXE, OcrAssets, model_search_dirs, models_dir, ocr_root,
     resolve_assets,
 };
-use crate::ocr_client::{OcrError, OcrWorker, SessionConfig, Timeouts};
+use crate::ocr_client::{OcrError, OcrWorker, SessionConfig, Timeouts, elapsed_ms};
 use image::{ImageBuffer, Rgba, imageops};
 use serde_json::Value;
 use snow_config::document::ConfigDocument;
@@ -141,6 +141,43 @@ struct Inner {
     last_used: Instant,
     /// 空闲监视线程是否在运行。
     monitor_running: bool,
+}
+
+/// 一次识别请求的分段耗时（只用于日志，毫秒）。
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct RequestStages {
+    /// 这次请求是否新拉起了 worker 进程（冷启动）；复用已有进程为假。
+    cold_start: bool,
+    /// worker 进程 ID。
+    pid: Option<u32>,
+    /// 拉起并握手（复用时约为 0）。
+    launch_ms: u64,
+    /// 准备会话（模型加载；会话已准备好时约为 0）。
+    prepare_ms: u64,
+    /// 识别本身。
+    recognize_ms: u64,
+}
+
+impl RequestStages {
+    /// 写一行 info 日志：冷启动 / 复用、三段耗时与合计（不含取资产、缩放等前置步骤）、图像尺寸与识别行数。
+    ///
+    /// # 参数
+    /// - `width` / `height`：送进 worker 的图像尺寸。
+    /// - `lines`：识别出的行数。
+    fn log(&self, width: u32, height: u32, lines: usize) {
+        tracing::info!(
+            cold_start = self.cold_start,
+            pid = self.pid,
+            launch_ms = self.launch_ms,
+            prepare_ms = self.prepare_ms,
+            recognize_ms = self.recognize_ms,
+            total_ms = self.launch_ms + self.prepare_ms + self.recognize_ms,
+            width,
+            height,
+            lines,
+            "OCR 识别耗时分段"
+        );
+    }
 }
 
 /// 加锁并忽略中毒（一次线程 panic 不应让 OCR 永久失效）。
@@ -410,14 +447,23 @@ impl OcrService {
     pub fn warm_up(&self, config: &OcrRequestConfig) -> Result<(), OcrError> {
         let assets = self.resolve(&config.model_kind)?;
         let session = session_for(config, &assets);
+        let warm_started = Instant::now();
         let mut guard = lock(&self.inner);
-        if guard.worker.is_none() {
+        let cold_start = guard.worker.is_none();
+        if cold_start {
             guard.worker = Some(self.launcher.launch(&assets)?);
         }
         let prepared = match guard.worker.as_mut() {
             Some(worker) => worker.prepare(&session),
             None => Err(OcrError::ProcessDied(String::new())),
         };
+        if prepared.is_ok() {
+            tracing::info!(
+                cold_start,
+                warm_ms = elapsed_ms(warm_started),
+                "OCR 预热完成"
+            );
+        }
         guard.last_used = Instant::now();
         if let Err(e) = prepared {
             if e.is_fatal_for_worker()
@@ -448,18 +494,34 @@ impl OcrService {
         let mut attempt = 0;
         loop {
             let reused = guard.worker.is_some();
+            let mut stages = RequestStages {
+                cold_start: !reused,
+                ..RequestStages::default()
+            };
+            let launch_started = Instant::now();
             if !reused {
                 guard.worker = Some(self.launcher.launch(assets)?);
             }
+            stages.launch_ms = elapsed_ms(launch_started);
             let outcome = match guard.worker.as_mut() {
-                Some(worker) => worker
-                    .prepare(session)
-                    .and_then(|()| worker.recognize(width, height, rgba)),
+                Some(worker) => {
+                    stages.pid = worker.pid();
+                    let prepare_started = Instant::now();
+                    let prepared = worker.prepare(session);
+                    stages.prepare_ms = elapsed_ms(prepare_started);
+                    prepared.and_then(|()| {
+                        let recognize_started = Instant::now();
+                        let lines = worker.recognize(width, height, rgba);
+                        stages.recognize_ms = elapsed_ms(recognize_started);
+                        lines
+                    })
+                }
                 None => Err(OcrError::ProcessDied(String::new())),
             };
             guard.last_used = Instant::now();
             match outcome {
                 Ok(lines) => {
+                    stages.log(width, height, lines.len());
                     if !resident && !guard.monitor_running {
                         guard.monitor_running = true;
                         spawn_idle_monitor(Arc::clone(&self.inner), self.idle_timeout);

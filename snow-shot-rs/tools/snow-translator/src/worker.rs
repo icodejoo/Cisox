@@ -138,6 +138,8 @@ pub struct Worker<B: Backend> {
     loader: Loader<B>,
     /// `load` 给的缺省语言对，`translate` 没带语言时沿用（`load` 没给则为空）。
     default_pair: Option<(String, String)>,
+    /// 上一次翻译成功后待执行的内存收缩：等结果事件发出并 flush 后由 [`Worker::after_send`] 执行。
+    pending_trim: bool,
 }
 
 impl<B: Backend> Worker<B> {
@@ -158,6 +160,23 @@ impl<B: Backend> Worker<B> {
             backend: None,
             loader,
             default_pair: None,
+            pending_trim: false,
+        }
+    }
+
+    /// 执行挂起的内存收缩（无挂起则什么都不做）。
+    ///
+    /// 调用方应在结果事件发出并 flush 后立即调用，让 trim 不占用请求的关键路径。
+    ///
+    /// # 示例
+    /// ```ignore
+    /// worker.after_send();
+    /// ```
+    pub fn after_send(&mut self) {
+        if std::mem::take(&mut self.pending_trim)
+            && let Some(backend) = self.backend.as_mut()
+        {
+            backend.trim();
         }
     }
 
@@ -174,6 +193,13 @@ impl<B: Backend> Worker<B> {
     /// let out = worker.handle(Command::Ping);
     /// ```
     pub fn handle(&mut self, cmd: Command) -> Outcome {
+        // 保险：调用方漏调 after_send 时，trim 仍在处理下一条命令前完成；
+        // Load/Unload 会丢弃旧后端，只清标志不白跑一次 trim
+        if matches!(cmd, Command::Load { .. } | Command::Unload) {
+            self.pending_trim = false;
+        } else {
+            self.after_send();
+        }
         match cmd {
             Command::Ping => {
                 let m = sysmem::snapshot();
@@ -312,7 +338,8 @@ impl<B: Backend> Worker<B> {
         }
         // elapsed_ms 只统计翻译本身，不含随后的内存收缩
         let elapsed_ms = started.elapsed().as_millis() as u64;
-        backend.trim();
+        // trim 挪到结果发出之后（见 after_send），不放在关键路径上
+        self.pending_trim = true;
         Outcome::one(Event::Result {
             id,
             texts: out,
@@ -724,5 +751,117 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    thread_local! {
+        /// 本线程里“发送 / trim”发生的先后（验证 trim 在 Result 发出之后；每个测试一个线程）。
+        static LOG: std::cell::RefCell<Vec<&'static str>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    /// 取出并清空 [`LOG`]。
+    fn take_log() -> Vec<&'static str> {
+        LOG.with(|l| std::mem::take(&mut *l.borrow_mut()))
+    }
+
+    /// 记录 trim 调用的假后端：文本 "boom" 时翻译失败。
+    struct TrimFake;
+
+    impl Backend for TrimFake {
+        /// 固定 ID。
+        fn model_id(&self) -> &str {
+            "trim-fake"
+        }
+
+        /// 原样返回；"boom" 报错。
+        fn translate(
+            &mut self,
+            text: &str,
+            _src: &str,
+            _tgt: &str,
+            _opts: &TranslateOptions,
+        ) -> Result<String, EngineError> {
+            if text == "boom" {
+                return Err(EngineError {
+                    kind: ErrorKind::DecodeFailed,
+                    message: "boom".into(),
+                });
+            }
+            Ok(text.into())
+        }
+
+        /// 记录一次 trim。
+        fn trim(&mut self) {
+            LOG.with(|l| l.borrow_mut().push("trim"));
+        }
+    }
+
+    /// 总是成功的加载函数。
+    fn trim_loader(_dir: &Path, _pair: Option<(&str, &str)>) -> Result<TrimFake, EngineError> {
+        Ok(TrimFake)
+    }
+
+    /// 模拟 main 循环：处理命令、“发送”全部事件（记入日志）、再调 after_send。
+    fn serve(w: &mut Worker<TrimFake>, cmd: Command) -> Outcome {
+        let out = w.handle(cmd);
+        for e in &out.events {
+            LOG.with(|l| {
+                l.borrow_mut().push(match e {
+                    Event::Result { .. } => "send:result",
+                    _ => "send:other",
+                })
+            });
+        }
+        w.after_send();
+        out
+    }
+
+    /// trim 在 Result 发出之后、下一条命令之前发生；失败请求不 trim；协议事件内容不变。
+    #[test]
+    fn trim_runs_after_result_is_sent() {
+        let mut w = Worker::new(trim_loader);
+        serve(&mut w, load_cmd("ok"));
+        take_log();
+
+        let out = serve(&mut w, translate_cmd(1, "hi", None, None));
+        assert!(matches!(
+            out.events.as_slice(),
+            [Event::Result { id: 1, texts, .. }] if texts == &["hi"]
+        ));
+        assert_eq!(take_log(), vec!["send:result", "trim"]);
+
+        // 失败请求：只发错误事件，不 trim
+        serve(&mut w, translate_cmd(2, "boom", None, None));
+        assert_eq!(take_log(), vec!["send:other"]);
+    }
+
+    /// handle 返回时 trim 尚未发生；没人调 after_send 时下一条命令开头补做，Load/Unload 只清标志。
+    #[test]
+    fn pending_trim_safety_net() {
+        let mut w = Worker::new(trim_loader);
+        w.handle(load_cmd("ok"));
+        take_log();
+
+        w.handle(translate_cmd(1, "hi", None, None));
+        assert!(take_log().is_empty(), "trim 不能先于结果事件发出");
+        w.after_send();
+        assert_eq!(take_log(), vec!["trim"]);
+        w.after_send();
+        assert!(take_log().is_empty(), "已执行过的 trim 不重复");
+
+        // 漏调 after_send：下一条命令（Ping）处理前补做
+        w.handle(translate_cmd(2, "hi", None, None));
+        assert!(take_log().is_empty());
+        w.handle(Command::Ping);
+        assert_eq!(take_log(), vec!["trim"]);
+
+        // 旧后端马上被替换/卸载：不白跑 trim
+        w.handle(translate_cmd(3, "hi", None, None));
+        w.handle(load_cmd("ok"));
+        w.after_send();
+        assert!(take_log().is_empty());
+        w.handle(translate_cmd(4, "hi", None, None));
+        w.handle(Command::Unload);
+        w.after_send();
+        assert!(take_log().is_empty());
     }
 }

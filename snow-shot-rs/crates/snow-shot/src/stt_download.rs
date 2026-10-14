@@ -6,7 +6,6 @@
 //! 清单里 sha256 为空的资产放行但会记日志，并在 [`InstallReport::unpinned`] 里返回，让界面提示「校验值待固定」。
 //! 下载在调用线程里阻塞执行，调用方应放到后台线程。
 
-use crate::ocr_assets::COMPLETE_MARKER;
 use crate::ocr_download::{
     FetchError, TOOL_TAR, quiet_command, sha256_file, system_tool, write_marker,
 };
@@ -114,14 +113,16 @@ pub struct InstallReport {
     pub unpinned: Vec<String>,
 }
 
-/// 模型是否已安装：完成标记在且 `files` 全部存在。
+/// 模型是否已安装：`files` 全部存在即可。
+///
+/// 不要求完成标记：应用内下载已撤（模型由用户从浏览器下载后自己解压放入），手动放入的目录里没有标记。
 ///
 /// # 参数
 /// - `spec`：模型。
 /// - `data_root`：应用数据根目录。
 pub fn is_installed(spec: &SttModelSpec, data_root: &Path) -> bool {
     let dir = stt_models::model_dir(spec, data_root);
-    dir.join(COMPLETE_MARKER).is_file() && spec.files.iter().all(|f| dir.join(f).is_file())
+    spec.files.iter().all(|f| dir.join(f).is_file())
 }
 
 /// 共享 VAD 是否已安装：文件存在且大小与清单一致。
@@ -582,6 +583,7 @@ pub fn install_vad_asset(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ocr_assets::COMPLETE_MARKER;
 
     /// 取消与真正失败分开归类。
     #[test]
@@ -867,9 +869,9 @@ mod tests {
         }
     }
 
-    /// 已安装判定：缺任一必需文件或没有完成标记都算未安装。
+    /// 已安装判定：缺任一必需文件算未安装；没有完成标记（手动放入）只要文件齐全仍算已安装。
     #[test]
-    fn installed_requires_marker_and_files() {
+    fn installed_requires_files_not_marker() {
         let src = temp_root("inst-src");
         let root = temp_root("inst-dst");
         let spec = make_spec(&src, "pack-inst", false, true);
@@ -881,7 +883,10 @@ mod tests {
         std::fs::write(dir.join("tokens.txt"), b"a").expect("写");
         assert!(is_installed(&spec, &root));
         std::fs::remove_file(dir.join(COMPLETE_MARKER)).expect("删");
-        assert!(!is_installed(&spec, &root));
+        assert!(
+            is_installed(&spec, &root),
+            "手动放入（无完成标记）且文件齐全应算已安装"
+        );
         for d in [src, root] {
             let _ = std::fs::remove_dir_all(&d);
         }

@@ -60,9 +60,7 @@ impl OcrAutoAction {
     }
 }
 
-/// 结果面板最多显示的行数。
-pub const PANEL_MAX_LINES: usize = 8;
-/// 结果面板每行最多显示的字符数。
+/// 结果弹窗里失败说明最多显示的字符数的基数（失败说明取它的两倍）。
 pub const PANEL_MAX_CHARS: usize = 56;
 
 /// OCR 在覆盖窗里的状态。
@@ -147,15 +145,15 @@ impl OcrUiState {
         }
     }
 
-    /// 底部状态条文案。
+    /// 底部状态条文案（识别中没有）。
     ///
     /// # 参数
     /// - `i18n`：界面语料。
     pub fn status_text(&self, i18n: &I18n) -> Option<String> {
         let count = |boxes: &[OcrTextBox]| Args::new().named("count", boxes.len().to_string());
         match self {
-            Self::Idle => None,
-            Self::Running => Some(i18n.tr("ocr-panel-running")),
+            // 识别中只有扫描动画，不出任何等待文字
+            Self::Idle | Self::Running => None,
             Self::Done { text, .. } if text.is_empty() => Some(i18n.tr("ocr-panel-empty")),
             Self::Done {
                 boxes,
@@ -197,53 +195,52 @@ pub fn truncate_line(line: &str, max_chars: usize) -> String {
     }
 }
 
-/// 结果面板要显示的文字行。
+/// 结果弹窗内容区要显示的内容。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PopupBody {
+    /// 每个文本框一行（下标与 `boxes` 一一对应，悬停某行高亮截图上对应的识别框）。
+    Boxes(Vec<String>),
+    /// 只有文本没有文本框（如 LaTeX / 表格模式），按文本行显示，无高亮。
+    Text(Vec<String>),
+    /// 提示文字（未识别到文字 / 失败 / 下载中），无高亮。
+    Notice(Vec<String>),
+}
+
+impl PopupBody {
+    /// 内容区的所有行文字（估算弹窗高度用）。
+    pub fn lines(&self) -> &[String] {
+        match self {
+            Self::Boxes(lines) | Self::Text(lines) | Self::Notice(lines) => lines,
+        }
+    }
+}
+
+/// 结果弹窗内容区的内容。
 ///
 /// # 参数
 /// - `state`：OCR 状态。
 /// - `i18n`：界面语料。
 ///
 /// # 返回
-/// 空表示不显示面板；否则依次是标题 / 正文 / 操作提示。
+/// `None` 表示不显示弹窗（未启用，或识别进行中只有扫描动画）。
 ///
 /// ```ignore
-/// assert!(panel_lines(&OcrUiState::Idle, i18n).is_empty());
+/// assert!(popup_body(&OcrUiState::Running, i18n).is_none());
 /// ```
-pub fn panel_lines(state: &OcrUiState, i18n: &I18n) -> Vec<String> {
-    match state {
-        OcrUiState::Idle => Vec::new(),
-        OcrUiState::Running => vec![i18n.tr("ocr-panel-running")],
-        OcrUiState::Downloading(step) => vec![step.clone(), i18n.tr("ocr-panel-downloading-hint")],
-        OcrUiState::Done { text, .. } if text.is_empty() => {
-            vec![i18n.tr("ocr-panel-empty"), i18n.tr("ocr-panel-esc")]
+pub fn popup_body(state: &OcrUiState, i18n: &I18n) -> Option<PopupBody> {
+    Some(match state {
+        OcrUiState::Idle | OcrUiState::Running => return None,
+        OcrUiState::Downloading(step) => {
+            PopupBody::Notice(vec![step.clone(), i18n.tr("ocr-panel-downloading-hint")])
         }
-        OcrUiState::Done {
-            text,
-            copied,
-            skipped,
-            ..
-        } => {
-            let all: Vec<&str> = text.lines().collect();
-            let mut lines: Vec<String> = all
-                .iter()
-                .take(PANEL_MAX_LINES)
-                .map(|l| truncate_line(l, PANEL_MAX_CHARS))
-                .collect();
-            if all.len() > PANEL_MAX_LINES {
-                lines.push(i18n.tr_with(
-                    "ocr-panel-more-lines",
-                    &Args::new().named("count", (all.len() - PANEL_MAX_LINES).to_string()),
-                ));
-            }
-            let footer = if *copied {
-                "ocr-panel-footer-copied"
-            } else if *skipped {
-                "ocr-panel-footer-not-copied"
-            } else {
-                "ocr-panel-footer-copy-failed"
-            };
-            lines.push(i18n.tr(footer));
-            lines
+        OcrUiState::Done { text, .. } if text.is_empty() => {
+            PopupBody::Notice(vec![i18n.tr("ocr-panel-empty"), i18n.tr("ocr-panel-esc")])
+        }
+        OcrUiState::Done { boxes, .. } if !boxes.is_empty() => {
+            PopupBody::Boxes(boxes.iter().map(|b| b.text.clone()).collect())
+        }
+        OcrUiState::Done { text, .. } => {
+            PopupBody::Text(text.lines().map(str::to_string).collect())
         }
         OcrUiState::Failed {
             message,
@@ -254,9 +251,21 @@ pub fn panel_lines(state: &OcrUiState, i18n: &I18n) -> Vec<String> {
                 lines.push(i18n.tr("ocr-panel-download-hint"));
             }
             lines.push(i18n.tr("ocr-panel-esc"));
-            lines
+            PopupBody::Notice(lines)
         }
-    }
+    })
+}
+
+/// 弹窗的“复制”是否可用：识别完成且有文字。
+///
+/// # 参数
+/// - `state`：OCR 状态。
+///
+/// ```ignore
+/// assert!(!popup_copyable(&OcrUiState::Idle));
+/// ```
+pub fn popup_copyable(state: &OcrUiState) -> bool {
+    matches!(state, OcrUiState::Done { text, .. } if !text.is_empty())
 }
 
 #[cfg(test)]
@@ -313,10 +322,11 @@ mod tests {
             done.status_text(zh()).as_deref(),
             Some("已识别 2 行，文字已复制到剪贴板")
         );
-        let lines = panel_lines(&done, zh());
-        assert_eq!(lines[0], "第一行");
-        assert_eq!(lines[1], "second");
-        assert!(lines.last().is_some_and(|l| l.contains("Enter")));
+        // 有文本框：每个框一行，原样不截断
+        assert_eq!(
+            popup_body(&done, zh()),
+            Some(PopupBody::Boxes(vec!["第一行".into(), "second".into()]))
+        );
         let failed_copy = OcrUiState::from_result(&result(&["a"]), false);
         assert!(
             failed_copy
@@ -325,26 +335,60 @@ mod tests {
         );
         let empty = OcrUiState::from_result(&result(&[]), true);
         assert_eq!(empty.status_text(zh()).as_deref(), Some("未识别到文字"));
-        assert_eq!(panel_lines(&empty, zh())[0], "未识别到文字");
+        assert_eq!(popup_body(&empty, zh()).unwrap().lines()[0], "未识别到文字");
         assert_eq!(empty.status_text(en()).as_deref(), Some("No text found"));
     }
 
-    /// 面板行数与行宽受限；超出行数给出“另有 N 行”。
+    /// 内容区不截断也不限行数（弹窗内可滚动）；没有文本框时按文本行显示；失败说明仍有长度上限。
     #[test]
-    fn panel_is_bounded() {
-        let long = "长".repeat(PANEL_MAX_CHARS + 10);
+    fn popup_body_variants() {
         let many: Vec<String> = (0..12).map(|i| format!("line{i}")).collect();
         let refs: Vec<&str> = many.iter().map(String::as_str).collect();
-        let lines = panel_lines(&OcrUiState::from_result(&result(&refs), true), zh());
-        assert_eq!(lines.len(), PANEL_MAX_LINES + 2);
-        assert!(lines[PANEL_MAX_LINES].contains("另有 4 行"));
-        let lines = panel_lines(
-            &OcrUiState::from_result(&result(&[long.as_str()]), true),
-            zh(),
+        let done = OcrUiState::from_result(&result(&refs), true);
+        assert_eq!(popup_body(&done, zh()).unwrap().lines().len(), 12);
+        let long = "长".repeat(PANEL_MAX_CHARS * 3);
+        let done = OcrUiState::from_result(&result(&[long.as_str()]), true);
+        assert_eq!(popup_body(&done, zh()).unwrap().lines()[0], long);
+        // LaTeX / 表格：只有文本没有文本框
+        let text_only = OcrUiState::Done {
+            text: "a\nb".to_string(),
+            boxes: Vec::new(),
+            copied: false,
+            skipped: true,
+        };
+        assert_eq!(
+            popup_body(&text_only, zh()),
+            Some(PopupBody::Text(vec!["a".into(), "b".into()]))
         );
-        assert_eq!(lines[0].chars().count(), PANEL_MAX_CHARS + 1);
-        assert!(lines[0].ends_with('…'));
+        let failed = OcrUiState::Failed {
+            message: "长".repeat(PANEL_MAX_CHARS * 3),
+            can_download: false,
+        };
+        let body = popup_body(&failed, zh()).unwrap();
+        assert_eq!(body.lines()[0].chars().count(), PANEL_MAX_CHARS * 2 + 1);
         assert_eq!(truncate_line("abc", 5), "abc");
+    }
+
+    /// 识别中与未启用不出弹窗；“复制”只在有文字的完成态可用。
+    #[test]
+    fn popup_hidden_while_running_and_copy_gate() {
+        assert_eq!(popup_body(&OcrUiState::Idle, zh()), None);
+        assert_eq!(popup_body(&OcrUiState::Running, zh()), None);
+        assert_eq!(popup_body(&OcrUiState::Running, en()), None);
+        assert!(popup_copyable(&OcrUiState::from_result(
+            &result(&["a"]),
+            true
+        )));
+        assert!(!popup_copyable(&OcrUiState::from_result(
+            &result(&[]),
+            true
+        )));
+        assert!(!popup_copyable(&OcrUiState::Running));
+        assert!(!popup_copyable(&OcrUiState::Downloading("x".into())));
+        assert!(!popup_copyable(&OcrUiState::Failed {
+            message: "x".into(),
+            can_download: false,
+        }));
     }
 
     /// 各类失败给出不同文案；缺资产时提示按 D 下载，其它失败不提示。
@@ -358,14 +402,18 @@ mod tests {
                 .is_some_and(|s| s.contains("按 D 下载"))
         );
         assert!(
-            panel_lines(&no_runtime, zh())
+            popup_body(&no_runtime, zh())
+                .unwrap()
+                .lines()
                 .iter()
                 .any(|l| l.contains("按 D 下载"))
         );
         let no_runtime_en =
             OcrUiState::from_error(&OcrError::Unavailable(OcrUnavailable::NoRuntime), en());
         assert!(
-            panel_lines(&no_runtime_en, en())
+            popup_body(&no_runtime_en, en())
+                .unwrap()
+                .lines()
                 .iter()
                 .all(|l| l.is_ascii())
         );
@@ -374,23 +422,27 @@ mod tests {
             died.status_text(zh())
                 .is_some_and(|s| s.contains("crash") && !s.contains("按 D"))
         );
-        assert!(!panel_lines(&died, zh()).iter().any(|l| l.contains("按 D")));
+        assert!(
+            !popup_body(&died, zh())
+                .unwrap()
+                .lines()
+                .iter()
+                .any(|l| l.contains("按 D"))
+        );
         assert_ne!(no_runtime.status_text(zh()), died.status_text(zh()));
     }
 
-    /// 下载中与运行中的文案。
+    /// 下载中有进度文案；运行中没有任何等待文字。
     #[test]
     fn progress_states() {
-        assert_eq!(
-            OcrUiState::Running.status_text(zh()).as_deref(),
-            Some("正在识别文字…")
-        );
+        assert_eq!(OcrUiState::Running.status_text(zh()), None);
+        assert_eq!(OcrUiState::Running.status_text(en()), None);
         let d = OcrUiState::Downloading("正在下载 OCR 模型 (1/3)…".into());
         assert_eq!(
             d.status_text(zh()).as_deref(),
             Some("正在下载 OCR 模型 (1/3)…")
         );
-        assert_eq!(panel_lines(&d, zh()).len(), 2);
+        assert_eq!(popup_body(&d, zh()).unwrap().lines().len(), 2);
     }
 
     /// 自动动作配置：六个值都能解析，只有“复制”两种会自动复制，只有“复制并结束”会结束截图。
@@ -436,7 +488,7 @@ mod tests {
         assert_eq!(OcrAutoAction::default(), OcrAutoAction::NoAction);
     }
 
-    /// 没有自动复制的完成态：状态条与底部提示是“未复制”文案，不是“复制失败”，中英文都有。
+    /// 没有自动复制的完成态：状态条是“未复制”文案，不是“复制失败”，中英文都有。
     #[test]
     fn skipped_copy_has_its_own_texts() {
         let state = OcrUiState::from_result(&result(&["abc"]), true).without_auto_copy();
@@ -453,12 +505,6 @@ mod tests {
             assert!(
                 !status.contains("失败") && !status.contains("failed"),
                 "{status}"
-            );
-            let footer = panel_lines(&state, i18n).pop().unwrap();
-            assert!(footer.contains("Enter"), "{footer}");
-            assert!(
-                !footer.contains("失败") && !footer.contains("failed"),
-                "{footer}"
             );
         }
         assert_eq!(OcrUiState::Idle.without_auto_copy(), OcrUiState::Idle);

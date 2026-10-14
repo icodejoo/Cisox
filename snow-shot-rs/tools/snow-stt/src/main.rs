@@ -193,6 +193,18 @@ fn print_stats(load_ms: u128, stats: &SessionStats) {
     );
 }
 
+/// 加载完成后的单行摘要：加载耗时（从收到 START 起算）与后端、识别模式。
+///
+/// # 参数
+/// - `load_ms`：加载耗时（毫秒）。
+/// - `req`：START 请求。
+fn load_line(load_ms: u128, req: &StartRequest) -> String {
+    format!(
+        "load: load_ms={load_ms} backend={:?} mode={:?}",
+        req.backend, req.mode
+    )
+}
+
 /// 本次会话是否让 worker 在加载模型之前先开始采音（先开麦 + 环形缓存）。
 ///
 /// 只有 worker 自己采样的本地后端才适用：麦克风，或测试用的 `--wav-preroll`；
@@ -284,6 +296,11 @@ fn main() {
         };
     let mut backend = loaded.unwrap_or_else(|why| fail(why));
     let load_ms = t0.elapsed().as_millis();
+    // 加载摘要无条件写 stderr（stdout 协议不变）：主程序把 `load:` / `load_plan:` 行提升为 info 日志
+    eprintln!("{}", load_line(load_ms, &req));
+    if let Some(report) = &load_report {
+        eprintln!("{}", report.summary());
+    }
 
     // 先开麦的来源直接沿用（积压由主循环按序快进消费）；否则加载完再开：系统语音只需节拍，
     // 普通 `--wav` 读文件
@@ -314,9 +331,6 @@ fn main() {
     );
     if args.stats {
         print_stats(load_ms, &stats);
-        if let Some(report) = &load_report {
-            eprintln!("{}", report.summary());
-        }
     }
     // 会话顺利结束后，没有缓存就在后台生成一次（空闲优先级子进程，不影响刚结束的听写，也不会拖慢下一次）
     if end != SessionEnd::Failed
@@ -383,6 +397,14 @@ mod tests {
         assert!(a.no_model_type && a.no_opt_cache);
         let none = parse_args_from(argv(&["--wav", "a.wav"]));
         assert!(none.optimize.is_none() && !none.no_model_type && !none.no_opt_cache);
+    }
+
+    /// 加载摘要行：固定 `load:` 前缀与 `load_ms=` 字段，主程序按它提升日志级别、取耗时。
+    #[test]
+    fn load_line_has_stable_prefix_and_field() {
+        let line = load_line(1234, &StartRequest::default());
+        assert!(line.starts_with("load: load_ms=1234 "), "{line}");
+        assert!(line.contains("backend=Local"), "{line}");
     }
 
     /// 先开麦只用于本地后端：麦克风与 `--wav-preroll` 走缓存；普通 wav 与系统语音保持老流程。

@@ -8,6 +8,9 @@
 ## 当前入口
 - [cisox-progress-handoff.md](cisox-progress-handoff.md) — 进度交接。**最新状态与未验证 / 待办在 §0.-1（2026-10-13 收口：截图翻译、翻译浮窗改版、托盘宿主双进程阶段 0~6 并切默认、语音冷启动与双语模型加载提速）**，上一轮见 §0.0（2026-10-09），文件主体仍是 2026-10-03 暂停点的状态；旧待办清单在 §5.1（已被 §0.-1 部分取代），**进程模型（托盘宿主 + 按需 UI）在 §6.2**；功能对齐程度看 [research/qt-parity-audit.md](research/qt-parity-audit.md)。
 
+## 台账
+- [reference/model-load-optimization-ledger.md](reference/model-load-optimization-ledger.md) — 模型加载优化台账 = 加载提速 = 冷启动优化（语音 / 翻译 / OCR / 表格 / 公式）：每项已做 / 待做 / 已否决带编号和证据，**查"哪些优化过"先看它**，改动后同提交更新。有效。
+
 ## 方案与决策
 - [cisox-gpui-migration-plan.md](cisox-gpui-migration-plan.md) — Snow Shot → Rust + GPUI 改造方案（v2.0，含 ADR 与已拍板决策）。有效。
 - [cisox-upstream-patches.md](cisox-upstream-patches.md) — 对 upstream 共享代码的补丁清单。有效。

@@ -13,7 +13,7 @@ use snow_ocr_protocol::{
     decode_session_ready, encode_frame, hello_payload, prepare_session_payload, submit_payload,
     write_slot_header,
 };
-use std::io::{BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -29,6 +29,74 @@ const STDERR_KEEP_BYTES: usize = 2048;
 const SHUTDOWN_ACK_WAIT: Duration = Duration::from_secs(2);
 /// 临时映射文件名前缀。
 const TEMP_FILE_PREFIX: &str = "snow-shot-ocr";
+/// worker 引擎初始化耗时“尚未收到”的占位值。
+const ENGINE_MS_UNSET: u64 = u64::MAX;
+/// worker 报告引擎初始化完成的事件名（见 `snow-ocr-process`）。
+const EVENT_ENGINE_READY: &str = "ocr.engine_ready";
+/// worker 事件的成功结果标记。
+const OUTCOME_SUCCEEDED: &str = "succeeded";
+/// stderr 单次读取一行的字节上限（防止异常输出撑爆内存；超长行被拆成几段，各段按普通行处理）。
+const STDERR_LINE_LIMIT: u64 = 8 * 1024;
+
+/// worker 在 stderr 里以 JSON 行输出的结构化事件（预编译的 `snow-ocr-process` 1.0.8 起如此）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkerEvent {
+    /// 事件名，如 `ocr.engine_ready`。
+    pub event: String,
+    /// 阶段，如 `initialization`。
+    pub stage: String,
+    /// 后端，如 `cpu` / `directml`。
+    pub backend: String,
+    /// 结果，如 `succeeded` / `failed`。
+    pub outcome: String,
+    /// worker 自报的耗时（毫秒）。
+    pub duration_ms: u64,
+    /// 附带说明（常为空）。
+    pub message: String,
+}
+
+/// 解析 worker 的一行 stderr：JSON 且事件名以 `ocr.` 开头才算结构化事件，其余（普通日志、残缺行）返回 `None`。
+///
+/// # 参数
+/// - `line`：一行 stderr 文本。
+///
+/// # 返回
+/// 解析出的事件；缺失的字段取空串 / 0。
+///
+/// ```ignore
+/// let ev = parse_worker_event(r#"{"event":"ocr.engine_ready","message":"","fields":{"duration_ms":850}}"#);
+/// assert_eq!(ev.map(|e| e.duration_ms), Some(850));
+/// ```
+pub fn parse_worker_event(line: &str) -> Option<WorkerEvent> {
+    let value: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+    let event = value.get("event")?.as_str()?;
+    if !event.starts_with("ocr.") {
+        return None;
+    }
+    let fields = value.get("fields");
+    let text = |obj: Option<&serde_json::Value>, key: &str| {
+        obj.and_then(|o| o.get(key))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    Some(WorkerEvent {
+        event: event.to_string(),
+        stage: text(fields, "stage"),
+        backend: text(fields, "backend"),
+        outcome: text(fields, "outcome"),
+        duration_ms: fields
+            .and_then(|f| f.get("duration_ms"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0),
+        message: text(Some(&value), "message"),
+    })
+}
+
+/// 自 `start` 起经过的毫秒数（超出 `u64` 时饱和），OCR 日志里的 `*_ms` 字段统一用它。
+pub fn elapsed_ms(start: Instant) -> u64 {
+    u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
 
 /// 各阶段超时。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -268,6 +336,14 @@ pub struct OcrWorker {
     prepared: Option<SessionConfig>,
     /// 各阶段超时。
     timeouts: Timeouts,
+    /// 进程拉起（或连接建立）时刻，日志里的“距拉起”以它为基准。
+    spawned_at: Instant,
+    /// 本进程是否已成功准备过会话（否则下一次准备就是模型冷加载）。
+    prepared_once: bool,
+    /// 本进程是否已成功完成过识别（否则下一次是首次识别）。
+    recognized_once: bool,
+    /// worker 自报的引擎初始化耗时（毫秒，`ENGINE_MS_UNSET` 表示还没收到），由 stderr 读线程写入。
+    engine_init_ms: Arc<AtomicU64>,
 }
 
 impl OcrWorker {
@@ -293,6 +369,7 @@ impl OcrWorker {
         if let Some(dir) = assets.exe.parent() {
             command.current_dir(dir);
         }
+        let spawn_started = Instant::now();
         let mut child = command
             .spawn()
             .map_err(|e| OcrError::SpawnFailed(e.to_string()))?;
@@ -305,10 +382,25 @@ impl OcrWorker {
             ));
         };
         let stderr_tail = Arc::new(Mutex::new(String::new()));
-        spawn_stderr_pump(stderr, Arc::clone(&stderr_tail));
+        let engine_init_ms = Arc::new(AtomicU64::new(ENGINE_MS_UNSET));
+        spawn_stderr_pump(
+            stderr,
+            Arc::clone(&stderr_tail),
+            Arc::clone(&engine_init_ms),
+        );
         let mut worker = Self::from_transport(stdout, stdin, Some(child), stderr_tail, timeouts);
+        worker.spawned_at = spawn_started;
+        worker.engine_init_ms = engine_init_ms;
         worker.handshake(&assets.state_dir)?;
         Ok(worker)
+    }
+
+    /// worker 自报的引擎初始化耗时（毫秒）；还没收到（或不是真实进程）返回 `None`。
+    fn engine_init_ms(&self) -> Option<u64> {
+        match self.engine_init_ms.load(Ordering::Relaxed) {
+            ENGINE_MS_UNSET => None,
+            ms => Some(ms),
+        }
     }
 
     /// 用任意传输构造连接（不握手）；读线程立即启动。
@@ -350,6 +442,10 @@ impl OcrWorker {
             next_id: 1,
             prepared: None,
             timeouts,
+            spawned_at: Instant::now(),
+            prepared_once: false,
+            recognized_once: false,
+            engine_init_ms: Arc::new(AtomicU64::new(ENGINE_MS_UNSET)),
         }
     }
 
@@ -372,6 +468,11 @@ impl OcrWorker {
                 actual: ready.protocol,
             });
         }
+        tracing::info!(
+            pid = self.pid(),
+            spawn_to_ready_ms = elapsed_ms(self.spawned_at),
+            "OCR worker 已就绪"
+        );
         Ok(())
     }
 
@@ -391,6 +492,7 @@ impl OcrWorker {
             &config.recognizer.to_string_lossy(),
             &config.dictionary.to_string_lossy(),
         );
+        let prepare_started = Instant::now();
         self.send(Kind::PrepareSession, id, &payload)?;
         let frame = self.wait(
             Kind::SessionReady,
@@ -403,6 +505,15 @@ impl OcrWorker {
             return Err(OcrError::SessionNotReady);
         }
         self.prepared = Some(config.clone());
+        tracing::info!(
+            pid = self.pid(),
+            first_prepare = !self.prepared_once,
+            prepare_ms = elapsed_ms(prepare_started),
+            engine_init_ms = self.engine_init_ms(),
+            spawn_to_prepared_ms = elapsed_ms(self.spawned_at),
+            "OCR 会话已准备（模型加载完成）"
+        );
+        self.prepared_once = true;
         Ok(())
     }
 
@@ -432,9 +543,23 @@ impl OcrWorker {
                 rgba.len()
             )));
         }
+        let recognize_started = Instant::now();
         let file = write_mapping_file(width, height, rgba)?;
         let generation = self.take_id();
         let result = self.run_recognition(&file, generation, width, height);
+        if let Ok(lines) = &result
+            && !std::mem::replace(&mut self.recognized_once, true)
+        {
+            tracing::info!(
+                pid = self.pid(),
+                recognize_ms = elapsed_ms(recognize_started),
+                spawn_to_first_recognize_ms = elapsed_ms(self.spawned_at),
+                width,
+                height,
+                lines = lines.len(),
+                "OCR worker 首次识别完成"
+            );
+        }
         // 无论成败都尽力解除映射，才能删除文件；进程已死则跳过
         if !result
             .as_ref()
@@ -592,27 +717,70 @@ impl Drop for OcrWorker {
     }
 }
 
-/// 启动 stderr 读线程，只保留末尾若干字节。
-fn spawn_stderr_pump(stderr: impl Read + Send + 'static, tail: Arc<Mutex<String>>) {
-    std::thread::spawn(move || {
-        let mut reader = BufReader::new(stderr);
-        let mut buffer = [0u8; 512];
-        while let Ok(n) = reader.read(&mut buffer) {
-            if n == 0 {
-                break;
-            }
-            if let Ok(mut text) = tail.lock() {
-                text.push_str(&String::from_utf8_lossy(&buffer[..n]));
-                if text.len() > STDERR_KEEP_BYTES {
-                    let mut cut = text.len() - STDERR_KEEP_BYTES;
-                    while !text.is_char_boundary(cut) {
-                        cut += 1;
-                    }
-                    text.drain(..cut);
+/// 处理 stderr 里一条完整的行：结构化事件写 info 日志，引擎就绪事件的耗时存进 `engine_init_ms`。
+///
+/// # 参数
+/// - `line`：一行 stderr 文本。
+/// - `engine_init_ms`：保存 worker 自报引擎初始化耗时的共享槽。
+fn note_stderr_line(line: &str, engine_init_ms: &AtomicU64) {
+    let Some(event) = parse_worker_event(line) else {
+        return;
+    };
+    if event.event == EVENT_ENGINE_READY && event.outcome == OUTCOME_SUCCEEDED {
+        engine_init_ms.store(event.duration_ms, Ordering::Relaxed);
+    }
+    tracing::info!(
+        target: "snow_ocr_process",
+        event = %event.event,
+        stage = %event.stage,
+        backend = %event.backend,
+        outcome = %event.outcome,
+        duration_ms = event.duration_ms,
+        message = %event.message,
+        "OCR worker 事件"
+    );
+}
+
+/// 启动 stderr 读线程，见 [`pump_stderr`]。
+fn spawn_stderr_pump(
+    stderr: impl Read + Send + 'static,
+    tail: Arc<Mutex<String>>,
+    engine_init_ms: Arc<AtomicU64>,
+) {
+    std::thread::spawn(move || pump_stderr(stderr, &tail, &engine_init_ms));
+}
+
+/// 逐行读 stderr 直到 EOF：只保留末尾若干字节用于错误说明，同时解析 worker 的结构化事件写日志。
+///
+/// # 参数
+/// - `stderr`：worker 的 stderr。
+/// - `tail`：保存末尾文本的共享缓冲。
+/// - `engine_init_ms`：保存引擎初始化耗时的共享槽。
+fn pump_stderr(stderr: impl Read, tail: &Mutex<String>, engine_init_ms: &AtomicU64) {
+    let mut reader = BufReader::new(stderr);
+    let mut raw = Vec::new();
+    loop {
+        raw.clear();
+        let read = reader
+            .by_ref()
+            .take(STDERR_LINE_LIMIT)
+            .read_until(b'\n', &mut raw);
+        if read.map_or(true, |n| n == 0) {
+            break;
+        }
+        let line = String::from_utf8_lossy(&raw);
+        note_stderr_line(&line, engine_init_ms);
+        if let Ok(mut text) = tail.lock() {
+            text.push_str(&line);
+            if text.len() > STDERR_KEEP_BYTES {
+                let mut cut = text.len() - STDERR_KEEP_BYTES;
+                while !text.is_char_boundary(cut) {
+                    cut += 1;
                 }
+                text.drain(..cut);
             }
         }
-    });
+    }
 }
 
 /// 写映射文件：32 字节槽头 + 紧凑 RGBA；返回自动清理的临时文件。
@@ -848,6 +1016,73 @@ mod tests {
     /// 2x1 的 RGBA 测试图。
     fn tiny_image() -> Vec<u8> {
         vec![11, 22, 33, 255, 44, 55, 66, 255]
+    }
+
+    /// worker 事件解析：`ocr.` 开头的 JSON 行取出阶段 / 后端 / 结果 / 耗时；普通文本、别的 JSON、残缺行都是 `None`。
+    #[test]
+    fn parses_worker_events() {
+        let line = r#"{"event":"ocr.engine_ready","message":"","fields":{"operation":"3","stage":"initialization","backend":"cpu","outcome":"succeeded","duration_ms":850}}"#;
+        assert_eq!(
+            parse_worker_event(line),
+            Some(WorkerEvent {
+                event: "ocr.engine_ready".into(),
+                stage: "initialization".into(),
+                backend: "cpu".into(),
+                outcome: "succeeded".into(),
+                duration_ms: 850,
+                message: String::new(),
+            })
+        );
+        let minimal = parse_worker_event(r#"{"event":"ocr.backend_fallback","message":"x"}"#);
+        assert_eq!(
+            minimal.map(|e| (e.duration_ms, e.message)),
+            Some((0, "x".into()))
+        );
+        assert_eq!(parse_worker_event("plain text"), None);
+        assert_eq!(parse_worker_event(r#"{"event":"other.thing"}"#), None);
+        assert_eq!(parse_worker_event(r#"{"event":"ocr.engine_ready""#), None);
+    }
+
+    /// stderr 泵：逐行解析事件并取走引擎耗时；尾部缓冲只留最后 `STDERR_KEEP_BYTES` 字节；无换行的残片也被消费。
+    #[test]
+    fn pump_stderr_parses_events_and_keeps_tail() {
+        let event = r#"{"event":"ocr.engine_ready","message":"","fields":{"outcome":"succeeded","duration_ms":42}}"#;
+        let filler = "x".repeat(STDERR_KEEP_BYTES);
+        let text = format!("{event}\r\n{filler}\nlast words");
+        let (slot, tail) = (AtomicU64::new(ENGINE_MS_UNSET), Mutex::new(String::new()));
+        pump_stderr(text.as_bytes(), &tail, &slot);
+        assert_eq!(slot.load(Ordering::Relaxed), 42);
+        let tail = tail.lock().unwrap();
+        assert_eq!(tail.len(), STDERR_KEEP_BYTES);
+        assert!(tail.ends_with("last words"));
+    }
+
+    /// stderr 行：引擎就绪成功事件把耗时存进共享槽；失败事件与普通行不改它。
+    #[test]
+    fn engine_ready_event_updates_shared_slot() {
+        let slot = AtomicU64::new(ENGINE_MS_UNSET);
+        note_stderr_line("not json", &slot);
+        let failed = r#"{"event":"ocr.engine_ready","message":"","fields":{"outcome":"failed","duration_ms":5}}"#;
+        note_stderr_line(failed, &slot);
+        assert_eq!(slot.load(Ordering::Relaxed), ENGINE_MS_UNSET);
+        let ok = r#"{"event":"ocr.engine_ready","message":"","fields":{"outcome":"succeeded","duration_ms":850}}"#;
+        note_stderr_line(ok, &slot);
+        assert_eq!(slot.load(Ordering::Relaxed), 850);
+    }
+
+    /// 阶段标志：准备与识别成功后才置位；失败不置位；管道传输没有 stderr 事件。
+    #[test]
+    fn stage_flags_track_successes_only() {
+        let mut worker = spawn_fake(FakeScript::ok(), fast());
+        worker.handshake(Path::new("s")).expect("握手");
+        assert!(!worker.prepared_once && !worker.recognized_once);
+        assert!(worker.recognize(0, 1, &[]).is_err());
+        assert!(!worker.recognized_once, "失败不置位");
+        worker.prepare(&config()).expect("准备");
+        assert!(worker.prepared_once);
+        worker.recognize(2, 1, &tiny_image()).expect("识别");
+        assert!(worker.recognized_once);
+        assert_eq!(worker.engine_init_ms(), None);
     }
 
     /// 完整时序：握手、准备、识别；假 worker 核对了槽头与首像素（RGBA 原样），文件随后被清理。

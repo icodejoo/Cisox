@@ -189,8 +189,10 @@ impl Prespawn {
                 drop(slot);
                 self.changed.notify_all();
                 prespawned.wake.bind(Arc::clone(&wake));
+                let mut link = prespawned.link;
+                link.note_claimed();
                 wake();
-                Some(prespawned.link)
+                Some(link)
             }
             Slot::Ready(stale) => {
                 drop(slot);
@@ -231,6 +233,7 @@ pub fn spawn_worker(config: &DictationConfig, data_root: &Path) -> Option<Prespa
     let wake = Arc::new(LateWake::default());
     let late = Arc::clone(&wake);
     let mut link = ProcessSttLink::spawn(&exe, Arc::new(move || late.call())).ok()?;
+    link.mark_prespawned();
     for command in [Command::Start(request.clone()), Command::Ping] {
         link.send(&command).ok()?;
     }

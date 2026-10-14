@@ -94,7 +94,6 @@ ocr-step-recognize = recognizing
 
 ocr-step-detach = releasing the image
 
-ocr-panel-running = Recognizing text...
 
 ocr-panel-empty = No text found
 
@@ -108,11 +107,8 @@ ocr-panel-downloading-hint = After the download finishes, click "OCR" again.
 
 ocr-panel-esc = Esc to go back
 
-ocr-panel-more-lines = ... ({ $count } more lines)
 
-ocr-panel-footer-copied = Copied - E opens the result window - Enter copies and closes - Esc goes back
 
-ocr-panel-footer-copy-failed = Copy failed - E opens the result window - Enter retries and closes - Esc goes back
 
 ocr-panel-download-hint = Press D to download the OCR components (runtime about 17 MB + model about 31 MB)
 
@@ -120,4 +116,3 @@ fetch-task-start-failed = Could not start the background task: { $detail }
 
 ocr-panel-done-not-copied = Recognized { $count } lines; press Enter to copy the text
 
-ocr-panel-footer-not-copied = Not copied - E opens the result window - Enter copies and closes - Esc goes back

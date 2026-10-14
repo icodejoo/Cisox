@@ -157,6 +157,10 @@ overlay-panel-undo = 撤销
 
 overlay-panel-close = 关闭
 
+ocr-popup-title = 识别结果
+
+ocr-popup-exit = 退出
+
 overlay-translate-bar-details = 查看详情
 
 overlay-translate-bar-undo = 撤销翻译

@@ -394,6 +394,28 @@ pub struct WheelResult {
     pub opacity: f32,
 }
 
+/// 不透明度换算成整窗 alpha（`0` 全透明 ~ `255` 不透明），先钳到 `[OPACITY_MIN, OPACITY_MAX]`。
+///
+/// # 参数
+/// - `opacity`：不透明度。
+///
+/// # 返回
+/// 交给系统整窗透明的 alpha 值。
+///
+/// ```
+/// use snow_shot::pinned_model::window_alpha;
+/// assert_eq!(window_alpha(1.0), 255);
+/// assert_eq!(window_alpha(0.5), 128);
+/// ```
+pub fn window_alpha(opacity: f32) -> u8 {
+    let opacity = if opacity.is_nan() {
+        OPACITY_MAX
+    } else {
+        opacity.clamp(OPACITY_MIN, OPACITY_MAX)
+    };
+    (opacity * f32::from(u8::MAX)).round() as u8
+}
+
 /// 应用一次滚轮：按住 Ctrl 调不透明度，否则按锚点缩放。
 ///
 /// # 参数
@@ -910,6 +932,17 @@ mod tests {
         assert_eq!(wheel_steps(3.0), 1.0);
         assert_eq!(wheel_steps(-1.5), -0.5);
         assert_eq!(wheel_steps(f32::NAN), 0.0);
+    }
+
+    /// 不透明度换算整窗 alpha：两端、中间值四舍五入、越界与 NaN 钳制。
+    #[test]
+    fn window_alpha_from_opacity() {
+        assert_eq!(window_alpha(OPACITY_MAX), u8::MAX);
+        assert_eq!(window_alpha(0.5), 128);
+        assert_eq!(window_alpha(OPACITY_MIN), 26);
+        assert_eq!(window_alpha(0.0), 26, "低于下限按下限");
+        assert_eq!(window_alpha(7.0), u8::MAX, "高于上限按上限");
+        assert_eq!(window_alpha(f32::NAN), u8::MAX);
     }
 
     /// 滚轮缩放：按锚点缩放、上下限钳制；Ctrl+滚轮只改透明度。

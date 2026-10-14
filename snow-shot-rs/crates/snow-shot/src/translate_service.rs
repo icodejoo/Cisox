@@ -788,6 +788,11 @@ impl Translator for TranslateHost {
     }
 }
 
+/// 预热触发来源：翻译流程 / 输入框浮窗建成时与其余工作并行预热。
+const WARM_TRIGGER_START: &str = "start";
+/// 预热触发来源：输入框里开始输入时发现包已不在内存，补一次。
+const WARM_TRIGGER_FIRST_INPUT: &str = "first_input";
+
 /// 一次翻译请求的预热句柄：与 OCR 并行预热本地翻译 worker，流程结束后回收没用上的预热。
 pub struct WarmHandle {
     /// 流程已结束（或取消）：预热线程据此放弃。
@@ -812,6 +817,43 @@ impl WarmHandle {
         config: TranslateConfig,
         cancel: Arc<AtomicBool>,
     ) -> Self {
+        Self::spawn(host, config, cancel, WARM_TRIGGER_START, false)
+    }
+
+    /// 输入框里开始输入时补一次预热：线程里先看包还在不在内存（含正在加载），在就什么都不做，
+    /// 不在（预热被 TTL 回收或从未预热成功）才重新预热，让加载与防抖等待重叠。
+    ///
+    /// 非本地后端不开线程。返回的句柄与浮窗里其余预热句柄一起，关窗时由 [`Self::finish`] 回收。
+    ///
+    /// # 参数
+    /// - `host`：翻译宿主。
+    /// - `config`：与浮窗首次真实请求一致的翻译配置。
+    /// - `cancel`：取消标志；为真时预热放弃并回收。
+    ///
+    /// ```ignore
+    /// let warm = WarmHandle::rewarm_on_input(Arc::clone(&host), config, Arc::new(AtomicBool::new(false)));
+    /// ```
+    pub fn rewarm_on_input(
+        host: Arc<TranslateHost>,
+        config: TranslateConfig,
+        cancel: Arc<AtomicBool>,
+    ) -> Self {
+        Self::spawn(host, config, cancel, WARM_TRIGGER_FIRST_INPUT, true)
+    }
+
+    /// 起预热线程的共同实现。
+    ///
+    /// # 参数
+    /// - `host` / `config` / `cancel`：同 [`Self::start`]。
+    /// - `trigger`：触发来源，写进日志便于对照收益。
+    /// - `only_if_cold`：为真时包还在内存就不预热（补热用）。
+    fn spawn(
+        host: Arc<TranslateHost>,
+        config: TranslateConfig,
+        cancel: Arc<AtomicBool>,
+        trigger: &'static str,
+        only_if_cold: bool,
+    ) -> Self {
         let done = Arc::new(AtomicBool::new(false));
         if config.backend == Backend::Local {
             let finished = Arc::clone(&done);
@@ -819,18 +861,23 @@ impl WarmHandle {
                 .name("snow-translate-warm".into())
                 .spawn(move || {
                     let started = Instant::now();
+                    if only_if_cold && host.worker_running() {
+                        tracing::debug!(trigger, "翻译包仍在内存，不补预热");
+                        return;
+                    }
                     let abort = || finished.load(Ordering::SeqCst) || cancel.load(Ordering::SeqCst);
                     match host.warm(&config, &abort) {
                         Some(model) => tracing::info!(
+                            trigger,
                             model,
                             warm_ms = started.elapsed().as_millis() as u64,
                             "翻译模型已预热"
                         ),
-                        None => tracing::debug!("本次未预热翻译模型"),
+                        None => tracing::debug!(trigger, "本次未预热翻译模型"),
                     }
                 });
             if let Err(error) = spawned {
-                tracing::warn!(%error, "无法创建翻译预热线程，跳过预热");
+                tracing::warn!(trigger, %error, "无法创建翻译预热线程，跳过预热");
             }
         }
         Self { done }
@@ -2090,6 +2137,42 @@ mod tests {
             Arc::new(AtomicBool::new(true)),
         );
         drop(dropped);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 补预热：包被回收后重新预热（再拉起一次）；包还在内存时什么都不做。
+    #[test]
+    fn rewarm_on_input_reloads_only_after_recycle() {
+        let root = temp_root("rewarm-on-input");
+        let (host, workers) = warm_host(&root, None);
+        let first = WarmHandle::start(
+            Arc::clone(&host),
+            warm_config(),
+            Arc::new(AtomicBool::new(false)),
+        );
+        assert!(wait_until(|| host.worker_running()), "应在后台预热起来");
+        // 包还在内存：补热不应再拉起
+        let idle = WarmHandle::rewarm_on_input(
+            Arc::clone(&host),
+            warm_config(),
+            Arc::new(AtomicBool::new(false)),
+        );
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!((workers.launches(), workers.loads()), (1, 1));
+        // 预热被回收（TTL / 关窗）后：补热重新拉起并加载
+        first.finish(host.as_ref());
+        assert!(!host.worker_running());
+        let again = WarmHandle::rewarm_on_input(
+            Arc::clone(&host),
+            warm_config(),
+            Arc::new(AtomicBool::new(false)),
+        );
+        assert!(wait_until(|| host.worker_running()), "应重新预热起来");
+        assert_eq!((workers.launches(), workers.loads()), (2, 2));
+        // 关窗：全部句柄回收，不留进程
+        idle.finish(host.as_ref());
+        again.finish(host.as_ref());
+        assert!(!host.worker_running());
         let _ = std::fs::remove_dir_all(&root);
     }
 

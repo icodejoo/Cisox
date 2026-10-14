@@ -138,6 +138,8 @@ pub struct TranslateInputSession {
     detected: Option<Lang>,
     /// 进行中请求的原文（完成后据此识别源语言）。
     in_flight: Option<String>,
+    /// 最近一次看到的输入是否为空白（用来识别“开始输入”的那一下）。
+    blank: bool,
 }
 
 impl TranslateInputSession {
@@ -160,6 +162,7 @@ impl TranslateInputSession {
             auto: AutoTranslate::new(true),
             detected: None,
             in_flight: None,
+            blank: true,
         }
     }
 
@@ -263,7 +266,32 @@ impl TranslateInputSession {
         self.flow.reset();
         self.detected = None;
         self.in_flight = None;
+        self.blank = true;
         self.auto.mark_synced("");
+    }
+
+    /// 记录一次输入变化，判断是不是“开始输入”：此前为空白（含刚打开、刚清空）而现在有内容。
+    ///
+    /// 视图据此在开始输入的那一下检查翻译包还在不在内存，不在就补一次预热，让加载与防抖等待重叠；
+    /// 连续按键只有第一下返回真。
+    ///
+    /// # 参数
+    /// - `text`：当前输入。
+    ///
+    /// # 返回
+    /// 这一下是开始输入返回真。
+    ///
+    /// # 示例
+    /// ```ignore
+    /// let mut s = TranslateInputSession::new(Lang::En);
+    /// assert!(s.note_edit("h"));
+    /// assert!(!s.note_edit("he"));
+    /// ```
+    pub fn note_edit(&mut self, text: &str) -> bool {
+        let blank = text.trim().is_empty();
+        let started = self.blank && !blank;
+        self.blank = blank;
+        started
     }
 
     /// 输入框内容变化：返回需要启动的防抖代数（到点交给 [`Self::debounce_due`]）。
@@ -569,6 +597,20 @@ mod tests {
         assert!(s.finish(serial, done("你好")));
         assert!(s.take_queued("hello!!"));
         assert!(!s.take_queued("hello!!"), "排队只取一次");
+    }
+
+    /// 开始输入：空白 -> 有内容只触发一次；清空 / 删光后再输入重新触发；已有内容时的编辑不触发。
+    #[test]
+    fn note_edit_marks_start_of_typing_once() {
+        let mut s = TranslateInputSession::new(Lang::En);
+        assert!(!s.note_edit("  "), "空白不算开始");
+        assert!(s.note_edit("h"), "第一下");
+        assert!(!s.note_edit("he"));
+        assert!(!s.note_edit("hello"));
+        assert!(!s.note_edit(""), "删光不触发");
+        assert!(s.note_edit("again"), "删光后再输入重新触发");
+        s.clear();
+        assert!(s.note_edit("x"), "清空按钮之后重新触发");
     }
 
     /// 识别规则：中文识别为简中，英文识别为英语，日文识别为日语，纯数字标点与空串识别不出。

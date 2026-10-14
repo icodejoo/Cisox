@@ -27,19 +27,23 @@ use crate::frozen_frame::FrozenFrame;
 use crate::history_nav::{FinishStep, HistoryNav, HistoryProvider, LoadOutcome, NavStep};
 use crate::history_store::{HistorySnapshot, HistorySource, LoadedEntry};
 use crate::ocr_client::OcrError;
-use crate::ocr_flow::{OcrAutoAction, OcrUiState, panel_lines};
+use crate::ocr_flow::{OcrAutoAction, OcrUiState, PopupBody, popup_body, popup_copyable};
+use crate::ocr_popup::{
+    POPUP_ACTION_HEIGHT, POPUP_BUTTON_GAP, POPUP_TITLE_HEIGHT, PopupDrag, auto_origin, popup_size,
+    resolve_origin,
+};
 use crate::ocr_service::OcrResult;
 use crate::overlay_keymap::{DrawingKey, OverlayKeyAction, OverlayKeymap};
 use crate::overlay_probe::FrameProbe;
 use crate::previous_selection::{PREVIOUS_SELECTION_KEY, SelectionStyle, decode, encode};
 use crate::region_select::{RegionDraft, RegionType};
+use crate::scan_animation::scan_overlay;
 use crate::screenshot_output::{
     self, ExportOverrides, ExportSettings, ManualSaveJob, SaveMode, SaveOutcome, home_directory,
 };
 use crate::settings_state::SharedConfig;
 use crate::translate_flow::{
     LINK_BORDER, LINK_FILL, LinkHover, TranslateUiState, panel_lines as translate_panel_lines,
-    stage_text,
 };
 use crate::translate_render::{
     detail_panel_origin, render_with_system_font, rgba_to_premultiplied_bgra,
@@ -147,8 +151,8 @@ const EDGE_TOLERANCE_LOGICAL: f32 = DEFAULT_EDGE_TOLERANCE as f32;
 const MASK_COLOR: u32 = 0x00000099;
 /// 未选区时的整屏薄遮罩色。
 const IDLE_MASK_COLOR: u32 = 0x00000040;
-/// 主题强调色。
-const ACCENT_COLOR: u32 = 0x1677FF;
+/// 主题强调色（扫描动画等模块共用）。
+pub(crate) const ACCENT_COLOR: u32 = 0x1677FF;
 /// 尺寸标签背景色。
 const LABEL_BG_COLOR: u32 = 0x000000CC;
 /// 悬停窗口高亮的半透明填充色（强调色 + 低 alpha）。
@@ -2010,6 +2014,10 @@ pub struct ScreenshotOverlayView {
     detail_target_scroll: UniformListScrollHandle,
     /// 原文 / 译文条目与识别区的三方悬停联动状态。
     link_hover: LinkHover,
+    /// OCR 结果弹窗被用户拖动后的位置（画布逻辑像素）；`None` 表示用自动位置，新一轮 OCR 或撤销后重置。
+    ocr_popup_origin: Option<(f32, f32)>,
+    /// 进行中的 OCR 弹窗标题栏拖动；松开鼠标或状态重置时清除。
+    ocr_popup_drag: Option<PopupDrag>,
     /// 窗口悬停来源（智能选区开启时才有）。
     window_hover: Option<Box<dyn WindowHover>>,
     /// 悬停处的命中层级路径与当前选中层（仅 Idle 时更新并高亮）。
@@ -2160,6 +2168,8 @@ impl ScreenshotOverlayView {
             detail_source_scroll: UniformListScrollHandle::new(),
             detail_target_scroll: UniformListScrollHandle::new(),
             link_hover: LinkHover::default(),
+            ocr_popup_origin: None,
+            ocr_popup_drag: None,
             window_hover: None,
             pick: PickPath::new(PickTarget::WindowSubElement),
             highlight_transition: HighlightTransition::new(true),
@@ -2550,6 +2560,12 @@ impl ScreenshotOverlayView {
         let point = self.clamp_point(point);
         let previous = self.cursor_pos;
         self.cursor_pos = point;
+        // OCR 弹窗拖动中：只移动弹窗，不碰选区 / 标注状态机
+        if let Some(drag) = self.ocr_popup_drag {
+            let cursor = (point.x as f32 / self.scale, point.y as f32 / self.scale);
+            self.ocr_popup_origin = Some(drag.origin_at(cursor));
+            return;
+        }
         self.update_magnifier_grid(point);
         if self.annotating {
             self.continue_annotation(point);
@@ -2639,6 +2655,10 @@ impl ScreenshotOverlayView {
         let point = self.clamp_point(point);
         self.cursor_pos = point;
         self.move_held = false;
+        // OCR 弹窗拖动结束：位置保留，不触发选区确认
+        if self.ocr_popup_drag.take().is_some() {
+            return false;
+        }
         if self.annotating {
             self.finish_annotation(point);
             return false;
@@ -2797,11 +2817,6 @@ impl ScreenshotOverlayView {
             }
             ("tab", true) => {
                 self.cycle_region_type(shift);
-                OverlayOutcome::Stay
-            }
-            ("e", false) if matches!(self.ocr, OcrUiState::Done { ref text, .. } if !text.is_empty()) =>
-            {
-                self.open_recognition_window();
                 OverlayOutcome::Stay
             }
             ("o", false)
@@ -5020,8 +5035,21 @@ impl ScreenshotOverlayView {
         }
     }
 
-    /// 切换 OCR 状态，同时刷新底部状态条。
+    /// 把 OCR 弹窗恢复到自动位置并结束进行中的拖动。
+    fn reset_ocr_popup(&mut self) {
+        self.ocr_popup_origin = None;
+        self.ocr_popup_drag = None;
+    }
+
+    /// 切换 OCR 状态，同时刷新底部状态条；弹窗位置回到自动位置（下载进度刷新除外，免得拖动中的弹窗跳回去）。
     fn set_ocr_state(&mut self, state: OcrUiState) {
+        let progress_only = matches!(
+            (&self.ocr, &state),
+            (OcrUiState::Downloading(_), OcrUiState::Downloading(_))
+        );
+        if !progress_only {
+            self.reset_ocr_popup();
+        }
         self.qr_link = None;
         self.table_texts = None;
         self.latex_text = None;
@@ -5035,6 +5063,7 @@ impl ScreenshotOverlayView {
     fn dismiss_ocr(&mut self) {
         self.ocr_serial += 1;
         self.ocr = OcrUiState::Idle;
+        self.reset_ocr_popup();
         self.link_hover.clear();
         self.qr_link = None;
         self.qr_auto_panel = false;
@@ -5125,6 +5154,7 @@ impl ScreenshotOverlayView {
         match result {
             Ok(()) => {
                 self.ocr = OcrUiState::Idle;
+                self.reset_ocr_popup();
                 self.status_message = Some(self.i18n.tr("overlay-msg-ocr-download-ready"));
             }
             Err(e) => self.set_ocr_state(OcrUiState::Failed {
@@ -5191,10 +5221,10 @@ impl ScreenshotOverlayView {
                     target = target.code(),
                     "已提交文字翻译"
                 );
-                self.set_translate_state(TranslateUiState::Running(stage_text(
+                self.set_translate_state(TranslateUiState::running(
                     TranslateStage::Recognizing,
                     self.i18n,
-                )));
+                ));
             }
             Err(e) => {
                 tracing::error!(error = %e, "提交文字翻译失败");
@@ -5221,7 +5251,7 @@ impl ScreenshotOverlayView {
 
     /// 翻译还在进行时通知后台取消（放弃识别后的工作、回收预热的翻译进程）；其它状态什么都不做。
     fn cancel_running_translate(&mut self) {
-        if matches!(self.translate, TranslateUiState::Running(_)) {
+        if matches!(self.translate, TranslateUiState::Running { .. }) {
             self.output.cancel_translate(self.translate_serial);
         }
     }
@@ -5244,9 +5274,10 @@ impl ScreenshotOverlayView {
     /// - `serial`：请求序号。
     /// - `stage`：当前阶段。
     pub fn update_translate_stage(&mut self, serial: u64, stage: TranslateStage) {
-        if serial == self.translate_serial && matches!(self.translate, TranslateUiState::Running(_))
+        if serial == self.translate_serial
+            && matches!(self.translate, TranslateUiState::Running { .. })
         {
-            self.set_translate_state(TranslateUiState::Running(stage_text(stage, self.i18n)));
+            self.set_translate_state(TranslateUiState::running(stage, self.i18n));
         }
     }
 
@@ -5261,7 +5292,7 @@ impl ScreenshotOverlayView {
         result: Result<TranslateOutcome, TranslateFlowError>,
     ) {
         if serial != self.translate_serial
-            || !matches!(self.translate, TranslateUiState::Running(_))
+            || !matches!(self.translate, TranslateUiState::Running { .. })
         {
             tracing::info!(
                 serial,
@@ -5432,7 +5463,28 @@ impl ScreenshotOverlayView {
             .iter()
             .map(|l| div().child(l.clone()).into_any_element())
             .collect();
-        vec![self.result_panel(selection, screen, &lines, rows, false, cx)]
+        let mut parts = Vec::new();
+        // 只在识别阶段扫描；翻译阶段识别已结束，不再扫
+        if self.translate.is_recognizing() {
+            parts.push(self.scan_layer("overlay-translate-scan", selection));
+        }
+        parts.push(self.result_panel(selection, screen, &lines, rows, false, cx));
+        parts
+    }
+
+    /// 选区上的扫描动画层（识别进行中提示用，不拦截鼠标）。
+    ///
+    /// # 参数
+    /// - `id`：动画元素 ID（OCR 与翻译各用各的）。
+    /// - `selection`：选区（画布物理坐标）。
+    fn scan_layer(&self, id: &'static str, selection: PhysicalRect) -> AnyElement {
+        scan_overlay(
+            id,
+            self.lp(selection.x),
+            self.lp(selection.y),
+            self.lp(selection.width),
+            self.lp(selection.height),
+        )
     }
 
     /// 翻译结果是否该以“原位替换 + 按钮条”呈现：完成态且译文非空。
@@ -5472,21 +5524,8 @@ impl ScreenshotOverlayView {
         for (ix, b) in boxes.iter().enumerate() {
             let active = self.link_hover.box_active(pairs, ix);
             parts.push(
-                div()
+                self.recognition_box_div(selection, b.rect, self.translate_detail_open, active)
                     .id(("translate-box", ix))
-                    .absolute()
-                    .top(self.lp(selection.y + b.rect.y))
-                    .left(self.lp(selection.x + b.rect.x))
-                    .w(self.lp(b.rect.width))
-                    .h(self.lp(b.rect.height))
-                    .when(self.translate_detail_open || active, |d| {
-                        d.border_1().border_color(if active {
-                            rgba(LINK_BORDER)
-                        } else {
-                            rgb(OCR_BOX_COLOR)
-                        })
-                    })
-                    .when(active, |d| d.bg(rgba(LINK_FILL)))
                     .on_hover(cx.listener(move |this, hovered: &bool, _w, cx| {
                         this.link_hover.set_box(ix, *hovered);
                         this.apply_hover_scroll();
@@ -5958,52 +5997,239 @@ impl ScreenshotOverlayView {
         }
     }
 
-    /// OCR 结果浮层：文本框描边 + 白底结果面板（无 OCR 界面或无选区时为空）。
+    /// 识别框元素：平时按 `outline` 决定是否描边，`active`（悬停联动）时描黄边并填半透明黄。
+    /// OCR 与翻译共用，保证高亮样式一致；不挂悬停监听，由调用方补。
     ///
     /// # 参数
     /// - `selection`：选区（画布物理坐标）。
-    /// - `screen`：本屏在画布里的逻辑矩形 `(x, y, 宽, 高)`，面板不超出它。
-    /// - `cx`：视图上下文（挂按钮回调）。
+    /// - `rect`：识别框（选区内图像坐标）。
+    /// - `outline`：非高亮时是否也描边。
+    /// - `active`：是否高亮。
+    fn recognition_box_div(
+        &self,
+        selection: PhysicalRect,
+        rect: PhysicalRect,
+        outline: bool,
+        active: bool,
+    ) -> Div {
+        div()
+            .absolute()
+            .top(self.lp(selection.y + rect.y))
+            .left(self.lp(selection.x + rect.x))
+            .w(self.lp(rect.width))
+            .h(self.lp(rect.height))
+            .when(outline || active, |d| {
+                d.border_1().border_color(if active {
+                    rgba(LINK_BORDER)
+                } else {
+                    rgb(OCR_BOX_COLOR)
+                })
+            })
+            .when(active, |d| d.bg(rgba(LINK_FILL)))
+    }
+
+    /// OCR 结果浮层：识别中只有扫描动画；完成后是文本框描边 + 独立结果弹窗（无选区或 Idle 时为空）。
+    ///
+    /// # 参数
+    /// - `selection`：选区（画布物理坐标）。
+    /// - `screen`：本屏在画布里的逻辑矩形 `(x, y, 宽, 高)`，弹窗不超出它。
+    /// - `toolbar_pos`：主工具栏左上角（逻辑像素），弹窗避开它。
+    /// - `selection_logical`：选区在本屏上的逻辑矩形。
+    /// - `cx`：视图上下文（挂按钮与悬停回调）。
     fn ocr_overlay(
         &self,
         selection: PhysicalRect,
         screen: (f32, f32, f32, f32),
+        toolbar_pos: Option<PhysicalPoint>,
+        selection_logical: Option<PhysicalRect>,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let mut parts: Vec<AnyElement> = Vec::new();
-        let mut confirm_enabled = false;
-        if let OcrUiState::Done { boxes, text, .. } = &self.ocr {
-            confirm_enabled = !text.is_empty();
-            for b in boxes {
+        // 加载模型 + 识别期间在选区上扫描（下载组件时不扫）
+        if matches!(self.ocr, OcrUiState::Running) {
+            parts.push(self.scan_layer("overlay-ocr-scan", selection));
+        }
+        if let OcrUiState::Done { boxes, .. } = &self.ocr {
+            for (ix, b) in boxes.iter().enumerate() {
+                let active = self.link_hover.box_hovered(ix);
                 parts.push(
-                    div()
-                        .absolute()
-                        .top(self.lp(selection.y + b.rect.y))
-                        .left(self.lp(selection.x + b.rect.x))
-                        .w(self.lp(b.rect.width))
-                        .h(self.lp(b.rect.height))
-                        .border_1()
-                        .border_color(rgb(OCR_BOX_COLOR))
+                    self.recognition_box_div(selection, b.rect, true, active)
                         .into_any_element(),
                 );
             }
         }
-        let mut lines = panel_lines(&self.ocr, self.i18n);
-        if lines.is_empty() {
+        let Some(body) = popup_body(&self.ocr, self.i18n) else {
             return parts;
-        }
-        if self.qr_link.is_some() {
-            lines.push(self.i18n.tr("overlay-qr-open-link-hint"));
-        }
-        let rows: Vec<AnyElement> = lines
-            .iter()
-            .map(|l| div().child(l.clone()).into_any_element())
+        };
+        let avoid: Vec<PhysicalRect> = toolbar_pos
+            .map(|p| {
+                let (w, h) = self.toolbar_size();
+                PhysicalRect::new(p.x, p.y, w, h)
+            })
+            .into_iter()
             .collect();
-        parts.push(self.result_panel(selection, screen, &lines, rows, confirm_enabled, cx));
+        parts.push(self.ocr_popup(&body, selection_logical, screen, &avoid, cx));
         parts
     }
 
-    /// 白底黑字结果面板：文字行 + 底部“确定 / 撤销 / 关闭”三个按钮；位置贴选区左上并限制在本屏内。
+    /// OCR 结果弹窗：覆盖窗内的独立浮层，三段结构。
+    /// 标题栏可拖动；内容区可滚动，每个文本框一行，悬停某行高亮截图上对应的识别框；
+    /// 操作栏是“复制 / 撤销 / 退出”。
+    ///
+    /// 位置先按自动摆放（选区外优先，放不下落到选区内侧），拖动过就用拖动位置，始终限制在本屏内。
+    /// 弹窗吞掉左 / 中 / 右键按下，点击或拖动它不会被覆盖窗当成框选、改选区或退出。
+    ///
+    /// # 参数
+    /// - `body`：内容区内容。
+    /// - `selection_logical`：选区在本屏上的逻辑矩形。
+    /// - `screen`：本屏在画布里的逻辑矩形。
+    /// - `avoid`：不能压住的矩形（工具栏）。
+    /// - `cx`：视图上下文。
+    fn ocr_popup(
+        &self,
+        body: &PopupBody,
+        selection_logical: Option<PhysicalRect>,
+        screen: (f32, f32, f32, f32),
+        avoid: &[PhysicalRect],
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let qr_hint = self
+            .qr_link
+            .is_some()
+            .then(|| self.i18n.tr("overlay-qr-open-link-hint"));
+        let mut all_lines = body.lines().to_vec();
+        all_lines.extend(qr_hint.iter().cloned());
+        let size = popup_size(&all_lines, (screen.2, screen.3));
+        let auto = auto_origin(selection_logical, size, screen, avoid);
+        let origin = resolve_origin(auto, self.ocr_popup_origin, size, screen);
+        let hoverable = matches!(body, PopupBody::Boxes(_));
+        let rows: Vec<AnyElement> = body
+            .lines()
+            .iter()
+            .enumerate()
+            .map(|(ix, text)| {
+                let active = hoverable && self.link_hover.box_hovered(ix);
+                let row = div()
+                    .id(("ocr-popup-row", ix))
+                    .px_1()
+                    .py_0p5()
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(if active {
+                        rgba(LINK_BORDER)
+                    } else {
+                        rgba(0x00000000)
+                    })
+                    .when(active, |d| d.bg(rgba(LINK_FILL)))
+                    .child(text.clone());
+                if hoverable {
+                    row.on_hover(cx.listener(move |this, hovered: &bool, _w, cx| {
+                        this.link_hover.set_box(ix, *hovered);
+                        cx.notify();
+                    }))
+                    .into_any_element()
+                } else {
+                    row.into_any_element()
+                }
+            })
+            .collect();
+        let (screen_x, screen_y) = (screen.0, screen.1);
+        let title = div()
+            .h(px(POPUP_TITLE_HEIGHT))
+            .flex_none()
+            .flex()
+            .items_center()
+            .px_2()
+            .font_weight(FontWeight::SEMIBOLD)
+            .border_b_1()
+            .border_color(rgba(OCR_PANEL_BORDER))
+            .cursor_move()
+            .child(self.i18n.tr("ocr-popup-title"))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, ev: &MouseDownEvent, _w, cx| {
+                    cx.stop_propagation();
+                    // 窗口内逻辑坐标 + 本屏原点 = 画布逻辑坐标
+                    let cursor = (
+                        screen_x + ev.position.x.as_f32(),
+                        screen_y + ev.position.y.as_f32(),
+                    );
+                    this.ocr_popup_origin = Some(origin);
+                    this.ocr_popup_drag = Some(PopupDrag::begin(cursor, origin, size, screen));
+                    cx.notify();
+                }),
+            );
+        let content = div()
+            .id("ocr-popup-body")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .px_1()
+            .py_1()
+            .children(rows)
+            .children(qr_hint.map(|hint| div().px_1().child(hint)));
+        let copy = Button::new("ocr-popup-copy")
+            .with_size(ComponentSize::Small)
+            .label(self.i18n.tr("overlay-toolbar-copy"))
+            .disabled(!popup_copyable(&self.ocr))
+            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                let outcome = this.copy_ocr_text_and_close();
+                this.finish(outcome, window, cx);
+            }));
+        let undo = Button::new("ocr-popup-undo")
+            .with_size(ComponentSize::Small)
+            .label(self.i18n.tr("overlay-panel-undo"))
+            .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
+                this.undo_result_panel();
+                cx.notify();
+            }));
+        let exit = Button::new("ocr-popup-exit")
+            .with_size(ComponentSize::Small)
+            .label(self.i18n.tr("ocr-popup-exit"))
+            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                this.finish(OverlayOutcome::Close, window, cx);
+            }));
+        div()
+            .absolute()
+            .top(px(origin.1))
+            .left(px(origin.0))
+            .w(px(size.0))
+            .h(px(size.1))
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .rounded_md()
+            .border_1()
+            .border_color(rgba(OCR_PANEL_BORDER))
+            .bg(rgba(OCR_PANEL_BG))
+            .text_color(rgba(OCR_PANEL_TEXT))
+            .text_xs()
+            .cursor_default()
+            .occlude()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_down(MouseButton::Middle, |_, _, cx| cx.stop_propagation())
+            .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+            .child(title)
+            .child(content)
+            .child(
+                div()
+                    .h(px(POPUP_ACTION_HEIGHT))
+                    .flex_none()
+                    .border_t_1()
+                    .border_color(rgba(OCR_PANEL_BORDER))
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .gap(px(POPUP_BUTTON_GAP))
+                    .px_2()
+                    .child(copy)
+                    .child(undo)
+                    .child(exit),
+            )
+            .into_any_element()
+    }
+
+    /// 白底黑字结果面板（翻译进度 / 失败用）：文字行 + 底部“确定 / 撤销 / 关闭”三个按钮；位置贴选区左上并限制在本屏内。
     ///
     /// 面板自己吞掉左右键按下，点击面板不会被覆盖窗当成新的框选或右键退出。
     ///
@@ -7717,7 +7943,7 @@ impl ScreenshotOverlayView {
             && anchor_here
         {
             let screen_logical = (ox, oy, mon_w, mon_h);
-            for part in self.ocr_overlay(s, screen_logical, cx) {
+            for part in self.ocr_overlay(s, screen_logical, toolbar_pos, selection_logical, cx) {
                 root = root.child(part);
             }
             for part in
@@ -7746,6 +7972,7 @@ impl ScreenshotOverlayView {
 
         // 放大镜：跟随光标，光标压在工具栏上时隐藏
         if cursor_here
+            && self.ocr_popup_drag.is_none()
             && !self.magnifier_hidden
             && !self.cursor_over_toolbar(toolbar_pos, menu_open)
             && !self.cursor_over_style_panel(panel_pos)
@@ -10098,7 +10325,7 @@ mod tests {
         );
         assert!(matches!(
             view.translate_state(),
-            TranslateUiState::Running(_)
+            TranslateUiState::Running { .. }
         ));
         {
             let r = rec.borrow();
@@ -10586,7 +10813,7 @@ mod tests {
         assert_eq!(view.ocr_state(), &OcrUiState::Idle);
         assert!(matches!(
             view.translate_state(),
-            TranslateUiState::Running(_)
+            TranslateUiState::Running { .. }
         ));
         assert_eq!(rec.borrow().translates.len(), 2);
     }
@@ -10636,6 +10863,105 @@ mod tests {
         view.finish_ocr(1, Ok(ocr_result(&[])));
         assert!(rec.borrow().texts.is_empty());
         assert_eq!(view.status_message.as_deref(), Some("No text found"));
+    }
+
+    /// 识别中不出弹窗也没有等待文字；完成后有弹窗内容，每个文本框一行。
+    #[test]
+    fn ocr_popup_hidden_while_running_and_one_row_per_box() {
+        let (mut view, _) = view_with(100, 80, 1.0, false);
+        drag(&mut view, (5, 5), (44, 34));
+        view.apply_action(ToolbarAction::Ocr);
+        assert_eq!(view.ocr_state(), &OcrUiState::Running);
+        assert!(popup_body(view.ocr_state(), view.i18n).is_none());
+        assert_eq!(view.status_message, None, "识别中不显示等待文字");
+        view.finish_ocr(1, Ok(ocr_result(&["hello", "世界"])));
+        assert_eq!(
+            popup_body(view.ocr_state(), view.i18n),
+            Some(PopupBody::Boxes(vec!["hello".into(), "世界".into()]))
+        );
+        assert!(popup_copyable(view.ocr_state()));
+    }
+
+    /// 拖动弹窗：只移动弹窗并限制在屏内，不改选区；松开后位置保留且不触发选区确认。
+    #[test]
+    fn ocr_popup_drag_moves_popup_without_touching_selection() {
+        let (mut view, _) = view_with(100, 80, 1.0, false);
+        drag(&mut view, (5, 5), (44, 34));
+        view.apply_action(ToolbarAction::Ocr);
+        view.finish_ocr(1, Ok(ocr_result(&["a"])));
+        let selection = view.current_selection();
+        let state = view.state;
+        let screen = (0.0, 0.0, 100.0, 80.0);
+        view.ocr_popup_drag = Some(PopupDrag::begin(
+            (50.0, 10.0),
+            (40.0, 5.0),
+            (30.0, 40.0),
+            screen,
+        ));
+        view.handle_mouse_move(PhysicalPoint::new(60, 30));
+        assert_eq!(view.ocr_popup_origin, Some((50.0, 25.0)));
+        // 拖出屏幕被夹住
+        view.handle_mouse_move(PhysicalPoint::new(99, 79));
+        assert_eq!(view.ocr_popup_origin, Some((70.0, 40.0)));
+        assert_eq!(view.state, state);
+        assert_eq!(view.current_selection(), selection);
+        assert!(!view.handle_mouse_up(PhysicalPoint::new(99, 79)));
+        assert!(view.ocr_popup_drag.is_none());
+        assert_eq!(view.ocr_popup_origin, Some((70.0, 40.0)), "松开后位置保留");
+        assert_eq!(view.state, state);
+        // 之后的鼠标移动回到正常的选区状态机（悬停模式随光标更新）
+        view.handle_mouse_move(PhysicalPoint::new(20, 20));
+        assert_eq!(view.ocr_popup_origin, Some((70.0, 40.0)));
+    }
+
+    /// 拖动位置在本次结果期间保持；撤销、Esc、新一轮 OCR 后回到自动位置；下载进度刷新不重置。
+    #[test]
+    fn ocr_popup_position_resets_with_the_round() {
+        let (mut view, _) = view_with(100, 80, 1.0, false);
+        drag(&mut view, (5, 5), (44, 34));
+        view.apply_action(ToolbarAction::Ocr);
+        view.finish_ocr(1, Ok(ocr_result(&["a"])));
+        view.ocr_popup_origin = Some((10.0, 10.0));
+        view.link_hover.set_box(0, true);
+        // 撤销
+        view.undo_result_panel();
+        assert_eq!(view.ocr_popup_origin, None);
+        assert_eq!(view.link_hover, LinkHover::default());
+        // 新一轮 OCR
+        view.apply_action(ToolbarAction::Ocr);
+        view.ocr_popup_origin = Some((10.0, 10.0));
+        view.ocr_popup_drag = Some(PopupDrag::begin(
+            (0.0, 0.0),
+            (0.0, 0.0),
+            (1.0, 1.0),
+            (0.0, 0.0, 9.0, 9.0),
+        ));
+        let serial = view.ocr_serial;
+        view.finish_ocr(serial, Ok(ocr_result(&["b"])));
+        assert_eq!((view.ocr_popup_origin, view.ocr_popup_drag), (None, None));
+        // Esc
+        view.ocr_popup_origin = Some((10.0, 10.0));
+        assert_eq!(
+            view.handle_key("escape", false, false),
+            OverlayOutcome::Stay
+        );
+        assert_eq!(view.ocr_popup_origin, None);
+        // 下载进度刷新不把弹窗拖回去
+        view.set_ocr_state(OcrUiState::Downloading("1/3".into()));
+        view.ocr_popup_origin = Some((10.0, 10.0));
+        view.update_ocr_download("2/3");
+        assert_eq!(view.ocr_popup_origin, Some((10.0, 10.0)));
+    }
+
+    /// E 键不再打开识别结果窗（弹窗已直接展示结果）。
+    #[test]
+    fn ocr_e_key_no_longer_opens_recognition_window() {
+        let (mut view, rec) = view_with(100, 80, 1.0, false);
+        drag(&mut view, (5, 5), (44, 34));
+        view.apply_action(ToolbarAction::Ocr);
+        view.finish_ocr(1, Ok(ocr_result(&["a"])));
+        press(&mut view, "e");
+        assert!(rec.borrow().recognition_translations.is_empty());
     }
 
     /// 复制失败：仍展示结果，但状态条说明复制失败。

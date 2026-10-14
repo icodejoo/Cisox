@@ -799,6 +799,46 @@ fn store_present(
     Ok(())
 }
 
+/// 并行加载分词器、编码器会话与解码器会话（ORT 建会话是单线程逐节点处理，两个会话互不依赖）。
+///
+/// 编码器、解码器各占一个子线程，分词器在调用线程；报错优先级与原串行顺序一致：
+/// 分词器 > 编码器 > 解码器，错误类别与消息不变。子线程 panic 原样重抛。
+///
+/// # 参数
+/// - `manifest`：已加载的清单。
+/// - `dir`：模型目录。
+///
+/// # 返回
+/// `(分词器, 编码器会话, 解码器会话)`；任一失败返回按上述优先级的第一个错误。
+///
+/// # 示例
+/// ```ignore
+/// let (tokenizer, encoder, decoder) = load_parts(&manifest, dir)?;
+/// ```
+fn load_parts(
+    manifest: &Manifest,
+    dir: &Path,
+) -> Result<(Tokenizer, Session, Session), EngineError> {
+    let (tokenizer, encoder, decoder) = std::thread::scope(|s| {
+        let spawn_session = |key: &'static str| {
+            s.spawn(move || -> Result<Session, EngineError> {
+                build_session(&manifest.resolve_file(dir, key)?, &manifest.execution)
+            })
+        };
+        let encoder = spawn_session(FILE_ENCODER);
+        let decoder = spawn_session(FILE_DECODER);
+        let tokenizer = manifest
+            .resolve_file(dir, FILE_TOKENIZER)
+            .map_err(EngineError::from)
+            .and_then(|p| load_tokenizer(&p));
+        let join = |h: std::thread::ScopedJoinHandle<'_, Result<Session, EngineError>>| {
+            h.join().unwrap_or_else(|p| std::panic::resume_unwind(p))
+        };
+        (tokenizer, join(encoder), join(decoder))
+    });
+    Ok((tokenizer?, encoder?, decoder?))
+}
+
 impl Engine {
     /// 加载模型并做自检；会话只建一次，之后任意语言对都用同一个引擎。
     ///
@@ -822,15 +862,7 @@ impl Engine {
         }
         init_runtime()?;
         let gen_params = resolve_gen_params(&manifest, dir)?;
-        let tokenizer = load_tokenizer(&manifest.resolve_file(dir, FILE_TOKENIZER)?)?;
-        let encoder = build_session(
-            &manifest.resolve_file(dir, FILE_ENCODER)?,
-            &manifest.execution,
-        )?;
-        let decoder = build_session(
-            &manifest.resolve_file(dir, FILE_DECODER)?,
-            &manifest.execution,
-        )?;
+        let (tokenizer, encoder, decoder) = load_parts(&manifest, dir)?;
 
         let dec_names: Vec<&str> = decoder.inputs().iter().map(|o| o.name()).collect();
         for required in ["input_ids", "encoder_hidden_states", "use_cache_branch"] {
@@ -1591,6 +1623,39 @@ mod tests {
             "model":{"type":"BPE","unk_token":"<unk>","vocab":{"<s>":0,"<pad>":1,"</s>":2,"<unk>":3,
             "a":4,"eng_Latn":5,"zho_Hans":6},"merges":[]}}"#;
         Tokenizer::from_bytes(json.as_bytes()).unwrap()
+    }
+
+    /// 并行加载的报错优先级与原串行顺序一致（分词器 > 编码器 > 解码器），且不依赖 ORT 动态库。
+    #[test]
+    fn load_parts_error_precedence_matches_serial_order() {
+        let tok_json = r#"{"version":"1.0","truncation":null,"padding":null,"added_tokens":[],
+            "normalizer":null,"pre_tokenizer":null,"post_processor":null,"decoder":null,
+            "model":{"type":"BPE","unk_token":"<unk>","vocab":{"<unk>":0},"merges":[]}}"#;
+        let dir = temp_dir_with("load-parts", &[("tokenizer.json", tok_json)]);
+        let mut m = manifest_with(GenerationOverride::default());
+
+        // 三个键都缺：先报分词器
+        let e = load_parts(&m, &dir).err().unwrap();
+        assert_eq!(e.kind, ErrorKind::ManifestInvalid);
+        assert!(e.message.contains("files.tokenizer"), "{}", e.message);
+
+        // 分词器文件不存在（读失败）优先于编码器/解码器缺键
+        m.files.insert("tokenizer".into(), "missing.json".into());
+        let e = load_parts(&m, &dir).err().unwrap();
+        assert_eq!(e.kind, ErrorKind::LoadFailed);
+        assert!(e.message.contains("read "), "{}", e.message);
+
+        // 分词器正常：编码器缺键优先于解码器缺键
+        m.files.insert("tokenizer".into(), "tokenizer.json".into());
+        let e = load_parts(&m, &dir).err().unwrap();
+        assert_eq!(e.kind, ErrorKind::ManifestInvalid);
+        assert!(e.message.contains("files.encoder"), "{}", e.message);
+
+        // 编码器路径越界（解析阶段就失败）仍先于解码器缺键
+        m.files.insert("encoder".into(), "../x.onnx".into());
+        let e = load_parts(&m, &dir).err().unwrap();
+        assert!(e.message.contains("files.encoder"), "{}", e.message);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// 构造带 `lang_tokens` 的 m2m100 清单。

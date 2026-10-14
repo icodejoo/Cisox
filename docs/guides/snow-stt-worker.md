@@ -74,11 +74,12 @@ stdin 关闭（主程序退出或崩溃）视为中止：不再发事件，直�
 
 - **`model_type`**：sherpa 在 `model_type` 为空时会先建一个临时 ORT 会话读元数据，等于把 encoder 载两遍。worker 加载前按顺序取：①模型目录 `model.json` 的 `model_type` 字段（主程序下载安装时由清单写入，只写核对过的）；②缓存元数据里记的值（生成缓存时从 encoder 的 ONNX 元数据读出）；③都没有就不设，走 sherpa 旧路径。取值过白名单（流式：`conformer` / `ebranchformer` / `lstm` / `zipformer` / `zipformer2`），不合法的值当没有。
 - **encoder 预优化缓存**：缓存放 `<模型目录>/.opt/`（`encoder.opt.onnx` 约 150MB、`encoder.opt.json` 元数据、`encoder.opt.lock` 生成锁），随模型目录一起被替换 / 删除。命中条件：元数据 `state=ready`、格式版本一致、ORT 指纹一致（`ort::info()` 构建串加 `onnxruntime.dll` 字节数）、源 encoder 的文件名 / 大小 / 修改时间一致、产物的大小 / 修改时间 / 首尾各 64KB 哈希一致。命中就把优化后的文件交给 sherpa，加载 x-asr 480ms 约 0.8 s（原 5~6 s）。
-- **生成**：没命中、没有失败记录、没人在生成时，**会话顺利结束后**拉起后台子进程 `cisox-stt --optimize <模型目录>`（空闲优先级类、无窗口、不继承管道；ORT 单线程，EXTENDED 级别，把批量维 `N` 固定为 1，约 5 s），所以这一次识别照常用原文件，下一次起命中。产物先写临时文件，ORT 载入核对输入输出名通过后才改名，最后写元数据；失败写 `failed` 记录，同一份源文件与同一版 ORT 不再重试，ORT 换版本后可重试。生成进程被杀留下的锁 15 分钟后可被接管。`--optimize` 也可手动运行（前台、打印一行结果，退出码 0 / 1）。
+- **生成**：没命中、没有失败记录、没人在生成时，**会话顺利结束后**拉起后台子进程 `cisox-stt --optimize <模型目录>`（空闲优先级类、无窗口、不继承管道；ORT 单线程，EXTENDED 级别，把批量维 `N` 固定为 1，约 5 s），所以这一次识别照常用原文件，下一次起命中。另外，主程序设置页（`settings_view.rs::refresh_stt_cache`，创建设置页、切换分组、宿主跳转分组时运行）刷新已装模型列表时，对已安装、还没有缓存的流式模型也会在后台拉起一次同样的生成（`stt_optimize.rs`）：只看 `<模型目录>/.opt/` 下 `encoder.opt.json` 或 `encoder.opt.lock` 在不在，任一存在就不拉起；每个模型在主程序进程内只尝试一次；离线模型不拉起；找不到 worker 或拉起失败只记 warn，不弹提示。（2026-10-09 起设置页不再提供应用内下载，模型由用户从浏览器获取后放入模型目录，所以触发点放在"扫描到已装模型"而不是"安装完成"。）产物先写临时文件，ORT 载入核对输入输出名通过后才改名，最后写元数据；失败写 `failed` 记录，同一份源文件与同一版 ORT 不再重试，ORT 换版本后可重试。生成进程被杀留下的锁 15 分钟后可被接管。`--optimize` 也可手动运行（前台、打印一行结果，退出码 0 / 1）。
 - **回退**：缓存或 `model_type` 导致 sherpa 创建返回失败时，缓存标成失败，退回原 encoder 且不带 `model_type` 重新创建。**注意** sherpa / ORT 对损坏的模型可能直接结束进程（实测覆盖缓存文件头部会这样），所以缓存的完整性在加载前靠大小 / 时间 / 首尾哈希校验，不靠事后回退。
 - **离线**：sherpa 只有离线 transducer 会探测元数据；`offline-transducer` 在 `model.json` 写了 `model_type`（`transducer` / `nemo_transducer`）时会交给 sherpa。清单里目前没给离线模型填值（没核对、没测），其余离线类型本来就不探测。
 - **限制**：固定批量为 1，worker 只有一路流所以没问题，将来要并发多路时需关闭；缓存只在本机（i5-13500 / ORT 1.28.0）验证过，没在别的 CPU 上验证；不跨模型目录共享；没有单独的清理入口。
-- **测试 / 对比开关**（命令行，生产不用）：`--no-model-type`（不交 `model_type`）、`--no-opt-cache`（不使用也不生成缓存）、`--stats` 时多打一行 `load_plan: encoder=cache|original model_type=… fell_back=… want_generation=…`。
+- **测试 / 对比开关**（命令行，生产不用）：`--no-model-type`（不交 `model_type`）、`--no-opt-cache`（不使用也不生成缓存）。
+- **加载日志**（2026-10-14，STT-14）：模型加载完后 worker **无条件**向 stderr 写两行（stdout 协议不变）：`load: load_ms=<毫秒> backend=… mode=…`，以及流式本地后端的 `load_plan: encoder=cache|original model_type=… fell_back=… want_generation=…`；`--stats` 另在结束时写 `stats: load_ms=… chunks=… rtf=…`。主程序 `dictation/client.rs` 把这三种前缀的行提升为 info 日志（其余 stderr 仍只进 debug），并在会话结束时输出 `语音转文字会话摘要`（拉起 / READY / START / RECORDING / PONG / 首字时间点、是否预拉起认领、模型 ID、worker 自报 `load_ms`），字段定义见 `dictation/timeline.rs`。
 
 ## 构建
 ```

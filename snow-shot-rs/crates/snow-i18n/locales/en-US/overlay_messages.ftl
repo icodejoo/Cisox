@@ -157,6 +157,10 @@ overlay-panel-undo = Undo
 
 overlay-panel-close = Close
 
+ocr-popup-title = Recognition result
+
+ocr-popup-exit = Exit
+
 overlay-translate-bar-details = View details
 
 overlay-translate-bar-undo = Undo translation
