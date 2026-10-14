@@ -6,6 +6,7 @@
 //! 手势判定是纯逻辑，见 [`Gesture`]。其它平台 `start` 返回「不支持」。
 
 mod gesture;
+mod held_keys;
 
 pub use gesture::{Binding, DragEvent, Gesture, Input, Modifiers, MouseKey, Outcome, Point};
 
@@ -60,6 +61,7 @@ impl GlobalMouseService {
 
 #[cfg(windows)]
 mod imp {
+    use super::held_keys::{is_modifier_key, modifiers_from_keys, reconcile_held};
     use super::{Binding, DragEvent, DragHandler, Gesture, Input, Modifiers, MouseKey, Point};
     use std::collections::BTreeSet;
     use std::sync::mpsc::channel;
@@ -70,8 +72,7 @@ mod imp {
     use windows::Win32::System::Threading::GetCurrentThreadId;
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         GetAsyncKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput, VIRTUAL_KEY, VK_LBUTTON,
-        VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MBUTTON, VK_RBUTTON, VK_RCONTROL, VK_RMENU, VK_RSHIFT, VK_RWIN,
-        VK_XBUTTON1, VK_XBUTTON2,
+        VK_MBUTTON, VK_RBUTTON, VK_XBUTTON1, VK_XBUTTON2,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         CallNextHookEx, DispatchMessageW, GetMessageW, HHOOK, KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT, PostThreadMessageW,
@@ -137,13 +138,7 @@ mod imp {
     impl State {
         /// 由按住的虚拟键算出修饰键集合。
         fn modifiers(&self) -> Modifiers {
-            let any = |keys: &[VIRTUAL_KEY]| keys.iter().any(|k| self.held_keys.contains(&k.0));
-            Modifiers {
-                win: any(&[VK_LWIN, VK_RWIN]),
-                ctrl: any(&[VK_LCONTROL, VK_RCONTROL]),
-                alt: any(&[VK_LMENU, VK_RMENU]),
-                shift: any(&[VK_LSHIFT, VK_RSHIFT]),
-            }
+            modifiers_from_keys(&self.held_keys)
         }
 
         /// 是否需要鼠标钩子：手势进行中，或当前修饰键恰好匹配某条绑定。
@@ -294,11 +289,32 @@ mod imp {
         }
     }
 
-    /// 虚拟键是否是我们关心的修饰键。
-    fn is_modifier(vk: u16) -> bool {
-        [VK_LWIN, VK_RWIN, VK_LCONTROL, VK_RCONTROL, VK_LMENU, VK_RMENU, VK_LSHIFT, VK_RSHIFT]
-            .iter()
-            .any(|k| k.0 == vk)
+    /// 虚拟键此刻是否真的按着（`GetAsyncKeyState` 最高位；廉价调用，钩子里可用）。
+    fn vk_is_down(vk: u16) -> bool {
+        // SAFETY: 纯值参数。
+        let state = unsafe { GetAsyncKeyState(i32::from(vk)) };
+        state as u16 & 0x8000 != 0
+    }
+
+    /// 用真实键态给 `held_keys` 对账，剔除漏收 KEYUP 而卡住的修饰键。
+    ///
+    /// 剔除时若有手势进行中，按取消处理。
+    ///
+    /// # 返回
+    /// `None` 表示没有卡住的键；`Some(event)` 表示已清理，`event` 是要交给上层的取消事件（调用方在锁外派发）。
+    fn reconcile_held_state() -> Option<Option<DragEvent>> {
+        let mut guard = lock();
+        let state = guard.as_mut()?;
+        if state.held_keys.is_empty() {
+            return None;
+        }
+        let clean = reconcile_held(&state.held_keys, vk_is_down);
+        if clean.len() == state.held_keys.len() {
+            return None;
+        }
+        tracing::warn!(stuck = ?state.held_keys.difference(&clean).collect::<Vec<_>>(), "修饰键状态与真实键态不符，已清除卡住的键");
+        state.held_keys = clean;
+        Some(state.gesture.handle(Input::Cancel, &[]).event)
     }
 
     /// 低级键盘钩子：跟踪修饰键，并随之决定是否需要鼠标钩子。
@@ -307,7 +323,7 @@ mod imp {
             // SAFETY: code>=0 时 lparam 指向有效的 KBDLLHOOKSTRUCT。
             let info = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) };
             let vk = info.vkCode as u16;
-            if !ignore(info.flags.0 & LLKHF_INJECTED != 0) && is_modifier(vk) {
+            if !ignore(info.flags.0 & LLKHF_INJECTED != 0) && is_modifier_key(vk) {
                 let down = matches!(wparam.0 as u32, WM_KEYDOWN | WM_SYSKEYDOWN);
                 let up = matches!(wparam.0 as u32, WM_KEYUP | WM_SYSKEYUP);
                 if down || up {
@@ -344,7 +360,7 @@ mod imp {
         .iter()
         .filter(|(key, _)| *key != except)
         // SAFETY: 纯值参数。
-        .any(|(_, vk)| unsafe { GetAsyncKeyState(i32::from(vk.0)) } as u16 & 0x8000 != 0)
+        .any(|(_, vk)| vk_is_down(vk.0))
     }
 
     /// 发一个无意义的按键，让系统认为 Win 键期间发生过别的操作，松开 Win 时不再弹开始菜单。
@@ -380,6 +396,14 @@ mod imp {
                     _ => (None, None),
                 };
                 let moved = wparam.0 as u32 == WM_MOUSEMOVE;
+                // 判定手势前先用真实键态对账：漏收 Win 的 KEYUP 会让 Win「永久按着」，之后每次点击都误触发。
+                // 对账剔除了卡住的键时，进行中的手势按取消处理（不吞当前这个鼠标事件）。
+                if (press.is_some() || moved)
+                    && let Some(cancelled) = reconcile_held_state()
+                {
+                    dispatch(cancelled);
+                    sync_mouse_hook();
+                }
                 let input = match (press, release) {
                     (Some(button), _) => Some(Input::Press {
                         button,
