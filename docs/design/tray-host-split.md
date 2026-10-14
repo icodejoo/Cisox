@@ -1,7 +1,7 @@
 ---
 title: 托盘宿主 + 按需 UI 进程（拆分方案）
 status: approved
-updated: 2026-10-13
+updated: 2026-10-14
 summary: 把常驻托盘的最小 Win32 宿主和承载全部窗口的 GPUI UI 进程拆开：进程边界、IPC、退出规则、冷启动预算、分阶段验收与回退。
 ---
 
@@ -125,7 +125,7 @@ snow-shot             改  bin 改名 cisox-ui；新增 spec 生成（纯函数�
 
 **命令集（宿主→UI）**：不发明新命令名，直接用现有的两套 id：托盘信号（`pin_clipboard`、`history`、`main_window`、`settings`、`pin_manage`、`group:<id>`、`group_new`、`group_delete_empty`）和 `AppCommand`/`QuickAction` 名（截图、录屏、长截图、输入框翻译、语音 `start|stop|toggle`、各快捷动作）。UI 侧复用 `map_tray_signal` / `register_bus_handlers`，所以 UI 内部处理逻辑一行不改。另有：`restore_pins`、`gesture{begin|update|finish|cancel, id, x, y}`、`set_config{key, value}`、`shutdown`（优雅退出）。
 
-**UI→宿主**：`hello`、`ack{seq}`、`tooltip{text}`、`spec_changed{rev}`（UI 已写好快照）、`hotkeys_apply{rev}` 的应答、`exit_request{last_seq}`、`activity{windows, pins, busy_reasons}`（给崩溃恢复和日志用）。
+**UI→宿主**：`hello`、`ack{seq}`、`tooltip{text}`、`spec_changed{rev}`（UI 已写好快照）、`hotkeys_apply{rev}` 的应答、`exit_request{last_seq}`、`activity{windows, pins, busy_reasons}`（给崩溃恢复和日志用）。另有 `capture_idle`（截图会话已结束，给连续误触发保护量"关闭 → 下次开启"的间隔用，见 §10 第 18 条）。
 
 **宿主状态机**：`Absent → Starting → Running → Exiting → Absent`，另有 `Backoff`（熔断）。
 
@@ -454,6 +454,13 @@ snow-shot             改  bin 改名 cisox-ui；新增 spec 生成（纯函数�
 15. **独立排查项（与拆分无关，常驻模式即受益）**：每次截图后内核句柄 +~9 不回落的泄漏；热路径里覆盖窗可见到内容出现约 400ms 的空档。
 16. **切默认为双进程（2026-10-13，用户拍板）**：真屏验收通过后，`snow-shot-ui.exe` 无参数转去启动宿主，自启统一指向宿主，`--resident` 成为显式回退开关；没有运行实例时 `--cmd` 由新宿主执行（`quit` 除外），见阶段 4 “切默认实施结果”。
 17. **进程名统一 cisox 开头（2026-10-13，用户拍板）**：宿主 `snow-shot.exe` → `cisox.exe`（FileDescription "Cisox"）；UI `snow-shot-ui.exe` → `cisox-ui.exe`（"Cisox UI"）；worker `snow-recorder` / `snow-stt` / `snow-translator` / `snow-table` / `snow-latex` → `cisox-recorder` / `cisox-stt` / `cisox-translator` / `cisox-table` / `cisox-latex`（"Cisox recorder" 等）。只改 `[[bin]] name` 与版本资源，crate / package 名仍是 `snow-*`（`cargo build -p snow-tray-host -p snow-shot` 不变）；开发工具 `snow-ocr-compare`、`snow-fps-fixture`、`workspace-guard`、`snow-i18n-tool` 不改。未发布，不做旧名兼容（旧自启项由用户自行重设）；单实例互斥体、会话管道名、数据目录、日志文件名不变。exe 名常量集中在 `snow_host_protocol::launch`（`HOST_EXE_NAME`、`UI_EXE_NAME`），worker 名仍放各自客户端模块（`RECORDER_EXE_NAME` 等）。
+18. **连续误触发保护（2026-10-14，用户拍板）**：截图覆盖窗会挡住所有操作，热键 / 手势被连环误触发时用户几乎无法自救（起因：漏收 Win 抬起事件导致"点哪儿都开截图"）。宿主在把截图类命令转给 UI 之前过一道判定，纯逻辑在 `snow-tray-host/src/rapid.rs`（`RapidGuard`，有单测），接线在 `host.rs`（`dispatch_action` / `handle_gesture`），确认框在 `win.rs`。规则：
+    - **计什么**：每次覆盖窗**关闭 → 下一次截图开启**的间隔。**连续 `RAPID_REOPEN_STREAK`（5）次**间隔都 **< `RAPID_REOPEN_GAP`（5 秒，恰好 5 秒不算）** 才判定异常；任何一次间隔 >= 5 秒就把连续计数清零。覆盖窗还开着时又来的触发没有间隔，放行但不计数。
+    - **计入的命令**（会开全屏覆盖窗）：清单是 `snow_host_protocol::CAPTURE_ACTION_IDS`——`capture`、`start_recording`、`scroll_capture`、`quick.screenshot_delay / fixed / ocr / translation / copy`、`quick.screen_record_copy`，外加鼠标手势的 `begin`（手势动作全是截图 / 录屏选区）。不计：整屏 / 前台窗口直接截图、贴图、设置、历史、语音、翻译浮窗等。UI 侧 `host_spec.rs` 有测试核对这份清单与实际行为一致。
+    - **"关闭"信号**：协议新增 UI→宿主消息 `capture_idle`（`UiMessage::CaptureIdle`，向后兼容：旧宿主按未知消息忽略；旧 UI 不发，宿主退化为只在 UI 进程退出时记关闭）。UI 在"没有采集、没有延迟倒计时、没有鼠标手势、没有覆盖窗、收件箱已空"时上报一次（`host_session.rs::report_capture_idle`；宿主每转来一条截图类命令就重新布防，所以命令什么都没开也会收到关闭信号）。UI 有贴图 / 设置窗口开着而不退出时，同样靠它拿到关闭时刻；UI 退出也算关闭。`--resident` 单进程模式没有宿主，**不受此保护**。
+    - **触发后**：本次命令不分发，宿主弹 `MessageBoxW`（`MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2 | MB_TOPMOST | MB_SETFOREGROUND | MB_SYSTEMMODAL`，默认"否"，直接回车即退出）。模态调用跑在专用短命线程（`rapid-capture-prompt`），主线程、托盘线程、热键线程、鼠标 / 键盘钩子线程都不受阻塞，回答经事件通道回到主线程。选"否"走与托盘"退出"相同的正常退出路径（UI 先优雅关闭）；选"是"放行被拦下的那一条（手势 `begin` 已过期，不补发）并进入 `RAPID_COOLDOWN`（10 分钟）冷却，冷却内不检测，冷却过后重新从零计数。弹窗期间新到的截图类命令直接丢弃（不排队，debug 日志）；被拦下的鼠标手势会让钩子取消并丢掉其后续 update / finish，免得把 UI 拉起来。触发时记 warn 日志（次数、窗口秒数、来源）。确认框拉不起来则按"刻意"放行。
+    - **文案**：标题是 `PRODUCT_NAME`；正文走 i18n 键 `tray-notice-rapid-capture`（`quick_actions.ftl`，en-US / zh-CN），UI 生成快照时渲染进 `strings.notice_rapid_capture`（次数用 `{count}` 占位，产品名用运行时注入的 `$product`），宿主填入次数；快照缺失 / 旧快照时用 `view.rs` 里的英文兜底（与 `notice_ui_*` 同一机制，宿主不链 i18n）。
+    - **常量位置**：`RAPID_REOPEN_GAP`、`RAPID_REOPEN_STREAK`、`RAPID_COOLDOWN` 都在 `snow-tray-host/src/rapid.rs`。
 
 ## 11. 未证实清单（阶段 0 验证）
 

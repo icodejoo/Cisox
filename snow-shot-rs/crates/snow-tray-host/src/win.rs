@@ -8,6 +8,7 @@
 use crate::convert::{binding_from_spec, origin_from_shell, tray_menu, tray_spec_from_plan};
 use crate::gesture::{GestureThrottle, bindings_from_spec, event_from_drag};
 use crate::host::{Event, HeadlessKind, Platform, SpawnedUi, TrayPlan};
+use crate::rapid::quit_chosen;
 use snow_host_protocol::frame::encode_line;
 use snow_host_protocol::launch::{
     FLAG_HEADLESS, HEADLESS_EMIT_SPEC, HeadlessJob, UI_EXE_NAME, UiHint, UiLaunch,
@@ -38,7 +39,10 @@ use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, INFINITE, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
     PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, TerminateProcess, WaitForSingleObject,
 };
-use windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow;
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    AllowSetForegroundWindow, MB_DEFBUTTON2, MB_ICONWARNING, MB_SETFOREGROUND, MB_SYSTEMMODAL,
+    MB_TOPMOST, MB_YESNO, MessageBoxW,
+};
 
 /// 环境变量：覆盖 UI 进程 exe 的路径（开发与验收脚本用；正式安装不设置）。
 pub const ENV_UI_EXE: &str = "SNOW_UI_EXE";
@@ -55,6 +59,37 @@ const KILL_EXIT_CODE: u32 = 1;
 
 /// 重启时，旧宿主退出后等多久（`ping` 次数，每次约 1 秒）再拉起新宿主，保证互斥体已释放。
 const RESTART_WAIT_PINGS: u32 = 3;
+
+/// 连续误触发确认框的样式：是 / 否两个按钮、警告图标、**默认按钮是“否”**（直接回车就退出）、
+/// 置顶并抢前台（覆盖窗可能还留在最上层）、系统模态。
+pub const RAPID_PROMPT_STYLE: u32 =
+    MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2 | MB_TOPMOST | MB_SETFOREGROUND | MB_SYSTEMMODAL;
+
+/// 确认框线程的名字（排查线程用）。
+const RAPID_PROMPT_THREAD_NAME: &str = "rapid-capture-prompt";
+
+/// UTF-8 文本转以 NUL 结尾的 UTF-16（Win32 宽字符串参数）。
+fn to_wide(text: &str) -> Vec<u16> {
+    text.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// 弹 `MessageBoxW` 并等用户回答（模态阻塞，只能在专用线程里调）。
+///
+/// # 返回
+/// `MessageBoxW` 的返回值；失败为 0。
+fn show_rapid_prompt(title: &str, text: &str) -> i32 {
+    let title = to_wide(title);
+    let text = to_wide(text);
+    // SAFETY: 两个缓冲区都以 NUL 结尾且在调用期间存活；窗口句柄为空表示无属主窗口
+    unsafe {
+        MessageBoxW(
+            std::ptr::null_mut(),
+            text.as_ptr(),
+            title.as_ptr(),
+            RAPID_PROMPT_STYLE,
+        )
+    }
+}
 
 /// 自己持有的内核进程句柄（关闭时自动释放）。
 struct ProcessHandle(HANDLE);
@@ -499,6 +534,24 @@ impl Platform for WinPlatform {
 
     fn unix_now(&mut self) -> u64 {
         snow_platform::unix_time::unix_secs()
+    }
+
+    /// 模态 `MessageBoxW` 放在专用短命线程里：主线程要继续处理事件，鼠标 / 键盘钩子各有自己的线程与
+    /// 消息循环，都不受它阻塞；用户回答后经事件通道回报。
+    fn confirm_rapid_capture(&mut self, title: &str, text: &str) -> Result<(), String> {
+        let (title, text) = (title.to_string(), text.to_string());
+        let tx = self.tx.clone();
+        std::thread::Builder::new()
+            .name(RAPID_PROMPT_THREAD_NAME.into())
+            .spawn(move || {
+                let code = show_rapid_prompt(&title, &text);
+                tracing::info!(code, "连续误触发确认框已回答");
+                let _ = tx.send(Event::RapidCaptureAnswered {
+                    quit: quit_chosen(code),
+                });
+            })
+            .map(|_| ())
+            .map_err(|e| format!("创建确认框线程失败: {e}"))
     }
 
     fn restart_host(&mut self) -> Result<(), String> {

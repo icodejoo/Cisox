@@ -322,3 +322,27 @@ fn trim_and_grant_are_safe() {
     let _ = platform.fullscreen_focused();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// 确认框样式：是 / 否按钮、默认选“否”（回车即退出）、置顶抢前台；不能带“是”为默认或取消按钮。
+#[test]
+fn rapid_prompt_style_defaults_to_no() {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        MB_DEFBUTTON1, MB_OKCANCEL, MB_TYPEMASK, MB_YESNOCANCEL,
+    };
+    assert_eq!(RAPID_PROMPT_STYLE & MB_TYPEMASK, MB_YESNO);
+    assert_ne!(RAPID_PROMPT_STYLE & MB_DEFBUTTON2, 0);
+    assert_eq!(RAPID_PROMPT_STYLE & MB_DEFBUTTON1, 0);
+    for flag in [MB_TOPMOST, MB_SETFOREGROUND, MB_SYSTEMMODAL, MB_ICONWARNING] {
+        assert_ne!(RAPID_PROMPT_STYLE & flag, 0);
+    }
+    assert_ne!(RAPID_PROMPT_STYLE & MB_TYPEMASK, MB_OKCANCEL);
+    assert_ne!(RAPID_PROMPT_STYLE & MB_TYPEMASK, MB_YESNOCANCEL);
+}
+
+/// 宽字符串以 NUL 结尾，非 ASCII 文字按 UTF-16 编码。
+#[test]
+fn to_wide_is_nul_terminated_utf16() {
+    assert_eq!(to_wide("a"), vec![0x61, 0]);
+    assert_eq!(to_wide("否"), vec![0x5426, 0]);
+    assert_eq!(to_wide(""), vec![0]);
+}

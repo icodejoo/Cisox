@@ -161,6 +161,10 @@ pub struct HostStrings {
     /// 界面进程反复异常退出、进入退避；空串时宿主用内置英文兜底文案。
     #[serde(default)]
     pub notice_ui_crash_loop: String,
+    /// 连续误触发保护的确认文案（含 [`crate::PLACEHOLDER_COUNT`] 占位符，产品名已由 UI 填入）；
+    /// 空串时宿主用内置英文兜底文案。
+    #[serde(default)]
+    pub notice_rapid_capture: String,
 }
 
 /// 保活与登录时要做的事。
@@ -454,6 +458,7 @@ mod tests {
                 notice_gate_off: "off".into(),
                 notice_ui_start_failed: "ui failed".into(),
                 notice_ui_crash_loop: "ui loop".into(),
+                notice_rapid_capture: "rapid {count}".into(),
             },
             flags: HostFlags {
                 keep_alive: vec![crate::KEEP_ALIVE_MCP.into()],

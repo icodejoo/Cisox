@@ -22,7 +22,7 @@ use snow_host_protocol::spec::HostSpec;
 use snow_host_protocol::{
     ACTION_CAPTURE, ACTION_KEEP_ALIVE, ACTION_QUIT, ACTION_RESTART, ACTION_SCROLL_CAPTURE,
     ACTION_START_RECORDING, ACTION_TOGGLE_FULLSCREEN_GATE, ACTION_TOGGLE_GLOBAL_HOTKEYS,
-    HOTKEYS_APPLY_TIMEOUT,
+    CAPTURE_ACTION_IDS, HOTKEYS_APPLY_TIMEOUT,
 };
 use snow_platform::global_mouse::{DragEvent, Point};
 use snow_platform::single_instance::session_pipe::PipeWriter;
@@ -155,6 +155,9 @@ pub(crate) struct HostSession {
     last_activity: RefCell<Option<Activity>>,
     /// 最近一次写进快照的“登录要恢复的贴图数”（`None` 表示还没写过，第一次空闲时校一遍）。
     last_restorable: Cell<Option<u32>>,
+    /// 是否已经向宿主报告过“截图会话已结束”；宿主每转来一条命令 / 手势就清零，
+    /// 会话再落到空闲时补报一次（即使这条命令什么都没开，宿主也能收到关闭信号）。
+    capture_idle_sent: Cell<bool>,
 }
 
 impl HostSession {
@@ -173,6 +176,7 @@ impl HostSession {
             startup_synced: Cell::new(false),
             last_activity: RefCell::new(None),
             last_restorable: Cell::new(None),
+            capture_idle_sent: Cell::new(true),
         }
     }
 
@@ -349,6 +353,7 @@ pub(super) fn after_event(cx: &ShellContext, state: &AppState) {
             sync_restorable_pins(state, session);
         }
     }
+    report_capture_idle(cx, state, session);
     if !busy.is_empty() || !state.inbox.is_empty() {
         return;
     }
@@ -365,6 +370,36 @@ pub(super) fn after_event(cx: &ShellContext, state: &AppState) {
     if session.link.request_exit() {
         tracing::info!("所有窗口已关闭且无活动，请求退出");
     }
+}
+
+/// 截图类会话（采集中、延迟倒计时、鼠标手势、覆盖窗）是否在进行。
+///
+/// # 参数
+/// - `cx`：外壳上下文。
+/// - `state`：运行时状态。
+fn capture_session_active(cx: &ShellContext, state: &AppState) -> bool {
+    state.capture_in_flight
+        || state.delay.is_pending()
+        || state.gesture.is_some()
+        || any_overlay_open(cx, state)
+}
+
+/// 截图类会话落到空闲时向宿主报告一次 `capture_idle`（宿主据此量“覆盖窗关闭 → 下次开启”的间隔，
+/// 做连续误触发保护）。收件箱里还有没处理的事件时不报：刚转来的命令还没来得及开会话。
+///
+/// # 参数
+/// - `cx`：外壳上下文。
+/// - `state`：运行时状态。
+/// - `session`：宿主会话。
+fn report_capture_idle(cx: &ShellContext, state: &AppState, session: &HostSession) {
+    if capture_session_active(cx, state) {
+        session.capture_idle_sent.set(false);
+        return;
+    }
+    if !state.inbox.is_empty() || session.capture_idle_sent.replace(true) {
+        return;
+    }
+    session.link.send(&UiMessage::CaptureIdle);
 }
 
 /// 处理一个宿主侧事件（在 GPUI 主线程上）。
@@ -405,6 +440,9 @@ fn handle_message(
         HostMessage::Command { seq, id, origin } => {
             if session.link.accept(seq) == snow_host_protocol::seq::SeqCheck::Duplicate {
                 return;
+            }
+            if CAPTURE_ACTION_IDS.contains(&id.as_str()) {
+                session.capture_idle_sent.set(false);
             }
             match target_for_action(&id, origin) {
                 ActionTarget::Event(event) => {
@@ -450,6 +488,9 @@ fn handle_message(
             };
             if check == snow_host_protocol::seq::SeqCheck::Duplicate {
                 return;
+            }
+            if phase == GesturePhase::Begin {
+                session.capture_idle_sent.set(false);
             }
             match drag_event_from_host(phase, id, action, x, y) {
                 Some(event) => {

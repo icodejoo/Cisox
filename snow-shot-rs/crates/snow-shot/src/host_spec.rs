@@ -21,7 +21,7 @@ use snow_host_protocol::spec::{
 };
 use snow_host_protocol::{
     ACTION_TOGGLE_FULLSCREEN_GATE, ACTION_TOGGLE_GLOBAL_HOTKEYS, KEEP_ALIVE_MCP,
-    KEEP_ALIVE_OCR_HOT_START, PLACEHOLDER_FAILURES, SPEC_VERSION,
+    KEEP_ALIVE_OCR_HOT_START, PLACEHOLDER_COUNT, PLACEHOLDER_FAILURES, SPEC_VERSION,
 };
 use snow_i18n::Args;
 use snow_ui::shell::tray::{TrayAction, TrayIconImage, TrayMenuEntry};
@@ -56,10 +56,14 @@ const NOTICE_HOTKEYS_RESUME_FAILED: &str = "quick-notice-hotkeys-resume-failed";
 const NOTICE_UI_START_FAILED: &str = "tray-notice-ui-start-failed";
 /// 提示文案 id：界面进程反复异常退出。
 const NOTICE_UI_CRASH_LOOP: &str = "tray-notice-ui-crash-loop";
+/// 提示文案 id：连续误触发保护的确认框正文（`$arg1` 次数占位符，产品名由运行时注入 `$product`）。
+const NOTICE_RAPID_CAPTURE: &str = "tray-notice-rapid-capture";
 /// 提示文案 id：热键暂停期间的托盘悬停提示。
 const TOOLTIP_PAUSED: &str = "tray-tooltip-paused";
 /// 文案里“失败原因”参数的序号。
 const FAILURES_ARG_INDEX: u8 = 1;
+/// 连续误触发文案里“次数占位符”参数的序号。
+const RAPID_COUNT_ARG_INDEX: u8 = 1;
 
 /// 快捷动作的稳定 id（`quick.<名>`）；两个由宿主自己处理的开关用协议里的常量。
 ///
@@ -363,6 +367,10 @@ pub fn host_spec_from_document(
             notice_gate_off: i18n.tr(NOTICE_FULLSCREEN_GATE_OFF),
             notice_ui_start_failed: i18n.tr(NOTICE_UI_START_FAILED),
             notice_ui_crash_loop: i18n.tr(NOTICE_UI_CRASH_LOOP),
+            notice_rapid_capture: i18n.tr_with(
+                NOTICE_RAPID_CAPTURE,
+                &Args::new().arg(RAPID_COUNT_ARG_INDEX, PLACEHOLDER_COUNT),
+            ),
         },
         flags: HostFlags {
             keep_alive: keep_alive_reasons(document),
@@ -392,6 +400,37 @@ mod tests {
             pins_to_restore: 0,
             update_due_at: None,
             rev: 1,
+        }
+    }
+
+    /// 宿主的“会开覆盖窗”清单与 UI 的实际行为一致：清单里的 id 都能还原成截图 / 录屏 / 覆盖窗类命令，
+    /// 反过来所有走覆盖窗（含延迟倒计时、录屏选区）的快捷动作都在清单里；直接截图不在清单里。
+    #[test]
+    fn capture_action_ids_match_overlay_behaviour() {
+        use crate::quick_actions::{QuickPlan, plan_for};
+        use snow_host_protocol::{ACTION_SCROLL_CAPTURE, CAPTURE_ACTION_IDS};
+        let opens_overlay = |action: QuickAction| {
+            matches!(
+                plan_for(action),
+                QuickPlan::Overlay(_) | QuickPlan::Delayed | QuickPlan::RecordAndCopy
+            )
+        };
+        for id in CAPTURE_ACTION_IDS {
+            if *id == ACTION_SCROLL_CAPTURE {
+                continue;
+            }
+            match command_from_id(id).unwrap_or_else(|| panic!("{id} 无法还原成命令")) {
+                AppCommand::Capture(_) | AppCommand::StartRecording(_) => {}
+                AppCommand::QuickAction(action) => assert!(opens_overlay(action), "{id}"),
+                other => panic!("{id} 不该是 {other:?}"),
+            }
+        }
+        for (_, action) in QUICK_ACTION_KEYS {
+            assert_eq!(
+                opens_overlay(*action),
+                CAPTURE_ACTION_IDS.contains(&quick_action_id(*action)),
+                "{action:?}"
+            );
         }
     }
 
@@ -755,6 +794,17 @@ mod tests {
             en.strings
                 .notice_resume_failed
                 .contains(PLACEHOLDER_FAILURES)
+        );
+        // 连续误触发确认文案：次数占位符原样保留给宿主填，产品名已由运行时注入
+        for spec in [&zh, &en] {
+            let text = &spec.strings.notice_rapid_capture;
+            assert!(text.contains(PLACEHOLDER_COUNT), "{text}");
+            assert!(text.contains(snow_app_core::PRODUCT_NAME), "{text}");
+            assert!(!text.contains("$product"), "{text}");
+        }
+        assert_ne!(
+            zh.strings.notice_rapid_capture,
+            en.strings.notice_rapid_capture
         );
     }
 }

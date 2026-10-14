@@ -14,6 +14,7 @@
 //! - [`host`]：宿主核心（状态机 + 快照 + 暂停 / 闸门 + 托盘与热键的应用），系统调用都在 [`host::Platform`] 后面。
 //! - [`view`]：从快照算出实际要显示 / 注册的东西（纯函数）。
 //! - [`convert`]：快照类型转 `snow-shell-core` 的托盘 / 热键类型。
+//! - [`rapid`]：连续误触发保护（覆盖窗关闭 → 下一次开启的间隔连续太短时弹确认框）。
 //! - [`ipc_map`]：`--cmd` 命令到动作 id 的映射。
 //! - [`cli`]：命令行解析。
 //! - [`harden`]：进程加固（扩展点禁用、`ImmDisableIME(-1)`、DPI 感知）。
@@ -31,6 +32,7 @@ pub mod host_log;
 pub mod ipc_map;
 pub mod machine;
 pub mod queue;
+pub mod rapid;
 pub mod view;
 
 #[cfg(windows)]

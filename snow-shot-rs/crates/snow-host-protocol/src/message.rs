@@ -181,6 +181,10 @@ pub enum UiMessage {
         /// 阻止退出的原因（录屏、下载等）。
         busy_reasons: Vec<String>,
     },
+    /// 截图类会话已结束：没有采集在进行、没有倒计时、没有覆盖窗（宿主据此量“关闭 → 下次开启”的间隔，
+    /// 用于连续误触发保护）。UI 每处理完一条截图类命令后、会话落到空闲时发一次；旧 UI 不发这条消息，
+    /// 宿主退化为只在 UI 进程退出时记关闭时刻。
+    CaptureIdle,
 }
 
 /// `hello` 校验不通过的原因。
@@ -431,6 +435,7 @@ mod tests {
                 },
                 json!({"type": "activity", "windows": 1, "pins": 2, "busy_reasons": ["recording"]}),
             ),
+            (UiMessage::CaptureIdle, json!({"type": "capture_idle"})),
         ];
         for (message, wire) in cases {
             assert_eq!(serde_json::to_value(&message).unwrap(), wire);

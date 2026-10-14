@@ -4,12 +4,13 @@
 //! 所以真正显示的菜单勾选、真正注册的热键要在快照之上再叠一层宿主状态。
 
 use serde_json::Value;
+use snow_data_paths::PRODUCT_NAME;
 use snow_host_protocol::message::HotkeyResult;
 use snow_host_protocol::spec::{GateSpec, HostFlags, HostStrings, TrayTheme};
 use snow_host_protocol::spec::{HostSpec, HotkeySpec, IconRgba, MenuItemSpec, TraySection};
 use snow_host_protocol::{
     ACTION_QUIT, ACTION_TOGGLE_FULLSCREEN_GATE, ACTION_TOGGLE_GLOBAL_HOTKEYS,
-    CONFIG_KEY_DISABLE_ON_FULLSCREEN, PLACEHOLDER_FAILURES, SPEC_VERSION,
+    CONFIG_KEY_DISABLE_ON_FULLSCREEN, PLACEHOLDER_COUNT, PLACEHOLDER_FAILURES, SPEC_VERSION,
 };
 
 /// 内置最小菜单里“退出”的文案：快照缺失 / 损坏时唯一写死的界面文字（不进 i18n，方案 §2）。
@@ -23,6 +24,14 @@ pub const FALLBACK_NOTICE_UI_START_FAILED: &str = "The UI process failed to star
 
 /// 内置兜底：界面进程反复异常退出的提示。
 pub const FALLBACK_NOTICE_UI_CRASH_LOOP: &str = "The UI process keeps crashing; retrying later";
+
+/// 内置兜底：连续误触发确认框的正文（快照里的本地化文案为空时用）；`{product}` 由宿主换成产品名。
+pub const FALLBACK_NOTICE_RAPID_CAPTURE: &str =
+    "Screenshots were started {count} times in a row. Was this intentional?
+Choose No (just press Enter) to quit {product}.";
+
+/// 兜底文案里产品名的占位符。
+const FALLBACK_PLACEHOLDER_PRODUCT: &str = "{product}";
 
 /// 内置兜底托盘图标的边长与颜色（纯色方块，宿主没有图标资源）。
 const FALLBACK_ICON_SIZE: u32 = 32;
@@ -239,6 +248,25 @@ pub fn fill_failures(template: &str, failures: &str) -> String {
     template.replace(PLACEHOLDER_FAILURES, failures)
 }
 
+/// 连续误触发确认框的正文：优先用快照里的本地化文案，空则用内置英文兜底；把次数填进占位符。
+///
+/// # 参数
+/// - `localized`：快照里的文案（产品名已由 UI 填好）；缺失或空串用兜底。
+/// - `count`：连续启动截图的次数。
+///
+/// ```rust
+/// use snow_tray_host::view::rapid_capture_text;
+/// assert_eq!(rapid_capture_text(Some("{count} 次"), 5), "5 次");
+/// assert!(rapid_capture_text(None, 5).contains("5 times"));
+/// ```
+pub fn rapid_capture_text(localized: Option<&str>, count: u32) -> String {
+    localized
+        .filter(|text| !text.is_empty())
+        .unwrap_or(FALLBACK_NOTICE_RAPID_CAPTURE)
+        .replace(PLACEHOLDER_COUNT, &count.to_string())
+        .replace(FALLBACK_PLACEHOLDER_PRODUCT, PRODUCT_NAME)
+}
+
 /// 悬停提示里放一条提示：`产品名: 文案`，超长截断。
 ///
 /// # 参数
@@ -400,6 +428,21 @@ mod tests {
         assert_eq!(compose_tooltip("Cisox", "ok"), "Cisox: ok");
         let long = compose_tooltip("Cisox", &"字".repeat(300));
         assert_eq!(long.chars().count(), NOTICE_TOOLTIP_MAX_CHARS);
+    }
+
+    /// 确认框正文：本地化文案优先并填次数；缺失 / 空串用兜底，兜底里的产品名与次数都被替换。
+    #[test]
+    fn rapid_capture_text_prefers_localized_and_falls_back() {
+        assert_eq!(
+            rapid_capture_text(Some("已连续 {count} 次"), 5),
+            "已连续 5 次"
+        );
+        for missing in [None, Some("")] {
+            let text = rapid_capture_text(missing, 5);
+            assert!(text.contains("5 times"), "{text}");
+            assert!(text.contains(PRODUCT_NAME), "{text}");
+            assert!(!text.contains('{'), "{text}");
+        }
     }
 
     /// 闸门开关落配置用的键与值。

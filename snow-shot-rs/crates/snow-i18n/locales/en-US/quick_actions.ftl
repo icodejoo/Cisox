@@ -36,3 +36,6 @@ tray-tooltip-paused = { $product } (hotkeys paused)
 tray-notice-ui-start-failed = The interface process failed to start.
 
 tray-notice-ui-crash-loop = The interface process keeps exiting unexpectedly. It will be retried later.
+
+tray-notice-rapid-capture = Screenshots were started { $arg1 } times in a row. Was this intentional?
+    Choose "No" (just press Enter) to quit { $product }.

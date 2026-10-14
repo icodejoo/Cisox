@@ -36,3 +36,6 @@ tray-tooltip-paused = { $product }（热键已暂停）
 tray-notice-ui-start-failed = 界面进程启动失败。
 
 tray-notice-ui-crash-loop = 界面进程反复异常退出，稍后会再次尝试。
+
+tray-notice-rapid-capture = 短时间内已连续启动截图 { $arg1 } 次。这是你刻意操作的吗？
+    选择“否”（直接按回车）将退出 { $product }。

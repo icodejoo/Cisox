@@ -29,6 +29,8 @@ enum Call {
     Mouse(Vec<String>),
     CancelGesture,
     Headless(HeadlessJob),
+    /// 连续误触发确认框：`(标题, 正文)`。
+    RapidPrompt(String, String),
 }
 
 /// 假平台。
@@ -54,6 +56,8 @@ struct Fake {
     spawn_fails: bool,
     /// 下一个 UI 进程 ID。
     next_pid: u32,
+    /// 确认框拉起是否失败。
+    prompt_fails: bool,
 }
 
 impl Platform for Fake {
@@ -155,6 +159,14 @@ impl Platform for Fake {
     fn unix_now(&mut self) -> u64 {
         self.unix
     }
+    fn confirm_rapid_capture(&mut self, title: &str, text: &str) -> Result<(), String> {
+        if self.prompt_fails {
+            return Err("线程拉不起来".into());
+        }
+        self.calls
+            .push(Call::RapidPrompt(title.to_string(), text.to_string()));
+        Ok(())
+    }
 }
 
 /// 测试令牌。
@@ -221,6 +233,7 @@ fn spec(rev: u64) -> HostSpec {
             notice_gate_off: "gate off".into(),
             notice_ui_start_failed: "ui failed".into(),
             notice_ui_crash_loop: "ui loop".into(),
+            notice_rapid_capture: "rapid {count}".into(),
         },
         flags: HostFlags::default(),
     }
@@ -1632,4 +1645,242 @@ fn hello_timeout_is_driven_by_tick() {
     let calls = take_calls(&mut core);
     assert!(calls.contains(&Call::Kill(1001)));
     assert!(calls.contains(&Call::Tooltip("Cisox: ui failed".into())));
+}
+
+// ---------- 连续误触发保护 ----------
+
+/// 一个 UI 会话里发给 UI 的某个命令的数量（看有没有被放行）。
+fn sent_commands(calls: &[Call], id: &str) -> usize {
+    calls
+        .iter()
+        .filter(|c| matches!(c, Call::Send(_, HostMessage::Command { id: sent, .. }) if sent == id))
+        .count()
+}
+
+/// 一次热键触发。
+fn hotkey(id: &str) -> Event {
+    Event::Action {
+        id: id.into(),
+        origin: ActionOrigin::Hotkey,
+    }
+}
+
+/// UI 上报“截图会话已结束”。
+fn capture_idle(generation: u64) -> Event {
+    Event::SessionLine {
+        generation,
+        line: line(&UiMessage::CaptureIdle),
+    }
+}
+
+/// 让保护走到“弹了确认框”：UI 已起，`bring_up_ui` 的那次 `capture` 算第 1 次开启，之后每次
+/// “关闭 → 1 秒后再开”，直到第 6 次开启被拦下。返回会话代数与被拦下那次触发的时刻。
+fn run_until_asked(core: &mut HostCore<Fake>, t0: Instant) -> (u64, Instant) {
+    let (generation, _) = bring_up_ui(core, t0);
+    let mut t = t0;
+    for _ in 0..crate::rapid::RAPID_REOPEN_STREAK {
+        core.handle(t, capture_idle(generation));
+        t += Duration::from_secs(1);
+        core.handle(t, hotkey("capture"));
+    }
+    (generation, t)
+}
+
+/// 连续 5 个短间隔：前 5 次放行，第 6 次不分发，改弹确认框（标题是产品名、正文带次数）。
+#[test]
+fn rapid_reopen_asks_instead_of_dispatching() {
+    let (mut core, t0) = started(Some(spec(1)));
+    take_calls(&mut core);
+    run_until_asked(&mut core, t0);
+    let calls = take_calls(&mut core);
+    assert_eq!(sent_commands(&calls, "capture"), 5, "前 5 次放行");
+    assert!(calls.contains(&Call::RapidPrompt("Cisox".into(), "rapid 5".into())));
+}
+
+/// 中间有一次间隔恰好 5 秒（不算太快）就清零：同样 6 次触发不会询问。
+#[test]
+fn long_gap_prevents_prompt() {
+    let (mut core, t0) = started(Some(spec(1)));
+    let (generation, _) = bring_up_ui(&mut core, t0);
+    take_calls(&mut core);
+    let mut t = t0;
+    for round in 0..crate::rapid::RAPID_REOPEN_STREAK {
+        core.handle(t, capture_idle(generation));
+        t += if round == 2 {
+            crate::rapid::RAPID_REOPEN_GAP
+        } else {
+            Duration::from_secs(1)
+        };
+        core.handle(t, hotkey("capture"));
+    }
+    let calls = take_calls(&mut core);
+    assert_eq!(sent_commands(&calls, "capture"), 5);
+    assert!(!calls.iter().any(|c| matches!(c, Call::RapidPrompt(..))));
+}
+
+/// 不开覆盖窗的动作（设置、整屏截图）不计数。
+#[test]
+fn non_overlay_actions_are_not_counted() {
+    let (mut core, t0) = started(Some(spec(1)));
+    let (generation, _) = bring_up_ui(&mut core, t0);
+    take_calls(&mut core);
+    let mut t = t0;
+    for _ in 0..10 {
+        core.handle(t, capture_idle(generation));
+        t += Duration::from_secs(1);
+        core.handle(t, hotkey("settings"));
+        core.handle(t, hotkey("quick.screenshot_full_screen"));
+    }
+    let calls = take_calls(&mut core);
+    assert!(!calls.iter().any(|c| matches!(c, Call::RapidPrompt(..))));
+}
+
+/// 弹窗期间新到的截图类命令直接丢弃（不排队）；选“是”后只放行被拦下的那一条，之后进入冷却，
+/// 冷却过后重新计数。
+#[test]
+fn drop_while_prompting_then_yes_dispatches_pending_and_cools_down() {
+    let (mut core, t0) = started(Some(spec(1)));
+    take_calls(&mut core);
+    let (generation, t) = run_until_asked(&mut core, t0);
+    take_calls(&mut core);
+    // 弹窗期间：丢弃，不排队、不弹第二个框
+    core.handle(t, hotkey("capture"));
+    core.handle(t, hotkey("start_recording"));
+    assert!(take_calls(&mut core).is_empty());
+    // 选“是”：被拦下的 capture 照常分发
+    core.handle(t, Event::RapidCaptureAnswered { quit: false });
+    let calls = take_calls(&mut core);
+    assert_eq!(sent_commands(&calls, "capture"), 1);
+    assert_eq!(
+        sent_commands(&calls, "start_recording"),
+        0,
+        "弹窗期间的不补发"
+    );
+    // 冷却内再连续触发：一律放行，不再询问
+    let mut now = t;
+    for _ in 0..10 {
+        core.handle(now, capture_idle(generation));
+        now += Duration::from_secs(1);
+        core.handle(now, hotkey("capture"));
+    }
+    let calls = take_calls(&mut core);
+    assert_eq!(sent_commands(&calls, "capture"), 10);
+    assert!(!calls.iter().any(|c| matches!(c, Call::RapidPrompt(..))));
+    // 冷却过后重新计数：第一次开启不计，再连续 5 个短间隔才询问
+    now += crate::rapid::RAPID_COOLDOWN;
+    core.handle(now, capture_idle(generation));
+    core.handle(now, hotkey("capture"));
+    for _ in 0..crate::rapid::RAPID_REOPEN_STREAK {
+        core.handle(now, capture_idle(generation));
+        now += Duration::from_secs(1);
+        core.handle(now, hotkey("capture"));
+    }
+    let calls = take_calls(&mut core);
+    assert!(calls.iter().any(|c| matches!(c, Call::RapidPrompt(..))));
+}
+
+/// 选“否”：走与托盘“退出”相同的正常退出路径（UI 先优雅关闭），之后截图类命令仍被丢弃。
+#[test]
+fn answering_no_quits_through_the_normal_path() {
+    let (mut core, t0) = started(Some(spec(1)));
+    take_calls(&mut core);
+    let (generation, t) = run_until_asked(&mut core, t0);
+    take_calls(&mut core);
+    core.handle(t, Event::RapidCaptureAnswered { quit: true });
+    let calls = take_calls(&mut core);
+    assert!(calls.contains(&Call::Send(generation, HostMessage::Shutdown)));
+    assert!(core.machine().is_quitting());
+    assert_eq!(sent_commands(&calls, "capture"), 0, "被拦下的命令不再分发");
+    core.handle(t, hotkey("capture"));
+    assert_eq!(sent_commands(&take_calls(&mut core), "capture"), 0);
+}
+
+/// 确认框拉不起来：按刻意放行被拦下的命令并进入冷却，不能让提示状态卡死。
+#[test]
+fn prompt_spawn_failure_releases_the_command() {
+    let (mut core, t0) = started(Some(spec(1)));
+    take_calls(&mut core);
+    core.platform.prompt_fails = true;
+    run_until_asked(&mut core, t0);
+    let calls = take_calls(&mut core);
+    assert_eq!(sent_commands(&calls, "capture"), 6, "第 6 次也放行了");
+    assert!(!core.rapid.is_prompting());
+}
+
+/// UI 进程退出也算覆盖窗关闭：每次都是“UI 退出 → 1 秒后再触发”同样会询问。
+#[test]
+fn ui_exit_counts_as_close() {
+    let (mut core, t0) = started(Some(spec(1)));
+    take_calls(&mut core);
+    let mut t = t0;
+    core.handle(t, hotkey("capture"));
+    for _ in 0..crate::rapid::RAPID_REOPEN_STREAK {
+        let generation = core.machine().generation();
+        core.handle(t, Event::UiExited { generation });
+        t += Duration::from_secs(1);
+        core.handle(t, hotkey("capture"));
+    }
+    let calls = take_calls(&mut core);
+    assert!(calls.iter().any(|c| matches!(c, Call::RapidPrompt(..))));
+}
+
+/// 鼠标手势 `begin` 也计入：被拦下的手势取消钩子里的手势，它后续的 update / finish 不会发给 UI；
+/// 选“是”后冷却，但过期的手势不补发。
+#[test]
+fn gesture_begin_is_guarded_and_its_tail_is_dropped() {
+    let (mut core, t0) = started(Some(spec_with_mouse(1, &["screenshot_copy"])));
+    let (generation, _) = bring_up_ui(&mut core, t0);
+    take_calls(&mut core);
+    let gesture = |phase: GesturePhase, id: u64| {
+        Event::Gesture(GestureEvent {
+            phase,
+            id,
+            action: (phase == GesturePhase::Begin).then(|| "screenshot_copy".to_string()),
+            x: 1,
+            y: 1,
+        })
+    };
+    let mut t = t0;
+    for id in 0..u64::from(crate::rapid::RAPID_REOPEN_STREAK) {
+        core.handle(t, gesture(GesturePhase::Begin, id));
+        core.handle(t, gesture(GesturePhase::Finish, id));
+        core.handle(t, capture_idle(generation));
+        t += Duration::from_secs(1);
+    }
+    take_calls(&mut core);
+    // 第 6 次 begin 被拦下
+    core.handle(t, gesture(GesturePhase::Begin, 99));
+    core.handle(t, gesture(GesturePhase::Update, 99));
+    core.handle(t, gesture(GesturePhase::Finish, 99));
+    let calls = take_calls(&mut core);
+    assert!(calls.contains(&Call::CancelGesture));
+    assert!(calls.iter().any(|c| matches!(c, Call::RapidPrompt(..))));
+    assert!(
+        !calls
+            .iter()
+            .any(|c| matches!(c, Call::Send(_, HostMessage::Gesture { .. }))),
+        "被拦下的手势一条都不能发给 UI"
+    );
+    // 选“是”：手势已过期，不补发
+    core.handle(t, Event::RapidCaptureAnswered { quit: false });
+    let calls = take_calls(&mut core);
+    assert!(!calls.iter().any(|c| matches!(c, Call::Send(..))));
+}
+
+/// 快照里没有本地化文案（旧快照）：确认框用内置英文兜底，产品名与次数都已替换。
+#[test]
+fn prompt_falls_back_to_builtin_text() {
+    let mut s = spec(1);
+    s.strings.notice_rapid_capture = String::new();
+    let (mut core, t0) = started(Some(s));
+    take_calls(&mut core);
+    run_until_asked(&mut core, t0);
+    let text = take_calls(&mut core)
+        .into_iter()
+        .find_map(|c| match c {
+            Call::RapidPrompt(_, text) => Some(text),
+            _ => None,
+        })
+        .expect("应弹确认框");
+    assert!(text.contains("5 times") && text.contains("Cisox"), "{text}");
 }

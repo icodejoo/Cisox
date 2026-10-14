@@ -91,6 +91,23 @@ pub const ACTION_SETTINGS: &str = "settings";
 /// 动作 id：唤醒主窗口（托盘点击、`--cmd show`）。
 pub const ACTION_MAIN_WINDOW: &str = "main_window";
 
+/// 会打开全屏覆盖窗（选区 / 框选）的动作 id：宿主的连续误触发保护只对它们计数。
+///
+/// 不含直接截取整屏 / 前台窗口（`quick.screenshot_full_screen`、`quick.screenshot_focused_window`，
+/// 它们不开覆盖窗）和从剪贴板贴图等；鼠标手势的 `begin` 另算（见宿主 `rapid` 模块）。
+/// UI 侧有测试核对这份清单里的 id 都能还原成命令，且快捷动作确实走覆盖窗 / 延迟 / 录屏选区。
+pub const CAPTURE_ACTION_IDS: &[&str] = &[
+    ACTION_CAPTURE,
+    ACTION_START_RECORDING,
+    ACTION_SCROLL_CAPTURE,
+    "quick.screenshot_delay",
+    "quick.screenshot_fixed",
+    "quick.screenshot_ocr",
+    "quick.screenshot_translation",
+    "quick.screenshot_copy",
+    "quick.screen_record_copy",
+];
+
 /// 动作 id：宿主要求 UI 常驻（登录时按 `keep_alive` 拉起、崩溃后补拉），UI 收到后什么都不做。
 pub const ACTION_KEEP_ALIVE: &str = "keep_alive";
 
@@ -106,6 +123,9 @@ pub const CONFIG_KEY_DISABLE_ON_FULLSCREEN: &str =
 
 /// 快照提示文案里“失败原因”的占位符；宿主把它替换成实际的失败描述。
 pub const PLACEHOLDER_FAILURES: &str = "{failures}";
+
+/// 快照“连续截图提示”文案里次数的占位符；宿主把它替换成实际的连续次数。
+pub const PLACEHOLDER_COUNT: &str = "{count}";
 
 /// 快照里的保活原因：`mcp/enabled` 为真时 UI 常驻。
 pub const KEEP_ALIVE_MCP: &str = "mcp";

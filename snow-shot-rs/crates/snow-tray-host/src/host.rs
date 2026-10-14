@@ -10,11 +10,13 @@
 use crate::gesture::GestureEvent;
 use crate::machine::{Effect, HostMachine, Notice};
 use crate::queue::Outbound;
+use crate::rapid::{RAPID_REOPEN_GAP, RapidGuard, RapidVerdict, opens_capture_overlay};
 use crate::view::{
     FALLBACK_NOTICE_UI_CRASH_LOOP, FALLBACK_NOTICE_UI_START_FAILED, aggregate_results,
     compose_tooltip, describe_failures, effective_hotkeys, effective_menu, fallback_spec,
-    fill_failures, gate_config_change,
+    fill_failures, gate_config_change, rapid_capture_text,
 };
+use snow_data_paths::PRODUCT_NAME;
 use snow_host_protocol::frame::decode_line;
 use snow_host_protocol::launch::{HeadlessJob, UiHint};
 use snow_host_protocol::message::{
@@ -135,6 +137,17 @@ pub trait Platform {
 
     /// 当前 Unix 秒（更新检查到点判断用）。
     fn unix_now(&mut self) -> u64;
+
+    /// 弹“连续误触发”确认框（系统模态提示，默认选“否”）。**不得阻塞调用线程**：实现要把模态调用放到
+    /// 单独的短命线程里，用户回答后由平台投递 [`Event::RapidCaptureAnswered`]。
+    ///
+    /// # 参数
+    /// - `title`：标题（产品名）。
+    /// - `text`：正文（已本地化、已填好次数）。
+    ///
+    /// # 返回
+    /// 弹窗线程拉起失败返回错误（宿主按“刻意”放行，不能让提示状态卡死）。
+    fn confirm_rapid_capture(&mut self, title: &str, text: &str) -> Result<(), String>;
 }
 
 /// 宿主拉起的无窗口任务种类（结束时按它投递 [`Event::HeadlessDone`]）。
@@ -202,6 +215,11 @@ pub enum Event {
     SpecEmitted,
     /// 鼠标手势钩子产生了一个事件（已过节流）。
     Gesture(GestureEvent),
+    /// 连续误触发确认框有结果了。
+    RapidCaptureAnswered {
+        /// 用户是否选了“否，退出”。
+        quit: bool,
+    },
     /// 无窗口任务（更新检查 / 改配置）结束了。
     HeadlessDone {
         /// 任务种类。
@@ -253,6 +271,12 @@ pub struct HostCore<P: Platform> {
     config_job_running: bool,
     /// 等改配置任务结束后再投递的消息（保序）。
     held: VecDeque<Outbound>,
+    /// 连续误触发保护（截图覆盖窗“关闭 → 开启”间隔判定）。
+    rapid: RapidGuard,
+    /// 弹确认框期间被扣下的命令：`(动作 id, 来源)`；鼠标手势 `begin` 过期，不扣。
+    rapid_pending: Option<(String, ActionOrigin)>,
+    /// 被保护丢弃的鼠标手势编号（它后续的 update / finish / cancel 也要丢，否则会把 UI 拉起来）。
+    dropped_gesture: Option<u64>,
 }
 
 impl<P: Platform> HostCore<P> {
@@ -279,6 +303,9 @@ impl<P: Platform> HostCore<P> {
             update_running: false,
             config_job_running: false,
             held: VecDeque::new(),
+            rapid: RapidGuard::new(),
+            rapid_pending: None,
+            dropped_gesture: None,
         }
     }
 
@@ -350,11 +377,16 @@ impl<P: Platform> HostCore<P> {
                 tracing::debug!(generation, "会话管道已断开");
             }
             Event::UiExited { generation } => {
+                // 覆盖窗随 UI 进程消失：记为关闭（过期代数的退出不算）
+                if generation == self.machine.generation() {
+                    self.rapid.on_closed(now);
+                }
                 let effects = self.machine.on_ui_exited(now, generation);
                 self.run_effects(now, effects);
             }
             Event::SpecEmitted => self.load_spec(now, true),
-            Event::Gesture(gesture) => self.submit(now, gesture.into_outbound()),
+            Event::Gesture(gesture) => self.handle_gesture(now, gesture),
+            Event::RapidCaptureAnswered { quit } => self.on_rapid_answer(now, quit),
             Event::HeadlessDone { kind, notice } => self.on_headless_done(now, kind, notice),
         }
     }
@@ -404,13 +436,107 @@ impl<P: Platform> HostCore<P> {
         match id.as_str() {
             ACTION_TOGGLE_GLOBAL_HOTKEYS => self.toggle_pause(),
             ACTION_TOGGLE_FULLSCREEN_GATE => self.toggle_gate(now),
-            _ => self.submit(
+            _ => self.dispatch_action(now, id, origin),
+        }
+    }
+
+    /// 转发一个动作给 UI；会打开截图覆盖窗的动作先过连续误触发保护。
+    fn dispatch_action(&mut self, now: Instant, id: String, origin: ActionOrigin) {
+        if opens_capture_overlay(&id) {
+            match self.rapid.on_open(now) {
+                RapidVerdict::Allow => {}
+                RapidVerdict::Drop => {
+                    tracing::debug!(%id, ?origin, "连续误触发确认框开着，截图类命令已丢弃");
+                    return;
+                }
+                RapidVerdict::Ask { count } => {
+                    return self.ask_rapid(now, count, Some((id, origin)));
+                }
+            }
+        }
+        self.submit(
+            now,
+            Outbound::Action {
+                id,
+                origin: Some(origin),
+            },
+        );
+    }
+
+    /// 处理一个鼠标手势事件：`begin` 过连续误触发保护；被丢弃的手势后续事件一并丢弃。
+    fn handle_gesture(&mut self, now: Instant, gesture: GestureEvent) {
+        if gesture.phase == GesturePhase::Begin {
+            self.dropped_gesture = None;
+            match self.rapid.on_open(now) {
+                RapidVerdict::Allow => {}
+                RapidVerdict::Drop => {
+                    tracing::debug!(id = gesture.id, "连续误触发确认框开着，鼠标手势已丢弃");
+                    self.drop_gesture(gesture.id);
+                    return;
+                }
+                RapidVerdict::Ask { count } => {
+                    self.drop_gesture(gesture.id);
+                    return self.ask_rapid(now, count, None);
+                }
+            }
+        } else if self.dropped_gesture == Some(gesture.id) {
+            if matches!(gesture.phase, GesturePhase::Finish | GesturePhase::Cancel) {
+                self.dropped_gesture = None;
+            }
+            return;
+        }
+        self.submit(now, gesture.into_outbound());
+    }
+
+    /// 丢弃一次鼠标手势：让钩子别再吞鼠标输入，并记下编号以便丢掉它后续的事件。
+    fn drop_gesture(&mut self, id: u64) {
+        self.dropped_gesture = Some(id);
+        self.platform.cancel_gesture();
+    }
+
+    /// 判定为连续误触发：本次命令不分发，弹确认框问是不是刻意的。
+    ///
+    /// # 参数
+    /// - `count`：连续“太快”的次数。
+    /// - `pending`：被扣下的命令（动作 id 与来源）；鼠标手势 `begin` 为 `None`。
+    fn ask_rapid(&mut self, now: Instant, count: u32, pending: Option<(String, ActionOrigin)>) {
+        tracing::warn!(
+            count,
+            window_secs = RAPID_REOPEN_GAP.as_secs(),
+            origin = ?pending.as_ref().map(|(_, origin)| *origin),
+            "短时间内连续启动截图，已拦下本次命令并询问是否刻意"
+        );
+        let localized = self
+            .spec
+            .as_ref()
+            .map(|spec| spec.strings.notice_rapid_capture.as_str());
+        let text = rapid_capture_text(localized, count);
+        self.rapid_pending = pending;
+        if let Err(e) = self.platform.confirm_rapid_capture(PRODUCT_NAME, &text) {
+            tracing::warn!(error = %e, "确认框拉不起来，按刻意操作放行");
+            self.on_rapid_answer(now, false);
+        }
+    }
+
+    /// 确认框有答案了：选“否”走正常退出路径（UI 一并退出）；选“是”放行被扣下的命令并进入冷却。
+    fn on_rapid_answer(&mut self, now: Instant, quit: bool) {
+        let pending = self.rapid_pending.take();
+        if quit {
+            tracing::warn!("用户确认并非刻意连续截图，按回车选择退出，宿主即将退出");
+            self.rapid.answer_quit();
+            self.quit(now, false);
+            return;
+        }
+        tracing::info!("用户确认是刻意的连续截图，放行并进入冷却");
+        self.rapid.answer_intentional(now, pending.is_some());
+        if let Some((id, origin)) = pending {
+            self.submit(
                 now,
                 Outbound::Action {
                     id,
                     origin: Some(origin),
                 },
-            ),
+            );
         }
     }
 
@@ -600,6 +726,7 @@ impl<P: Platform> HostCore<P> {
                 tracing::debug!(id, "UI 放弃了这次鼠标手势，取消钩子里的手势");
                 self.platform.cancel_gesture();
             }
+            UiMessage::CaptureIdle => self.rapid.on_closed(now),
             UiMessage::Activity {
                 windows,
                 pins,
