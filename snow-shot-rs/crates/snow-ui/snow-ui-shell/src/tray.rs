@@ -10,7 +10,7 @@ use crate::error::{ShellError, require_capability};
 use snow_app_core::command::AppCommand;
 use snow_capability::{Capability, CapabilityRegistry};
 use snow_shell_core::tray::TrayService as CoreTrayService;
-pub use snow_shell_core::tray::{SignalSink, TrayIconImage};
+pub use snow_shell_core::tray::{Balloon, BalloonIcon, SignalSink, TrayIconImage};
 
 /// 托盘触发的动作：命令（派发到总线）或应用自定义信号。
 pub type TrayAction = snow_shell_core::tray::TrayAction<AppCommand>;
@@ -75,6 +75,24 @@ impl TrayService {
     /// 更新悬停提示文字。
     pub fn set_tooltip(&self, text: impl Into<String>) -> Result<(), ShellError> {
         self.inner.set_tooltip(text)
+    }
+
+    /// 弹一条系统通知气泡（Win10 起显示为 Toast）。
+    ///
+    /// # 参数
+    /// - `balloon`：标题、正文、可选小图和点击后要打开的路径。
+    ///
+    /// # 返回
+    /// 服务已关闭返回 `ServiceClosed`。
+    ///
+    /// ```no_run
+    /// # fn demo(tray: &snow_ui_shell::tray::TrayService) {
+    /// use snow_ui_shell::tray::Balloon;
+    /// tray.show_balloon(Balloon { title: "Cisox".into(), text: "截图已复制".into(), ..Default::default() }).unwrap();
+    /// # }
+    /// ```
+    pub fn show_balloon(&self, balloon: Balloon) -> Result<(), ShellError> {
+        self.inner.show_balloon(balloon)
     }
 
     /// 整体替换右键菜单（例如界面语言切换后刷新文案）。

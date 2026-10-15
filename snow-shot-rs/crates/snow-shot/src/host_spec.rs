@@ -492,6 +492,7 @@ mod tests {
             crate::app_runtime::TRAY_SIGNAL_QUIT,
             crate::app_runtime::TRAY_SIGNAL_RESTART,
             crate::app_runtime::TRAY_SIGNAL_PIN_MANAGE,
+            crate::app_runtime::TRAY_SIGNAL_OPEN_CAPTURES,
             crate::app_runtime::TRAY_SIGNAL_GROUP_NEW,
             crate::app_runtime::TRAY_SIGNAL_GROUP_DELETE_EMPTY,
         ] {

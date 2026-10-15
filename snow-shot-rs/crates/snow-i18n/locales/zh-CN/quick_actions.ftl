@@ -19,9 +19,9 @@ quick-notice-delay-started = { $arg1 } 秒后截图……
 
 quick-notice-delay-busy = 已有一个延迟截图正在倒计时。
 
-quick-notice-direct-copied = 截图已复制（{ $arg1 }x{ $arg2 }）。
+quick-notice-direct-captured = 已截图（{ $arg1 }x{ $arg2 }），点击查看。
 
-quick-notice-direct-saved = 截图已复制并保存：{ $arg1 }
+quick-notice-direct-saved = 截图已保存：{ $arg1 }
 
 quick-notice-direct-failed = 截图失败：{ $arg1 }
 

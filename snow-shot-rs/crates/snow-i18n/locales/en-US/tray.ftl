@@ -32,6 +32,8 @@ tray-record-copy = Record / copy video
 
 tray-open-recordings = Open recordings folder
 
+tray-open-captures = Open screenshot temp folder
+
 tray-translate-selected = Translate selected text
 
 tray-toggle-hotkeys = Disable global hotkeys

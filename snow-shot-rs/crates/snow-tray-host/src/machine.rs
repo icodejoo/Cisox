@@ -818,7 +818,10 @@ impl HostMachine {
 fn forward_if_informational(message: UiMessage, out: &mut Vec<Effect>) {
     if matches!(
         message,
-        UiMessage::Tooltip { .. } | UiMessage::SpecChanged { .. } | UiMessage::HotkeysApply { .. }
+        UiMessage::Tooltip { .. }
+            | UiMessage::Balloon { .. }
+            | UiMessage::SpecChanged { .. }
+            | UiMessage::HotkeysApply { .. }
     ) {
         out.push(Effect::FromUi(message));
     }

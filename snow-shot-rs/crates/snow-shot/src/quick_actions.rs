@@ -279,13 +279,13 @@ impl DelayGate {
 /// 直接截图的输出方案。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DirectOutputPlan {
-    /// 是否复制到剪贴板（恒为真）。
+    /// 是否复制到剪贴板（直接截图固定为假：只存临时目录并通知，不动剪贴板）。
     pub copy: bool,
     /// 是否另存为文件。
     pub save: bool,
 }
 
-/// 按设置决定直接截图的输出：恒复制；开启自动保存或“复制图片文件”时同时落盘。
+/// 按设置决定直接截图的输出：不复制到剪贴板；开启自动保存或“复制图片文件”时按配置落盘。
 ///
 /// # 参数
 /// - `auto_save`：`screenshot/auto_save_after_copy`。
@@ -296,7 +296,7 @@ pub struct DirectOutputPlan {
 /// ```
 pub fn direct_output_plan(auto_save: bool, copy_file: bool) -> DirectOutputPlan {
     DirectOutputPlan {
-        copy: true,
+        copy: false,
         save: auto_save || copy_file,
     }
 }
@@ -505,7 +505,7 @@ mod tests {
         assert_eq!(
             direct_output_plan(false, false),
             DirectOutputPlan {
-                copy: true,
+                copy: false,
                 save: false
             }
         );
@@ -514,7 +514,7 @@ mod tests {
         assert_eq!(
             direct_output_plan_from(&ConfigDocument::from_bytes(None)),
             DirectOutputPlan {
-                copy: true,
+                copy: false,
                 save: false
             }
         );
@@ -562,7 +562,7 @@ mod tests {
         let with_args = [
             "quick-notice-hotkeys-resume-failed",
             "quick-notice-delay-started",
-            "quick-notice-direct-copied",
+            "quick-notice-direct-captured",
             "quick-notice-direct-saved",
             "quick-notice-direct-failed",
             "quick-notice-folder-failed",

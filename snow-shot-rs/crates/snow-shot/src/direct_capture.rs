@@ -1,5 +1,8 @@
 //! 直接截图：不进覆盖层，后台线程抓取区域后按输出方案复制 / 保存。
 
+use crate::direct_preview::{
+    TEMP_KEEP_COUNT, THUMBNAIL_SIDE, Thumbnail, captures_dir, make_thumbnail, save_temp_png,
+};
 use crate::history_store::{HistoryRecorder, HistorySource};
 use crate::overlay_view::{OutputSink, SystemOutput};
 use crate::quick_actions::DirectOutputPlan;
@@ -21,6 +24,10 @@ pub struct DirectResult {
     pub copied: Option<Result<(), String>>,
     /// 保存文件的结果；未执行为 `None`。
     pub saved: Option<Result<PathBuf, String>>,
+    /// 通知用的缩略图；生成失败为 `None`。
+    pub preview: Option<Thumbnail>,
+    /// 临时目录里的副本（点通知时用默认看图程序打开它）；未执行为 `None`。
+    pub temp_copy: Option<Result<PathBuf, String>>,
 }
 
 /// 直接截图写入历史所需的上下文（可跨线程）。
@@ -37,12 +44,16 @@ pub struct DirectHistory {
 impl DirectResult {
     /// 是否至少有一步输出成功（全部失败时不应写入历史）。
     pub fn any_success(&self) -> bool {
-        matches!(self.copied, Some(Ok(_))) || matches!(self.saved, Some(Ok(_)))
+        matches!(self.copied, Some(Ok(_)))
+            || matches!(self.saved, Some(Ok(_)))
+            || matches!(self.temp_copy, Some(Ok(_)))
     }
 
     /// 是否有任一步骤失败。
     pub fn has_failure(&self) -> bool {
-        matches!(self.copied, Some(Err(_))) || matches!(self.saved, Some(Err(_)))
+        matches!(self.copied, Some(Err(_)))
+            || matches!(self.saved, Some(Err(_)))
+            || matches!(self.temp_copy, Some(Err(_)))
     }
 
     /// 汇总失败原因（用于提示与日志）；没有失败返回 `None`。
@@ -52,6 +63,9 @@ impl DirectResult {
             reasons.push(e.clone());
         }
         if let Some(Err(e)) = &self.saved {
+            reasons.push(e.clone());
+        }
+        if let Some(Err(e)) = &self.temp_copy {
             reasons.push(e.clone());
         }
         (!reasons.is_empty()).then(|| reasons.join("; "))
@@ -83,6 +97,8 @@ pub fn apply_direct_output(
         height,
         copied: plan.copy.then(|| sink.copy_image(width, height, rgba)),
         saved: plan.save.then(|| sink.save_image(width, height, rgba)),
+        preview: None,
+        temp_copy: None,
     }
 }
 
@@ -114,8 +130,20 @@ pub fn spawn_direct_capture(
             let result = snow_platform::capture::capture_display(Some(region)).map(|screen| {
                 let rgba = screen.to_rgba();
                 let mut sink = SystemOutput::new(save_dir);
-                let result =
+                let mut result =
                     apply_direct_output(plan, &mut sink, screen.width, screen.height, &rgba);
+                // 不再写剪贴板，临时副本是通知点击后要打开的那份，所以总是写
+                result.temp_copy = Some(save_temp_png(
+                    &captures_dir(),
+                    screen.width,
+                    screen.height,
+                    &rgba,
+                    TEMP_KEEP_COUNT,
+                ));
+                if result.any_success() {
+                    result.preview =
+                        make_thumbnail(screen.width, screen.height, &rgba, THUMBNAIL_SIDE);
+                }
                 if let Some(h) = history.as_ref().filter(|_| result.any_success()) {
                     h.recorder.submit(
                         h.policy.clone(),
@@ -233,11 +261,28 @@ mod tests {
     /// 只要有一步输出成功就应写入历史；全部失败或没有输出则不写。
     #[test]
     fn any_success_gates_history() {
+        let temp_only = DirectResult {
+            width: 1,
+            height: 1,
+            copied: None,
+            saved: None,
+            preview: None,
+            temp_copy: Some(Ok(PathBuf::from("t.png"))),
+        };
+        assert!(temp_only.any_success(), "只有临时副本成功也算成功");
+        let temp_failed = DirectResult {
+            temp_copy: Some(Err("磁盘满".into())),
+            ..temp_only.clone()
+        };
+        assert!(!temp_failed.any_success());
+        assert_eq!(temp_failed.failure_reason().as_deref(), Some("磁盘满"));
         let ok = DirectResult {
             width: 1,
             height: 1,
             copied: Some(Err("busy".into())),
             saved: Some(Ok(PathBuf::from("a.png"))),
+            preview: None,
+            temp_copy: None,
         };
         assert!(ok.any_success());
         let failed = DirectResult {
@@ -245,6 +290,8 @@ mod tests {
             height: 1,
             copied: Some(Err("busy".into())),
             saved: None,
+            preview: None,
+            temp_copy: None,
         };
         assert!(!failed.any_success());
         let none = DirectResult {
@@ -252,6 +299,8 @@ mod tests {
             height: 1,
             copied: None,
             saved: None,
+            preview: None,
+            temp_copy: None,
         };
         assert!(!none.any_success());
     }

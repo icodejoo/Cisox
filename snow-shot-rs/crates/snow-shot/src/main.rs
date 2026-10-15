@@ -52,6 +52,7 @@ pub mod decoration_style;
 pub mod desktop_frames;
 pub mod dictation;
 pub mod direct_capture;
+pub mod direct_preview;
 pub mod export_format;
 pub mod export_naming;
 pub mod export_pdf;

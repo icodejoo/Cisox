@@ -32,6 +32,18 @@ pub enum ActionOrigin {
     Ipc,
 }
 
+/// 通知气泡里的小图（RGBA，行优先，无行间填充）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BalloonIcon {
+    /// 宽（像素）。
+    pub width: u32,
+    /// 高（像素）。
+    pub height: u32,
+    /// RGBA 像素，线上存成 base64。
+    #[serde(with = "crate::base64::bytes")]
+    pub rgba: Vec<u8>,
+}
+
 /// 单个 `config_key` 的热键注册结果。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HotkeyResult {
@@ -151,6 +163,19 @@ pub enum UiMessage {
     Tooltip {
         /// 提示文字。
         text: String,
+    },
+    /// 请宿主弹一条系统通知气泡（UI 随后可能立即退出，所以由宿主来弹）。
+    Balloon {
+        /// 气泡标题。
+        title: String,
+        /// 气泡正文。
+        text: String,
+        /// 气泡里显示的小图（如截图缩略图）；没有则用系统默认图标。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        icon: Option<BalloonIcon>,
+        /// 点气泡时用系统默认程序打开的路径（如截图文件）；没有则点了不做事。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        open: Option<String>,
     },
     /// UI 已写好新快照（托盘菜单、手势等变了）。
     SpecChanged {
@@ -410,6 +435,32 @@ mod tests {
             (
                 UiMessage::Tooltip { text: "hi".into() },
                 json!({"type": "tooltip", "text": "hi"}),
+            ),
+            (
+                UiMessage::Balloon {
+                    title: "t".into(),
+                    text: "x".into(),
+                    icon: None,
+                    open: None,
+                },
+                json!({"type": "balloon", "title": "t", "text": "x"}),
+            ),
+            (
+                UiMessage::Balloon {
+                    title: "t".into(),
+                    text: "x".into(),
+                    icon: Some(BalloonIcon {
+                        width: 1,
+                        height: 1,
+                        rgba: vec![1, 2, 3, 4],
+                    }),
+                    open: Some("C:/a".into()),
+                },
+                json!({
+                    "type": "balloon", "title": "t", "text": "x",
+                    "icon": {"width": 1, "height": 1, "rgba": "AQIDBA=="},
+                    "open": "C:/a"
+                }),
             ),
             (
                 UiMessage::SpecChanged { rev: 3 },

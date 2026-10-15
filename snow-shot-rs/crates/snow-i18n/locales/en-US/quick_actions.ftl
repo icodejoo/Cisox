@@ -19,9 +19,9 @@ quick-notice-delay-started = Capturing in { $arg1 } s...
 
 quick-notice-delay-busy = A delayed capture is already counting down.
 
-quick-notice-direct-copied = Screenshot copied ({ $arg1 }x{ $arg2 }).
+quick-notice-direct-captured = Screenshot taken ({ $arg1 }x{ $arg2 }). Click to view.
 
-quick-notice-direct-saved = Screenshot copied and saved: { $arg1 }
+quick-notice-direct-saved = Screenshot saved: { $arg1 }
 
 quick-notice-direct-failed = Screenshot failed: { $arg1 }
 

@@ -30,7 +30,9 @@ use snow_host_protocol::{
     ACTION_QUIT, ACTION_RESTART, ACTION_TOGGLE_FULLSCREEN_GATE, ACTION_TOGGLE_GLOBAL_HOTKEYS,
     UPDATE_CHECK_START_DELAY,
 };
+use snow_shell_core::tray::{Balloon, BalloonIcon};
 use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 /// 宿主启动后多久做第一次工作集修剪（等启动期的一次性分配落定）。
@@ -100,6 +102,9 @@ pub trait Platform {
 
     /// 更新托盘悬停提示。
     fn set_tooltip(&mut self, text: &str);
+
+    /// 弹一条系统通知气泡。
+    fn show_balloon(&mut self, balloon: Balloon);
 
     /// 移除托盘图标。
     fn stop_tray(&mut self);
@@ -720,6 +725,24 @@ impl<P: Platform> HostCore<P> {
     fn handle_ui_message(&mut self, now: Instant, message: UiMessage) {
         match message {
             UiMessage::Tooltip { text } => self.platform.set_tooltip(&text),
+            UiMessage::Balloon {
+                title,
+                text,
+                icon,
+                open,
+            } => {
+                tracing::info!(%title, %text, has_icon = icon.is_some(), ?open, "收到 UI 的通知气泡请求");
+                self.platform.show_balloon(Balloon {
+                    title,
+                    text,
+                    icon: icon.map(|icon| BalloonIcon {
+                        width: icon.width,
+                        height: icon.height,
+                        rgba: icon.rgba,
+                    }),
+                    open: open.map(PathBuf::from),
+                })
+            }
             UiMessage::SpecChanged { .. } => self.load_spec(now, true),
             UiMessage::HotkeysApply { rev } => self.apply_hotkeys_request(now, rev),
             UiMessage::CancelGesture { id } => {

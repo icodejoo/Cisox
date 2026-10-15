@@ -24,7 +24,7 @@ use snow_platform::single_instance::session_pipe::{PipeWriter, SessionEvent, Ses
 use snow_shell_core::dispatch::Dispatcher;
 use snow_shell_core::hotkey::{HotkeyHandle, HotkeyService};
 use snow_shell_core::native::set_popup_menu_dark;
-use snow_shell_core::tray::TrayService;
+use snow_shell_core::tray::{Balloon, TrayService};
 use std::io::Read;
 use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
@@ -408,6 +408,14 @@ impl Platform for WinPlatform {
             && let Err(e) = tray.set_tooltip(text)
         {
             tracing::warn!(error = %e, "更新托盘提示失败");
+        }
+    }
+
+    fn show_balloon(&mut self, balloon: Balloon) {
+        if let Some(tray) = self.tray.as_ref()
+            && let Err(e) = tray.show_balloon(balloon)
+        {
+            tracing::warn!(error = %e, "弹出通知气泡失败");
         }
     }
 

@@ -223,12 +223,25 @@ mod backend {
     use crate::dispatch::ActionOrigin;
     use crate::native::{self, LoopWaker};
     use crate::service_thread::ServiceThread;
+    use std::os::windows::ffi::OsStrExt;
+    use std::path::PathBuf;
+    use std::sync::Mutex;
     use std::sync::atomic::AtomicBool;
     use std::sync::mpsc::{Receiver, Sender, channel};
     use tray_icon::menu::{ContextMenu, Menu, MenuItem, PredefinedMenuItem};
     use tray_icon::{
         Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent,
     };
+    use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+    use windows::Win32::Graphics::Gdi::{CreateBitmap, DeleteObject};
+    use windows::Win32::UI::Shell::{
+        DefSubclassProc, NIF_INFO, NIIF_INFO, NIIF_LARGE_ICON, NIIF_USER, NIM_MODIFY,
+        NOTIFYICONDATAW, SetWindowSubclass, Shell_NotifyIconW, ShellExecuteW,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CreateIconIndirect, DestroyIcon, HICON, ICONINFO, SW_SHOWNORMAL,
+    };
+    use windows::core::{PCWSTR, w};
 
     /// 进程内只允许一个托盘服务（事件通道是进程级单例）。
     static RUNNING: AtomicBool = AtomicBool::new(false);
@@ -237,6 +250,8 @@ mod backend {
     enum Ctl<A> {
         /// 更新悬停提示。
         SetTooltip(String),
+        /// 弹一条系统通知气泡。
+        Balloon(Balloon),
         /// 设置信号出口（设置后信号不再进入 `signals()` 通道）。
         SetSignalSink(SignalSink),
         /// 整体替换右键菜单。
@@ -339,6 +354,121 @@ mod backend {
         signals: Sender<String>,
         /// 自定义信号出口；有值时优先于 `signals` 通道。
         sink: Option<SignalSink>,
+        /// 托盘图标在系统里的 `uID`；推不出来时为 `None`，此时不弹气泡。
+        icon_uid: Option<u32>,
+        /// 上一条气泡用的图标；系统可能还在引用它，所以留到下一条气泡换掉时才销毁。
+        balloon_icon: Option<OwnedIcon>,
+    }
+
+    /// 自己创建、析构时销毁的 `HICON`。
+    struct OwnedIcon(HICON);
+
+    impl Drop for OwnedIcon {
+        /// 销毁图标。
+        fn drop(&mut self) {
+            // SAFETY: 句柄由 `CreateIconIndirect` 创建，只在这里销毁一次。
+            let _ = unsafe { DestroyIcon(self.0) };
+        }
+    }
+
+    /// 点击气泡时要打开的路径（进程内只有一个托盘，用全局即可）。
+    static OPEN_ON_CLICK: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+    /// `tray_icon` 给托盘图标登记的回调消息号（其内部常量 `WM_USER_TRAYICON`）。
+    /// 升级 `tray-icon` 后须复核。
+    const TRAY_CALLBACK_MESSAGE: u32 = 6002;
+    /// 子类化回调的标识。
+    const BALLOON_SUBCLASS_ID: usize = 0x4358;
+    /// `NIN_BALLOONUSERCLICK`：用户点了气泡。
+    const NIN_BALLOONUSERCLICK: u32 = 0x405;
+
+    /// 子类化托盘窗口，截获“点了气泡”的通知，其余消息原样交回。
+    unsafe extern "system" fn balloon_click_proc(
+        hwnd: HWND,
+        message: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+        _id: usize,
+        _data: usize,
+    ) -> LRESULT {
+        if message == TRAY_CALLBACK_MESSAGE && (lparam.0 as u32 & 0xFFFF) == NIN_BALLOONUSERCLICK {
+            open_click_target();
+        }
+        // SAFETY: 参数原样转交给下一个窗口过程。
+        unsafe { DefSubclassProc(hwnd, message, wparam, lparam) }
+    }
+
+    /// 用系统默认程序打开登记的路径（取走，只开一次）。
+    fn open_click_target() {
+        let Some(path) = OPEN_ON_CLICK.lock().ok().and_then(|mut slot| slot.take()) else {
+            return;
+        };
+        let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        // SAFETY: `wide` 以 0 结尾且在调用期间有效。
+        let result = unsafe {
+            ShellExecuteW(
+                None,
+                w!("open"),
+                PCWSTR(wide.as_ptr()),
+                None,
+                None,
+                SW_SHOWNORMAL,
+            )
+        };
+        // 返回值大于 32 表示成功
+        if result.0 as usize <= 32 {
+            tracing::warn!(path = %path.display(), "点击通知后打开失败");
+        }
+    }
+
+    /// 由 RGBA 像素造一个带透明通道的图标；尺寸为 0 或像素长度不对时返回 `None`。
+    fn icon_from_rgba(icon: &BalloonIcon) -> Option<OwnedIcon> {
+        let width = i32::try_from(icon.width).ok()?;
+        let height = i32::try_from(icon.height).ok()?;
+        if width == 0
+            || height == 0
+            || icon.rgba.len() != icon.width as usize * icon.height as usize * 4
+        {
+            return None;
+        }
+        let bgra: Vec<u8> = icon
+            .rgba
+            .chunks_exact(4)
+            .flat_map(|px| [px[2], px[1], px[0], px[3]])
+            .collect();
+        // SAFETY: `bgra` 长度与位图尺寸匹配；两张位图在创建图标后立即删除。
+        unsafe {
+            let color = CreateBitmap(width, height, 1, 32, Some(bgra.as_ptr().cast()));
+            let mask = CreateBitmap(width, height, 1, 1, None);
+            let info = ICONINFO {
+                fIcon: true.into(),
+                xHotspot: 0,
+                yHotspot: 0,
+                hbmMask: mask,
+                hbmColor: color,
+            };
+            let handle = CreateIconIndirect(&info);
+            let _ = DeleteObject(color.into());
+            let _ = DeleteObject(mask.into());
+            handle.ok().map(OwnedIcon)
+        }
+    }
+
+    /// 推出 `tray_icon` 分给图标的内部 `uID`。
+    ///
+    /// 库没公开这个值：默认图标 id 是 `"<pid>-<N>"`，`N` 取自进程级计数器，紧接着创建图标时
+    /// 内部 id 取计数器的下一个值，即 `N + 1`。升级 `tray-icon` 后须复核这条假设。
+    fn tray_icon_uid(tray: &TrayIcon) -> Option<u32> {
+        let counter: u32 = tray.id().0.rsplit('-').next()?.parse().ok()?;
+        counter.checked_add(1)
+    }
+
+    /// 把 `text` 按 UTF-16 写进定长缓冲，超长截断，末尾留 0 结尾。
+    fn fill_wide(buf: &mut [u16], text: &str) {
+        let limit = buf.len().saturating_sub(1);
+        for (slot, unit) in buf.iter_mut().zip(text.encode_utf16().take(limit)) {
+            *slot = unit;
+        }
     }
 
     impl<A: Clone> Worker<A> {
@@ -380,6 +510,40 @@ mod backend {
             }
         }
 
+        /// 弹系统通知气泡：对真实托盘图标发 `NIM_MODIFY` 带 `NIF_INFO`，Win10 起系统把它显示成 Toast；
+        /// 有小图就用它当大图标，并登记点击后要打开的路径。失败只记日志。
+        fn show_balloon(&mut self, balloon: &Balloon) {
+            let Some(uid) = self.icon_uid else {
+                tracing::warn!("推不出托盘图标 uID，无法弹通知气泡");
+                return;
+            };
+            let icon = balloon.icon.as_ref().and_then(icon_from_rgba);
+            let mut data = NOTIFYICONDATAW {
+                cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+                hWnd: HWND(self.tray.window_handle()),
+                uID: uid,
+                uFlags: NIF_INFO,
+                dwInfoFlags: NIIF_INFO,
+                ..Default::default()
+            };
+            if let Some(icon) = icon.as_ref() {
+                data.dwInfoFlags = NIIF_USER | NIIF_LARGE_ICON;
+                data.hBalloonIcon = icon.0;
+            }
+            fill_wide(&mut data.szInfoTitle, &balloon.title);
+            fill_wide(&mut data.szInfo, &balloon.text);
+            if let Ok(mut slot) = OPEN_ON_CLICK.lock() {
+                *slot = balloon.open.clone();
+            }
+            // SAFETY: `data` 在调用期间有效，`hWnd` 是本线程托盘窗口。
+            if unsafe { Shell_NotifyIconW(NIM_MODIFY, &data) }.as_bool() {
+                // 新图标已交给系统，换掉并销毁上一条的
+                self.balloon_icon = icon;
+            } else {
+                tracing::warn!(uid, "弹出托盘通知气泡失败");
+            }
+        }
+
         /// 处理控制请求与托盘事件；返回 `false` 表示退出。
         fn tick(&mut self, ctl: &Receiver<Ctl<A>>) -> bool {
             while let Ok(req) = ctl.try_recv() {
@@ -389,6 +553,7 @@ mod backend {
                             tracing::warn!(%e, "更新托盘提示失败");
                         }
                     }
+                    Ctl::Balloon(balloon) => self.show_balloon(&balloon),
                     Ctl::SetSignalSink(sink) => self.sink = Some(sink),
                     Ctl::SetMenu(entries) => {
                         (self.plan, self.actions) = TrayActions::plan(&entries);
@@ -453,6 +618,19 @@ mod backend {
                 move || {
                     let (plan, actions) = TrayActions::plan(&spec.menu);
                     let tray = build_tray(&spec)?;
+                    let icon_uid = tray_icon_uid(&tray);
+                    // SAFETY: 窗口属于本线程；回调只读全局的点击目标。
+                    let installed = unsafe {
+                        SetWindowSubclass(
+                            HWND(tray.window_handle()),
+                            Some(balloon_click_proc),
+                            BALLOON_SUBCLASS_ID,
+                            0,
+                        )
+                    };
+                    if !installed.as_bool() {
+                        tracing::warn!("子类化托盘窗口失败，点击通知将无反应");
+                    }
                     let waker = native::current_thread_waker();
                     let worker = Worker {
                         tray,
@@ -464,6 +642,8 @@ mod backend {
                         dispatcher,
                         signals: sig_tx,
                         sink: None,
+                        icon_uid,
+                        balloon_icon: None,
                     };
                     Ok((worker, waker))
                 },
@@ -484,6 +664,15 @@ mod backend {
         pub(super) fn set_tooltip(&self, text: String) -> Result<(), ShellError> {
             self.ctl
                 .send(Ctl::SetTooltip(text))
+                .map_err(|_| ShellError::ServiceClosed)?;
+            self.thread.ready().wake();
+            Ok(())
+        }
+
+        /// 弹系统通知气泡。
+        pub(super) fn show_balloon(&self, balloon: Balloon) -> Result<(), ShellError> {
+            self.ctl
+                .send(Ctl::Balloon(balloon))
                 .map_err(|_| ShellError::ServiceClosed)?;
             self.thread.ready().wake();
             Ok(())
@@ -551,6 +740,11 @@ mod backend {
             Err(unsupported())
         }
 
+        /// 弹气泡：不支持。
+        pub(super) fn show_balloon(&self, _balloon: Balloon) -> Result<(), ShellError> {
+            Err(unsupported())
+        }
+
         /// 替换菜单：不支持。
         pub(super) fn set_menu(&self, _entries: Vec<TrayMenuEntry<A>>) -> Result<(), ShellError> {
             Err(unsupported())
@@ -566,6 +760,30 @@ mod backend {
             &self.signals
         }
     }
+}
+
+/// 通知气泡里的小图（RGBA，行优先，无行间填充）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BalloonIcon {
+    /// 宽（像素）。
+    pub width: u32,
+    /// 高（像素）。
+    pub height: u32,
+    /// RGBA 像素，长度必须等于 `width * height * 4`。
+    pub rgba: Vec<u8>,
+}
+
+/// 一条系统通知气泡。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Balloon {
+    /// 标题，超过 63 个 UTF-16 单元会被截断。
+    pub title: String,
+    /// 正文，超过 255 个 UTF-16 单元会被截断。
+    pub text: String,
+    /// 气泡里显示的小图；`None` 用系统默认的信息图标。
+    pub icon: Option<BalloonIcon>,
+    /// 用户点气泡时用系统默认程序打开的路径（图片文件会进默认看图程序，目录进资源管理器）；`None` 则点了不做事。
+    pub open: Option<std::path::PathBuf>,
 }
 
 /// 托盘自定义信号出口：在托盘线程上同步调用，只应做轻量转发（如投递到主线程收件箱）。
@@ -616,6 +834,24 @@ impl<A: Clone + Send + 'static> TrayService<A> {
     /// 更新悬停提示文字。
     pub fn set_tooltip(&self, text: impl Into<String>) -> Result<(), ShellError> {
         self.inner.set_tooltip(text.into())
+    }
+
+    /// 弹一条系统通知气泡（Win10 起显示为 Toast）。
+    ///
+    /// # 参数
+    /// - `balloon`：标题、正文、可选小图和点击后要打开的路径。
+    ///
+    /// # 返回
+    /// 服务已关闭返回 `ServiceClosed`；系统调用失败只记日志，不报错。
+    ///
+    /// ```no_run
+    /// # fn demo(tray: &snow_shell_core::tray::TrayService<String>) {
+    /// use snow_shell_core::tray::Balloon;
+    /// tray.show_balloon(Balloon { title: "Cisox".into(), text: "截图已复制".into(), ..Default::default() }).unwrap();
+    /// # }
+    /// ```
+    pub fn show_balloon(&self, balloon: Balloon) -> Result<(), ShellError> {
+        self.inner.show_balloon(balloon)
     }
 
     /// 整体替换右键菜单（例如界面语言切换后刷新文案）。

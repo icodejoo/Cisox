@@ -32,6 +32,8 @@ tray-record-copy = 录屏 / 复制视频
 
 tray-open-recordings = 打开录屏文件夹
 
+tray-open-captures = 打开截图临时目录
+
 tray-translate-selected = 翻译选中文本
 
 tray-toggle-hotkeys = 禁用全局热键

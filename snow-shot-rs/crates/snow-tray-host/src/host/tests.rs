@@ -20,6 +20,7 @@ enum Call {
     StartTray(TrayPlan),
     SetMenu(Vec<MenuItemSpec>),
     Tooltip(String),
+    Balloon(Balloon),
     StopTray,
     Theme(TrayTheme),
     Hotkeys(Vec<String>),
@@ -108,6 +109,9 @@ impl Platform for Fake {
     }
     fn set_tooltip(&mut self, text: &str) {
         self.calls.push(Call::Tooltip(text.to_string()));
+    }
+    fn show_balloon(&mut self, balloon: Balloon) {
+        self.calls.push(Call::Balloon(balloon));
     }
     fn stop_tray(&mut self) {
         self.calls.push(Call::StopTray);
@@ -1498,6 +1502,43 @@ fn ui_tooltip_is_applied() {
     assert_eq!(
         take_calls(&mut core),
         vec![Call::Tooltip("Cisox: 已复制".into())]
+    );
+}
+
+/// UI 发来的气泡原样交给托盘弹出。
+#[test]
+fn ui_balloon_is_shown() {
+    let (mut core, t0) = started(Some(spec(1)));
+    let (generation, _) = bring_up_ui(&mut core, t0);
+    take_calls(&mut core);
+    core.handle(
+        t0,
+        Event::SessionLine {
+            generation,
+            line: line(&UiMessage::Balloon {
+                title: "Cisox".into(),
+                text: "截图已复制".into(),
+                icon: Some(snow_host_protocol::message::BalloonIcon {
+                    width: 1,
+                    height: 1,
+                    rgba: vec![9, 8, 7, 6],
+                }),
+                open: Some("C:/tmp/captures".into()),
+            }),
+        },
+    );
+    assert_eq!(
+        take_calls(&mut core),
+        vec![Call::Balloon(Balloon {
+            title: "Cisox".into(),
+            text: "截图已复制".into(),
+            icon: Some(snow_shell_core::tray::BalloonIcon {
+                width: 1,
+                height: 1,
+                rgba: vec![9, 8, 7, 6],
+            }),
+            open: Some(std::path::PathBuf::from("C:/tmp/captures")),
+        })]
     );
 }
 

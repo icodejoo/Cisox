@@ -17,7 +17,9 @@ use crate::host_spec::{HostSpecInputs, command_from_id, host_spec_from_document}
 use crate::host_spec_sync::SpecSync;
 use snow_app_core::command::CommandContext;
 use snow_host_protocol::launch::HOST_EXE_NAME;
-use snow_host_protocol::message::{ActionOrigin, GesturePhase, HostMessage, UiMessage};
+use snow_host_protocol::message::{
+    ActionOrigin, BalloonIcon as WireBalloonIcon, GesturePhase, HostMessage, UiMessage,
+};
 use snow_host_protocol::spec::HostSpec;
 use snow_host_protocol::{
     ACTION_CAPTURE, ACTION_KEEP_ALIVE, ACTION_QUIT, ACTION_RESTART, ACTION_SCROLL_CAPTURE,
@@ -26,6 +28,7 @@ use snow_host_protocol::{
 };
 use snow_platform::global_mouse::{DragEvent, Point};
 use snow_platform::single_instance::session_pipe::PipeWriter;
+use snow_ui::shell::tray::Balloon;
 use std::cell::Cell;
 
 /// 等宿主回报热键注册结果超时时给设置页的失败原因（占位，设置页前缀已本地化）。
@@ -187,6 +190,23 @@ impl HostSession {
     pub(crate) fn send_tooltip(&self, text: &str) {
         self.link.send(&UiMessage::Tooltip {
             text: text.to_string(),
+        });
+    }
+
+    /// 请宿主弹系统通知气泡。
+    ///
+    /// # 参数
+    /// - `balloon`：标题、正文、可选小图和点击后要打开的路径。
+    pub(crate) fn send_balloon(&self, balloon: Balloon) {
+        self.link.send(&UiMessage::Balloon {
+            title: balloon.title,
+            text: balloon.text,
+            icon: balloon.icon.map(|icon| WireBalloonIcon {
+                width: icon.width,
+                height: icon.height,
+                rgba: icon.rgba,
+            }),
+            open: balloon.open.map(|path| path.to_string_lossy().into_owned()),
         });
     }
 

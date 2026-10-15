@@ -99,7 +99,9 @@ use snow_ui::shell::hotkey::{HotkeyBinding, HotkeyHandle, HotkeyService};
 use snow_ui::shell::inbox::MainThreadInbox;
 use snow_ui::shell::monitor::{MonitorInfo, MonitorTarget};
 use snow_ui::shell::overlay::cursor_screen_position;
-use snow_ui::shell::tray::{TrayAction, TrayIconImage, TrayMenuEntry, TrayService, TraySpec};
+use snow_ui::shell::tray::{
+    Balloon, BalloonIcon, TrayAction, TrayIconImage, TrayMenuEntry, TrayService, TraySpec,
+};
 use snow_ui::shell::window::{Placement, WindowSpec};
 use snow_ui::ui::AppContext;
 use snow_ui::ui::{Entity, ShellContext, ShellWindow};
@@ -170,6 +172,22 @@ impl<'a> TooltipSink<'a> {
         }
     }
 
+    /// 弹一条系统通知气泡（失败只记日志，不影响主流程）。
+    ///
+    /// # 参数
+    /// - `balloon`：标题、正文、可选小图和点击后要打开的路径。
+    pub fn balloon(&self, balloon: Balloon) {
+        match self.target {
+            TooltipTarget::Tray(tray) => {
+                if let Err(e) = tray.show_balloon(balloon) {
+                    tracing::debug!(error = %e, "弹出托盘气泡失败");
+                }
+            }
+            TooltipTarget::Host(host) => host.send_balloon(balloon),
+            TooltipTarget::Nowhere => {}
+        }
+    }
+
     /// 提示会不会真的送达某处（测试与日志用）。
     pub fn is_connected(&self) -> bool {
         !matches!(self.target, TooltipTarget::Nowhere)
@@ -196,6 +214,8 @@ pub const TRAY_SIGNAL_QUIT: &str = snow_host_protocol::ACTION_QUIT;
 pub const TRAY_SIGNAL_GROUP_PREFIX: &str = "group:";
 /// 托盘信号：打开贴图管理窗口。
 pub const TRAY_SIGNAL_PIN_MANAGE: &str = "pin_manage";
+/// 托盘信号：打开截图临时目录。
+pub const TRAY_SIGNAL_OPEN_CAPTURES: &str = "open_captures_folder";
 /// 托盘信号：新建贴图分组。
 pub const TRAY_SIGNAL_GROUP_NEW: &str = "group_new";
 /// 托盘信号：删除空的贴图分组。
@@ -407,6 +427,8 @@ pub enum UiEvent {
     },
     /// 把剪贴板里的图像贴到屏幕上。
     PinFromClipboard,
+    /// 打开截图临时目录（直接截图写入的那份副本所在处）。
+    OpenCapturesFolder,
     /// 打开（或激活）设置窗口（主窗口已并入设置窗口，保持当前页）。
     OpenMainWindow,
     /// 打开（或激活）截图历史窗口。
@@ -710,6 +732,7 @@ pub fn map_tray_signal(signal: &str) -> Option<UiEvent> {
         TRAY_SIGNAL_QUIT => Some(UiEvent::Quit),
         TRAY_SIGNAL_RESTART => Some(UiEvent::Restart),
         TRAY_SIGNAL_PIN_MANAGE => Some(UiEvent::OpenPinManage),
+        TRAY_SIGNAL_OPEN_CAPTURES => Some(UiEvent::OpenCapturesFolder),
         TRAY_SIGNAL_GROUP_NEW => Some(UiEvent::PinGroupNew),
         TRAY_SIGNAL_GROUP_DELETE_EMPTY => Some(UiEvent::PinGroupDeleteEmpty),
         other => other
@@ -866,6 +889,15 @@ pub fn build_tray_spec_with_groups(
                 "tray-capture-focused-window",
                 "scan",
                 quick(QuickAction::ScreenshotFocusedWindow),
+            ),
+        ),
+        // 与「当前显示器」同一个开关：直接截图的人才需要这个入口
+        (
+            Some("quick.screenshot-full-screen"),
+            item(
+                "tray-open-captures",
+                "folder",
+                TrayAction::Signal(TRAY_SIGNAL_OPEN_CAPTURES.into()),
             ),
         ),
         sep(),
@@ -4953,6 +4985,21 @@ fn request_direct_capture(cx: &mut ShellContext, state: &mut AppState, kind: Dir
 /// - `result`：采集与输出结果。
 fn on_direct_capture_done(state: &mut AppState, result: Result<DirectResult, String>) {
     state.direct_in_flight = false;
+    // 通知里的缩略图，以及点通知时要打开的临时目录
+    let (icon, open) = match &result {
+        Ok(r) => (
+            r.preview.as_ref().map(|thumb| BalloonIcon {
+                width: thumb.width,
+                height: thumb.height,
+                rgba: thumb.rgba.clone(),
+            }),
+            r.temp_copy
+                .as_ref()
+                .and_then(|copy| copy.as_ref().ok())
+                .cloned(),
+        ),
+        Err(_) => (None, None),
+    };
     let text = match result {
         Err(reason) => {
             tracing::error!(%reason, "直接截图采集失败");
@@ -4981,12 +5028,19 @@ fn on_direct_capture_done(state: &mut AppState, result: Result<DirectResult, Str
             }
             _ => notice_text(
                 state,
-                "quick-notice-direct-copied",
+                "quick-notice-direct-captured",
                 Args::new().arg(1, r.width).arg(2, r.height),
             ),
         },
     };
     show_notice(state, &text);
+    // 截图后 UI 往往立刻退出，悬停提示看不到，所以再弹一条系统通知
+    state.tooltip_sink().balloon(Balloon {
+        title: PRODUCT_NAME.into(),
+        text,
+        icon,
+        open,
+    });
 }
 
 /// 切换「前台全屏窗口时停用热键」：写回配置、同步闸门镜像并重建托盘菜单的勾选。
@@ -5090,6 +5144,28 @@ fn open_recording_folder(state: &AppState) {
         Ok(()) => tracing::info!(dir = %dir.display(), "已打开录屏保存目录"),
         Err(reason) => {
             tracing::warn!(dir = %dir.display(), %reason, "打开录屏保存目录失败");
+            notify(
+                state,
+                "quick-notice-folder-failed",
+                Args::new().arg(1, reason),
+            );
+        }
+    }
+}
+
+/// 打开截图临时目录（不存在就先创建），失败时给出提示。
+///
+/// # 参数
+/// - `state`：运行时状态。
+fn open_captures_folder(state: &AppState) {
+    let dir = crate::direct_preview::captures_dir();
+    let opened = std::fs::create_dir_all(&dir)
+        .map_err(|e| e.to_string())
+        .and_then(|()| open_in_explorer(&dir).map_err(|e| e.to_string()));
+    match opened {
+        Ok(()) => tracing::info!(dir = %dir.display(), "已打开截图临时目录"),
+        Err(reason) => {
+            tracing::warn!(dir = %dir.display(), %reason, "打开截图临时目录失败");
             notify(
                 state,
                 "quick-notice-folder-failed",
@@ -5276,6 +5352,7 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
             refresh_pin_manage(cx, state);
         }
         UiEvent::OpenPinManage => open_or_focus_pin_manage(cx, state),
+        UiEvent::OpenCapturesFolder => open_captures_folder(state),
         UiEvent::MouseGesture(event) => on_mouse_gesture(cx, state, event),
         UiEvent::OpenRecognitionWindow(data) => open_recognition_window(cx, state, *data),
         UiEvent::SelectedTextReady(None) => {
