@@ -390,6 +390,56 @@ pub fn resolve_hardware_mode(env: Option<&str>, hardware_allowed: bool) -> Hardw
     }
 }
 
+/// 搜索框内缩放恰好得到目标尺寸所需的上限框时，向外探测的最大步长（像素）。
+const EXACT_BOX_PROBE: u32 = 3;
+
+/// 找一个上限框，使框内等比缩放（浮点向下取整）后恰好得到 `target`。
+///
+/// 浮点取整会让目标框本身偶尔差 1~2 像素，所以在邻域里探测；找不到时退回目标框本身。
+///
+/// # 参数
+/// - `src`：选区尺寸（宽，高）。
+/// - `target`：期望的输出尺寸（宽，高，偶数，与选区同方向）。
+pub fn exact_box(src: (u32, u32), target: (u32, u32)) -> (u32, u32) {
+    use snow_screen_recorder::{ExportFormat, scaled_output_dimensions};
+    for step in 0..=EXACT_BOX_PROBE {
+        for (dw, dh) in [(step, 0), (0, step), (step, step)] {
+            let (bw, bh) = (target.0 + dw, target.1 + dh);
+            let got = scaled_output_dimensions(src.0, src.1, Some(bw), Some(bh), ExportFormat::Mp4);
+            if got == target {
+                return (bw, bh);
+            }
+        }
+    }
+    target
+}
+
+/// 决定本次录制的尺寸上限：请求了精确输出尺寸时以它为准（覆盖环境变量与清晰度），否则同 [`size_limit_for`]。
+///
+/// # 参数
+/// - `output_size`：请求里的精确输出尺寸（宽，高）。
+/// - `requested`：请求里的清晰度上限（长边，短边）。
+/// - `src`：选区尺寸（宽，高）。
+///
+/// # 示例
+/// ```
+/// use crate::settings::limit_for_request;
+/// assert_eq!(limit_for_request(Some((1280, 720)), None, (2560, 1440)).is_some(), true);
+/// ```
+pub fn limit_for_request(
+    output_size: Option<(u32, u32)>,
+    requested: Option<(u32, u32)>,
+    src: (u32, u32),
+) -> SizeLimit {
+    match output_size {
+        Some(target) => {
+            let (w, h) = exact_box(src, target);
+            Some((w.max(h), w.min(h)))
+        }
+        None => size_limit_for(requested),
+    }
+}
+
 /// 把上限按选区方向取向成（最大宽，最大高）。
 ///
 /// # 参数
@@ -414,6 +464,45 @@ pub fn oriented_limit(limit: SizeLimit, width: u32, height: u32) -> (Option<u32>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 精确输出尺寸覆盖其他上限；未指定时沿用清晰度上限。
+    #[test]
+    fn output_size_overrides_limit() {
+        assert_eq!(
+            limit_for_request(Some((1280, 720)), Some((1920, 1080)), (1280, 720)),
+            Some((1280, 720))
+        );
+        assert_eq!(
+            limit_for_request(Some((720, 1280)), None, (720, 1280)),
+            Some((1280, 720))
+        );
+        assert_eq!(
+            limit_for_request(None, Some((1920, 1080)), (64, 64)),
+            size_limit_for(Some((1920, 1080)))
+        );
+    }
+
+    /// 协议算出的输出尺寸经框内缩放后与自身一致（各档、横竖屏、奇数边）。
+    #[test]
+    fn protocol_size_matches_box_fit() {
+        use snow_recorder_protocol::fit_output_size;
+        use snow_screen_recorder::{ExportFormat, scaled_output_dimensions};
+        for (w, h) in [
+            (2560, 1440),
+            (1440, 2560),
+            (3000, 2000),
+            (1001, 601),
+            (3841, 2161),
+        ] {
+            for target in [1080, 720, 480] {
+                let (ow, oh) = fit_output_size(w, h, target);
+                let (mw, mh) =
+                    oriented_limit(limit_for_request(Some((ow, oh)), None, (w, h)), w, h);
+                let got = scaled_output_dimensions(w, h, mw, mh, ExportFormat::Mp4);
+                assert_eq!(got, (ow, oh), "{w}x{h} -> {target}");
+            }
+        }
+    }
 
     /// 硬件模式解析：大小写/空白不敏感，未知值沿用默认。
     #[test]

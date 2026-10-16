@@ -191,6 +191,7 @@ pub fn build_recording_config(
             document,
             format != RecordingFormat::Mp4,
         ),
+        output_size: None,
     })
 }
 

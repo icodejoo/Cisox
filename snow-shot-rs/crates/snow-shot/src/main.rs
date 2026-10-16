@@ -109,6 +109,7 @@ pub mod scan_animation;
 pub mod screenshot_output;
 pub mod scroll_capture;
 pub mod scroll_view;
+pub mod select_kit;
 pub mod settings_model;
 pub mod settings_pages;
 pub mod settings_state;
@@ -146,6 +147,7 @@ pub mod translate_service;
 pub mod translate_settings;
 pub mod translate_typeset;
 pub mod tray_config;
+pub mod video_editor;
 pub mod window_geometry;
 pub mod window_pick;
 

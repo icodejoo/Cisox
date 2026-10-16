@@ -105,6 +105,8 @@ pub struct RecordingConfig {
     pub effects: EffectsRequest,
     /// 编码质量请求（清晰度上限、硬编开关、软编预设、动图循环）。
     pub quality: QualityRequest,
+    /// 精确输出尺寸（宽，高）；`None` 为原选区尺寸，由录制进程在编码前缩放。
+    pub output_size: Option<(u32, u32)>,
 }
 
 impl Default for RecordingConfig {
@@ -120,6 +122,7 @@ impl Default for RecordingConfig {
             audio: AudioRequest::default(),
             effects: EffectsRequest::default(),
             quality: QualityRequest::default(),
+            output_size: None,
         }
     }
 }
@@ -130,6 +133,8 @@ pub enum RecordingState {
     /// 空闲待命状态。
     #[default]
     Idle,
+    /// 选区已完成、录制窗已显示但尚未开始（不发 Start）。
+    Ready,
     /// 倒计时准备状态。
     Countdown {
         /// 剩余倒计时秒数（例如 3, 2, 1）。
@@ -228,6 +233,20 @@ impl RecordingState {
         matches!(self, Self::Recording { .. })
     }
 
+    /// 判断是否处于就绪待命状态（已选区但尚未开始录制）。
+    ///
+    /// # 返回
+    /// 处于 `Ready` 状态时返回 `true`，其余状态返回 `false`。
+    ///
+    /// # 示例
+    /// ```ignore
+    /// assert!(RecordingState::Ready.is_ready());
+    /// assert!(!RecordingState::Idle.is_ready());
+    /// ```
+    pub const fn is_ready(&self) -> bool {
+        matches!(self, Self::Ready)
+    }
+
     /// 会话是否已到终态（完成、出错），不再需要录制进程。
     pub const fn is_terminal(&self) -> bool {
         matches!(self, Self::Finished { .. } | Self::Error { .. })
@@ -255,6 +274,7 @@ impl fmt::Display for RecordingState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Idle => write!(f, "idle"),
+            Self::Ready => write!(f, "ready"),
             Self::Countdown { seconds_left } => write!(f, "countdown: {seconds_left}"),
             Self::Recording {
                 elapsed_secs,
@@ -335,6 +355,11 @@ mod tests {
     #[test]
     fn test_state_predicates() {
         assert!(!RecordingState::Idle.is_active());
+        assert!(!RecordingState::Ready.is_active());
+        assert!(RecordingState::Ready.is_ready());
+        assert!(!RecordingState::Idle.is_ready());
+        assert!(!RecordingState::Ready.is_terminal());
+        assert_eq!(RecordingState::Ready.to_string(), "ready");
         assert!(!RecordingState::Countdown { seconds_left: 3 }.is_active());
         let recording = RecordingState::Recording {
             elapsed_secs: 10,

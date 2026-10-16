@@ -92,6 +92,68 @@ impl ScreenRecordingSession {
         &self.state
     }
 
+    /// 接入录制进程通道并进入就绪待命状态（不发送启动命令）。
+    ///
+    /// # 参数
+    /// - `link`：已拉起的录制进程通信通道。
+    ///
+    /// # 示例
+    /// ```ignore
+    /// session.attach_ready(link);
+    /// assert!(session.state().is_ready());
+    /// ```
+    pub fn attach_ready(&mut self, link: Box<dyn RecorderLink>) {
+        self.link = Some(link);
+        self.state = RecordingState::Ready;
+        self.awaiting_first_event = None;
+    }
+
+    /// 在就绪状态下获取录制配置的可变引用（开始录制后不可修改）。
+    ///
+    /// # 返回
+    /// 处于 `Ready` 状态时返回配置的可变引用 `Some(&mut config)`，其余状态返回 `None`。
+    ///
+    /// # 示例
+    /// ```ignore
+    /// if let Some(config) = session.config_in_ready() {
+    ///     config.fps = 60;
+    /// }
+    /// ```
+    pub fn config_in_ready(&mut self) -> Option<&mut RecordingConfig> {
+        if self.state.is_ready() {
+            Some(&mut self.config)
+        } else {
+            None
+        }
+    }
+
+    /// 从就绪状态开始录制流程。
+    ///
+    /// 用当前配置重置音频面板；若倒计时秒数为 0 则立即开始录制，否则进入倒计时状态。
+    ///
+    /// # 返回
+    /// 成功由 `Ready` 触发开始流程返回 `true`；若当前不是 `Ready` 状态则返回 `false` 且不发送任何命令。
+    ///
+    /// # 示例
+    /// ```ignore
+    /// session.attach_ready(link);
+    /// assert!(session.start_from_ready());
+    /// ```
+    pub fn start_from_ready(&mut self) -> bool {
+        if !self.state.is_ready() {
+            return false;
+        }
+        self.audio = AudioBoard::new(&self.config.audio);
+        if self.config.countdown_secs == 0 {
+            self.start_immediately();
+        } else {
+            self.state = RecordingState::Countdown {
+                seconds_left: self.config.countdown_secs,
+            };
+        }
+        true
+    }
+
     /// 接入录制进程通道并开始倒计时（`seconds == 0` 时立即开始）。
     ///
     /// # 参数
@@ -136,6 +198,7 @@ impl ScreenRecordingSession {
             audio: self.config.audio.clone(),
             effects: self.config.effects.clone(),
             quality: self.config.quality.clone(),
+            output_size: self.config.output_size,
         };
         self.state = RecordingState::Recording {
             elapsed_secs: 0,
@@ -243,7 +306,12 @@ impl ScreenRecordingSession {
             }
             // 视频编辑 / 探测事件由编辑流程消费，录制状态机不关心
             LinkEvent::Event(
-                Event::EditProgress { .. } | Event::EditFinished { .. } | Event::ProbeResult(_),
+                Event::EditProgress { .. }
+                | Event::EditFinished { .. }
+                | Event::ProbeResult(_)
+                | Event::Keyframes { .. }
+                | Event::ThumbReady { .. }
+                | Event::FrameReady { .. },
             ) => {}
             // 音频源状态只影响降级提示，不改变录制状态机
             LinkEvent::Event(Event::AudioState { source, status }) => {
@@ -412,6 +480,27 @@ mod tests {
             }
             other => panic!("期望单条 START，实际 {other:?}"),
         }
+    }
+
+    /// START 透传配置里的输出尺寸；缺省为 `None`（原选区尺寸）。
+    #[test]
+    fn output_size_passed_through_to_start() {
+        let sent_start = |config: RecordingConfig| {
+            let probe = Rc::new(RefCell::new(Probe::default()));
+            let mut s = ScreenRecordingSession::new(config);
+            s.begin(Box::new(FakeLink(probe.clone())), 0);
+            let sent = probe.borrow().sent.clone();
+            match &sent[..] {
+                [Command::Start(r)] => r.output_size,
+                other => panic!("期望单条 START，实际 {other:?}"),
+            }
+        };
+        assert_eq!(sent_start(RecordingConfig::default()), None);
+        let config = RecordingConfig {
+            output_size: Some((1280, 720)),
+            ..RecordingConfig::default()
+        };
+        assert_eq!(sent_start(config), Some((1280, 720)));
     }
 
     /// START 带上配置里的音频请求；音频状态事件折算成降级提示且不影响录制状态。
@@ -658,5 +747,113 @@ mod tests {
         drop(s);
         assert_eq!(probe.borrow().sent.last(), Some(&Command::Cancel));
         assert_eq!(probe.borrow().shutdowns, 1);
+    }
+
+    /// 构造处于就绪状态的会话与观测句柄。
+    fn ready_session(config: RecordingConfig) -> (ScreenRecordingSession, Rc<RefCell<Probe>>) {
+        let probe = Rc::new(RefCell::new(Probe::default()));
+        let mut s = ScreenRecordingSession::new(config);
+        s.attach_ready(Box::new(FakeLink(probe.clone())));
+        (s, probe)
+    }
+
+    /// attach_ready 接入后进入 Ready 状态且不发 START 命令。
+    #[test]
+    fn attach_ready_does_not_send_start() {
+        let (s, probe) = ready_session(RecordingConfig::default());
+        assert_eq!(*s.state(), RecordingState::Ready);
+        assert!(s.state().is_ready());
+        assert!(probe.borrow().sent.is_empty());
+    }
+
+    /// start_from_ready 发送 START 并带上在 Ready 状态下修改过的配置项。
+    #[test]
+    fn start_from_ready_sends_start_with_modified_config() {
+        use snow_recorder_protocol::AudioRequest;
+        let (mut s, probe) = ready_session(RecordingConfig::default());
+        let audio_req = AudioRequest {
+            microphone: true,
+            system: false,
+            ..AudioRequest::default()
+        };
+        {
+            let config = s.config_in_ready().expect("Ready 状态下可修改配置");
+            config.fps = 60;
+            config.output_size = Some((1280, 720));
+            config.audio = audio_req.clone();
+            config.show_cursor = false;
+        }
+        assert!(s.start_from_ready());
+        assert!(s.state().is_active());
+        match &probe.borrow().sent[..] {
+            [Command::Start(r)] => {
+                assert_eq!(r.fps, 60);
+                assert_eq!(r.output_size, Some((1280, 720)));
+                assert_eq!(r.audio, audio_req);
+                assert!(!r.show_cursor);
+            }
+            other => panic!("期望单条 START，实际 {other:?}"),
+        }
+    }
+
+    /// 倒计时配置为 3 秒时，start_from_ready 先进入 Countdown，步进完成后才发送 START。
+    #[test]
+    fn start_from_ready_with_countdown() {
+        let (mut s, probe) = ready_session(RecordingConfig {
+            countdown_secs: 3,
+            ..RecordingConfig::default()
+        });
+        assert!(s.start_from_ready());
+        assert_eq!(*s.state(), RecordingState::Countdown { seconds_left: 3 });
+        assert!(probe.borrow().sent.is_empty());
+        assert!(!s.tick_countdown());
+        assert_eq!(*s.state(), RecordingState::Countdown { seconds_left: 2 });
+        assert!(probe.borrow().sent.is_empty());
+        assert!(!s.tick_countdown());
+        assert_eq!(*s.state(), RecordingState::Countdown { seconds_left: 1 });
+        assert!(probe.borrow().sent.is_empty());
+        assert!(s.tick_countdown());
+        assert!(s.state().is_active());
+        assert_eq!(probe.borrow().sent.len(), 1);
+        assert!(matches!(probe.borrow().sent[0], Command::Start(_)));
+    }
+
+    /// Ready 状态取消不发 START、发送 Cancel 并调用 shutdown 一次，状态回到 Idle。
+    #[test]
+    fn cancel_in_ready_sends_cancel_and_shuts_down() {
+        let (mut s, probe) = ready_session(RecordingConfig::default());
+        s.cancel();
+        assert_eq!(*s.state(), RecordingState::Idle);
+        assert_eq!(probe.borrow().sent, vec![Command::Cancel]);
+        assert_eq!(probe.borrow().shutdowns, 1);
+    }
+
+    /// 开始后 config_in_ready 返回 None（非 Ready 状态配置不可修改）。
+    #[test]
+    fn config_in_ready_none_after_start() {
+        let (mut s, _probe) = ready_session(RecordingConfig::default());
+        assert!(s.config_in_ready().is_some());
+        assert!(s.start_from_ready());
+        assert!(s.config_in_ready().is_none());
+        assert!(
+            !s.start_from_ready(),
+            "非 Ready 状态再次调用 start_from_ready 应返回 false"
+        );
+    }
+
+    /// Ready 状态收到 Exited 事件转为 Error 并清理通道。
+    #[test]
+    fn ready_exited_turns_to_error() {
+        let (mut s, probe) = ready_session(RecordingConfig::default());
+        push(&probe, LinkEvent::Exited { code: Some(1) });
+        assert!(s.poll(Instant::now()));
+        assert!(matches!(
+            s.state(),
+            RecordingState::Error {
+                reason: RecordingFailure::ProcessExited { code: Some(1) }
+            }
+        ));
+        assert_eq!(probe.borrow().shutdowns, 1);
+        assert!(!s.needs_polling());
     }
 }

@@ -11,8 +11,10 @@
 pub mod extract;
 pub mod image;
 pub mod parallel;
+pub mod session;
 pub mod source;
 pub mod system;
+pub mod thumbs;
 pub mod transcode;
 pub mod trim;
 pub mod yuv;
@@ -227,7 +229,7 @@ impl EngineCaps {
                     &self.extract_webp_lossless
                 }
             }
-            EditOp::TrimKeyframe { .. } => &self.trim_keyframe,
+            EditOp::TrimKeyframe { .. } | EditOp::TrimSegments { .. } => &self.trim_keyframe,
         }
     }
 }
@@ -312,7 +314,7 @@ impl EditEngine for FfmpegEngine {
 
     /// 见 trait。
     fn run(&mut self, req: &EditRequest, ctl: &TaskCtl) -> Result<EditReport, EditError> {
-        match req.op {
+        match &req.op {
             EditOp::ExtractFrames {
                 mode,
                 format,
@@ -322,9 +324,9 @@ impl EditEngine for FfmpegEngine {
                     &extract::ExtractParams {
                         input: &req.input,
                         out_dir: &req.output,
-                        mode,
-                        format,
-                        quality,
+                        mode: *mode,
+                        format: *format,
+                        quality: *quality,
                     },
                     ctl,
                 )?;
@@ -338,7 +340,7 @@ impl EditEngine for FfmpegEngine {
                     &transcode::TranscodeParams {
                         input: &req.input,
                         output: &req.output,
-                        op: req.op,
+                        op: req.op.clone(),
                     },
                     ctl,
                 )?;
@@ -352,11 +354,18 @@ impl EditEngine for FfmpegEngine {
                     &trim::TrimParams {
                         input: &req.input,
                         output: &req.output,
-                        start_ms,
-                        end_ms,
+                        start_ms: *start_ms,
+                        end_ms: *end_ms,
                     },
                     ctl,
                 )?;
+                Ok(EditReport {
+                    path: req.output.clone(),
+                    frames,
+                })
+            }
+            EditOp::TrimSegments { segments } => {
+                let frames = trim::run_segments(&req.input, &req.output, segments, ctl)?;
                 Ok(EditReport {
                     path: req.output.clone(),
                     frames,

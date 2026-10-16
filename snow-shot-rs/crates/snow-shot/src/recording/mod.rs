@@ -11,6 +11,8 @@ pub mod keymap;
 pub mod model;
 pub mod output;
 pub mod quality;
+pub mod ready_options;
+pub mod ready_panel;
 pub mod runtime;
 
 pub use area_view::{AutoPlan, RecordingAreaAction, RecordingAreaView};

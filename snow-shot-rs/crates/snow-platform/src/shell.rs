@@ -37,6 +37,18 @@ pub fn explorer_open_arg(dir: &Path) -> String {
     format!("\"{}\"", explorer_path_text(dir))
 }
 
+/// 允许任意进程抢前台：新拉起的 explorer 才能把窗口放到最前，而不是开在后台闪任务栏。
+///
+/// 调用方刚关掉自己的前台窗口时会失去前台权，这里在启动 explorer 前授权；失败只记日志。
+#[cfg(windows)]
+fn allow_any_foreground() {
+    use windows::Win32::UI::WindowsAndMessaging::{ASFW_ANY, AllowSetForegroundWindow};
+    // SAFETY: 仅传入常量参数。
+    if let Err(e) = unsafe { AllowSetForegroundWindow(ASFW_ANY) } {
+        tracing::debug!(error = %e, "授予前台权限失败");
+    }
+}
+
 /// 在资源管理器中打开文件所在目录并选中该文件。
 ///
 /// # 参数
@@ -52,6 +64,7 @@ pub fn explorer_open_arg(dir: &Path) -> String {
 #[cfg(windows)]
 pub fn reveal_in_explorer(path: &Path) -> Result<(), String> {
     use std::os::windows::process::CommandExt;
+    allow_any_foreground();
     std::process::Command::new("explorer.exe")
         .raw_arg(explorer_select_arg(path))
         .spawn()
@@ -81,6 +94,7 @@ pub fn reveal_in_explorer(_path: &Path) -> Result<(), String> {
 pub fn open_directory(dir: &Path) -> Result<(), String> {
     use std::os::windows::process::CommandExt;
     std::fs::create_dir_all(dir).map_err(|e| format!("无法创建目录: {e}"))?;
+    allow_any_foreground();
     std::process::Command::new("explorer.exe")
         .raw_arg(explorer_open_arg(dir))
         .spawn()

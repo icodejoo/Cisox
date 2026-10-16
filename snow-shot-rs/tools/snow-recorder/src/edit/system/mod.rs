@@ -138,13 +138,15 @@ impl EditEngine for SystemEngine {
                 })
             }
             EditOp::ReduceFps { .. } | EditOp::Scale { .. } => {
-                let frames = transcode::run(&req.input, &req.output, req.op, ctl)?;
+                let frames = transcode::run(&req.input, &req.output, req.op.clone(), ctl)?;
                 Ok(EditReport {
                     path: req.output.clone(),
                     frames,
                 })
             }
-            EditOp::TrimKeyframe { .. } => Err(EditError::unsupported(NO_SYSTEM_TRIM)),
+            EditOp::TrimKeyframe { .. } | EditOp::TrimSegments { .. } => {
+                Err(EditError::unsupported(NO_SYSTEM_TRIM))
+            }
         }
     }
 }

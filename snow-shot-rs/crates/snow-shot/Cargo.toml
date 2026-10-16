@@ -54,6 +54,19 @@ snow-ui-selector = { path = "../../../snow-crates/crates/snow-ui-selector" }
 # 区域检测（仓库内 path 依赖，默认纯 Rust 后端，不启用 opencv）
 visual-region-detector = { path = "../../../snow-crates/crates/visual-region-detector" }
 snow-selected-text = { path = "../../../snow-crates/crates/snow-selected-text" }
+# 视频剪辑窗的预览播放：Media Foundation 媒体引擎（frame-server 模式）+ D3D11 取帧；与 snow-platform 同版本（0.62）
+# `#[implement]` 宏展开需要 windows_core 为直接依赖（已在锁文件里，是 windows 的同版本传递依赖）
+windows-core = "0.62"
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D10",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+] }
 
 # 构建期嵌入 exe 图标与版本资源（仅 Windows 目标用到，不进运行时）
 [target.'cfg(windows)'.build-dependencies]

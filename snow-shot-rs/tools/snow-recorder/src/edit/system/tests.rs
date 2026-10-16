@@ -320,7 +320,7 @@ fn reduce_fps_matches_ffmpeg() {
     let run = |engine, name: &str| {
         let req = EditRequest {
             engine,
-            op,
+            op: op.clone(),
             input: input.clone(),
             output: dir.join(name),
         };
@@ -380,7 +380,7 @@ fn scale_matches_ffmpeg() {
     ] {
         let req = EditRequest {
             engine,
-            op,
+            op: op.clone(),
             input: input.clone(),
             output: dir.join(name),
         };
@@ -485,7 +485,7 @@ fn hd_1080p_matches_ffmpeg() {
             .unwrap()
             .path()
     };
-    let sys = find(&run(EngineKind::System, png, "sys-png"));
+    let sys = find(&run(EngineKind::System, png.clone(), "sys-png"));
     let ff = find(&run(EngineKind::Ffmpeg, png, "ff-png"));
     let (a, b) = (testclip::decode_bgr(&sys), testclip::decode_bgr(&ff));
     assert_eq!((a.0, a.1), (1920, 1080));
@@ -507,7 +507,7 @@ fn hd_1080p_matches_ffmpeg() {
     let fps = EditOp::ReduceFps { target_fps: 15 };
     let mut problems: Vec<String> = Vec::new();
     for (op, name, dims) in [(scale, "scale", (1280, 720)), (fps, "fps", (1920, 1080))] {
-        let sys = run(EngineKind::System, op, &format!("sys-{name}.mp4"));
+        let sys = run(EngineKind::System, op.clone(), &format!("sys-{name}.mp4"));
         let ff = run(EngineKind::Ffmpeg, op, &format!("ff-{name}.mp4"));
         let (si, fi) = (probe_out(&sys), probe_out(&ff));
         assert_eq!((si.width, si.height), dims, "{name}");

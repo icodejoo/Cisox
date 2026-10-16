@@ -104,7 +104,7 @@ use snow_ui::shell::tray::{
 };
 use snow_ui::shell::window::{Placement, WindowSpec};
 use snow_ui::ui::AppContext;
-use snow_ui::ui::{Entity, ShellContext, ShellWindow};
+use snow_ui::ui::{Entity, RenderImage, ShellContext, ShellWindow};
 use snow_ui::widgets::{AnnotationTool, ToolbarAction};
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -402,6 +402,8 @@ pub enum UiEvent {
         region: PhysicalRect,
         /// 区域所在显示器。
         monitor: MonitorInfo,
+        /// 就绪态底图：选区时冻结的该显示器干净画面。
+        backdrop: Option<Arc<RenderImage>>,
     },
     /// 录制进程有新事件（读线程唤醒）。
     RecorderPoll,
@@ -2145,6 +2147,10 @@ fn open_overlays(cx: &mut ShellContext, state: &mut AppState, payloads: Vec<Capt
 
     let record_inbox = state.inbox.clone();
     let record_monitors = monitors.clone();
+    // 录制就绪态用选区时冻结的画面当底图：按画布矩形记下每块屏的图像
+    let record_backdrops: Vec<(PhysicalRect, Arc<RenderImage>)> = (0..frames.count())
+        .map(|i| (frames.rect(i), frames.image(i)))
+        .collect();
     let pin_inbox = state.inbox.clone();
     let ocr_inbox = state.inbox.clone();
     let ocr_download_inbox = state.inbox.clone();
@@ -2164,9 +2170,15 @@ fn open_overlays(cx: &mut ShellContext, state: &mut AppState, payloads: Vec<Capt
             .with_recording(move |rect| {
                 // 覆盖窗坐标以画布左上角为原点，换算成虚拟桌面坐标；录制窗绑定选区所在的那块显示器
                 let region = monitor_local_to_desktop(rect, canvas);
+                let center = rect.center();
+                let backdrop = record_backdrops
+                    .iter()
+                    .find(|(r, _)| r.contains(center))
+                    .map(|(_, image)| Arc::clone(image));
                 record_inbox.push(UiEvent::RecordingRegionChosen {
                     region,
                     monitor: session_monitor_for(&record_monitors, region),
+                    backdrop,
                 });
             })
             .with_pin(move |rect, width, height, rgba| {
@@ -3547,7 +3559,7 @@ fn request_recording(cx: &mut ShellContext, state: &mut AppState) {
     tracing::info!(region = ?spec.region, plan = ?spec.plan, "自动化录屏（跳过选区）");
     state
         .recording
-        .begin(cx, spec.region, &monitor, Some(&spec));
+        .begin(cx, spec.region, &monitor, Some(&spec), None);
 }
 
 /// 处理长截图请求：普通路径进入“长截图选区”覆盖窗；设置了自动化环境变量时跳过选区直接开始。
@@ -5313,8 +5325,12 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
         }
         UiEvent::ConfigChanged { key, previous } => on_config_changed(cx, state, &key, previous),
         UiEvent::StartRecording => request_recording(cx, state),
-        UiEvent::RecordingRegionChosen { region, monitor } => {
-            state.recording.begin(cx, region, &monitor, None);
+        UiEvent::RecordingRegionChosen {
+            region,
+            monitor,
+            backdrop,
+        } => {
+            state.recording.begin(cx, region, &monitor, None, backdrop);
             if std::mem::take(&mut state.record_copy_pending) {
                 state.recording.mark_copy_on_finish(cx);
             }

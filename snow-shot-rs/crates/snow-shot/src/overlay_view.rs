@@ -41,6 +41,7 @@ use crate::scan_animation::scan_overlay;
 use crate::screenshot_output::{
     self, ExportOverrides, ExportSettings, ManualSaveJob, SaveMode, SaveOutcome, home_directory,
 };
+use crate::select_kit::{CompactSelect, compact_select};
 use crate::settings_state::SharedConfig;
 use crate::translate_flow::{
     LINK_BORDER, LINK_FILL, LinkHover, TranslateUiState, panel_lines as translate_panel_lines,
@@ -79,7 +80,7 @@ use snow_ui::ui::component::checkbox::Checkbox;
 use snow_ui::ui::component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
 use snow_ui::ui::component::input::{Input, InputEvent, InputState};
 use snow_ui::ui::component::searchable_list::{SearchableListItem, SearchableVec};
-use snow_ui::ui::component::select::{Select, SelectEvent, SelectState};
+use snow_ui::ui::component::select::{SelectEvent, SelectState};
 use snow_ui::ui::component::{
     Disableable, IndexPath, Sizable, Size as ComponentSize, Theme, ThemeMode,
 };
@@ -6385,6 +6386,24 @@ impl ScreenshotOverlayView {
         self.auto_confirm = action;
     }
 
+    /// 处理左键松开并给出窗口去向。
+    ///
+    /// 录屏选区模式下，这次松开只要确认了选区就直接交给录屏流程（进入就绪态），不再等 Enter / 双击；
+    /// 其余情况沿用“自动动作”逻辑。
+    ///
+    /// # 参数
+    /// - `point`：底图物理坐标。
+    ///
+    /// # 返回
+    /// 窗口去向；未触发时为 `Stay`。
+    pub fn mouse_up_outcome(&mut self, point: PhysicalPoint) -> OverlayOutcome {
+        let confirmed = self.handle_mouse_up(point);
+        if self.record_mode && confirmed {
+            return self.start_recording_and_close();
+        }
+        self.auto_confirm_outcome()
+    }
+
     /// 鼠标松开后调用：若已有选区且设置了自动动作，则执行一次（之后恢复为普通编辑）。
     ///
     /// # 返回
@@ -6826,14 +6845,12 @@ fn panel_label(i18n: &I18n, id: &str) -> Div {
 
 /// 面板里的下拉框（固定宽高与菜单最大高度）。
 fn panel_select(state: &Entity<StyleSelect>) -> Div {
-    div()
-        .w(px(STYLE_SELECT_WIDTH))
-        .h(px(STYLE_SELECT_HEIGHT))
-        .child(
-            Select::new(state)
-                .with_size(ComponentSize::Small)
-                .menu_max_h(px(STYLE_SELECT_MENU_MAX_HEIGHT)),
-        )
+    compact_select(
+        state,
+        (STYLE_SELECT_WIDTH, STYLE_SELECT_HEIGHT),
+        STYLE_SELECT_MENU_MAX_HEIGHT,
+        CompactSelect::default(),
+    )
 }
 
 /// 聚光灯 / 水印设置面板：控件创建、同步、编辑与持久化。
@@ -7495,17 +7512,15 @@ impl ScreenshotOverlayView {
                         .w(px(WATERMARK_INPUT_WIDTH))
                         .child(Input::new(&ui.template).with_size(ComponentSize::Small)),
                 )
-                .child(
-                    div()
-                        .w(px(WATERMARK_TEMPLATE_SELECT_WIDTH))
-                        .h(px(STYLE_SELECT_HEIGHT))
-                        .child(
-                            Select::new(&ui.wm_template)
-                                .with_size(ComponentSize::Small)
-                                .placeholder(i18n.tr("annot-deco-template-saved"))
-                                .menu_max_h(px(STYLE_SELECT_MENU_MAX_HEIGHT)),
-                        ),
-                )
+                .child(compact_select(
+                    &ui.wm_template,
+                    (WATERMARK_TEMPLATE_SELECT_WIDTH, STYLE_SELECT_HEIGHT),
+                    STYLE_SELECT_MENU_MAX_HEIGHT,
+                    CompactSelect {
+                        placeholder: Some(i18n.tr("annot-deco-template-saved").into()),
+                        ..CompactSelect::default()
+                    },
+                ))
                 .child(
                     Button::new("deco-template-save")
                         .with_size(ComponentSize::Small)
@@ -7515,16 +7530,12 @@ impl ScreenshotOverlayView {
                         })),
                 )
                 .child(label("annot-deco-font-family"))
-                .child(
-                    div()
-                        .w(px(WATERMARK_FAMILY_WIDTH))
-                        .h(px(STYLE_SELECT_HEIGHT))
-                        .child(
-                            Select::new(&ui.wm_family)
-                                .with_size(ComponentSize::Small)
-                                .menu_max_h(px(STYLE_SELECT_MENU_MAX_HEIGHT)),
-                        ),
-                )
+                .child(compact_select(
+                    &ui.wm_family,
+                    (WATERMARK_FAMILY_WIDTH, STYLE_SELECT_HEIGHT),
+                    STYLE_SELECT_MENU_MAX_HEIGHT,
+                    CompactSelect::default(),
+                ))
                 .child(label("annot-deco-font-size"))
                 .child(select(&ui.wm_font))
                 .child(label("annot-deco-opacity"))
@@ -8123,8 +8134,7 @@ impl ScreenshotOverlayView {
                             this.scale = this.scale_override.unwrap_or(window.scale_factor());
                             let p = this.canvas_point(index, ev.position);
                             this.set_shift(ev.modifiers.shift);
-                            this.handle_mouse_up(p);
-                            let outcome = this.auto_confirm_outcome();
+                            let outcome = this.mouse_up_outcome(p);
                             this.finish(outcome, window, cx);
                         });
                     });
@@ -10016,6 +10026,45 @@ mod tests {
             rec.borrow().records,
             vec![PhysicalRect::new(50, 50, 101, 71)]
         );
+    }
+
+    /// 录屏选区模式：框选松手即交给录制流程，无需再按 Enter；无效选区不触发。
+    #[test]
+    fn record_mode_mouse_up_starts_recording() {
+        let (mut view, rec) = view_with(255, 200, 1.0, false);
+        view.set_record_mode(true);
+        view.handle_mouse_down(PhysicalPoint::new(50, 50), 1);
+        view.handle_mouse_move(PhysicalPoint::new(150, 120));
+        assert_eq!(
+            view.mouse_up_outcome(PhysicalPoint::new(150, 120)),
+            OverlayOutcome::Close
+        );
+        assert_eq!(
+            rec.borrow().records,
+            vec![PhysicalRect::new(50, 50, 101, 71)]
+        );
+        // 太小的选区不算确认
+        let (mut view, rec) = view_with(255, 200, 1.0, false);
+        view.set_record_mode(true);
+        view.handle_mouse_down(PhysicalPoint::new(20, 20), 1);
+        assert_eq!(
+            view.mouse_up_outcome(PhysicalPoint::new(20, 20)),
+            OverlayOutcome::Stay
+        );
+        assert!(rec.borrow().records.is_empty());
+    }
+
+    /// 非录屏模式：松手不触发录屏。
+    #[test]
+    fn plain_mode_mouse_up_does_not_record() {
+        let (mut view, rec) = view_with(255, 200, 1.0, false);
+        view.handle_mouse_down(PhysicalPoint::new(50, 50), 1);
+        view.handle_mouse_move(PhysicalPoint::new(150, 120));
+        assert_eq!(
+            view.mouse_up_outcome(PhysicalPoint::new(150, 120)),
+            OverlayOutcome::Stay
+        );
+        assert!(rec.borrow().records.is_empty());
     }
 
     /// 工具栏“录屏”动作在截图模式下同样可用；输出失败时保留窗口。

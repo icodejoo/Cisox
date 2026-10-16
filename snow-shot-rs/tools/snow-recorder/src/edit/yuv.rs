@@ -48,6 +48,8 @@ struct Key {
     full_range: bool,
     /// 色彩矩阵编号。
     matrix: i32,
+    /// 输出宽高。
+    out: (u32, u32),
 }
 
 /// YUV 到 RGB 类格式的一步转换器（按需重建、复用输出缓冲）。
@@ -58,6 +60,8 @@ pub struct RgbConverter {
     ctx: Option<(Key, scaling::Context)>,
     /// 复用的输出帧。
     out: Option<frame::Video>,
+    /// 指定输出宽高（转换时同步缩放）；`None` 表示与输入同尺寸。
+    size: Option<(u32, u32)>,
 }
 
 impl RgbConverter {
@@ -70,7 +74,16 @@ impl RgbConverter {
             target,
             ctx: None,
             out: None,
+            size: None,
         }
+    }
+
+    /// 指定输出宽高：之后的转换一步完成"色彩转换 + 缩放"。
+    ///
+    /// # 参数
+    /// - `size`：输出宽高；`None` 恢复为与输入同尺寸。
+    pub fn set_size(&mut self, size: Option<(u32, u32)>) {
+        self.size = size;
     }
 
     /// 把解码帧一步转成目标格式，返回转换结果（下次调用前有效）。
@@ -94,10 +107,11 @@ impl RgbConverter {
             full_range: input.color_range() == color::Range::JPEG
                 || input.format() == Pixel::YUVJ420P,
             matrix: matrix_for(input.color_space(), input.height()),
+            out: self.size.unwrap_or((input.width(), input.height())),
         };
         if self.ctx.as_ref().is_none_or(|(k, _)| *k != key) {
             self.ctx = Some((key, self.build(&key)?));
-            self.out = Some(frame::Video::new(self.target, key.width, key.height));
+            self.out = Some(frame::Video::new(self.target, key.out.0, key.out.1));
         }
         let (_, ctx) = self
             .ctx
@@ -119,8 +133,8 @@ impl RgbConverter {
             key.width,
             key.height,
             self.target,
-            key.width,
-            key.height,
+            key.out.0,
+            key.out.1,
             software::scaling::Flags::BICUBIC
                 | software::scaling::Flags::ACCURATE_RND
                 | software::scaling::Flags::FULL_CHR_H_INT,

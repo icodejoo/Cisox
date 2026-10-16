@@ -339,7 +339,7 @@ pub fn run(params: &TranscodeParams<'_>, ctl: &TaskCtl) -> Result<u64, EditError
 fn transcode_to(params: &TranscodeParams<'_>, ctl: &TaskCtl, tmp: &Path) -> Result<u64, EditError> {
     let mut src = VideoSource::open(params.input)?;
     let (info, _) = src.scan()?;
-    let target = plan_target(params.op, &info)?;
+    let target = plan_target(params.op.clone(), &info)?;
     let src_tb = src.time_base();
     let audio = src
         .input()

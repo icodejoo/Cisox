@@ -236,6 +236,29 @@ fn probe_input(input: &Path) {
     }
 }
 
+/// 进入常驻编辑会话（不会返回）；录制或编辑任务进行中时忽略。
+///
+/// # 参数
+/// - `input`：要打开的视频。
+/// - `rx`：命令行通道，会话接管它直到 `Close` 或 stdin 关闭。
+/// - `busy`：当前是否已有录制或编辑任务。
+fn open_session(input: &Path, rx: &mpsc::Receiver<Option<String>>, busy: bool) {
+    if busy {
+        eprintln!("进程忙，忽略 OPEN");
+        return;
+    }
+    #[cfg(windows)]
+    edit::session::run(input, rx, Box::new(emit));
+    #[cfg(not(windows))]
+    {
+        let _ = (input, rx);
+        emit(&Event::Error {
+            reason: "视频编辑目前只支持 Windows".to_string(),
+        });
+        std::process::exit(EXIT_FAILED);
+    }
+}
+
 /// 进程入口：命令循环。
 fn main() {
     os::enable_dpi_awareness();
@@ -267,6 +290,9 @@ fn main() {
                 match Command::parse(line.trim_start_matches('\u{feff}')) {
                     Ok(Command::Edit(req)) => start_edit(req, &mut job, active.is_some()),
                     Ok(Command::Probe { input }) => probe_input(&input),
+                    Ok(Command::Open { input }) => {
+                        open_session(&input, &rx, active.is_some() || job.is_some());
+                    }
                     Ok(Command::Cancel) if job.is_some() => {
                         if let Some(j) = &job {
                             j.cancel.store(true, Ordering::SeqCst);
@@ -338,7 +364,9 @@ fn handle(cmd: Command, active: Option<Active>) -> Option<Active> {
         (Command::Cancel, Some(a)) => cancel(a),
         (Command::Cancel, None) => exit_idle(),
         // 编辑类命令已在命令循环里分流，这里不会再见到
-        (Command::Edit(_) | Command::Probe { .. }, a) => a,
+        (Command::Edit(_) | Command::Probe { .. } | Command::Open { .. }, a) => a,
+        // 取帧类命令只在编辑会话里有意义，这里（录制态）忽略
+        (Command::Thumbs { .. } | Command::Frame { .. } | Command::Close, a) => a,
         (other, None) => {
             eprintln!("未开始录制，忽略命令: {other:?}");
             None

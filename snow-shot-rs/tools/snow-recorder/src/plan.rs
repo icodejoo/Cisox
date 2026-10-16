@@ -135,6 +135,7 @@ mod tests {
             audio: Default::default(),
             effects: Default::default(),
             quality: Default::default(),
+            output_size: None,
         }
     }
 

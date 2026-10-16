@@ -2,11 +2,16 @@
 //!
 //! 对齐规则：起点落在"不晚于起点的最后一个关键帧"，终点落在"不早于终点的第一个关键帧"
 //! （没有则到文件末尾），所以输出一定完整覆盖请求区间，只会多出不超过一个 GOP 的内容。
+//!
+//! 多段裁剪：每段各自对齐后，对齐结果重叠或相接的并成一段；各段的包按顺序写入同一个输出，
+//! 后一段的时间戳整体前移到前一段结尾处，所以输出连续、无重叠、无需重编码。
 
 use std::path::Path;
 
 use ffmpeg_next as ffmpeg;
 use ffmpeg_next::{Rational, format, media};
+
+use snow_recorder_protocol::validate_segments;
 
 use super::source::VideoSource;
 use super::transcode::{MICRO_TB, rescale};
@@ -71,7 +76,82 @@ pub fn run(params: &TrimParams<'_>, ctl: &TaskCtl) -> Result<u64, EditError> {
     if params.end_ms <= params.start_ms {
         return Err(EditError::new("裁剪终点必须晚于起点"));
     }
-    run_via_scratch(params.output, |tmp| trim_to(params, ctl, tmp))
+    let ranges = [(params.start_ms, params.end_ms)];
+    run_via_scratch(params.output, |tmp| {
+        trim_to(params.input, &ranges, ctl, tmp)
+    })
+}
+
+/// 执行多段关键帧裁剪并拼接。
+///
+/// # 参数
+/// - `input`：输入视频。
+/// - `output`：输出文件（.mp4）。
+/// - `segments`：保留区间（毫秒，`[start, end)`），升序、不重叠、每段 start<end。
+/// - `ctl`：进度与取消控制。
+///
+/// # 返回
+/// 输出的视频帧数；区间非法返回错误，取消返回 `cancelled`。失败或取消时不留下中间文件。
+pub fn run_segments(
+    input: &Path,
+    output: &Path,
+    segments: &[(u64, u64)],
+    ctl: &TaskCtl,
+) -> Result<u64, EditError> {
+    validate_segments(segments).map_err(|e| EditError::new(e.to_string()))?;
+    run_via_scratch(output, |tmp| trim_to(input, segments, ctl, tmp))
+}
+
+/// 合并并对齐后的一段保留区间，时间为绝对微秒。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct KeepSpan {
+    /// 输入里的起点（含）。
+    origin_us: i64,
+    /// 输入里的终点（不含）；`None` 到文件末尾。
+    end_us: Option<i64>,
+    /// 这一段在输出时间线上的起点（相对输出开头）。
+    offset_us: i64,
+}
+
+/// 把各段对齐到关键帧，重叠或相接的并成一段，并算出每段在输出里的起点。
+///
+/// # 参数
+/// - `keys`：关键帧相对 PTS，升序。
+/// - `ranges_ticks`：各请求区间（刻度），已升序。
+/// - `to_us`：把"相对 PTS 刻度"换算成绝对微秒。
+fn plan_spans(
+    keys: &[i64],
+    ranges_ticks: &[(i64, i64)],
+    to_us: impl Fn(i64) -> i64,
+) -> Result<Vec<KeepSpan>, EditError> {
+    let mut aligned: Vec<Span> = Vec::new();
+    for &(s, e) in ranges_ticks {
+        let span = align_span(keys, s, e)?;
+        match aligned.last_mut() {
+            Some(prev) if prev.end.is_none_or(|pe| span.start <= pe) => {
+                prev.end = match (prev.end, span.end) {
+                    (Some(a), Some(b)) => Some(a.max(b)),
+                    _ => None,
+                };
+            }
+            _ => aligned.push(span),
+        }
+    }
+    let mut out = Vec::with_capacity(aligned.len());
+    let mut offset_us = 0i64;
+    for sp in aligned {
+        let origin_us = to_us(sp.start);
+        let end_us = sp.end.map(&to_us);
+        out.push(KeepSpan {
+            origin_us,
+            end_us,
+            offset_us,
+        });
+        if let Some(e) = end_us {
+            offset_us += e - origin_us;
+        }
+    }
+    Ok(out)
 }
 
 /// 输入流到输出流的映射。
@@ -84,21 +164,66 @@ struct Map {
     video: bool,
 }
 
-/// 裁剪主体：写到中间文件。
-fn trim_to(params: &TrimParams<'_>, ctl: &TaskCtl, tmp: &Path) -> Result<u64, EditError> {
-    let mut probe = VideoSource::open(params.input)?;
+/// 视频 DTS 补偿：B 帧流里后一段首个包的 DTS 可能不大于前一段末尾包，
+/// 每进入新的一段就按需算出一个段内恒定的最小补偿量（只动 DTS，不动 PTS，补偿越小越不顶到 PTS）。
+#[derive(Debug, Default)]
+struct DtsFix {
+    /// 上一个已写出视频包的 DTS（输出时间基）。
+    last_dts: Option<i64>,
+    /// 当前所在段下标。
+    span: Option<usize>,
+    /// 当前段的 DTS 补偿量。
+    bump: i64,
+}
+
+impl DtsFix {
+    /// 修正一个已换算到输出时间基的视频包。
+    ///
+    /// # 参数
+    /// - `pkt`：待写出的视频包。
+    /// - `span`：包所在的保留区间下标。
+    fn apply(&mut self, pkt: &mut ffmpeg::Packet, span: usize) {
+        let Some(dts) = pkt.dts() else {
+            return;
+        };
+        if self.span != Some(span) {
+            self.span = Some(span);
+            self.bump = match self.last_dts {
+                Some(last) if dts <= last => last + 1 - dts,
+                _ => 0,
+            };
+        }
+        let mut fixed = dts + self.bump;
+        if let Some(pts) = pkt.pts() {
+            fixed = fixed.min(pts);
+        }
+        pkt.set_dts(Some(fixed));
+        self.last_dts = Some(fixed);
+    }
+}
+
+/// 裁剪主体：按保留区间写到中间文件。
+fn trim_to(
+    input_path: &Path,
+    ranges: &[(u64, u64)],
+    ctl: &TaskCtl,
+    tmp: &Path,
+) -> Result<u64, EditError> {
+    let mut probe = VideoSource::open(input_path)?;
     let (info, keys) = probe.scan()?;
     let video_tb = probe.time_base();
     let start_pts = probe.start_pts();
-    let span = align_span(
-        &keys,
-        probe.ms_to_pts(params.start_ms),
-        probe.ms_to_pts(params.end_ms),
-    )?;
+    let ranges_ticks: Vec<(i64, i64)> = ranges
+        .iter()
+        .map(|&(s, e)| (probe.ms_to_pts(s), probe.ms_to_pts(e)))
+        .collect();
     drop(probe);
+    let spans = plan_spans(&keys, &ranges_ticks, |t| {
+        rescale(start_pts + t, video_tb, MICRO_TB)
+    })?;
 
-    let mut input = format::input(params.input)
-        .map_err(|e| EditError::new(format!("无法打开输入视频: {e}")))?;
+    let mut input =
+        format::input(input_path).map_err(|e| EditError::new(format!("无法打开输入视频: {e}")))?;
     let video_idx = input
         .streams()
         .best(media::Type::Video)
@@ -144,10 +269,9 @@ fn trim_to(params: &TrimParams<'_>, ctl: &TaskCtl, tmp: &Path) -> Result<u64, Ed
         });
     }
     // 区间（绝对时间，微秒）：音频按时间截取，视频按 PTS 截取
-    let origin_us = rescale(start_pts + span.start, video_tb, MICRO_TB);
-    let end_us = span.end.map(|e| rescale(start_pts + e, video_tb, MICRO_TB));
     let (mut done, mut written) = (0u64, 0u64);
     let mut last_video_dur = 0i64;
+    let mut dts_fix = DtsFix::default();
     let mut pkt = ffmpeg::Packet::empty();
     loop {
         match pkt.read(&mut input) {
@@ -164,7 +288,9 @@ fn trim_to(params: &TrimParams<'_>, ctl: &TaskCtl, tmp: &Path) -> Result<u64, Ed
         };
         let ts = pkt.pts().or(pkt.dts()).unwrap_or(0);
         let ts_us = rescale(ts, m.in_tb, MICRO_TB);
-        let keep = ts_us >= origin_us && end_us.is_none_or(|e| ts_us < e);
+        let hit_idx = spans
+            .iter()
+            .position(|sp| ts_us >= sp.origin_us && sp.end_us.is_none_or(|e| ts_us < e));
         if m.video {
             done += 1;
             // 末包时长常为 0（如 B 帧流），MP4 编辑列表会据此裁掉末帧，沿用上一个时长补上
@@ -174,11 +300,16 @@ fn trim_to(params: &TrimParams<'_>, ctl: &TaskCtl, tmp: &Path) -> Result<u64, Ed
                 pkt.set_duration(last_video_dur);
             }
         }
-        if keep {
-            let shift = rescale(origin_us, MICRO_TB, m.in_tb);
+        if let Some(idx) = hit_idx {
+            let sp = &spans[idx];
+            // 前移量：本段起点落到它在输出时间线上的位置
+            let shift = rescale(sp.origin_us - sp.offset_us, MICRO_TB, m.in_tb);
             pkt.set_pts(pkt.pts().map(|p| p - shift));
             pkt.set_dts(pkt.dts().map(|p| p - shift));
             pkt.rescale_ts(m.in_tb, m.out_tb);
+            if m.video {
+                dts_fix.apply(&mut pkt, idx);
+            }
             pkt.set_stream(index_map[in_stream].unwrap_or(0));
             pkt.set_position(-1);
             pkt.write_interleaved(&mut out)
@@ -299,6 +430,135 @@ mod tests {
         let output = dir.join("out.mp4");
         assert!(run(&params(&input, &output, 500, 500), &ctl(false)).is_err());
         let err = run(&params(&input, &output, 0, 500), &ctl(true)).unwrap_err();
+        assert!(err.is_cancelled());
+        assert!(!output.exists());
+        assert!(no_scratch(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 解出文件里所有帧：返回（样片帧序号, 毫秒）。
+    fn decode_all(path: &Path) -> Vec<(i32, i64)> {
+        let mut src = VideoSource::open(path).unwrap();
+        let mut v = Vec::new();
+        while let Some(d) = src.pull().unwrap() {
+            v.push((testclip::frame_index_of(&d.frame), d.ms));
+        }
+        v
+    }
+
+    /// 多段样片：25fps、GOP 8（320ms）、72 帧。
+    fn seg_clip(bframes: usize) -> Clip {
+        Clip {
+            gop: 8,
+            audio: true,
+            bframes,
+            ..Clip::default()
+        }
+    }
+
+    /// 多段对齐：重叠或相接的对齐结果并成一段，输出起点逐段累加。
+    #[test]
+    fn plan_spans_merges_and_offsets() {
+        let keys = [0, 8, 16, 24, 32, 40];
+        let id = |t: i64| t * 10;
+        // (0,3)->[0,8)；(7,10)->[0,16) 与前一段重叠并入；(30,31)->[24,32)
+        let spans = plan_spans(&keys, &[(0, 3), (7, 10), (30, 31)], id).unwrap();
+        assert_eq!(spans.len(), 2);
+        assert_eq!((spans[0].origin_us, spans[0].end_us), (0, Some(160)));
+        assert_eq!(spans[0].offset_us, 0);
+        assert_eq!((spans[1].origin_us, spans[1].end_us), (240, Some(320)));
+        assert_eq!(spans[1].offset_us, 160);
+        // 终点超过最后关键帧：该段到文件末尾
+        let spans = plan_spans(&keys, &[(0, 3), (41, 50)], id).unwrap();
+        assert_eq!(spans[1].end_us, None);
+        assert_eq!(spans[1].offset_us, 80);
+    }
+
+    /// 三段拼接（无 B 帧）：帧序列、时长、PTS 均匀递增、无重复帧、可重新打开。
+    #[test]
+    fn segments_concat_three() {
+        let dir = testclip::temp_dir("trim-segs3");
+        let input = dir.join("in.mp4");
+        testclip::make_clip(&input, &seg_clip(0)).unwrap();
+        let output = dir.join("out.mp4");
+        // 对齐后 [0,8)、[16,32)、[40,56) 帧，共 8+16+16
+        let segs = [(0, 300), (700, 1000), (1800, 2000)];
+        let n = run_segments(&input, &output, &segs, &ctl(false)).unwrap();
+        assert_eq!(n, 40);
+        let info = probe(&output);
+        assert_eq!(info.frames, 40);
+        assert!(
+            (1580..=1620).contains(&info.duration_ms),
+            "时长 {}",
+            info.duration_ms
+        );
+        let got = decode_all(&output);
+        let idx: Vec<i32> = got.iter().map(|g| g.0).collect();
+        let want: Vec<i32> = (0..8).chain(16..32).chain(40..56).collect();
+        assert_eq!(idx, want);
+        // 每帧间隔都是 40ms（含拼接处），说明连续、无重叠
+        for w in got.windows(2) {
+            assert_eq!(w[1].1 - w[0].1, 40, "{w:?}");
+        }
+        let audio = testclip::audio_facts(&output).expect("应保留音频");
+        assert!(
+            (audio.duration_ms - 1600).abs() <= 120,
+            "音频时长 {}",
+            audio.duration_ms
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 两段拼接（有 B 帧）：帧数、时长、PTS 严格递增、无重复。
+    #[test]
+    fn segments_concat_with_bframes() {
+        let dir = testclip::temp_dir("trim-segs-b");
+        let input = dir.join("in.mp4");
+        testclip::make_clip(&input, &seg_clip(2)).unwrap();
+        let output = dir.join("out.mp4");
+        let n = run_segments(&input, &output, &[(0, 300), (1800, 2000)], &ctl(false)).unwrap();
+        assert_eq!(n, 24);
+        let got = decode_all(&output);
+        assert_eq!(got.len(), 24);
+        for w in got.windows(2) {
+            assert_eq!(w[1].1 - w[0].1, 40, "{w:?}");
+        }
+        let mut seen = std::collections::HashSet::new();
+        assert!(got.iter().all(|g| seen.insert(g.1)), "存在重复时间戳");
+        let audio = testclip::audio_facts(&output).expect("应保留音频");
+        assert!(
+            (audio.duration_ms - 960).abs() <= 120,
+            "音频时长 {}",
+            audio.duration_ms
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 单段拼接与关键帧裁剪结果等价（帧数、时长、帧序列一致）。
+    #[test]
+    fn single_segment_equals_trim_keyframe() {
+        let dir = testclip::temp_dir("trim-segs1");
+        let input = dir.join("in.mp4");
+        testclip::make_clip(&input, &seg_clip(0)).unwrap();
+        let (a, b) = (dir.join("a.mp4"), dir.join("b.mp4"));
+        let na = run(&params(&input, &a, 700, 1500), &ctl(false)).unwrap();
+        let nb = run_segments(&input, &b, &[(700, 1500)], &ctl(false)).unwrap();
+        assert_eq!(na, nb);
+        assert_eq!(probe(&a), probe(&b));
+        assert_eq!(decode_all(&a), decode_all(&b));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 非法区间与取消不留输出。
+    #[test]
+    fn segments_invalid_and_cancel() {
+        let dir = testclip::temp_dir("trim-segs-bad");
+        let input = dir.join("in.mp4");
+        testclip::make_clip(&input, &Clip::default()).unwrap();
+        let output = dir.join("out.mp4");
+        assert!(run_segments(&input, &output, &[], &ctl(false)).is_err());
+        assert!(run_segments(&input, &output, &[(0, 500), (400, 900)], &ctl(false)).is_err());
+        let err = run_segments(&input, &output, &[(0, 500)], &ctl(true)).unwrap_err();
         assert!(err.is_cancelled());
         assert!(!output.exists());
         assert!(no_scratch(&dir));

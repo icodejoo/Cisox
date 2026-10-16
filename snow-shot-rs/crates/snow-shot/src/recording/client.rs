@@ -100,6 +100,11 @@ pub struct ProcessRecorderLink {
 }
 
 impl ProcessRecorderLink {
+    /// 子进程 ID（会话结束后用于清理它的 scratch 目录）。
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
     /// 拉起录制进程。
     ///
     /// # 参数

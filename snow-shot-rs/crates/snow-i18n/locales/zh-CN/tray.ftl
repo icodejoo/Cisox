@@ -18,7 +18,7 @@ tray-capture-ocr = 文字识别
 
 tray-capture-translate = 文字翻译
 
-tray-capture-copy = 复制到剪贴板
+tray-capture-copy = 截图到剪贴板
 
 tray-capture-full-screen = 当前显示器
 

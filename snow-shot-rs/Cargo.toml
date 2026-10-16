@@ -54,6 +54,13 @@ panic = "abort"
 debug = 0
 incremental = false
 
+# 本地验证用的快速 release：thin LTO + 多 codegen-units + 增量，编译快、性能略低；正式发布仍用 release
+[profile.release-fast]
+inherits = "release"
+lto = "thin"
+codegen-units = 16
+incremental = true
+
 # 开发模式编译优化：debug = 1 保留行号/文件名堆栈信息（panic 及断点仍可定位），大幅缩减符号体积以加速 link.exe
 [profile.dev]
 debug = 1

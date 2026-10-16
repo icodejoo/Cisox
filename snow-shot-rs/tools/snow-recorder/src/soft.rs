@@ -132,7 +132,11 @@ pub fn start_software(
         request,
         partial,
         upstream_gpu,
-        settings::size_limit_for(request.quality.max_size),
+        settings::limit_for_request(
+            request.output_size,
+            request.quality.max_size,
+            (request.width, request.height),
+        ),
     );
     if let Some(p) = std::env::var(plan::ENV_PRESET)
         .ok()

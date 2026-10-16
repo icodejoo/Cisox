@@ -206,7 +206,11 @@ fn windows_spec(
 ) -> Result<crate::win::assemble::HardwareSpec, String> {
     use snow_screen_recorder::{ExportFormat, scaled_output_dimensions};
     let (max_w, max_h) = settings::oriented_limit(
-        settings::size_limit_for(request.quality.max_size),
+        settings::limit_for_request(
+            request.output_size,
+            request.quality.max_size,
+            (request.width, request.height),
+        ),
         request.width,
         request.height,
     );
@@ -316,6 +320,7 @@ mod tests {
             audio: Default::default(),
             effects: Default::default(),
             quality: Default::default(),
+            output_size: None,
         }
     }
 

@@ -16,7 +16,7 @@ use snow_ui::shell::geometry::{PhysicalPoint, PhysicalRect, Region};
 use snow_ui::shell::inbox::MainThreadInbox;
 use snow_ui::shell::monitor::{MonitorInfo, MonitorTarget};
 use snow_ui::shell::window::WindowSpec;
-use snow_ui::ui::{AppContext, Entity, ShellContext, ShellWindow};
+use snow_ui::ui::{AppContext, Entity, RenderImage, ShellContext, ShellWindow};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -98,6 +98,34 @@ pub fn monitor_for_region(monitors: &[MonitorInfo], region: PhysicalRect) -> Opt
         .or_else(|| monitors.first())
 }
 
+/// 录制完成后的收尾分流结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FinishPlan {
+    /// 把文件复制到剪贴板。
+    copy: bool,
+    /// 在资源管理器中定位文件。
+    reveal: bool,
+}
+
+/// 决定完成后做什么：去编辑时既不定位也不复制；否则复制优先，复制时不再定位。
+///
+/// # 参数
+/// - `to_editor`：用户点了“完成并编辑”。
+/// - `copy`：设置要求复制到剪贴板。
+/// - `reveal`：本次允许在资源管理器中定位。
+fn finish_plan(to_editor: bool, copy: bool, reveal: bool) -> FinishPlan {
+    if to_editor {
+        return FinishPlan {
+            copy: false,
+            reveal: false,
+        };
+    }
+    FinishPlan {
+        copy,
+        reveal: reveal && !copy,
+    }
+}
+
 /// 正在进行的一次录制。
 struct ActiveRecording {
     /// 录制窗。
@@ -108,6 +136,8 @@ struct ActiveRecording {
     applied_hit: Vec<PhysicalRect>,
     /// 完成后是否在资源管理器中定位文件。
     reveal: bool,
+    /// 完成后的收尾（定位文件 / 复制到剪贴板）已执行。
+    finished_handled: bool,
 }
 
 /// 录屏宿主：持有当前录制窗并处理其生命周期。
@@ -171,12 +201,14 @@ impl RecordingHost {
     /// - `region`：录制区域（虚拟桌面物理坐标）。
     /// - `monitor`：区域所在显示器。
     /// - `autotest`：自动化参数（验收用）；给出时不打开资源管理器。
+    /// - `backdrop`：就绪态底图（选区时冻结的该显示器画面）；`None` 时就绪态退回裁剪模式。
     pub fn begin(
         &mut self,
         cx: &mut ShellContext,
         region: PhysicalRect,
         monitor: &MonitorInfo,
         autotest: Option<&AutotestSpec>,
+        backdrop: Option<Arc<RenderImage>>,
     ) {
         if self.is_busy(cx) {
             tracing::info!("已有录制在进行，忽略新的录制请求");
@@ -227,24 +259,42 @@ impl RecordingHost {
         if let Some(a) = autotest {
             view.set_auto_plan(a.plan);
         }
-        self.attach_recorder(&mut view, countdown);
+        view.set_edit_enabled(autotest.is_none());
+        if let Some(image) = backdrop {
+            // 就绪态用选区时冻结的干净画面铺满整窗（和截图一样，不依赖窗口透明）；开始录制后丢弃
+            view.set_backdrop(image);
+        }
+        self.attach_recorder(&mut view, countdown, autotest.is_some());
 
         let mut spec = WindowSpec::overlay(MonitorTarget::Id(monitor.id));
         spec.focus = false;
+        // 实测未绘制的像素不会透明，窗口只靠 SetWindowRgn 裁剪；就绪态由底图铺满
+        spec.transparent = false;
+        let autotest_mode = autotest.is_some();
         let opened = cx.open_window(&spec, move |_window, app| {
             app.new(|cx| {
-                view.set_focus_handle(cx.focus_handle());
+                let handle = cx.focus_handle();
+                view.set_focus_handle(handle.clone());
+                if !autotest_mode {
+                    view.init_ready_ui(_window, cx);
+                    // 就绪态要能直接响应 Esc：焦点给到视图，下面再激活窗口
+                    _window.focus(&handle, cx);
+                }
                 view
             })
         });
         match opened {
             Ok((window, view)) => {
                 self.configure_window(&window);
+                if !autotest_mode {
+                    cx.activate_window(&window);
+                }
                 self.active = Some(ActiveRecording {
                     window,
                     view: view.clone(),
                     applied_hit: Vec::new(),
                     reveal: autotest.is_none(),
+                    finished_handled: false,
                 });
                 self.spawn_ticker(cx, view);
                 self.sync(cx);
@@ -254,7 +304,9 @@ impl RecordingHost {
     }
 
     /// 拉起录制进程并接入会话；失败则让会话直接进入错误状态（用户能在窗口里看到原因）。
-    fn attach_recorder(&self, view: &mut RecordingAreaView, countdown: u32) {
+    ///
+    /// 自动化验证直接按倒计时开始；正常流程进入就绪态（Ready），等用户点“开始”才发 START。
+    fn attach_recorder(&self, view: &mut RecordingAreaView, countdown: u32, autotest: bool) {
         let Some(exe) = locate_recorder_exe() else {
             tracing::error!("找不到录制进程 cisox-recorder（可用环境变量 SNOW_RECORDER_EXE 指定）");
             view.session.abort(RecordingFailure::RecorderMissing);
@@ -265,7 +317,8 @@ impl RecordingHost {
             inbox.push(UiEvent::RecorderPoll);
         });
         match ProcessRecorderLink::spawn(&exe, wake) {
-            Ok(link) => view.session.begin(Box::new(link), countdown),
+            Ok(link) if autotest => view.session.begin(Box::new(link), countdown),
+            Ok(link) => view.session.attach_ready(Box::new(link)),
             Err(e) => {
                 tracing::error!(error = ?e, "启动录制进程失败");
                 view.session.abort(e);
@@ -314,7 +367,7 @@ impl RecordingHost {
             return;
         };
         let now = Instant::now();
-        let (layout_rects, over, finished, copy) = active.view.update(cx.app(), |v, vcx| {
+        let (layout_rects, over, finished, copy, edit) = active.view.update(cx.app(), |v, vcx| {
             if v.advance(now) {
                 vcx.notify();
             }
@@ -322,12 +375,9 @@ impl RecordingHost {
                 RecordingState::Finished { file_path, .. } => Some(file_path.clone()),
                 _ => None,
             };
-            (
-                v.layout().hit_rects(),
-                v.is_over(now),
-                finished,
-                v.copy_on_finish(),
-            )
+            let copy = v.copy_on_finish();
+            let edit = v.take_edit_request();
+            (v.layout().hit_rects(), v.is_over(now), finished, copy, edit)
         });
         if layout_rects != active.applied_hit {
             let mut region = Region::new();
@@ -345,32 +395,43 @@ impl RecordingHost {
                 Err(e) => tracing::warn!(error = %e, "无法取得录制窗句柄"),
             }
         }
+        // 命中区域已裁剪好之后，才丢弃就绪态底图
+        active.view.update(cx.app(), |v, vcx| {
+            if v.release_backdrop_if_started() {
+                vcx.notify();
+            }
+        });
+        // 完成后立刻按分流结果定位文件 / 复制到剪贴板（只做一次）；去编辑时两者都不做
+        if let Some(path) = &finished
+            && !active.finished_handled
+        {
+            active.finished_handled = true;
+            tracing::info!(path = %path.display(), "录屏完成");
+            let plan = finish_plan(edit.is_some(), copy, active.reveal);
+            if plan.copy {
+                match snow_platform::clipboard::copy_files_to_clipboard(std::slice::from_ref(path))
+                {
+                    Ok(()) => tracing::info!(path = %path.display(), "录制文件已复制到剪贴板"),
+                    Err(e) => tracing::warn!(error = %e, "复制录制文件到剪贴板失败"),
+                }
+            }
+            if plan.reveal
+                && let Err(e) = snow_platform::shell::reveal_in_explorer(path)
+            {
+                tracing::warn!(error = %e, "无法在资源管理器中定位录制文件");
+            }
+        }
         if !over {
             return;
         }
         let window = active.window;
-        let reveal = active.reveal;
         self.active = None;
         window.close(cx.app());
-        match finished {
-            Some(path) => {
-                tracing::info!(path = %path.display(), "录屏完成");
-                if copy {
-                    match snow_platform::clipboard::copy_files_to_clipboard(std::slice::from_ref(
-                        &path,
-                    )) {
-                        Ok(()) => tracing::info!(path = %path.display(), "录制文件已复制到剪贴板"),
-                        Err(e) => tracing::warn!(error = %e, "复制录制文件到剪贴板失败"),
-                    }
-                }
-                if reveal
-                    && !copy
-                    && let Err(e) = snow_platform::shell::reveal_in_explorer(&path)
-                {
-                    tracing::warn!(error = %e, "无法在资源管理器中定位录制文件");
-                }
-            }
-            None => tracing::info!("录制窗已关闭（取消或出错）"),
+        if let Some(path) = edit {
+            let locale = crate::app_runtime::locale_of(self.config.borrow().document());
+            crate::video_editor::open_video_editor(cx, &path, locale);
+        } else if finished.is_none() {
+            tracing::info!("录制窗已关闭（取消或出错）");
         }
     }
 }
@@ -430,6 +491,17 @@ mod tests {
         ] {
             assert_eq!(parse_autotest(bad), None, "应拒绝 {bad:?}");
         }
+    }
+
+    /// 完成收尾分流：去编辑不定位不复制；普通停止保持原行为。
+    #[test]
+    fn finish_plan_routes() {
+        let plan = |copy, reveal| FinishPlan { copy, reveal };
+        assert_eq!(finish_plan(true, true, true), plan(false, false));
+        assert_eq!(finish_plan(true, false, true), plan(false, false));
+        assert_eq!(finish_plan(false, false, true), plan(false, true));
+        assert_eq!(finish_plan(false, true, true), plan(true, false));
+        assert_eq!(finish_plan(false, false, false), plan(false, false));
     }
 
     /// 区域所在显示器：按左上角判定，副屏为负原点时同样成立；越界回退主屏。

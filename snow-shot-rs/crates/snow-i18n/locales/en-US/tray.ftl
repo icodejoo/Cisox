@@ -18,7 +18,7 @@ tray-capture-ocr = Text recognition
 
 tray-capture-translate = Text translation
 
-tray-capture-copy = Copy to clipboard
+tray-capture-copy = Screenshot to clipboard
 
 tray-capture-full-screen = Current monitor
 

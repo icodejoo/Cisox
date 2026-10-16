@@ -65,6 +65,20 @@ const CMD_CANCEL: &str = "CANCEL";
 const CMD_EDIT: &str = "EDIT";
 /// 命令字：探测视频信息。
 const CMD_PROBE: &str = "PROBE";
+/// 命令字（编辑会话）：打开视频并扫描。
+const CMD_OPEN: &str = "OPEN";
+/// 命令字（编辑会话）：按时间列表取缩略图。
+const CMD_THUMBS: &str = "THUMBS";
+/// 命令字（编辑会话）：取某时刻的预览帧。
+const CMD_FRAME: &str = "FRAME";
+/// 命令字（编辑会话）：关闭会话并退出进程。
+const CMD_CLOSE: &str = "CLOSE";
+/// 事件字：关键帧时间表。
+const EVT_KEYFRAMES: &str = "KEYFRAMES";
+/// 事件字：一张缩略图就绪。
+const EVT_THUMB_READY: &str = "THUMB_READY";
+/// 事件字：预览帧就绪。
+const EVT_FRAME_READY: &str = "FRAME_READY";
 /// 事件字：进程就绪。
 const EVT_READY: &str = "READY";
 /// 事件字：录制中状态。
@@ -117,6 +131,8 @@ const START_KEY_BG_KEY: &str = "kbg";
 const START_KEY_FG_KEY: &str = "kfg";
 /// START 前缀令牌：输出尺寸上限（`长边xx短边`，如 `1920x1080`）。
 const START_MAX_SIZE_KEY: &str = "maxsz";
+/// START 前缀令牌：精确输出尺寸（`宽x高`，按选区方向书写，如 `1280x720`）。
+const START_OUTPUT_SIZE_KEY: &str = "outsz";
 /// START 前缀令牌：是否允许硬件编码（`0` 只用软件编码）。
 const START_HARDWARE_KEY: &str = "hw";
 /// START 前缀令牌：软件编码预设名。
@@ -359,6 +375,50 @@ fn parse_max_size(text: &str) -> Option<(u32, u32)> {
     (ok(a) && ok(b)).then_some((a.max(b), a.min(b)))
 }
 
+/// 把边长向下规整为偶数（H.264/MP4 要求），最小为 2。
+fn even_floor(value: u32) -> u32 {
+    (value & !1).max(2)
+}
+
+/// 按选区宽高比与目标短边，算出等比、偶数、不放大的输出尺寸。
+///
+/// 选区短边不超过目标时不缩放（只把边长规整为偶数）；超过时按短边等比缩小，
+/// 长边向下取整后规整为偶数（与录制进程的框内缩放口径一致），两边至少为 2。
+///
+/// # 参数
+/// - `width`、`height`：选区物理像素尺寸；为 0 时按 2 处理。
+/// - `target_short_side`：目标短边（如 1080 / 720 / 480）；为 0 时不缩放。
+///
+/// # 返回
+/// （宽，高），保持选区方向。
+///
+/// # 示例
+/// ```
+/// use snow_recorder_protocol::fit_output_size;
+/// assert_eq!(fit_output_size(2560, 1440, 720), (1280, 720));
+/// assert_eq!(fit_output_size(1280, 720, 1080), (1280, 720));
+/// ```
+pub fn fit_output_size(width: u32, height: u32, target_short_side: u32) -> (u32, u32) {
+    let (w, h) = (width.max(1), height.max(1));
+    let short = w.min(h);
+    if target_short_side == 0 || short <= target_short_side {
+        return (even_floor(w), even_floor(h));
+    }
+    let scale = |side: u32| {
+        let scaled = u64::from(side) * u64::from(target_short_side) / u64::from(short);
+        even_floor(u32::try_from(scaled).unwrap_or(u32::MAX))
+    };
+    (scale(w), scale(h))
+}
+
+/// 解析 `宽x高`（不重排方向）；两边须在 `1..=MAX_SIZE_SIDE_LIMIT`，并规整为偶数，否则 `None`。
+fn parse_output_size(text: &str) -> Option<(u32, u32)> {
+    let (a, b) = text.split_once('x')?;
+    let (a, b) = (a.parse::<u32>().ok()?, b.parse::<u32>().ok()?);
+    let ok = |v: u32| (1..=MAX_SIZE_SIDE_LIMIT).contains(&v);
+    (ok(a) && ok(b)).then(|| (even_floor(a), even_floor(b)))
+}
+
 /// 把 RGBA 编成 `RRGGBBAA` 十六进制。
 fn rgba_hex(c: [u8; 4]) -> String {
     format!("{:02X}{:02X}{:02X}{:02X}", c[0], c[1], c[2], c[3])
@@ -458,6 +518,8 @@ pub struct StartRequest {
     pub effects: EffectsRequest,
     /// 编码质量请求（默认全缺省，等同旧版行为）。
     pub quality: QualityRequest,
+    /// 精确输出尺寸（宽，高；按选区方向，须为偶数）；`None` 沿用原选区尺寸（受清晰度上限约束）。
+    pub output_size: Option<(u32, u32)>,
 }
 
 /// 编辑引擎选择。
@@ -605,7 +667,7 @@ impl ExtractMode {
 }
 
 /// 编辑操作。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EditOp {
     /// 降低帧率（按 PTS 网格丢帧，重编码为 H.264）。
     ReduceFps {
@@ -635,11 +697,55 @@ pub enum EditOp {
         /// 终点（毫秒）。
         end_ms: u64,
     },
+    /// 按关键帧无重编码裁剪多个保留区间，并按顺序拼成一个文件。
+    TrimSegments {
+        /// 保留区间 `[start, end)`（毫秒），升序、不重叠、每段 start<end。
+        segments: Vec<(u64, u64)>,
+    },
+}
+
+/// 多段裁剪记号前缀。
+const TRIM_SEGMENTS_TAG: &str = "trims";
+/// 多段裁剪里段与段的分隔符。
+const SEGMENT_SEP: char = ';';
+/// 多段裁剪里起点与终点的分隔符。
+const SEGMENT_RANGE_SEP: char = '-';
+
+/// 校验保留区间：非空、每段 start<end、升序且不重叠。
+///
+/// # 参数
+/// - `segments`：保留区间（毫秒，`[start, end)`）。
+///
+/// # 返回
+/// 合法返回 `Ok(())`，否则返回带原因的 [`ParseError`]。
+///
+/// # 示例
+/// ```
+/// use snow_recorder_protocol::validate_segments;
+/// assert!(validate_segments(&[(0, 1500), (4000, 9000)]).is_ok());
+/// assert!(validate_segments(&[(0, 1500), (1000, 2000)]).is_err());
+/// ```
+pub fn validate_segments(segments: &[(u64, u64)]) -> Result<(), ParseError> {
+    if segments.is_empty() {
+        return err("裁剪区间不能为空");
+    }
+    let mut prev_end = 0u64;
+    for (i, &(start, end)) in segments.iter().enumerate() {
+        if start >= end {
+            return err(format!("第 {} 段起点必须早于终点", i + 1));
+        }
+        if i > 0 && start < prev_end {
+            return err(format!("第 {} 段与前一段重叠或乱序", i + 1));
+        }
+        prev_end = end;
+    }
+    Ok(())
 }
 
 impl EditOp {
-    /// 序列化为不含空白的记号（逗号分隔），如 `frames,single=1500,png,90`。
-    pub fn to_token(self) -> String {
+    /// 序列化为不含空白的记号（逗号分隔），如 `frames,single=1500,png,90`；
+    /// 多段裁剪为 `trims,0-1500;4000-9000`。
+    pub fn to_token(&self) -> String {
         match self {
             Self::ReduceFps { target_fps } => format!("fps,{target_fps}"),
             Self::Scale { width, height } => format!("scale,{width},{height}"),
@@ -651,6 +757,16 @@ impl EditOp {
                 format!("frames,{},{},{quality}", mode.to_token(), format.as_str())
             }
             Self::TrimKeyframe { start_ms, end_ms } => format!("trim,{start_ms},{end_ms}"),
+            Self::TrimSegments { segments } => {
+                let body: Vec<String> = segments
+                    .iter()
+                    .map(|(s, e)| format!("{s}{SEGMENT_RANGE_SEP}{e}"))
+                    .collect();
+                format!(
+                    "{TRIM_SEGMENTS_TAG},{}",
+                    body.join(&SEGMENT_SEP.to_string())
+                )
+            }
         }
     }
 
@@ -691,6 +807,17 @@ impl EditOp {
                 start_ms: number(it.next(), "start_ms")?,
                 end_ms: number(it.next(), "end_ms")?,
             }),
+            Some(TRIM_SEGMENTS_TAG) => {
+                let mut segments = Vec::new();
+                for part in it.next().unwrap_or("").split(SEGMENT_SEP) {
+                    let Some((s, e)) = part.split_once(SEGMENT_RANGE_SEP) else {
+                        return err(format!("裁剪区间格式应为 起点-终点: {part}"));
+                    };
+                    segments.push((number(Some(s), "start_ms")?, number(Some(e), "end_ms")?));
+                }
+                validate_segments(&segments)?;
+                Ok(Self::TrimSegments { segments })
+            }
             other => err(format!("未知编辑操作: {}", other.unwrap_or(""))),
         }
     }
@@ -746,6 +873,97 @@ pub enum Command {
         /// 输入视频。
         input: PathBuf,
     },
+    /// 打开编辑会话：打开并扫描，回 `ProbeResult` 与 `Keyframes`。
+    Open {
+        /// 输入视频。
+        input: PathBuf,
+    },
+    /// 按时间列表依次取缩略图（渐进回 `ThumbReady`）；会打断尚未完成的上一批。
+    ///
+    /// 缩放规则：等比缩放到完整落入 `width`x`height`（不放大、不裁切），
+    /// 实际宽高以事件里的 `w`/`h` 为准。
+    Thumbs {
+        /// 批次号，事件原样带回；旧批次被打断后不再回报。
+        id: u64,
+        /// 目标框宽。
+        width: u32,
+        /// 目标框高。
+        height: u32,
+        /// 要取帧的时间（毫秒）。
+        times_ms: Vec<u64>,
+    },
+    /// 取某时刻的显示帧（回 `FrameReady`）；会打断尚未完成的缩略图批次。
+    Frame {
+        /// 请求序号，事件原样带回。
+        seq: u64,
+        /// 时间（毫秒）。
+        at_ms: u64,
+        /// 最大宽度（不放大，等比缩放）。
+        max_w: u32,
+    },
+    /// 关闭编辑会话：清理 scratch 目录并退出进程。
+    Close,
+}
+
+/// 编辑会话的帧文件扩展名（内容为纯 BGRA 像素，宽高在事件里）。
+pub const FRAME_FILE_EXT: &str = "bgra";
+/// 编辑会话 scratch 目录名前缀（位于系统临时目录下，不碰上游数据目录）。
+pub const SESSION_SCRATCH_PREFIX: &str = "snow-edit-session-";
+/// 预览帧文件保留的个数（超出的旧 seq 文件会被删除）。
+pub const FRAME_KEEP: u64 = 16;
+
+/// 编辑会话的 scratch 目录：`<系统临时目录>/snow-edit-session-<pid>`。
+///
+/// # 参数
+/// - `pid`：recorder 进程 ID。
+///
+/// # 返回
+/// 目录路径（会话关闭时整目录删除；崩溃后主程序可按同规则清理）。
+///
+/// # 示例
+/// ```
+/// let d = snow_recorder_protocol::session_scratch_dir(7);
+/// assert!(d.ends_with("snow-edit-session-7"));
+/// ```
+pub fn session_scratch_dir(pid: u32) -> PathBuf {
+    std::env::temp_dir().join(format!("{SESSION_SCRATCH_PREFIX}{pid}"))
+}
+
+/// 缩略图文件名：`t<id>-<index>.bgra`。
+///
+/// # 参数
+/// - `id`：批次号。
+/// - `index`：批内序号。
+pub fn thumb_file_name(id: u64, index: usize) -> String {
+    format!("t{id}-{index}.{FRAME_FILE_EXT}")
+}
+
+/// 预览帧文件名：`f<seq>.bgra`。
+///
+/// # 参数
+/// - `seq`：请求序号。
+pub fn frame_file_name(seq: u64) -> String {
+    format!("f{seq}.{FRAME_FILE_EXT}")
+}
+
+/// 毫秒列表转逗号分隔文本（空列表为空串）。
+fn join_numbers(list: &[u64]) -> String {
+    let mut out = String::with_capacity(list.len() * 7);
+    for (i, v) in list.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str(&v.to_string());
+    }
+    out
+}
+
+/// 解析逗号分隔的数字列表；空串得到空列表。
+fn parse_numbers(text: &str, name: &str) -> Result<Vec<u64>, ParseError> {
+    if text.is_empty() {
+        return Ok(Vec::new());
+    }
+    text.split(',').map(|t| number(Some(t), name)).collect()
 }
 
 /// 录制进程回报给主程序的事件。
@@ -804,6 +1022,39 @@ pub enum Event {
         source: AudioSource,
         /// 新状态。
         status: AudioStatus,
+    },
+    /// 关键帧时间表（毫秒，升序；数量过大时会被均匀抽稀）。
+    Keyframes {
+        /// 关键帧时间。
+        ms: Vec<u64>,
+    },
+    /// 一张缩略图就绪；文件为 `w*h*4` 字节的 BGRA。
+    ThumbReady {
+        /// 批次号。
+        id: u64,
+        /// 批内序号。
+        index: u64,
+        /// 实际帧的时间（毫秒）。
+        at_ms: u64,
+        /// 宽。
+        w: u32,
+        /// 高。
+        h: u32,
+        /// 像素文件。
+        path: PathBuf,
+    },
+    /// 预览帧就绪；文件为 `w*h*4` 字节的 BGRA。
+    FrameReady {
+        /// 请求序号。
+        seq: u64,
+        /// 实际帧的时间（毫秒）。
+        at_ms: u64,
+        /// 宽。
+        w: u32,
+        /// 高。
+        h: u32,
+        /// 像素文件。
+        path: PathBuf,
     },
 }
 
@@ -888,7 +1139,12 @@ fn decode_token(text: &str) -> Option<String> {
 }
 
 /// START 的可选前缀令牌（每个后跟一个空格）；缺省值不输出，旧格式字节不变。
-fn start_prefix(a: &AudioRequest, e: &EffectsRequest, q: &QualityRequest) -> String {
+fn start_prefix(
+    a: &AudioRequest,
+    e: &EffectsRequest,
+    q: &QualityRequest,
+    output_size: Option<(u32, u32)>,
+) -> String {
     let mut out = String::new();
     if a.microphone {
         out.push_str(&format!("{START_MIC_KEY}=1 "));
@@ -944,6 +1200,9 @@ fn start_prefix(a: &AudioRequest, e: &EffectsRequest, q: &QualityRequest) -> Str
     }
     if let Some((long, short)) = q.max_size {
         out.push_str(&format!("{START_MAX_SIZE_KEY}={long}x{short} "));
+    }
+    if let Some((w, h)) = output_size {
+        out.push_str(&format!("{START_OUTPUT_SIZE_KEY}={w}x{h} "));
     }
     if !q.hardware {
         out.push_str(&format!("{START_HARDWARE_KEY}=0 "));
@@ -1021,7 +1280,7 @@ impl Command {
         match self {
             Self::Start(r) => format!(
                 "{CMD_START} {}{} {} {} {} {} {} {} {}",
-                start_prefix(&r.audio, &r.effects, &r.quality),
+                start_prefix(&r.audio, &r.effects, &r.quality, r.output_size),
                 r.x,
                 r.y,
                 r.width,
@@ -1045,6 +1304,18 @@ impl Command {
             Self::Probe { input } => {
                 format!("{CMD_PROBE} {}", line_path(input))
             }
+            Self::Open { input } => format!("{CMD_OPEN} {}", line_path(input)),
+            Self::Thumbs {
+                id,
+                width,
+                height,
+                times_ms,
+            } => format!(
+                "{CMD_THUMBS} {id} {width} {height} {}",
+                join_numbers(times_ms)
+            ),
+            Self::Frame { seq, at_ms, max_w } => format!("{CMD_FRAME} {seq} {at_ms} {max_w}"),
+            Self::Close => CMD_CLOSE.to_string(),
         }
     }
 
@@ -1069,16 +1340,48 @@ impl Command {
             CMD_RESUME => Ok(Self::Resume),
             CMD_STOP => Ok(Self::Stop),
             CMD_CANCEL => Ok(Self::Cancel),
+            CMD_CLOSE => Ok(Self::Close),
+            CMD_OPEN => {
+                if rest.is_empty() {
+                    return err("字段 input 缺失");
+                }
+                Ok(Self::Open {
+                    input: PathBuf::from(rest),
+                })
+            }
+            CMD_THUMBS => {
+                let mut it = rest.splitn(4, ' ');
+                Ok(Self::Thumbs {
+                    id: number(it.next(), "id")?,
+                    width: number(it.next(), "width")?,
+                    height: number(it.next(), "height")?,
+                    times_ms: parse_numbers(it.next().unwrap_or(""), "times_ms")?,
+                })
+            }
+            CMD_FRAME => {
+                let mut it = rest.split(' ');
+                Ok(Self::Frame {
+                    seq: number(it.next(), "seq")?,
+                    at_ms: number(it.next(), "at_ms")?,
+                    max_w: number(it.next(), "max_w")?,
+                })
+            }
             CMD_START => {
                 let mut audio = AudioRequest::default();
                 let mut effects = EffectsRequest::default();
                 let mut quality = QualityRequest::default();
+                let mut output_size = None;
                 let mut rest = rest;
                 while let Some((token, after)) = rest
                     .split_once(' ')
                     .filter(|(token, _)| token.contains('='))
                 {
-                    apply_prefix_token(&mut audio, &mut effects, &mut quality, token);
+                    match token.split_once('=') {
+                        Some((START_OUTPUT_SIZE_KEY, value)) => {
+                            output_size = parse_output_size(value);
+                        }
+                        _ => apply_prefix_token(&mut audio, &mut effects, &mut quality, token),
+                    }
                     rest = after;
                 }
                 let mut it = rest.splitn(8, ' ');
@@ -1106,6 +1409,7 @@ impl Command {
                     audio,
                     effects,
                     quality,
+                    output_size,
                 }))
             }
             CMD_EDIT => {
@@ -1187,6 +1491,28 @@ impl Event {
             Self::AudioState { source, status } => {
                 format!("{EVT_AUDIO_STATE} {} {}", source.as_str(), status.as_str())
             }
+            Self::Keyframes { ms } => format!("{EVT_KEYFRAMES} {}", join_numbers(ms)),
+            Self::ThumbReady {
+                id,
+                index,
+                at_ms,
+                w,
+                h,
+                path,
+            } => format!(
+                "{EVT_THUMB_READY} {id} {index} {at_ms} {w} {h} {}",
+                line_path(path)
+            ),
+            Self::FrameReady {
+                seq,
+                at_ms,
+                w,
+                h,
+                path,
+            } => format!(
+                "{EVT_FRAME_READY} {seq} {at_ms} {w} {h} {}",
+                line_path(path)
+            ),
         }
     }
 
@@ -1284,6 +1610,44 @@ impl Event {
                 };
                 Ok(Self::AudioState { source, status })
             }
+            EVT_KEYFRAMES => Ok(Self::Keyframes {
+                ms: parse_numbers(rest, "ms")?,
+            }),
+            EVT_THUMB_READY => {
+                let mut it = rest.splitn(6, ' ');
+                let (id, index, at_ms) = (
+                    number(it.next(), "id")?,
+                    number(it.next(), "index")?,
+                    number(it.next(), "at_ms")?,
+                );
+                let (w, h) = (number(it.next(), "w")?, number(it.next(), "h")?);
+                let Some(path) = it.next().filter(|p| !p.is_empty()) else {
+                    return err(MSG_PATH_MISSING);
+                };
+                Ok(Self::ThumbReady {
+                    id,
+                    index,
+                    at_ms,
+                    w,
+                    h,
+                    path: PathBuf::from(path),
+                })
+            }
+            EVT_FRAME_READY => {
+                let mut it = rest.splitn(5, ' ');
+                let (seq, at_ms) = (number(it.next(), "seq")?, number(it.next(), "at_ms")?);
+                let (w, h) = (number(it.next(), "w")?, number(it.next(), "h")?);
+                let Some(path) = it.next().filter(|p| !p.is_empty()) else {
+                    return err(MSG_PATH_MISSING);
+                };
+                Ok(Self::FrameReady {
+                    seq,
+                    at_ms,
+                    w,
+                    h,
+                    path: PathBuf::from(path),
+                })
+            }
             other => err(format!("未知事件: {other}")),
         }
     }
@@ -1307,6 +1671,7 @@ mod tests {
             audio: AudioRequest::default(),
             effects: EffectsRequest::default(),
             quality: QualityRequest::default(),
+            output_size: None,
         }
     }
 
@@ -1320,6 +1685,79 @@ mod tests {
             mic_device: Some("{0.0.1.00000000}.{abc-1} 麦克风".into()),
             system_device: Some("扬声器 (Realtek)".into()),
         }
+    }
+
+    /// 编辑会话命令与事件往返（路径含空格、空时间表、空关键帧表）。
+    #[test]
+    fn edit_session_round_trip() {
+        let cmds = [
+            Command::Open {
+                input: PathBuf::from("C:\\My Videos\\a b.mp4"),
+            },
+            Command::Thumbs {
+                id: 3,
+                width: 160,
+                height: 90,
+                times_ms: vec![0, 500, 1_000],
+            },
+            Command::Thumbs {
+                id: 4,
+                width: 1,
+                height: 1,
+                times_ms: vec![],
+            },
+            Command::Frame {
+                seq: 9,
+                at_ms: 1234,
+                max_w: 960,
+            },
+            Command::Close,
+        ];
+        for c in cmds {
+            assert_eq!(Command::parse(&c.to_line()).unwrap(), c, "{}", c.to_line());
+        }
+        let evts = [
+            Event::Keyframes {
+                ms: vec![0, 2000, 4000],
+            },
+            Event::Keyframes { ms: vec![] },
+            Event::ThumbReady {
+                id: 3,
+                index: 1,
+                at_ms: 480,
+                w: 160,
+                h: 90,
+                path: PathBuf::from("C:\\Temp\\s s\\t3-1.bgra"),
+            },
+            Event::FrameReady {
+                seq: 9,
+                at_ms: 1200,
+                w: 960,
+                h: 540,
+                path: PathBuf::from("C:\\Temp\\f9.bgra"),
+            },
+        ];
+        for e in evts {
+            assert_eq!(Event::parse(&e.to_line()).unwrap(), e, "{}", e.to_line());
+        }
+        let line = Command::Thumbs {
+            id: 1,
+            width: 2,
+            height: 3,
+            times_ms: vec![4, 5],
+        }
+        .to_line();
+        assert_eq!(line, "THUMBS 1 2 3 4,5");
+        assert!(Command::parse("THUMBS 1 2 3 4,x").is_err());
+        assert!(Command::parse("OPEN").is_err());
+    }
+
+    /// 会话 scratch 目录与帧文件命名。
+    #[test]
+    fn session_file_names() {
+        assert!(session_scratch_dir(5).ends_with("snow-edit-session-5"));
+        assert_eq!(thumb_file_name(2, 7), "t2-7.bgra");
+        assert_eq!(frame_file_name(11), "f11.bgra");
     }
 
     /// 默认录音请求的 START 行与旧格式字节完全一致。
@@ -1486,6 +1924,9 @@ mod tests {
                 start_ms: 1000,
                 end_ms: 5000,
             },
+            EditOp::TrimSegments {
+                segments: vec![(0, 1500), (4000, 9000)],
+            },
         ];
         let engines = [EngineKind::Auto, EngineKind::System, EngineKind::Ffmpeg];
         ops.into_iter()
@@ -1497,6 +1938,44 @@ mod tests {
                 output: PathBuf::from("D:\\out dir\\x y"),
             })
             .collect()
+    }
+
+    /// 多段裁剪记号：格式固定、往返一致。
+    #[test]
+    fn trim_segments_token_round_trip() {
+        let op = EditOp::TrimSegments {
+            segments: vec![(0, 1500), (4000, 9000)],
+        };
+        assert_eq!(op.to_token(), "trims,0-1500;4000-9000");
+        assert_eq!(EditOp::parse_token("trims,0-1500;4000-9000").unwrap(), op);
+        let one = EditOp::parse_token("trims,10-20").unwrap();
+        assert_eq!(
+            one,
+            EditOp::TrimSegments {
+                segments: vec![(10, 20)]
+            }
+        );
+    }
+
+    /// 多段裁剪的非法输入：空、缺分隔、反向、重叠、乱序、非数字。
+    #[test]
+    fn trim_segments_rejects_invalid() {
+        for bad in [
+            "trims",
+            "trims,",
+            "trims,100",
+            "trims,5-5",
+            "trims,9-3",
+            "trims,0-100;50-200",
+            "trims,500-600;0-100",
+            "trims,a-b",
+            "trims,0-100;",
+        ] {
+            assert!(EditOp::parse_token(bad).is_err(), "应拒绝: {bad:?}");
+        }
+        assert!(validate_segments(&[]).is_err());
+        // 首尾相接允许
+        assert!(validate_segments(&[(0, 100), (100, 200)]).is_ok());
     }
 
     /// 编辑与探测命令往返：路径含空格。
@@ -1590,6 +2069,7 @@ mod tests {
             audio: AudioRequest::default(),
             effects: EffectsRequest::default(),
             quality: QualityRequest::default(),
+            output_size: None,
         };
         assert_eq!(
             Command::Start(base.clone()).to_line(),
@@ -1662,5 +2142,59 @@ mod tests {
             panic!("应为 START");
         };
         assert_eq!(r.quality.max_size, None);
+    }
+
+    /// 输出尺寸计算：等比、偶数、不放大、极端宽高比、选区小于目标档。
+    #[test]
+    fn fit_output_size_rules() {
+        assert_eq!(fit_output_size(2560, 1440, 720), (1280, 720));
+        assert_eq!(fit_output_size(3840, 2160, 1080), (1920, 1080));
+        // 竖屏选区保持方向
+        assert_eq!(fit_output_size(1440, 2560, 720), (720, 1280));
+        // 不放大：选区短边不超过目标时保持原样
+        assert_eq!(fit_output_size(1280, 720, 1080), (1280, 720));
+        assert_eq!(fit_output_size(640, 360, 1080), (640, 360));
+        // 奇数边规整为偶数
+        assert_eq!(fit_output_size(641, 361, 1080), (640, 360));
+        // 缩放后长边奇数也规整为偶数：1001x601 -> 短边 480，长边 799.4 -> 向下取整 799 -> 798
+        assert_eq!(fit_output_size(1001, 601, 480), (798, 480));
+        // 极端宽高比：短边下限为 2，不得为 0
+        assert_eq!(fit_output_size(10000, 1, 720), (10000, 2));
+        let (w, h) = fit_output_size(16000, 800, 480);
+        assert_eq!((w, h), (9600, 480));
+        // 目标为 0 或选区为 0：不缩放且不为 0
+        assert_eq!(fit_output_size(1920, 1080, 0), (1920, 1080));
+        assert_eq!(fit_output_size(0, 0, 720), (2, 2));
+    }
+
+    /// 输出尺寸字段往返：缺省不产生令牌（旧格式字节不变）；设置后往返；奇数规整、非法忽略。
+    #[test]
+    fn output_size_roundtrip_and_legacy_compat() {
+        let mut req = sample_start();
+        req.format = MediaFormat::Mp4;
+        req.output = PathBuf::from("o.mp4");
+        assert!(!Command::Start(req.clone()).to_line().contains("outsz"));
+        // 旧格式（无该令牌）仍可解析，且为 None
+        let Command::Start(old) = Command::parse("START 1 2 3 4 mp4 30 0 o.mp4").unwrap() else {
+            panic!("应为 START");
+        };
+        assert_eq!(old.output_size, None);
+        req.output_size = Some((1280, 720));
+        let line = Command::Start(req.clone()).to_line();
+        assert!(line.contains("outsz=1280x720"));
+        assert_eq!(Command::parse(&line).unwrap(), Command::Start(req));
+        let Command::Start(r) =
+            Command::parse("START outsz=1281x721 1 2 3 4 mp4 30 0 o.mp4").unwrap()
+        else {
+            panic!("应为 START");
+        };
+        assert_eq!(r.output_size, Some((1280, 720)));
+        for bad in ["bad", "0x720", "99999x10", "1280"] {
+            let line = format!("START outsz={bad} 1 2 3 4 mp4 30 0 o.mp4");
+            let Command::Start(r) = Command::parse(&line).unwrap() else {
+                panic!("应为 START");
+            };
+            assert_eq!(r.output_size, None, "{bad}");
+        }
     }
 }
