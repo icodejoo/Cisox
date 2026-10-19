@@ -121,7 +121,7 @@ jobs:
       # 根目录 .cargo/config.toml 把 target 指到 build/cargo，这里单独给 latex 一个目录，产物位置才确定
       - name: Build latex (cisox-latex)
         env:
-          CARGO_TARGET_DIR: ${{ github.workspace }}uild\latex
+          CARGO_TARGET_DIR: ${{ github.workspace }}\build\latex
         run: cargo build --release --manifest-path snow-shot-rs/tools/snow-latex/Cargo.toml
 
       # stt：构建期联网下载 sherpa 预编译库（静态 CRT）；其 onnxruntime.dll 随包，
@@ -156,7 +156,8 @@ jobs:
           ./scripts/package-cisox.ps1 `
             -Version "${{ steps.ver.outputs.version }}" `
             -MainReleaseDir "$env:GITHUB_WORKSPACE\build\cargo\release" `
-            -SttReleaseDir "$env:STT_TARGET\release"
+            -SttReleaseDir "$env:STT_TARGET\release" `
+            -LatexReleaseDir "$env:GITHUB_WORKSPACE\build\latex\release"
 
       # 冒烟：静默安装到临时目录，检查关键文件都在
       - name: Smoke test silent install
