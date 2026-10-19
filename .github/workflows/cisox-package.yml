@@ -93,20 +93,21 @@ jobs:
           if (-not (Test-Path "$dir\libclang.dll")) { throw "runner 上找不到 libclang: $dir" }
           "LIBCLANG_PATH=$dir" >> $env:GITHUB_ENV
 
-      # ---- FFmpeg（录制 worker 的静态依赖，vcpkg 构建，耗时最长，缓存） ----
-      - name: Bootstrap vcpkg
-        run: ./scripts/bootstrap.ps1 -VcpkgVariants Static -SkipDependencyInstall -SkipQtValidation
-
-      - name: Cache static FFmpeg
-        id: ffmpeg-cache
-        uses: actions/cache@v4
-        with:
-          path: .tools/vcpkg/installed/static-nox265
-          key: ffmpeg-static-nox265-${{ runner.os }}-${{ hashFiles('snow-shot-rs/tools/snow-recorder/vcpkg-overlay/**', 'cmake/vcpkg-overlay-ports/**', 'cmake/vcpkg-overlay-triplets/**', 'scripts/build-ffmpeg-recorder.ps1') }}
-
-      - name: Build static FFmpeg
-        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
-        run: ./scripts/build-ffmpeg-recorder.ps1
+      # ---- FFmpeg：不在这里编，直接下载 cisox-ffmpeg.yml 发布的预编译包 ----
+      - name: Fetch prebuilt FFmpeg
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $asset = "ffmpeg-static-nox265-x64-windows-static.zip"
+          gh release download deps-ffmpeg --pattern "$asset" --pattern "$asset.sha256"
+          if ($LASTEXITCODE -ne 0) { throw "下载 FFmpeg 失败：先运行 cisox-ffmpeg 工作流生成 Release deps-ffmpeg" }
+          $want = ((Get-Content "$asset.sha256" -Raw).Trim() -split '\s+')[0].ToLower()
+          $got = (Get-FileHash $asset -Algorithm SHA256).Hash.ToLower()
+          if ($want -ne $got) { throw "FFmpeg 校验失败: 期望 $want, 实际 $got" }
+          $dest = ".tools/vcpkg/installed/static-nox265/x64-windows-static"
+          New-Item -ItemType Directory -Force $dest | Out-Null
+          Expand-Archive -Path $asset -DestinationPath $dest -Force
+          if (-not (Test-Path "$dest/lib/avcodec.lib")) { throw "解压后缺少 avcodec.lib" }
 
       # ---- 各 worker ----
       - name: Build recorder (cisox-recorder)
