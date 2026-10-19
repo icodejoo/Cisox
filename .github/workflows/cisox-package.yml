@@ -1,0 +1,186 @@
+name: Cisox Package
+
+# 在 CI 里编出完整功能的 Cisox 安装包：宿主 + UI + 录制 / 语音 / 翻译 / 表格 / 公式 五个 worker。
+# 产物：NSIS 安装包（当前用户安装）+ 便携 zip。打 tag（vX.Y.Z_cisox）时额外建草稿 Release。
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "版本号（留空则取 snow-shot-rs/Cargo.toml 的 workspace 版本）"
+        required: false
+        default: ""
+  push:
+    tags:
+      - "v*_cisox"
+    # 打包相关文件改动时自动验证一轮（工作流要先进默认分支才能手动触发，分支触发可提前验证）
+    branches:
+      - "jelon/**"
+    paths:
+      - ".github/workflows/cisox-package.yml"
+      - "scripts/package-cisox.ps1"
+      - "installer/**"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: cisox-package-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  # 独立 workspace 的 worker 用短路径的 target，避免 sherpa 预编译包路径过长
+  STT_TARGET: C:\stt
+
+jobs:
+  package:
+    name: Build installer (windows-x64)
+    runs-on: windows-latest
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: ver
+        run: |
+          $v = "${{ inputs.version }}"
+          if ([string]::IsNullOrWhiteSpace($v) -and "${{ github.ref_type }}" -eq "tag") {
+            $v = "${{ github.ref_name }}" -replace '^v', '' -replace '_cisox$', ''
+          }
+          if ([string]::IsNullOrWhiteSpace($v)) {
+            $m = Select-String -Path snow-shot-rs/Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1
+            if (-not $m) { throw "读不到 workspace 版本号" }
+            $v = $m.Matches[0].Groups[1].Value
+          }
+          if ($v -notmatch '^\d+\.\d+\.\d+$') { throw "版本号必须是 X.Y.Z，实际 '$v'" }
+          "version=$v" >> $env:GITHUB_OUTPUT
+          Write-Host "版本: $v"
+
+      - name: Select MSVC x64 tools
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.1
+          targets: x86_64-pc-windows-msvc
+
+      # 主工作区与四个独立 worker 工作区各缓存各自的 target
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            snow-shot-rs
+            snow-shot-rs/tools/snow-recorder
+            snow-shot-rs/tools/snow-translator
+            snow-shot-rs/tools/snow-table
+            snow-shot-rs/tools/snow-latex
+          cache-on-failure: true
+
+      - name: Install NSIS
+        run: choco install nsis -y --no-progress
+
+      # libclang（ffmpeg-sys 的 bindgen 要用）：runner 自带 LLVM
+      - name: Locate libclang
+        run: |
+          $dir = "C:\Program Files\LLVM\bin"
+          if (-not (Test-Path "$dir\libclang.dll")) { throw "runner 上找不到 libclang: $dir" }
+          "LIBCLANG_PATH=$dir" >> $env:GITHUB_ENV
+
+      # ---- FFmpeg（录制 worker 的静态依赖，vcpkg 构建，耗时最长，缓存） ----
+      - name: Bootstrap vcpkg
+        run: ./scripts/bootstrap.ps1 -VcpkgVariants Static -SkipDependencyInstall -SkipQtValidation
+
+      - name: Cache static FFmpeg
+        id: ffmpeg-cache
+        uses: actions/cache@v4
+        with:
+          path: .tools/vcpkg/installed/static-nox265
+          key: ffmpeg-static-nox265-${{ runner.os }}-${{ hashFiles('snow-shot-rs/tools/snow-recorder/vcpkg-overlay/**', 'cmake/vcpkg-overlay-ports/**', 'cmake/vcpkg-overlay-triplets/**', 'scripts/build-ffmpeg-recorder.ps1') }}
+
+      - name: Build static FFmpeg
+        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        run: ./scripts/build-ffmpeg-recorder.ps1
+
+      # ---- 各 worker ----
+      - name: Build recorder (cisox-recorder)
+        run: ./scripts/build-snow-recorder.ps1 -Profile release
+
+      - name: Build translator (cisox-translator)
+        run: ./scripts/build-snow-translator.ps1 -Profile release
+
+      - name: Build table (cisox-table)
+        run: ./scripts/build-snow-table.ps1 -Profile release
+
+      - name: Build latex (cisox-latex)
+        run: cargo build --release --manifest-path snow-shot-rs/tools/snow-latex/Cargo.toml
+
+      # stt：构建期联网下载 sherpa 预编译库（静态 CRT）；其 onnxruntime.dll 随包，
+      # 同目录的 table / translator / latex 也用它（要求 ≥1.28，ort api-28）。
+      - name: Build stt (cisox-stt)
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+          CARGO_TARGET_DIR: ${{ env.STT_TARGET }}
+        run: |
+          cargo build --release -j 2 --manifest-path snow-shot-rs/tools/snow-stt/Cargo.toml
+          if ($LASTEXITCODE -ne 0) { throw "cargo 失败，退出码 $LASTEXITCODE" }
+          $rel = Join-Path $env:STT_TARGET "release"
+          $c = Get-ChildItem -Path $env:STT_TARGET -Recurse -Filter "sherpa-onnx-c-api.dll" |
+            Where-Object { $_.FullName -match "sherpa-onnx-prebuilt" } | Select-Object -First 1
+          if (-not $c) { throw "找不到 sherpa-onnx-c-api.dll（构建期下载失败？）" }
+          foreach ($n in "sherpa-onnx-c-api.dll", "onnxruntime.dll", "onnxruntime_providers_shared.dll") {
+            $f = Join-Path $c.DirectoryName $n
+            if (Test-Path $f) { Copy-Item $f $rel -Force } elseif ($n -ne "onnxruntime_providers_shared.dll") { throw "缺少 $f" }
+          }
+          $ver = [version](Get-Item (Join-Path $rel "onnxruntime.dll")).VersionInfo.FileVersionRaw
+          Write-Host "onnxruntime $ver"
+          if ($ver -lt [version]"1.28.0") { throw "onnxruntime 版本过低: $ver（需要 ≥1.28）" }
+
+      # ---- 宿主 + UI（同一条命令，与真实打包一致） ----
+      - name: Build host and UI (cisox.exe, cisox-ui.exe)
+        working-directory: snow-shot-rs
+        run: cargo build --release -p snow-tray-host -p snow-shot
+
+      # ---- 打包 ----
+      - name: Package
+        run: |
+          ./scripts/package-cisox.ps1 `
+            -Version "${{ steps.ver.outputs.version }}" `
+            -MainReleaseDir "$env:GITHUB_WORKSPACE\build\cargo\release" `
+            -SttReleaseDir "$env:STT_TARGET\release"
+
+      # 冒烟：静默安装到临时目录，检查关键文件都在
+      - name: Smoke test silent install
+        run: |
+          $setup = Get-ChildItem artifacts/cisox-dist -Filter "Cisox-*-setup.exe" | Select-Object -First 1
+          $dest = "C:\cisox-smoke"
+          $p = Start-Process -FilePath $setup.FullName -ArgumentList "/S", "/D=$dest" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "安装程序退出码 $($p.ExitCode)" }
+          foreach ($n in "cisox.exe","cisox-ui.exe","cisox-recorder.exe","cisox-stt.exe","cisox-translator.exe","cisox-table.exe","cisox-latex.exe","onnxruntime.dll","sherpa-onnx-c-api.dll","Uninstall.exe") {
+            if (-not (Test-Path (Join-Path $dest $n))) { throw "安装后缺少 $n" }
+          }
+          Get-ChildItem $dest | Select-Object Name, Length | Format-Table -AutoSize
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: cisox-${{ steps.ver.outputs.version }}-windows-x64
+          path: |
+            artifacts/cisox-dist/*.exe
+            artifacts/cisox-dist/*.zip
+          if-no-files-found: error
+
+      - name: Draft release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          files: |
+            artifacts/cisox-dist/*.exe
+            artifacts/cisox-dist/*.zip
