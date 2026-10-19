@@ -1,0 +1,77 @@
+name: Cisox FFmpeg
+
+# 单独构建录制 worker 用的静态 FFmpeg（无 x265），产物发布到 Release `deps-ffmpeg`。
+# 它基本不会再变；打包流水线（cisox-package.yml）直接从该 Release 下载，不再自己编。
+# 只有改了 vcpkg overlay / 三元组 / 构建脚本时才需要重新跑（手动触发，或改这些文件时自动触发）。
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "jelon/**"
+    paths:
+      - ".github/workflows/cisox-ffmpeg.yml"
+      - "snow-shot-rs/tools/snow-recorder/vcpkg-overlay/**"
+      - "cmake/vcpkg-overlay-ports/**"
+      - "cmake/vcpkg-overlay-triplets/**"
+      - "scripts/build-ffmpeg-recorder.ps1"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: cisox-ffmpeg
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: deps-ffmpeg
+  ASSET_NAME: ffmpeg-static-nox265-x64-windows-static.zip
+
+jobs:
+  ffmpeg:
+    name: Build static FFmpeg and publish
+    runs-on: windows-latest
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Select MSVC x64 tools
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Bootstrap vcpkg
+        run: ./scripts/bootstrap.ps1 -VcpkgVariants Static -SkipDependencyInstall -SkipQtValidation
+
+      - name: Build static FFmpeg
+        run: ./scripts/build-ffmpeg-recorder.ps1
+
+      # zip 根目录直接是 include / lib / share，解压到
+      # .tools/vcpkg/installed/static-nox265/x64-windows-static 即可被 build-snow-recorder.ps1 识别。
+      - name: Pack
+        run: |
+          $dir = ".tools/vcpkg/installed/static-nox265/x64-windows-static"
+          if (-not (Test-Path "$dir/lib/avcodec.lib")) { throw "缺少 avcodec.lib: $dir" }
+          if (Get-ChildItem "$dir/lib" -Filter "x265*.lib" -ErrorAction SilentlyContinue) { throw "不应含 x265" }
+          Compress-Archive -Force -Path "$dir/include", "$dir/lib", "$dir/share" -DestinationPath $env:ASSET_NAME
+          $hash = (Get-FileHash $env:ASSET_NAME -Algorithm SHA256).Hash.ToLower()
+          "$hash  $env:ASSET_NAME" | Set-Content -NoNewline -Encoding ascii "$env:ASSET_NAME.sha256"
+          Get-Item $env:ASSET_NAME | Select-Object Name, @{n='MB';e={[math]::Round($_.Length/1MB,1)}}
+          Write-Host "sha256: $hash"
+
+      - name: Publish to release
+        run: |
+          gh release view $env:RELEASE_TAG 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $env:RELEASE_TAG --prerelease --target "${{ github.sha }}" `
+              --title "Prebuilt FFmpeg (static, no x265)" `
+              --notes "录制 worker 用的静态 FFmpeg（x64-windows-static，无 x265），由 cisox-ffmpeg.yml 构建；cisox-package.yml 从这里下载。"
+            if ($LASTEXITCODE -ne 0) { throw "创建 release 失败" }
+          }
+          gh release upload $env:RELEASE_TAG $env:ASSET_NAME "$env:ASSET_NAME.sha256" --clobber
+          if ($LASTEXITCODE -ne 0) { throw "上传失败" }
