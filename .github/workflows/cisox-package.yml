@@ -118,7 +118,10 @@ jobs:
       - name: Build table (cisox-table)
         run: ./scripts/build-snow-table.ps1 -Profile release
 
+      # 根目录 .cargo/config.toml 把 target 指到 build/cargo，这里单独给 latex 一个目录，产物位置才确定
       - name: Build latex (cisox-latex)
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}uild\latex
         run: cargo build --release --manifest-path snow-shot-rs/tools/snow-latex/Cargo.toml
 
       # stt：构建期联网下载 sherpa 预编译库（静态 CRT）；其 onnxruntime.dll 随包，
