@@ -71,7 +71,7 @@
 
 **仍未做 / 已知缺口**
 - 智能擦除（D12 P2 / P3：Lab 多尺度 PatchMatch 自写，零新依赖）；MCP 余下 89 个 tool 与桥接进程；G04 Markdown / HTML 调用。
-- 打包：`cisox-table.exe` / `cisox-latex.exe` / `cisox-stt.exe` 入安装包（Rust 版打包脚本尚不存在）；`snow-stt` CI 里没有 test。
+- 打包：`cisox-table.exe` / `cisox-latex.exe` / `cisox-stt.exe` 入安装包（**2026-10-19 已由 GitHub Actions 打包，见 [guides/cisox-packaging.md](guides/cisox-packaging.md)**，七个 exe 全在包里；安装后真机未验证）；`snow-stt` CI 里没有 test。
 - 聚光灯 / 水印黄金对照、水印模板删除与弹窗命名；录屏默认软件编码预设由 superfast 变为 veryfast（CPU 略高）。
 - 真机验证清单：本轮所有新界面（设置内嵌页、翻译窗口、检查更新、归档对话框、表格 / 公式 / 自动滤镜 / 水印面板）、录屏控制条键盘焦点、G02 结果窗渲染、多屏混合 DPI 与负原点副屏；鼠标钩子全流程这台机器测不了。
 
@@ -460,4 +460,4 @@ Windows 主线已经能跑通「热键 / 托盘 / IPC → 截图覆盖窗（单�
 
 **切默认时的前提（已由用户拍板放行）**：① 真屏验收通过；② 托盘态宿主私有提交 ≤ 6MB；③ 冷拉起热键→首帧、连续热键截图无丢命令无双 UI；④ 功能回归；⑤ ~~`dictation_hotkey` 是否登录预拉~~（**2026-10-13 用户改判：绑语音热键不保活、不预拉，窗口全关照常立即退出**，见 `docs/design/tray-host-split.md` §10 第 4 条；代价是冷拉起时按住说话开头可能丢约 1s）。注意首帧实测上沿 1.02s 高于阶段 4 量化口径 0.9s，属已知偏差（2026-10-13 读系统偏好改 `RegGetValueW` 后热路径再快约 123ms；剩余可选优化见 §0.-1）。`--resident` 路径至少保留到用户另行拍板。
 
-**升级与自启（切默认后）**：开机自启永远指向宿主（`system_settings::auto_start_target`，注册表值不能带参数，所以 `--resident` 回退进程也指向宿主）；未发布、不做旧名兼容：旧名（`snow-shot.exe` / `snow-shot-ui.exe`）登记的自启项由用户自行重设；若注册表里指向的是 `cisox-ui.exe`，其无参数启动会转去拉宿主，随后配置载入时自启值被改写为宿主路径。Rust 版暂无安装 / 打包脚本与快捷方式（`scripts/package-snow-shot.ps1` 等是 Qt 版流水线）；将来出现时必须把两个 exe 放同一目录，开始菜单与自启指向宿主，`snow-update` 自动安装要先 `--cmd quit` 宿主再替换两个 exe。
+**升级与自启（切默认后）**：开机自启永远指向宿主（`system_settings::auto_start_target`，注册表值不能带参数，所以 `--resident` 回退进程也指向宿主）；未发布、不做旧名兼容：旧名（`snow-shot.exe` / `snow-shot-ui.exe`）登记的自启项由用户自行重设；若注册表里指向的是 `cisox-ui.exe`，其无参数启动会转去拉宿主，随后配置载入时自启值被改写为宿主路径。Rust 版安装包已由 CI 出（2026-10-19，`installer/cisox.nsi` + `scripts/package-cisox.ps1`，开始菜单快捷方式指向宿主，见 [guides/cisox-packaging.md](guides/cisox-packaging.md)；`scripts/package-snow-shot.ps1` 等是 Qt 版流水线）；约束不变：必须把两个 exe 放同一目录，开始菜单与自启指向宿主，`snow-update` 自动安装要先 `--cmd quit` 宿主再替换两个 exe。

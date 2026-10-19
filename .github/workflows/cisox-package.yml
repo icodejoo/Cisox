@@ -18,6 +18,7 @@ on:
     paths:
       - ".github/workflows/cisox-package.yml"
       - "scripts/package-cisox.ps1"
+      - "scripts/fetch-ffmpeg.ps1"
       - "installer/**"
 
 permissions:
@@ -97,17 +98,7 @@ jobs:
       - name: Fetch prebuilt FFmpeg
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          $asset = "ffmpeg-static-nox265-x64-windows-static.zip"
-          gh release download deps-ffmpeg --pattern "$asset" --pattern "$asset.sha256"
-          if ($LASTEXITCODE -ne 0) { throw "下载 FFmpeg 失败：先运行 cisox-ffmpeg 工作流生成 Release deps-ffmpeg" }
-          $want = ((Get-Content "$asset.sha256" -Raw).Trim() -split '\s+')[0].ToLower()
-          $got = (Get-FileHash $asset -Algorithm SHA256).Hash.ToLower()
-          if ($want -ne $got) { throw "FFmpeg 校验失败: 期望 $want, 实际 $got" }
-          $dest = ".tools/vcpkg/installed/static-nox265/x64-windows-static"
-          New-Item -ItemType Directory -Force $dest | Out-Null
-          Expand-Archive -Path $asset -DestinationPath $dest -Force
-          if (-not (Test-Path "$dest/lib/avcodec.lib")) { throw "解压后缺少 avcodec.lib" }
+        run: ./scripts/fetch-ffmpeg.ps1 -Repo "${{ github.repository }}"
 
       # ---- 各 worker ----
       - name: Build recorder (cisox-recorder)
