@@ -119,9 +119,20 @@ impl VideoEditorView {
             return;
         }
         let ms = view.x_to_ms(x);
+        let near_playhead = (view.ms_to_x(self.playhead_ms) - x).abs() <= EDGE_HIT;
+        if near_playhead {
+            // 抓住黄色播放头：暂停后直接拖动
+            self.pause();
+            self.drag = Some(Drag::Playhead);
+            self.drag_to(x, cx);
+            return;
+        }
         if let Some(idx) = list.segment_at(ms) {
             self.selected = Some(idx);
-            self.seek_to(ms);
+            self.pause();
+            self.drag = Some(Drag::Playhead);
+            self.drag_to(x, cx);
+            return;
         } else {
             self.restore_at(ms, cx);
         }
