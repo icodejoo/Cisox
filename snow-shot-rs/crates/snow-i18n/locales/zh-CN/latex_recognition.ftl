@@ -21,3 +21,7 @@ recwin-latex-title = 识别出的公式
 recwin-copy-latex = 复制 LaTeX
 
 recwin-copy-latex-block = 复制为 $$ 块
+
+latex-err-truncated = 公式超过解码长度上限，请缩小选区后重试。
+latex-err-timeout = 公式识别超时，请重试。
+latex-err-cancelled = 公式识别已取消。

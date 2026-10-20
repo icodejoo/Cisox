@@ -761,6 +761,20 @@ pub trait TranslationEngine: Send + Sync {
         texts.iter().map(|t| self.translate(t, src, tgt)).collect()
     }
 
+    /// 可取消批量翻译；后端可覆盖以打断等待和推理。
+    fn translate_batch_cancellable(
+        &self,
+        texts: &[String],
+        src: Lang,
+        tgt: Lang,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Vec<String>, TranslateError> {
+        if cancelled() {
+            return Err(TranslateError::WorkerDied("translation cancelled".into()));
+        }
+        self.translate_batch(texts, src, tgt)
+    }
+
     /// 返回当前后端支持的语言对组合。
     fn supported_pairs(&self) -> Vec<(Lang, Lang)>;
 
@@ -881,6 +895,29 @@ impl TranslationService {
         let engine = self.engine().ok_or_else(|| {
             TranslateError::NoModelFound("no translation backend is configured".into())
         })?;
+        self.translate_batch_with_engine(engine.as_ref(), texts, src, tgt)
+    }
+
+    /// 使用请求固定的引擎引用，避免配置切换改变在途请求。
+    pub fn translate_batch_with_engine(
+        &self,
+        engine: &dyn TranslationEngine,
+        texts: &[String],
+        src: Lang,
+        tgt: Lang,
+    ) -> Result<Vec<String>, TranslateError> {
+        self.translate_batch_with_engine_cancellable(engine, texts, src, tgt, &|| false)
+    }
+
+    /// 使用请求引擎快照和取消判定，缓存未命中时传递给后端。
+    pub fn translate_batch_with_engine_cancellable(
+        &self,
+        engine: &dyn TranslationEngine,
+        texts: &[String],
+        src: Lang,
+        tgt: Lang,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Vec<String>, TranslateError> {
         let id = engine.cache_id();
         let key_of = |text: &str| format!("{id}|{}>{}|{}", src.code(), tgt.code(), text.trim());
         let mut results: Vec<Option<String>> = vec![None; texts.len()];
@@ -906,7 +943,7 @@ impl TranslationService {
                     unique.push(texts[index].clone());
                 }
             }
-            let translated = engine.translate_batch(&unique, src, tgt)?;
+            let translated = engine.translate_batch_cancellable(&unique, src, tgt, cancelled)?;
             ensure_same_len(translated.len(), unique.len())?;
             let mut cache = self.cache.lock().unwrap_or_else(PoisonError::into_inner);
             for (source, target) in unique.iter().zip(&translated) {

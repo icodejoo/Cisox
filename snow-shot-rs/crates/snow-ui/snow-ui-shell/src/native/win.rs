@@ -400,6 +400,43 @@ mod tests {
     };
     use windows::core::w;
 
+    /// 实际 Win32 窗口区域只包含图像和操作条，空白角不属于窗口形状。
+    #[test]
+    fn translation_region_native_union_excludes_blank() {
+        use windows::Win32::Graphics::Gdi::{GetWindowRgn, PtInRegion};
+        // SAFETY: 创建不显示的系统 STATIC 窗口，不占用桌面，用完销毁。
+        let hwnd = unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                w!("STATIC"),
+                w!("region-probe"),
+                WINDOW_STYLE(0),
+                0,
+                0,
+                800,
+                540,
+                None,
+                None,
+                None,
+                None,
+            )
+        }
+        .expect("建区域测试窗口");
+        let mut region = Region::from_rect(PhysicalRect::new(0, 0, 800, 500));
+        region.union_rect(PhysicalRect::new(684, 500, 116, 40));
+        set_window_region(hwnd.0 as isize, Some(&region)).unwrap();
+        // SAFETY: 查询本测试有效窗口与 GDI 区域，所有句柄都在结束前释放。
+        unsafe {
+            let actual = CreateRectRgn(0, 0, 0, 0);
+            assert_ne!(GetWindowRgn(hwnd, actual).0, 0);
+            assert!(PtInRegion(actual, 1, 1).as_bool());
+            assert!(PtInRegion(actual, 790, 520).as_bool());
+            assert!(!PtInRegion(actual, 100, 520).as_bool());
+            let _ = DeleteObject(HGDIOBJ(actual.0));
+            DestroyWindow(hwnd).unwrap();
+        }
+    }
+
     /// 开启输入透明会带上 LAYERED / TRANSPARENT 样式，关闭后恢复。
     #[test]
     fn input_transparent_toggles_ex_style() {

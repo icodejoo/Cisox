@@ -3,6 +3,7 @@
 
 use crate::conversion_guide::ConversionGuide;
 use crate::ocr_service::OcrTextBox;
+use crate::pin_action_bar::{ActionSpec, inline_actions};
 use crate::settings_state::UiPrefs;
 use crate::settings_view::{Palette, palette};
 use crate::table_structure::TableTexts;
@@ -13,11 +14,27 @@ use snow_i18n::Args;
 use snow_platform::clipboard::copy_text_to_clipboard;
 use snow_ui::shell::geometry::LogicalSize;
 use snow_ui::shell::window::WindowSpec;
-use snow_ui::ui::component::button::Button;
 use snow_ui::ui::component::input::{Textarea, TextareaState};
-use snow_ui::ui::component::{Sizable, Size as ComponentSize};
 use snow_ui::ui::*;
 use std::sync::Arc;
+
+/// OCR 与翻译详情结果窗共用的底部动作。
+fn recognition_actions(i18n: &snow_i18n::I18n) -> Vec<ActionSpec<bool>> {
+    [
+        (false, "recwin-copy-all", "icons/antd/copy.svg"),
+        (true, "recwin-close", "icons/antd/close.svg"),
+    ]
+    .into_iter()
+    .map(|(action, id, icon)| ActionSpec {
+        action,
+        id,
+        icon,
+        tooltip: i18n.tr(id),
+        disabled: false,
+        loading: false,
+    })
+    .collect()
+}
 
 /// 窗口逻辑宽度。
 pub const WINDOW_WIDTH: f32 = 980.0;
@@ -191,26 +208,90 @@ impl RecognitionView {
     }
 }
 
-/// 点击后复制固定文本的小按钮。
-///
-/// # 参数
-/// - `id`：按钮元素 ID。
-/// - `label`：按钮文字（已本地化）。
-/// - `text`：点击时复制的文本。
-/// - `cx`：视图上下文。
-fn copy_button(
-    id: &'static str,
-    label: String,
-    text: String,
-    cx: &mut Context<RecognitionView>,
-) -> Button {
-    Button::new(id)
-        .with_size(ComponentSize::Small)
-        .label(label)
-        .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| this.copy(&text, cx)))
+/// 结果窗的格式复制与转换动作。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FormatAction {
+    Markdown,
+    Html,
+    Latex,
+    LatexBlock,
+    ConvertMarkdown,
+    ConvertHtml,
+}
+
+/// 按结果载荷提供格式动作；翻译详情通常只有两个转换引导。
+fn format_actions(
+    i18n: &snow_i18n::I18n,
+    table: bool,
+    latex: bool,
+) -> Vec<ActionSpec<FormatAction>> {
+    let mut actions = Vec::new();
+    if table {
+        actions.extend([
+            (FormatAction::Markdown, "recwin-copy-markdown"),
+            (FormatAction::Html, "recwin-copy-html"),
+        ]);
+    }
+    if latex {
+        actions.extend([
+            (FormatAction::Latex, "recwin-copy-latex"),
+            (FormatAction::LatexBlock, "recwin-copy-latex-block"),
+        ]);
+    }
+    actions.extend([
+        (FormatAction::ConvertMarkdown, "recwin-convert-markdown"),
+        (FormatAction::ConvertHtml, "recwin-convert-html"),
+    ]);
+    actions
+        .into_iter()
+        .map(|(action, id)| ActionSpec {
+            action,
+            id,
+            icon: if matches!(
+                action,
+                FormatAction::ConvertMarkdown | FormatAction::ConvertHtml
+            ) {
+                "icons/antd/file-text.svg"
+            } else {
+                "icons/antd/copy.svg"
+            },
+            tooltip: i18n.tr(id),
+            disabled: false,
+            loading: false,
+        })
+        .collect()
+}
+
+impl RecognitionView {
+    /// 格式复制取对应载荷；转换仍打开原来的配置引导。
+    fn apply_format_action(
+        &mut self,
+        action: FormatAction,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let text = match action {
+            FormatAction::Markdown => self.data.table.as_ref().map(|t| t.markdown.clone()),
+            FormatAction::Html => self.data.table.as_ref().map(|t| t.html.clone()),
+            FormatAction::Latex => self.data.latex.clone(),
+            FormatAction::LatexBlock => self
+                .data
+                .latex
+                .as_ref()
+                .map(|t| crate::latex_ocr::wrap_display(t)),
+            FormatAction::ConvertMarkdown | FormatAction::ConvertHtml => {
+                self.show_conversion_guide(cx);
+                None
+            }
+        };
+        if let Some(text) = text {
+            self.copy(&text, cx);
+        }
+    }
 }
 
 impl Render for RecognitionView {
+    /// 渲染宿主内容并装配共用图标动作。
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         for image in self.pending_drops.drain(..) {
             let _ = window.drop_image(image);
@@ -272,64 +353,27 @@ impl Render for RecognitionView {
                     .child(i18n.tr("recwin-hint-click-box")),
             );
 
-        let copy_all = Button::new("recwin-copy-all")
-            .with_size(ComponentSize::Small)
-            .label(i18n.tr("recwin-copy-all"))
-            .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
-                let text = this.text.read(cx).value().to_string();
-                this.copy(&text, cx);
-            }));
-        let close = Button::new("recwin-close")
-            .with_size(ComponentSize::Small)
-            .label(i18n.tr("recwin-close"))
-            .on_click(cx.listener(|_this, _e: &ClickEvent, window, _cx| window.remove_window()));
-        let mut format_row = div().flex().flex_wrap().items_center().gap(px(GAP));
-        if let Some(table) = &self.data.table {
-            format_row = format_row
-                .child(copy_button(
-                    "recwin-copy-markdown",
-                    i18n.tr("recwin-copy-markdown"),
-                    table.markdown.clone(),
-                    cx,
-                ))
-                .child(copy_button(
-                    "recwin-copy-html",
-                    i18n.tr("recwin-copy-html"),
-                    table.html.clone(),
-                    cx,
-                ));
-        }
-        if let Some(latex) = &self.data.latex {
-            format_row = format_row
-                .child(copy_button(
-                    "recwin-copy-latex",
-                    i18n.tr("recwin-copy-latex"),
-                    latex.clone(),
-                    cx,
-                ))
-                .child(copy_button(
-                    "recwin-copy-latex-block",
-                    i18n.tr("recwin-copy-latex-block"),
-                    crate::latex_ocr::wrap_display(latex),
-                    cx,
-                ));
-        }
-        for (id, label) in [
-            (
-                "recwin-convert-markdown",
-                i18n.tr("recwin-convert-markdown"),
-            ),
-            ("recwin-convert-html", i18n.tr("recwin-convert-html")),
-        ] {
-            format_row = format_row.child(
-                Button::new(id)
-                    .with_size(ComponentSize::Small)
-                    .label(label)
-                    .on_click(
-                        cx.listener(|this, _e: &ClickEvent, _w, cx| this.show_conversion_guide(cx)),
-                    ),
-            );
-        }
+        let actions = inline_actions(
+            recognition_actions(i18n)
+                .into_iter()
+                .map(|action| {
+                    action.bind(cx, |this, close, window, cx| {
+                        if close {
+                            window.remove_window();
+                        } else {
+                            let text = this.text.read(cx).value().to_string();
+                            this.copy(&text, cx);
+                        }
+                    })
+                })
+                .collect(),
+        );
+        let format_row = inline_actions(
+            format_actions(i18n, self.data.table.is_some(), self.data.latex.is_some())
+                .into_iter()
+                .map(|action| action.bind(cx, Self::apply_format_action))
+                .collect(),
+        );
         let mut translation_area = None;
         if let Some(paragraphs) = &self.data.translation {
             let active = self.hover.active_paragraph(paragraphs);
@@ -419,8 +463,7 @@ impl Render for RecognitionView {
                             })
                             .child(self.notice.clone().map(|(t, _)| t).unwrap_or_default()),
                     )
-                    .child(copy_all)
-                    .child(close),
+                    .child(actions),
             );
 
         div()
@@ -439,6 +482,52 @@ impl Render for RecognitionView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 翻译详情窗底部动作保持复制全文与关闭，分发顺序及双语提示完整。
+    #[test]
+    fn translation_result_action_bar_dispatches() {
+        for locale in ["en-US", "zh-CN"] {
+            let actions = recognition_actions(crate::ocr_backend::i18n_for(locale));
+            assert_eq!(
+                actions.iter().map(|a| a.id).collect::<Vec<_>>(),
+                ["recwin-copy-all", "recwin-close"]
+            );
+            let mut called = Vec::new();
+            for action in actions {
+                assert!(icon_asset_exists(action.icon));
+                assert!(!action.tooltip.is_empty() && !action.tooltip.starts_with("recwin-"));
+                assert!(action.dispatch(|close| called.push(close)));
+            }
+            assert_eq!(called, [false, true]);
+        }
+    }
+
+    /// 格式行按结果类型提供精确动作集，转换与复制均通过共用入口分发。
+    #[test]
+    fn translation_result_format_action_bar_dispatches() {
+        for locale in ["en-US", "zh-CN"] {
+            for table in [false, true] {
+                for latex in [false, true] {
+                    let specs = format_actions(crate::ocr_backend::i18n_for(locale), table, latex);
+                    let mut expected = Vec::new();
+                    if table {
+                        expected.extend([FormatAction::Markdown, FormatAction::Html]);
+                    }
+                    if latex {
+                        expected.extend([FormatAction::Latex, FormatAction::LatexBlock]);
+                    }
+                    expected.extend([FormatAction::ConvertMarkdown, FormatAction::ConvertHtml]);
+                    let mut called = Vec::new();
+                    for spec in specs {
+                        assert!(icon_asset_exists(spec.icon));
+                        assert!(!spec.tooltip.is_empty() && !spec.tooltip.starts_with("recwin-"));
+                        assert!(spec.dispatch(|action| called.push(action)));
+                    }
+                    assert_eq!(called, expected);
+                }
+            }
+        }
+    }
 
     /// 表格结果与转换引导随数据带入窗口。
     #[test]

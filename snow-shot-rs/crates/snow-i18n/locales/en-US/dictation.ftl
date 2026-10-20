@@ -129,3 +129,10 @@ dictation-lang-en = English
 stt-ui-translate-preview = Will translate: { $pairs }
 
 stt-ui-translate-pair = { $src } to { $tgt }
+
+dictation-error-microphone-unavailable = Microphone is unavailable.
+dictation-error-microphone-ended = Microphone capture ended.
+dictation-error-microphone-closed = Microphone channel closed.
+dictation-error-invalid-wave = Cannot read WAV input: { $value }
+dictation-error-wave-sample-rate = WAV sample rate must be 16000 Hz (received { $value }).
+dictation-error-recognition-failed = Speech recognition failed. See the log for details.

@@ -29,6 +29,7 @@ impl BgraSource for FrameBgra {
 }
 
 /// 冻结的屏幕底图（BGRA，不透明）。
+#[derive(Clone)]
 pub struct FrozenFrame {
     /// 图像物理宽度。
     width: u32,
@@ -36,6 +37,23 @@ pub struct FrozenFrame {
     height: u32,
     /// GPUI 图像资源（持有唯一一份像素缓冲）。
     image: Arc<RenderImage>,
+}
+
+impl std::fmt::Debug for FrozenFrame {
+    /// 只输出资源尺寸，避免日志复制整幅图像。
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FrozenFrame")
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for FrozenFrame {
+    /// 共享图像以资源身份比较，不逐像素扫描。
+    fn eq(&self, other: &Self) -> bool {
+        self.size() == other.size() && Arc::ptr_eq(&self.image, &other.image)
+    }
 }
 
 impl FrozenFrame {

@@ -6,11 +6,11 @@
 
 use crate::{Lang, TranslateError, TranslationEngine};
 use serde::{Deserialize, Serialize};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// 聊天补全端点后缀。
 pub const CHAT_ENDPOINT_SUFFIX: &str = "/chat/completions";
@@ -192,6 +192,21 @@ pub trait HttpPost: Send + Sync {
         body: &str,
         timeout: Duration,
     ) -> Result<HttpResponse, String>;
+
+    /// 可取消传输；真实实现负责中断本地 HTTP 子进程。
+    fn post_json_cancellable(
+        &self,
+        url: &str,
+        api_key: &str,
+        body: &str,
+        timeout: Duration,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<HttpResponse, String> {
+        if cancelled() {
+            return Err("translation cancelled".into());
+        }
+        self.post_json(url, api_key, body, timeout)
+    }
 }
 
 /// 转义 curl 配置文件里双引号字符串的内容（反斜杠、双引号与控制字符）。
@@ -301,6 +316,14 @@ impl Drop for TempBody {
     }
 }
 
+/// 在独立线程排空 HTTP 输出，避免子进程被管道背压卡住。
+fn read_pipe(mut pipe: impl Read) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    pipe.read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    Ok(bytes)
+}
+
 impl HttpPost for CurlHttp {
     /// 经 curl 发送；配置走 stdin，请求体走临时文件。
     fn post_json(
@@ -310,6 +333,22 @@ impl HttpPost for CurlHttp {
         body: &str,
         timeout: Duration,
     ) -> Result<HttpResponse, String> {
+        self.post_json_cancellable(url, api_key, body, timeout, &|| false)
+    }
+
+    /// 并行排空输出管道，等待进程时检查取消和单次截止时间。
+    fn post_json_cancellable(
+        &self,
+        url: &str,
+        api_key: &str,
+        body: &str,
+        timeout: Duration,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<HttpResponse, String> {
+        if cancelled() {
+            return Err("translation cancelled".into());
+        }
+        let deadline = Instant::now() + timeout;
         let temp = TempBody::create(body)?;
         let config = curl_config_text(url, api_key, &temp.path, timeout.as_secs().max(1));
         let mut command = Command::new(curl_program());
@@ -336,19 +375,41 @@ impl HttpPost for CurlHttp {
                 .write_all(config.as_bytes())
                 .map_err(|e| format!("无法向 curl 传入配置: {e}"))?;
         }
-        let output = child
-            .wait_with_output()
-            .map_err(|e| format!("等待 curl 结束失败: {e}"))?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!(
-                "curl 失败 ({}): {}",
-                output.status,
-                snippet(&stderr)
-            ));
+        let stdout = child.stdout.take().ok_or("curl stdout unavailable")?;
+        let stderr = child.stderr.take().ok_or("curl stderr unavailable")?;
+        let stdout = std::thread::spawn(move || read_pipe(stdout));
+        let stderr = std::thread::spawn(move || read_pipe(stderr));
+        let status = loop {
+            if cancelled() || Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout.join();
+                let _ = stderr.join();
+                return Err(if cancelled() {
+                    "translation cancelled"
+                } else {
+                    "HTTP deadline exceeded"
+                }
+                .into());
+            }
+            match child.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!("cannot wait for curl: {error}"));
+                }
+            }
+        };
+        let output = stdout.join().map_err(|_| "curl stdout reader failed")??;
+        let errors = stderr.join().map_err(|_| "curl stderr reader failed")??;
+        if !status.success() {
+            let stderr = String::from_utf8_lossy(&errors);
+            return Err(format!("curl failed ({status}): {}", snippet(&stderr)));
         }
         let (status, body) =
-            split_curl_output(&output.stdout).ok_or_else(|| "curl 输出缺少状态码".to_string())?;
+            split_curl_output(&output).ok_or_else(|| "curl 输出缺少状态码".to_string())?;
         Ok(HttpResponse { status, body })
     }
 }
@@ -403,6 +464,36 @@ impl OpenAiEngine {
     }
 }
 
+impl OpenAiEngine {
+    /// 执行单段可取消 HTTP 翻译。
+    fn translate_one(
+        &self,
+        text: &str,
+        src: Lang,
+        tgt: Lang,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<String, TranslateError> {
+        if text.trim().is_empty() {
+            return Ok(text.to_string());
+        }
+        let body = self.config.format_request(text, src, tgt);
+        let response = self
+            .http
+            .post_json_cancellable(
+                &self.config.endpoint(),
+                &self.config.api_key,
+                &body,
+                self.timeout,
+                cancelled,
+            )
+            .map_err(TranslateError::Network)?;
+        if !(200..300).contains(&response.status) {
+            return Err(status_error(response.status, &response.body));
+        }
+        parse_chat_response(&response.body)
+    }
+}
+
 /// 把 HTTP 失败状态映射成可读错误（不含密钥）。
 fn status_error(status: u16, body: &str) -> TranslateError {
     let detail = match status {
@@ -417,23 +508,7 @@ fn status_error(status: u16, body: &str) -> TranslateError {
 impl TranslationEngine for OpenAiEngine {
     /// 发一次聊天补全请求并解析译文。
     fn translate(&self, text: &str, src: Lang, tgt: Lang) -> Result<String, TranslateError> {
-        if text.trim().is_empty() {
-            return Ok(text.to_string());
-        }
-        let body = self.config.format_request(text, src, tgt);
-        let response = self
-            .http
-            .post_json(
-                &self.config.endpoint(),
-                &self.config.api_key,
-                &body,
-                self.timeout,
-            )
-            .map_err(TranslateError::Network)?;
-        if !(200..300).contains(&response.status) {
-            return Err(status_error(response.status, &response.body));
-        }
-        parse_chat_response(&response.body)
+        self.translate_one(text, src, tgt, &|| false)
     }
 
     /// 逐段请求（最多 [`MAX_BATCH_SEGMENTS`] 段，超出返回错误而不是静默截断）。
@@ -443,13 +518,32 @@ impl TranslationEngine for OpenAiEngine {
         src: Lang,
         tgt: Lang,
     ) -> Result<Vec<String>, TranslateError> {
+        self.translate_batch_cancellable(texts, src, tgt, &|| false)
+    }
+
+    /// 每个段落提交和 HTTP 等待均检查取消，不发送剩余段落。
+    fn translate_batch_cancellable(
+        &self,
+        texts: &[String],
+        src: Lang,
+        tgt: Lang,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Vec<String>, TranslateError> {
         if texts.len() > MAX_BATCH_SEGMENTS {
             return Err(TranslateError::InvalidRequest(format!(
                 "文本段数过多（{}，上限 {MAX_BATCH_SEGMENTS}）",
                 texts.len()
             )));
         }
-        texts.iter().map(|t| self.translate(t, src, tgt)).collect()
+        texts
+            .iter()
+            .map(|text| {
+                if cancelled() {
+                    return Err(TranslateError::Network("translation cancelled".into()));
+                }
+                self.translate_one(text, src, tgt, cancelled)
+            })
+            .collect()
     }
 
     /// 大模型不限语言对：这里列出常用组合（含 `Auto` 源语言）。
@@ -530,6 +624,20 @@ mod tests {
             OpenAiEngine::with_http(config(), Box::new(http), Duration::from_secs(5)),
             seen,
         )
+    }
+
+    /// 首段返回时取消，后续段落不会继续发送到 HTTP 后端。
+    #[test]
+    fn cancelled_batch_does_not_send_remaining_segments() {
+        let (engine, seen) = engine(vec![ok("one"), ok("two")]);
+        let result = engine.translate_batch_cancellable(
+            &["first".into(), "second".into()],
+            Lang::En,
+            Lang::ZhHans,
+            &|| !seen.lock().unwrap().is_empty(),
+        );
+        assert!(result.is_err());
+        assert_eq!(seen.lock().unwrap().len(), 1);
     }
 
     /// 请求体：模型名、文本、语言方向；`Auto` 让模型自行判断。

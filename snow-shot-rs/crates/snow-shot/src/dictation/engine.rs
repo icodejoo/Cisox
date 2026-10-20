@@ -362,7 +362,13 @@ impl Engine {
                 // 系统语音的可识别错误带类别标记，翻译成本地化提示；其余原样上报
                 let failure = match SystemError::from_error_text(&reason) {
                     Some((kind, detail)) => Failure::SystemSpeech(kind, detail),
-                    None => Failure::Worker(reason),
+                    None => match snow_stt_protocol::WorkerError::from_error_text(&reason) {
+                        Some((code, parameter)) => Failure::WorkerCode(code, parameter),
+                        None => {
+                            tracing::warn!(%reason, "语音 worker 诊断");
+                            Failure::Worker(reason)
+                        }
+                    },
                 };
                 self.finish(Duration::ZERO, Effect::Failed(failure))
             }

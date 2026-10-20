@@ -129,3 +129,10 @@ dictation-lang-en = 英文
 stt-ui-translate-preview = 将翻译：{ $pairs }
 
 stt-ui-translate-pair = { $src }译为{ $tgt }
+
+dictation-error-microphone-unavailable = 麦克风不可用。
+dictation-error-microphone-ended = 麦克风采集已结束。
+dictation-error-microphone-closed = 麦克风采集通道已关闭。
+dictation-error-invalid-wave = 无法读取 WAV 输入：{ $value }
+dictation-error-wave-sample-rate = WAV 采样率须为 16000 Hz（实际为 { $value }）。
+dictation-error-recognition-failed = 语音识别失败，请查看日志了解详情。

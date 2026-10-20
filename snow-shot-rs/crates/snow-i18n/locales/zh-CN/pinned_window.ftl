@@ -81,3 +81,15 @@ pinned-menu-default-group = 默认分组
 pinned-menu-move-to-group = 移到分组：{ $arg1 }
 
 pinned-menu-close = 关闭
+
+## 截图翻译临时贴图按钮条
+translation-pin-save-original = 保存原图
+translation-pin-undo = 撤销
+translation-pin-copy = 复制译文
+translation-pin-close = 关闭
+
+translation-pin-empty = 没有可翻译的文字
+translation-pin-move-bar = 拖动以移动操作栏
+
+translation-pin-retry = 重试翻译
+translation-pin-download = 下载所需组件

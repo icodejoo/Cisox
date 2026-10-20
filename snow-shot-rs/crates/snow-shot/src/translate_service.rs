@@ -286,6 +286,19 @@ pub trait Translator {
         texts: &[String],
     ) -> Result<Translated, TranslateError>;
 
+    /// 可取消翻译，默认后端在调用前检查。
+    fn translate_cancellable(
+        &self,
+        config: &TranslateConfig,
+        texts: &[String],
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Translated, TranslateError> {
+        if cancelled() {
+            return Err(TranslateError::WorkerDied("translation cancelled".into()));
+        }
+        self.translate(config, texts)
+    }
+
     /// 回收没被真实请求用上的预热（默认什么都不做）；会等进行中的预热结束，应在后台线程里调用。
     fn release_unused_warm(&self) {}
 }
@@ -644,25 +657,43 @@ impl TranslateHost {
         &self,
         config: &TranslateConfig,
     ) -> Result<(String, Lang, Lang), TranslateError> {
+        self.prepare_request(config).map(|(_, prepared)| prepared)
+    }
+
+    /// 在装配锁内取得固定引擎和策略快照，包池继续复用。
+    fn prepare_request(
+        &self,
+        config: &TranslateConfig,
+    ) -> Result<(Built, Prepared), TranslateError> {
         let (fresh, prepared) = match config.backend {
             Backend::Local => self.build_local(config)?,
             Backend::OpenAi => self.build_openai(config)?,
         };
         let mut built = self.built.lock().unwrap_or_else(PoisonError::into_inner);
-        match built.as_mut() {
-            Some(current) if current.key == fresh.key => {
-                // 同参数：沿用已有引擎（丢弃刚构造的、尚未启动的新引擎），只热更新路由策略
-                if let (Some(current_router), Some(fresh_router)) = (&current.router, &fresh.router)
-                {
-                    current_router.set_policy(fresh_router.policy());
-                }
-            }
-            _ => {
-                self.service.set_engine(Some(Arc::clone(&fresh.engine)));
-                *built = Some(fresh);
-            }
+        if !built
+            .as_ref()
+            .is_some_and(|current| current.key == fresh.key)
+        {
+            self.service.set_engine(Some(Arc::clone(&fresh.engine)));
+            *built = Some(fresh);
         }
-        Ok(prepared)
+        let current = built.as_ref().expect("engine was installed");
+        if let Some(router) = &current.router {
+            router.set_policy(config.route_policy());
+        }
+        let engine = current.router.as_ref().map_or_else(
+            || Arc::clone(&current.engine),
+            |router| router.snapshot(config.route_policy()),
+        );
+        Ok((
+            Built {
+                key: current.key.clone(),
+                engine,
+                router: current.router.clone(),
+                labels: current.labels.clone(),
+            },
+            prepared,
+        ))
     }
 
     /// 当前路由器（没有本地装配时为 `None`）。
@@ -673,13 +704,6 @@ impl TranslateHost {
             .as_ref()?
             .router
             .clone()
-    }
-
-    /// 当前路由器与包展示名表（没有本地装配时为 `None`）。
-    fn routing(&self) -> Option<(Arc<RoutedEngine>, LabelTable)> {
-        let built = self.built.lock().unwrap_or_else(PoisonError::into_inner);
-        let current = built.as_ref()?;
-        Some((current.router.clone()?, current.labels.clone()))
     }
 
     /// 是否有本地 worker 正在运行（探针用）。
@@ -724,11 +748,14 @@ impl TranslateHost {
         if config.backend != Backend::Local || abort() {
             return None;
         }
-        if let Err(error) = self.prepare(config) {
-            tracing::debug!(%error, "翻译预热跳过：装配失败");
-            return None;
-        }
-        let router = self.router()?;
+        let (snapshot, _) = match self.prepare_request(config) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                tracing::debug!(%error, "翻译预热跳过：装配失败");
+                return None;
+            }
+        };
+        let router = snapshot.router?;
         let warmed = match router.warm(config.source, config.target, abort) {
             Ok(warmed) => warmed,
             Err(error) => {
@@ -766,12 +793,28 @@ impl Translator for TranslateHost {
         config: &TranslateConfig,
         texts: &[String],
     ) -> Result<Translated, TranslateError> {
-        let (label, src, tgt) = self.prepare(config)?;
-        let routing = self.routing();
+        self.translate_cancellable(config, texts, &|| false)
+    }
+
+    /// 请求固定引擎与策略，并向分段及 worker 等待传递取消。
+    fn translate_cancellable(
+        &self,
+        config: &TranslateConfig,
+        texts: &[String],
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Translated, TranslateError> {
+        let (snapshot, (label, src, tgt)) = self.prepare_request(config)?;
+        let routing = snapshot.router.map(|router| (router, snapshot.labels));
         if let Some((router, _)) = &routing {
             router.reset_used();
         }
-        let texts = self.service.translate_batch(texts, src, tgt)?;
+        let texts = self.service.translate_batch_with_engine_cancellable(
+            snapshot.engine.as_ref(),
+            texts,
+            src,
+            tgt,
+            cancelled,
+        )?;
         // 标签反映实际参与翻译的包；缓存命中等没有用包记录时沿用预选标签
         let label = match routing {
             Some((router, labels)) => actual_label(&router.used_ids(), &labels, &label),
@@ -902,39 +945,34 @@ impl Drop for WarmHandle {
     }
 }
 
-/// 在飞的那一次翻译请求的取消标志（同一时刻界面只有一次翻译，所以只记最近一次）。
+/// 在飞翻译任务的取消标志，独立贴图可同时拥有多个请求。
 #[derive(Default)]
 pub struct CancelSlot {
-    /// 最近一次请求的序号与取消标志。
-    current: Option<(u64, Arc<AtomicBool>)>,
+    /// 请求序号对应的取消标志。
+    current: std::collections::BTreeMap<u64, Arc<AtomicBool>>,
 }
 
 impl CancelSlot {
-    /// 登记新请求，返回它的取消标志（取代上一次登记）。
-    ///
-    /// # 参数
-    /// - `serial`：请求序号。
+    /// 登记请求并返回它的取消标志。
     pub fn begin(&mut self, serial: u64) -> Arc<AtomicBool> {
         let flag = Arc::new(AtomicBool::new(false));
-        self.current = Some((serial, Arc::clone(&flag)));
+        self.current.insert(serial, Arc::clone(&flag));
         flag
     }
 
-    /// 取消指定序号的请求；序号不是最近一次登记的（已被新请求取代）就忽略。
-    ///
-    /// # 参数
-    /// - `serial`：被取消的请求序号。
-    ///
-    /// # 返回
-    /// 是否命中并置位。
+    /// 取消指定请求，其他贴图任务保持运行。
     pub fn cancel(&mut self, serial: u64) -> bool {
-        match &self.current {
-            Some((current, flag)) if *current == serial => {
-                flag.store(true, Ordering::SeqCst);
-                true
-            }
-            _ => false,
+        if let Some(flag) = self.current.remove(&serial) {
+            flag.store(true, Ordering::SeqCst);
+            true
+        } else {
+            false
         }
+    }
+
+    /// 任务结束后释放登记，不再接受取消。
+    pub fn finish(&mut self, serial: u64) {
+        self.current.remove(&serial);
     }
 }
 
@@ -1035,11 +1073,11 @@ pub fn run_flow(
     run_flow_cancellable(recognize, translator, config, on_stage, || false)
 }
 
-/// 同 [`run_flow`]，多一个取消判定：识别完成后若已被取消就不再翻译，返回 `Cancelled`。
+/// 同 [`run_flow`]，取消判定传入分段翻译和本地 worker 管道等待，取消后返回 `Cancelled`。
 ///
 /// # 参数
 /// - `recognize` / `translator` / `config` / `on_stage`：同 [`run_flow`]。
-/// - `cancelled`：取消判定（识别结束后检查一次）。
+/// - `cancelled`：贯穿识别完成、分段翻译与本地 worker 等待的取消判定。
 ///
 /// # 返回
 /// 同 [`run_flow`]；被取消返回 `Cancelled`（不调用翻译后端）。
@@ -1073,9 +1111,11 @@ pub fn run_flow_cancellable(
     }
     on_stage(TranslateStage::Translating);
     let started = std::time::Instant::now();
-    let translated = translator
-        .translate(config, &paragraphs)
-        .map_err(TranslateFlowError::Translate)?;
+    let translated = translator.translate_cancellable(config, &paragraphs, &cancelled);
+    if cancelled() {
+        return Err(TranslateFlowError::Cancelled);
+    }
+    let translated = translated.map_err(TranslateFlowError::Translate)?;
     let translate_ms = started.elapsed().as_millis() as u64;
     let translated_text = translated.texts.join("\n");
     let pairs: Vec<TranslatedParagraph> = paragraphs_with_indices
@@ -1996,6 +2036,32 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// A 装配后 B 切换策略，A 的引擎引用及策略快照仍保持原配置。
+    #[test]
+    fn request_snapshot_survives_interleaved_prepare() {
+        let root = temp_root("snapshot-interleaved");
+        let (host, _) = warm_host(&root, None);
+        let first = warm_config();
+        let (a, (_, src, tgt)) = host.prepare_request(&first).unwrap();
+        let mut second = first.clone();
+        second.max_resident = 2;
+        let (b, _) = host.prepare_request(&second).unwrap();
+        assert!(!Arc::ptr_eq(&a.engine, &b.engine));
+        assert!(Arc::ptr_eq(
+            a.router.as_ref().unwrap(),
+            b.router.as_ref().unwrap()
+        ));
+        let key = a.engine.cache_id();
+        assert_eq!(a.engine.cache_id(), key);
+        let result = host
+            .service
+            .translate_batch_with_engine(a.engine.as_ref(), &["Hello".into()], src, tgt)
+            .unwrap();
+        assert_eq!(result.len(), 1);
+        host.shutdown();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// 不该预热的情况都不拉进程：OpenAI 后端、没有模型、已放弃。
     #[test]
     fn warm_skips_when_not_applicable() {
@@ -2069,7 +2135,7 @@ mod tests {
         let warmed = host.warm(&warm_config(), &|| abort_flag.load(Ordering::SeqCst));
         assert_eq!(warmed, None);
         assert!(!host.worker_running());
-        assert!(workers.unloaded(0));
+        assert!(workers.states.lock().unwrap()[0].lock().unwrap().closed);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -2190,17 +2256,19 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// 取消标志登记：只认最近一次登记的序号；序号对不上（已被新请求取代）的取消被忽略。
+    /// 多贴图任务的取消互不影响，完成后取消无效。
     #[test]
-    fn cancel_slot_matches_latest_serial_only() {
+    fn cancel_slot_matches_independent_serials() {
         let mut slot = CancelSlot::default();
-        assert!(!slot.cancel(1), "没登记过");
+        assert!(!slot.cancel(1));
         let first = slot.begin(1);
         let second = slot.begin(2);
-        assert!(!slot.cancel(1), "1 已被 2 取代");
-        assert!(!first.load(Ordering::SeqCst) && !second.load(Ordering::SeqCst));
-        assert!(slot.cancel(2));
-        assert!(second.load(Ordering::SeqCst) && !first.load(Ordering::SeqCst));
+        assert!(slot.cancel(1));
+        assert!(first.load(Ordering::SeqCst));
+        assert!(!second.load(Ordering::SeqCst));
+        slot.finish(2);
+        assert!(!slot.cancel(2));
+        assert!(!second.load(Ordering::SeqCst));
     }
 
     /// 取消的流程：识别结束后发现已取消就不调用翻译，返回 Cancelled；未取消照常。

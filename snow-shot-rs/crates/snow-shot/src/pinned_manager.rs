@@ -5,12 +5,20 @@
 
 use crate::app_runtime::UiEvent;
 use crate::capture_flow::pick_monitor;
+use crate::pin_action_bar::{
+    PinActionBarPosition as TranslationBarPosition, bar_height, bar_width,
+};
+/// 翻译贴图在选区外的固定操作条宽度。
+const TRANSLATION_BAR_WIDTH: f32 = bar_width(4, TranslationBarPosition::Below);
+
 use crate::pinned_controls::{
     CONTROL_SIZE, PinExitControl, PinHideHandle, exit_button_rect, hide_handle_rect,
 };
 use crate::pinned_model::{PinGeometry, flatten_alpha_on_white, initial_pin_rect, visible_rect};
 use crate::pinned_shared::{PinControlEvent, PinError, PinShared};
-use crate::pinned_view::{PinInit, PinOp, PinnedWindowView, frame_from_rgba};
+use crate::pinned_view::{
+    PinInit, PinOp, PinnedWindowView, TranslationPin, TranslationPinData, frame_from_rgba,
+};
 use crate::screenshot_output::encode_png_with_level;
 use crate::settings_state::SharedConfig;
 use snow_history::timeutil::now_utc_ms;
@@ -83,6 +91,33 @@ fn clamp_to_visible(
     geometry.width = rect.width;
     geometry.height = rect.height;
     geometry
+}
+
+/// 按下方、上方、内部顺序放置按钮条；选区和屏幕用物理像素，条尺寸用逻辑像素。
+pub(crate) fn translation_bounds(
+    rect: PhysicalRect,
+    bar_size: (f32, f32),
+    screen: PhysicalRect,
+    scale: f32,
+) -> (TranslationBarPosition, PhysicalRect) {
+    let bar_width = (bar_size.0 * scale).ceil() as i32;
+    let bar_height = (bar_size.1 * scale).ceil() as i32;
+    let position = crate::pin_action_bar::outer_position(rect, screen, bar_height);
+    if position == TranslationBarPosition::Inside {
+        return (position, rect);
+    }
+    let bar = crate::pin_action_bar::outer_bar_rect(rect, screen, bar_width, bar_height, position);
+    let x = rect.x.min(bar.x);
+    let y = rect.y.min(bar.y);
+    (
+        position,
+        PhysicalRect::new(
+            x,
+            y,
+            rect.right().max(bar.right()) - x,
+            rect.bottom().max(bar.bottom()) - y,
+        ),
+    )
 }
 
 /// 自动化脚本首步之前等待窗口稳定的时间。
@@ -187,7 +222,9 @@ impl PinnedManager {
     ) {
         match event {
             // 文字识别请求由主程序的后台线程处理，这里不需要动作
-            PinControlEvent::OcrRequested { .. } => {}
+            PinControlEvent::OcrRequested { .. }
+            | PinControlEvent::TranslationRetry { .. }
+            | PinControlEvent::TranslationDownload { .. } => {}
             PinControlEvent::MoveToGroup { id, group } => {
                 if let Err(e) = self.move_to_group(cx, &id, &group) {
                     tracing::warn!(id = %id, group = %group, error = %e, "移动贴图到分组失败");
@@ -486,6 +523,66 @@ impl PinnedManager {
         self.create(cx, width, height, rgba, geometry)
     }
 
+    /// 在截图原位置打开临时翻译浮层，不触发普通贴图持久化或自动 OCR。
+    pub fn create_translation(
+        &mut self,
+        cx: &mut ShellContext,
+        data: TranslationPinData,
+    ) -> Result<String, String> {
+        let monitors = cx.monitors().map_err(|error| error.to_string())?;
+        let monitor = monitors.best_for_rect(data.rect);
+        let scale = monitor
+            .as_ref()
+            .map_or(1.0, |monitor| monitor.scale.value());
+        let work = monitor.as_ref().map_or(data.rect, |monitor| monitor.bounds);
+        let (mut position, mut bounds) = translation_bounds(
+            data.rect,
+            (TRANSLATION_BAR_WIDTH, bar_height()),
+            work,
+            scale,
+        );
+        if cfg!(debug_assertions)
+            && std::env::var(crate::app_runtime::ENV_PIN_BAR_FORCE).as_deref() == Ok("inside")
+        {
+            position = TranslationBarPosition::Inside;
+            bounds = data.rect;
+        }
+        tracing::info!(?position, ?bounds, "翻译贴图操作条布局");
+        let mut translation = TranslationPin::new(&data)?;
+        translation.bar_position = position;
+        let id = self.shared.new_id()?;
+        let init = PinInit {
+            id: id.clone(),
+            frame: frame_from_rgba(data.width, data.height, data.original)?,
+            geometry: PinGeometry::new(bounds, 1.0, 1.0, true),
+            created_ms: now_utc_ms(),
+            payload_bytes: 0,
+            session: Vec::new(),
+            dpr: scale,
+        };
+        self.open_window_with_translation(cx, init, Some(translation))?;
+        Ok(id)
+    }
+
+    /// 将翻译结果送到仍打开的对应贴图，由贴图调用共用渲染器。
+    pub fn deliver_translation(
+        &mut self,
+        cx: &mut ShellContext,
+        id: &str,
+        result: Result<
+            crate::translate_service::TranslateOutcome,
+            crate::translate_service::TranslateFlowError,
+        >,
+        image: Option<crate::frozen_frame::FrozenFrame>,
+    ) {
+        if let Some(pin) = self.windows.get(id) {
+            pin.view.update(cx.app(), |view, vcx| {
+                view.finish_translation(result, image);
+                vcx.notify();
+            });
+        }
+    }
+
     /// 把剪贴板里的图像贴到光标所在显示器的中央。
     ///
     /// # 返回
@@ -628,6 +725,16 @@ impl PinnedManager {
 
     /// 打开贴图窗口并登记。
     fn open_window(&mut self, cx: &mut ShellContext, init: PinInit) -> Result<(), String> {
+        self.open_window_with_translation(cx, init, None)
+    }
+
+    /// 共用普通贴图的无边框置顶窗口创建与生命周期登记。
+    fn open_window_with_translation(
+        &mut self,
+        cx: &mut ShellContext,
+        init: PinInit,
+        translation: Option<TranslationPin>,
+    ) -> Result<(), String> {
         let geometry = init.geometry;
         let id = init.id.clone();
         let spec = WindowSpec {
@@ -644,7 +751,11 @@ impl PinnedManager {
         let shared = Rc::clone(&self.shared);
         let (window, view) = cx
             .open_window(&spec, move |window, app| {
-                PinnedWindowView::create(window, app, shared, init)
+                let view = PinnedWindowView::create(window, app, shared, init);
+                if let Some(translation) = translation {
+                    view.update(app, |view, _| view.set_translation(translation));
+                }
+                view
             })
             .map_err(|e| format!("打开贴图窗口失败: {e}"))?;
         view.update(cx.app(), |v, cx| v.set_window(window, cx));
@@ -809,6 +920,119 @@ mod tests {
             work_area: bounds,
             scale: ScaleFactor::ONE,
             is_primary: primary,
+        }
+    }
+
+    /// 真机反馈的选区以共用按钮条高度扩窗，不再多出固定四十像素。
+    #[test]
+    fn translation_pin_bounds_use_action_bar_height() {
+        let rect = PhysicalRect::new(100, 100, 572, 558);
+        let screen = PhysicalRect::new(0, 0, 1920, 1080);
+        assert_eq!(
+            translation_bounds(rect, (TRANSLATION_BAR_WIDTH, bar_height()), screen, 1.0),
+            (
+                TranslationBarPosition::Below,
+                PhysicalRect::new(100, 100, 572, 590)
+            ),
+        );
+    }
+
+    /// 下方有空间时优先放在下方；条尺寸按逻辑像素缩放并向上取整。
+    #[test]
+    fn translation_pin_bounds_prefer_below() {
+        let screen = PhysicalRect::new(0, 0, 1920, 1080);
+        let rect = PhysicalRect::new(100, 200, 600, 300);
+        assert_eq!(
+            translation_bounds(rect, (120.0, 40.0), screen, 1.0),
+            (
+                TranslationBarPosition::Below,
+                PhysicalRect::new(100, 200, 600, 340)
+            ),
+        );
+        assert_eq!(
+            translation_bounds(rect, (120.0, 40.5), screen, 1.5)
+                .1
+                .height,
+            361,
+        );
+    }
+
+    /// 下方不够时向上扩展，窗口上移但选区不移动。
+    #[test]
+    fn translation_pin_bounds_fall_back_above() {
+        let screen = PhysicalRect::new(0, 0, 1920, 1080);
+        let rect = PhysicalRect::new(100, 780, 600, 300);
+        assert_eq!(
+            translation_bounds(rect, (120.0, 40.0), screen, 1.0),
+            (
+                TranslationBarPosition::Above,
+                PhysicalRect::new(100, 740, 600, 340)
+            ),
+        );
+    }
+
+    /// 上下都不足时悬浮在选区内，窗口外框严格保持选区。
+    #[test]
+    fn translation_pin_bounds_inside_equals_selection() {
+        let screen = PhysicalRect::new(0, 0, 1920, 1080);
+        let rect = PhysicalRect::new(100, 20, 600, 1040);
+        assert_eq!(
+            translation_bounds(rect, (120.0, 40.0), screen, 1.0),
+            (TranslationBarPosition::Inside, rect),
+        );
+    }
+
+    /// 右下角窄选区的条向左展开并置于上方，不越出显示器。
+    #[test]
+    fn translation_pin_bounds_at_bottom_right() {
+        let screen = PhysicalRect::new(0, 0, 1920, 1080);
+        let rect = PhysicalRect::new(1900, 1070, 20, 10);
+        let (position, bounds) =
+            translation_bounds(rect, (TRANSLATION_BAR_WIDTH, bar_height()), screen, 1.0);
+        assert_eq!(position, TranslationBarPosition::Above);
+        assert_eq!(
+            bounds,
+            PhysicalRect::new(
+                1804,
+                1070 - bar_height() as i32,
+                116,
+                10 + bar_height() as i32
+            )
+        );
+        assert_eq!(bounds.intersect(&screen), Some(bounds));
+        assert_eq!(bounds.intersect(&rect), Some(rect));
+    }
+
+    /// 负原点与 1.5 倍 DPI 下，下方、上方和内部均以物理屏幕边界判断。
+    #[test]
+    fn translation_pin_bounds_at_negative_origin_and_mixed_dpi() {
+        let screen = PhysicalRect::new(-1920, -300, 1920, 1080);
+        for (rect, position, bounds) in [
+            (
+                PhysicalRect::new(-1800, -200, 600, 300),
+                TranslationBarPosition::Below,
+                PhysicalRect::new(-1800, -200, 600, 300 + (bar_height() * 1.5) as i32),
+            ),
+            (
+                PhysicalRect::new(-20, 770, 20, 10),
+                TranslationBarPosition::Above,
+                PhysicalRect::new(
+                    -174,
+                    770 - (bar_height() * 1.5) as i32,
+                    174,
+                    10 + (bar_height() * 1.5) as i32,
+                ),
+            ),
+            (
+                PhysicalRect::new(-1800, -280, 600, 1040),
+                TranslationBarPosition::Inside,
+                PhysicalRect::new(-1800, -280, 600, 1040),
+            ),
+        ] {
+            assert_eq!(
+                translation_bounds(rect, (TRANSLATION_BAR_WIDTH, bar_height()), screen, 1.5),
+                (position, bounds),
+            );
         }
     }
 

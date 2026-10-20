@@ -215,6 +215,12 @@ pub enum OcrError {
     NoLatex,
     /// 模型没有产出任何公式文本。
     EmptyLatex,
+    /// 公式解码未遇到结束标记，长度已耗尽。
+    LatexTruncated,
+    /// 整次公式识别超过总期限。
+    LatexTimedOut,
+    /// 用户取消公式识别。
+    LatexCancelled,
 }
 
 impl OcrError {
@@ -257,6 +263,9 @@ impl OcrError {
             Self::Latex(e) => with_detail("latex-err-failed", e),
             Self::NoLatex => i18n.tr("latex-err-blank"),
             Self::EmptyLatex => i18n.tr("latex-err-empty"),
+            Self::LatexTruncated => i18n.tr("latex-err-truncated"),
+            Self::LatexTimedOut => i18n.tr("latex-err-timeout"),
+            Self::LatexCancelled => i18n.tr("latex-err-cancelled"),
         }
     }
 
@@ -285,6 +294,9 @@ impl OcrError {
                 | Self::Latex(_)
                 | Self::NoLatex
                 | Self::EmptyLatex
+                | Self::LatexTruncated
+                | Self::LatexTimedOut
+                | Self::LatexCancelled
         )
     }
 }

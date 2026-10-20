@@ -44,6 +44,31 @@ pub struct FocusReading {
     pub uia: Result<Option<UiaElement>, String>,
 }
 
+/// 键入目标身份；UIA 运行时标识区分同一原生窗口内的多个编辑控件。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypingTarget {
+    /// 顶层前台窗口。
+    pub window: isize,
+    /// 窗口所属进程。
+    pub process: u32,
+    /// 原生焦点控件。
+    pub focus: isize,
+    /// UIA 元素运行时标识。
+    pub element: Vec<i32>,
+}
+
+/// 读取完整键入目标，身份不确定时返回空，禁止将文字注入未知控件。
+pub fn typing_target() -> Option<TypingTarget> {
+    #[cfg(windows)]
+    {
+        win::typing_target()
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
 /// 读取当前前台焦点。
 ///
 /// # 返回
@@ -190,6 +215,61 @@ mod win {
         };
         // SAFETY: info 已设置 cbSize，是有效的输出位置。
         unsafe { GetGUIThreadInfo(thread_id, &mut info) }.is_ok() && !info.hwndCaret.0.is_null()
+    }
+
+    /// 同时读取前台窗口、进程、原生焦点和 UIA 元素身份。
+    pub(super) fn typing_target() -> Option<super::TypingTarget> {
+        use windows::Win32::System::Ole::{
+            SafeArrayDestroy, SafeArrayGetElement, SafeArrayGetLBound, SafeArrayGetUBound,
+        };
+        let _com = ComGuard::init(COINIT_MULTITHREADED).ok();
+        // SAFETY: 以下均为只读系统查询；输出结构大小已初始化。
+        unsafe {
+            let hwnd = GetForegroundWindow();
+            if hwnd.0.is_null() {
+                return None;
+            }
+            let mut process = 0;
+            let thread = GetWindowThreadProcessId(hwnd, Some(&mut process));
+            let mut info = GUITHREADINFO {
+                cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
+                ..Default::default()
+            };
+            GetGUIThreadInfo(thread, &mut info).ok()?;
+            let automation: IUIAutomation =
+                CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER).ok()?;
+            let focused = automation.GetFocusedElement().ok()?;
+            let array = focused.GetRuntimeId().ok()?;
+            if array.is_null() {
+                return None;
+            }
+            let read = (|| {
+                let lower = SafeArrayGetLBound(array, 1).ok()?;
+                let upper = SafeArrayGetUBound(array, 1).ok()?;
+                if !upper
+                    .checked_sub(lower)
+                    .is_some_and(|len| (0..=1024).contains(&len))
+                {
+                    return None;
+                }
+                let mut element = Vec::new();
+                for index in lower..=upper {
+                    let mut value = 0i32;
+                    SafeArrayGetElement(array, &index, (&mut value as *mut i32).cast()).ok()?;
+                    element.push(value);
+                }
+                (GetForegroundWindow() == hwnd && !element.is_empty()).then_some(
+                    super::TypingTarget {
+                        window: hwnd.0 as isize,
+                        process,
+                        focus: info.hwndFocus.0 as isize,
+                        element,
+                    },
+                )
+            })();
+            let _ = SafeArrayDestroy(array);
+            read
+        }
     }
 
     /// 汇总一次读数。

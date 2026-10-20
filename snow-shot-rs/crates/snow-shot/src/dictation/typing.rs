@@ -4,6 +4,7 @@
 //! 被修饰键挡住时的延后，全是纯逻辑，通过 [`KeySink`] 与系统隔开，可离屏单测。
 //! 退格按 Unicode 标量值计数：组合字符、ZWJ 表情序列在多数输入框里一次退格删得更多，这是已知偏差。
 
+use snow_platform::focus_probe::TypingTarget;
 use snow_platform::text_inject::KeyStroke;
 
 /// 未落定（PARTIAL）修正时最多回删多少个字符；超出的差异等 FINAL 再一次性修正。
@@ -57,12 +58,14 @@ pub fn plan_edit(typed: &str, desired: &str) -> EditPlan {
 }
 
 /// 键入通道此刻的状态。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SinkState {
     /// 可以发送；携带当前前台窗口。
     Ready {
         /// 前台窗口句柄（数值）。
         window: isize,
+        /// 进程和焦点控件的完整身份。
+        target: TypingTarget,
     },
     /// 暂时不能发（修饰键被按住，或瞬时没有前台窗口），稍后重试。
     Busy,
@@ -72,6 +75,14 @@ pub enum SinkState {
 pub trait KeySink {
     /// 当前能否发送。
     fn state(&mut self) -> SinkState;
+
+    /// 绑定时忽略热键修饰键，身份查询独立于能否立即发送。
+    fn target(&mut self) -> Option<TypingTarget> {
+        match self.state() {
+            SinkState::Ready { target, .. } => Some(target),
+            SinkState::Busy => None,
+        }
+    }
 
     /// 一次性发送一批按键；失败返回原因。
     fn send(&mut self, strokes: &[KeyStroke]) -> Result<(), String>;
@@ -87,10 +98,18 @@ impl KeySink for SystemKeySink {
         if snow_platform::text_inject::physical_modifiers_held() {
             return SinkState::Busy;
         }
-        match snow_platform::text_inject::foreground_window() {
-            Some(window) => SinkState::Ready { window },
+        match self.target() {
+            Some(target) => SinkState::Ready {
+                window: target.window,
+                target,
+            },
             None => SinkState::Busy,
         }
+    }
+
+    /// 不受语音热键按住状态影响地读取目标身份。
+    fn target(&mut self) -> Option<TypingTarget> {
+        snow_platform::focus_probe::typing_target()
     }
 
     /// 用一次 `SendInput` 发出。
@@ -120,10 +139,15 @@ pub struct Typer {
     /// 已键入到目标里的文本。
     typed: String,
     /// 首次键入时的前台窗口；之后前台变化视为目标丢失。
-    target: Option<isize>,
+    target: Option<TypingTarget>,
 }
 
 impl Typer {
+    /// 开始听写时绑定，失败则保持未绑定并禁止后续自动换目标。
+    pub fn bind(&mut self, sink: &mut dyn KeySink) {
+        self.target = sink.target();
+    }
+
     /// 已键入的文本。
     pub fn typed(&self) -> &str {
         &self.typed
@@ -144,13 +168,12 @@ impl Typer {
         if !settle && plan.backspaces > MAX_PARTIAL_BACKSPACES {
             return SyncOutcome::Skipped;
         }
-        let window = match sink.state() {
+        let current = match sink.state() {
             SinkState::Busy => return SyncOutcome::Deferred,
-            SinkState::Ready { window } => window,
+            SinkState::Ready { target, .. } => target,
         };
-        match self.target {
-            Some(target) if target != window => return SyncOutcome::TargetChanged,
-            _ => self.target = Some(window),
+        if self.target.as_ref() != Some(&current) {
+            return SyncOutcome::TargetChanged;
         }
         match sink.send(&plan.strokes()) {
             Ok(()) => {
@@ -166,6 +189,46 @@ impl Typer {
 mod tests {
     use super::*;
 
+    /// 构造无需真实桌面的完整目标身份。
+    fn fake_target(window: isize) -> TypingTarget {
+        TypingTarget {
+            window,
+            process: 1,
+            focus: 10,
+            element: vec![42, 10],
+        }
+    }
+
+    /// 加载期间切窗、同窗切控件和进程身份变化均禁止首次出字及修正退格。
+    #[test]
+    fn target_identity_is_bound_before_first_text() {
+        for field in 0..3 {
+            for initial in ["", "abc"] {
+                let mut typer = Typer::default();
+                let mut sink = FakeSink::ready(1);
+                typer.bind(&mut sink);
+                typer.sync(initial, true, &mut sink);
+                let count = sink.sent.len();
+                let mut target = fake_target(1);
+                match field {
+                    0 => target.window = 2,
+                    1 => target.process = 2,
+                    _ => target.element = vec![42, 11],
+                }
+                sink.state = SinkState::Ready {
+                    window: target.window,
+                    target,
+                };
+                assert_eq!(
+                    typer.sync("changed", true, &mut sink),
+                    SyncOutcome::TargetChanged
+                );
+                assert_eq!(sink.sent.len(), count);
+                assert_eq!(typer.typed(), initial);
+            }
+        }
+    }
+
     /// 测试用通道：可控状态，记录发送内容。
     struct FakeSink {
         state: SinkState,
@@ -176,7 +239,10 @@ mod tests {
     impl FakeSink {
         fn ready(window: isize) -> Self {
             Self {
-                state: SinkState::Ready { window },
+                state: SinkState::Ready {
+                    window,
+                    target: fake_target(window),
+                },
                 sent: Vec::new(),
                 fail: None,
             }
@@ -185,7 +251,7 @@ mod tests {
 
     impl KeySink for FakeSink {
         fn state(&mut self) -> SinkState {
-            self.state
+            self.state.clone()
         }
         fn send(&mut self, strokes: &[KeyStroke]) -> Result<(), String> {
             if let Some(reason) = &self.fail {
@@ -269,6 +335,7 @@ mod tests {
     fn sync_sends_one_batch_each_time() {
         let mut typer = Typer::default();
         let mut sink = FakeSink::ready(7);
+        typer.bind(&mut sink);
         assert_eq!(
             typer.sync("今天天汽", false, &mut sink),
             SyncOutcome::Synced
@@ -291,10 +358,14 @@ mod tests {
     fn busy_defers_then_catches_up() {
         let mut typer = Typer::default();
         let mut sink = FakeSink::ready(1);
+        typer.bind(&mut sink);
         sink.state = SinkState::Busy;
         assert_eq!(typer.sync("hello", false, &mut sink), SyncOutcome::Deferred);
         assert_eq!(typer.typed(), "");
-        sink.state = SinkState::Ready { window: 1 };
+        sink.state = SinkState::Ready {
+            window: 1,
+            target: fake_target(1),
+        };
         assert_eq!(
             typer.sync("hello world", true, &mut sink),
             SyncOutcome::Synced
@@ -308,6 +379,7 @@ mod tests {
     fn partial_backspace_cap() {
         let mut typer = Typer::default();
         let mut sink = FakeSink::ready(1);
+        typer.bind(&mut sink);
         let long = "一二三四五六七八九十一二三四五六七八";
         assert_eq!(typer.sync(long, true, &mut sink), SyncOutcome::Synced);
         assert_eq!(
@@ -324,8 +396,12 @@ mod tests {
     fn target_change_stops_typing() {
         let mut typer = Typer::default();
         let mut sink = FakeSink::ready(1);
+        typer.bind(&mut sink);
         assert_eq!(typer.sync("abc", false, &mut sink), SyncOutcome::Synced);
-        sink.state = SinkState::Ready { window: 2 };
+        sink.state = SinkState::Ready {
+            window: 2,
+            target: fake_target(2),
+        };
         assert_eq!(
             typer.sync("abcd", false, &mut sink),
             SyncOutcome::TargetChanged
@@ -339,6 +415,7 @@ mod tests {
     fn send_failure_reported() {
         let mut typer = Typer::default();
         let mut sink = FakeSink::ready(1);
+        typer.bind(&mut sink);
         sink.fail = Some("blocked".into());
         assert_eq!(
             typer.sync("x", false, &mut sink),

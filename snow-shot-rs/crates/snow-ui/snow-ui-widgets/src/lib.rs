@@ -6,7 +6,6 @@
 mod magnifier;
 mod menu_button;
 mod popconfirm;
-mod result_bar;
 mod submenu_placement;
 mod text_measure;
 mod toolbar;
@@ -18,19 +17,16 @@ pub use menu_button::{
     menu_button_size,
 };
 pub use popconfirm::{Popconfirm, PopconfirmHandler, PopconfirmPlacement};
-pub use result_bar::{
-    ResultBar, ResultBarItem, calculate_outer_first_bar_placement, result_bar_size,
-};
 pub use text_measure::{
     LABEL_FONT_PX, max_label_width, max_width, menu_button_outer_width, menu_outer_width,
 };
 pub use toolbar::{
-    AnnotationTool, ScreenshotToolbar, ToolbarAction, ToolbarGroups, ToolbarLabel,
-    calculate_toolbar_placement,
+    AnnotationTool, Look as ToolbarButtonLook, ScreenshotToolbar, ToolbarAction, ToolbarButtonSpec,
+    ToolbarGroups, ToolbarItemRunner, ToolbarLabel, ToolbarRenderer, calculate_toolbar_placement,
 };
 pub use toolbar_groups::{
-    HOVER_CLOSE_DELAY_MS, HOVER_OPEN_DELAY_MS, ToolbarGroup, ToolbarItem, all_icon_paths,
-    all_items, max_menu_height, toolbar_logical_size,
+    HOVER_CLOSE_DELAY_MS, HOVER_OPEN_DELAY_MS, ToolbarGroup, ToolbarItem, ToolbarSlot,
+    all_icon_paths, all_items, max_menu_height, toolbar_logical_size, toolbar_slots,
 };
 
 /// 本 crate 的阶段标记，用于骨架连通性测试。

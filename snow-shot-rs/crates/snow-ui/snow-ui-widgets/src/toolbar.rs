@@ -10,10 +10,10 @@ use crate::menu_button::MenuEntry;
 use crate::submenu_placement::{SubmenuInput, SubmenuSide, place_submenu};
 use crate::text_measure::{LABEL_FONT_PX, ROW_ICON, max_label_width, menu_outer_width};
 use crate::toolbar_groups::{
-    ARROW_GAP, ARROW_ICON, BAR_BORDER, BAR_PADDING_X, BAR_PADDING_Y, BUTTON_SIZE, CHECK_ICON,
-    CHECK_ICON_SIZE, COLOR_CHECK_GREEN, DIVIDER_WIDTH, GroupMemory, ITEM_GAP, MENU_PADDING,
-    MENU_ROW_HEIGHT, POPUP_OFFSET, PopupEffect, PopupMachine, SECTION_GAP, ToolbarGroup,
-    ToolbarItem, group_width, menu_outer_height, toolbar_logical_size,
+    BAR_BORDER, BAR_PADDING_X, BAR_PADDING_Y, BUTTON_SIZE, CHECK_ICON, CHECK_ICON_SIZE,
+    COLOR_CHECK_GREEN, GroupMemory, ITEM_GAP, MENU_PADDING, MENU_ROW_HEIGHT, POPUP_OFFSET,
+    PopupEffect, PopupMachine, SECTION_GAP, ToolbarGroup, ToolbarItem, ToolbarSlot, group_width,
+    menu_outer_height, toolbar_logical_size, toolbar_slots,
 };
 use snow_ui_shell::geometry::{PhysicalPoint, PhysicalRect};
 use snow_ui_shell::ui::component::button::{Button, ButtonCustomVariant, ButtonVariants};
@@ -286,7 +286,7 @@ type ActionHandler = Rc<dyn Fn(ToolbarAction, &mut Window, &mut App)>;
 type ToolHandler = Rc<dyn Fn(AnnotationTool, &mut Window, &mut App)>;
 
 /// 一个条目被触发（选中工具 / 执行动作）的回调。
-type ItemRunner = Rc<dyn Fn(&mut Window, &mut App)>;
+type ItemRunner = ToolbarItemRunner;
 /// 选中翻译目标语言的回调，参数是语言项序号。
 type LanguageHandler = Rc<dyn Fn(usize, &mut Window, &mut App)>;
 /// 主菜单某一行的悬停事件对二级菜单的影响：移入「翻译」行展开，移入其他行收起，移出不改变
@@ -365,10 +365,6 @@ const ALPHA_ACTIVE_BG: u32 = 0x33;
 const ALPHA_ACTIVE_HOVER: u32 = 0x4D;
 /// 悬停提示（tooltip）出现前的延迟。
 pub(crate) const TOOLTIP_DELAY: Duration = Duration::from_millis(350);
-/// 图标按钮内图标的边长。
-const ICON_SIZE: f32 = 18.0;
-/// 下箭头图标边长。
-const ARROW_ICON_SIZE: f32 = 10.0;
 
 /// 当前项文字的提亮颜色。
 pub(crate) const COLOR_CURRENT_TEXT: u32 = 0xFFFFFF;
@@ -435,7 +431,7 @@ pub(crate) fn menu_row_content(icon: &'static str, label: String, checked: bool)
 
 /// 按钮外观：普通 / 选中 / 主操作 / 危险。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Look {
+pub enum Look {
     /// 普通。
     Normal,
     /// 选中（主色）。
@@ -448,7 +444,7 @@ pub(crate) enum Look {
 
 impl Look {
     /// 把外观转成组件库的自定义按钮配色；置灰由按钮的 `disabled` 状态负责。
-    pub(crate) fn variant(self, cx: &App) -> ButtonCustomVariant {
+    pub fn variant(self, cx: &App) -> ButtonCustomVariant {
         let base = ButtonCustomVariant::new(cx);
         let tint = |alpha: u32| rgba((COLOR_PRIMARY << 8) | alpha).into();
         match self {
@@ -604,6 +600,64 @@ impl ToolbarGroups {
     }
 }
 
+/// 按钮业务回调；由宿主共用操作栏安装事件隔离。
+pub type ToolbarItemRunner = Rc<dyn Fn(&mut Window, &mut App)>;
+
+/// 截图工具栏的可离屏按钮输入，不携带具体的按钮渲染实现。
+pub struct ToolbarButtonSpec {
+    /// 稳定元素标识。
+    pub id: String,
+    /// 工具或业务动作。
+    pub item: ToolbarItem,
+    /// 本地化提示。
+    pub tooltip: String,
+    /// 展开菜单时主按钮暂停提示。
+    pub tooltip_enabled: bool,
+    /// 当前项高亮。
+    pub selected: bool,
+    /// 禁用态。
+    pub disabled: bool,
+    /// 配色语义。
+    pub look: Look,
+    /// 原有逻辑尺寸。
+    pub size: (f32, f32),
+    /// 主栏分组提示图标。
+    pub indicator: Option<&'static str>,
+    /// 主动作分发。
+    pub on_click: Option<ToolbarItemRunner>,
+    /// 分组右键展开。
+    pub on_right_down: Option<ToolbarItemRunner>,
+}
+
+impl ToolbarButtonSpec {
+    /// 离屏与实际点击共用分发入口，禁用输入不调用宿主回调。
+    pub fn dispatch(&self, callback: impl FnOnce(ToolbarItem)) -> bool {
+        if self.disabled {
+            return false;
+        }
+        callback(self.item);
+        true
+    }
+}
+
+/// 宿主必须显式提供共用操作栏渲染器；工具栏只负责菜单与布局模型。
+pub trait ToolbarRenderer {
+    /// 渲染一个图标动作。
+    fn button(&self, spec: ToolbarButtonSpec, cx: &App) -> AnyElement;
+    /// 渲染组间分隔符。
+    fn separator(&self) -> AnyElement;
+    /// 可选的首部控件，由宿主共用组件提供。
+    fn leading(&self) -> Option<AnyElement> {
+        None
+    }
+    /// 首部控件的完整占用宽度（含间距）。
+    fn leading_width(&self) -> f32 {
+        0.0
+    }
+    /// 渲染主栏横向按钮行。
+    fn row(&self, gap: f32) -> Div;
+}
+
 /// 截图主工具栏组件。
 pub struct ScreenshotToolbar {
     id: ElementId,
@@ -652,6 +706,14 @@ impl ScreenshotToolbar {
             groups: None,
             translate_languages: Vec::new(),
             on_translate_language: None,
+        }
+    }
+
+    /// 绑定宿主操作栏渲染器后才成为可绘制元素，禁止回退到旧的手写按钮。
+    pub fn with_renderer(self, renderer: Rc<dyn ToolbarRenderer>) -> RenderedToolbar {
+        RenderedToolbar {
+            toolbar: self,
+            renderer,
         }
     }
 
@@ -818,42 +880,50 @@ impl ScreenshotToolbar {
         }
     }
 
-    /// 带无障碍标签的纯图标按钮。
-    fn icon_button(
+    /// 按钮定义交给宿主的共用操作栏渲染，尺寸与分组行为仍由工具栏提供。
+    pub fn button_spec(
         &self,
         id: String,
         item: ToolbarItem,
         look: Look,
-        disabled: bool,
-        cx: &App,
-    ) -> Button {
-        Button::new(SharedString::from(id))
-            .custom(look.variant(cx))
-            .with_size(ComponentSize::Size(px(BUTTON_SIZE)))
-            .icon(
-                Icon::default()
-                    .path(item.icon_path())
-                    .with_size(ComponentSize::Size(px(ICON_SIZE))),
-            )
-            .disabled(disabled)
-            .accessibility_label(SharedString::from(self.label_text(item.label())))
+        size: (f32, f32),
+    ) -> ToolbarButtonSpec {
+        ToolbarButtonSpec {
+            id,
+            item,
+            tooltip: self.label_text(item.label()),
+            tooltip_enabled: true,
+            selected: matches!(item, ToolbarItem::Tool(tool) if tool == self.active_tool),
+            disabled: self.item_disabled(item)
+                || matches!(item, ToolbarItem::Action(ToolbarAction::Undo) if !self.can_undo)
+                || matches!(item, ToolbarItem::Action(ToolbarAction::Redo) if !self.can_redo),
+            look,
+            size,
+            indicator: None,
+            on_click: if ToolbarGroup::of(item).is_some() {
+                self.item_click(item)
+            } else {
+                self.runner(item)
+            },
+            on_right_down: None,
+        }
     }
 
-    /// 独立图标按钮（撤销 / 重做 / 复制 / 取消）。
+    /// 独立动作使用同一个渲染入口与禁用判定。
     fn solo_button(
         &self,
         action: ToolbarAction,
         look: Look,
-        enabled: bool,
+        renderer: &dyn ToolbarRenderer,
         cx: &App,
     ) -> AnyElement {
-        let item = ToolbarItem::Action(action);
-        let id = format!("tb-solo-{action:?}");
-        let mut btn = self.icon_button(id.clone(), item, look, !enabled, cx);
-        if enabled && let Some(run) = self.runner(item) {
-            btn = btn.on_click(move |_, window, cx| run(window, cx));
-        }
-        with_tooltip(id, self.label_text(item.label()), btn).into_any_element()
+        let spec = self.button_spec(
+            format!("tb-solo-{action:?}"),
+            ToolbarItem::Action(action),
+            look,
+            (BUTTON_SIZE, BUTTON_SIZE),
+        );
+        renderer.button(spec, cx)
     }
 
     /// 一个分组的复合按钮：图标 + 小箭头合成同一个按钮，悬停弹出同组菜单。
@@ -863,66 +933,30 @@ impl ScreenshotToolbar {
         group: ToolbarGroup,
         memory: &GroupMemory,
         open: Option<ToolbarGroup>,
+        renderer: &dyn ToolbarRenderer,
         cx: &App,
     ) -> AnyElement {
         let current = memory.current(group);
         let is_open = open == Some(group);
-        let disabled = self.item_disabled(current);
         let key = group.key();
-        let btn_id = format!("tb-{key}-main");
-        let look = self.item_look(current);
+        let mut spec = self.button_spec(
+            format!("tb-{key}-main"),
+            current,
+            self.item_look(current),
+            (group_width(group), BUTTON_SIZE),
+        );
         if !group.has_menu() {
-            // 只有一项：退化为普通图标按钮
-            let mut main = self.icon_button(btn_id.clone(), current, look, disabled, cx);
-            if let Some(act) = self.item_click(current) {
-                main = main.on_click(move |_, window, cx| act(window, cx));
-            }
-            let tip = self.label_text(current.label());
-            return with_tooltip(btn_id, tip, main).into_any_element();
+            return renderer.button(spec, cx);
         }
-
-        // 整体一个按钮：当前项图标 + 小箭头；点击 = 执行当前项，右键 = 打开菜单
-        let content = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .justify_center()
-            .gap(px(ARROW_GAP))
-            .child(
-                Icon::default()
-                    .path(current.icon_path())
-                    .with_size(ComponentSize::Size(px(ICON_SIZE))),
-            )
-            .child(
-                Icon::default()
-                    .path(ARROW_ICON)
-                    .with_size(ComponentSize::Size(px(ARROW_ICON_SIZE))),
-            );
-        let mut btn = Button::new(SharedString::from(btn_id.clone()))
-            .custom(look.variant(cx))
-            .with_size(ComponentSize::Size(px(ARROW_ICON_SIZE)))
-            .w(px(group_width(group)))
-            .h(px(BUTTON_SIZE))
-            .disabled(disabled)
-            .accessibility_label(SharedString::from(
-                self.label_text(ToolbarLabel::GroupTip(group, current)),
-            ))
-            .child(content);
+        spec.tooltip = self.label_text(ToolbarLabel::GroupTip(group, current));
+        spec.indicator = Some("icons/chevron-down.svg");
+        spec.tooltip_enabled = !is_open;
         if let Some(groups) = self.groups.clone() {
-            // 触屏 / 无法悬停时的补充途径：右键直接开关菜单
-            btn = btn.on_mouse_down(MouseButton::Right, move |_, _, cx| {
+            spec.on_right_down = Some(Rc::new(move |_, cx| {
                 groups.update(cx, |state, gcx| state.click_arrow(group, gcx));
-            });
+            }));
         }
-        if let Some(act) = self.item_click(current) {
-            btn = btn.on_click(move |_, window, cx| act(window, cx));
-        }
-        let row = if is_open {
-            div().child(btn)
-        } else {
-            let tip = self.label_text(ToolbarLabel::GroupTip(group, current));
-            div().child(with_tooltip(btn_id, tip, btn))
-        };
+        let row = renderer.button(spec, cx);
 
         let mut popup = Popup::new(SharedString::from(format!("tb-group-{key}")), row)
             .anchor(if self.popup_up {
@@ -1140,15 +1174,23 @@ impl ScreenshotToolbar {
     }
 }
 
-impl RenderOnce for ScreenshotToolbar {
+/// 显式注入渲染器后的工具栏元素，避免 widgets 反向依赖应用层。
+pub struct RenderedToolbar {
+    toolbar: ScreenshotToolbar,
+    renderer: Rc<dyn ToolbarRenderer>,
+}
+
+impl RenderOnce for RenderedToolbar {
     /// 渲染工具栏。
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let renderer = self.renderer.as_ref();
+        let this = self.toolbar;
         // 当前激活的工具（可能由快捷键切换）要成为它所在组的当前项；静默同步，不触发重绘
-        if let Some(groups) = &self.groups {
-            let active = ToolbarItem::Tool(self.active_tool);
+        if let Some(groups) = &this.groups {
+            let active = ToolbarItem::Tool(this.active_tool);
             groups.update(cx, |state, _| state.remember(active));
         }
-        let (memory, open) = match &self.groups {
+        let (memory, open) = match &this.groups {
             Some(groups) => {
                 let state = groups.read(cx);
                 (state.memory.clone(), state.open_group())
@@ -1156,41 +1198,16 @@ impl RenderOnce for ScreenshotToolbar {
             None => (GroupMemory::default(), None),
         };
 
-        let section = || div().flex().flex_row().items_center().gap(px(ITEM_GAP));
-        let divider = || div().w(px(DIVIDER_WIDTH)).h_4().bg(rgba(COLOR_DIVIDER));
-
-        let mut tool_section = section();
-        for group in ToolbarGroup::TOOL_GROUPS {
-            tool_section = tool_section.child(self.group_view(window, group, &memory, open, cx));
-        }
-
-        // 撤销 / 重做：不可用时置灰且不注册点击
-        let history_section = section()
-            .child(self.solo_button(ToolbarAction::Undo, Look::Normal, self.can_undo, cx))
-            .child(self.solo_button(ToolbarAction::Redo, Look::Normal, self.can_redo, cx));
-
-        let mut action_section = section();
-        for group in ToolbarGroup::ACTION_GROUPS {
-            action_section =
-                action_section.child(self.group_view(window, group, &memory, open, cx));
-        }
-        // 复制是推荐主动作；取消用危险色
-        let copy_enabled = !self.is_action_disabled(ToolbarAction::Copy);
-        let cancel_enabled = !self.is_action_disabled(ToolbarAction::Cancel);
-        action_section = action_section
-            .child(self.solo_button(ToolbarAction::Copy, Look::Primary, copy_enabled, cx))
-            .child(self.solo_button(ToolbarAction::Cancel, Look::Danger, cancel_enabled, cx));
-
-        let (width, height) = toolbar_logical_size(self.show_tools);
+        let (width, height) = toolbar_logical_size(this.show_tools);
         let mut bar = div()
-            .id(self.id.clone())
+            .id(this.id.clone())
             .flex()
             .flex_row()
             .items_center()
             .gap(px(SECTION_GAP))
             .px(px(BAR_PADDING_X))
             .py(px(BAR_PADDING_Y))
-            .w(px(width as f32))
+            .w(px(width as f32 + renderer.leading_width()))
             .h(px(height as f32))
             .rounded_md()
             .bg(rgba(COLOR_BAR_BG))
@@ -1199,26 +1216,46 @@ impl RenderOnce for ScreenshotToolbar {
             .border_color(rgba(COLOR_BAR_BORDER))
             // 点击工具栏不应穿透到下层选区，否则会误触发重新框选
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation());
-        if self.show_tools {
-            bar = bar
-                .child(tool_section)
-                .child(divider())
-                .child(history_section)
-                .child(divider());
+            .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+            .on_mouse_down(MouseButton::Middle, |_, _, cx| cx.stop_propagation());
+        if let Some(leading) = renderer.leading() {
+            bar = bar.child(div().flex_none().mr(px(-SECTION_GAP)).child(leading));
         }
-        bar.child(action_section)
+        let mut section = renderer.row(ITEM_GAP);
+        for slot in toolbar_slots(this.show_tools) {
+            match *slot {
+                ToolbarSlot::Group(group) => {
+                    section =
+                        section.child(this.group_view(window, group, &memory, open, renderer, cx));
+                }
+                ToolbarSlot::Action(action) => {
+                    let look = match action {
+                        ToolbarAction::Copy => Look::Primary,
+                        ToolbarAction::Cancel => Look::Danger,
+                        _ => Look::Normal,
+                    };
+                    section = section.child(this.solo_button(action, look, renderer, cx));
+                }
+                ToolbarSlot::Separator => {
+                    bar = bar.child(section).child(renderer.separator());
+                    section = renderer.row(ITEM_GAP);
+                }
+            }
+        }
+        bar.child(section)
     }
 }
 
-impl IntoElement for ScreenshotToolbar {
+impl IntoElement for RenderedToolbar {
     type Element = ViewElement<Self>;
 
+    /// 将已绑定渲染器的工具栏转换为元素。
     #[track_caller]
     fn into_element(self) -> Self::Element {
         ViewElement::new(self)
     }
 
+    /// 擦除元素类型供宿主组合布局。
     #[track_caller]
     fn into_any_element(self) -> AnyElement {
         Element::into_any(self.into_element())
@@ -1228,6 +1265,60 @@ impl IntoElement for ScreenshotToolbar {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 七组菜单实际渲染入口必须保留图标文字、选中槽、原尺寸与点击路径。
+    #[test]
+    fn toolbar_popup_options_keep_icon_and_text() {
+        let source = include_str!("toolbar.rs");
+        let menu = source
+            .split("    fn menu_view(")
+            .nth(1)
+            .unwrap()
+            .split("    fn language_submenu(")
+            .next()
+            .unwrap();
+        assert!(menu.contains("for item in group.items().iter().copied()"));
+        assert!(menu.contains(
+            "menu_row_content(item.icon_path(), self.label_text(item.label()), is_current)"
+        ));
+        for required in [
+            ".custom(self.item_look(item).variant(cx))",
+            ".w_full()",
+            ".h(px(MENU_ROW_HEIGHT))",
+            ".disabled(disabled)",
+            "self.item_click(item)",
+            "row.on_click(",
+            "cell.on_hover(",
+            "self.language_submenu(window, menu_size, cx)",
+        ] {
+            assert!(menu.contains(required), "缺少原菜单行为：{required}");
+        }
+        assert!(!menu.contains("renderer"));
+        assert!(!menu.contains("button_spec"));
+        let content = source
+            .split("pub(crate) fn menu_row_content(")
+            .nth(1)
+            .unwrap()
+            .split("/// 按钮外观")
+            .next()
+            .unwrap();
+        for required in [
+            ".path(icon)",
+            ".child(label)",
+            ".child(menu_check_slot(checked))",
+        ] {
+            assert!(content.contains(required));
+        }
+        let toolbar = ScreenshotToolbar::new("popup-test");
+        for group in ToolbarGroup::ALL {
+            for item in group.items() {
+                assert!(!item.icon_path().is_empty());
+                assert!(!toolbar.label_text(item.label()).is_empty());
+                let _ = menu_row_content(item.icon_path(), toolbar.label_text(item.label()), true)
+                    .into_any_element();
+            }
+        }
+    }
 
     /// 验证工具标签。
     #[test]

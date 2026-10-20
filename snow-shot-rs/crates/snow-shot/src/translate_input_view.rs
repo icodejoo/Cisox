@@ -9,6 +9,7 @@
 use crate::app_runtime::UiEvent;
 use crate::history_view::apply_theme;
 use crate::ocr_backend::i18n_for;
+use crate::pin_action_bar::ActionSpec;
 use crate::settings_state::UiPrefs;
 use crate::settings_view::{Palette, palette};
 use crate::translate_input::{InputError, PackChoice, Phase};
@@ -20,11 +21,10 @@ use crate::translate_page_view::{ChoiceItem, ChoiceSelect, index_of, lang_items,
 use crate::translate_service::{TranslateConfig, Translated};
 use snow_platform::clipboard::copy_text_to_clipboard;
 use snow_ui::shell::inbox::MainThreadInbox;
-use snow_ui::ui::component::button::{Button, ButtonVariants};
 use snow_ui::ui::component::input::{InputEvent, Textarea, TextareaState};
 use snow_ui::ui::component::searchable_list::SearchableVec;
 use snow_ui::ui::component::select::{Select, SelectEvent, SelectState};
-use snow_ui::ui::component::{Disableable, Icon, IndexPath, Sizable, Size as ComponentSize};
+use snow_ui::ui::component::{Icon, IndexPath, Sizable, Size as ComponentSize};
 use snow_ui::ui::*;
 use std::f32::consts::FRAC_PI_2;
 use std::time::Duration;
@@ -65,8 +65,6 @@ const GAP: f32 = 8.0;
 const TEXT_SIZE: f32 = 14.0;
 /// 标题 / 状态行字号。
 const SMALL_SIZE: f32 = 12.0;
-/// 图标按钮内图标的边长。
-const ICON_SIZE: f32 = 16.0;
 /// 状态行高度。
 const STATUS_HEIGHT: f32 = 18.0;
 /// 模型下拉与交换按钮所在行的高度。
@@ -79,6 +77,59 @@ const ICON_COPY: &str = "icons/antd/copy.svg";
 const ICON_SWAP: &str = "icons/antd/swap.svg";
 /// 关闭图标（antd）。
 const ICON_CLOSE: &str = "icons/antd/close.svg";
+
+/// 输入浮窗里的四个独立图标动作。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InputAction {
+    Close,
+    Clear,
+    Swap,
+    Copy,
+}
+
+/// 混合工具栏只替换动作按钮，语言与模型下拉保持原有布局和焦点。
+fn input_action(
+    action: InputAction,
+    locale: &str,
+    has_input: bool,
+    has_translation: bool,
+    can_swap: bool,
+) -> ActionSpec<InputAction> {
+    let (id, icon, key, disabled) = match action {
+        InputAction::Close => (
+            "translate-input-close",
+            ICON_CLOSE,
+            "translate-input-close",
+            false,
+        ),
+        InputAction::Clear => (
+            "translate-input-clear",
+            ICON_CLEAR,
+            "translate-input-clear",
+            !has_input && !has_translation,
+        ),
+        InputAction::Swap => (
+            "translate-input-swap",
+            ICON_SWAP,
+            "translate-page-swap",
+            !can_swap,
+        ),
+        InputAction::Copy => (
+            "translate-input-copy",
+            ICON_COPY,
+            "translate-input-copy",
+            !has_translation,
+        ),
+    };
+    ActionSpec {
+        id,
+        icon,
+        tooltip: text(locale, key),
+        disabled,
+        loading: false,
+        action,
+    }
+}
 
 /// 取界面语言下的文案。
 fn text(locale: &str, id: &str) -> String {
@@ -417,13 +468,14 @@ impl TranslateInputView {
             )
     }
 
-    /// 图标按钮（幽灵样式，悬停有文字提示）。
-    fn icon_button(id: &'static str, icon: Icon, tooltip: String) -> Button {
-        Button::new(id)
-            .ghost()
-            .with_size(ComponentSize::Small)
-            .icon(icon.with_size(ComponentSize::Size(px(ICON_SIZE))))
-            .tooltip(tooltip)
+    /// 共用动作入口，保留清空后聚焦、交换重翻和复制状态反馈。
+    fn apply_action(&mut self, action: InputAction, window: &mut Window, cx: &mut Context<Self>) {
+        match action {
+            InputAction::Close => window.remove_window(),
+            InputAction::Clear => self.clear(window, cx),
+            InputAction::Swap => self.swap(window, cx),
+            InputAction::Copy => self.copy(cx),
+        }
     }
 
     /// 一块灰色卡片：标题行（语言下拉 + 图标）加下面的白色文本框。
@@ -443,6 +495,7 @@ impl TranslateInputView {
 }
 
 impl Render for TranslateInputView {
+    /// 渲染宿主内容并装配共用图标动作。
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p: Palette = palette(self.prefs.dark, self.prefs.accent);
         let locale = self.prefs.locale;
@@ -484,14 +537,15 @@ impl Render for TranslateInputView {
                     .child(text(locale, "translate-input-title")),
             )
             .child(
-                Self::icon_button(
-                    "translate-input-close",
-                    Icon::default().path(ICON_CLOSE),
-                    text(locale, "translate-input-close"),
+                input_action(
+                    InputAction::Close,
+                    locale,
+                    has_input,
+                    has_translation,
+                    can_swap,
                 )
-                .on_click(
-                    cx.listener(|_this, _e: &ClickEvent, window, _cx| window.remove_window()),
-                ),
+                .bind(cx, Self::apply_action)
+                .render(),
             );
 
         // 上块：源语言 + 清空，下面是输入框
@@ -510,15 +564,15 @@ impl Render for TranslateInputView {
                     cx,
                 ))
                 .child(
-                    Self::icon_button(
-                        "translate-input-clear",
-                        Icon::default().path(ICON_CLEAR),
-                        text(locale, "translate-input-clear"),
+                    input_action(
+                        InputAction::Clear,
+                        locale,
+                        has_input,
+                        has_translation,
+                        can_swap,
                     )
-                    .disabled(!has_input && !has_translation)
-                    .on_click(
-                        cx.listener(|this, _e: &ClickEvent, window, cx| this.clear(window, cx)),
-                    ),
+                    .bind(cx, Self::apply_action)
+                    .render(),
                 ),
             Textarea::new(&self.input).bordered(false).bg(p.bg),
         );
@@ -546,13 +600,15 @@ impl Render for TranslateInputView {
             ))
             .child(div().flex_1())
             .child(
-                Self::icon_button(
-                    "translate-input-swap",
-                    Icon::default().path(ICON_SWAP).rotate(radians(FRAC_PI_2)),
-                    text(locale, "translate-page-swap"),
+                input_action(
+                    InputAction::Swap,
+                    locale,
+                    has_input,
+                    has_translation,
+                    can_swap,
                 )
-                .disabled(!can_swap)
-                .on_click(cx.listener(|this, _e: &ClickEvent, window, cx| this.swap(window, cx))),
+                .bind(cx, Self::apply_action)
+                .render_with_icon(Icon::default().path(ICON_SWAP).rotate(radians(FRAC_PI_2))),
             );
 
         // 译文框：白色底，空时显示占位说明
@@ -587,13 +643,15 @@ impl Render for TranslateInputView {
                     cx,
                 ))
                 .child(
-                    Self::icon_button(
-                        "translate-input-copy",
-                        Icon::default().path(ICON_COPY),
-                        text(locale, "translate-input-copy"),
+                    input_action(
+                        InputAction::Copy,
+                        locale,
+                        has_input,
+                        has_translation,
+                        can_swap,
                     )
-                    .disabled(!has_translation)
-                    .on_click(cx.listener(|this, _e: &ClickEvent, _window, cx| this.copy(cx))),
+                    .bind(cx, Self::apply_action)
+                    .render(),
                 ),
             result_box,
         );
@@ -635,5 +693,61 @@ impl Render for TranslateInputView {
                             .child(status.unwrap_or_default()),
                     ),
             )
+    }
+}
+
+#[cfg(test)]
+mod action_bar_tests {
+    use super::*;
+
+    /// 四个生产按钮的集合、所有可用状态组合和业务回调身份均可离屏验证。
+    #[test]
+    fn translate_input_action_bar_states_and_dispatch() {
+        for locale in ["en-US", "zh-CN"] {
+            for has_input in [false, true] {
+                for has_translation in [false, true] {
+                    for can_swap in [false, true] {
+                        let mut ids = Vec::new();
+                        let mut called = Vec::new();
+                        for action in [
+                            InputAction::Close,
+                            InputAction::Clear,
+                            InputAction::Swap,
+                            InputAction::Copy,
+                        ] {
+                            let spec =
+                                input_action(action, locale, has_input, has_translation, can_swap);
+                            ids.push(spec.id);
+                            assert!(icon_asset_exists(spec.icon));
+                            assert!(
+                                !spec.tooltip.is_empty() && !spec.tooltip.starts_with("translate-")
+                            );
+                            let disabled = match action {
+                                InputAction::Close => false,
+                                InputAction::Clear => !has_input && !has_translation,
+                                InputAction::Swap => !can_swap,
+                                InputAction::Copy => !has_translation,
+                            };
+                            assert_eq!(spec.disabled, disabled);
+                            let before = called.len();
+                            assert_eq!(spec.dispatch(|a| called.push(a)), !disabled);
+                            assert_eq!(called.len() - before, usize::from(!disabled));
+                            if !disabled {
+                                assert_eq!(called.last(), Some(&action));
+                            }
+                        }
+                        assert_eq!(
+                            ids,
+                            [
+                                "translate-input-close",
+                                "translate-input-clear",
+                                "translate-input-swap",
+                                "translate-input-copy"
+                            ]
+                        );
+                    }
+                }
+            }
+        }
     }
 }

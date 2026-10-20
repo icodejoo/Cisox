@@ -1,9 +1,131 @@
 # Cisox 进度交接（2026-10-03 暂停点；2026-10-13 最新收口见 §0.-1，上一轮 2026-10-09 见 §0.0）
 
-> 本文记录 2026-10-03 暂停时的真实状态与续做入口。**续做先读 §0.-1（2026-10-13 收口）**。方案主文档：`docs/cisox-gpui-migration-plan.md`。
+> 本文记录 2026-10-03 暂停时的真实状态与续做入口。**续做先读 §0.-4（宿主与 worker 审查修复）、§0.-3（2026-10-20 UI 审查）与 §0.-2（截图翻译贴图接手）；双进程状态见 §0.-1（2026-10-13 收口）**。方案主文档：`docs/cisox-gpui-migration-plan.md`。
 > **功能对齐程度以 [`research/qt-parity-audit.md`](research/qt-parity-audit.md)（2026-10-03，读代码得出）为准**；方案 P2~P7 与旧验收报告里的「已完成」没按现状重核，别直接引用。
 > 最新待办清单在 §5.1；§5 及之前的清单是 09-29 旧稿，仍有效的条目已在 §5 开头标出。
 > 进程模型（托盘宿主 + 按需 UI：两个 exe、启动开关、构建、日志位置、验收脚本；**2026-10-13 已切默认为双进程；阶段 0~4、6 完成，阶段 5（冷启动优化）未执行**）见 §6.2。
+
+## 0.-4 2026-10-20 宿主与 worker 审查修复
+
+> 来源：2026-10-20 按 exe 逐个做的代码审查（cisox-ui / cisox / recorder / stt / translator / table / latex 共七轮），主会话复核后全部修复。UI 侧见 §0.-3。
+
+- **宿主 `cisox.exe`**：会话管道改为有界异步写队列（`mailbox.rs`），手势更新合并，写失败进入会话故障处理，`--cmd quit` 优先；无窗口配置任务限时 30 秒，超时终止回收，暂存命令队列有容量、合并和过期；托盘菜单展开时窗口消息调用 `EndMenu` 退出；UI 子进程登记前由清理守卫持有，任一步失败都终止回收；首次有效快照到达后一次性恢复登录贴图；全屏闸门放行已放行按下的配对松键；重启改为宿主自身 `--restart-after` 等旧进程退出后直接启动，不再经 cmd / ping。
+- **录制 `cisox-recorder.exe`**：MF 编码保留末帧并按停止终点定时长（静止尾段不再提前结束）；后台编码 / 采集故障及时回报 Error；暂停恢复重新抓完整桌面（跨屏等全部首帧）；采集队列有界、光标更新取最新值；软编复用设备选择与两路音量；音频写入失败回报 Lost 并保留首个错误；光标缓存限容 FIFO。软编停止时无损合并音轨有临时磁盘与收尾 I/O 开销；软编音画同步原点为会话就绪时刻，精确同步待实测。
+- **`cisox-stt.exe`**：在途 PCM 限 30 秒，过载立即拒收并报错；STOP 冻结采样、释放采集，收尾轮询并持续输出结果、期间响应 CANCEL / EOF；STOP 积压按 `max_seconds` 剩余额度裁剪。sherpa 单次解码仍不可中断。
+- **`cisox-translator.exe`**：超长单句按 token 偏移切分并在推理前再校验；独立读取 stdin，EOF / 取消贯穿分段、解码和 ORT Run（`cancellation.rs`）；Seq2Seq 加载期校验 logits、运行期缺失返回结构化错误；相对 DLL 路径检查后固定为规范化绝对路径。
+- **`cisox-table.exe` / `cisox-latex.exe`**：table 校验输入数量 / 类型 / 形状，不再直接索引；latex 新编码开始即清空旧上下文，失败后禁止解码。
+- 验证（各自独立 target 目录）：宿主库 164、shell-core 25、workspace-guard 24+6；recorder 脚本测试 208（2 项基准忽略）；STT 94（1 忽略）、translator 108、table 1、latex 1；相关 clippy / fmt / `git diff --check` 通过。
+- 未覆盖：真屏托盘菜单退出与宿主重启、PE 导入表验收、真实多屏暂停恢复与音画同步、真实麦克风与慢模型的中断效果。
+
+## 0.-3 2026-10-20 UI 侧审查修复
+
+- 贴图跨 DPI 时保持图像物理位置，统一重算操作条外框、图像偏移、原生命中区域和拖动基准；新增含负坐标屏的连续往返测试。
+- 翻译请求持有引擎 Arc 与只读路由策略快照，仍复用模型池；取消沿分段、包池等待、本地 worker 加载、管道读写和分块传播；OpenAI 兼容后端的段间请求与本地 curl 等待也响应取消。非致命首错也启动空闲回收；分块预算改按 JSON 转义后长度计算，单段超限明确拒绝。
+- 翻译贴图保留结构化错误：失败时共享 `pin_action_bar` 中的撤销 / 复制位置分别提供重试 / 下载（后者按错误能力启用），图标 + 双语 tooltip；重试保持原图与原目标语言。最终排版、GDI 光栅化与像素转换在后台完成，UI 只安装图像；无可绘制内容时返还原像素缓冲，回退不再整图克隆。
+- OCR / 表格 / 公式沿用应用会话播种序号，拒收上一截图的迟到结果；翻译原有会话播种和 serial ↔ pin 映射已存在，保留。
+- 开始听写即绑定前台窗口、进程、原生焦点及 UIA RuntimeId，每批注入前复核；切窗或同窗切控件时停止键入并沿用目标丢失提示。UIA 身份无法确定时不向未知控件注入。
+- 表格属性缺少 `>` 时返回结构错误，不能吞掉后续格 / 行；新增跨度、行列和文本导出的固定 token 黄金样例。公式解码必须遇到 EOS，长度耗尽返回双语错误；总期限为加载预算 + 推理预算（当前合计 120 秒），读写均可取消，退出识别界面或关闭截图时回收 worker；stderr 只保存固定容量尾部。补固定公式图 + 脚本 token 的精确输出断言。
+- STT worker 与 UI 共用稳定 `[worker:<code>] <参数>` 错误编码，麦克风 / WAV 故障按码本地化，其他诊断只写日志。未涉及本轮之外的 STT 问题。
+- 已检查删除的 `result_bar.rs` 没有代码悬空引用；`calculate_toolbar_placement` 仍有录屏 / 长图的有效调用，与前节文档一致。
+- 本轮改动文件（不包含会话开始前已有、且本轮未编辑的文件）：
+  - `crates/snow-shot/src/`：`app_runtime.rs`、`overlay_view.rs`、`pinned_view.rs`、`pinned_manager.rs`、`pinned_shared.rs`、`frozen_frame.rs`、`ocr_client.rs`、`table_structure.rs`、`latex_ocr.rs`、`latex_service.rs`、`translate_render.rs`、`translate_service.rs`、`dictation/{engine,flow,status,typing}.rs`。
+  - `crates/snow-translate/src/{lib,router,worker,openai}.rs`、`crates/snow-platform/src/focus_probe.rs`、`crates/snow-stt-protocol/src/lib.rs`、`tools/snow-stt/src/{main,source}.rs`。
+  - `crates/snow-i18n/locales/{en-US,zh-CN}/{pinned_window,dictation,latex_recognition}.ftl`；本交接文档、`docs/README.md`、`docs/guides/snow-stt-worker.md`。以上 crate / tools 路径均相对 `snow-shot-rs/`；`AGENTS.md`、共享操作栏和 Qt/C++ 未被本轮编辑。
+- 本轮全部 Cargo 命令固定 `CARGO_TARGET_DIR=C:\cargo-target\cisox-review`，保留已有未提交改动；不增依赖、不改 Qt/C++，不提交 / stash / checkout / reset，不启动或停止产品进程。
+- 最终验证：`cargo test -p snow-shot` 按 `latex_`（34 通过 / 1 忽略）、`table_`（36 / 1）、`pinned`（89 / 1）、`translat`（231）、`dictation`（133 / 1）、`overlay`（194）、`action_bar`（20）过滤通过；析构兜底和翻译预热取消改动后分别复跑受影响的 `overlay` / `dictation` / `translat` 组通过。各过滤组有重叠，不相加作总用例数。
+- `snow-translate` 初轮完整 crate 测试通过；最终 `worker::tests`（42）、`router::tests`（37）、`openai::tests`（12）通过。`snow-stt-protocol`（21 单测 + 10 文档测试）、`snow-i18n`（38 单测 / 集成测试 + 11 文档测试）、`workspace-guard`（24 单测 + 6 文档测试）通过；`snow-platform com::tests`（1）通过，`focus_probe` 过滤无匹配用例，真实 UIA 查询未验。独立 `snow-stt` 87 通过 / 1 个真实模型测试忽略；最后对更新后的 WAV 错误码断言单独复跑通过。
+- `cargo clippy -p <crate> --all-targets -- -D warnings` 对 `snow-shot`、`snow-translate`、`snow-platform`、`snow-stt-protocol`、`snow-i18n`、独立 `snow-stt` 均通过；主 workspace 受影响包及独立 STT 的 `cargo fmt -- --check` 通过。i18n `check` 与 `extract crates --exclude crates/snow-i18n --strict-refs` 通过（398 引用、缺失 0），`git diff --check` 通过。未跑 workspace 全量测试。
+- 验证环境：STT 首次测试因隔离目录缺少匹配 DLL 报 `0xc000007b`，随后将已有 sherpa C API 与 ORT 1.28 DLL 复制到 `cisox-review/debug/deps` 后复跑通过；没有改运行目录或运行中的 exe。编译期间的接口 / 死代码检查失败均已修正并复跑相关检查。
+- 未覆盖：真实跨 DPI 桌面交互、UIA 提供方稳定性 / 延迟、实际输入注入、下载 / 剪贴板端到端、真实模型识别精度及无响应 worker 的系统级回收冒烟。离线公式样例验证流水线输出，不代表真实模型质量；本轮没有新增 Qt 模块移植，也没有新增 C++ 黄金样本。
+
+## 0.-2 2026-10-20 截图翻译贴图接手（含 10-19 浮层调整）
+
+- 点击截图翻译后，在 `TranslateRequested` 处理时立即复用 `PinnedManager` / `PinnedWindowView` 创建原图临时贴图并关闭全部截图覆盖窗；后台 OCR / 翻译由贴图接手，成功前不等待覆盖窗、不进入翻译详情窗口。独立输入翻译与听写翻译入口保留。
+- 复用现有 OCR 排版与译文原位渲染，共用函数 `translate_render::build_translated_rgba` 不依赖覆盖窗，覆盖窗基准路径与贴图均调用它；完成时替换对应贴图的图像。图片保持原选区的桌面物理坐标与尺寸，含负原点副屏。操作按钮为保存原图、撤销、复制译文、关闭，使用组件库 Small 图标 Button + tooltip；图标经 `snow_ui::ui` 现有 antd 资源门面加载，提示沿用 en-US / zh-CN 的四个 `translation-pin-*` 键，不显示按钮文字。
+- 翻译期间以现有 `scan_overlay` 扫描图像区域，不遮按钮条、不拦截鼠标；可拖动、保存原图和关闭，撤销 / 复制译文在结果出现前禁用。成功、失败、无文字或取消均停止扫描；失败提示复用翻译错误文案，空译文用新增双语状态文案，通过贴图 badge 显示，保持原图。
+- 保存原图取翻译提交时的截图副本；撤销释放译文图，仅保留原截图浮层，撤销与复制译文按钮禁用。浮层关闭即结束，不进入普通贴图持久化 / 自动恢复。
+- `AppState::translation_pins` 登记 serial → 贴图 ID，完成后消费路由；关闭贴图删除路由并调用 `translate_cancel.cancel(serial)`。取消槽支持多个独立请求；截图会话序号占高 32 位，避免后一次截图收到前一次的迟到结果。已关闭或已完成的贴图也拒收结果。
+- 覆盖窗只移交本次原图并退出等待态，关闭覆盖窗不会取消已移交任务；旧状态机 / 详情窗保留给 `SNOW_OVERLAY_BENCH_TRANSLATE_AUTO` 等覆盖窗内等待路径。
+- 翻译贴图与普通贴图共用 `render`、识别边框、悬停高亮 / 光标、窗口级拖动与 Esc 关闭；翻译图像只允许整体移动（内部操作条另有抓手可移动条），禁用缩放、透明度、标注等普通交互，移动仍跳过持久化。
+- 操作条封装为独立 `pin_action_bar.rs` 组件，接收按钮定义（图标、tooltip、禁用状态、点击回调）、放置模式与逻辑尺寸，统一使用组件库 Small 图标 Button；`pinned_view.rs` 只装配业务按钮、回调与布局输入。按钮（含禁用按钮）拦截左 / 右 / 中键按下，条空白区域继续冒泡给根节点拖窗。按钮宽 / 高均为 24px、间距 4px、条高由实际按钮高度 + 上下各 4px 内边距计算（当前 32px）、抓手宽 24px、两侧内边距各 4px，条宽由按钮数和模式统一计算：四按钮外部条 116px，内部含抓手为 144px；翻译完成前撤销 / 复制继续禁用。
+- `Inside` 模式条首位显示 Lucide `grip-vertical` 图标 Button，提示使用双语 `translation-pin-move-bar`；该图标经 `snow_ui` 资源门面从现有库按需嵌入。抓手仅移动操作条，不改变图像 / 窗口；`Below / Above` 不显示抓手且固定位置。`TranslationPin::bar_state` 保存相对选区左上角的逻辑偏移和抓手拖动起点，重绘复用状态；默认靠右贴底，移动图像或条空白使整窗移动时相对偏移保持。
+- 纯函数 `clamp_bar_offset` 接收选区尺寸、条尺寸、当前逻辑偏移与拖动增量，按四边 4px 边距夹紧；空间不足时按轴缩减边距，条比选区大时该轴偏移退化为 0，由窗口裁剪，保持选区 / 窗口尺寸不变。抓手移动按下点到当前鼠标的总增量计算，避免边界处往返拖动累积误差；松开及按键丢失结束抓手拖动。
+- `pinned_manager::translation_bounds` 为纯函数：输入选区、条逻辑尺寸、所在显示器物理 `bounds` 与 scale，输出 `Below / Above / Inside` 和窗口物理外框。优先选区正下方，下方不足则试正上方，上下都不足才默认在选区内部底部靠右悬浮（可用抓手调整相对位置）。外部布局按条高扩展窗口，窄选区必要时向左扩宽，上方布局同时上移窗口；图像通过窗口内偏移保持原屏幕坐标与尺寸。内部模式外框严格等于选区，不扩窗。显示器按选区最大交集选取，负原点与混合 DPI 统一在物理坐标中判断。
+- 10-19 原调整离线验证：新增 6 项单测；翻译相关 178 项、贴图相关 68 项、i18n 测试、架构守卫，以及相关 crate clippy、fmt、i18n check / strict-refs 通过。未做真屏按钮点击、剪贴板 / 保存落盘端到端、多屏混合 DPI 观感验收。
+- 10-19 共用渲染返工验证：`cargo fmt --all` / `--check`、`cargo clippy -p snow-shot --all-targets -- -D warnings`、贴图过滤测试（72 通过 / 1 个既有发布检查忽略）、i18n check / strict-refs（403 引用，缺失 0）、`workspace-guard`（24 项）通过。新增离线测试覆盖翻译图像 / 条空白拖动与不持久化、所有八向缩放及滚轮缩放 / 透明度禁用、移动后撤销几何不变，以及普通贴图共用入口回归。真屏按钮事件冒泡、边框观感、Esc、多屏混合 DPI 未验。
+- 10-20 贴图接手验证：`cargo fmt --all` / `--check`、`cargo clippy -p snow-shot --all-targets -- -D warnings` 通过；`cargo test -p snow-shot pinned`（75 通过，1 个既有发布检查忽略）、`translat`（213 通过）、`overlay`（184 通过），i18n check / strict-refs（406 引用，缺失 0），`workspace-guard`（24 单测 + 6 文档测试）通过。离线覆盖提交即产生原图贴图数据、完成换图停扫、失败 / 无文字 / 取消保留原图和状态、关闭取消、迟到结果与跨会话隔离。未跑 workspace 全量；`CARGO_TARGET_DIR` 保持 `C:\cargo-target\cisox`。未做真屏扫描裁剪 / 拖动 / 按钮点击、保存 / 剪贴板端到端、多屏混合 DPI 和基准脚本实跑；本次仅调整 Rust UI 生命周期并复用既有渲染器，没有移植新模块。
+- 10-20 按钮条位置 / 图标调整验证：`cargo fmt --all` / `--check`、`cargo clippy -p snow-shot --all-targets -- -D warnings` 通过；`cargo test -p snow-shot pinned`（80 通过，1 个既有发布检查忽略）、`translat`（218 通过），i18n check / strict-refs（406 引用，缺失 0）、`cargo test -p workspace-guard`（24 单测 + 6 文档测试）通过。位置单测覆盖下方优先、上方回退、内部外框等于选区、右下角、负坐标与 1.5 倍 DPI；视图离屏测试覆盖三种布局安装后图像屏幕位置不变、空白拖动、撤销不改几何 / 不持久化，以及四个图标资源存在。未做真屏按钮 tooltip / 点击冒泡、内部条空白拖动与混合 DPI 多屏观感验收，保存 / 剪贴板端到端仍未覆盖；未跑 workspace 全量，未改 `CARGO_TARGET_DIR`（`C:\cargo-target\cisox`），没有移植新模块。
+- 10-20 独立操作条 / 内部抓手验证：新增 4 项离屏单测并扩展三模式整窗移动回归，覆盖四边夹紧、条大于选区 / 零尺寸退化、拖动偏移更新及边界往返、默认靠右贴底、整窗移动后相对偏移不变、仅 Inside 暴露且接受抓手、按模式计算宽度和抓手资源可加载。`cargo fmt --all` / `--check`、`cargo clippy -p snow-shot --all-targets -- -D warnings` 通过；`cargo test -p snow-shot pinned`（84 通过，1 个既有发布检查忽略）、`translat`（218 通过），i18n check / strict-refs（407 引用，缺失 0），`cargo test -p workspace-guard`（24 单测 + 6 文档测试）通过。未做真屏抓手 / 按钮事件冒泡、tooltip、窄选区裁剪观感、跨屏混合 DPI，以及保存 / 剪贴板端到端验收。未跑 workspace 全量，`CARGO_TARGET_DIR` 保持 `C:\cargo-target\cisox`；无新增依赖、无新 Qt 模块移植、未修改 Qt/C++，未提交。
+- **10-20 原有翻译操作栏统一迁移**：在上述未提交改动之上继续改，保留截图翻译由贴图接手的生命周期；本轮只整理 UI 组件与离屏验证。
+  - 覆盖窗 `translate_bar` 五动作（详情 / 撤销 / 保存译文图 / 保存原图 / 关闭）及 `result_panel` 三动作（确定 / 撤销 / 关闭）均改用 `pin_action_bar`。原位详情面板只有两列联动文字、没有另一排按钮；其交互不变。
+  - `recognition_view`（翻译详情 / 识别结果共用窗）底部复制全文 / 关闭、格式复制与转换引导行全部复用组件。共用窗的 OCR / 表格 / 公式入口一并使用同一渲染路径。
+  - `translate_page_view` 独立窗和设置内嵌页的翻译 / 复制 / 复制并关闭动作行迁移，内嵌仍不显示关闭动作；交换与清空历史的独立图标按钮也复用组件。提交忙碌动画、复制禁用条件和键盘入口保留。
+  - `translate_input_view` 关闭 / 清空 / 交换 / 复制四个独立动作全部复用组件的按钮入口，删除旧 `icon_button`，交换图标保留 90° 旋转。`dictation/view`（含听写翻译）底部复制 / 关闭改用共用条，空文本时仍允许复制。
+  - 原有翻译贴图四动作继续使用该组件；组件新增普通流布局、覆盖窗浮动布局、可离屏检查 / 分发的 `ActionSpec<A>` 与泛型宿主实体绑定，不依赖 `PinnedWindowView`。所有动作仅显示图标 + 本地化 tooltip，图标沿用 `snow_ui::ui` 现有资源门面，不加依赖或图标包。
+  - 空白行为显式参数化：贴图条空白继续冒泡给父节点拖窗，覆盖窗条空白拦截左 / 中 / 右键，避免重新框选；按钮（含禁用态）统一隔离事件。内部抓手只移动条，偏移随宿主重绘保留，新的翻译状态重置偏移；超窄选区按宿主选区裁剪。
+  - **位置策略变化**：覆盖窗原条按“选区右侧外缘 → 内部右下 → 避让主工具栏”放置；现统一为选区下方优先、不足回退上方、上下均不足才内部悬浮并显示抓手，不再采用旧的主工具栏避让位置策略。贴图窗口扩框逻辑复用同一个外部优先决策。
+  - **本步骤当时未迁移的部分（截图主栏现已由下文补齐）**：翻译页 / 输入浮窗的语言与模型下拉、文本输入和标题拖动区是输入 / 选择 / 宿主布局，保留 gpui-component 控件及焦点行为；翻译历史记录按钮显示记录内容，是记录列表而非图标操作栏。原位详情两列文字没有按钮条。设置页翻译 / 视觉模型下拉后的“获取”属于模型配置表单的导航动作，保留原控件。纯 OCR 浮窗、录屏与非翻译设置操作不在本任务范围。
+  - 删除无调用者的 `snow-ui-widgets/src/result_bar.rs`（旧渲染、交互、尺寸与定位算法及旧策略测试）和门面导出，删除旧按钮间距 / 图标尺寸常量。所有旧按钮文案均继续用作 tooltip，没有因本轮迁移而废弃的 `.ftl` 键；双语 catalog 的已有未提交新增内容保留。
+  - 本轮改动文件：`snow-shot/src/{pin_action_bar,overlay_view,pinned_manager,pinned_view,recognition_view,translate_input_view,translate_page_view}.rs`、`snow-shot/src/dictation/view.rs`、`snow-ui-widgets/src/lib.rs`、删除 `snow-ui-widgets/src/result_bar.rs`，以及本节与 `docs/README.md` 索引。
+  - 验证结果：`cargo fmt --all` / `--check`、`cargo clippy -p snow-shot --all-targets -- -D warnings` 通过；`cargo test -p snow-shot pinned`（84 通过，1 个既有 sha256 发布检查忽略）、`translat`（224 通过）、`overlay`（185 通过）、`action_bar`（11 通过）通过；i18n check / strict-refs（395 引用，缺失 0）通过，`cargo test -p workspace-guard`（24 单测 + 6 文档测试）通过。新增 7 项离屏用例覆盖生产按钮集合、双语 tooltip / 图标资源、各禁用条件、业务动作回调分发、覆盖窗三种放置与内部相对拖动；既有贴图 / 翻译 / 覆盖窗状态机回归通过。
+  - 未覆盖：真屏 tooltip / 鼠标事件命中与焦点观感、抓手跨屏混合 DPI、窄选区实际裁剪、保存落盘 / 剪贴板端到端。没有新增 Qt 模块移植，故不新增 C++ 黄金样本；沿用既有业务状态机离屏回归。未跑 workspace 全量，未改 `CARGO_TARGET_DIR`（`C:\cargo-target\cisox`），无新增依赖，未改 AGENTS.md 或 Qt/C++，未提交。
+- **10-20 截图主工具栏按钮行接入共用组件（本轮，在既有未提交修改上继续）**：
+  - 主栏构成：形状 / 画笔 / 标记 / 滤镜 / 编辑五个工具组 → 撤销 / 重做 → 识别组（OCR / 翻译 / 表格 / 公式）→ 输出组（贴图 / 长图 / 录屏 / 保存）→ 复制 / 取消。分组弹层包含全部 15 个标注工具和 8 个识别 / 输出动作，另有 4 个独立动作，共 27 项；确认入口仍由现有 Enter / 自动确认逻辑处理，没有新增动作。
+  - 主栏按钮使用 `pin_action_bar::PinActionButton`，只显示图标 + 原 `.ftl` tooltip。七组下拉菜单（形状 / 画笔 / 标记 / 滤镜 / 编辑 / 识别 / 输出）的选项保持迁移前的图标 + 文字，不属于操作栏，不走通用操作栏组件；直接恢复 HEAD 的菜单行布局、配色、选中勾选槽、禁用和点击 / 悬停行为。水印面板“保存模板”恢复原 gpui-component 带文字 Button。组件保留主栏使用的选中态、按钮宽高、横向行、分隔符、分组提示箭头、右键菜单回调与覆盖窗原生 tooltip，删除无人使用的纵向行参数和独立原生提示构造器；菜单展开时暂停主按钮提示。撤销 / 重做、录屏 / 长图的禁用条件以及快捷键 / 工具切换 / 焦点业务回调继续沿用。
+  - `snow-ui-widgets::ScreenshotToolbar` 保留分组模型、悬停计时器和菜单 / 二级菜单布局，必须显式 `with_renderer` 注入 `ScreenshotActionRenderer` 才成为可渲染元素；widgets 不依赖 snow-shot。删除旧的主栏 `icon_button` / `solo_button` 实体构造与分组主按钮渲染；主栏生成按钮定义，主栏渲染、选中态和左 / 中 / 右按下隔离由通用组件负责，禁用主按钮同样隔离事件。弹层继续用原 `menu_row_content` + gpui-component Button，不通过主栏渲染器。分组悬停、右键开关、当前项记忆和翻译目标语言回调保持原路径。
+  - **位置与性能边界（位置部分已由本节末统一放置修正取代）**：该轮仅迁移按钮，错误保留了截图主栏专有位置决策；现已改为组件统一的 Below / Above / Inside 与抓手。`ToolbarGroups` 实体和量字缓存跨帧复用，弹层仍仅展开时构造；静态主栏布局表由生产渲染与顺序测试共用，不为此分配临时集合，没有新增模型、图像或持久状态的逐帧重建。覆盖窗已迁移的译文条不改位置 / 生命周期。
+  - **保留的非图标动作控件**：颜色色块 / 最近颜色（色样）、装饰 `ColorPicker`（任意颜色输入）；线宽、字号、箭头头型、滤镜、模板、字体、透明度、角度、间距的 `Select`（多值选择）；填充 `Checkbox`（二值开关）；水印文字 / 模板 `Input`（文本输入）；带语言名称和勾选标记的翻译目标语言二级菜单（语言选择，不是图标动作行）。七组菜单的图标 + 文字选项及水印保存模板也保留原控件。选区形状菜单属于另一个选区选择控件，保持原实现。
+  - 本轮改动文件：`AGENTS.md`、`docs/{README,cisox-progress-handoff}.md`、`snow-shot/src/{overlay_view,pin_action_bar,pinned_view}.rs`、`snow-ui-widgets/src/{toolbar,toolbar_groups,lib}.rs`。贴图视图仅将原四个按钮的结构体字面量改为组件构造器，回调不变。删除失用图标尺寸 / 箭头间距常量；没有废弃文案键，双语提示继续复用现有 catalog，没有新增依赖。
+  - 验证结果：`cargo fmt --all` / `--check`、`cargo clippy -p snow-shot --all-targets -- -D warnings` 通过；`cargo test -p snow-shot toolbar`（16 通过）、`overlay`（187 通过）、`pinned`（87 通过，1 项既有发布检查忽略）、`action_bar`（19 通过）；额外 `cargo test -p snow-ui-widgets toolbar`（24 通过）。i18n check / strict-refs（396 引用，缺失 0）与 `cargo test -p workspace-guard`（24 单测 + 6 文档测试）通过，`git diff --check` 通过。新增 4 项离线测试覆盖生产静态布局与全部 27 项分组 / 顺序、当前工具高亮与模式 / 历史禁用、双语 tooltip 与图标、生产输入的禁用分发和事件隔离先于回调；既有工具切换、快捷键、输出 sink、翻译条、贴图和覆盖窗回归通过。
+  - 未覆盖：真屏鼠标命中 / tooltip / 焦点、分组与语言菜单悬停、混合 DPI 观感、FPS / 渲染耗时实测，以及保存 / 剪贴板端到端。本轮是现有 UI 按钮组件整理，没有新增 Qt 模块移植，沿用原业务黄金样本与覆盖窗离屏回归；没有新增 C++ 黄金样本。未跑 workspace 全量，不修改 `CARGO_TARGET_DIR`（`C:\cargo-target\cisox`），不改 Qt/C++，不提交；既有未提交内容保留。
+
+
+- **10-20 截图分组弹层验收修正**：操作栏的纯图标规则只适用于按钮行，不适用于下拉菜单。七组共 23 项（15 个工具、8 个识别 / 输出动作）的 `menu_view`、语言二级菜单本体与水印“保存模板”按钮直接恢复 HEAD 实现，保留原 `.ftl` 文案、图标文字布局、勾选 / 悬停 / 禁用配色与点击 / 悬停回调。主栏的七个分组入口与撤销 / 重做 / 复制 / 取消继续走共用操作栏；相关尺寸、选中态、分隔符和分组箭头仍被主栏使用，widgets 导出与分组模型保留。删除仅弹层使用的纵向行参数和失用的 `native_tooltip()` 构造器。
+  - 本次改动文件：`AGENTS.md`、`docs/{README,cisox-progress-handoff}.md`、`snow-shot/src/{overlay_view,pin_action_bar}.rs`、`snow-ui-widgets/src/toolbar.rs`；其它既有未提交改动保留。
+  - 验证：`cargo fmt --all` / `--check`、`cargo clippy -p snow-shot --all-targets -- -D warnings`；`cargo test -p snow-shot overlay`（188 通过）、`toolbar`（18 通过）、`pinned`（87 通过、1 项既有忽略）、`action_bar`（20 通过）；`cargo test -p snow-ui-widgets`（46 单测、18 文档测试通过，1 文档测试既有忽略）；i18n check / strict-refs（396 引用、缺失 0）；`cargo test -p workspace-guard`（24 单测、6 文档测试）均通过，`git diff --check` 通过。
+  - 新增 3 项离屏回归：菜单图标文字渲染入口与主栏纯图标渲染入口的源码契约、全部分组菜单内容可构造，以及水印保存模板带文字。源码契约检查防止重复迁移错误，不等同于真屏像素 / 鼠标验收；实际布局与交互直接复用 HEAD，既有状态机测试保持通过。未验真屏悬停 / 点击 / tooltip / 焦点、混合 DPI、保存 / 剪贴板端到端。无新增依赖或文案键、无新模块移植、无方案偏差；未跑 workspace 全量，未改 `CARGO_TARGET_DIR`（`C:\cargo-target\cisox`）、Qt/C++，未提交。
+
+- 本节取代 §0.-1 中截图翻译完成后的按钮条与详情交互描述；没有新增依赖，没有移植新 Qt 模块。
+
+- **10-20 外置白条 / Inside 验收入口修正（本轮，在上述未提交改动上继续）**：
+  - A 采用单窗原生形状方案。已核实滚轮透明度走 `SetLayeredWindowAttributes` 整窗 alpha，不能提供局部穿透；GPUI Windows 的 Transparent 背景只改变合成属性，没有按空白区域自动透传输入的保证。仓库已有 ADR-2b 的 `SetWindowRgn` 矩形并集能力，区域外既不可见也不接收输入，故直接复用，比新增独立置顶窗更简单，也不需要同步两窗的移动 / 关闭 / 焦点。
+  - `pin_action_bar::outer_bar_rect` 统一外置几何：宽度为内容宽度，默认靠选区右缘，屏幕边界向左夹紧；覆盖窗与贴图共用。翻译贴图用同一矩形设置内容宽容器和“图像 ∪ 外置条”的原生窗口区域，条左侧空白从系统窗口形状中排除，不能画白底或拦截鼠标。窗口外框仍是两块区域的包围盒，图像原始桌面坐标 / 尺寸不变，拖动天然一起移动，关闭只有一个窗口；内部模式只保留选区区域。实际 DPI 在建窗时初始化，区域随 DPI 更新，几何未变不重复提交系统调用。
+  - B 未发现 Inside 缺少抓手分支、图标资源或 tooltip：抓手 Button 在业务按钮之前，按下隔离整窗拖动，仅更新相对偏移，夹紧在选区内。验收不可见的原因是默认外置布局本来不显示抓手；`SNOW_OVERLAY_SYNTH=800x500` 改变底图和基准缩放，而贴图外置判断使用真实显示器边界，因此小合成图不能保证进入 Inside。
+  - 新增 `app_runtime::ENV_PIN_BAR_FORCE`（`SNOW_PIN_BAR_FORCE=inside`）：仅 `debug_assertions` 构建生效，只强制新翻译贴图进入 Inside，外框等于选区；不改变截图 / 翻译图像位置和尺寸。删除该变量恢复正常外部优先策略。提示继续复用双语 `.ftl` 的 `translation-pin-move-bar`，无新增文案或依赖。
+  - 可复现入口：先 `cargo build -p snow-shot`；在没有其它 Cisox 实例时，用 PowerShell 设置 `$env:SNOW_OVERLAY_SYNTH='800x500'`、`$env:SNOW_OVERLAY_BENCH='60'`、`$env:SNOW_OVERLAY_BENCH_TRANSLATE='1'`、`$env:SNOW_PIN_BAR_FORCE='inside'`；以 `Start-Process C:\cargo-target\cisox\debug\cisox-ui.exe -ArgumentList '--resident' -WindowStyle Hidden` 启动首进程，待托盘就绪后执行 `& C:\cargo-target\cisox\debug\cisox-ui.exe --resident --cmd screenshot`，由第二进程 IPC 触发。预期选区图像出现后即可看到最前面的六点竖向抓手及 tooltip，拖动抓手只移动条，拖图像则整窗移动；普通 Below / Above 验收去掉强制变量。
+  - 新增离屏覆盖：生产渲染的抓手 Button 输入仅 Inside 存在；外置宽度与左右边界夹紧；原生区域排除空白角，DPI 1 / 1.5 / 2，移动 / 撤销保持相同窗口内区域；抓手往四边越界夹紧。另以隐藏的真实 Win32 窗口，调用 `GetWindowRgn` / `PtInRegion` 验证实际系统区域。
+  - 最终验证：`cargo fmt --all` / `--check`、`cargo clippy -p snow-shot --all-targets -- -D warnings` 通过；`cargo test -p snow-shot pinned`（85 通过，1 个既有发布 sha256 检查忽略）、`translat`（225 通过）、`overlay`（185 通过）、`action_bar`（13 通过）均通过；原生窗口区域测试 `cargo test -p snow-ui-shell translation_region_native`（1 项）通过；i18n check / strict-refs（396 引用，缺失 0）通过；`workspace-guard`（24 单测 + 6 文档测试）通过；`git diff --check` 通过。新增 4 项测试，既有抓手拖动与双语提示测试一并扩展。
+  - 本轮改动文件：`snow-shot/src/{app_runtime,pin_action_bar,pinned_manager,pinned_view}.rs`、`snow-ui-shell/src/{ui,native/win}.rs` 与本节；其余已有未提交改动保留。未跑 workspace 全量，未修改 `CARGO_TARGET_DIR`（`C:\cargo-target\cisox`）、AGENTS.md、Qt/C++，无新增依赖，未提交。
+  - 未覆盖 / 验收差异：真屏 resident / IPC 尚未运行：当前有既有 `cisox.exe` 宿主占用与 resident 共用的单实例互斥体，本轮未结束该进程。离屏构造并非像素截图或真实鼠标验收；真实 tooltip / 抓手拖动 / 区域外跨进程点击、跨屏混合 DPI 以及保存 / 剪贴板端到端仍需验收。没有新增 Qt 模块移植，沿用既有业务黄金样本 / 离屏回归。
+
+
+- **10-20 真机反馈修正：自适应条高与异形边框（历史步骤；联合轮廓边框由下文矩形边框修正取代，自适应条高保留）**：
+  - `pin_action_bar` 抽出实际按钮高度 `BUTTON_HEIGHT`（24 逻辑像素）和上下各 `BAR_VERTICAL_PADDING`（4px），按钮 / 抓手通过同一个构造入口保留组件库 Small 样式并显式设置实际高度。`bar_height()` 根据按钮与内边距计算 32px，替代固定的 40px。浮动条、普通流布局、覆盖窗、翻译页、输入浮窗 / 听写浮窗及识别结果共用该尺寸来源；独立混排图标按钮保持按钮自身尺寸。
+  - 翻译贴图建窗、Below / Above / Inside 空间判断、条定位、原生 `SetWindowRgn` 区域 / 命中和内部拖动夹紧统一消费 `bar_height()`，物理尺寸仍按 DPI 向上取整。572×558 选区在 100% DPI 的 Below 外框由 572×598 变为 572×590，图像坐标和尺寸不变。
+  - 翻译贴图改为图像矩形与外置条矩形并集的外沿描边：纯函数按两个矩形的边缘划分格子，仅输出外沿的顺时针线段，再向区域内部展开为色条拼接。交接处不画内线，Above 同样闭合；Inside 仍为图像外框，普通贴图沿用原矩形边框。极窄图像按内部可用厚度缩减描边，避免混合 DPI 下越出原生区域。
+  - 新增离屏测试覆盖按钮高度 / 内边距公式及外置空间恰好够用的临界判断、真机尺寸案例、Below / Above / Inside / 向左扩条 / 单物理像素窄图的轮廓闭合、每段两侧内外关系、无内部交接线、1 / 1.5 / 2 倍 DPI 描边完全在区域内；现有区域、整窗移动、撤销、普通贴图及所有操作栏宿主回归保留。
+  - 抓手规格未改：仅 Inside 创建，生产渲染在业务按钮之前插入；图标资源与双语 tooltip 沿用既有实现。离屏构造生产抓手 Button 并验证仅 Inside 存在，实际条高参与初始位置与四边越界夹紧 / 返回起点回归。`SNOW_PIN_BAR_FORCE=inside` 仍仅在 debug 构建生效。真屏复现沿用上文入口：无其它实例时以该环境变量启动 debug resident，再通过第二进程 `--resident --cmd screenshot` 触发合成截图翻译，检查最前抓手、拖动仅移动条并夹紧选区四边；去掉变量核对 Below / Above 不显示抓手。
+  - 验证：`cargo fmt --all` / `--check`、`cargo clippy -p snow-shot --all-targets -- -D warnings` 通过；`cargo test -p snow-shot pinned`（87 通过，1 个既有发布检查忽略）、`translat`（227 通过）、`overlay`（185 通过）、`action_bar`（15 通过）；i18n check / strict-refs（396 引用，缺失 0）与 `cargo test -p workspace-guard`（24 单测 + 6 文档测试）通过；`git diff --check` 通过。新增 3 项测试，其余相关测试随自适应高度更新。
+  - 本轮仅修改 `snow-shot/src/{pin_action_bar,pinned_manager,pinned_view}.rs` 与本节，保留其它未提交改动；无新增依赖 / 文案，不改 AGENTS.md、Qt/C++、`CARGO_TARGET_DIR`（`C:\cargo-target\cisox`），未提交。
+  - 未覆盖 / 偏差：当前已有 `cisox.exe` 与 `cisox-ui.exe` 实例运行，未重启，未做真屏抓手拖动 / tooltip、边框像素观感、区域外点击及跨屏混合 DPI 验收；离屏测试不是实际鼠标验收。保存 / 剪贴板端到端仍未覆盖。无新模块移植，无需新增 C++ 黄金样本；无实现要求或迁移方案偏差，未跑 workspace 全量。
+
+- **10-20 真机反馈修正：图像闭合矩形边框与外置条独立描边（本轮最终状态）**：
+  - 撤销上一轮“图像 ∪ 条”联合轮廓描边。翻译贴图的图像始终独立绘制完整矩形四边，Below / Above 不再绕过条，Inside 仍为图像矩形；`border` / 悬停及拖动时 `border_active` 的选择逻辑不变。普通贴图沿用原渲染路径。
+  - 外置条使用同一颜色独立描边，仅省略与图像相接的重合边段，保留图像完整边线以避免双线；窄图导致条向左扩出时，交接边超出图像的部分仍画出。所有色条向所属矩形内部展开，不越出 `SetWindowRgn` 区域；极窄尺寸按内部厚度缩减，图像位置、窗口形状和命中区域不变。
+  - 删除格子划分式联合轮廓算法，改为共用矩形四边生成与条交接段裁减；替换原联合轮廓测试，覆盖 Below / Above / Inside、窄图扩条、单物理像素图像、图像四边闭合、条独立边线 / 无重合双线，以及 1 / 1.25 / 1.5 / 2 倍 DPI 下每段描边均在所属矩形内。保留原区域、移动、撤销及各操作栏宿主回归。
+  - 验证：`cargo fmt --all` / `--check`、`cargo clippy -p snow-shot --all-targets -- -D warnings` 通过；`cargo test -p snow-shot pinned`（87 通过，1 个既有发布 sha256 检查忽略）、`translat`（227 通过）、`overlay`（185 通过）、`action_bar`（15 通过）通过；i18n check / strict-refs（396 引用，缺失 0）、`cargo test -p workspace-guard`（24 单测 + 6 文档测试）和 `git diff --check` 通过。
+  - 本轮仅改 `snow-shot/src/pinned_view.rs` 与本节。共用 `pin_action_bar.rs`、覆盖窗 / 翻译页 / 输入浮窗 / 听写浮窗不改；其余已有未提交改动保留，无新增依赖 / 文案，不改 AGENTS.md、Qt/C++ 或 `CARGO_TARGET_DIR`（`C:\cargo-target\cisox`），未提交，未跑 workspace 全量。
+  - 未覆盖：真屏矩形边框与条交接处像素观感、实际鼠标 / tooltip / 跨进程区域外点击、跨屏混合 DPI，以及保存 / 剪贴板端到端仍未验收；离屏测试验证几何与业务回归，不等同于真屏验收。本轮只修正边框，无新模块移植、无新增 C++ 黄金样本，与实现要求及迁移方案无偏差。
+
+- **10-20 截图主工具栏统一位置与内部抓手（本轮，取代前文主栏位置例外）**：
+  - 截图主栏删除对旧 `calculate_toolbar_placement` 的调用、`TOOLBAR_MARGIN`、向右边缘二次锚定和按最大菜单高度决定展开方向的逻辑；统一由 `pin_action_bar.rs` 的 `outer_position` / `outer_bar_rect` / `clamp_bar_offset` 与 `action_bar_layout` 决策。下方 → 上方 → 内部，Inside 使用同一 `BAR_PADDING`、`GRIP_WIDTH`、`BUTTON_GAP`，最前显示组件库抓手。旧定位函数仍服务录屏 / 长图的独立视图，不再参与截图主栏。
+  - 抽出不依赖 `PinnedWindowView` 的 `ActionBarGrip`，贴图条与截图主栏共用按钮构造、按下隔离和窗口级移动 / 松开监听；`PinActionBarState` 跨帧持有内部偏移，夹紧在选区内，选区变化和开始重新框选 / 调整时重置。覆盖窗原始捕获监听在抓手会话中跳过选区状态机，避免误改选区或自动确认。共用 `positioned_actions` 只裁剪内部条，选区内其它空白继续沿用框选 / 拖选区 / 手柄事件。
+  - 覆盖窗沿用每屏 monitor / bounds、起始屏选区求交与当前窗口 DPI 换算，不把负坐标屏当作主屏；实际条矩形（含抓手宽度）同时用于放大镜命中和其它面板避让。主栏不再执行自己的位置避让。分组菜单 Below 向下、Above 向上，Inside 按实际条上下剩余空间选择方向，随拖动更新。七组弹层选项仍为图标 + 文字；其它选择 / 输入控件不变。
+  - `ToolbarGroups` 与量字缓存仍跨帧复用；新增几何运算和状态均为常数开销，不逐帧重建模型 / 图像 / 分组实体。更新 AGENTS.md 的 Action bars 规则，删除截图主栏位置例外。
+  - 新增覆盖窗离屏测试覆盖负坐标、1 / 1.25 / 1.5 / 2 倍 DPI、上下边均无外置空间时 Inside 且提供生产抓手、外置无抓手、四边夹紧、重绘保留 / 重新框选与调整重置，以及弹层随实际位置与抓手偏移改向。复用既有通用组件和贴图夹紧回归。
+  - 本轮修改：`AGENTS.md`、`docs/README.md`、本交接文档、`snow-shot/src/{overlay_view,pin_action_bar}.rs`、`snow-ui-widgets/src/toolbar.rs`。其余未提交修改保留。
+  - 验证：`cargo fmt --all` / `--check`、`cargo clippy -p snow-shot --all-targets -- -D warnings` 通过；`cargo test -p snow-shot` 分别按 `overlay`（191 通过）、`toolbar`、`pinned`（87 通过，1 个既有发布 sha256 检查忽略）、`action_bar`（20 通过）过滤，全部通过。`cargo test -p snow-ui-widgets`（46 单测、18 文档测试通过，1 个既有文档测试忽略）、i18n check / strict-refs（398 引用，缺失 0）、`cargo test -p workspace-guard`（24 单测 + 6 文档测试）与 `git diff --check` 均通过。
+  - 未覆盖：真实桌面鼠标 / tooltip、菜单像素观感、跨屏混合 DPI 实机与性能基准；离屏几何及状态测试不等同于真屏验收。无新 Qt 模块移植，沿用既有业务黄金样本，不新增 C++ 样本；无新增依赖 / 文案，不改 Qt/C++ 或 `CARGO_TARGET_DIR`（`C:\cargo-target\cisox`），未提交，未跑 workspace 全量。无实现要求或迁移方案偏差。
 
 ## 0.-1 2026-10-13 收口（最新，先读这里）
 

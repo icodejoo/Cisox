@@ -264,6 +264,8 @@ pub const ORIGIN_GESTURE: &str = "gesture";
 pub const ENV_OVERLAY_BENCH: &str = "SNOW_OVERLAY_BENCH";
 /// 性能基准的合成底图尺寸环境变量，格式 `宽x高`（如 `3840x2160`）。
 pub const ENV_OVERLAY_SYNTH: &str = "SNOW_OVERLAY_SYNTH";
+/// 仅调试构建的贴图操作条验收开关：inside 强制内部布局，不改变截图几何。
+pub const ENV_PIN_BAR_FORCE: &str = "SNOW_PIN_BAR_FORCE";
 /// 标注性能基准的工具名环境变量（rectangle / ellipse / arrow / line / pencil / mosaic / blur / text）；
 /// 设置后基准改为在选区内绘制该工具的标注而不是框选。
 pub const ENV_OVERLAY_BENCH_TOOL: &str = "SNOW_OVERLAY_BENCH_TOOL";
@@ -596,6 +598,8 @@ pub enum UiEvent {
         height: u32,
         /// RGBA 像素。
         rgba: Vec<u8>,
+        /// 关闭或取消识别时置位。
+        cancel: crate::latex_service::Cancellation,
     },
     /// 覆盖窗请求下载公式识别所需的 onnxruntime 运行时（进度与结果复用 OCR 下载事件）。
     LatexDownloadRequested,
@@ -637,6 +641,8 @@ pub enum UiEvent {
         serial: u64,
         /// 翻译产出或失败原因。
         result: Result<TranslateOutcome, TranslateFlowError>,
+        /// 后台完成排版、光栅化和像素转换的图像。
+        image: Option<crate::frozen_frame::FrozenFrame>,
     },
     /// 覆盖窗请求下载翻译用的 onnxruntime 运行时。
     TranslateDownloadRequested,
@@ -1583,8 +1589,12 @@ pub struct AppState {
     ocr: Arc<OcrService>,
     /// 文字翻译宿主（本地 NMT worker / OpenAI 兼容，按配置装配）。
     translator: Arc<TranslateHost>,
-    /// 在飞的那次文字翻译的取消标志（覆盖窗撤销 / 关闭时置位）。
+    /// 在飞文字翻译的取消标志，覆盖窗或对应贴图关闭时置位。
     translate_cancel: CancelSlot,
+    /// 翻译任务与临时贴图的对应关系，移除后拒收迟到结果。
+    translation_pins: std::collections::BTreeMap<u64, String>,
+    /// 截图会话序号，用于分配独立的翻译序号范围。
+    translation_session: u64,
     /// 应用数据根目录（OCR 组件下载位置等）。
     data_root: PathBuf,
     /// 截图会话的共享视图（所有显示器上的覆盖窗共用；OCR 结果回写、导出命令用）。
@@ -1680,6 +1690,8 @@ impl AppState {
             ocr: Arc::new(OcrService::new(data_root)),
             translator: Arc::clone(&translator),
             translate_cancel: CancelSlot::default(),
+            translation_pins: std::collections::BTreeMap::new(),
+            translation_session: 0,
             data_root: data_root.to_path_buf(),
             overlay_view: None,
             overlay_windows: Vec::new(),
@@ -2212,9 +2224,10 @@ fn open_overlays(cx: &mut ShellContext, state: &mut AppState, payloads: Vec<Capt
             .with_table_download(move || {
                 table_download_inbox.push(UiEvent::TableDownloadRequested);
             })
-            .with_latex(move |serial, width, height, rgba| {
+            .with_latex(move |serial, width, height, rgba, cancel| {
                 latex_inbox.push(UiEvent::LatexRequested {
                     serial,
+                    cancel: crate::latex_service::Cancellation(cancel),
                     width,
                     height,
                     rgba,
@@ -2412,6 +2425,10 @@ fn configure_overlay(
     scale_override: Option<f32>,
 ) {
     crate::timing_diag::mark("configure-overlay-begin");
+    state.translation_session += 1;
+    view.update(cx.app(), |view, _| {
+        view.seed_translation_serial(state.translation_session << 32)
+    });
     let record_mode = mode == CaptureMode::Record;
     let scroll_mode = mode == CaptureMode::Scroll;
     let auto_confirm = match mode {
@@ -2861,6 +2878,21 @@ fn spawn_pin_ocr(state: &AppState, id: String, width: u32, height: u32, rgba: Ve
     }
 }
 
+/// 关闭翻译贴图时撤销对应后台任务，并删除结果路由。
+fn cancel_translation_pin(
+    pins: &mut std::collections::BTreeMap<u64, String>,
+    cancel: &mut CancelSlot,
+    id: &str,
+) {
+    if let Some(serial) = pins
+        .iter()
+        .find_map(|(serial, pin)| (pin == id).then_some(*serial))
+    {
+        pins.remove(&serial);
+        cancel.cancel(serial);
+    }
+}
+
 /// 在后台线程执行“识别 + 翻译”（阻塞调用不进主线程），阶段与结果经收件箱回到主线程。
 ///
 /// 同时与 OCR 并行预热本地翻译 worker（见 [`WarmHandle`]），让首次拉起与加载的耗时被 OCR 盖住；
@@ -2909,12 +2941,37 @@ fn spawn_translate(
             || cancel.load(std::sync::atomic::Ordering::SeqCst),
         );
         warm.finish(translator.as_ref());
-        inbox.push(UiEvent::TranslateFinished { serial, result });
+        let image = result
+            .as_ref()
+            .ok()
+            .filter(|outcome| !outcome.translated.trim().is_empty())
+            .filter(|_| !cancel.load(std::sync::atomic::Ordering::SeqCst))
+            .and_then(|outcome| {
+                let pixels = crate::translate_render::build_translated_rgba(
+                    width,
+                    height,
+                    rgba,
+                    &outcome.boxes,
+                    &outcome.pairs,
+                );
+                crate::pinned_view::frame_from_rgba(
+                    width,
+                    height,
+                    pixels.unwrap_or_else(|original| original),
+                )
+                .ok()
+            });
+        inbox.push(UiEvent::TranslateFinished {
+            serial,
+            result,
+            image,
+        });
     });
     if let Err(e) = spawned {
         tracing::error!(error = %e, "无法创建翻译线程");
         state.inbox.push(UiEvent::TranslateFinished {
             serial,
+            image: None,
             result: Err(TranslateFlowError::Ocr(OcrError::SpawnFailed(
                 e.to_string(),
             ))),
@@ -3073,7 +3130,14 @@ fn run_table(
 /// - `state`：运行时状态。
 /// - `serial`：请求序号。
 /// - `width` / `height` / `rgba`：选区图像。
-fn spawn_latex(state: &AppState, serial: u64, width: u32, height: u32, rgba: Vec<u8>) {
+fn spawn_latex(
+    state: &AppState,
+    serial: u64,
+    width: u32,
+    height: u32,
+    rgba: Vec<u8>,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+) {
     let model_dir = crate::latex_assets::model_dir_from_document(state.config.borrow().document());
     let latex_model = crate::model_pick::selected_from_document(
         state.config.borrow().document(),
@@ -3082,7 +3146,15 @@ fn spawn_latex(state: &AppState, serial: u64, width: u32, height: u32, rgba: Vec
     let data_root = state.data_root.clone();
     let inbox = state.inbox.clone();
     let spawned = state.spawn_guarded(reason::OCR_JOB, "snow-latex-request", move || {
-        let result = run_latex_job(&model_dir, &latex_model, &data_root, width, height, &rgba);
+        let result = run_latex_job(
+            &model_dir,
+            &latex_model,
+            &data_root,
+            width,
+            height,
+            &rgba,
+            cancel,
+        );
         inbox.push(UiEvent::OcrFinished { serial, result });
     });
     if let Err(e) = spawned {
@@ -3108,6 +3180,7 @@ fn run_latex_job(
     width: u32,
     height: u32,
     rgba: &[u8],
+    cancel: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<OcrResult, OcrError> {
     let beside = exe_dir();
     let assets = crate::latex_assets::resolve_assets(
@@ -3123,7 +3196,7 @@ fn run_latex_job(
         beside.as_deref(),
     )
     .map_err(OcrError::LatexUnavailable)?;
-    crate::latex_service::run_latex(&assets, width, height, rgba)
+    crate::latex_service::run_latex_cancellable(&assets, width, height, rgba, cancel)
 }
 
 /// 在后台线程下载公式识别缺的 onnxruntime 运行时（模型由用户自行下载，这里不碰），进度与结果复用 OCR 下载事件。
@@ -5354,6 +5427,25 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
             tracing::info!(restored, "启动恢复贴图");
             refresh_tray_menu(state);
         }
+        UiEvent::PinControl(crate::pinned_shared::PinControlEvent::TranslationRetry {
+            id,
+            width,
+            height,
+            rgba,
+            target,
+        }) => {
+            state.translation_session += 1;
+            let serial = state.translation_session << 32;
+            state.translation_pins.insert(serial, id);
+            spawn_translate(state, serial, width, height, rgba, target);
+        }
+        UiEvent::PinControl(crate::pinned_shared::PinControlEvent::TranslationDownload { ocr }) => {
+            if ocr {
+                spawn_ocr_download(state);
+            } else {
+                spawn_translate_runtime_download(state);
+            }
+        }
         UiEvent::PinControl(crate::pinned_shared::PinControlEvent::OcrRequested {
             id,
             width,
@@ -5364,6 +5456,11 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
         }
         UiEvent::PinOcrFinished { id, result } => state.pins.deliver_ocr(cx, &id, result),
         UiEvent::PinClosed { id } => {
+            cancel_translation_pin(
+                &mut state.translation_pins,
+                &mut state.translate_cancel,
+                &id,
+            );
             state.pins.forget(&id);
             refresh_pin_manage(cx, state);
         }
@@ -5484,10 +5581,11 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
         UiEvent::TableDownloadRequested => spawn_table_download(state),
         UiEvent::LatexRequested {
             serial,
+            cancel,
             width,
             height,
             rgba,
-        } => spawn_latex(state, serial, width, height, rgba),
+        } => spawn_latex(state, serial, width, height, rgba, cancel.0),
         UiEvent::LatexDownloadRequested => spawn_latex_download(state),
         UiEvent::OcrFinished { serial, result } => {
             let outcome = state.overlay_view.as_ref().map(|view| {
@@ -5508,9 +5606,47 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
             height,
             rgba,
             target,
-        } => spawn_translate(state, serial, width, height, rgba, target),
+        } => {
+            let (auto, _) = parse_translate_auto(
+                std::env::var(ENV_OVERLAY_BENCH_TRANSLATE_AUTO)
+                    .ok()
+                    .as_deref(),
+            );
+            if !auto {
+                let pin = state.overlay_view.as_ref().and_then(|view| {
+                    view.update(cx.app(), |view, _| view.take_translation_pin(serial))
+                });
+                let Some(pin) = pin else {
+                    return;
+                };
+                match state.pins.create_translation(cx, pin) {
+                    Ok(id) => {
+                        state.translation_pins.insert(serial, id);
+                        close_all_overlays(cx, state);
+                    }
+                    Err(error) => {
+                        if let Some(view) = &state.overlay_view {
+                            view.update(cx.app(), |view, vcx| {
+                                view.translation_pin_failed(error);
+                                vcx.notify();
+                            });
+                        }
+                        return;
+                    }
+                }
+            }
+            spawn_translate(state, serial, width, height, rgba, target);
+        }
         UiEvent::TranslateCancelled { serial } => {
             if state.translate_cancel.cancel(serial) {
+                if let Some(id) = state.translation_pins.remove(&serial) {
+                    state.pins.deliver_translation(
+                        cx,
+                        &id,
+                        Err(TranslateFlowError::Cancelled),
+                        None,
+                    );
+                }
                 tracing::info!(serial, "文字翻译已被撤销");
             }
         }
@@ -5522,13 +5658,21 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
                 });
             }
         }
-        UiEvent::TranslateFinished { serial, result } => {
-            let (auto, _) = parse_translate_auto(
-                std::env::var(ENV_OVERLAY_BENCH_TRANSLATE_AUTO)
-                    .ok()
-                    .as_deref(),
-            );
-            if let Some(view) = &state.overlay_view {
+        UiEvent::TranslateFinished {
+            serial,
+            result,
+            image,
+        } => {
+            state.translate_cancel.finish(serial);
+            if let Some(id) = state.translation_pins.remove(&serial) {
+                state.pins.deliver_translation(cx, &id, result, image);
+            } else if let Some(view) = &state.overlay_view {
+                // 基准路径继续使用覆盖窗状态机，独立序号会拒收旧会话结果。
+                let (auto, _) = parse_translate_auto(
+                    std::env::var(ENV_OVERLAY_BENCH_TRANSLATE_AUTO)
+                        .ok()
+                        .as_deref(),
+                );
                 view.update(cx.app(), |v, vcx| {
                     v.finish_translate(serial, result);
                     if auto
@@ -5765,6 +5909,24 @@ mod tests {
     use crate::settings_model::portable_to_hotkey_text;
     use snow_app_core::command::CommandContext;
     use snow_ui::shell::hotkey::Hotkey;
+
+    /// 关闭贴图撤销对应任务并删除路由，不影响其他贴图，迟到结果无目标。
+    #[test]
+    fn translation_pin_close_cancels_and_removes_result_route() {
+        use std::sync::atomic::Ordering;
+        let mut pins =
+            std::collections::BTreeMap::from([(1, "pin-a".to_string()), (2, "pin-b".to_string())]);
+        let mut cancel = CancelSlot::default();
+        let first = cancel.begin(1);
+        let second = cancel.begin(2);
+        cancel_translation_pin(&mut pins, &mut cancel, "pin-a");
+        assert!(first.load(Ordering::SeqCst));
+        assert!(!second.load(Ordering::SeqCst));
+        assert!(pins.remove(&1).is_none());
+        assert_eq!(pins.get(&2).map(String::as_str), Some("pin-b"));
+        cancel_translation_pin(&mut pins, &mut cancel, "pin-a");
+        assert!(!second.load(Ordering::SeqCst));
+    }
 
     /// 翻译自动化开关解析：空关闭、download 只下载、其它值下载后重试。
     #[test]

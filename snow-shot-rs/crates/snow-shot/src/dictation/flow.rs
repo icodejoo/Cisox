@@ -262,6 +262,9 @@ impl DictationHost {
         self.round += 1;
         self.transcript.clear();
         self.typer = Typer::default();
+        if config.output != OutputMode::Overlay {
+            self.typer.bind(self.sink.as_mut());
+        }
         self.mode = config.output;
         self.with_overlay = config.type_with_overlay;
         self.probe_deadline = None;

@@ -160,6 +160,52 @@ impl SystemError {
     }
 }
 
+/// 本地语音 worker 的稳定错误码；诊断文本不参与 UI 展示。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkerError {
+    /// 麦克风不可用。
+    MicrophoneUnavailable,
+    /// 麦克风采集结束。
+    MicrophoneEnded,
+    /// 麦克风通道关闭。
+    MicrophoneClosed,
+    /// WAV 输入不可读取。
+    InvalidWave,
+    /// WAV 采样率不符，参数为实际采样率。
+    WaveSampleRate,
+    /// 其他识别错误。
+    RecognitionFailed,
+}
+
+impl WorkerError {
+    /// 全部稳定类别及协议码。
+    pub const ALL: [(Self, &'static str); 6] = [
+        (Self::MicrophoneUnavailable, "microphone-unavailable"),
+        (Self::MicrophoneEnded, "microphone-ended"),
+        (Self::MicrophoneClosed, "microphone-closed"),
+        (Self::InvalidWave, "invalid-wave"),
+        (Self::WaveSampleRate, "wave-sample-rate"),
+        (Self::RecognitionFailed, "recognition-failed"),
+    ];
+
+    /// 编码错误码及业务参数，沿用 ERROR 行协议的转义规则。
+    pub fn to_error_text(self, parameter: &str) -> String {
+        let code = Self::ALL
+            .iter()
+            .find(|(kind, _)| *kind == self)
+            .expect("known error")
+            .1;
+        format!("[worker:{code}] {parameter}")
+    }
+
+    /// 解析稳定错误码和业务参数。
+    pub fn from_error_text(text: &str) -> Option<(Self, String)> {
+        let (code, parameter) = text.strip_prefix("[worker:")?.split_once(']')?;
+        let kind = Self::ALL.iter().find(|(_, tag)| *tag == code)?.0;
+        Some((kind, parameter.trim_start().to_string()))
+    }
+}
+
 /// 识别模式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RecognitionMode {
@@ -1031,5 +1077,27 @@ mod tests {
     fn escape_unescape_inverse() {
         let s = "a\\n\n\\\t\r末尾\\";
         assert_eq!(unescape(&escape(s)).unwrap(), s);
+    }
+}
+
+#[cfg(test)]
+mod worker_error_tests {
+    use super::*;
+
+    /// 错误码、含换行路径参数经完整事件往返保持一致。
+    #[test]
+    fn stable_worker_errors_round_trip() {
+        for (kind, _) in WorkerError::ALL {
+            let parameter = "C:\\audio\n.wav";
+            let event = Event::Error(kind.to_error_text(parameter));
+            let Event::Error(text) = Event::parse(&event.to_line()).unwrap() else {
+                panic!("error event");
+            };
+            assert_eq!(
+                WorkerError::from_error_text(&text),
+                Some((kind, parameter.into()))
+            );
+        }
+        assert_eq!(WorkerError::from_error_text("legacy diagnostic"), None);
     }
 }

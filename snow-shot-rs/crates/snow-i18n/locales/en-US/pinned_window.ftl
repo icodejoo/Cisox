@@ -81,3 +81,15 @@ pinned-menu-default-group = Default group
 pinned-menu-move-to-group = Move to group: { $arg1 }
 
 pinned-menu-close = Close
+
+## 截图翻译临时贴图按钮条
+translation-pin-save-original = Save original
+translation-pin-undo = Undo
+translation-pin-copy = Copy translation
+translation-pin-close = Close
+
+translation-pin-empty = No text to translate
+translation-pin-move-bar = Drag to move the action bar
+
+translation-pin-retry = Retry translation
+translation-pin-download = Download required assets

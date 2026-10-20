@@ -33,6 +33,43 @@ pub enum ToolbarGroup {
     Output,
 }
 
+/// 主栏的一个固定布局槽，生产渲染与离屏顺序验证共用。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolbarSlot {
+    /// 显示分组当前项与弹层入口。
+    Group(ToolbarGroup),
+    /// 独立动作按钮。
+    Action(ToolbarAction),
+    /// 分组间分隔符。
+    Separator,
+}
+
+/// 主栏固定顺序；录屏和长图只显示第二个分隔符之后的动作部分。
+const MAIN_SLOTS: [ToolbarSlot; 13] = [
+    ToolbarSlot::Group(ToolbarGroup::Shape),
+    ToolbarSlot::Group(ToolbarGroup::Pen),
+    ToolbarSlot::Group(ToolbarGroup::Mark),
+    ToolbarSlot::Group(ToolbarGroup::Filter),
+    ToolbarSlot::Group(ToolbarGroup::Edit),
+    ToolbarSlot::Separator,
+    ToolbarSlot::Action(ToolbarAction::Undo),
+    ToolbarSlot::Action(ToolbarAction::Redo),
+    ToolbarSlot::Separator,
+    ToolbarSlot::Group(ToolbarGroup::Recognize),
+    ToolbarSlot::Group(ToolbarGroup::Output),
+    ToolbarSlot::Action(ToolbarAction::Copy),
+    ToolbarSlot::Action(ToolbarAction::Cancel),
+];
+
+/// 返回实际渲染使用的静态布局切片，不逐帧分配按钮集合。
+pub fn toolbar_slots(show_tools: bool) -> &'static [ToolbarSlot] {
+    if show_tools {
+        &MAIN_SLOTS
+    } else {
+        &MAIN_SLOTS[9..]
+    }
+}
+
 /// 形状组成员。
 const SHAPE_ITEMS: [ToolbarItem; 4] = [
     ToolbarItem::Tool(AnnotationTool::Rectangle),
@@ -229,8 +266,6 @@ pub fn all_items() -> Vec<ToolbarItem> {
 
 /// 单个图标按钮的边长（逻辑像素）。
 pub const BUTTON_SIZE: f32 = 28.0;
-/// 复合按钮里图标与小箭头的间距。
-pub const ARROW_GAP: f32 = 2.0;
 /// 复合按钮下箭头部分占的宽度（并入同一个按钮，只影响总宽）。
 pub const ARROW_WIDTH: f32 = 12.0;
 /// 同一区段内相邻按钮的间距。

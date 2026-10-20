@@ -151,6 +151,24 @@ pub struct RestoredPin {
 /// 贴图窗口发给管理器的控制事件（管理器负责开关点击穿透时的退出按钮小窗）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PinControlEvent {
+    /// 重试原翻译贴图，保留原图和目标语言。
+    TranslationRetry {
+        /// 贴图 ID。
+        id: String,
+        /// 图像宽。
+        width: u32,
+        /// 图像高。
+        height: u32,
+        /// 原图像素。
+        rgba: Vec<u8>,
+        /// 原目标语言。
+        target: snow_translate::Lang,
+    },
+    /// 下载当前失败所需的 OCR 资产或翻译运行时。
+    TranslationDownload {
+        /// 是否为 OCR 资产缺失。
+        ocr: bool,
+    },
     /// 贴图请求文字识别（像素为合成后的完整图像，识别在后台线程执行）。
     OcrRequested {
         /// 贴图 ID。

@@ -7,13 +7,40 @@
 use super::overlay_model::{CopyState, OverlayModel};
 use super::status::Status;
 use super::translate::TranslationState;
+use crate::pin_action_bar::{ActionSpec, inline_actions};
 use crate::settings_state::UiPrefs;
 use crate::settings_view::{Palette, palette};
 use snow_platform::clipboard::copy_text_to_clipboard;
-use snow_ui::ui::component::button::Button;
 use snow_ui::ui::component::input::{Textarea, TextareaState};
-use snow_ui::ui::component::{Sizable, Size as ComponentSize};
 use snow_ui::ui::*;
+
+/// 听写浮窗的动作集合：复制始终可点，关闭由运行时结束会话。
+fn dictation_actions(i18n: &snow_i18n::I18n) -> Vec<ActionSpec<bool>> {
+    [
+        (
+            false,
+            "dictation-copy",
+            "icons/antd/copy.svg",
+            "dictation-overlay-copy",
+        ),
+        (
+            true,
+            "dictation-close",
+            "icons/antd/close.svg",
+            "dictation-overlay-close",
+        ),
+    ]
+    .into_iter()
+    .map(|(action, id, icon, key)| ActionSpec {
+        action,
+        id,
+        icon,
+        tooltip: i18n.tr(key),
+        disabled: false,
+        loading: false,
+    })
+    .collect()
+}
 
 /// 浮窗逻辑宽度。
 pub const WINDOW_WIDTH: f32 = 380.0;
@@ -171,6 +198,7 @@ impl DictationView {
 }
 
 impl Render for DictationView {
+    /// 渲染宿主内容并装配共用图标动作。
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.apply_pending(window, cx);
         let p: Palette = palette(self.prefs.dark, self.prefs.accent);
@@ -252,23 +280,20 @@ impl Render for DictationView {
                             .text_color(note_color)
                             .child(copy_note),
                     )
-                    .child(
-                        Button::new("dictation-copy")
-                            .with_size(ComponentSize::Small)
-                            .label(i18n.tr("dictation-overlay-copy"))
-                            .on_click(
-                                cx.listener(|this, _event: &ClickEvent, _window, cx| this.copy(cx)),
-                            ),
-                    )
-                    .child(
-                        // 关窗即退出语音识别模式（流程层发现浮窗被关后结束本轮）
-                        Button::new("dictation-close")
-                            .with_size(ComponentSize::Small)
-                            .label(i18n.tr("dictation-overlay-close"))
-                            .on_click(cx.listener(|_this, _event: &ClickEvent, window, _cx| {
-                                window.remove_window()
-                            })),
-                    ),
+                    .child(inline_actions(
+                        dictation_actions(i18n)
+                            .into_iter()
+                            .map(|action| {
+                                action.bind(cx, |this, close, window, cx| {
+                                    if close {
+                                        window.remove_window();
+                                    } else {
+                                        this.copy(cx);
+                                    }
+                                })
+                            })
+                            .collect(),
+                    )),
             )
     }
 }
@@ -302,6 +327,25 @@ pub fn bottom_right_rect(
 mod tests {
     use super::*;
     use snow_ui::shell::geometry::{PhysicalRect, ScaleFactor};
+
+    /// 听写翻译共用两个动作，空内容也保留既有可复制行为。
+    #[test]
+    fn translation_action_bar_dispatches_copy_and_close() {
+        for locale in ["en-US", "zh-CN"] {
+            let actions = dictation_actions(crate::ocr_backend::i18n_for(locale));
+            assert_eq!(
+                actions.iter().map(|a| a.id).collect::<Vec<_>>(),
+                ["dictation-copy", "dictation-close"]
+            );
+            let mut called = Vec::new();
+            for action in actions {
+                assert!(icon_asset_exists(action.icon));
+                assert!(!action.tooltip.is_empty() && !action.tooltip.starts_with("dictation-"));
+                assert!(action.dispatch(|close| called.push(close)));
+            }
+            assert_eq!(called, [false, true]);
+        }
+    }
 
     /// 100% 缩放：右下角留 16px 边距，尺寸为逻辑尺寸。
     #[test]

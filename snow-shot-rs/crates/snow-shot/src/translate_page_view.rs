@@ -6,6 +6,7 @@
 use crate::app_runtime::UiEvent;
 use crate::history_view::apply_theme;
 use crate::ocr_backend::i18n_for;
+use crate::pin_action_bar::{ActionSpec, PinActionButton, inline_actions};
 use crate::settings_state::UiPrefs;
 use crate::settings_view::{Palette, palette};
 use crate::translate_history::{self, TranslateHistory};
@@ -21,10 +22,56 @@ use snow_ui::ui::component::button::Button;
 use snow_ui::ui::component::input::{InputEvent, Textarea, TextareaState};
 use snow_ui::ui::component::searchable_list::{SearchableListItem, SearchableVec};
 use snow_ui::ui::component::select::{Select, SelectEvent, SelectState};
-use snow_ui::ui::component::{Disableable, IndexPath, Sizable, Size as ComponentSize};
+use snow_ui::ui::component::{IndexPath, Sizable, Size as ComponentSize};
 use snow_ui::ui::*;
 use std::path::PathBuf;
 use std::time::Duration;
+
+/// 翻译页按钮条的业务动作。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PageAction {
+    Translate,
+    Copy,
+    CopyClose,
+}
+
+/// 独立窗口和内嵌页共用按钮集合及禁用条件。
+fn page_actions(
+    locale: &str,
+    embedded: bool,
+    busy: bool,
+    has_translation: bool,
+) -> Vec<ActionSpec<PageAction>> {
+    let mut actions = vec![
+        ActionSpec {
+            id: "translate-page-go",
+            icon: "icons/antd/translation.svg",
+            tooltip: text(locale, "translate-page-button-translate"),
+            disabled: busy,
+            loading: busy,
+            action: PageAction::Translate,
+        },
+        ActionSpec {
+            id: "translate-page-copy",
+            icon: "icons/antd/copy.svg",
+            tooltip: text(locale, "translate-page-button-copy"),
+            disabled: !has_translation,
+            loading: false,
+            action: PageAction::Copy,
+        },
+    ];
+    if !embedded {
+        actions.push(ActionSpec {
+            id: "translate-page-copy-close",
+            icon: "icons/antd/export.svg",
+            tooltip: text(locale, "translate-page-button-copy-close"),
+            disabled: !has_translation,
+            loading: false,
+            action: PageAction::CopyClose,
+        });
+    }
+    actions
+}
 
 /// 窗口逻辑宽度。
 pub const WINDOW_WIDTH: f32 = 640.0;
@@ -421,11 +468,14 @@ impl TranslatePageView {
                     .child(title),
             )
             .child(
-                Button::new("translate-history-clear")
-                    .with_size(ComponentSize::Small)
-                    .label(i18n.tr("translate-page-history-clear"))
-                    .disabled(history.is_empty())
-                    .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| this.clear_history(cx))),
+                PinActionButton::new(
+                    "translate-history-clear",
+                    "icons/antd/clear.svg",
+                    i18n.tr("translate-page-history-clear"),
+                    history.is_empty(),
+                    cx.listener(|this, _, _, cx| this.clear_history(cx)),
+                )
+                .render(),
             );
         let mut list = div()
             .id("translate-history-list")
@@ -535,6 +585,7 @@ impl TranslatePageView {
 }
 
 impl Render for TranslatePageView {
+    /// 渲染宿主内容并装配共用图标动作。
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p: Palette = palette(self.prefs.dark, self.prefs.accent);
         let locale = self.prefs.locale;
@@ -570,10 +621,24 @@ impl Render for TranslatePageView {
                 d.text_color(p.dim)
                     .child(text(locale, "translate-page-result-empty"))
             });
-        let swap_button = Button::new("translate-page-swap")
-            .label(text(locale, "translate-page-swap"))
-            .disabled(!self.model.can_swap())
-            .on_click(cx.listener(|this, _e: &ClickEvent, window, cx| this.swap(window, cx)));
+        let swap_button = PinActionButton::new(
+            "translate-page-swap",
+            "icons/antd/swap.svg",
+            text(locale, "translate-page-swap"),
+            !self.model.can_swap(),
+            cx.listener(|this, _, window, cx| this.swap(window, cx)),
+        )
+        .render();
+        let actions = page_actions(locale, embedded, busy, has_translation)
+            .into_iter()
+            .map(|action| {
+                action.bind(cx, |this, action, window, cx| match action {
+                    PageAction::Translate => this.submit(window, cx),
+                    PageAction::Copy => this.copy(false, window, cx),
+                    PageAction::CopyClose => this.copy(true, window, cx),
+                })
+            })
+            .collect();
         let source = self.labeled(
             &p,
             text(locale, "translate-page-label-source"),
@@ -618,40 +683,7 @@ impl Render for TranslatePageView {
                     .child(pack),
             )
             .child(Textarea::new(&self.input))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(GAP))
-                    .child(
-                        Button::new("translate-page-go")
-                            .label(text(locale, "translate-page-button-translate"))
-                            .loading(busy)
-                            .disabled(busy)
-                            .on_click(cx.listener(|this, _e: &ClickEvent, window, cx| {
-                                this.submit(window, cx)
-                            })),
-                    )
-                    .child(div().flex_1())
-                    .child(
-                        Button::new("translate-page-copy")
-                            .label(text(locale, "translate-page-button-copy"))
-                            .disabled(!has_translation)
-                            .on_click(cx.listener(|this, _e: &ClickEvent, window, cx| {
-                                this.copy(false, window, cx)
-                            })),
-                    )
-                    .when(!embedded, |row| {
-                        row.child(
-                            Button::new("translate-page-copy-close")
-                                .label(text(locale, "translate-page-button-copy-close"))
-                                .disabled(!has_translation)
-                                .on_click(cx.listener(|this, _e: &ClickEvent, window, cx| {
-                                    this.copy(true, window, cx)
-                                })),
-                        )
-                    }),
-            )
+            .child(inline_actions(actions))
             .child(result_box)
             .child(
                 div()
@@ -669,5 +701,60 @@ impl Render for TranslatePageView {
                 )
             })
             .child(history)
+    }
+}
+
+#[cfg(test)]
+mod action_bar_tests {
+    use super::*;
+
+    /// 内嵌不关主窗，忙碌与空译文分别约束提交和复制，双语图标提示完整。
+    #[test]
+    fn translate_page_action_bar_sets_and_dispatch() {
+        for locale in ["en-US", "zh-CN"] {
+            for embedded in [false, true] {
+                for busy in [false, true] {
+                    for has_translation in [false, true] {
+                        let specs = page_actions(locale, embedded, busy, has_translation);
+                        let expected = if embedded {
+                            vec![PageAction::Translate, PageAction::Copy]
+                        } else {
+                            vec![
+                                PageAction::Translate,
+                                PageAction::Copy,
+                                PageAction::CopyClose,
+                            ]
+                        };
+                        assert_eq!(specs.iter().map(|s| s.action).collect::<Vec<_>>(), expected);
+                        let mut called = Vec::new();
+                        for spec in specs {
+                            assert!(icon_asset_exists(spec.icon));
+                            assert!(
+                                !spec.tooltip.is_empty()
+                                    && !spec.tooltip.starts_with("translate-page-")
+                            );
+                            let disabled = if spec.action == PageAction::Translate {
+                                busy
+                            } else {
+                                !has_translation
+                            };
+                            assert_eq!(spec.disabled, disabled);
+                            assert_eq!(spec.dispatch(|action| called.push(action)), !disabled);
+                        }
+                        assert_eq!(
+                            called,
+                            expected
+                                .into_iter()
+                                .filter(|a| if *a == PageAction::Translate {
+                                    !busy
+                                } else {
+                                    has_translation
+                                })
+                                .collect::<Vec<_>>()
+                        );
+                    }
+                }
+            }
+        }
     }
 }

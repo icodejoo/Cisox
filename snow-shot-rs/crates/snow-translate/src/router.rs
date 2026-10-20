@@ -350,7 +350,101 @@ pub struct RoutedEngine {
     used: Mutex<Vec<usize>>,
 }
 
+/// 请求级路由快照，复用现有包池但不读取热更新后的策略。
+struct RequestEngine {
+    /// 共享包池。
+    router: Arc<RoutedEngine>,
+    /// 请求固定的策略。
+    policy: RoutePolicy,
+    /// 固定的缓存标识。
+    cache_id: String,
+}
+
+impl TranslationEngine for RequestEngine {
+    /// 单条翻译使用固定策略。
+    fn translate(&self, text: &str, src: Lang, tgt: Lang) -> Result<String, TranslateError> {
+        crate::take_single(
+            self.translate_batch(&[text.into()], src, tgt)?,
+            "missing translation",
+        )
+    }
+    /// 批量翻译使用固定策略。
+    fn translate_batch(
+        &self,
+        texts: &[String],
+        src: Lang,
+        tgt: Lang,
+    ) -> Result<Vec<String>, TranslateError> {
+        self.translate_batch_cancellable(texts, src, tgt, &|| false)
+    }
+    /// 固定策略并传递取消标记。
+    fn translate_batch_cancellable(
+        &self,
+        texts: &[String],
+        src: Lang,
+        tgt: Lang,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Vec<String>, TranslateError> {
+        self.router
+            .translate_with_policy(texts, src, tgt, &self.policy, cancelled)
+    }
+    /// 包池支持的语言对。
+    fn supported_pairs(&self) -> Vec<(Lang, Lang)> {
+        self.router.supported_pairs()
+    }
+    /// 路由引擎名称。
+    fn engine_name(&self) -> &'static str {
+        ENGINE_NAME
+    }
+    /// 请求固定的缓存命名空间。
+    fn cache_id(&self) -> String {
+        self.cache_id.clone()
+    }
+}
+
 impl RoutedEngine {
+    /// 创建只读请求快照；策略切换仍复用同一包池和已加载模型。
+    pub fn snapshot(self: &Arc<Self>, policy: RoutePolicy) -> Arc<dyn TranslationEngine> {
+        let slots = self
+            .slots
+            .iter()
+            .map(|slot| slot.engine.cache_id())
+            .collect::<Vec<_>>()
+            .join(",");
+        let cache_id = format!(
+            "route:{}:{}:{}:{}",
+            policy.mode.code(),
+            policy.preferred_id.trim(),
+            self.splitter.name(),
+            slots
+        );
+        Arc::new(RequestEngine {
+            router: Arc::clone(self),
+            policy,
+            cache_id,
+        })
+    }
+
+    /// 按传入的固定策略执行，不再读取共享策略。
+    fn translate_with_policy(
+        &self,
+        texts: &[String],
+        src: Lang,
+        tgt: Lang,
+        policy: &RoutePolicy,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Vec<String>, TranslateError> {
+        if texts.iter().all(|t| t.trim().is_empty()) {
+            return Ok(texts.to_vec());
+        }
+        match policy.mode {
+            RouteMode::MixedSplit => self.translate_mixed(texts, src, tgt, policy, cancelled),
+            RouteMode::Single | RouteMode::SpecializedFirst => {
+                self.translate_routed(texts, src, tgt, policy, cancelled)
+            }
+        }
+    }
+
     /// 创建路由引擎（不加载任何模型；识别器默认为 [`ScriptSplitter`]）。
     ///
     /// # 参数
@@ -562,25 +656,31 @@ impl RoutedEngine {
         self.slots.iter().map(|s| &s.manifest).collect()
     }
 
-    /// 占用一个包：若它正被卸载先等其卸完；它尚未常驻时按上限驱逐空闲的旧包。
-    ///
-    /// # 错误
-    /// 路由器已关闭时返回 `WorkerUnavailable`。
-    fn acquire(&self, index: usize, max_resident: usize) -> Result<Lease<'_>, TranslateError> {
-        self.acquire_with(index, max_resident, true)
-    }
-
-    /// [`Self::acquire`] 的底层：`record_use` 为假时不计入“实际参与翻译的包”（预热用，免得污染结果标签）。
+    /// 占用包池的入口；预热不计入实际用包记录，真实请求使用可取消入口。
     fn acquire_with(
         &self,
         index: usize,
         max_resident: usize,
         record_use: bool,
     ) -> Result<Lease<'_>, TranslateError> {
+        self.acquire_with_cancellable(index, max_resident, record_use, &|| false)
+    }
+
+    /// 占用包池时允许取消，不无限等待另一次卸载完成。
+    fn acquire_with_cancellable(
+        &self,
+        index: usize,
+        max_resident: usize,
+        record_use: bool,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Lease<'_>, TranslateError> {
         let busy_elsewhere;
         {
             let mut pool = self.lock_pool();
             loop {
+                if cancelled() {
+                    return Err(TranslateError::WorkerDied("translation cancelled".into()));
+                }
                 if pool.closed {
                     return Err(TranslateError::WorkerUnavailable(CLOSED_MESSAGE.into()));
                 }
@@ -589,8 +689,9 @@ impl RoutedEngine {
                 }
                 pool = self
                     .unload_done
-                    .wait(pool)
-                    .unwrap_or_else(PoisonError::into_inner);
+                    .wait_timeout(pool, Duration::from_millis(20))
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .0;
             }
             busy_elsewhere = pool.in_flight[index] > 0;
             pool.in_flight[index] += 1;
@@ -693,6 +794,7 @@ impl RoutedEngine {
         src: Lang,
         tgt: Lang,
         policy: &RoutePolicy,
+        cancelled: &dyn Fn() -> bool,
     ) -> Result<Vec<String>, TranslateError> {
         let manifests = self.manifests();
         if src != Lang::Auto {
@@ -701,8 +803,11 @@ impl RoutedEngine {
             let resolved = manifests[index]
                 .resolve_source(src, tgt)
                 .ok_or(TranslateError::UnsupportedLanguagePair(src, tgt))?;
-            let lease = self.acquire(index, policy.max_resident)?;
-            return lease.engine().translate_batch(texts, resolved, tgt);
+            let lease =
+                self.acquire_with_cancellable(index, policy.max_resident, true, cancelled)?;
+            return lease
+                .engine()
+                .translate_batch_cancellable(texts, resolved, tgt, cancelled);
         }
         // Auto：逐条判定语言，按语言分组
         let mut out: Vec<String> = texts.to_vec();
@@ -728,8 +833,11 @@ impl RoutedEngine {
         }
         for (index, lang, members) in plans {
             let batch: Vec<String> = members.iter().map(|&i| texts[i].clone()).collect();
-            let lease = self.acquire(index, policy.max_resident)?;
-            let translated = lease.engine().translate_batch(&batch, lang, tgt)?;
+            let lease =
+                self.acquire_with_cancellable(index, policy.max_resident, true, cancelled)?;
+            let translated = lease
+                .engine()
+                .translate_batch_cancellable(&batch, lang, tgt, cancelled)?;
             crate::ensure_same_len(translated.len(), batch.len())?;
             for (&i, text) in members.iter().zip(translated) {
                 out[i] = text;
@@ -745,6 +853,7 @@ impl RoutedEngine {
         src: Lang,
         tgt: Lang,
         policy: &RoutePolicy,
+        cancelled: &dyn Fn() -> bool,
     ) -> Result<Vec<String>, TranslateError> {
         let manifests = self.manifests();
         let mut plans: Vec<Vec<Part>> = Vec::with_capacity(texts.len());
@@ -812,7 +921,8 @@ impl RoutedEngine {
         }
         for slot in slot_order {
             // 每个引擎一次占用：期间不会被驱逐，也只加载一次
-            let lease = self.acquire(slot, policy.max_resident)?;
+            let lease =
+                self.acquire_with_cancellable(slot, policy.max_resident, true, cancelled)?;
             let mut sources: Vec<Lang> = Vec::new();
             for job in jobs.iter().filter(|j| j.slot == slot) {
                 if !sources.contains(&job.src) {
@@ -824,7 +934,9 @@ impl RoutedEngine {
                     .filter(|&j| jobs[j].slot == slot && jobs[j].src == source)
                     .collect();
                 let batch: Vec<String> = members.iter().map(|&j| jobs[j].text.clone()).collect();
-                let translated = lease.engine().translate_batch(&batch, source, tgt)?;
+                let translated = lease
+                    .engine()
+                    .translate_batch_cancellable(&batch, source, tgt, cancelled)?;
                 crate::ensure_same_len(translated.len(), batch.len())?;
                 for (&member, text) in members.iter().zip(translated) {
                     jobs[member].out = Some(text);
@@ -869,14 +981,25 @@ impl TranslationEngine for RoutedEngine {
         src: Lang,
         tgt: Lang,
     ) -> Result<Vec<String>, TranslateError> {
+        self.translate_batch_cancellable(texts, src, tgt, &|| false)
+    }
+
+    /// 分段和分包翻译期间沿用同一取消判定。
+    fn translate_batch_cancellable(
+        &self,
+        texts: &[String],
+        src: Lang,
+        tgt: Lang,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Vec<String>, TranslateError> {
         if texts.iter().all(|t| t.trim().is_empty()) {
             return Ok(texts.to_vec());
         }
         let policy = self.policy();
         match policy.mode {
-            RouteMode::MixedSplit => self.translate_mixed(texts, src, tgt, &policy),
+            RouteMode::MixedSplit => self.translate_mixed(texts, src, tgt, &policy, cancelled),
             RouteMode::Single | RouteMode::SpecializedFirst => {
-                self.translate_routed(texts, src, tgt, &policy)
+                self.translate_routed(texts, src, tgt, &policy, cancelled)
             }
         }
     }
@@ -1143,6 +1266,39 @@ mod tests {
             preferred_id: String::new(),
             max_resident,
         }
+    }
+
+    /// 交错配置切换后，请求 A 仍按自己的策略选专用包，B 仍按指定通用包执行。
+    #[test]
+    fn request_snapshot_keeps_policy_after_interleaved_switch() {
+        let first = RoutePolicy {
+            mode: RouteMode::SpecializedFirst,
+            preferred_id: String::new(),
+            max_resident: 1,
+        };
+        let (router, general, specialized) = router(first.clone());
+        let router = Arc::new(router);
+        let a = router.snapshot(first);
+        let cache_a = a.cache_id();
+        let second = RoutePolicy {
+            mode: RouteMode::Single,
+            preferred_id: "nllb".into(),
+            max_resident: 2,
+        };
+        router.set_policy(second.clone());
+        let b = router.snapshot(second);
+        assert_eq!(
+            a.translate("hello", Lang::En, Lang::ZhHans).unwrap(),
+            "opus:en:hello"
+        );
+        assert_eq!(
+            b.translate("world", Lang::En, Lang::ZhHans).unwrap(),
+            "nllb:en:world"
+        );
+        assert_eq!(a.cache_id(), cache_a);
+        assert_ne!(a.cache_id(), b.cache_id());
+        assert_eq!(general.calls.lock().unwrap().len(), 1);
+        assert_eq!(specialized.calls.lock().unwrap().len(), 1);
     }
 
     /// 单文本便捷调用。

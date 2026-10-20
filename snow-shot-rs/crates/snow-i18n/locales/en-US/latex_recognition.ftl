@@ -21,3 +21,7 @@ recwin-latex-title = Recognized formula
 recwin-copy-latex = Copy LaTeX
 
 recwin-copy-latex-block = Copy as $$ block
+
+latex-err-truncated = The formula exceeded the decoder length limit. Select a smaller region and retry.
+latex-err-timeout = Formula recognition timed out. Please retry.
+latex-err-cancelled = Formula recognition was cancelled.

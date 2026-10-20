@@ -35,6 +35,10 @@ use crate::ocr_popup::{
 use crate::ocr_service::OcrResult;
 use crate::overlay_keymap::{DrawingKey, OverlayKeyAction, OverlayKeymap};
 use crate::overlay_probe::FrameProbe;
+use crate::pin_action_bar::{
+    ActionBarGrip, ActionBarLayout, ActionSpec, PinActionBarState, ScreenshotActionRenderer,
+    action_bar_layout, floating_actions, inline_actions,
+};
 use crate::previous_selection::{PREVIOUS_SELECTION_KEY, SelectionStyle, decode, encode};
 use crate::region_select::{RegionDraft, RegionType};
 use crate::scan_animation::scan_overlay;
@@ -47,7 +51,7 @@ use crate::translate_flow::{
     LINK_BORDER, LINK_FILL, LinkHover, TranslateUiState, panel_lines as translate_panel_lines,
 };
 use crate::translate_render::{
-    detail_panel_origin, render_with_system_font, rgba_to_premultiplied_bgra,
+    build_translated_rgba, detail_panel_origin, rgba_to_premultiplied_bgra,
 };
 use crate::translate_service::{
     TOOLBAR_TARGET_LANGS, TranslateFlowError, TranslateOutcome, TranslateStage,
@@ -87,13 +91,12 @@ use snow_ui::ui::component::{
 use snow_ui::ui::*;
 use snow_ui::widgets::{
     AnnotationTool, ColorFormat, Magnifier, MagnifierGrid, ScreenshotToolbar, ToolbarAction,
-    ToolbarGroup, ToolbarGroups, ToolbarLabel, calculate_magnifier_placement,
-    calculate_toolbar_placement, max_menu_height, toolbar_logical_size,
+    ToolbarGroup, ToolbarGroups, ToolbarLabel, calculate_magnifier_placement, max_menu_height,
+    toolbar_logical_size,
 };
 use snow_ui::widgets::{
-    IconMenuButton, LABEL_FONT_PX, MenuEntry, ResultBar, ResultBarItem,
-    calculate_outer_first_bar_placement, calculate_region_bar_placement, max_label_width,
-    menu_button_menu_height, menu_button_outer_width, menu_button_size, result_bar_size,
+    IconMenuButton, LABEL_FONT_PX, MenuEntry, calculate_region_bar_placement, max_label_width,
+    menu_button_menu_height, menu_button_outer_width, menu_button_size,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -142,8 +145,6 @@ const STYLE_SELECT_WIDTH: f32 = 96.0;
 const STYLE_SELECT_HEIGHT: f32 = 28.0;
 /// 样式下拉浮层的最大高度。
 const STYLE_SELECT_MENU_MAX_HEIGHT: f32 = 220.0;
-/// 工具栏距选区的逻辑间距。
-const TOOLBAR_MARGIN: i32 = 8;
 /// 手柄的逻辑边长。
 const HANDLE_LOGICAL_SIZE: f32 = DEFAULT_HANDLE_SIZE as f32;
 /// 边缘命中容差的逻辑值。
@@ -216,8 +217,6 @@ const RESULT_PANEL_BUTTON_ROW_HEIGHT: f32 = 40.0;
 const RESULT_PANEL_PADDING_X: f32 = 16.0;
 /// 结果面板上下内边距之和（逻辑像素）。
 const RESULT_PANEL_PADDING_Y: f32 = 8.0;
-/// 结果面板按钮间距。
-const RESULT_PANEL_BUTTON_GAP: f32 = 6.0;
 /// OCR 文本框描边色。
 const OCR_BOX_COLOR: u32 = 0xFAAD14;
 /// 双击判定所需的点击次数。
@@ -842,6 +841,63 @@ impl TranslateBarAction {
     }
 }
 
+/// 翻译结果条的离屏动作定义。
+fn translate_bar_actions(i18n: &I18n) -> Vec<ActionSpec<TranslateBarAction>> {
+    TRANSLATE_BAR_ACTIONS
+        .into_iter()
+        .map(|action| ActionSpec {
+            id: action.id(),
+            icon: action.icon(),
+            tooltip: i18n.tr(action.tooltip_id()),
+            disabled: false,
+            loading: false,
+            action,
+        })
+        .collect()
+}
+
+/// 翻译状态面板动作，确定按钮只在结果可用时启用。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PanelAction {
+    Confirm,
+    Undo,
+    Close,
+}
+
+/// 翻译状态面板的按钮集合和可用性。
+fn panel_actions(i18n: &I18n, confirm_enabled: bool) -> Vec<ActionSpec<PanelAction>> {
+    [
+        (
+            PanelAction::Confirm,
+            "overlay-panel-confirm",
+            "icons/snow/check.svg",
+            !confirm_enabled,
+        ),
+        (
+            PanelAction::Undo,
+            "overlay-panel-undo",
+            "icons/antd/rollback.svg",
+            false,
+        ),
+        (
+            PanelAction::Close,
+            "overlay-panel-close",
+            "icons/antd/close.svg",
+            false,
+        ),
+    ]
+    .into_iter()
+    .map(|(action, id, icon, disabled)| ActionSpec {
+        action,
+        id,
+        icon,
+        disabled,
+        loading: false,
+        tooltip: i18n.tr(id),
+    })
+    .collect()
+}
+
 /// 样式下拉里的一个选项：取值（数字或头型标识）加本地化标签。
 #[derive(Clone)]
 struct StyleItem {
@@ -1154,6 +1210,7 @@ pub trait OutputSink {
         _width: u32,
         _height: u32,
         _rgba: Vec<u8>,
+        _cancel: Arc<std::sync::atomic::AtomicBool>,
     ) -> Result<(), String> {
         Err(ERR_LATEX_NOT_WIRED.to_string())
     }
@@ -1336,7 +1393,7 @@ pub struct SystemOutput {
     /// 表格识别组件下载回调。
     on_table_download: Option<Box<dyn Fn()>>,
     /// 公式识别回调：`(序号, 宽, 高, RGBA)`。
-    on_latex: Option<OcrCallback>,
+    on_latex: Option<LatexCallback>,
     /// 公式识别运行时下载回调。
     on_latex_download: Option<Box<dyn Fn()>>,
     /// 打开识别结果窗的回调。
@@ -1358,6 +1415,8 @@ type HistoryCallback = Box<dyn Fn(HistorySource, u32, u32, &[u8])>;
 
 /// 文字识别回调类型：`(序号, 宽, 高, RGBA)`。
 type OcrCallback = Box<dyn Fn(u64, u32, u32, Vec<u8>)>;
+/// 公式请求携带共享取消标记。
+type LatexCallback = Box<dyn Fn(u64, u32, u32, Vec<u8>, Arc<std::sync::atomic::AtomicBool>)>;
 
 /// 文字翻译回调类型：`(序号, 宽, 高, RGBA, 目标语言)`。
 type TranslateCallback = Box<dyn Fn(u64, u32, u32, Vec<u8>, Lang)>;
@@ -1483,7 +1542,10 @@ impl SystemOutput {
     ///
     /// # 参数
     /// - `callback`：接收请求序号、图像尺寸与 RGBA 像素。
-    pub fn with_latex(mut self, callback: impl Fn(u64, u32, u32, Vec<u8>) + 'static) -> Self {
+    pub fn with_latex(
+        mut self,
+        callback: impl Fn(u64, u32, u32, Vec<u8>, Arc<std::sync::atomic::AtomicBool>) + 'static,
+    ) -> Self {
         self.on_latex = Some(Box::new(callback));
         self
     }
@@ -1760,9 +1822,10 @@ impl OutputSink for SystemOutput {
         width: u32,
         height: u32,
         rgba: Vec<u8>,
+        _cancel: Arc<std::sync::atomic::AtomicBool>,
     ) -> Result<(), String> {
         invoke_callback(&self.on_latex, ERR_LATEX_NOT_WIRED, |callback| {
-            callback(serial, width, height, rgba)
+            callback(serial, width, height, rgba, _cancel)
         })
     }
 
@@ -1991,6 +2054,8 @@ pub struct ScreenshotOverlayView {
     qr_link: Option<String>,
     /// 最近一次 OCR 请求序号（过期结果据此丢弃）。
     ocr_serial: u64,
+    /// 公式任务的取消标记，退出识别界面或关闭时置位。
+    recognition_cancel: Arc<std::sync::atomic::AtomicBool>,
     /// 当前这轮识别是不是表格识别（决定缺组件时按 D 下载哪一套）。
     table_mode: bool,
     /// 当前这轮识别是不是公式识别（缺运行时时按 D 下载 onnxruntime）。
@@ -2009,6 +2074,12 @@ pub struct ScreenshotOverlayView {
     translated_image: Option<TranslatedImage>,
     /// 详情面板是否展开。
     translate_detail_open: bool,
+    /// 覆盖窗内部操作条的抓手位置。
+    translate_bar_state: Rc<PinActionBarState>,
+    /// 主工具栏的内部偏移与抓手会话，跨帧复用。
+    toolbar_bar_state: Rc<PinActionBarState>,
+    /// 记录组件实际矩形，命中与其它面板避让包含抓手宽度。
+    toolbar_bar_layout: Cell<Option<ActionBarLayout>>,
     /// 详情面板原文列表的滚动句柄。
     detail_source_scroll: UniformListScrollHandle,
     /// 详情面板译文列表的滚动句柄。
@@ -2027,6 +2098,14 @@ pub struct ScreenshotOverlayView {
     highlight_transition: HighlightTransition,
     /// 按下时锁定的窗口矩形：位移未超阈值就松开则直接作为选区，超过则作废转手动框选。
     click_window: Option<PhysicalRect>,
+}
+
+impl Drop for ScreenshotOverlayView {
+    /// 系统直接销毁窗口时也取消识别，避免只依赖显式关闭回调。
+    fn drop(&mut self) {
+        self.recognition_cancel
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 impl ScreenshotOverlayView {
@@ -2157,6 +2236,7 @@ impl ScreenshotOverlayView {
             ocr: OcrUiState::Idle,
             qr_link: None,
             ocr_serial: 0,
+            recognition_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             table_mode: false,
             latex_mode: false,
             table_texts: None,
@@ -2166,6 +2246,9 @@ impl ScreenshotOverlayView {
             translate_source: None,
             translated_image: None,
             translate_detail_open: false,
+            translate_bar_state: Rc::default(),
+            toolbar_bar_state: Rc::default(),
+            toolbar_bar_layout: Cell::default(),
             detail_source_scroll: UniformListScrollHandle::new(),
             detail_target_scroll: UniformListScrollHandle::new(),
             link_hover: LinkHover::default(),
@@ -2488,6 +2571,7 @@ impl ScreenshotOverlayView {
                 self.begin_region_input(point, click_count);
             }
             SelectionState::Idle => {
+                self.toolbar_bar_state.reset();
                 // 按下点处的窗口先锁定，松开时若位移很小就直接选中该窗口
                 self.refresh_window_hover(point);
                 self.click_window = self.pick.current();
@@ -2528,6 +2612,7 @@ impl ScreenshotOverlayView {
                         self.run_click_action(self.double_click_action)
                     };
                 }
+                self.toolbar_bar_state.reset();
                 self.state = if mode == SelectionDragMode::None {
                     // 点击选区外，重新开始框选
                     SelectionState::MarqueeDragging {
@@ -2891,6 +2976,7 @@ impl ScreenshotOverlayView {
             // 详情面板展开时，取消键先收起它
             OverlayKeyAction::Cancel if self.translate_detail_open => {
                 self.translate_detail_open = false;
+                self.translate_bar_state = Rc::default();
                 self.link_hover.clear();
                 OverlayOutcome::Stay
             }
@@ -3585,7 +3671,6 @@ impl ScreenshotOverlayView {
         let (top, left) = match toolbar_pos {
             // 选区确定后：叠在选区内右下角，小选区 / 嵌入式工具栏的回退见 `calculate_region_bar_placement`
             Some(pos) if selected && selection.is_some() => {
-                let (toolbar_w, toolbar_h) = self.toolbar_size();
                 let screen = PhysicalRect::new(
                     monitor.0 as i32,
                     monitor.1 as i32,
@@ -3594,7 +3679,7 @@ impl ScreenshotOverlayView {
                 );
                 let at = calculate_region_bar_placement(
                     selection.unwrap_or(screen),
-                    PhysicalRect::new(pos.x, pos.y, toolbar_w, toolbar_h),
+                    self.toolbar_bounds_at(pos),
                     (bar_w.ceil() as i32, bar_h.ceil() as i32),
                     screen,
                     REGION_BAR_MARGIN as i32,
@@ -4828,6 +4913,9 @@ impl ScreenshotOverlayView {
         let Some((w, h, rgba)) = self.recognition_prelude(false) else {
             return OverlayOutcome::Stay;
         };
+        self.recognition_cancel
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.recognition_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
         self.ocr_serial += 1;
         self.table_mode = kind == RecognitionKind::Table;
         self.latex_mode = kind == RecognitionKind::Latex;
@@ -4835,7 +4923,10 @@ impl ScreenshotOverlayView {
         let result = match kind {
             RecognitionKind::Ocr => self.output.start_ocr(serial, w, h, rgba),
             RecognitionKind::Table => self.output.start_table(serial, w, h, rgba),
-            RecognitionKind::Latex => self.output.start_latex(serial, w, h, rgba),
+            RecognitionKind::Latex => {
+                self.output
+                    .start_latex(serial, w, h, rgba, Arc::clone(&self.recognition_cancel))
+            }
         };
         match result {
             Ok(()) => {
@@ -5062,6 +5153,8 @@ impl ScreenshotOverlayView {
 
     /// 退出 OCR 界面（回到框选状态）；识别仍在进行时，其结果会因序号过期被丢弃。
     fn dismiss_ocr(&mut self) {
+        self.recognition_cancel
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         self.ocr_serial += 1;
         self.ocr = OcrUiState::Idle;
         self.reset_ocr_popup();
@@ -5247,6 +5340,7 @@ impl ScreenshotOverlayView {
         self.status_message = state.status_text(self.i18n);
         self.link_hover.clear();
         self.translate_detail_open = false;
+        self.translate_bar_state = Rc::default();
         self.translate = state;
     }
 
@@ -5264,6 +5358,7 @@ impl ScreenshotOverlayView {
         self.translate = TranslateUiState::Idle;
         self.link_hover.clear();
         self.translate_detail_open = false;
+        self.translate_bar_state = Rc::default();
         self.translate_source = None;
         self.drop_translated_image();
         self.status_message = None;
@@ -5324,19 +5419,59 @@ impl ScreenshotOverlayView {
         self.build_translated_image();
     }
 
+    /// 为运行时分配的会话序号留出空间，避免不同截图的迟到结果串窗。
+    pub fn seed_translation_serial(&mut self, base: u64) {
+        self.translate_serial = base;
+        self.ocr_serial = base;
+    }
+
+    /// 提交后立即移交原图与桌面选区，覆盖窗关闭时不再取消该任务。
+    pub fn take_translation_pin(
+        &mut self,
+        serial: u64,
+    ) -> Option<crate::pinned_view::TranslationPinData> {
+        if serial != self.translate_serial
+            || !matches!(self.translate, TranslateUiState::Running { .. })
+        {
+            return None;
+        }
+        let rect = self
+            .current_selection()?
+            .translate(self.canvas_origin.x, self.canvas_origin.y);
+        let (width, height, original) = self.translate_source.take()?;
+        self.translate = TranslateUiState::Idle;
+        Some(crate::pinned_view::TranslationPinData {
+            width,
+            height,
+            original,
+            image: Vec::new(),
+            text: String::new(),
+            target: self.translate_target(),
+            rect,
+        })
+    }
+
+    /// 浮层建窗失败时保留截图会话并显示错误，便于重试或保存。
+    pub fn translation_pin_failed(&mut self, detail: String) {
+        self.status_message = Some(
+            self.i18n
+                .tr_with("overlay-msg-pin-failed", &Args::new().arg(1, detail)),
+        );
+    }
+
     /// 译文完成后，把开始时留的选区图像副本就地换成译文原位替换图（并装成屏幕显示用的图像资源）；
     /// 没有可替换的段落时不生成，保存图片会回落到原图。
     fn build_translated_image(&mut self) {
         self.drop_translated_image();
         let source = self.translate_source.take();
-        let (TranslateUiState::Done { boxes, pairs, .. }, Some((w, h, mut rgba))) =
+        let (TranslateUiState::Done { boxes, pairs, .. }, Some((w, h, rgba))) =
             (&self.translate, source)
         else {
             return;
         };
-        if render_with_system_font(&mut rgba, w, h, boxes, pairs) == 0 {
+        let Ok(rgba) = build_translated_rgba(w, h, rgba, boxes, pairs) else {
             return;
-        }
+        };
         let Some(buffer) = RgbaImage::from_raw(w, h, rgba_to_premultiplied_bgra(&rgba)) else {
             return;
         };
@@ -5535,75 +5670,49 @@ impl ScreenshotOverlayView {
                     .into_any_element(),
             );
         }
-        let (bar, bar_rect) = self.translate_bar(toolbar_pos, selection_logical, screen, cx);
+        let (bar, bar_rect) = self.translate_bar(selection_logical, screen, cx);
         self.region_bar_rect = Some(bar_rect);
         parts.push(bar);
         if self.translate_detail_open {
-            let toolbar_rect = toolbar_pos.map(|p| {
-                let (w, h) = self.toolbar_size();
-                PhysicalRect::new(p.x, p.y, w, h)
-            });
+            let toolbar_rect = toolbar_pos.map(|p| self.toolbar_bounds_at(p));
             let avoid: Vec<PhysicalRect> = std::iter::once(bar_rect).chain(toolbar_rect).collect();
             parts.push(self.translate_detail_panel(selection_logical, screen, &avoid, cx));
         }
         parts
     }
 
-    /// 那排图标按钮及其逻辑矩形：选区外面放得下就放外面（右下角一侧），放不下放进选区里面（右下角）。
+    /// 共用组件负责下方、上方、内部回退与内部抓手，宿主只装配业务动作。
     fn translate_bar(
         &self,
-        toolbar_pos: Option<PhysicalPoint>,
         selection_logical: Option<PhysicalRect>,
         screen: (f32, f32, f32, f32),
         cx: &mut Context<Self>,
     ) -> (AnyElement, PhysicalRect) {
-        let (bar_w, bar_h) = result_bar_size(TRANSLATE_BAR_ACTIONS.len());
-        let size = (bar_w.ceil() as i32, bar_h.ceil() as i32);
-        let screen_rect = PhysicalRect::new(
+        let screen = PhysicalRect::new(
             screen.0 as i32,
             screen.1 as i32,
             screen.2 as i32,
             screen.3 as i32,
         );
-        let (toolbar_w, toolbar_h) = self.toolbar_size();
-        let toolbar = toolbar_pos.map_or(PhysicalRect::new(0, 0, 0, 0), |p| {
-            PhysicalRect::new(p.x, p.y, toolbar_w, toolbar_h)
-        });
-        let at = calculate_outer_first_bar_placement(
-            selection_logical.unwrap_or(screen_rect),
-            toolbar,
-            size,
-            screen_rect,
-            REGION_BAR_MARGIN as i32,
-            REGION_BAR_GAP as i32,
-        );
-        let items: Vec<ResultBarItem> = TRANSLATE_BAR_ACTIONS
-            .iter()
-            .map(|a| ResultBarItem {
-                id: a.id(),
-                icon: a.icon(),
-                tooltip: self.i18n.tr(a.tooltip_id()),
-                danger: *a == TranslateBarAction::Close,
+        let buttons = translate_bar_actions(self.i18n)
+            .into_iter()
+            .map(|action| {
+                action.bind(cx, |this, action, window, cx| {
+                    let outcome = this.apply_translate_bar_action(action);
+                    this.finish(outcome, window, cx);
+                })
             })
             .collect();
-        let view = cx.entity();
-        let bar = ResultBar::new("translate-bar", items).on_click(move |index, window, app| {
-            let Some(action) = TRANSLATE_BAR_ACTIONS.get(index).copied() else {
-                return;
-            };
-            view.update(app, |this, cx| {
-                let outcome = this.apply_translate_bar_action(action);
-                this.finish(outcome, window, cx);
-            });
-        });
-        (
-            div()
-                .absolute()
-                .top(px(at.y as f32))
-                .left(px(at.x as f32))
-                .child(bar)
-                .into_any_element(),
-            PhysicalRect::new(at.x, at.y, size.0, size.1),
+        let entity = cx.entity().downgrade();
+        floating_actions(
+            buttons,
+            selection_logical.unwrap_or(screen),
+            screen,
+            self.translate_bar_state.clone(),
+            self.i18n.tr("translation-pin-move-bar"),
+            move |cx| {
+                let _ = entity.update(cx, |_, cx| cx.notify());
+            },
         )
     }
 
@@ -6063,10 +6172,7 @@ impl ScreenshotOverlayView {
             return parts;
         };
         let avoid: Vec<PhysicalRect> = toolbar_pos
-            .map(|p| {
-                let (w, h) = self.toolbar_size();
-                PhysicalRect::new(p.x, p.y, w, h)
-            })
+            .map(|p| self.toolbar_bounds_at(p))
             .into_iter()
             .collect();
         parts.push(self.ocr_popup(&body, selection_logical, screen, &avoid, cx));
@@ -6263,31 +6369,27 @@ impl ScreenshotOverlayView {
             (width, height),
             screen,
         );
-        let confirm = Button::new("overlay-panel-confirm")
-            .with_size(ComponentSize::Small)
-            .label(self.i18n.tr("overlay-panel-confirm"))
-            .disabled(!confirm_enabled)
-            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                // 翻译面板确定：结果窗打开后退出截图状态，只留结果窗
-                let from_translate = this.translate.is_visible();
-                if this.open_recognition_window() && from_translate {
-                    this.finish(OverlayOutcome::Close, window, cx);
-                }
-                cx.notify();
-            }));
-        let undo = Button::new("overlay-panel-undo")
-            .with_size(ComponentSize::Small)
-            .label(self.i18n.tr("overlay-panel-undo"))
-            .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
-                this.undo_result_panel();
-                cx.notify();
-            }));
-        let close = Button::new("overlay-panel-close")
-            .with_size(ComponentSize::Small)
-            .label(self.i18n.tr("overlay-panel-close"))
-            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                this.finish(OverlayOutcome::Close, window, cx);
-            }));
+        let actions = inline_actions(
+            panel_actions(self.i18n, confirm_enabled)
+                .into_iter()
+                .map(|action| {
+                    action.bind(cx, |this, action, window, cx| match action {
+                        PanelAction::Confirm => {
+                            let from_translate = this.translate.is_visible();
+                            if this.open_recognition_window() && from_translate {
+                                this.finish(OverlayOutcome::Close, window, cx);
+                            }
+                            cx.notify();
+                        }
+                        PanelAction::Undo => {
+                            this.undo_result_panel();
+                            cx.notify();
+                        }
+                        PanelAction::Close => this.finish(OverlayOutcome::Close, window, cx),
+                    })
+                })
+                .collect(),
+        );
         div()
             .absolute()
             .top(px(y))
@@ -6315,10 +6417,7 @@ impl ScreenshotOverlayView {
                     .flex()
                     .items_center()
                     .justify_end()
-                    .gap(px(RESULT_PANEL_BUTTON_GAP))
-                    .child(confirm)
-                    .child(undo)
-                    .child(close),
+                    .child(actions),
             )
             .into_any_element()
     }
@@ -6541,6 +6640,8 @@ impl ScreenshotOverlayView {
     /// # 参数
     /// - `window`：当前窗口。
     pub fn close(&mut self, window: &mut Window) {
+        self.recognition_cancel
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         tracing::info!(stats = %self.probe.describe(), "overlay closing");
         for image in self.frame.images() {
             // 这块图只在对应显示器的窗口里上传过；别的窗口里释放会报未找到，忽略即可
@@ -6806,6 +6907,32 @@ impl ScreenshotOverlayView {
         PhysicalRect::new(pos.x, pos.y, size.0, size.1).contains(self.cursor_logical_point())
     }
 
+    /// 向通用组件提供选区、当前屏可用区域和条尺寸；状态只在几何变化时重置。
+    fn toolbar_layout(&self, selection: PhysicalRect, screen: PhysicalRect) -> ActionBarLayout {
+        self.toolbar_bar_state.sync_selection(selection);
+        let size = self.toolbar_size();
+        let layout = action_bar_layout(
+            selection,
+            screen,
+            (size.0 as f32, size.1 as f32),
+            &self.toolbar_bar_state,
+        );
+        self.toolbar_bar_layout.set(Some(layout));
+        layout
+    }
+
+    /// 命中与面板避让读取通用组件的实际尺寸；渲染前回退到基础尺寸。
+    fn toolbar_bounds_at(&self, pos: PhysicalPoint) -> PhysicalRect {
+        if let Some(layout) = self.toolbar_bar_layout.get()
+            && layout.rect.x == pos.x
+            && layout.rect.y == pos.y
+        {
+            return layout.rect;
+        }
+        let (width, height) = self.toolbar_size();
+        PhysicalRect::new(pos.x, pos.y, width, height)
+    }
+
     /// 主工具栏的逻辑尺寸（宽, 高）；录屏 / 长图模式隐藏标注工具组，所以更窄。
     fn toolbar_size(&self) -> (i32, i32) {
         toolbar_logical_size(!self.record_mode && !self.scroll_mode)
@@ -6820,7 +6947,8 @@ impl ScreenshotOverlayView {
         let Some(pos) = toolbar_pos else {
             return false;
         };
-        let (width, height) = self.toolbar_size();
+        let rect = self.toolbar_bounds_at(pos);
+        let (width, height) = (rect.width, rect.height);
         let extra = if menu_open {
             max_menu_height().ceil() as i32 + TOOLBAR_MENU_GAP
         } else {
@@ -7555,6 +7683,7 @@ impl ScreenshotOverlayView {
 
 impl Render for ScreenshotOverlayView {
     /// 渲染覆盖窗视图（单窗口路径：等价于第 0 块显示器）。
+    /// 渲染宿主内容并装配共用图标动作。
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.render_monitor(0, None, window, cx)
     }
@@ -7839,22 +7968,15 @@ impl ScreenshotOverlayView {
             // 尺寸标签（选区左上方，贴近上沿时落到选区内侧）
             root = root.child(self.size_label_div((sx, sy), s));
 
-            // 浮动工具栏（选区确定后展示；标注工具未实现所以隐藏，贴图 / OCR / 翻译置灰）
+            // 主工具栏的放置、夹紧与抓手全部复用通用操作栏。
             if matches!(self.state, SelectionState::Selected { .. }) && anchor_here {
                 let screen_logical =
                     PhysicalRect::new(ox as i32, oy as i32, mon_w as i32, mon_h as i32);
                 let on_this_monitor = mon.intersect(&s).unwrap_or(s);
-                let (toolbar_w, toolbar_h) = self.toolbar_size();
-                let pos = calculate_toolbar_placement(
-                    logical_rect(on_this_monitor, scale),
-                    PhysicalPoint::new(toolbar_w, toolbar_h),
-                    screen_logical,
-                    TOOLBAR_MARGIN,
-                );
-                // 工具栏下方放不下最高的分组菜单时，菜单改向上展开
-                let popup_up =
-                    pos.y + toolbar_h + TOOLBAR_MENU_GAP + max_menu_height().ceil() as i32
-                        > screen_logical.bottom();
+                let selection = logical_rect(on_this_monitor, scale);
+                let layout = self.toolbar_layout(selection, screen_logical);
+                let pos = PhysicalPoint::new(layout.rect.x, layout.rect.y);
+                let popup_up = layout.popup_up(screen_logical);
                 let groups = match &self.toolbar_groups {
                     Some(groups) => groups.clone(),
                     None => {
@@ -7900,15 +8022,23 @@ impl ScreenshotOverlayView {
                     .on_action(move |action, window, app| {
                         entity.update(app, |this, cx| this.on_toolbar_action(action, window, cx));
                     });
-                // 按右边缘锚定：真实宽度与估算不符时也不会溢出屏幕右侧
-                let right_gap = (screen_w - (pos.x + toolbar_w) as f32).max(0.0);
-                root = root.child(
-                    div()
-                        .absolute()
-                        .top(px(pos.y as f32))
-                        .right(px(right_gap))
-                        .child(tb),
-                );
+                let notify_entity = cx.entity().downgrade();
+                let renderer = ScreenshotActionRenderer {
+                    grip: layout.position.has_grip().then(|| ActionBarGrip {
+                        selection: (selection.width as f32, selection.height as f32),
+                        size: (layout.rect.width as f32, layout.rect.height as f32),
+                        state: self.toolbar_bar_state.clone(),
+                        tooltip: self.i18n.tr("translation-pin-move-bar"),
+                        notify: Rc::new(move |app| {
+                            let _ = notify_entity.update(app, |_, cx| cx.notify());
+                        }),
+                    }),
+                };
+                root = root.child(crate::pin_action_bar::positioned_actions(
+                    tb.with_renderer(Rc::new(renderer)).into_any_element(),
+                    layout,
+                    selection,
+                ));
                 // 样式面板按本屏相对坐标摆放，再平移回画布坐标
                 let (mx, my) = (ox as i32, oy as i32);
                 if let Some(origin) =
@@ -8116,6 +8246,9 @@ impl ScreenshotOverlayView {
                             return;
                         }
                         moves.update(app, |this, cx| {
+                            if this.toolbar_bar_state.is_dragging() {
+                                return;
+                            }
                             let started = Instant::now();
                             this.scale = this.scale_override.unwrap_or(window.scale_factor());
                             let p = this.canvas_point(index, ev.position);
@@ -8131,6 +8264,9 @@ impl ScreenshotOverlayView {
                             return;
                         }
                         ups.update(app, |this, cx| {
+                            if this.toolbar_bar_state.is_dragging() {
+                                return;
+                            }
                             this.scale = this.scale_override.unwrap_or(window.scale_factor());
                             let p = this.canvas_point(index, ev.position);
                             this.set_shift(ev.modifiers.shift);
@@ -8218,6 +8354,7 @@ impl OverlayWindowView {
 
 impl Render for OverlayWindowView {
     /// 渲染：交给共享视图按本屏几何绘制。
+    /// 渲染宿主内容并装配共用图标动作。
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let (index, focus) = (self.index, self.focus.clone());
         crate::timing_diag::mark("overlay-render-begin");
@@ -8430,6 +8567,7 @@ mod tests {
             w: u32,
             h: u32,
             rgba: Vec<u8>,
+            _cancel: Arc<std::sync::atomic::AtomicBool>,
         ) -> Result<(), String> {
             self.gate()?;
             self.rec.borrow_mut().latexes.push((serial, w, h, rgba));
@@ -10540,6 +10678,80 @@ mod tests {
         (view, rec)
     }
 
+    /// 请求提交后即可移交原图，移交后关闭覆盖窗不会取消贴图任务。
+    #[test]
+    fn translation_pin_submission_hands_off_before_result() {
+        let (mut view, rec) = view_with(100, 80, 1.5, false);
+        view.set_canvas_origin(PhysicalPoint::new(-1920, -300));
+        drag(&mut view, (5, 5), (44, 34));
+        let selected = view.current_selection().unwrap();
+        view.apply_action(ToolbarAction::Translate);
+        assert!(view.take_translation_pin(0).is_none());
+        let pin = view.take_translation_pin(1).unwrap();
+        assert_eq!(pin.original, rec.borrow().translates[0].3);
+        assert!(pin.image.is_empty() && pin.text.is_empty());
+        assert_eq!(pin.rect, selected.translate(-1920, -300));
+        view.cancel_running_translate();
+        assert!(view.take_translation_pin(1).is_none());
+        assert!(matches!(view.translate, TranslateUiState::Idle));
+    }
+
+    /// 截图会话使用不同序号范围，新覆盖窗拒收旧贴图任务的迟到结果。
+    #[test]
+    fn translation_pin_serial_seed_rejects_previous_session_result() {
+        let (mut view, _) = view_with(100, 80, 1.0, false);
+        view.seed_translation_serial(2_u64 << 32);
+        drag(&mut view, (5, 5), (44, 34));
+        view.apply_action(ToolbarAction::Translate);
+        let serial = view.translate_serial;
+        assert_eq!(serial, (2_u64 << 32) + 1);
+        view.finish_translate((1_u64 << 32) + 1, Ok(translate_outcome_with_box()));
+        assert!(matches!(view.translate, TranslateUiState::Running { .. }));
+        assert!(view.take_translation_pin(serial).is_some());
+    }
+
+    /// 退出公式识别会将同一共享标记置位，后台读写等待可据此终止。
+    #[test]
+    fn dismiss_latex_cancels_background_request() {
+        let (mut view, _) = view_with(100, 80, 1.0, false);
+        drag(&mut view, (5, 5), (44, 34));
+        view.apply_action(ToolbarAction::Latex);
+        let flag = Arc::clone(&view.recognition_cancel);
+        assert!(!flag.load(std::sync::atomic::Ordering::SeqCst));
+        view.dismiss_ocr();
+        assert!(flag.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    /// 系统直接销毁视图也能中止 worker，不依赖窗口仍然打开。
+    #[test]
+    fn dropping_overlay_cancels_recognition() {
+        let (view, _) = view_with(100, 80, 1.0, false);
+        let flag = Arc::clone(&view.recognition_cancel);
+        drop(view);
+        assert!(flag.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    /// OCR、表格和公式共用识别序号，旧截图会话结果不能结束新截图。
+    #[test]
+    fn recognition_serial_seed_rejects_previous_session_result() {
+        for action in [
+            ToolbarAction::Ocr,
+            ToolbarAction::Table,
+            ToolbarAction::Latex,
+        ] {
+            let (mut view, _) = view_with(100, 80, 1.0, false);
+            view.seed_translation_serial(2_u64 << 32);
+            drag(&mut view, (5, 5), (44, 34));
+            view.apply_action(action);
+            let current = view.ocr_serial;
+            assert_eq!(current, (2_u64 << 32) + 1);
+            view.finish_ocr((1_u64 << 32) + 1, Ok(ocr_result(&["old"])));
+            assert!(matches!(view.ocr, OcrUiState::Running));
+            view.finish_ocr(current, Ok(ocr_result(&["new"])));
+            assert!(!matches!(view.ocr, OcrUiState::Running));
+        }
+    }
+
     /// 翻译完成：生成译文原位替换图（与原图同尺寸但像素不同），按钮条可见；开始时的副本已转手。
     #[test]
     fn translate_done_builds_replacement_image() {
@@ -10553,6 +10765,46 @@ mod tests {
         // 框外（右下角）分毫不动
         let last = (w * h - 1) as usize * 4;
         assert_eq!(image.rgba[last..last + 4], original[last..last + 4]);
+    }
+
+    /// 生产按钮集合与禁用条件通过共享入口分发，业务状态机另有下方回归覆盖。
+    #[test]
+    fn overlay_translation_action_bar_dispatches_and_disables() {
+        for locale in ["en-US", "zh-CN"] {
+            let i18n = crate::ocr_backend::i18n_for(locale);
+            let specs = translate_bar_actions(i18n);
+            assert_eq!(
+                specs.iter().map(|s| s.action).collect::<Vec<_>>(),
+                TRANSLATE_BAR_ACTIONS
+            );
+            let mut called = Vec::new();
+            for spec in specs {
+                assert!(icon_asset_exists(spec.icon));
+                assert!(!spec.tooltip.is_empty() && spec.tooltip != spec.action.tooltip_id());
+                assert!(spec.dispatch(|action| called.push(action)));
+            }
+            assert_eq!(called, TRANSLATE_BAR_ACTIONS);
+            for enabled in [false, true] {
+                let specs = panel_actions(i18n, enabled);
+                assert_eq!(
+                    specs.iter().map(|s| s.action).collect::<Vec<_>>(),
+                    [PanelAction::Confirm, PanelAction::Undo, PanelAction::Close]
+                );
+                let mut called = Vec::new();
+                for spec in specs {
+                    assert!(icon_asset_exists(spec.icon));
+                    assert_eq!(
+                        spec.disabled,
+                        spec.action == PanelAction::Confirm && !enabled
+                    );
+                    spec.dispatch(|action| called.push(action));
+                }
+                assert_eq!(called.contains(&PanelAction::Confirm), enabled);
+                assert!(
+                    called.contains(&PanelAction::Undo) && called.contains(&PanelAction::Close)
+                );
+            }
+        }
     }
 
     /// 按钮条的动作表：五个按钮、顺序固定、图标与提示 id 都不重复。
@@ -11978,6 +12230,151 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// 水印弹层保存模板保留原文字按钮与回调，不接入纯图标操作栏。
+    #[test]
+    fn toolbar_watermark_template_save_keeps_label() {
+        let source = include_str!("overlay_view.rs");
+        let save = source
+            .split("Button::new(\"deco-template-save\")")
+            .nth(1)
+            .unwrap()
+            .split(".child(label(\"annot-deco-font-family\"))")
+            .next()
+            .unwrap();
+        assert!(save.contains(".label(i18n.tr(\"annot-deco-template-save\"))"));
+        assert!(save.contains("this.save_watermark_template(cx)"));
+        assert!(!save.contains("PinActionButton"));
+    }
+
+    /// 生产分组表决定主栏与选项顺序，全部工具和动作只出现一次（独立历史与结束按钮另列）。
+    #[test]
+    fn toolbar_action_bar_collections_and_order() {
+        use AnnotationTool::*;
+        use ToolbarAction::*;
+        use snow_ui::widgets::ToolbarItem::{Action, Tool};
+        use snow_ui::widgets::{ToolbarSlot, toolbar_slots};
+        assert_eq!(
+            toolbar_slots(true),
+            [
+                ToolbarSlot::Group(ToolbarGroup::Shape),
+                ToolbarSlot::Group(ToolbarGroup::Pen),
+                ToolbarSlot::Group(ToolbarGroup::Mark),
+                ToolbarSlot::Group(ToolbarGroup::Filter),
+                ToolbarSlot::Group(ToolbarGroup::Edit),
+                ToolbarSlot::Separator,
+                ToolbarSlot::Action(Undo),
+                ToolbarSlot::Action(Redo),
+                ToolbarSlot::Separator,
+                ToolbarSlot::Group(ToolbarGroup::Recognize),
+                ToolbarSlot::Group(ToolbarGroup::Output),
+                ToolbarSlot::Action(Copy),
+                ToolbarSlot::Action(Cancel),
+            ]
+        );
+        assert_eq!(toolbar_slots(false), &toolbar_slots(true)[9..]);
+        let expected = [
+            vec![Tool(Rectangle), Tool(Ellipse), Tool(Arrow), Tool(Line)],
+            vec![Tool(Pencil), Tool(Highlighter)],
+            vec![Tool(Counter), Tool(Text), Tool(Watermark)],
+            vec![Tool(Mosaic), Tool(Blur), Tool(AutoFilter)],
+            vec![Tool(Eraser), Tool(Select), Tool(Spotlight)],
+            vec![Action(Ocr), Action(Translate), Action(Table), Action(Latex)],
+            vec![
+                Action(Pin),
+                Action(ScrollCapture),
+                Action(Record),
+                Action(Save),
+            ],
+        ];
+        for (group, expected) in ToolbarGroup::ALL.into_iter().zip(expected) {
+            assert_eq!(group.items(), expected);
+        }
+        assert_eq!(ToolbarGroup::TOOL_GROUPS, ToolbarGroup::ALL[..5]);
+        assert_eq!(ToolbarGroup::ACTION_GROUPS, ToolbarGroup::ALL[5..]);
+        let mut items: Vec<_> = ToolbarGroup::ALL
+            .into_iter()
+            .flat_map(|group| group.items())
+            .copied()
+            .collect();
+        items.extend([Action(Undo), Action(Redo), Action(Copy), Action(Cancel)]);
+        assert_eq!(items.len(), 27);
+        assert_eq!(
+            items.iter().collect::<std::collections::HashSet<_>>().len(),
+            27
+        );
+    }
+
+    /// 模式禁用、历史状态与当前工具高亮都进入生产操作栏输入，双语提示与资源保持可用。
+    #[test]
+    fn toolbar_action_bar_selected_disabled_and_localized() {
+        use snow_ui::widgets::{ToolbarButtonLook, ToolbarItem};
+        for locale in ["en-US", "zh-CN"] {
+            for disabled in [
+                &[][..],
+                &RECORD_MODE_DISABLED_ACTIONS[..],
+                &SCROLL_MODE_DISABLED_ACTIONS[..],
+            ] {
+                for active in [
+                    AnnotationTool::None,
+                    AnnotationTool::Arrow,
+                    AnnotationTool::Text,
+                ] {
+                    let toolbar = ScreenshotToolbar::new("test")
+                        .labels(toolbar_labels(crate::ocr_backend::i18n_for(locale)))
+                        .active_tool(active)
+                        .undo_redo_state(false, true)
+                        .disabled_actions(disabled)
+                        .on_tool_change(|_, _, _| {})
+                        .on_action(|_, _, _| {});
+                    let items = ToolbarGroup::ALL
+                        .into_iter()
+                        .flat_map(|group| group.items().iter().copied())
+                        .chain([
+                            ToolbarItem::Action(ToolbarAction::Undo),
+                            ToolbarItem::Action(ToolbarAction::Redo),
+                            ToolbarItem::Action(ToolbarAction::Copy),
+                            ToolbarItem::Action(ToolbarAction::Cancel),
+                        ]);
+                    for item in items {
+                        let spec = toolbar.button_spec(
+                            "test".into(),
+                            item,
+                            ToolbarButtonLook::Normal,
+                            (28.0, 28.0),
+                        );
+                        let expected_disabled = match item {
+                            ToolbarItem::Tool(_) => false,
+                            ToolbarItem::Action(action) => {
+                                action == ToolbarAction::Undo || disabled.contains(&action)
+                            }
+                        };
+                        assert_eq!(spec.disabled, expected_disabled, "{item:?}");
+                        let mut delivered = Vec::new();
+                        assert_eq!(
+                            spec.dispatch(|item| delivered.push(item)),
+                            !expected_disabled
+                        );
+                        assert_eq!(
+                            delivered,
+                            if expected_disabled {
+                                Vec::new()
+                            } else {
+                                vec![item]
+                            }
+                        );
+                        assert_eq!(
+                            spec.selected,
+                            matches!(item, ToolbarItem::Tool(tool) if tool == active)
+                        );
+                        assert!(!spec.tooltip.is_empty());
+                        assert!(!spec.tooltip.starts_with("overlay-"));
+                        assert!(icon_asset_exists(item.icon_path()));
+                    }
+                }
+            }
+        }
+    }
+
     /// 工具栏文案：每个按钮位置都有消息，中英文都齐全，英文界面不夹中文，且按钮之间不重名。
     #[test]
     fn toolbar_labels_are_localized() {
@@ -12091,6 +12488,115 @@ mod tests {
             view.handle_key("escape", false, false),
             OverlayOutcome::Close
         );
+    }
+
+    /// 主栏直接消费共用布局，跨负坐标屏幕与混合 DPI 仍遵守外置优先。
+    #[test]
+    fn overlay_toolbar_uses_shared_placement_and_grip() {
+        use crate::pin_action_bar::{BUTTON_GAP, GRIP_WIDTH, PinActionBarPosition as Position};
+        use snow_ui::widgets::ToolbarRenderer;
+        let (view, _) = view_with(1920, 1080, 1.0, false);
+        let (width, height) = view.toolbar_size();
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let screen = logical_rect(PhysicalRect::new(-1920, -1080, 1920, 1080), scale);
+            for (inset_top, inset_bottom, expected) in [
+                (10, 10, Position::Inside),
+                (0, 0, Position::Inside),
+                (100, 0, Position::Above),
+                (0, 100, Position::Below),
+            ] {
+                let selection = PhysicalRect::new(
+                    screen.x,
+                    screen.y + inset_top,
+                    screen.width,
+                    screen.height - inset_top - inset_bottom,
+                );
+                let layout = view.toolbar_layout(selection, screen);
+                assert_eq!(layout.position, expected);
+                let renderer = ScreenshotActionRenderer {
+                    grip: layout.position.has_grip().then(|| ActionBarGrip {
+                        selection: (selection.width as f32, selection.height as f32),
+                        size: (layout.rect.width as f32, height as f32),
+                        state: view.toolbar_bar_state.clone(),
+                        tooltip: view.i18n.tr("translation-pin-move-bar"),
+                        notify: Rc::new(|_| {}),
+                    }),
+                };
+                assert_eq!(renderer.leading().is_some(), expected.has_grip());
+                assert_eq!(
+                    layout.rect.width as f32,
+                    width as f32 + renderer.leading_width()
+                );
+                assert_eq!(
+                    renderer.leading_width(),
+                    if expected.has_grip() {
+                        GRIP_WIDTH + BUTTON_GAP
+                    } else {
+                        0.0
+                    }
+                );
+                assert_eq!(layout.popup_up(screen), expected != Position::Below);
+                assert!(layout.rect.x >= screen.x);
+                assert!(layout.rect.right() <= screen.right());
+            }
+        }
+    }
+
+    /// 抓手偏移四边夹紧，重新框选 / 调整手柄即清空，重绘相同选区保留。
+    #[test]
+    fn overlay_toolbar_drag_clamps_and_selection_resets() {
+        let (mut view, _) = view_with(1920, 1080, 1.0, false);
+        let screen = PhysicalRect::new(0, 0, 1920, 1080);
+        let selection = PhysicalRect::new(10, 10, 1900, 1060);
+        view.state = SelectionState::Selected { rect: selection };
+        let layout = view.toolbar_layout(selection, screen);
+        let size = (layout.rect.width as f32, layout.rect.height as f32);
+        let state = view.toolbar_bar_state.clone();
+        let initial = state.offset.get().unwrap();
+        state.begin(layout.position, (0.0, 0.0), initial);
+        for (cursor, expected) in [
+            ((-10000.0, -10000.0), (4.0, 4.0)),
+            (
+                (10000.0, 10000.0),
+                (1900.0 - size.0 - 4.0, 1060.0 - size.1 - 4.0),
+            ),
+        ] {
+            state.move_to((1900.0, 1060.0), size, cursor);
+            assert_eq!(state.offset.get(), Some(expected));
+            let repeated = view.toolbar_layout(selection, screen);
+            assert_eq!(repeated.rect.x, selection.x + expected.0 as i32);
+            assert_eq!(repeated.rect.y, selection.y + expected.1 as i32);
+        }
+        // 改变选区矩形时，连同仍在进行的抓手会话一起重置。
+        let changed = PhysicalRect::new(20, 10, 1880, 1060);
+        view.toolbar_layout(changed, screen);
+        assert!(!state.is_dragging());
+        assert_ne!(state.offset.get(), Some(initial));
+        // 外部重新框选和边角调整，即使尚未移动也立即清空偏移。
+        for point in [PhysicalPoint::new(0, 0), PhysicalPoint::new(10, 10)] {
+            view.state = SelectionState::Selected { rect: selection };
+            view.toolbar_layout(selection, screen);
+            view.handle_mouse_down(point, 1);
+            assert_eq!(state.offset.get(), None);
+            assert!(!state.is_dragging());
+        }
+    }
+
+    /// 内部菜单随抓手拖动后剩余空间改变方向，外置方向不受菜单高度影响。
+    #[test]
+    fn overlay_toolbar_popup_tracks_actual_bar_position() {
+        let (view, _) = view_with(1920, 1080, 1.0, false);
+        let screen = PhysicalRect::new(0, 0, 1920, 1080);
+        let layout = view.toolbar_layout(screen, screen);
+        assert!(layout.popup_up(screen));
+        let state = &view.toolbar_bar_state;
+        state.begin(layout.position, (0.0, 0.0), state.offset.get().unwrap());
+        state.move_to(
+            (1920.0, 1080.0),
+            (layout.rect.width as f32, layout.rect.height as f32),
+            (0.0, -10000.0),
+        );
+        assert!(!view.toolbar_layout(screen, screen).popup_up(screen));
     }
 
     /// 主工具栏尺寸随模式变化：录屏 / 长图隐藏标注工具组后更窄，且都远小于旧版 1120 估算。

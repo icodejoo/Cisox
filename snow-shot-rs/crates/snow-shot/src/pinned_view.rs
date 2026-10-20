@@ -12,6 +12,10 @@ use crate::annotation::{AnnotationLayer, LayerUpdate};
 use crate::frozen_frame::FrozenFrame;
 use crate::ocr_service::{OcrResult, OcrTextBox};
 use crate::overlay_view::TileSprite;
+use crate::pin_action_bar::{
+    PinActionBar, PinActionBarPosition as TranslationBarPosition, PinActionBarState,
+    PinActionButton, bar_height, bar_width,
+};
 use crate::pinned_controls::revealed_rect;
 use crate::pinned_keymap::PinKeyAction;
 use crate::pinned_model::{
@@ -28,7 +32,8 @@ use snow_platform::capture::CapturedScreen;
 use snow_platform::clipboard::copy_image_to_clipboard;
 use snow_platform::menu::{MenuEntry, MenuItem, show_popup_menu};
 use snow_platform::text_raster::DEFAULT_FONT_FAMILY;
-use snow_ui::shell::geometry::{PhysicalPoint, PhysicalRect};
+use snow_ui::shell::geometry::{PhysicalPoint, PhysicalRect, Region};
+
 use snow_ui::shell::overlay::cursor_screen_position;
 use snow_ui::shell::pinned_geometry::{
     PinnedDragHandle, ScaleAnchor, anchored_scale_rect, handle_rects, hit_test_handle,
@@ -39,6 +44,105 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
+
+/// 矩形边框的顺时针线段，右侧始终是所属矩形内部。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PinBorderSegment {
+    /// 物理坐标起点。
+    start: PhysicalPoint,
+    /// 物理坐标终点。
+    end: PhysicalPoint,
+    /// 所属矩形的内部厚度，窄到不足一逻辑像素时仍保证描边不出界。
+    inset_limit: i32,
+}
+
+impl PinBorderSegment {
+    /// 将矩形边向内展开为逻辑像素色条，保证描边位于原生窗口区域内。
+    fn inset_strip(self, scale: f32) -> (f32, f32, f32, f32) {
+        let x = self.start.x.min(self.end.x) as f32 / scale;
+        let y = self.start.y.min(self.end.y) as f32 / scale;
+        let w = (self.end.x - self.start.x).abs() as f32 / scale;
+        let h = (self.end.y - self.start.y).abs() as f32 / scale;
+        let thickness = 1.0_f32.min(self.inset_limit as f32 / scale);
+        if w > 0.0 {
+            (
+                x,
+                y - if self.end.x < self.start.x {
+                    thickness
+                } else {
+                    0.0
+                },
+                w,
+                thickness,
+            )
+        } else {
+            (
+                x - if self.end.y > self.start.y {
+                    thickness
+                } else {
+                    0.0
+                },
+                y,
+                thickness,
+                h,
+            )
+        }
+    }
+}
+
+/// 生成矩形完整四边；线段朝向用于将描边限制在矩形内部。
+fn rect_border_segments(rect: PhysicalRect) -> Vec<PinBorderSegment> {
+    if rect.is_empty() {
+        return Vec::new();
+    }
+    let corners = [
+        PhysicalPoint::new(rect.x, rect.y),
+        PhysicalPoint::new(rect.right(), rect.y),
+        PhysicalPoint::new(rect.right(), rect.bottom()),
+        PhysicalPoint::new(rect.x, rect.bottom()),
+    ];
+    (0..4)
+        .map(|i| PinBorderSegment {
+            start: corners[i],
+            end: corners[(i + 1) % 4],
+            inset_limit: if i % 2 == 0 { rect.height } else { rect.width },
+        })
+        .collect()
+}
+
+/// 图像始终保留完整矩形；外置条独立描边，仅省略与图像相接的重合边段。
+fn pin_border_segments(image: PhysicalRect, bar: PhysicalRect) -> Vec<PinBorderSegment> {
+    let mut segments = rect_border_segments(image);
+    for segment in rect_border_segments(bar) {
+        let adjoining = !image.is_empty()
+            && segment.start.y == segment.end.y
+            && ((bar.y == image.bottom() && segment.start.y == bar.y)
+                || (bar.bottom() == image.y && segment.start.y == bar.bottom()));
+        if adjoining {
+            // 条宽于图像时，交接边超出图像的部分仍需描边。
+            for (left, right) in [
+                (bar.x, bar.right().min(image.x)),
+                (bar.x.max(image.right()), bar.right()),
+            ] {
+                if left < right {
+                    let (start, end) = if segment.start.x < segment.end.x {
+                        (left, right)
+                    } else {
+                        (right, left)
+                    };
+                    segments.push(PinBorderSegment {
+                        start: PhysicalPoint::new(start, segment.start.y),
+                        end: PhysicalPoint::new(end, segment.end.y),
+                        ..segment
+                    });
+                }
+            }
+        } else {
+            segments.push(segment);
+        }
+    }
+    segments
+}
 
 /// 几何 / 标注变化后延迟多久写盘（防抖，避免拖动或连续滚轮时频繁落盘）。
 const PERSIST_DEBOUNCE: Duration = Duration::from_millis(400);
@@ -161,6 +265,113 @@ const MENU_TOOLS: [(AnnotationTool, &str, &str); 8] = [
     (AnnotationTool::Text, "pinned-tool-text", "text"),
     (AnnotationTool::Mosaic, "pinned-tool-mosaic", "mosaic"),
     (AnnotationTool::Blur, "pinned-tool-blur", "blur"),
+];
+
+/// 截图翻译交给贴图窗口的原图与桌面物理选区，也支持已完成的译文图。
+pub struct TranslationPinData {
+    /// 图像宽度。
+    pub width: u32,
+    /// 图像高度。
+    pub height: u32,
+    /// 翻译前的截图，保存与撤销均使用此副本。
+    pub original: Vec<u8>,
+    /// 复用现有排版渲染器得到的译文覆盖图；空表示等待后台结果。
+    pub image: Vec<u8>,
+    /// 原选区在虚拟桌面中的物理坐标。
+    pub rect: PhysicalRect,
+    /// 可复制的完整译文。
+    pub text: String,
+    /// 本次截图选择的目标语言，重试时保持不变。
+    pub target: snow_translate::Lang,
+}
+
+/// 临时翻译贴图的展示状态，不写入普通贴图仓储。
+pub struct TranslationPin {
+    /// 结构化失败状态，保留错误类型和可下载能力。
+    failure: Option<crate::translate_service::TranslateFlowError>,
+    /// 重试目标语言。
+    target: snow_translate::Lang,
+    /// 译文图；撤销后立即释放。
+    image: Option<FrozenFrame>,
+    /// 完整译文，撤销后不再提供复制。
+    text: String,
+    /// 任务进行中，扫描只覆盖图像区域。
+    scanning: bool,
+    /// 图像区域物理尺寸；安装到视图后原点改为窗口内偏移。
+    rect: PhysicalRect,
+    /// 按钮条相对图像的位置。
+    pub(crate) bar_position: TranslationBarPosition,
+    /// 操作条相对选区的逻辑偏移及抓手拖动状态，由视图持有。
+    bar_state: Rc<PinActionBarState>,
+}
+
+impl TranslationPin {
+    /// 创建等待翻译的展示状态；已带译文图时直接装配绘制资源。
+    pub fn new(data: &TranslationPinData) -> Result<Self, String> {
+        Ok(Self {
+            failure: None,
+            target: data.target,
+            image: if data.image.is_empty() {
+                None
+            } else {
+                Some(frame_from_rgba(
+                    data.width,
+                    data.height,
+                    data.image.clone(),
+                )?)
+            },
+            scanning: data.image.is_empty(),
+            text: data.text.clone(),
+            rect: data.rect,
+            bar_position: TranslationBarPosition::Below,
+            bar_state: Rc::default(),
+        })
+    }
+
+    /// 安装后台生成的图像；失败保留结构化状态与本地化提示。
+    fn finish(
+        &mut self,
+        image: Option<FrozenFrame>,
+        result: Result<
+            crate::translate_service::TranslateOutcome,
+            crate::translate_service::TranslateFlowError,
+        >,
+        i18n: &snow_i18n::I18n,
+    ) -> Option<String> {
+        self.scanning = false;
+        let outcome = match result {
+            Ok(outcome) if !outcome.translated.trim().is_empty() => outcome,
+            Ok(_) => return Some(i18n.tr("translation-pin-empty")),
+            Err(error) => {
+                let message = crate::translate_flow::failure_message(&error, i18n).0;
+                self.failure = Some(error);
+                return Some(message);
+            }
+        };
+        self.image = image;
+        self.text = outcome.translated;
+        None
+    }
+
+    /// 撤销本次翻译并把旧资源交给窗口延迟释放。
+    fn undo(&mut self) -> Option<Arc<RenderImage>> {
+        self.text.clear();
+        self.image.take().map(|image| image.image())
+    }
+}
+
+/// 翻译操作按钮数。
+const TRANSLATION_BUTTON_COUNT: usize = 4;
+/// 外部固定操作条宽度，内部抓手另由组件计入。
+#[cfg(test)]
+const TRANSLATION_BAR_WIDTH: f32 =
+    bar_width(TRANSLATION_BUTTON_COUNT, TranslationBarPosition::Below);
+/// 共用图标库里的保存、撤销、复制和关闭图标。
+const TRANSLATION_ICONS: [&str; TRANSLATION_BUTTON_COUNT] = [
+    "icons/antd/save.svg",
+    "icons/antd/undo.svg",
+    "icons/antd/copy.svg",
+    "icons/antd/close.svg",
 ];
 
 /// 创建贴图视图所需的参数。
@@ -315,6 +526,10 @@ pub fn parse_tool(name: &str) -> Option<AnnotationTool> {
 pub struct PinnedWindowView {
     /// 贴图 ID。
     id: String,
+    /// 截图翻译浮层模式；普通贴图为空。
+    translation: Option<TranslationPin>,
+    /// 已提交的原生形状，几何不变时不重复调用系统。
+    content_region: Option<Region>,
     /// 共享上下文（仓储 / 配置）。
     shared: Rc<PinShared>,
     /// 交互配置快照。
@@ -409,6 +624,8 @@ impl PinnedWindowView {
         let g = init.geometry;
         let mut view = Self {
             id: init.id,
+            translation: None,
+            content_region: None,
             shared,
             interaction,
             frame: init.frame,
@@ -454,6 +671,273 @@ impl PinnedWindowView {
         view
     }
 
+    /// 在首帧前切换到临时翻译贴图模式，沿用贴图窗口与资源生命周期。
+    pub fn set_translation(&mut self, translation: TranslationPin) {
+        let mut translation = translation;
+        translation.rect.x -= self.bounds.x;
+        translation.rect.y -= self.bounds.y;
+        self.translation = Some(translation);
+    }
+
+    /// 接收后台翻译结果，已关闭窗口忽略迟到结果。
+    pub fn finish_translation(
+        &mut self,
+        result: Result<
+            crate::translate_service::TranslateOutcome,
+            crate::translate_service::TranslateFlowError,
+        >,
+        image: Option<FrozenFrame>,
+    ) {
+        if self.closed
+            || !self
+                .translation
+                .as_ref()
+                .is_some_and(|translation| translation.scanning)
+        {
+            return;
+        }
+        let i18n = crate::ocr_backend::i18n_for(self.interaction.locale);
+        if let Some(translation) = &mut self.translation {
+            self.status = translation.finish(image, result, i18n);
+        }
+    }
+
+    /// 将失败任务恢复为扫描状态，并把原图和原目标语言提交给宿主重试。
+    fn retry_translation(&mut self) {
+        let Some(pin) = &mut self.translation else {
+            return;
+        };
+        if pin.scanning || pin.failure.is_none() {
+            return;
+        }
+        let Some((width, height, rgba)) = self.frame.to_rgba() else {
+            return;
+        };
+        pin.failure = None;
+        pin.scanning = true;
+        self.status = None;
+        self.shared.emit_control(PinControlEvent::TranslationRetry {
+            id: self.id.clone(),
+            width,
+            height,
+            rgba,
+            target: pin.target,
+        });
+    }
+
+    /// 撤销译文覆盖，保留原图、原位置和关闭按钮。
+    fn undo_translation(&mut self) {
+        if let Some(translation) = &mut self.translation
+            && let Some(image) = translation.undo()
+        {
+            self.pending_drops.push(image);
+        }
+    }
+
+    /// 保存翻译前的截图，复用贴图保存配置与错误提示。
+    fn save_translation_original(&mut self, cx: &mut Context<Self>) {
+        let Some((w, h, rgba)) = self.frame.to_rgba() else {
+            self.say("pinned-msg-export-failed-save", cx);
+            return;
+        };
+        match self.shared.quick_save(w, h, &rgba) {
+            Ok(path) => self.say_with("pinned-msg-saved", path.display().to_string(), cx),
+            Err(error) => self.say_with("pinned-msg-save-failed", error, cx),
+        }
+    }
+
+    /// 为临时翻译贴图构造图标操作条，布局与鼠标隔离复用贴图组件。
+    fn translation_actions(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let i18n = crate::ocr_backend::i18n_for(self.interaction.locale);
+        let translation = self
+            .translation
+            .as_ref()
+            .expect("translation actions require a pin");
+        let active = translation.image.is_some();
+        let failed = translation.failure.is_some();
+        let can_download = translation
+            .failure
+            .as_ref()
+            .is_some_and(|error| crate::translate_flow::failure_message(error, i18n).1);
+        let position = translation.bar_position;
+        let entity = cx.entity().downgrade();
+        let bar = PinActionBar {
+            blank_behavior: crate::pin_action_bar::BarBlankBehavior::Bubble,
+            buttons: vec![
+                PinActionButton::new(
+                    "translation-save-original",
+                    TRANSLATION_ICONS[0],
+                    i18n.tr("translation-pin-save-original"),
+                    false,
+                    cx.listener(|this, _, _, cx| this.save_translation_original(cx)),
+                ),
+                PinActionButton::new(
+                    "translation-undo",
+                    if failed {
+                        "icons/antd/reload.svg"
+                    } else {
+                        TRANSLATION_ICONS[1]
+                    },
+                    i18n.tr(if failed {
+                        "translation-pin-retry"
+                    } else {
+                        "translation-pin-undo"
+                    }),
+                    !active && !failed,
+                    cx.listener(|this, _, _, cx| {
+                        if this
+                            .translation
+                            .as_ref()
+                            .is_some_and(|pin| pin.failure.is_some())
+                        {
+                            this.retry_translation();
+                        } else {
+                            this.undo_translation();
+                        }
+                        cx.notify();
+                    }),
+                ),
+                PinActionButton::new(
+                    "translation-copy",
+                    if failed {
+                        "icons/antd/download.svg"
+                    } else {
+                        TRANSLATION_ICONS[2]
+                    },
+                    i18n.tr(if failed {
+                        "translation-pin-download"
+                    } else {
+                        "translation-pin-copy"
+                    }),
+                    if failed { !can_download } else { !active },
+                    cx.listener(|this, _, _, cx| {
+                        if let Some(translation) = &this.translation {
+                            if let Some(error) = &translation.failure {
+                                this.shared
+                                    .emit_control(PinControlEvent::TranslationDownload {
+                                        ocr: matches!(
+                                            error,
+                                            crate::translate_service::TranslateFlowError::Ocr(_)
+                                        ),
+                                    });
+                            } else {
+                                let text = translation.text.clone();
+                                this.copy_ocr_text(&text, cx);
+                            }
+                        }
+                    }),
+                ),
+                PinActionButton::new(
+                    "translation-close",
+                    TRANSLATION_ICONS[3],
+                    i18n.tr("translation-pin-close"),
+                    false,
+                    cx.listener(|this, _, window, _| this.close(window, true)),
+                ),
+            ],
+            position,
+            size: (bar_width(TRANSLATION_BUTTON_COUNT, position), bar_height()),
+            selection: (
+                translation.rect.width as f32 / self.scale,
+                translation.rect.height as f32 / self.scale,
+            ),
+            image_origin: (
+                translation.rect.x as f32 / self.scale,
+                translation.rect.y as f32 / self.scale,
+            ),
+            state: translation.bar_state.clone(),
+            grip_tooltip: i18n.tr("translation-pin-move-bar"),
+        }
+        .render(move |cx| {
+            let _ = entity.update(cx, |_, cx| cx.notify());
+        });
+        if position.has_grip() {
+            bar.into_any_element()
+        } else {
+            let rect = self.translation_bar_rect(translation);
+            div()
+                .absolute()
+                .left(px(rect.x as f32 / self.scale))
+                .top(px(rect.y as f32 / self.scale))
+                .w(px(rect.width as f32 / self.scale))
+                .h(px(rect.height as f32 / self.scale))
+                .child(bar)
+                .into_any_element()
+        }
+    }
+
+    /// DPI 改变时保持图像桌面位置，统一重算外框、偏移、命中区域及拖动基准。
+    fn relayout_translation(&mut self, scale: f32, screen: PhysicalRect) -> bool {
+        let Some(translation) = &mut self.translation else {
+            self.scale = scale;
+            return false;
+        };
+        let image = translation.rect.translate(self.bounds.x, self.bounds.y);
+        let old = self.bounds;
+        let (position, bounds) = crate::pinned_manager::translation_bounds(
+            image,
+            (
+                bar_width(TRANSLATION_BUTTON_COUNT, TranslationBarPosition::Below),
+                bar_height(),
+            ),
+            screen,
+            scale,
+        );
+        translation.rect = image.translate(-bounds.x, -bounds.y);
+        translation.bar_position = position;
+        self.scale = scale;
+        self.bounds = bounds;
+        if let Some(drag) = &mut self.drag {
+            drag.start_bounds.x += bounds.x - old.x;
+            drag.start_bounds.y += bounds.y - old.y;
+            drag.start_bounds.width = bounds.width;
+            drag.start_bounds.height = bounds.height;
+        }
+        old != bounds
+    }
+
+    /// 外置条的窗口内物理矩形，与原生命中区域共用同一几何。
+    fn translation_bar_rect(&self, translation: &TranslationPin) -> PhysicalRect {
+        crate::pin_action_bar::outer_bar_rect(
+            translation.rect,
+            PhysicalRect::new(0, 0, self.bounds.width, self.bounds.height),
+            (bar_width(TRANSLATION_BUTTON_COUNT, translation.bar_position) * self.scale).ceil()
+                as i32,
+            (bar_height() * self.scale).ceil() as i32,
+            translation.bar_position,
+        )
+    }
+
+    /// 图像与外置条以外不属于窗口，消除白底及鼠标拦截；内部条完全位于图像内。
+    fn translation_region(&self) -> Option<Region> {
+        let translation = self.translation.as_ref()?;
+        let mut region = Region::from_rect(translation.rect);
+        if !translation.bar_position.has_grip() {
+            region.union_rect(self.translation_bar_rect(translation));
+        }
+        Some(region)
+    }
+
+    /// 仅几何改变时延后提交原生区域，避免系统同步窗口消息重入视图。
+    fn sync_content_region(&mut self, cx: &mut Context<Self>) {
+        let Some(shell) = self.window else {
+            return;
+        };
+        let Some(region) = self.translation_region() else {
+            return;
+        };
+        if self.content_region.as_ref() == Some(&region) {
+            return;
+        }
+        self.content_region = Some(region.clone());
+        cx.spawn(async move |_, _| {
+            if let Err(error) = shell.set_hit_region(&region) {
+                tracing::error!(%error, "设置翻译贴图命中区域失败");
+            }
+        })
+        .detach();
+    }
+
     /// 从持久化的引擎会话恢复二次标注（含撤销历史）；失败只记日志，底图保留。
     fn restore_session(&mut self, session: &[u8], dpr: f32) {
         let (w, h) = self.frame.size();
@@ -476,17 +960,18 @@ impl PinnedWindowView {
     /// 在 GPUI 中创建视图实体。
     ///
     /// # 参数
-    /// - `_window`：建窗回调提供的窗口（保留以便后续需要窗口上下文时扩展）。
+    /// - `window`：建窗回调提供的窗口，初始命中区域使用它的实际 DPI。
     /// - `app`：应用上下文。
     /// - `shared` / `init`：同 [`PinnedWindowView::new`]。
     pub fn create(
-        _window: &mut Window,
+        window: &mut Window,
         app: &mut App,
         shared: Rc<PinShared>,
         init: PinInit,
     ) -> Entity<Self> {
         app.new(|cx| {
             let mut view = Self::new(shared, init);
+            view.scale = window.scale_factor();
             view.focus_handle = Some(cx.focus_handle());
             view
         })
@@ -496,6 +981,7 @@ impl PinnedWindowView {
     pub fn set_window(&mut self, window: ShellWindow, cx: &mut Context<Self>) {
         self.window = Some(window);
         self.sync_window_alpha(cx);
+        self.sync_content_region(cx);
     }
 
     /// 把当前不透明度交给系统整窗透明（分层窗口 alpha）。
@@ -703,9 +1189,9 @@ impl PinnedWindowView {
     /// - `steps`：步进次数（正为放大 / 更不透明）。
     /// - `ctrl`：是否按住 Ctrl。
     /// - `cursor`：光标屏幕坐标（鼠标锚点用）。
-    pub fn wheel(&mut self, steps: f32, ctrl: bool, cursor: PhysicalPoint, cx: &mut Context<Self>) {
-        if self.pre_thumbnail.is_some() {
-            return;
+    pub fn wheel(&mut self, steps: f32, ctrl: bool, cursor: PhysicalPoint) -> bool {
+        if self.pre_thumbnail.is_some() || self.translation.is_some() {
+            return false;
         }
         let anchor = wheel_anchor(&self.interaction.wheel_mode, cursor);
         let out = apply_wheel(
@@ -718,17 +1204,30 @@ impl PinnedWindowView {
             anchor,
         );
         if out.rect == self.bounds && out.opacity == self.opacity {
-            return;
+            return false;
         }
         self.zoom = out.zoom;
-        if out.opacity != self.opacity {
-            self.opacity = out.opacity;
-            self.sync_window_alpha(cx);
+        self.opacity = out.opacity;
+        self.bounds = out.rect;
+        true
+    }
+
+    /// 应用滚轮状态变化到窗口，状态计算可离屏测试。
+    fn handle_wheel(
+        &mut self,
+        steps: f32,
+        ctrl: bool,
+        cursor: PhysicalPoint,
+        cx: &mut Context<Self>,
+    ) {
+        let opacity = self.opacity;
+        if self.wheel(steps, ctrl, cursor) {
+            if opacity != self.opacity {
+                self.sync_window_alpha(cx);
+            }
+            self.set_bounds(self.bounds, cx);
+            self.geometry_changed(cx);
         }
-        if out.rect != self.bounds {
-            self.set_bounds(out.rect, cx);
-        }
-        self.geometry_changed(cx);
     }
 
     /// 开始拖动（移动或缩放）。
@@ -737,6 +1236,9 @@ impl PinnedWindowView {
     /// - `handle`：拖动的手柄。
     /// - `cursor`：光标屏幕坐标。
     pub fn begin_drag(&mut self, handle: PinnedDragHandle, cursor: PhysicalPoint) {
+        if self.translation.is_some() && handle != PinnedDragHandle::Move {
+            return;
+        }
         self.drag = Some(DragState {
             handle,
             start_cursor: cursor,
@@ -748,9 +1250,9 @@ impl PinnedWindowView {
     ///
     /// # 参数
     /// - `cursor`：光标屏幕坐标。
-    pub fn drag_to(&mut self, cursor: PhysicalPoint, cx: &mut Context<Self>) {
+    pub fn drag_to(&mut self, cursor: PhysicalPoint) -> bool {
         let Some(drag) = self.drag else {
-            return;
+            return false;
         };
         let (rect, zoom) = drag_rect(
             drag.handle,
@@ -763,8 +1265,16 @@ impl PinnedWindowView {
             self.zoom = z;
         }
         if rect != self.bounds {
-            // 拖动中窗口尺寸变化会触发 GPUI 自身重绘，这里不额外 notify，只登记延迟写盘
-            self.set_bounds(rect, cx);
+            self.bounds = rect;
+            return true;
+        }
+        false
+    }
+
+    /// 将共用拖动计算结果应用到原生窗口，并登记普通贴图持久化。
+    fn handle_drag_to(&mut self, cursor: PhysicalPoint, cx: &mut Context<Self>) {
+        if self.drag_to(cursor) {
+            self.set_bounds(self.bounds, cx);
             self.schedule_persist(cx);
         }
     }
@@ -787,19 +1297,33 @@ impl PinnedWindowView {
     }
 
     /// 还原 100% 缩放，保持窗口中心不动。
-    pub fn reset_zoom(&mut self, cx: &mut Context<Self>) {
+    pub fn reset_zoom(&mut self) -> bool {
+        if self.translation.is_some() {
+            return false;
+        }
         let (w, h) = self.image_size();
         let center = self.bounds.center();
         let rect = PhysicalRect::new(center.x - w / 2, center.y - h / 2, w, h);
         self.zoom = 1.0;
-        self.set_bounds(rect, cx);
-        self.geometry_changed(cx);
+        self.bounds = rect;
+        true
+    }
+
+    /// 将还原缩放的状态结果应用到窗口。
+    fn handle_reset_zoom(&mut self, cx: &mut Context<Self>) {
+        if self.reset_zoom() {
+            self.set_bounds(self.bounds, cx);
+            self.geometry_changed(cx);
+        }
     }
 
     // ---------------------------------------------------------------- 落盘
 
     /// 延迟写盘：登记“有待写入的变化”，并保证同一时刻只有一个定时任务；到期后统一写一次。
     fn schedule_persist(&mut self, cx: &mut Context<Self>) {
+        if self.translation.is_some() {
+            return;
+        }
         self.persist_wanted = true;
         if self.persist_armed {
             return;
@@ -819,7 +1343,7 @@ impl PinnedWindowView {
 
     /// 立即写盘：几何总是写清单；二次标注有改动时写入引擎会话（原图不动，重启后仍可继续编辑）。
     pub fn persist_now(&mut self) {
-        if self.closed {
+        if self.closed || self.translation.is_some() {
             return;
         }
         self.persist_wanted = false;
@@ -956,7 +1480,7 @@ impl PinnedWindowView {
     /// # 参数
     /// - `dpr`：设备像素比（决定默认线宽与字号）。
     pub fn begin_editing(&mut self, dpr: f32, cx: &mut Context<Self>) {
-        if self.pre_thumbnail.is_some() {
+        if self.pre_thumbnail.is_some() || self.translation.is_some() {
             return;
         }
         if self.layer.is_none() {
@@ -1220,8 +1744,22 @@ impl PinnedWindowView {
         })
     }
 
-    /// 左键按下。
-    fn on_left_down(
+    /// 左键按下的共用状态入口；特殊动作交给窗口适配层，普通按下直接开始拖动。
+    fn on_left_down(&mut self, cursor: PhysicalPoint, click_count: usize) -> bool {
+        if (self.editing && self.tool != AnnotationTool::None)
+            || (click_count >= 2 && self.translation.is_none())
+        {
+            return false;
+        }
+        let handle = self
+            .pointer_handle(cursor)
+            .unwrap_or(PinnedDragHandle::Move);
+        self.begin_drag(handle, cursor);
+        true
+    }
+
+    /// 把左键状态入口适配到窗口焦点、标注与配置动作。
+    fn handle_left_down(
         &mut self,
         pos: (f32, f32),
         click_count: usize,
@@ -1230,32 +1768,20 @@ impl PinnedWindowView {
     ) {
         self.refocus_root(window, cx);
         self.request_raise(cx);
-        let tool_active = self.editing && self.tool != AnnotationTool::None;
-        // 点击输入框以外：先提交正在输入的文字
+        // 点击输入框以外先提交文字；拖动入口与离屏测试共用。
         self.commit_text_edit(window, cx);
-        if tool_active {
+        if self.on_left_down(self.cursor_or(pos), click_count) {
+            cx.notify();
+        } else if self.editing && self.tool != AnnotationTool::None {
             let point = self.image_point(pos);
             if self.tool == AnnotationTool::Text {
                 self.begin_text_edit(point, window, cx);
             } else {
                 self.start_annotation(point, cx);
             }
-            return;
-        }
-        if click_count >= 2 {
-            self.run_click_action(self.interaction.double_click, window, cx);
-            return;
-        }
-        let cursor = self.cursor_or(pos);
-        // 缩略图模式只允许整体移动，不允许拖边缩放
-        let handle = if self.pre_thumbnail.is_some() {
-            PinnedDragHandle::Move
         } else {
-            hit_test_handle(self.bounds, cursor, HANDLE_SIZE, EDGE_MARGIN)
-                .unwrap_or(PinnedDragHandle::Move)
-        };
-        self.begin_drag(handle, cursor);
-        cx.notify();
+            self.run_click_action(self.interaction.double_click, window, cx);
+        }
     }
 
     /// 执行双击 / 中键动作。
@@ -1265,10 +1791,13 @@ impl PinnedWindowView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.translation.is_some() {
+            return;
+        }
         match action {
             PinClickAction::None => {}
             PinClickAction::Close => self.close(window, true),
-            PinClickAction::ResetZoom => self.reset_zoom(cx),
+            PinClickAction::ResetZoom => self.handle_reset_zoom(cx),
         }
     }
 
@@ -1286,7 +1815,7 @@ impl PinnedWindowView {
                 return;
             }
             let cursor = self.cursor_or(pos);
-            self.drag_to(cursor, cx);
+            self.handle_drag_to(cursor, cx);
             return;
         }
         if self.annotating {
@@ -1298,7 +1827,7 @@ impl PinnedWindowView {
             None
         } else {
             let cursor = self.cursor_or(pos);
-            hit_test_handle(self.bounds, cursor, HANDLE_SIZE, EDGE_MARGIN)
+            self.pointer_handle(cursor)
         };
         if handle != self.hover_handle {
             self.hover_handle = handle;
@@ -1319,6 +1848,9 @@ impl PinnedWindowView {
 
     /// 右键按下：弹出原生菜单（在异步任务里，避免在 GPUI 借用期间进入模态消息循环）。
     fn on_right_down(&mut self, cx: &mut Context<Self>) {
+        if self.translation.is_some() {
+            return;
+        }
         let Some(window) = self.window else {
             return;
         };
@@ -1429,7 +1961,7 @@ impl PinnedWindowView {
                 self.set_topmost(next, cx);
             }
             MENU_ANNOTATE => self.toggle_editing(window, cx),
-            MENU_RESET_ZOOM => self.reset_zoom(cx),
+            MENU_RESET_ZOOM => self.handle_reset_zoom(cx),
             MENU_THUMBNAIL => self.toggle_thumbnail(window, cx),
             MENU_RECOGNIZE => self.toggle_text_recognition(cx),
             MENU_COPY_TEXT => {
@@ -1461,6 +1993,12 @@ impl PinnedWindowView {
 
     /// 按键处理。
     fn on_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.translation.is_some() {
+            if ev.keystroke.key == "escape" {
+                self.close(window, true);
+            }
+            return;
+        }
         let mods = ev.keystroke.modifiers;
         let key = ev.keystroke.key.as_str();
         if self.route_key_to_text_edit(key, mods.shift, mods.control, window, cx) {
@@ -1493,6 +2031,9 @@ impl PinnedWindowView {
     /// # 参数
     /// - `window`：当前窗口（进入时用来收起标注模式）。
     pub fn toggle_thumbnail(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.translation.is_some() {
+            return;
+        }
         if self.drag.is_some() {
             self.end_drag(cx);
         }
@@ -1602,6 +2143,9 @@ impl PinnedWindowView {
     /// # 参数
     /// - `window`：当前窗口（收起标注用）。
     pub fn toggle_hide_to_top(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.translation.is_some() {
+            return;
+        }
         if self.closed || self.click_through {
             return;
         }
@@ -1865,11 +2409,16 @@ impl PinnedWindowView {
             });
         }
         tracing::info!(id = %self.id, renders = self.render_count, remove_from_store, "贴图窗口关闭");
-        if remove_from_store {
+        if remove_from_store && self.translation.is_none() {
             self.shared.remove_remembering(&self.id);
         }
         if let Err(e) = window.drop_image(self.frame.image()) {
             tracing::warn!(error = %e, "释放贴图底图图集失败");
+        }
+        if let Some(translation) = &mut self.translation
+            && let Some(image) = translation.undo()
+        {
+            self.pending_drops.push(image);
         }
         self.flush_pending_drops(window);
         for (_, sprite) in self.tile_sprites.drain() {
@@ -1890,13 +2439,13 @@ impl PinnedWindowView {
         tracing::info!(id = %self.id, ?op, "贴图自动化操作");
         match op {
             PinOp::Wheel { steps, ctrl } => {
-                self.wheel(*steps, *ctrl, self.bounds.center(), cx);
+                self.handle_wheel(*steps, *ctrl, self.bounds.center(), cx);
             }
             PinOp::Drag { handle, dx, dy } => match parse_handle(handle) {
                 Some(h) => {
                     let start = PhysicalPoint::new(0, 0);
                     self.begin_drag(h, start);
-                    self.drag_to(PhysicalPoint::new(*dx, *dy), cx);
+                    self.handle_drag_to(PhysicalPoint::new(*dx, *dy), cx);
                     self.end_drag(cx);
                 }
                 None => tracing::warn!(handle, "未知的手柄名"),
@@ -1932,6 +2481,29 @@ impl PinnedWindowView {
     }
 
     // ---------------------------------------------------------------- 渲染辅助
+
+    /// 取得共用图像节点的资源与窗口内物理布局，移动和撤销均不改变布局。
+    fn display_image(&self) -> (Arc<RenderImage>, PhysicalRect) {
+        match &self.translation {
+            Some(translation) => (
+                translation.image.as_ref().unwrap_or(&self.frame).image(),
+                translation.rect,
+            ),
+            None => (
+                self.frame.image(),
+                PhysicalRect::new(0, 0, self.bounds.width, self.bounds.height),
+            ),
+        }
+    }
+
+    /// 返回当前位置的手柄；翻译与缩略图仅允许整体移动。
+    fn pointer_handle(&self, cursor: PhysicalPoint) -> Option<PinnedDragHandle> {
+        if self.translation.is_some() || self.pre_thumbnail.is_some() {
+            Some(PinnedDragHandle::Move)
+        } else {
+            hit_test_handle(self.bounds, cursor, HANDLE_SIZE, EDGE_MARGIN)
+        }
+    }
 
     /// 当前应显示的鼠标指针样式。
     fn cursor_style(&self) -> CursorStyle {
@@ -1969,7 +2541,24 @@ impl Render for PinnedWindowView {
     /// 渲染贴图窗口。
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.render_count += 1;
-        self.scale = window.scale_factor();
+        let scale = window.scale_factor();
+        if self.scale != scale {
+            let screen = snow_ui::shell::monitor::Monitors::enumerate()
+                .ok()
+                .and_then(|monitors| {
+                    monitors
+                        .best_for_rect(self.bounds)
+                        .map(|monitor| monitor.bounds)
+                });
+            if let Some(screen) = screen {
+                if self.relayout_translation(scale, screen) {
+                    self.set_bounds(self.bounds, cx);
+                }
+            } else {
+                self.scale = scale;
+            }
+        }
+        self.sync_content_region(cx);
         self.flush_pending_annotation(cx);
         self.flush_pending_drops(window);
         let k = self.logical_per_image_px();
@@ -1991,7 +2580,7 @@ impl Render for PinnedWindowView {
                 MouseButton::Left,
                 cx.listener(|this, ev: &MouseDownEvent, window, cx| {
                     let pos = (ev.position.x.as_f32(), ev.position.y.as_f32());
-                    this.on_left_down(pos, ev.click_count, window, cx);
+                    this.handle_left_down(pos, ev.click_count, window, cx);
                 }),
             )
             .on_mouse_down(
@@ -2011,7 +2600,7 @@ impl Render for PinnedWindowView {
                     ScrollDelta::Pixels(p) => p.y.as_f32() / PIXELS_PER_LINE,
                 };
                 let cursor = this.cursor_or((ev.position.x.as_f32(), ev.position.y.as_f32()));
-                this.wheel(wheel_steps(lines_y), ev.modifiers.control, cursor, cx);
+                this.handle_wheel(wheel_steps(lines_y), ev.modifiers.control, cursor, cx);
             }))
             .on_hover(cx.listener(|this, hovered: &bool, _window, cx| {
                 this.hover = *hovered;
@@ -2057,15 +2646,33 @@ impl Render for PinnedWindowView {
             .h(px(1.0)),
         );
 
-        // 图像：资源只在创建时构造一次，这里只复用句柄，由 GPU 缩放到窗口大小
+        // 共用图像节点；翻译图保持选区尺寸，普通贴图填满窗口。
+        let (image, rect) = self.display_image();
         root = root.child(
-            img(ImageSource::Render(self.frame.image()))
+            img(ImageSource::Render(image))
                 .absolute()
-                .top(px(0.0))
-                .left(px(0.0))
-                .size_full()
+                .top(px(rect.y as f32 / self.scale))
+                .left(px(rect.x as f32 / self.scale))
+                .w(px(rect.width as f32 / self.scale))
+                .h(px(rect.height as f32 / self.scale))
                 .object_fit(ObjectFit::Fill),
         );
+        if self
+            .translation
+            .as_ref()
+            .is_some_and(|translation| translation.scanning)
+        {
+            root = root.child(scan_overlay(
+                "pin-translation-scan",
+                px(rect.x as f32 / self.scale),
+                px(rect.y as f32 / self.scale),
+                px(rect.width as f32 / self.scale),
+                px(rect.height as f32 / self.scale),
+            ));
+        }
+        if self.translation.is_some() {
+            root = root.child(self.translation_actions(cx));
+        }
 
         // 二次标注预览分块（图像像素 -> 窗口逻辑像素）
         for sprite in self.tile_sprites.values() {
@@ -2122,19 +2729,39 @@ impl Render for PinnedWindowView {
             }
         }
 
-        // 边框
-        root = root.child(
-            div()
-                .absolute()
-                .top(px(0.0))
-                .left(px(0.0))
-                .size_full()
-                .border_1()
-                .border_color(rgba(border)),
-        );
+        // 图像保持完整矩形边框，外置条单独向内描边；普通贴图保持原路径。
+        if let Some(translation) = &self.translation {
+            let bar = if translation.bar_position.has_grip() {
+                PhysicalRect::default()
+            } else {
+                self.translation_bar_rect(translation)
+            };
+            for segment in pin_border_segments(translation.rect, bar) {
+                let (x, y, width, height) = segment.inset_strip(self.scale);
+                root = root.child(
+                    div()
+                        .absolute()
+                        .left(px(x))
+                        .top(px(y))
+                        .w(px(width))
+                        .h(px(height))
+                        .bg(rgba(border)),
+                );
+            }
+        } else {
+            root = root.child(
+                div()
+                    .absolute()
+                    .top(px(0.0))
+                    .left(px(0.0))
+                    .size_full()
+                    .border_1()
+                    .border_color(rgba(border)),
+            );
+        }
 
         // 悬停时显示八向手柄（不在标注模式）；手柄一半在窗口外会被裁掉，只显示窗口内的部分
-        if active && !self.editing {
+        if active && !self.editing && self.translation.is_none() {
             for (_, r) in handle_rects(self.bounds, HANDLE_SIZE) {
                 root = root.child(
                     div()
@@ -2261,6 +2888,631 @@ mod tests {
         assert_eq!((w, h), (8, 6));
         assert_eq!(rgba, solid(8, 6, [10, 20, 30]));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 撤销只移除译文资源，原图像素与桌面几何始终不变，且不会生成仓储记录。
+    #[test]
+    fn translation_pin_undo_keeps_original_and_skips_persistence() {
+        let dir = temp_dir("translation-undo");
+        let shared = shared_in(&dir);
+        let data = TranslationPinData {
+            width: 8,
+            height: 6,
+            original: solid(8, 6, [10, 20, 30]),
+            image: solid(8, 6, [220, 230, 240]),
+            text: "translated text".into(),
+            target: snow_translate::Lang::ZhHans,
+            rect: PhysicalRect::new(-500, 200, 8, 6),
+        };
+        let mut view = PinnedWindowView::new(
+            Rc::clone(&shared),
+            PinInit {
+                id: shared.new_id().unwrap(),
+                frame: frame_from_rgba(data.width, data.height, data.original.clone()).unwrap(),
+                geometry: PinGeometry::new(data.rect, 1.0, 1.0, true),
+                created_ms: 1,
+                payload_bytes: 0,
+                session: Vec::new(),
+                dpr: 1.0,
+            },
+        );
+        view.set_translation(TranslationPin::new(&data).unwrap());
+        assert_eq!(
+            view.translation
+                .as_ref()
+                .unwrap()
+                .image
+                .as_ref()
+                .unwrap()
+                .to_rgba()
+                .unwrap()
+                .2,
+            data.image
+        );
+        assert_eq!(view.frame.to_rgba().unwrap().2, data.original);
+        view.persist_now();
+        assert_eq!(shared.restorable_count(), 0);
+        view.undo_translation();
+        let translation = view.translation.as_ref().unwrap();
+        assert!(translation.image.is_none() && translation.text.is_empty());
+        assert_eq!(view.frame.to_rgba().unwrap().2, data.original);
+        assert_eq!(view.bounds, data.rect);
+        assert_eq!(view.pending_drops.len(), 1);
+        view.undo_translation();
+        assert_eq!(view.pending_drops.len(), 1);
+        view.persist_now();
+        assert_eq!(shared.restorable_count(), 0);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 构造带额外按钮空间的临时翻译贴图，覆盖负坐标和混合 DPI。
+    fn translation_view_in(shared: &Rc<PinShared>) -> PinnedWindowView {
+        let mut view = PinnedWindowView::new(
+            Rc::clone(shared),
+            PinInit {
+                id: shared.new_id().unwrap(),
+                frame: frame_from_rgba(80, 60, solid(80, 60, [10, 20, 30])).unwrap(),
+                geometry: PinGeometry::new(PhysicalRect::new(-600, 200, 540, 120), 1.0, 1.0, true),
+                created_ms: 1,
+                payload_bytes: 0,
+                session: Vec::new(),
+                dpr: 1.5,
+            },
+        );
+        view.scale = 1.5;
+        view.set_translation(
+            TranslationPin::new(&TranslationPinData {
+                width: 80,
+                height: 60,
+                original: solid(80, 60, [10, 20, 30]),
+                image: solid(80, 60, [220, 230, 240]),
+                text: "translated text".into(),
+                target: snow_translate::Lang::ZhHans,
+                rect: PhysicalRect::new(-140, 200, 80, 60),
+            })
+            .unwrap(),
+        );
+        view
+    }
+
+    /// 三种布局均保留图像完整四边，条独立描边且交接处没有第二条平行线。
+    #[test]
+    fn pinned_translation_border_preserves_image_rectangle_and_separate_bar() {
+        for (image, bar) in [
+            (
+                PhysicalRect::new(0, 0, 572, 558),
+                PhysicalRect::new(456, 558, 116, 32),
+            ),
+            (
+                PhysicalRect::new(0, 32, 572, 558),
+                PhysicalRect::new(456, 0, 116, 32),
+            ),
+            // Inside 的生产路径不传条矩形，条仍使用原有组件外观。
+            (PhysicalRect::new(0, 0, 572, 558), PhysicalRect::default()),
+            (
+                PhysicalRect::new(96, 0, 20, 60),
+                PhysicalRect::new(0, 60, 116, 32),
+            ),
+            (
+                PhysicalRect::new(96, 32, 20, 60),
+                PhysicalRect::new(0, 0, 116, 32),
+            ),
+            (
+                PhysicalRect::new(115, 0, 1, 3),
+                PhysicalRect::new(0, 3, 116, 32),
+            ),
+        ] {
+            let segments = pin_border_segments(image, bar);
+            let image_edges = &segments[..4];
+            assert_eq!(image_edges, rect_border_segments(image));
+            assert_eq!(image_edges[0].start, PhysicalPoint::new(image.x, image.y));
+            assert_eq!(
+                image_edges[1].start,
+                PhysicalPoint::new(image.right(), image.y)
+            );
+            assert_eq!(
+                image_edges[2].start,
+                PhysicalPoint::new(image.right(), image.bottom())
+            );
+            assert_eq!(
+                image_edges[3].start,
+                PhysicalPoint::new(image.x, image.bottom())
+            );
+            for i in 0..4 {
+                assert_eq!(image_edges[i].end, image_edges[(i + 1) % 4].start);
+            }
+            // 条的左右边和远离图像的一边完整保留，相接边只保留图像以外部分。
+            let bar_edges = &segments[4..];
+            if bar.is_empty() {
+                assert!(bar_edges.is_empty());
+            } else {
+                for edge in rect_border_segments(bar) {
+                    let adjoining = edge.start.y == edge.end.y
+                        && (edge.start.y == image.y || edge.start.y == image.bottom());
+                    if !adjoining {
+                        assert!(bar_edges.contains(&edge));
+                    }
+                }
+                for edge in bar_edges {
+                    if edge.start.y == edge.end.y
+                        && (edge.start.y == image.y || edge.start.y == image.bottom())
+                    {
+                        assert!(
+                            edge.start.x.max(edge.end.x) <= image.x
+                                || edge.start.x.min(edge.end.x) >= image.right()
+                        );
+                    }
+                }
+            }
+            // 检查每段色条的四角都在所属矩形内，比仅检查并集更严格。
+            for scale in [1.0, 1.25, 1.5, 2.0] {
+                for (i, segment) in segments.iter().enumerate() {
+                    let owner = if i < 4 { image } else { bar };
+                    let (x, y, w, h) = segment.inset_strip(scale);
+                    assert!(w > 0.0 && h > 0.0);
+                    for (u, v) in [
+                        (0.001, 0.001),
+                        (0.999, 0.001),
+                        (0.001, 0.999),
+                        (0.999, 0.999),
+                    ] {
+                        let (physical_x, physical_y) = ((x + w * u) * scale, (y + h * v) * scale);
+                        assert!(physical_x >= owner.x as f32 && physical_x < owner.right() as f32);
+                        assert!(physical_y >= owner.y as f32 && physical_y < owner.bottom() as f32);
+                    }
+                }
+            }
+        }
+        assert!(pin_border_segments(PhysicalRect::default(), PhysicalRect::default()).is_empty());
+    }
+
+    /// 原生命中区域仅保留图像和内容宽条，空白角落不绘制也不命中。
+    #[test]
+    fn pinned_translation_region_excludes_outer_blank_and_follows_image() {
+        let dir = temp_dir("translation-region");
+        let shared = shared_in(&dir);
+        for scale in [1.0, 1.5, 2.0] {
+            for position in [
+                TranslationBarPosition::Below,
+                TranslationBarPosition::Above,
+                TranslationBarPosition::Inside,
+            ] {
+                let mut view = translation_view_in(&shared);
+                view.scale = scale;
+                let height = (bar_height() * scale).ceil() as i32;
+                view.bounds = PhysicalRect::new(
+                    -900,
+                    100,
+                    800,
+                    500 + if position.has_grip() { 0 } else { height },
+                );
+                let translation = view.translation.as_mut().unwrap();
+                translation.bar_position = position;
+                translation.rect = PhysicalRect::new(
+                    0,
+                    if position == TranslationBarPosition::Above {
+                        height
+                    } else {
+                        0
+                    },
+                    800,
+                    500,
+                );
+                let region = view.translation_region().unwrap();
+                assert!(region.contains(PhysicalPoint::new(
+                    10,
+                    if position == TranslationBarPosition::Above {
+                        height + 10
+                    } else {
+                        10
+                    }
+                )));
+                if !position.has_grip() {
+                    let bar = view.translation_bar_rect(view.translation.as_ref().unwrap());
+                    assert_eq!(bar.width, (116.0 * scale).ceil() as i32);
+                    assert_eq!(bar.right(), 800);
+                    assert!(region.contains(PhysicalPoint::new(bar.x + 1, bar.y + 1)));
+                    assert!(!region.contains(PhysicalPoint::new(1, bar.y + 1)));
+                }
+                view.bounds.x += 300;
+                view.bounds.y -= 50;
+                assert_eq!(view.translation_region().unwrap(), region);
+                view.undo_translation();
+                assert_eq!(view.translation_region().unwrap(), region);
+            }
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 三种位置安装后图像屏幕位置和尺寸不变，移动与撤销共用原有路径。
+    #[test]
+    fn translation_pin_placement_preserves_image_on_screen() {
+        let dir = temp_dir("translation-placement");
+        let shared = shared_in(&dir);
+        let screen = PhysicalRect::new(-1920, -300, 1920, 1080);
+        for (rect, expected) in [
+            (
+                PhysicalRect::new(-20, 200, 20, 60),
+                TranslationBarPosition::Below,
+            ),
+            (
+                PhysicalRect::new(-20, 720, 20, 60),
+                TranslationBarPosition::Above,
+            ),
+            (
+                PhysicalRect::new(-100, -280, 80, 1040),
+                TranslationBarPosition::Inside,
+            ),
+        ] {
+            let (position, bounds) = crate::pinned_manager::translation_bounds(
+                rect,
+                (TRANSLATION_BAR_WIDTH, bar_height()),
+                screen,
+                1.5,
+            );
+            assert_eq!(position, expected);
+            let mut view = translation_view_in(&shared);
+            view.bounds = bounds;
+            let mut translation = view.translation.take().unwrap();
+            translation.rect = rect;
+            translation.bar_position = position;
+            view.set_translation(translation);
+            let image = view.display_image().1;
+            assert_eq!(image.translate(bounds.x, bounds.y), rect);
+            if position == TranslationBarPosition::Inside {
+                assert_eq!(bounds, rect);
+            }
+            view.undo_translation();
+            assert_eq!(view.display_image().1, image);
+            assert_eq!(view.bounds, bounds);
+            // 模拟内部条先拖到自定义偏移，再走图像/条空白的共用整窗移动路径。
+            let state = view.translation.as_ref().unwrap().bar_state.clone();
+            let selection = (
+                rect.width as f32 / view.scale,
+                rect.height as f32 / view.scale,
+            );
+            let bar = (bar_width(4, position), bar_height());
+            let offset = crate::pin_action_bar::clamp_bar_offset(
+                selection,
+                bar,
+                state.resolve(selection, bar),
+                (-20.0, -30.0),
+            );
+            state.offset.set(Some(offset));
+            // 条底部内边距属于空白区，三种模式均复用窗口拖动路径。
+            let bar_y = match position {
+                TranslationBarPosition::Above => bounds.y + 2,
+                TranslationBarPosition::Below | TranslationBarPosition::Inside => {
+                    bounds.bottom() - 2
+                }
+            };
+            let cursor = PhysicalPoint::new(bounds.right() - 2, bar_y);
+            assert!(view.on_left_down(cursor, 1));
+            assert_eq!(view.drag.unwrap().handle, PinnedDragHandle::Move);
+            assert!(view.drag_to(PhysicalPoint::new(cursor.x + 35, cursor.y - 20)));
+            assert_eq!(view.bounds, bounds.translate(35, -20));
+            assert_eq!(view.display_image().1, image);
+            assert_eq!(state.resolve(selection, bar), offset);
+            assert_eq!(state.offset.get(), Some(offset));
+            view.persist_now();
+            assert_eq!(shared.restorable_count(), 0);
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 四个图标由现有资源门面提供，逻辑宽度覆盖 Small 按钮与间距。
+    /// 连续跨 DPI 和负坐标屏时图像不跳动，后续拖动沿用重算后的外框。
+    #[test]
+    fn translation_dpi_changes_rebase_geometry_and_drag() {
+        let dir = temp_dir("dpi-review");
+        let shared = shared_in(&dir);
+        let mut view = translation_view_in(&shared);
+        for (scale, screen, x, y) in [
+            (1.0, PhysicalRect::new(0, 0, 1920, 1080), 100, 100),
+            (2.0, PhysicalRect::new(-3840, -400, 3840, 2160), -900, 1700),
+            (1.25, PhysicalRect::new(-1920, -300, 1920, 1080), -500, 650),
+            (1.0, PhysicalRect::new(0, 0, 1920, 1080), 100, 100),
+        ] {
+            let local = view.translation.as_ref().unwrap().rect;
+            view.bounds.x = x - local.x;
+            view.bounds.y = y - local.y;
+            let cursor = PhysicalPoint::new(x + 5, y + 5);
+            view.begin_drag(PinnedDragHandle::Move, cursor);
+            view.relayout_translation(scale, screen);
+            let image = view.translation.as_ref().unwrap().rect;
+            assert_eq!(
+                image.translate(view.bounds.x, view.bounds.y),
+                PhysicalRect::new(x, y, image.width, image.height)
+            );
+            let region = view.translation_region().unwrap().bounds().unwrap();
+            assert!(region.x >= 0 && region.y >= 0);
+            assert!(region.right() <= view.bounds.width && region.bottom() <= view.bounds.height);
+            let bounds = view.bounds;
+            view.drag_to(PhysicalPoint::new(cursor.x + 10, cursor.y - 7));
+            assert_eq!(view.bounds, bounds.translate(10, -7));
+        }
+    }
+
+    /// 普通和失败操作按钮的全部图标均来自现有资源门面。
+    #[test]
+    fn translation_pin_icon_assets_exist() {
+        for icon in TRANSLATION_ICONS
+            .into_iter()
+            .chain(["icons/antd/reload.svg", "icons/antd/download.svg"])
+        {
+            assert!(icon_asset_exists(icon), "{icon}");
+        }
+        assert_eq!(TRANSLATION_BAR_WIDTH, 116.0);
+    }
+
+    /// 构造等待翻译的原图贴图，不需要任何结果。
+    fn pending_translation_view(shared: &Rc<PinShared>) -> PinnedWindowView {
+        let mut view = translation_view_in(shared);
+        view.translation = None;
+        view.set_translation(
+            TranslationPin::new(&TranslationPinData {
+                width: 80,
+                height: 60,
+                original: solid(80, 60, [10, 20, 30]),
+                image: Vec::new(),
+                text: String::new(),
+                target: snow_translate::Lang::ZhHans,
+                rect: PhysicalRect::new(-140, 200, 80, 60),
+            })
+            .unwrap(),
+        );
+        view
+    }
+
+    /// 构造供离屏渲染的 OCR / 翻译产物。
+    fn pin_translation_outcome() -> crate::translate_service::TranslateOutcome {
+        crate::translate_service::TranslateOutcome {
+            source: "Hello".into(),
+            translated: "World".into(),
+            label: "test".into(),
+            ocr_ms: 0,
+            translate_ms: 0,
+            boxes: vec![crate::ocr_service::OcrTextBox {
+                rect: PhysicalRect::new(2, 2, 60, 25),
+                text: "Hello".into(),
+                confidence: None,
+            }],
+            pairs: vec![crate::translate_service::TranslatedParagraph {
+                source: "Hello".into(),
+                translated: "World".into(),
+                box_indices: vec![0],
+            }],
+        }
+    }
+
+    /// 翻译进行中展示原图，完成后复用排版图并停止扫描，撤销仍回原图。
+    #[test]
+    fn translation_pin_pending_then_complete_replaces_image() {
+        let dir = temp_dir("translation-pending");
+        let shared = shared_in(&dir);
+        let mut view = pending_translation_view(&shared);
+        let original = view.frame.to_rgba().unwrap().2;
+        let rect = view.display_image().1;
+        assert!(view.translation.as_ref().unwrap().scanning);
+        assert!(view.translation.as_ref().unwrap().image.is_none());
+        view.finish_translation(
+            Ok(pin_translation_outcome()),
+            Some(frame_from_rgba(80, 60, solid(80, 60, [200, 100, 50])).unwrap()),
+        );
+        let translation = view.translation.as_ref().unwrap();
+        assert!(!translation.scanning);
+        assert_eq!(translation.text, "World");
+        assert_ne!(
+            translation.image.as_ref().unwrap().to_rgba().unwrap().2,
+            original
+        );
+        assert_eq!(view.display_image().1, rect);
+        assert!(view.status.is_none());
+        view.undo_translation();
+        assert_eq!(view.frame.to_rgba().unwrap().2, original);
+        assert!(view.translation.as_ref().unwrap().image.is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 失败、无文字、取消与空译文均保留原图并通过状态条提示。
+    #[test]
+    fn translation_pin_failure_empty_and_cancel_stop_scanning() {
+        use crate::translate_service::TranslateFlowError;
+        let dir = temp_dir("translation-failed");
+        let shared = shared_in(&dir);
+        let mut empty = pin_translation_outcome();
+        empty.translated = "  ".into();
+        for result in [
+            Err(TranslateFlowError::NoText),
+            Err(TranslateFlowError::Cancelled),
+            Err(TranslateFlowError::Ocr(
+                crate::ocr_client::OcrError::SpawnFailed("test".into()),
+            )),
+            Ok(empty),
+        ] {
+            let mut view = pending_translation_view(&shared);
+            let original = view.frame.to_rgba().unwrap().2;
+            view.finish_translation(result, None);
+            let translation = view.translation.as_ref().unwrap();
+            assert!(
+                !translation.scanning && translation.image.is_none() && translation.text.is_empty()
+            );
+            assert!(
+                view.status
+                    .as_ref()
+                    .is_some_and(|status| !status.is_empty())
+            );
+            assert_eq!(view.frame.to_rgba().unwrap().2, original);
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 缺运行时失败保留可下载能力；重试恢复扫描且保留原目标语言。
+    #[test]
+    fn translation_failure_preserves_download_and_retry() {
+        use crate::translate_service::TranslateFlowError;
+        let dir = temp_dir("translation-retry");
+        let shared = shared_in(&dir);
+        let mut view = pending_translation_view(&shared);
+        view.finish_translation(
+            Err(TranslateFlowError::Translate(
+                snow_translate::TranslateError::RuntimeMissing("missing".into()),
+            )),
+            None,
+        );
+        let pin = view.translation.as_ref().unwrap();
+        let error = pin.failure.as_ref().unwrap();
+        assert!(
+            crate::translate_flow::failure_message(error, crate::ocr_backend::i18n_for("en-US")).1
+        );
+        let target = pin.target;
+        view.retry_translation();
+        let pin = view.translation.as_ref().unwrap();
+        assert!(pin.scanning && pin.failure.is_none());
+        assert_eq!(pin.target, target);
+        assert!(view.status.is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 关闭后的结果与完成后的重复结果均不再改变贴图。
+    #[test]
+    fn translation_pin_ignores_late_results() {
+        let dir = temp_dir("translation-late");
+        let shared = shared_in(&dir);
+        let mut view = pending_translation_view(&shared);
+        view.closed = true;
+        view.finish_translation(
+            Ok(pin_translation_outcome()),
+            Some(frame_from_rgba(80, 60, solid(80, 60, [200, 100, 50])).unwrap()),
+        );
+        assert!(view.translation.as_ref().unwrap().image.is_none());
+        view.closed = false;
+        view.finish_translation(
+            Ok(pin_translation_outcome()),
+            Some(frame_from_rgba(80, 60, solid(80, 60, [200, 100, 50])).unwrap()),
+        );
+        view.undo_translation();
+        view.finish_translation(
+            Ok(pin_translation_outcome()),
+            Some(frame_from_rgba(80, 60, solid(80, 60, [200, 100, 50])).unwrap()),
+        );
+        assert!(view.translation.as_ref().unwrap().image.is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 图像、按钮条空白和边缘均走 Move，移动不拉伸图像、不写仓储，撤销不改几何。
+    #[test]
+    fn translation_pin_left_down_drags_image_and_bar_without_persisting() {
+        let dir = temp_dir("translation-drag");
+        let shared = shared_in(&dir);
+        for (offset, clicks) in [((480, 30), 1), ((535, 90), 1), ((0, 0), 2)] {
+            let mut view = translation_view_in(&shared);
+            let before = view.bounds;
+            let layout = view.display_image().1;
+            let cursor = PhysicalPoint::new(before.x + offset.0, before.y + offset.1);
+            assert_eq!(view.pointer_handle(cursor), Some(PinnedDragHandle::Move));
+            view.hover_handle = view.pointer_handle(cursor);
+            assert_eq!(view.cursor_style(), CursorStyle::OpenHand);
+            assert!(view.on_left_down(cursor, clicks));
+            assert_eq!(view.drag.unwrap().handle, PinnedDragHandle::Move);
+            assert_eq!(view.cursor_style(), CursorStyle::ClosedHand);
+            assert!(view.drag_to(PhysicalPoint::new(cursor.x + 35, cursor.y - 20)));
+            assert_eq!(
+                view.bounds,
+                PhysicalRect::new(before.x + 35, before.y - 20, before.width, before.height)
+            );
+            assert_eq!(view.display_image().1, layout);
+            view.persist_now();
+            assert_eq!(shared.restorable_count(), 0);
+            let moved = view.bounds;
+            view.undo_translation();
+            assert_eq!(view.bounds, moved);
+            assert_eq!(view.display_image().1, layout);
+            view.persist_now();
+            assert_eq!(shared.restorable_count(), 0);
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 翻译贴图拒绝滚轮缩放、透明度、还原缩放与八向缩放，撤销后限制仍有效。
+    #[test]
+    fn translation_pin_scaling_entries_are_inert() {
+        let dir = temp_dir("translation-scaling");
+        let shared = shared_in(&dir);
+        let mut view = translation_view_in(&shared);
+        let before = view.geometry();
+        for undo in [false, true] {
+            if undo {
+                view.undo_translation();
+            }
+            for ctrl in [false, true] {
+                for steps in [-3.0, 3.0] {
+                    assert!(!view.wheel(steps, ctrl, view.bounds.center()));
+                    assert_eq!(view.geometry(), before);
+                }
+            }
+            assert!(!view.reset_zoom());
+            for (handle, _) in handle_rects(view.bounds, HANDLE_SIZE) {
+                view.begin_drag(handle, view.bounds.center());
+                assert!(view.drag.is_none());
+                assert!(!view.drag_to(PhysicalPoint::new(999, 999)));
+                assert_eq!(view.geometry(), before);
+            }
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 共用状态入口保留普通贴图的拖边缩放、滚轮透明度和还原缩放。
+    #[test]
+    fn ordinary_pin_shared_input_still_resizes_and_moves() {
+        let dir = temp_dir("shared-input");
+        let shared = shared_in(&dir);
+        let mut view = view_in(&shared, 160, 120);
+        let initial = view.bounds;
+        let corner = PhysicalPoint::new(initial.right() - 1, initial.bottom() - 1);
+        assert!(view.on_left_down(corner, 1));
+        assert!(view.drag.unwrap().handle.is_resize());
+        assert!(view.drag_to(PhysicalPoint::new(corner.x + 80, corner.y + 60)));
+        assert!(view.bounds.width > initial.width);
+        assert!(view.reset_zoom());
+        assert_eq!(view.bounds.width, initial.width);
+        assert!(view.wheel(-2.0, true, view.bounds.center()));
+        assert!(view.opacity < 1.0);
+        assert!(view.wheel(2.0, false, view.bounds.center()));
+        assert!(view.zoom > 1.0);
+        view.drag = None;
+        let before = view.bounds;
+        let center = before.center();
+        assert!(view.on_left_down(center, 1));
+        assert_eq!(view.drag.unwrap().handle, PinnedDragHandle::Move);
+        assert!(view.drag_to(PhysicalPoint::new(center.x + 10, center.y + 20)));
+        assert_eq!(
+            (view.bounds.x, view.bounds.y),
+            (before.x + 10, before.y + 20)
+        );
+        assert_eq!(
+            (view.bounds.width, view.bounds.height),
+            (before.width, before.height)
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 翻译按钮在两种语言中均有可用文案。
+    #[test]
+    fn translation_pin_buttons_are_localized() {
+        for locale in ["en-US", "zh-CN"] {
+            let i18n = crate::ocr_backend::i18n_for(locale);
+            for key in [
+                "translation-pin-save-original",
+                "translation-pin-undo",
+                "translation-pin-copy",
+                "translation-pin-close",
+                "translation-pin-move-bar",
+            ] {
+                let label = i18n.tr(key);
+                assert!(!label.is_empty() && label != key);
+            }
+        }
     }
 
     /// 非法尺寸 / 长度不符的图像被拒绝而不是 panic。

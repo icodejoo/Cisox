@@ -6,12 +6,14 @@ use super::translate::TranslateIssue;
 use crate::ocr_backend::i18n_for;
 use snow_config::extensions::DICTATION_BACKEND_SYSTEM;
 use snow_i18n::Args;
-use snow_stt_protocol::SystemError;
+use snow_stt_protocol::{SystemError, WorkerError};
 use snow_translate::Lang;
 
 /// 失败原因。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Failure {
+    /// 本地 worker 稳定错误码及业务参数。
+    WorkerCode(WorkerError, String),
     /// 系统语音后端报告的可识别错误（类别与细节）。
     SystemSpeech(SystemError, String),
     /// 找不到语音识别工作进程。
@@ -214,7 +216,18 @@ fn failure_message(failure: &Failure, locale: &str) -> String {
             let shown = code.map_or_else(|| "?".to_string(), |c| c.to_string());
             tr_arg(i18n, "dictation-error-crashed", "code", &shown)
         }
-        Failure::Worker(detail) => tr_arg(i18n, "dictation-error-worker", "detail", detail),
+        Failure::WorkerCode(kind, parameter) => {
+            let id = match kind {
+                WorkerError::MicrophoneUnavailable => "dictation-error-microphone-unavailable",
+                WorkerError::MicrophoneEnded => "dictation-error-microphone-ended",
+                WorkerError::MicrophoneClosed => "dictation-error-microphone-closed",
+                WorkerError::InvalidWave => "dictation-error-invalid-wave",
+                WorkerError::WaveSampleRate => "dictation-error-wave-sample-rate",
+                WorkerError::RecognitionFailed => "dictation-error-recognition-failed",
+            };
+            tr_arg(i18n, id, "value", parameter)
+        }
+        Failure::Worker(_) => i18n.tr("dictation-error-recognition-failed"),
         Failure::Link(detail) => tr_arg(i18n, "dictation-error-link", "detail", detail),
     }
 }
@@ -236,6 +249,18 @@ pub fn backend_notice(value: &serde_json::Value, locale: &str) -> Option<String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 英文 UI 不泄露底层中文诊断，各错误码均有双语提示。
+    #[test]
+    fn worker_errors_are_localized_without_diagnostics() {
+        assert!(failure_message(&Failure::Worker("底层中文诊断".into()), "en-US").is_ascii());
+        for (kind, _) in WorkerError::ALL {
+            for locale in ["en-US", "zh-CN"] {
+                let message = failure_message(&Failure::WorkerCode(kind, "16000".into()), locale);
+                assert!(!message.is_empty() && !message.contains("dictation-error-"));
+            }
+        }
+    }
 
     /// 全部状态与失败原因在两种语言下都能取到非空文案，且不会回落成消息 id 本身。
     #[test]

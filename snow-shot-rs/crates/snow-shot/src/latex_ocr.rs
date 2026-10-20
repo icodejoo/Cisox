@@ -44,6 +44,8 @@ pub enum LatexRunError {
     InvalidImage,
     /// 图里没有可识别的内容（纯色图）。
     Blank,
+    /// 解码达到长度上限，公式不完整。
+    LengthExceeded,
     /// 推理后端出错（附原因）。
     Backend(String),
     /// tokenizer 文件不合法（附原因）。
@@ -434,10 +436,10 @@ pub fn decode_loop(backend: &mut dyn LatexBackend) -> Result<Vec<i64>, LatexRunE
             as i64;
         out.push(next);
         if next == EOS_TOKEN {
-            break;
+            return Ok(out.split_off(1));
         }
     }
-    Ok(out.split_off(1))
+    Err(LatexRunError::LengthExceeded)
 }
 
 /// LaTeX 词表：下标即 token id。
@@ -914,9 +916,16 @@ mod tests {
         assert_eq!(ids, vec![5, 8, 2]);
         assert_eq!(fake.seen, vec![vec![1], vec![1, 5], vec![1, 5, 8]]);
 
+        let mut boundary = vec![5; MAX_SEQ_LEN];
+        boundary[MAX_SEQ_LEN - 1] = EOS_TOKEN;
+        let mut boundary = Fake::new(vec![], boundary);
+        assert_eq!(decode_loop(&mut boundary).unwrap().len(), MAX_SEQ_LEN);
+
         let mut endless = Fake::new(vec![], vec![5; MAX_SEQ_LEN + 8]);
-        let ids = decode_loop(&mut endless).expect("成功");
-        assert_eq!(ids.len(), MAX_SEQ_LEN);
+        assert_eq!(
+            decode_loop(&mut endless),
+            Err(LatexRunError::LengthExceeded)
+        );
         assert!(endless.seen.last().unwrap().len() <= MAX_SEQ_LEN);
     }
 

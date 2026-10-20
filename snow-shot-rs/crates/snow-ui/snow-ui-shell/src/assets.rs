@@ -11,6 +11,12 @@ use gpui_kit::{AssetSource, Result, SharedString};
 use snow_ui_icons::{IconTheme, mask_layers};
 use std::borrow::Cow;
 
+// 从现有 Lucide 库仅嵌入抓手，不加载完整图标集合。
+gpui_kit::assets::icon_assets!(GripAssets, [GripVertical]);
+
+/// 现有 Lucide 竖向抓手图标路径。
+pub const GRIP_VERTICAL_ICON: &str = "icons/grip-vertical.svg";
+
 /// antd 图标路径前缀。
 pub const ANTD_ICON_PREFIX: &str = "icons/antd/";
 /// 自绘图标路径前缀。
@@ -69,12 +75,16 @@ impl AssetSource for AppAssets {
         if let Some(name) = icon_name(path, OWN_ICON_PREFIX) {
             return Ok(own_icon(name).map(|svg| Cow::Borrowed(svg.as_bytes())));
         }
+        if let Some(icon) = AssetSource::load(&GripAssets, path)? {
+            return Ok(Some(icon));
+        }
         AssetSource::load(&gpui_kit::assets::Assets, path)
     }
 
     /// 列出前缀下的资源；只列 Lucide 与自绘图标（antd 数量大，按名字直接加载）。
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
         let mut all = AssetSource::list(&gpui_kit::assets::Assets, path)?;
+        all.extend(AssetSource::list(&GripAssets, path)?);
         all.extend(
             OWN_ICONS
                 .iter()

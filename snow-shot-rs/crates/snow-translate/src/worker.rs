@@ -12,7 +12,7 @@ use crate::protocol::{
 use crate::{Lang, TranslateError, TranslationEngine};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
-use std::process::{Child, ChildStdin, Command as ProcessCommand, Stdio};
+use std::process::{Child, Command as ProcessCommand, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -143,6 +143,18 @@ pub enum Recv {
 pub trait Transport: Send {
     /// 发送一行（实现负责补换行并刷新）。
     fn send(&mut self, line: &str) -> io::Result<()>;
+
+    /// 可取消写入，真实管道实现通过写线程和短轮询确认。
+    fn send_cancellable(&mut self, line: &str, cancelled: &dyn Fn() -> bool) -> io::Result<()> {
+        if cancelled() {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "translation cancelled",
+            ));
+        }
+        self.send(line)
+    }
+
     /// 接收一行，最多等 `timeout`。
     fn recv(&mut self, timeout: Duration) -> Recv;
     /// 进程失败时的诊断摘要（退出码与 stderr 末尾）。
@@ -218,9 +230,25 @@ impl WorkerLauncher for ProcessLauncher {
         let _ = thread::Builder::new()
             .name("snow-translate-stderr".into())
             .spawn(move || pump_stderr(stderr, &tail_writer));
+        let (writer, requests) = mpsc::channel::<String>();
+        let (ack, writes) = mpsc::channel();
+        thread::spawn(move || {
+            let mut stdin = stdin;
+            for line in requests {
+                let result = stdin
+                    .write_all(line.as_bytes())
+                    .and_then(|()| stdin.write_all(b"\n"))
+                    .and_then(|()| stdin.flush());
+                let failed = result.is_err();
+                if ack.send(result).is_err() || failed {
+                    break;
+                }
+            }
+        });
         Ok(Box::new(ProcessTransport {
             child,
-            stdin: Some(stdin),
+            stdin: Some(writer),
+            writes,
             lines: rx,
             stderr_tail: tail,
         }))
@@ -302,7 +330,9 @@ struct ProcessTransport {
     /// 子进程。
     child: Child,
     /// 子进程 stdin（关闭即通知 worker 退出）。
-    stdin: Option<ChildStdin>,
+    stdin: Option<mpsc::Sender<String>>,
+    /// 写线程确认，避免主调用线程卡在 write_all。
+    writes: Receiver<io::Result<()>>,
     /// stdout 行通道。
     lines: Receiver<String>,
     /// stderr 末尾内容。
@@ -310,15 +340,45 @@ struct ProcessTransport {
 }
 
 impl Transport for ProcessTransport {
-    /// 写一行并刷新。
+    /// 普通写入也受有限等待约束。
     fn send(&mut self, line: &str) -> io::Result<()> {
-        let stdin = self
-            .stdin
-            .as_mut()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "stdin 已关闭"))?;
-        stdin.write_all(line.as_bytes())?;
-        stdin.write_all(b"\n")?;
-        stdin.flush()
+        self.send_cancellable(line, &|| false)
+    }
+
+    /// 写线程执行阻塞 IO，等待方轮询取消并在中止时杀死进程以解开写管道。
+    fn send_cancellable(&mut self, line: &str, cancelled: &dyn Fn() -> bool) -> io::Result<()> {
+        self.stdin
+            .as_ref()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "stdin closed"))?
+            .send(line.into())
+            .map_err(|e| io::Error::new(io::ErrorKind::BrokenPipe, e))?;
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            let error = if cancelled() {
+                Some(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "translation cancelled",
+                ))
+            } else if Instant::now() >= deadline {
+                Some(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "worker write timed out",
+                ))
+            } else {
+                None
+            };
+            if let Some(error) = error {
+                self.terminate();
+                return Err(error);
+            }
+            match self.writes.recv_timeout(Duration::from_millis(20)) {
+                Ok(result) => return result,
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err(io::Error::new(io::ErrorKind::BrokenPipe, "writer closed"));
+                }
+            }
+        }
     }
 
     /// 从 stdout 行通道取一行。
@@ -584,7 +644,11 @@ impl WorkerEngine {
             }
             return Ok(());
         }
-        if needs_load && let Err(e) = self.shared.ensure_loaded(&mut session, TRIGGER_WARM) {
+        if needs_load
+            && let Err(e) = self
+                .shared
+                .ensure_loaded_cancellable(&mut session, TRIGGER_WARM, abort)
+        {
             // 本次拉起的进程没加载成功就不留着；复用的会话只在致命错误时丢弃
             if launched || Shared::is_fatal(&e) {
                 session.transport.terminate();
@@ -692,18 +756,26 @@ impl Shared {
         session.transport.terminate();
     }
 
-    /// 等待满足条件的事件；杂行被忽略；进程关闭返回 `WorkerDied`，超时返回 `Timeout`。
-    fn wait_event<T>(
+    /// 短轮询等待，取消时立即丢弃当前 worker 会话。
+    fn wait_event_cancellable<T>(
         &self,
         session: &mut Session,
         timeout: Duration,
+        cancelled: &dyn Fn() -> bool,
         mut pick: impl FnMut(Event) -> Option<Result<T, TranslateError>>,
     ) -> Result<T, TranslateError> {
         let deadline = Instant::now() + timeout;
         let mut ignored = 0usize;
         loop {
+            if cancelled() {
+                session.transport.terminate();
+                return Err(TranslateError::WorkerDied("translation cancelled".into()));
+            }
             let remaining = deadline.saturating_duration_since(Instant::now());
-            match session.transport.recv(remaining) {
+            match session
+                .transport
+                .recv(remaining.min(Duration::from_millis(20)))
+            {
                 Recv::Line(line) => match decode_event(&line) {
                     Ok(event) => {
                         if let Some(outcome) = pick(event) {
@@ -718,7 +790,8 @@ impl Shared {
                         }
                     }
                 },
-                Recv::Timeout => return Err(TranslateError::Timeout),
+                Recv::Timeout if Instant::now() >= deadline => return Err(TranslateError::Timeout),
+                Recv::Timeout => continue,
                 Recv::Closed => {
                     return Err(TranslateError::WorkerDied(session.transport.diagnostics()));
                 }
@@ -728,6 +801,14 @@ impl Shared {
 
     /// 拉起 worker 并等待 `ready`。
     fn start_session(&self) -> Result<Session, TranslateError> {
+        self.start_session_cancellable(&|| false)
+    }
+
+    /// 启动等待沿用请求的取消判定。
+    fn start_session_cancellable(
+        &self,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Session, TranslateError> {
         let spawn_started = Instant::now();
         let transport = self.launcher.launch(&self.config)?;
         self.launches.fetch_add(1, Ordering::SeqCst);
@@ -737,9 +818,10 @@ impl Shared {
             pid: 0,
             ready_ms: None,
         };
-        let ready = self.wait_event(
+        let ready = self.wait_event_cancellable(
             &mut session,
             self.config.timeouts.ready,
+            cancelled,
             |event| match event {
                 Event::Ready { protocol, pid } if protocol == PROTOCOL_VERSION => Some(Ok(pid)),
                 Event::Ready { protocol, .. } => Some(Err(TranslateError::WorkerUnavailable(
@@ -770,10 +852,21 @@ impl Shared {
     ///
     /// 加载成功时写一行 info 日志：`model_id`、`trigger`（`warm` / `request`）、`cold_start`（本次是否新拉起的进程）、
     /// `ready_ms`（拉起到 ready，复用进程为空）、`load_ms`（worker 自报）、`wait_ms`（主程序发 load 到收到 loaded）、`mem_bytes`。
+    #[cfg(test)]
     fn ensure_loaded(
         &self,
         session: &mut Session,
         trigger: &'static str,
+    ) -> Result<(), TranslateError> {
+        self.ensure_loaded_cancellable(session, trigger, &|| false)
+    }
+
+    /// 模型加载等待支持取消。
+    fn ensure_loaded_cancellable(
+        &self,
+        session: &mut Session,
+        trigger: &str,
+        cancelled: &dyn Fn() -> bool,
     ) -> Result<(), TranslateError> {
         if session.loaded {
             return Ok(());
@@ -788,28 +881,33 @@ impl Shared {
         let line = encode_command(&command).map_err(TranslateError::Inference)?;
         session
             .transport
-            .send(&line)
+            .send_cancellable(&line, cancelled)
             .map_err(|e| TranslateError::WorkerDied(format!("发送加载命令失败: {e}")))?;
         let ready_ms = session.ready_ms.take();
-        let outcome = self.wait_event(session, self.config.timeouts.load, |event| match event {
-            Event::Loaded {
-                load_ms, mem_bytes, ..
-            } => {
-                tracing::info!(
-                    model_id = %self.config.model_id,
-                    trigger,
-                    cold_start = ready_ms.is_some(),
-                    ready_ms,
-                    load_ms,
-                    wait_ms = elapsed_ms(load_started),
-                    mem_bytes,
-                    "翻译模型已加载"
-                );
-                Some(Ok(()))
-            }
-            Event::Error { kind, message, .. } => Some(Err(map_worker_error(kind, message, None))),
-            _ => None,
-        });
+        let outcome =
+            self.wait_event_cancellable(session, self.config.timeouts.load, cancelled, |event| {
+                match event {
+                    Event::Loaded {
+                        load_ms, mem_bytes, ..
+                    } => {
+                        tracing::info!(
+                            model_id = %self.config.model_id,
+                            trigger,
+                            cold_start = ready_ms.is_some(),
+                            ready_ms,
+                            load_ms,
+                            wait_ms = elapsed_ms(load_started),
+                            mem_bytes,
+                            "翻译模型已加载"
+                        );
+                        Some(Ok(()))
+                    }
+                    Event::Error { kind, message, .. } => {
+                        Some(Err(map_worker_error(kind, message, None)))
+                    }
+                    _ => None,
+                }
+            });
         if outcome.is_ok() {
             session.loaded = true;
         }
@@ -824,6 +922,7 @@ impl Shared {
         texts: Vec<String>,
         src: Lang,
         tgt: Lang,
+        cancelled: &dyn Fn() -> bool,
     ) -> Result<Vec<String>, TranslateError> {
         let chars: usize = texts.iter().map(|t| t.chars().count()).sum();
         let expected = texts.len();
@@ -837,10 +936,10 @@ impl Shared {
         let line = encode_command(&command).map_err(TranslateError::Inference)?;
         session
             .transport
-            .send(&line)
+            .send_cancellable(&line, cancelled)
             .map_err(|e| TranslateError::WorkerDied(format!("发送翻译请求失败: {e}")))?;
         let timeout = self.config.timeouts.request_for(chars);
-        self.wait_event(session, timeout, |event| match event {
+        self.wait_event_cancellable(session, timeout, cancelled, |event| match event {
             Event::Result { id: got, texts, .. } if got == id => Some(if texts.len() == expected {
                 Ok(texts)
             } else {
@@ -880,20 +979,21 @@ impl Shared {
         chunks: &[Vec<String>],
         src: Lang,
         tgt: Lang,
+        cancelled: &dyn Fn() -> bool,
     ) -> Result<Vec<String>, TranslateError> {
         if inner.session.is_none() {
-            inner.session = Some(self.start_session()?);
+            inner.session = Some(self.start_session_cancellable(cancelled)?);
         }
         let Some(mut session) = inner.session.take() else {
             return Err(TranslateError::WorkerDied("会话丢失".into()));
         };
         let mut out: Vec<String> = Vec::new();
-        let mut result = self.ensure_loaded(&mut session, TRIGGER_REQUEST);
+        let mut result = self.ensure_loaded_cancellable(&mut session, TRIGGER_REQUEST, cancelled);
         if result.is_ok() {
             for chunk in chunks {
                 let id = inner.next_id;
                 inner.next_id += 1;
-                match self.request(&mut session, id, chunk.clone(), src, tgt) {
+                match self.request(&mut session, id, chunk.clone(), src, tgt, cancelled) {
                     Ok(texts) => out.extend(texts),
                     Err(e) => {
                         result = Err(e);
@@ -932,18 +1032,22 @@ fn chunk_texts(texts: &[String], limit: usize) -> Result<Vec<Vec<String>>, Trans
     let mut current: Vec<String> = Vec::new();
     let mut size = 0usize;
     for text in texts {
-        if text.len() > limit {
+        let encoded = serde_json::to_string(text)
+            .map_err(|e| TranslateError::InvalidRequest(e.to_string()))?;
+        let encoded_size = encoded.len() - 2;
+        if encoded_size > limit {
             return Err(TranslateError::InvalidRequest(format!(
                 "单段文本过长（{} 字节，上限 {limit}）",
                 text.len()
             )));
         }
-        if !current.is_empty() && (size + text.len() > limit || current.len() >= MAX_REQUEST_TEXTS)
+        if !current.is_empty()
+            && (size + encoded_size > limit || current.len() >= MAX_REQUEST_TEXTS)
         {
             chunks.push(std::mem::take(&mut current));
             size = 0;
         }
-        size += text.len();
+        size += encoded_size;
         current.push(text.clone());
     }
     if !current.is_empty() {
@@ -1005,6 +1109,17 @@ impl TranslationEngine for WorkerEngine {
         src: Lang,
         tgt: Lang,
     ) -> Result<Vec<String>, TranslateError> {
+        self.translate_batch_cancellable(texts, src, tgt, &|| false)
+    }
+
+    /// 请求、加载、分块及应答等待均使用同一取消判定。
+    fn translate_batch_cancellable(
+        &self,
+        texts: &[String],
+        src: Lang,
+        tgt: Lang,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Vec<String>, TranslateError> {
         let resolved = crate::resolve_in_pairs(&self.shared.config.pairs, src, tgt)
             .ok_or(TranslateError::UnsupportedLanguagePair(src, tgt))?;
         let work: Vec<usize> = (0..texts.len())
@@ -1016,13 +1131,30 @@ impl TranslationEngine for WorkerEngine {
         }
         let payload: Vec<String> = work.iter().map(|&i| texts[i].clone()).collect();
         let chunks = chunk_texts(&payload, MAX_REQUEST_BYTES)?;
-        let mut inner = lock(&self.shared.inner);
+        let mut inner = loop {
+            if cancelled() {
+                return Err(TranslateError::WorkerDied("translation cancelled".into()));
+            }
+            match self.shared.inner.try_lock() {
+                Ok(inner) => break inner,
+                Err(std::sync::TryLockError::Poisoned(error)) => break error.into_inner(),
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    thread::sleep(Duration::from_millis(10))
+                }
+            }
+        };
         // 真实请求接手了会话（含预热出来的），不再属于“没用上的预热”
         inner.warm_unused = false;
         let mut retried = false;
         let translated = loop {
+            if cancelled() {
+                break Err(TranslateError::WorkerDied("translation cancelled".into()));
+            }
             let reused = inner.session.is_some();
-            match self.shared.attempt(&mut inner, &chunks, resolved, tgt) {
+            match self
+                .shared
+                .attempt(&mut inner, &chunks, resolved, tgt, cancelled)
+            {
                 Err(TranslateError::WorkerDied(reason)) if reused && !retried => {
                     tracing::warn!(%reason, "翻译 worker 已死亡，重启后重试一次");
                     retried = true;
@@ -1031,6 +1163,10 @@ impl TranslationEngine for WorkerEngine {
             }
         };
         inner.last_used = Instant::now();
+        if !inner.monitor_running && inner.session.is_some() {
+            inner.monitor_running = true;
+            spawn_idle_monitor(Arc::clone(&self.shared));
+        }
         let translated = translated?;
         if translated.len() != work.len() {
             return Err(TranslateError::Inference(
@@ -1039,10 +1175,6 @@ impl TranslationEngine for WorkerEngine {
         }
         for (slot, text) in work.iter().zip(translated) {
             results[*slot] = text;
-        }
-        if !inner.monitor_running && inner.session.is_some() {
-            inner.monitor_running = true;
-            spawn_idle_monitor(Arc::clone(&self.shared));
         }
         Ok(results)
     }
@@ -1642,11 +1774,47 @@ mod tests {
             Err(TranslateError::Inference(_))
         ));
         assert!(engine.is_running());
+        assert!(lock(&engine.shared.inner).monitor_running);
         assert_eq!(
             engine.translate("good", Lang::En, Lang::ZhHans).unwrap(),
             "T:good"
         );
         assert_eq!(launcher.launches(), 1);
+    }
+
+    /// 第一块翻译已发送后取消，立即终止 worker，后续分块不再提交。
+    #[test]
+    fn cancellation_terminates_worker_and_skips_remaining_chunks() {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let mark = Arc::clone(&cancelled);
+        let script: Script = Arc::new(move |command, state| {
+            if matches!(command, Command::Translate { .. }) {
+                mark.store(true, Ordering::SeqCst);
+                state.hang = true;
+            } else {
+                normal()(command, state);
+            }
+        });
+        let (engine, launcher) = engine_with(vec![script], config());
+        let texts = vec!["x".repeat(MAX_REQUEST_BYTES); 2];
+        assert!(
+            engine
+                .translate_batch_cancellable(&texts, Lang::En, Lang::ZhHans, &|| cancelled
+                    .load(Ordering::SeqCst))
+                .is_err()
+        );
+        assert!(!engine.is_running());
+        let states = launcher.states.lock().unwrap();
+        let state = states[0].lock().unwrap();
+        assert!(state.terminated);
+        assert_eq!(
+            state
+                .sent
+                .iter()
+                .filter(|c| matches!(c, Command::Translate { .. }))
+                .count(),
+            1
+        );
     }
 
     /// 协议版本对不上时的说明指出哪一边过旧。
@@ -1882,6 +2050,25 @@ mod tests {
         assert_eq!(load_count(&launcher, 1), 1);
     }
 
+    /// 预热加载模型期间取消也能打断等待，不能等完整加载结束才回收。
+    #[test]
+    fn warm_cancellation_interrupts_model_load() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let mark = Arc::clone(&flag);
+        let script: Script = Arc::new(move |command, state| {
+            if matches!(command, Command::Load { .. }) {
+                mark.store(true, Ordering::SeqCst);
+                state.hang = true;
+            } else {
+                normal()(command, state);
+            }
+        });
+        let (engine, launcher) = engine_with(vec![script], config());
+        assert!(engine.warm(&|| flag.load(Ordering::SeqCst)).is_err());
+        assert!(!engine.is_running());
+        assert!(launcher.state(0).lock().unwrap().terminated);
+    }
+
     /// 加载失败时返回映射后的错误且不留进程，也不留“未使用”标记。
     #[test]
     fn warm_errors_leave_no_process() {
@@ -2044,6 +2231,26 @@ mod tests {
         assert_eq!(exact.len(), 2, "恰好占满一块后新文本另起一块");
         assert!(chunk_texts(&[], 8).unwrap().is_empty());
         assert!(chunk_texts(&["123456789".to_string()], 8).is_err());
+    }
+
+    /// 控制字符转义后的大小决定预算，不能产生超协议行限的请求。
+    #[test]
+    fn chunk_texts_counts_json_escapes() {
+        assert!(chunk_texts(&["\u{0001}".repeat(180_000)], MAX_REQUEST_BYTES).is_err());
+        let texts = vec!["\u{0001}".repeat(20_000); 3];
+        let chunks = chunk_texts(&texts, MAX_REQUEST_BYTES).unwrap();
+        assert_eq!(chunks.len(), 3);
+        for chunk in chunks {
+            let line = encode_command(&Command::Translate {
+                id: u64::MAX,
+                texts: chunk,
+                num_beams: Some(8),
+                src: Some("zh-CN".into()),
+                tgt: Some("en".into()),
+            })
+            .unwrap();
+            assert!(line.len() < 1024 * 1024);
+        }
     }
 
     /// 缓存标识含模型与束宽；束宽被夹到合法范围。

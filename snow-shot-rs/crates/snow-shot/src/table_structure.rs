@@ -277,7 +277,7 @@ fn span_value(token: &str, name: &str) -> Option<usize> {
 ///
 /// # 返回
 /// 表格（文字尚未填充）。
-pub fn layout_cells(tokens: &[String], boxes: &[Option<[f32; 4]>]) -> Table {
+pub fn layout_cells(tokens: &[String], boxes: &[Option<[f32; 4]>]) -> Result<Table, String> {
     let mut table = Table::default();
     let mut occupied = std::collections::HashSet::new();
     let (mut row, mut col) = (0usize, 0usize);
@@ -293,13 +293,21 @@ pub fn layout_cells(tokens: &[String], boxes: &[Option<[f32; 4]>]) -> Table {
             let (mut row_span, mut col_span) = (1usize, 1usize);
             if token != TOKEN_PLAIN_CELL {
                 let mut j = i + 1;
-                while j < tokens.len() && !tokens[j].starts_with('>') {
+                while j < tokens.len() && tokens[j] != ">" {
+                    if !tokens[j].trim_start().starts_with("colspan=")
+                        && !tokens[j].trim_start().starts_with("rowspan=")
+                    {
+                        return Err("unterminated table cell attributes".into());
+                    }
                     if let Some(v) = span_value(&tokens[j], "colspan") {
                         col_span = v;
                     } else if let Some(v) = span_value(&tokens[j], "rowspan") {
                         row_span = v;
                     }
                     j += 1;
+                }
+                if j == tokens.len() {
+                    return Err("unterminated table cell attributes".into());
                 }
                 i = j;
             }
@@ -326,7 +334,7 @@ pub fn layout_cells(tokens: &[String], boxes: &[Option<[f32; 4]>]) -> Table {
         }
         i += 1;
     }
-    table
+    Ok(table)
 }
 
 /// 一段 OCR 文字（原图像素坐标）。
@@ -553,7 +561,7 @@ pub fn assemble_table(
     pieces: &[OcrPiece],
 ) -> Result<Option<Table>, String> {
     let structure = decode_structure(output, scale)?;
-    let mut table = layout_cells(&structure.tokens, &structure.cell_boxes);
+    let mut table = layout_cells(&structure.tokens, &structure.cell_boxes)?;
     if table.cells.is_empty() {
         return Ok(None);
     }
@@ -728,7 +736,7 @@ mod tests {
         .iter()
         .map(|s| (*s).to_string())
         .collect();
-        let t = layout_cells(&tokens, &[]);
+        let t = layout_cells(&tokens, &[]).expect("结构有效");
         assert_eq!((t.rows, t.cols), (3, 3));
         let at = |r: usize, c: usize| t.cells.iter().find(|x| x.row == r && x.col == c);
         assert_eq!(at(0, 0).map(|c| c.col_span), Some(2));
@@ -737,6 +745,25 @@ mod tests {
         // 第三行：第 0 列被上面的 rowspan 占住，所以从第 1 列开始
         assert!(at(2, 0).is_none());
         assert!(at(2, 1).is_some() && at(2, 2).is_some());
+    }
+
+    /// 缺少属性结束符时不能跨单元格、跨行或吞掉序列末尾。
+    #[test]
+    fn layout_rejects_unterminated_attributes() {
+        for tail in [
+            vec![],
+            vec!["</td>"],
+            vec!["</tr>"],
+            vec!["<td></td>"],
+            vec!["<td", ">"],
+        ] {
+            let tokens: Vec<String> = [vec!["<tr>", "<td", " colspan=\"2\""], tail]
+                .concat()
+                .into_iter()
+                .map(str::to_owned)
+                .collect();
+            assert!(layout_cells(&tokens, &[]).is_err(), "{tokens:?}");
+        }
     }
 
     /// 匹配：按 IoU 归格、同格多段合并、表头上方的标题与无交集的文字丢弃。
@@ -761,7 +788,7 @@ mod tests {
             Some([0.0, 90.0, 100.0, 130.0]),
             Some([100.0, 90.0, 200.0, 130.0]),
         ];
-        let mut t = layout_cells(&tokens, &boxes);
+        let mut t = layout_cells(&tokens, &boxes).expect("结构有效");
         let piece = |x1: f32, y1: f32, x2: f32, y2: f32, s: &str| OcrPiece {
             rect: [x1, y1, x2, y2],
             text: s.to_string(),
@@ -861,6 +888,55 @@ mod tests {
         );
         let none = output_for(&[]);
         assert_eq!(assemble_table(&none, 1.0, &pieces), Ok(None));
+    }
+
+    /// 固定模型 token 黄金样例同时验证行列、跨度、OCR 匹配和全部导出文本。
+    #[test]
+    fn assemble_spanning_table_golden() {
+        let out = output_for(&[
+            ("<tr>", [0.0; 8]),
+            ("<td", quad(0.0, 0.0, 200.0, 40.0)),
+            (" colspan=\"2\"", [0.0; 8]),
+            (">", [0.0; 8]),
+            ("</td>", [0.0; 8]),
+            ("</tr>", [0.0; 8]),
+            ("<tr>", [0.0; 8]),
+            ("<td></td>", quad(0.0, 40.0, 100.0, 80.0)),
+            ("<td></td>", quad(100.0, 40.0, 200.0, 80.0)),
+            ("</tr>", [0.0; 8]),
+        ]);
+        let pieces = [
+            OcrPiece {
+                rect: [5.0, 5.0, 195.0, 35.0],
+                text: "Stock".into(),
+            },
+            OcrPiece {
+                rect: [5.0, 45.0, 95.0, 75.0],
+                text: "Apple".into(),
+            },
+            OcrPiece {
+                rect: [105.0, 45.0, 195.0, 75.0],
+                text: "3".into(),
+            },
+        ];
+        let table = assemble_table(&out, 1.0, &pieces).unwrap().unwrap();
+        assert_eq!((table.rows, table.cols, table.cells.len()), (2, 2, 3));
+        assert_eq!(
+            (
+                table.cells[0].row,
+                table.cells[0].col,
+                table.cells[0].row_span,
+                table.cells[0].col_span
+            ),
+            (0, 0, 1, 2)
+        );
+        assert_eq!((table.cells[2].row, table.cells[2].col), (1, 1));
+        assert_eq!(to_tsv(&table), "Stock\t\nApple\t3");
+        assert_eq!(
+            to_markdown(&table),
+            "| Stock |  |\n| --- | --- |\n| Apple | 3 |"
+        );
+        assert!(to_html(&table).contains("<td colspan=\"2\">Stock</td>"));
     }
 
     /// 工作进程 JSON 可解析，坏 JSON 报错。

@@ -90,6 +90,7 @@ pub mod ort_runtime;
 pub mod overlay_keymap;
 pub mod overlay_probe;
 pub mod overlay_view;
+mod pin_action_bar;
 pub mod pinned_controls;
 pub mod pinned_keymap;
 pub mod pinned_manage;

@@ -20,7 +20,9 @@ use snow_capability::CapabilityRegistry;
 
 // ---- 精选 GPUI 子集（视图层使用）----
 /// 应用资源源与图标资源检查（antd / 自绘图标路径约定见 `assets` 模块）。
-pub use crate::assets::{ANTD_ICON_PREFIX, AppAssets, OWN_ICON_PREFIX, icon_asset_exists};
+pub use crate::assets::{
+    ANTD_ICON_PREFIX, AppAssets, GRIP_VERTICAL_ICON, OWN_ICON_PREFIX, icon_asset_exists,
+};
 /// 锚定弹层宿主（触发元素 + 延迟绘制的弹出内容，自带窗口边缘避让与遮挡）。
 pub use gpui_kit::base::Popup;
 /// 组件库的“取消”动作（Esc）：向焦点所在的下拉浮层派发即可关闭它。
@@ -190,6 +192,11 @@ impl ShellWindow {
     /// ```
     pub fn set_input_transparent(&self, transparent: bool) -> Result<(), ShellError> {
         native::set_input_transparent(self.native_hwnd()?, transparent)
+    }
+
+    /// 设置窗口坐标系物理区域；区域外不绘制且鼠标穿透，须在视图借用外调用。
+    pub fn set_hit_region(&self, region: &crate::geometry::Region) -> Result<(), ShellError> {
+        native::set_window_region(self.native_hwnd()?, Some(region))
     }
 
     /// 设置整窗不透明度，用于让不支持逐像素透明的窗口也呈现半透明。

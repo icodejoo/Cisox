@@ -21,6 +21,21 @@ use snow_ui::shell::geometry::PhysicalRect;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
+/// 根据原图与 OCR / 译文生成覆盖图，不依赖任何窗口状态。
+pub fn build_translated_rgba(
+    width: u32,
+    height: u32,
+    mut rgba: Vec<u8>,
+    boxes: &[OcrTextBox],
+    pairs: &[TranslatedParagraph],
+) -> Result<Vec<u8>, Vec<u8>> {
+    if render_with_system_font(&mut rgba, width, height, boxes, pairs) > 0 {
+        Ok(rgba)
+    } else {
+        Err(rgba)
+    }
+}
+
 /// 量字形度量用的参考字号（像素）。
 const REF_FONT_PX: u32 = 64;
 /// 实测墨迹失败时，本地模型（PP-OCR）行框高度与“满行墨迹高度”的比值：DB 检测会外扩，
@@ -762,6 +777,16 @@ pub fn detail_panel_origin(
 
 #[cfg(test)]
 mod tests {
+    /// 无可绘制文字时直接返还原缓冲，失败回退不克隆整幅图像。
+    #[test]
+    fn empty_render_reuses_original_allocation() {
+        let pixels = vec![255u8; 16 * 12 * 4];
+        let pointer = pixels.as_ptr();
+        let result = build_translated_rgba(16, 12, pixels, &[], &[]).unwrap_err();
+        assert_eq!(result.as_ptr(), pointer);
+        assert_eq!(result, vec![255u8; 16 * 12 * 4]);
+    }
+
     use super::*;
     use crate::translate_typeset::is_cjk_like;
 
