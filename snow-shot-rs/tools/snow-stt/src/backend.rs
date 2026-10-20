@@ -31,6 +31,16 @@ pub trait SttBackend {
 
     /// 结束输入并冲刷尾部，返回剩余事件（通常是最后一句 `Final`）。
     fn finish(&mut self) -> Vec<SttEvent>;
+
+    /// 开始冲刷；异步后端只关闭输入，后续结果由 poll 持续交出。
+    fn begin_finish(&mut self) -> Vec<SttEvent> {
+        self.finish()
+    }
+
+    /// 是否仍有收尾解码未完成；默认同步后端已经结束。
+    fn finishing(&self) -> bool {
+        false
+    }
 }
 
 /// 流式 transducer 模型目录里挑出来的四个文件（绝对路径文本）。

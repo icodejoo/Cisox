@@ -6,6 +6,7 @@
 //! 方便主循环在两批之间响应 STOP / CANCEL），再交出实时样本。
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -152,6 +153,8 @@ pub struct PumpedSource {
     hub: Hub,
     /// 采集线程句柄，丢弃本来源时等它退出（保证麦克风先于进程退出释放）。
     worker: Option<JoinHandle<()>>,
+    /// stdin 线程收到 STOP 即置位，加载模型期间也生效。
+    frozen: Arc<AtomicBool>,
 }
 
 impl PumpedSource {
@@ -173,10 +176,21 @@ impl PumpedSource {
     ///     cap_samples(120),
     /// );
     /// ```
+    #[cfg(test)]
     pub fn start(
         open: impl FnOnce() -> Result<Box<dyn AudioSource>, String> + Send + 'static,
         on_open: impl FnOnce(&Result<(), String>) + Send + 'static,
         cap_samples: usize,
+    ) -> Self {
+        Self::start_controlled(open, on_open, cap_samples, Arc::new(AtomicBool::new(false)))
+    }
+
+    /// 使用命令读取线程共享的冻结标记启动采集。
+    pub fn start_controlled(
+        open: impl FnOnce() -> Result<Box<dyn AudioSource>, String> + Send + 'static,
+        on_open: impl FnOnce(&Result<(), String>) + Send + 'static,
+        cap_samples: usize,
+        frozen: Arc<AtomicBool>,
     ) -> Self {
         let hub: Hub = Arc::new((
             Mutex::new(Shared {
@@ -188,16 +202,21 @@ impl PumpedSource {
             Condvar::new(),
         ));
         let thread_hub = Arc::clone(&hub);
+        let thread_frozen = Arc::clone(&frozen);
         let worker = std::thread::Builder::new()
             .name("snow-stt-preroll".into())
-            .spawn(move || pump(&thread_hub, open, on_open))
+            .spawn(move || pump(&thread_hub, open, on_open, &thread_frozen))
             .map_err(|e| {
                 let mut g = lock(&hub);
                 g.opened = true;
                 g.end = Some(End::Failed(format!("无法创建采集线程: {e}")));
             })
             .ok();
-        Self { hub, worker }
+        Self {
+            hub,
+            worker,
+            frozen,
+        }
     }
 
     /// 缓存里等着被取走的样本数（测试用）。
@@ -218,6 +237,7 @@ fn pump(
     hub: &Hub,
     open: impl FnOnce() -> Result<Box<dyn AudioSource>, String>,
     on_open: impl FnOnce(&Result<(), String>),
+    frozen: &AtomicBool,
 ) {
     let mut inner = match open() {
         Ok(source) => {
@@ -234,7 +254,7 @@ fn pump(
     };
     let mut warned = false;
     loop {
-        if lock(hub).stop {
+        if frozen.load(Ordering::Acquire) || lock(hub).stop {
             return;
         }
         match inner.next(PUMP_POLL) {
@@ -242,6 +262,9 @@ fn pump(
             SourceEvent::Samples(samples) => {
                 let lost = {
                     let mut g = lock(hub);
+                    if frozen.load(Ordering::Acquire) || g.stop {
+                        return;
+                    }
                     let lost = g.ring.push(&samples);
                     hub.1.notify_all();
                     lost
@@ -277,6 +300,16 @@ fn finish(hub: &Hub, end: End) {
 }
 
 impl AudioSource for PumpedSource {
+    /// 停止后缓存不再增长，并在开始解码尾部前释放麦克风。
+    fn stop(&mut self) {
+        self.frozen.store(true, Ordering::Release);
+        lock(&self.hub).stop = true;
+        self.hub.1.notify_all();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+
     /// 先交出积压（每次至多 [`CATCHUP_BATCH_SAMPLES`] 个，最旧的先出），积压取尽后交出实时样本；
     /// 缓存空了再等最多 `timeout`。采集线程已结束且缓存取尽后，返回 `Ended` / `Failed`。
     fn next(&mut self, timeout: Duration) -> SourceEvent {
@@ -311,6 +344,7 @@ impl AudioSource for PumpedSource {
 
     /// 取走缓存里剩下的全部样本（STOP 时用，保证积压也进识别）。
     fn drain_pending(&mut self) -> Vec<f32> {
+        self.stop();
         let mut g = lock(&self.hub);
         let n = g.ring.len();
         g.ring.take(n)
@@ -320,6 +354,7 @@ impl AudioSource for PumpedSource {
 impl Drop for PumpedSource {
     /// 通知采集线程停止并等它退出（来源随线程释放，麦克风就此关闭）；有溢出丢弃时在 stderr 汇总一行。
     fn drop(&mut self) {
+        self.stop();
         let dropped = {
             let mut g = lock(&self.hub);
             g.stop = true;
@@ -340,6 +375,59 @@ impl Drop for PumpedSource {
 
 #[cfg(test)]
 mod tests {
+    /// 模拟模型仍在加载时收到 STOP：在途批次被丢弃，来源释放且已缓存样本保留。
+    #[test]
+    fn stop_during_load_freezes_boundary_and_releases_source() {
+        /// 在途音频包与释放确认通道。
+        struct InFlight {
+            entered: mpsc::Sender<()>,
+            release: mpsc::Receiver<()>,
+            dropped: mpsc::Sender<()>,
+            first: bool,
+        }
+        impl Drop for InFlight {
+            /// 用通道确认麦克风替身已释放。
+            fn drop(&mut self) {
+                self.dropped.send(()).unwrap();
+            }
+        }
+        impl AudioSource for InFlight {
+            /// 第一批先入缓存，第二批阻塞到 STOP 到达。
+            fn next(&mut self, _: Duration) -> SourceEvent {
+                if self.first {
+                    self.first = false;
+                    return SourceEvent::Samples(vec![1.0; 10]);
+                }
+                self.entered.send(()).unwrap();
+                self.release.recv().unwrap();
+                SourceEvent::Samples(vec![2.0; 10])
+            }
+        }
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (dropped_tx, dropped_rx) = mpsc::channel();
+        let frozen = Arc::new(AtomicBool::new(false));
+        let mut source = PumpedSource::start_controlled(
+            move || {
+                Ok(Box::new(InFlight {
+                    entered: entered_tx,
+                    release: release_rx,
+                    dropped: dropped_tx,
+                    first: true,
+                }))
+            },
+            |_| {},
+            100,
+            Arc::clone(&frozen),
+        );
+        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        frozen.store(true, Ordering::Release);
+        release_tx.send(()).unwrap();
+        dropped_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(source.drain_pending(), vec![1.0; 10]);
+        assert!(source.drain_pending().is_empty());
+    }
+
     use super::*;
     use std::sync::mpsc;
     use std::time::Instant;

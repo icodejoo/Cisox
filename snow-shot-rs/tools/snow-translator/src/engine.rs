@@ -138,16 +138,28 @@ pub fn classify_error(message: &str, default: ErrorKind) -> EngineError {
 /// if let Some(p) = locate_ort_dylib() { println!("{}", p.display()); }
 /// ```
 pub fn locate_ort_dylib() -> Option<PathBuf> {
+    let cwd = std::env::current_dir().ok()?;
     for var in [ENV_ORT_DYLIB, ENV_ORT_DYLIB_STD] {
         if let Some(p) = std::env::var_os(var).map(PathBuf::from)
-            && p.is_file()
+            && let Some(path) = canonical_dylib(&p, &cwd)
         {
-            return Some(p);
+            return Some(path);
         }
     }
     let exe = std::env::current_exe().ok()?;
-    let candidate = exe.parent()?.join(ORT_DYLIB_NAME);
-    candidate.is_file().then_some(candidate)
+    canonical_dylib(&exe.parent()?.join(ORT_DYLIB_NAME), &cwd)
+}
+
+/// 检查和加载使用同一规范化绝对路径，避免 ORT 相对路径优先搜索 exe 目录。
+fn canonical_dylib(path: &Path, cwd: &Path) -> Option<PathBuf> {
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    };
+    path.is_file()
+        .then(|| std::fs::canonicalize(path).ok())
+        .flatten()
 }
 
 /// 进程内只初始化一次 ORT 环境。
@@ -758,7 +770,7 @@ fn step_logits<'o>(
     outputs: &'o SessionOutputs<'_>,
     rows: usize,
 ) -> Result<(&'o [f32], usize), EngineError> {
-    let (shape, logits) = outputs["logits"]
+    let (shape, logits) = crate::chat::require_output(outputs.get("logits"), "logits")?
         .try_extract_tensor::<f32>()
         .map_err(|e| decode_err(&e))?;
     let vocab = *shape.last().unwrap_or(&0) as usize;
@@ -864,6 +876,14 @@ impl Engine {
         let gen_params = resolve_gen_params(&manifest, dir)?;
         let (tokenizer, encoder, decoder) = load_parts(&manifest, dir)?;
 
+        crate::chat::check_output_names(
+            &decoder
+                .outputs()
+                .iter()
+                .map(|o| o.name())
+                .collect::<Vec<_>>(),
+            &[],
+        )?;
         let dec_names: Vec<&str> = decoder.inputs().iter().map(|o| o.name()).collect();
         for required in ["input_ids", "encoder_hidden_states", "use_cache_branch"] {
             if !dec_names.contains(&required) {
@@ -988,33 +1008,46 @@ impl Engine {
     }
 
     /// 带收缩标记的最小解码器空跑。
-    fn trim_run(&mut self, dim: usize) -> Result<(), ort::Error> {
-        let mut opts = RunOptions::new()?;
-        opts.set(ARENA_SHRINK_KEY, ARENA_SHRINK_VALUE)?;
+    fn trim_run(&mut self, dim: usize) -> Result<(), EngineError> {
+        let mut opts = RunOptions::new().map_err(|e| decode_err(&e))?;
+        opts.set(ARENA_SHRINK_KEY, ARENA_SHRINK_VALUE)
+            .map_err(|e| decode_err(&e))?;
+        let run = crate::cancellation::active_options(opts)?;
         let hidden = vec![0f32; dim];
         let mut inputs: DecoderInputs<'_> = vec![
             (
                 "input_ids".into(),
-                Tensor::from_array(([1usize, 1], vec![self.gen_params.start]))?.into(),
+                Tensor::from_array(([1usize, 1], vec![self.gen_params.start]))
+                    .map_err(|e| decode_err(&e))?
+                    .into(),
             ),
             (
                 "encoder_attention_mask".into(),
-                Tensor::from_array(([1usize, 1], vec![1i64]))?.into(),
+                Tensor::from_array(([1usize, 1], vec![1i64]))
+                    .map_err(|e| decode_err(&e))?
+                    .into(),
             ),
             (
                 "encoder_hidden_states".into(),
-                Tensor::from_array(([1usize, 1, dim], hidden))?.into(),
+                Tensor::from_array(([1usize, 1, dim], hidden))
+                    .map_err(|e| decode_err(&e))?
+                    .into(),
             ),
             (
                 "use_cache_branch".into(),
-                Tensor::from_array(([1usize], vec![false]))?.into(),
+                Tensor::from_array(([1usize], vec![false]))
+                    .map_err(|e| decode_err(&e))?
+                    .into(),
             ),
         ];
         for name in &self.past_names {
-            let empty = empty_kv(1, self.kv_heads as usize, self.kv_head_dim as usize)?;
+            let empty = empty_kv(1, self.kv_heads as usize, self.kv_head_dim as usize)
+                .map_err(|e| decode_err(&e))?;
             inputs.push((name.as_str().into(), empty.into()));
         }
-        self.decoder.run_with_options(inputs, &opts)?;
+        self.decoder
+            .run_with_options(inputs, &run.options)
+            .map_err(|e| decode_err(&e))?;
         Ok(())
     }
 
@@ -1070,6 +1103,7 @@ impl Engine {
         // 全角标点后处理在片段间共享引号计数，跨句的引号才能成对
         let mut quotes = 0usize;
         for seg in segments {
+            crate::cancellation::check()?;
             let translated = self.translate_segment(&seg.text, cap, beams, &plan)?;
             let translated = match &plan.m2m {
                 Some(cfg) => postprocess_m2m(&translated, cfg, &mut quotes),
@@ -1113,6 +1147,7 @@ impl Engine {
         let eos = self.gen_params.eos as u32;
         let mut pieces = Vec::with_capacity(chunks.len());
         for chunk in chunks {
+            crate::cancellation::check()?;
             let mut input = plan.prefix_ids.clone();
             input.extend_from_slice(&chunk);
             input.push(eos);
@@ -1175,7 +1210,11 @@ impl Engine {
             ));
         }
         let hidden: Vec<f32> = {
-            let outputs = self.encoder.run(enc_inputs).map_err(|e| decode_err(&e))?;
+            let run = crate::cancellation::active_run()?;
+            let outputs = self
+                .encoder
+                .run_with_options(enc_inputs, &run.options)
+                .map_err(|e| decode_err(&e))?;
             let (_, data) = outputs[0]
                 .try_extract_tensor::<f32>()
                 .map_err(|e| decode_err(&e))?;
@@ -1227,8 +1266,13 @@ impl Engine {
         // 每条存活束的下一步输入 token；不足 width 的行用第 0 行补齐
         let mut current: Vec<i64> = vec![gp.start; width];
         for step in 0..max_new {
+            crate::cancellation::check()?;
             let inputs = decoder_inputs(&current, &enc, step > 0, &self.past_names, &past)?;
-            let mut outputs = self.decoder.run(inputs).map_err(|e| decode_err(&e))?;
+            let run = crate::cancellation::active_run()?;
+            let mut outputs = self
+                .decoder
+                .run_with_options(inputs, &run.options)
+                .map_err(|e| decode_err(&e))?;
 
             let cands: Vec<Vec<Candidate>> = if let (0, Some(tok)) = (step, forced) {
                 // 首个生成位强制为目标语言码，本步 logits 不参与选择
@@ -1303,9 +1347,14 @@ impl Engine {
         let mut generated: Vec<u32> = Vec::new();
         let mut current = gp.start;
         for step in 0..max_new {
+            crate::cancellation::check()?;
             let inputs = decoder_inputs(&[current], &enc, step > 0, &self.past_names, &past)?;
 
-            let mut outputs = self.decoder.run(inputs).map_err(|e| decode_err(&e))?;
+            let run = crate::cancellation::active_run()?;
+            let mut outputs = self
+                .decoder
+                .run_with_options(inputs, &run.options)
+                .map_err(|e| decode_err(&e))?;
             let next = if let (0, Some(tok)) = (step, forced) {
                 // 首个生成位强制为目标语言码
                 tok as i64
@@ -1423,6 +1472,38 @@ pub(crate) fn build_session(path: &Path, exec: &ExecutionOptions) -> Result<Sess
 
 #[cfg(test)]
 mod tests {
+    /// 工作目录和 exe 目录有同名 DLL 时固定加载被检查的工作目录文件。
+    #[test]
+    fn relative_dll_path_is_pinned_to_checked_file() {
+        let root =
+            std::env::temp_dir().join(format!("translator-dll-review-{}", std::process::id()));
+        let cwd = root.join("cwd");
+        let exe = root.join("exe");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::create_dir_all(&exe).unwrap();
+        std::fs::write(cwd.join("runtime.dll"), b"checked").unwrap();
+        std::fs::write(exe.join("runtime.dll"), b"other").unwrap();
+        let selected = canonical_dylib(Path::new("runtime.dll"), &cwd).unwrap();
+        assert!(selected.is_absolute());
+        assert_eq!(std::fs::read(&selected).unwrap(), b"checked");
+        assert_ne!(
+            selected,
+            std::fs::canonicalize(exe.join("runtime.dll")).unwrap()
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 缺少 logits 在加载期拒绝，运行期按名取值也返回结构化错误。
+    #[test]
+    fn missing_seq2seq_logits_is_a_structured_error() {
+        let error = crate::chat::check_output_names(&["present.0"], &[]).unwrap_err();
+        assert_eq!(error.kind, ErrorKind::LoadFailed);
+        assert!(error.message.contains("logits"));
+        let error = crate::chat::require_output::<&DynValue>(None, "logits").unwrap_err();
+        assert_eq!(error.kind, ErrorKind::DecodeFailed);
+        assert!(error.message.contains("logits"));
+    }
+
     use super::*;
     use crate::manifest::{GenerationOverride, TGT_TOKEN_PLACEHOLDER};
     use std::collections::HashMap;

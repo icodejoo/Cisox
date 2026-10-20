@@ -130,6 +130,7 @@ pub fn greedy_decode(
     let mut past_len = 0usize;
     let mut feed: Vec<u32> = prompt.to_vec();
     for _ in 0..params.max_new {
+        crate::cancellation::check()?;
         let logits = model.forward(&feed, past_len)?;
         if seen.len() < logits.len() {
             seen.resize(logits.len(), false);
@@ -191,7 +192,7 @@ pub fn strip_specials(text: &str, specials: &[String]) -> String {
 ///
 /// # 参数
 /// - `segments`：分句结果。
-/// - `limit`：每组最多 token 数（单句超限时独占一组，不再硬切）。
+/// - `limit`：每组最多 token 数（超限单句须先经 split_long_segments 切分）。
 /// - `count`：统计文本 token 数的函数。
 ///
 /// # 返回
@@ -205,11 +206,18 @@ pub fn pack_segments(
     segments: &[Segment],
     limit: usize,
     count: impl Fn(&str) -> usize,
-) -> Vec<(String, String)> {
+) -> Result<Vec<(String, String)>, EngineError> {
     let mut groups: Vec<(String, String)> = Vec::new();
     let mut cur = String::new();
     let mut cur_sep = String::new();
     for seg in segments {
+        crate::cancellation::check()?;
+        if count(&seg.text) > limit {
+            return Err(EngineError::new(
+                ErrorKind::BadRequest,
+                "segment exceeds max_input_tokens",
+            ));
+        }
         let merged = format!("{cur}{cur_sep}{SEGMENT_JOINER}{}", seg.text);
         if !cur.is_empty() && count(&merged) > limit {
             groups.push((std::mem::take(&mut cur), std::mem::take(&mut cur_sep)));
@@ -222,7 +230,71 @@ pub fn pack_segments(
     if !cur.is_empty() {
         groups.push((cur, cur_sep));
     }
-    groups
+    Ok(groups)
+}
+
+/// 无标点长句按分词偏移继续切分；重分词后再次校验，保留原文 UTF-8 与末尾分隔符。
+fn split_long_segments(
+    tokenizer: &Tokenizer,
+    segments: &[Segment],
+    limit: usize,
+) -> Result<Vec<Segment>, EngineError> {
+    let mut result = Vec::new();
+    for segment in segments {
+        crate::cancellation::check()?;
+        let encoded = tokenizer
+            .encode(segment.text.as_str(), false)
+            .map_err(|e| decode_err(&e))?;
+        let offsets = encoded.get_offsets();
+        let mut start = 0;
+        while start < segment.text.len() {
+            crate::cancellation::check()?;
+            if limit == 0 {
+                return Err(EngineError::new(
+                    ErrorKind::BadRequest,
+                    "max_input_tokens must be positive",
+                ));
+            }
+            let first = offsets.partition_point(|&(_, end)| end <= start);
+            let mut end = offsets
+                .get(first.saturating_add(limit - 1))
+                .map(|p| p.1)
+                .unwrap_or(segment.text.len())
+                .min(segment.text.len());
+            while end > start {
+                while end > start && !segment.text.is_char_boundary(end) {
+                    end -= 1;
+                }
+                if end == start {
+                    break;
+                }
+                let n = tokenizer
+                    .encode(&segment.text[start..end], false)
+                    .map_err(|e| decode_err(&e))?
+                    .len();
+                if n <= limit {
+                    break;
+                }
+                end -= 1;
+            }
+            if end <= start {
+                return Err(EngineError::new(
+                    ErrorKind::BadRequest,
+                    "max_input_tokens cannot fit one character",
+                ));
+            }
+            result.push(Segment {
+                text: segment.text[start..end].into(),
+                sep: if end == segment.text.len() {
+                    segment.sep.clone()
+                } else {
+                    String::new()
+                },
+            });
+            start = end;
+        }
+    }
+    Ok(result)
 }
 
 /// 要求模型输出存在；缺失时返回 `DecodeFailed`，避免按索引取值 panic 或静默丢弃 KV。
@@ -233,7 +305,7 @@ pub fn pack_segments(
 ///
 /// # 返回
 /// 取到的值；缺失返回 `DecodeFailed`。
-fn require_output<T>(value: Option<T>, name: &str) -> Result<T, EngineError> {
+pub(crate) fn require_output<T>(value: Option<T>, name: &str) -> Result<T, EngineError> {
     value.ok_or_else(|| {
         EngineError::new(
             ErrorKind::DecodeFailed,
@@ -250,7 +322,10 @@ fn require_output<T>(value: Option<T>, name: &str) -> Result<T, EngineError> {
 ///
 /// # 返回
 /// 通过返回 `Ok`；缺失返回 `LoadFailed` 并点名。
-fn check_output_names(outputs: &[&str], present_names: &[String]) -> Result<(), EngineError> {
+pub(crate) fn check_output_names(
+    outputs: &[&str],
+    present_names: &[String],
+) -> Result<(), EngineError> {
     let missing = std::iter::once(OUTPUT_LOGITS)
         .chain(present_names.iter().map(String::as_str))
         .find(|n| !outputs.contains(n));
@@ -348,7 +423,11 @@ impl LogitsSource for ChatSession {
         for (name, value) in self.past_names.iter().zip(self.past.iter()) {
             inputs.push((name.as_str().into(), value.into()));
         }
-        let mut outputs = self.session.run(inputs).map_err(|e| decode_err(&e))?;
+        let run = crate::cancellation::active_run()?;
+        let mut outputs = self
+            .session
+            .run_with_options(inputs, &run.options)
+            .map_err(|e| decode_err(&e))?;
         {
             let logits = require_output(outputs.get(OUTPUT_LOGITS), OUTPUT_LOGITS)?;
             let (shape, data) = logits
@@ -554,11 +633,16 @@ impl ChatEngine {
         if self.count_tokens(whole) <= self.max_input_tokens {
             return self.translate_one(whole, tgt, max_new);
         }
-        let segments = split_sentences(text);
+        let segments = split_long_segments(
+            &self.tokenizer,
+            &split_sentences(text),
+            self.max_input_tokens,
+        )?;
         let limit = self.max_input_tokens;
-        let groups = pack_segments(&segments, limit, |t| self.count_tokens(t));
+        let groups = pack_segments(&segments, limit, |t| self.count_tokens(t))?;
         let mut parts = Vec::with_capacity(groups.len());
         for (group, sep) in groups {
+            crate::cancellation::check()?;
             parts.push((self.translate_one(&group, tgt, max_new)?, sep));
         }
         Ok(join_translated(&parts, crate::text::is_cjk_lang(tgt)))
@@ -571,6 +655,13 @@ impl ChatEngine {
         tgt: &str,
         max_new: usize,
     ) -> Result<String, EngineError> {
+        crate::cancellation::check()?;
+        if self.count_tokens(text) > self.max_input_tokens {
+            return Err(EngineError::new(
+                ErrorKind::BadRequest,
+                "source exceeds max_input_tokens",
+            ));
+        }
         let prompt = self.encode_prompt(text, tgt)?;
         let params = DecodeParams {
             max_new,
@@ -633,6 +724,69 @@ pub fn resolve_decode_params(manifest: &Manifest, dir: &Path) -> Result<DecodePa
 
 #[cfg(test)]
 mod tests {
+    /// 推理已执行一步后发生管道取消，后续 token 不再调用模型。
+    #[test]
+    fn cancellation_interrupts_token_decode() {
+        /// 首步模拟收到 EOF 的模型替身。
+        struct CancelAfterFirst {
+            state: std::sync::Arc<crate::cancellation::Cancellation>,
+            calls: usize,
+        }
+        impl LogitsSource for CancelAfterFirst {
+            /// 当前步结束后通知取消。
+            fn forward(&mut self, _: &[u32], _: usize) -> Result<&[f32], EngineError> {
+                self.calls += 1;
+                self.state.cancel();
+                Ok(&[0.0, 10.0])
+            }
+        }
+        let state = std::sync::Arc::new(crate::cancellation::Cancellation::default());
+        let mut model = CancelAfterFirst {
+            state: std::sync::Arc::clone(&state),
+            calls: 0,
+        };
+        let result =
+            crate::cancellation::scope(state, || greedy_decode(&mut model, &[1], &params(100)));
+        assert!(result.is_err());
+        assert_eq!(model.calls, 1);
+    }
+
+    /// 无标点中英长文本按 token 切分，重拼字节完全一致，打包后仍不超限。
+    #[test]
+    fn unpunctuated_text_is_split_at_token_boundaries() {
+        let vocab: tokenizers::models::bpe::Vocab = [
+            ("a".to_string(), 0),
+            ("b".to_string(), 1),
+            ("中".to_string(), 2),
+        ]
+        .into_iter()
+        .collect();
+        let tokenizer = Tokenizer::new(
+            tokenizers::models::bpe::BPE::builder()
+                .vocab_and_merges(vocab, vec![])
+                .build()
+                .unwrap(),
+        );
+        let text = "ab中".repeat(2000);
+        let segments = split_long_segments(&tokenizer, &split_sentences(&text), 17).unwrap();
+        let groups =
+            pack_segments(&segments, 17, |s| tokenizer.encode(s, false).unwrap().len()).unwrap();
+        assert!(groups.len() > 1);
+        assert!(
+            groups
+                .iter()
+                .all(|(s, _)| tokenizer.encode(s.as_str(), false).unwrap().len() <= 17)
+        );
+        assert_eq!(
+            groups
+                .iter()
+                .map(|(s, sep)| format!("{s}{sep}"))
+                .collect::<String>(),
+            text
+        );
+        assert!(split_long_segments(&tokenizer, &split_sentences("a"), 0).is_err());
+    }
+
     use super::*;
 
     /// 假模型：按脚本逐步给出“想选的 token”，并记录每步喂入的长度与 past_len。
@@ -809,19 +963,17 @@ mod tests {
         assert_eq!(strip_specials("plain text", &sp), "plain text");
     }
 
-    /// 打包：连续句子在上限内合并，超限换组，保留末句分隔符；单句超限独占一组。
+    /// 打包：连续句子在上限内合并，超限换组，保留末句分隔符；超限单句由调用方先切分。
     #[test]
     fn packs_segments_under_limit() {
         let segs = split_sentences("One. Two. Three.\nFour.");
         let by_len = |t: &str| t.len();
-        let all = pack_segments(&segs, 1000, by_len);
+        let all = pack_segments(&segs, 1000, by_len).unwrap();
         assert_eq!(all.len(), 1);
-        let small = pack_segments(&segs, 9, by_len);
+        let small = pack_segments(&segs, 9, by_len).unwrap();
         assert!(small.len() > 1);
         assert!(small.iter().all(|(t, _)| !t.is_empty()));
-        let tiny = pack_segments(&segs, 1, by_len);
-        assert_eq!(tiny.len(), 4);
-        assert_eq!(tiny[2].1, "\n");
+        assert!(pack_segments(&segs, 1, by_len).is_err());
     }
 
     /// 解码参数优先级：清单 > generation_config.json；缺省 repetition_penalty 1.05；缺 eos 报错。

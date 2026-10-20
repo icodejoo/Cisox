@@ -10,7 +10,7 @@
 //! 结构解码、与文字框的匹配都在主程序里做（纯函数，可离屏测试），这里不含任何业务逻辑。
 
 use ort::session::Session;
-use ort::value::Tensor;
+use ort::value::{Tensor, TensorElementType, ValueType};
 use serde::Serialize;
 use std::io::{BufWriter, Read, Write};
 use std::path::PathBuf;
@@ -98,6 +98,32 @@ fn read_input() -> Result<Vec<f32>, String> {
         .collect())
 }
 
+/// 验证模型仅接受一张固定尺寸的浮点图像，动态维度允许由实际输入确定。
+fn validate_inputs<'a>(inputs: &[(&'a str, &ValueType)]) -> Result<&'a str, String> {
+    let (name, dtype) = inputs.first().ok_or("incompatible model: no inputs")?;
+    if inputs.len() != 1 {
+        return Err(format!(
+            "incompatible model: expected 1 input, got {}",
+            inputs.len()
+        ));
+    }
+    let ValueType::Tensor {
+        ty: TensorElementType::Float32,
+        shape,
+        ..
+    } = dtype
+    else {
+        return Err("incompatible model: expected float32 tensor input".into());
+    };
+    let expected = [1, CHANNELS as i64, SIDE as i64, SIDE as i64];
+    if shape.len() != expected.len() || shape.iter().zip(expected).any(|(&a, b)| a >= 0 && a != b) {
+        return Err(format!(
+            "incompatible model: expected [1,3,488,488], got {shape:?}"
+        ));
+    }
+    Ok(name)
+}
+
 /// 加载模型、推理并组装响应。
 fn run(args: &Args, input: Vec<f32>) -> Result<Response, String> {
     ort::init_from(&args.ort)
@@ -108,6 +134,12 @@ fn run(args: &Args, input: Vec<f32>) -> Result<Response, String> {
         .map_err(|e| e.to_string())?
         .commit_from_file(&args.model)
         .map_err(|e| format!("cannot load {}: {e}", args.model.display()))?;
+    let inputs: Vec<_> = session
+        .inputs()
+        .iter()
+        .map(|i| (i.name(), i.dtype()))
+        .collect();
+    let input_name = validate_inputs(&inputs)?.to_string();
     let character = session
         .metadata()
         .map_err(|e| e.to_string())?
@@ -115,7 +147,6 @@ fn run(args: &Args, input: Vec<f32>) -> Result<Response, String> {
         .unwrap_or_default();
     let tensor =
         Tensor::from_array(([1usize, CHANNELS, SIDE, SIDE], input)).map_err(|e| e.to_string())?;
-    let input_name = session.inputs()[0].name().to_string();
     let outputs = session
         .run(ort::inputs![input_name => tensor])
         .map_err(|e| format!("inference failed: {e}"))?;
@@ -151,5 +182,34 @@ fn main() -> ExitCode {
             eprintln!("{e}");
             ExitCode::from(EXIT_FAILED)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 缺输入、多输入、错误类型和尺寸在运行前返回明确错误。
+    #[test]
+    fn rejects_incompatible_inputs() {
+        assert!(validate_inputs(&[]).unwrap_err().contains("no inputs"));
+        let tensor = |ty, dims: Vec<i64>| ValueType::Tensor {
+            ty,
+            shape: dims.into(),
+            dimension_symbols: std::iter::empty::<String>().collect(),
+        };
+        let valid = tensor(TensorElementType::Float32, vec![1, 3, 488, 488]);
+        assert_eq!(validate_inputs(&[("image", &valid)]).unwrap(), "image");
+        assert!(validate_inputs(&[("a", &valid), ("b", &valid)]).is_err());
+        for wrong in [
+            tensor(TensorElementType::Int64, vec![1, 3, 488, 488]),
+            tensor(TensorElementType::Float32, vec![1, 3, 224, 224]),
+            tensor(TensorElementType::Float32, vec![3, 488, 488]),
+            tensor(TensorElementType::Float32, vec![0, 3, 488, 488]),
+        ] {
+            assert!(validate_inputs(&[("image", &wrong)]).is_err());
+        }
+        let dynamic = tensor(TensorElementType::Float32, vec![-1, 3, -1, -1]);
+        assert!(validate_inputs(&[("image", &dynamic)]).is_ok());
     }
 }

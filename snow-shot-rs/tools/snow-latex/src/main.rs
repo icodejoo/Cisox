@@ -142,6 +142,22 @@ fn first_output(
     with_first_output(outputs, |shape, data| (shape, data.to_vec()))
 }
 
+/// 开始新图编码时先使旧上下文失效，仅成功后安装新上下文。
+fn replace_context<T, R>(
+    context: &mut Option<T>,
+    encode: impl FnOnce() -> Result<(T, R), String>,
+) -> Result<R, String> {
+    *context = None;
+    let (value, response) = encode()?;
+    *context = Some(value);
+    Ok(response)
+}
+
+/// 缺少本次图像的编码结果时禁止解码。
+fn encoded_context<T>(context: &Option<T>) -> Result<&T, String> {
+    context.as_ref().ok_or_else(|| "no encoded context".into())
+}
+
 impl Engine {
     /// 宽度分类：返回整段输出。
     fn resize(&mut self, shape: Vec<usize>, data: Vec<f32>) -> Result<Response, String> {
@@ -160,25 +176,36 @@ impl Engine {
 
     /// 编码并留存上下文。
     fn encode(&mut self, shape: Vec<usize>, data: Vec<f32>) -> Result<Response, String> {
-        let tensor = Tensor::from_array((shape, data)).map_err(|e| e.to_string())?;
-        let name = self.encoder.inputs()[0].name().to_string();
-        let outputs = self
-            .encoder
-            .run(ort::inputs![name => tensor])
-            .map_err(|e| format!("encoder: {e}"))?;
-        let (shape, data) = first_output(&outputs)?;
-        let dims: Vec<usize> = shape.iter().map(|d| *d as usize).collect();
-        self.context = Some(Tensor::from_array((dims, data)).map_err(|e| e.to_string())?);
-        Ok(Response {
-            ok: Some(true),
-            shape: Some(shape),
-            ..Response::default()
+        replace_context(&mut self.context, || {
+            let tensor = Tensor::from_array((shape, data)).map_err(|e| e.to_string())?;
+            let name = self
+                .encoder
+                .inputs()
+                .first()
+                .ok_or("encoder has no input")?
+                .name()
+                .to_string();
+            let outputs = self
+                .encoder
+                .run(ort::inputs![name => tensor])
+                .map_err(|e| format!("encoder: {e}"))?;
+            let (shape, data) = first_output(&outputs)?;
+            let dims: Vec<usize> = shape.iter().map(|d| *d as usize).collect();
+            let context = Tensor::from_array((dims, data)).map_err(|e| e.to_string())?;
+            Ok((
+                context,
+                Response {
+                    ok: Some(true),
+                    shape: Some(shape),
+                    ..Response::default()
+                },
+            ))
         })
     }
 
     /// 解码一步：整段 token 重算，只回最后一个位置的 logits。
     fn step(&mut self, tokens: Vec<i64>) -> Result<Response, String> {
-        let context = self.context.as_ref().ok_or("no encoded context")?;
+        let context = encoded_context(&self.context)?;
         let len = tokens.len();
         if len == 0 {
             return Err("empty token sequence".into());
@@ -288,5 +315,22 @@ fn main() -> ExitCode {
             eprintln!("{e}");
             ExitCode::from(EXIT_FAILED)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A 成功、B 失败后禁止沿用 A 解码，C 成功才恢复。
+    #[test]
+    fn failed_encode_invalidates_previous_image() {
+        let mut context = None;
+        replace_context(&mut context, || Ok(("A", ()))).unwrap();
+        assert_eq!(*encoded_context(&context).unwrap(), "A");
+        assert!(replace_context::<_, ()>(&mut context, || Err("B failed".into())).is_err());
+        assert_eq!(encoded_context(&context).unwrap_err(), "no encoded context");
+        replace_context(&mut context, || Ok(("C", ()))).unwrap();
+        assert_eq!(*encoded_context(&context).unwrap(), "C");
     }
 }

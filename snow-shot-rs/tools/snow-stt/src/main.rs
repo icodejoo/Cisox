@@ -24,7 +24,7 @@ mod system;
 
 use std::io::{BufRead, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use snow_stt_protocol::{BackendKind, Command, Event, RecognitionMode, StartRequest, SystemError};
@@ -128,13 +128,28 @@ fn emit(event: &Event) {
     if matches!(event, Event::Error(_)) && ERROR_SENT.swap(true, Ordering::SeqCst) {
         return;
     }
+    let event = match event {
+        Event::Error(reason) => {
+            eprintln!("stt worker error: {reason}");
+            let text = if snow_stt_protocol::WorkerError::from_error_text(reason).is_some() {
+                reason.clone()
+            } else if let Some((kind, _)) = snow_stt_protocol::SystemError::from_error_text(reason)
+            {
+                kind.to_error_text("")
+            } else {
+                snow_stt_protocol::WorkerError::RecognitionFailed.to_error_text("")
+            };
+            Event::Error(text)
+        }
+        other => other.clone(),
+    };
     let mut out = std::io::stdout().lock();
     let _ = writeln!(out, "{}", event.to_line());
     let _ = out.flush();
 }
 
 /// 启动 stdin 读取线程：逐行解析成 `Ctl`，EOF 时发 `Ctl::Eof`。
-fn spawn_stdin_reader() -> mpsc::Receiver<Ctl> {
+fn spawn_stdin_reader(frozen: Arc<AtomicBool>) -> mpsc::Receiver<Ctl> {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         let stdin = std::io::stdin();
@@ -149,10 +164,14 @@ fn spawn_stdin_reader() -> mpsc::Receiver<Ctl> {
                 Ok(c) => Ctl::Cmd(c),
                 Err(e) => Ctl::BadLine(e.to_string()),
             };
+            if matches!(msg, Ctl::Cmd(Command::Stop | Command::Cancel)) {
+                frozen.store(true, Ordering::Release);
+            }
             if tx.send(msg).is_err() {
                 return;
             }
         }
+        frozen.store(true, Ordering::Release);
         let _ = tx.send(Ctl::Eof);
     });
     rx
@@ -222,7 +241,7 @@ fn wants_preroll(args: &Args, req: &StartRequest) -> bool {
 /// # 参数
 /// - `args`：命令行参数（决定来源是麦克风还是 wav）。
 /// - `req`：START 请求（缓存上限随 `max_seconds`）。
-fn start_preroll(args: &Args, req: &StartRequest) -> PumpedSource {
+fn start_preroll(args: &Args, req: &StartRequest, frozen: Arc<AtomicBool>) -> PumpedSource {
     let wav = args.wav.clone();
     let pad_ms = args.wav_pad_ms;
     let open = move || -> Result<Box<dyn AudioSource>, String> {
@@ -233,13 +252,14 @@ fn start_preroll(args: &Args, req: &StartRequest) -> PumpedSource {
             None => MicSource::open().map(|s| Box::new(s) as Box<dyn AudioSource>),
         }
     };
-    PumpedSource::start(
+    PumpedSource::start_controlled(
         open,
         |opened| match opened {
             Ok(()) => emit(&Event::Recording),
             Err(why) => emit(&Event::Error(why.clone())),
         },
         cap_samples(req.max_seconds),
+        frozen,
     )
 }
 
@@ -253,7 +273,8 @@ fn main() {
     if let Some(dir) = &args.optimize {
         std::process::exit(optcache::run_optimize_cli(std::path::Path::new(dir)));
     }
-    let ctl = spawn_stdin_reader();
+    let frozen = Arc::new(AtomicBool::new(false));
+    let ctl = spawn_stdin_reader(Arc::clone(&frozen));
     emit(&Event::Ready);
 
     let Some(req) = wait_for_start(&ctl, &mut |e| emit(&e)) else {
@@ -263,7 +284,7 @@ fn main() {
     let t0 = Instant::now();
     // 先开麦：采集线程与模型加载并行，加载期间的音频进环形缓存，不再丢
     let early: Option<Box<dyn AudioSource>> = wants_preroll(&args, &req)
-        .then(|| Box::new(start_preroll(&args, &req)) as Box<dyn AudioSource>);
+        .then(|| Box::new(start_preroll(&args, &req, Arc::clone(&frozen))) as Box<dyn AudioSource>);
     if args.load_delay_ms > 0 {
         std::thread::sleep(Duration::from_millis(args.load_delay_ms));
     }

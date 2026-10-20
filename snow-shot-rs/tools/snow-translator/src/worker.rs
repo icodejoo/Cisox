@@ -331,6 +331,9 @@ impl<B: Backend> Worker<B> {
         let started = Instant::now();
         let mut out = Vec::with_capacity(inputs.len());
         for t in &inputs {
+            if let Err(e) = crate::cancellation::check() {
+                return Outcome::one(error_event(Some(id), e.kind, e.message));
+            }
             match backend.translate(t, src, tgt, &opts) {
                 Ok(s) => out.push(s),
                 Err(e) => return Outcome::one(error_event(Some(id), e.kind, e.message)),

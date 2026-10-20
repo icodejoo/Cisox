@@ -113,11 +113,12 @@ pub fn run_session(
             match ctl.try_recv() {
                 Ok(Ctl::Cmd(Command::Stop)) => {
                     // 来源里还有没取走的积压（模型加载期间录下的音频）：先喂完再冲刷，不能丢
-                    buf.extend(source.drain_pending());
+                    source.stop();
+                    append_limited(&mut buf, &source.drain_pending(), stats.fed_samples, limit);
                     if feed_chunks(backend, &mut buf, &mut dedup, emit, &mut stats) {
                         return (SessionEnd::Failed, stats);
                     }
-                    return finish(backend, &mut buf, &mut dedup, emit, stats);
+                    return finish(backend, source, ctl, &mut buf, &mut dedup, emit, stats);
                 }
                 Ok(Ctl::Cmd(Command::Cancel)) => {
                     emit(Event::Stopped);
@@ -137,22 +138,34 @@ pub fn run_session(
 
         match source.next(SOURCE_POLL) {
             SourceEvent::Idle => {}
-            SourceEvent::Ended => return finish(backend, &mut buf, &mut dedup, emit, stats),
+            SourceEvent::Ended => {
+                return finish(backend, source, ctl, &mut buf, &mut dedup, emit, stats);
+            }
             SourceEvent::Failed(why) => {
                 emit(Event::Error(why));
                 return (SessionEnd::Failed, stats);
             }
             SourceEvent::Samples(s) => {
-                buf.extend_from_slice(&s);
+                append_limited(&mut buf, &s, stats.fed_samples, limit);
                 if feed_chunks(backend, &mut buf, &mut dedup, emit, &mut stats) {
                     return (SessionEnd::Failed, stats);
                 }
-                if limit > 0 && stats.fed_samples >= limit {
-                    return finish(backend, &mut buf, &mut dedup, emit, stats);
+                if limit > 0 && stats.fed_samples + buf.len() as u64 >= limit {
+                    return finish(backend, source, ctl, &mut buf, &mut dedup, emit, stats);
                 }
             }
         }
     }
+}
+
+/// 所有输入路径按剩余额度裁剪，尾部缓冲也计入已接收额度。
+fn append_limited(buf: &mut Vec<f32>, samples: &[f32], fed: u64, limit: u64) {
+    let remaining = if limit == 0 {
+        samples.len()
+    } else {
+        limit.saturating_sub(fed).saturating_sub(buf.len() as u64) as usize
+    };
+    buf.extend_from_slice(&samples[..samples.len().min(remaining)]);
 }
 
 /// 把缓冲里凑满整块的样本依次喂给后端，每块之后取结果并发出事件；不足一块的尾部留在缓冲里。
@@ -205,11 +218,14 @@ fn emit_all(events: Vec<SttEvent>, dedup: &mut Dedup, emit: &mut dyn FnMut(Event
 /// 冲刷剩余样本与后端尾部，发出最后的事件和 STOPPED。
 fn finish(
     backend: &mut dyn SttBackend,
+    source: &mut dyn AudioSource,
+    ctl: &Receiver<Ctl>,
     buf: &mut Vec<f32>,
     dedup: &mut Dedup,
     emit: &mut dyn FnMut(Event),
     mut stats: SessionStats,
 ) -> (SessionEnd, SessionStats) {
+    source.stop();
     let mut events = Vec::new();
     if !buf.is_empty() {
         stats.fed_samples += buf.len() as u64;
@@ -217,9 +233,31 @@ fn finish(
         buf.clear();
         events.extend(backend.poll());
     }
-    events.extend(backend.finish());
+    events.extend(backend.begin_finish());
     if emit_all(events, dedup, emit) {
         return (SessionEnd::Failed, stats);
+    }
+    loop {
+        match ctl.try_recv() {
+            Ok(Ctl::Cmd(Command::Cancel)) => {
+                emit(Event::Stopped);
+                return (SessionEnd::Canceled, stats);
+            }
+            Ok(Ctl::Eof) | Err(TryRecvError::Disconnected) => return (SessionEnd::Aborted, stats),
+            Ok(Ctl::Cmd(Command::Ping)) => emit(Event::Pong),
+            Ok(_) => continue,
+            Err(TryRecvError::Empty) => {}
+        }
+        if !backend.finishing() {
+            break;
+        }
+        if emit_all(backend.poll(), dedup, emit) {
+            return (SessionEnd::Failed, stats);
+        }
+        if !backend.finishing() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
     }
     emit(Event::Stopped);
     (SessionEnd::Stopped, stats)
@@ -254,6 +292,101 @@ pub fn wait_for_start(
 
 #[cfg(test)]
 mod tests {
+    /// 同步后端收尾后不再 poll，防止把刚输出的 Final 再输出为 Partial。
+    #[test]
+    fn synchronous_backend_is_not_polled_after_finish() {
+        /// 模拟收尾后仍保留最后一句的在线后端。
+        struct SyncBackend(bool);
+        impl SttBackend for SyncBackend {
+            /// 测试不喂入音频。
+            fn feed(&mut self, _: &[f32]) {}
+            /// 已收尾后再次轮询即表明流程错误。
+            fn poll(&mut self) -> Vec<SttEvent> {
+                assert!(!self.0);
+                vec![]
+            }
+            /// 返回一次尾句。
+            fn finish(&mut self) -> Vec<SttEvent> {
+                self.0 = true;
+                vec![SttEvent::Final("tail".into())]
+            }
+        }
+        let (tx, rx) = mpsc::channel();
+        tx.send(Ctl::Cmd(Command::Stop)).unwrap();
+        let mut events = Vec::new();
+        let (end, _) = run_session(
+            &mut SyncBackend(false),
+            &mut Backlog(vec![]),
+            &rx,
+            &mut |event| events.push(event),
+            0,
+        );
+        assert_eq!(end, SessionEnd::Stopped);
+        assert_eq!(events, vec![Event::Final("tail".into()), Event::Stopped]);
+    }
+
+    /// 单个超大批次和 STOP 积压都严格限制为一秒，尾部也不能越界。
+    #[test]
+    fn all_feed_paths_obey_exact_sample_limit() {
+        let mut backend = FakeBackend::new(vec![], vec![]);
+        let (_, stats, _) = run(&mut backend, vec![silence(100_000)], vec![], 1);
+        assert_eq!(stats.fed_samples, 16_000);
+        assert_eq!(backend.fed, 16_000);
+        let mut backend = FakeBackend::new(vec![], vec![]);
+        let (_, stats, _) = run_with(
+            &mut backend,
+            &mut Backlog(vec![0.0; 100_000]),
+            vec![Ctl::Cmd(Command::Stop)],
+            1,
+        );
+        assert_eq!(stats.fed_samples, 16_000);
+        assert_eq!(backend.fed, 16_000);
+    }
+
+    /// STOP 后先持续交出结果，期间 CANCEL 立即结束，不等待后台解码。
+    #[test]
+    fn stop_flush_emits_results_and_accepts_cancel() {
+        /// 始终挂起收尾的假后端。
+        struct Pending;
+        impl SttBackend for Pending {
+            /// 测试后端不需要音频。
+            fn feed(&mut self, _: &[f32]) {}
+            /// 已解码的结果仍可取出。
+            fn poll(&mut self) -> Vec<SttEvent> {
+                vec![SttEvent::Final("decoded".into())]
+            }
+            /// 若调用阻塞收尾说明接线错误。
+            fn finish(&mut self) -> Vec<SttEvent> {
+                panic!("blocking finish")
+            }
+            /// 启动异步收尾。
+            fn begin_finish(&mut self) -> Vec<SttEvent> {
+                self.poll()
+            }
+            /// 模拟尚未结束的推理。
+            fn finishing(&self) -> bool {
+                true
+            }
+        }
+        let (tx, rx) = mpsc::channel();
+        tx.send(Ctl::Cmd(Command::Stop)).unwrap();
+        let mut events = Vec::new();
+        let (end, _) = run_session(
+            &mut Pending,
+            &mut Backlog(vec![]),
+            &rx,
+            &mut |e| {
+                if matches!(e, Event::Final(_)) {
+                    tx.send(Ctl::Cmd(Command::Cancel)).unwrap();
+                }
+                events.push(e);
+            },
+            0,
+        );
+        assert_eq!(end, SessionEnd::Canceled);
+        assert_eq!(events, vec![Event::Final("decoded".into()), Event::Stopped]);
+    }
+
     use super::*;
     use std::collections::VecDeque;
     use std::sync::mpsc;
@@ -501,14 +634,16 @@ mod tests {
         assert_eq!(out, vec![Event::Error("boom".into())]);
     }
 
+    /// 按精确样本数停止，最后一批只喂剩余额度。
     #[test]
     fn max_seconds_triggers_stop() {
         let mut b = FakeBackend::new(vec![], vec![f("够了")]);
-        // 1 秒上限 = 16000 样本，第 4 块（20480）时越界
+        // 1 秒上限 = 16000 样本，第 4 批只接收剩余的 640 个样本
         let src = (0..10).map(|_| silence(CHUNK_SAMPLES)).collect();
         let (end, stats, out) = run(&mut b, src, vec![], 1);
         assert_eq!(end, SessionEnd::Stopped);
-        assert_eq!(stats.chunk_micros.len(), 4);
+        assert_eq!(stats.fed_samples, 16000);
+        assert_eq!(b.fed, 16000);
         assert_eq!(out, vec![Event::Final("够了".into()), Event::Stopped]);
     }
 

@@ -1,5 +1,6 @@
 //! 音频来源抽象：麦克风（复用 snow-audio-recorder）与测试用 wav 文件。
 
+use snow_stt_protocol::WorkerError;
 use std::time::Duration;
 
 use snow_audio_recorder::{
@@ -31,6 +32,9 @@ pub enum SourceEvent {
 
 /// 音频来源。
 pub trait AudioSource {
+    /// 冻结采样边界并释放采集资源，保留停止前的缓存。
+    fn stop(&mut self) {}
+
     /// 等待下一批样本。
     ///
     /// # 参数
@@ -78,7 +82,8 @@ impl MicSource {
 
 /// 把音频错误压成单行文本。
 fn describe(err: &AudioError) -> String {
-    format!("麦克风不可用: {err}").replace(['\r', '\n'], " ")
+    eprintln!("microphone error: {err}");
+    WorkerError::MicrophoneUnavailable.to_error_text("")
 }
 
 impl AudioSource for MicSource {
@@ -89,10 +94,14 @@ impl AudioSource for MicSource {
                 SourceEvent::Samples(p.data.iter().map(|&s| f32::from(s) / I16_SCALE).collect())
             }
             Ok(AudioEvent::Error(e)) => SourceEvent::Failed(describe(&e)),
-            Ok(AudioEvent::StreamEnded) => SourceEvent::Failed("麦克风采集已结束".into()),
+            Ok(AudioEvent::StreamEnded) => {
+                SourceEvent::Failed(WorkerError::MicrophoneEnded.to_error_text(""))
+            }
             Ok(_) => SourceEvent::Idle,
             Err(RecvTimeoutError::Timeout) => SourceEvent::Idle,
-            Err(RecvTimeoutError::Closed) => SourceEvent::Failed("麦克风采集通道已关闭".into()),
+            Err(RecvTimeoutError::Closed) => {
+                SourceEvent::Failed(WorkerError::MicrophoneClosed.to_error_text(""))
+            }
         }
     }
 }
@@ -115,9 +124,10 @@ impl WavSource {
     /// # 返回
     /// 来源实例；读取失败或采样率不是 16k 时返回原因。
     pub fn open(path: &str, pad_ms: u32) -> Result<Self, String> {
-        let wave = sherpa_onnx::Wave::read(path).ok_or_else(|| format!("无法读取 wav: {path}"))?;
+        let wave = sherpa_onnx::Wave::read(path)
+            .ok_or_else(|| WorkerError::InvalidWave.to_error_text(path))?;
         if wave.sample_rate() != SAMPLE_RATE {
-            return Err(format!("wav 采样率须为 16000，实际 {}", wave.sample_rate()));
+            return Err(WorkerError::WaveSampleRate.to_error_text(&wave.sample_rate().to_string()));
         }
         let mut samples = wave.samples().to_vec();
         samples.resize(
@@ -226,6 +236,12 @@ mod tests {
 
     #[test]
     fn missing_wav_is_error() {
-        assert!(WavSource::open("Z:/nope.wav", 0).is_err());
+        let error = WavSource::open("Z:/nope.wav", 0)
+            .err()
+            .expect("missing input");
+        assert_eq!(
+            WorkerError::from_error_text(&error),
+            Some((WorkerError::InvalidWave, "Z:/nope.wav".into()))
+        );
     }
 }

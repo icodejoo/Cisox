@@ -3,12 +3,12 @@
 //! 阻塞问题的结论：离线单段解码可能耗时数百毫秒，会话主循环是单线程的
 //! （收命令、取音频、`feed`+`poll`），在 `poll` 里同步解码会让 STOP/PING 响应延迟、
 //! 采集通道积压。所以解码放进后台工作线程：`feed` 只做 VAD（毫秒级）并把切好的段投递出去，
-//! `poll` 只收已完成的结果，`finish` 冲刷 VAD 后等待工作线程处理完并回收。
+//! `poll` 只收已完成的结果，收尾先关闭输入，再由会话轮询结果与取消命令。
 //! `START` 里的端点规则 `req.endpoint` 对离线无意义（切句完全由 VAD 参数决定），这里忽略。
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread::JoinHandle;
 
@@ -445,6 +445,16 @@ impl SegmentRecognizer for SherpaRecognizer {
     }
 }
 
+/// 解码队列按样本计费，包含当前正在解码的一段；过载立即拒收，不阻塞调用方。
+fn reserve_samples(queued: &AtomicUsize, incoming: usize) -> bool {
+    queued
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+            n.checked_add(incoming)
+                .filter(|&total| total <= SAMPLE_RATE as usize * 30)
+        })
+        .is_ok()
+}
+
 /// 离线识别后端：VAD 在调用线程，识别在后台工作线程。
 pub struct OfflineSherpaBackend {
     /// 切句器。
@@ -461,6 +471,10 @@ pub struct OfflineSherpaBackend {
     prev_end: usize,
     /// 取消标记：置位后工作线程丢弃尚未处理的段。
     cancel: Arc<AtomicBool>,
+    /// 排队和解码中的累计样本数，最大三十秒。
+    queued_samples: Arc<AtomicUsize>,
+    /// 队列过载时终止本次识别，避免静默丢音。
+    overloaded: bool,
 }
 
 impl OfflineSherpaBackend {
@@ -519,15 +533,21 @@ impl OfflineSherpaBackend {
         let (text_tx, text_rx) = channel::<String>();
         let cancel = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&cancel);
+        let queued_samples = Arc::new(AtomicUsize::new(0));
+        let queued = Arc::clone(&queued_samples);
         let worker = std::thread::Builder::new()
             .name("stt-offline-worker".into())
             .spawn(move || {
                 // 发送端关闭后 recv 返回错误，线程自然退出
                 while let Ok(seg) = seg_rx.recv() {
                     if flag.load(Ordering::Relaxed) {
+                        queued.fetch_sub(seg.len(), Ordering::AcqRel);
                         continue;
                     }
                     let text = clean_text(&recognizer.recognize(&seg));
+                    let samples = seg.len();
+                    drop(seg);
+                    queued.fetch_sub(samples, Ordering::AcqRel);
                     if text_tx.send(text).is_err() {
                         return;
                     }
@@ -542,6 +562,8 @@ impl OfflineSherpaBackend {
             history: History::default(),
             prev_end: 0,
             cancel,
+            queued_samples,
+            overloaded: false,
         })
     }
 
@@ -551,8 +573,18 @@ impl OfflineSherpaBackend {
             let end = seg.start + seg.samples.len();
             let samples = self.history.with_pre_roll(seg, self.prev_end);
             self.prev_end = end;
+            if samples.is_empty() {
+                continue;
+            }
             if let Some(tx) = &self.seg_tx {
-                let _ = tx.send(samples);
+                if !reserve_samples(&self.queued_samples, samples.len()) {
+                    self.overloaded = true;
+                    self.cancel.store(true, Ordering::Release);
+                    continue;
+                }
+                if tx.send(samples).is_err() {
+                    self.overloaded = true;
+                }
             }
         }
     }
@@ -577,7 +609,36 @@ impl SttBackend for OfflineSherpaBackend {
 
     /// 收取工作线程已完成的结果；离线模式不产生 `Partial`。
     fn poll(&mut self) -> Vec<SttEvent> {
-        self.collect_ready()
+        let mut events = self.collect_ready();
+        if std::mem::take(&mut self.overloaded) {
+            events.push(SttEvent::Failed(
+                snow_stt_protocol::WorkerError::RecognitionFailed
+                    .to_error_text("offline PCM queue overloaded"),
+            ));
+        }
+        if self.worker.as_ref().is_some_and(|h| h.is_finished())
+            && self.worker.take().is_some_and(|h| h.join().is_err())
+        {
+            events.push(SttEvent::Failed(
+                snow_stt_protocol::WorkerError::RecognitionFailed
+                    .to_error_text("offline decoder panicked"),
+            ));
+        }
+        events.extend(self.collect_ready());
+        events
+    }
+
+    /// 关闭输入后继续轮询结果，避免阻塞命令线程。
+    fn begin_finish(&mut self) -> Vec<SttEvent> {
+        self.vad.flush();
+        self.dispatch_segments();
+        self.seg_tx = None;
+        self.poll()
+    }
+
+    /// 已关闭输入但工作线程尚未回收时仍需轮询。
+    fn finishing(&self) -> bool {
+        self.worker.is_some()
     }
 
     /// 冲刷 VAD 尾部，等待工作线程处理完所有段并回收，返回剩余结果。
@@ -599,18 +660,114 @@ impl SttBackend for OfflineSherpaBackend {
 }
 
 impl Drop for OfflineSherpaBackend {
-    /// 取消未处理的段并回收工作线程，避免泄漏。
+    /// 取消未处理的段；当前不可中断的 sherpa 调用独占资源并自行退出。
     fn drop(&mut self) {
         self.cancel.store(true, Ordering::Relaxed);
         self.seg_tx = None;
-        if let Some(handle) = self.worker.take() {
-            let _ = handle.join();
-        }
+        // 当前 sherpa 单次解码没有中断 API；线程独占识别器，可安全脱离，进程退出时回收。
+        self.worker.take();
     }
 }
 
 #[cfg(test)]
 mod tests {
+    /// 超限语音段立即拒收并通知会话，不把大段 PCM 放进解码队列。
+    #[test]
+    fn overload_emits_structured_error_without_enqueuing_pcm() {
+        let mut backend = backend(0);
+        backend.feed(&vec![0.5; SAMPLE_RATE as usize * 30 + 1]);
+        backend.feed(&[0.0; 10]);
+        let events = backend.poll();
+        assert!(events.iter().any(|e| matches!(e, SttEvent::Failed(text)
+            if snow_stt_protocol::WorkerError::from_error_text(text).is_some())));
+        assert_eq!(backend.queued_samples.load(Ordering::Acquire), 0);
+    }
+
+    /// 真正的离线队列与会话联动：STOP 期间交出首段，CANCEL/EOF 不等待仍在解码的尾段。
+    #[test]
+    fn offline_stop_streams_results_and_accepts_cancel_or_eof() {
+        use crate::session::{Ctl, SessionEnd, run_session};
+        use crate::source::{AudioSource, SourceEvent};
+        use snow_stt_protocol::{Command, Event};
+        use std::sync::mpsc;
+        /// 第二段挂起的识别器，通道控制而非依赖时间先后。
+        struct Gated {
+            calls: usize,
+            release: mpsc::Receiver<()>,
+        }
+        impl SegmentRecognizer for Gated {
+            /// 第一段直接返回，第二段等待测试放行。
+            fn recognize(&mut self, _: &[f32]) -> String {
+                self.calls += 1;
+                if self.calls > 1 {
+                    self.release.recv().unwrap();
+                }
+                "decoded".into()
+            }
+        }
+        /// 只提供停止命令的测试来源。
+        struct Idle;
+        impl AudioSource for Idle {
+            /// 不再追加音频。
+            fn next(&mut self, _: Duration) -> SourceEvent {
+                SourceEvent::Idle
+            }
+        }
+        for (control, expected) in [
+            (Ctl::Cmd(Command::Cancel), SessionEnd::Canceled),
+            (Ctl::Eof, SessionEnd::Aborted),
+        ] {
+            let (release_tx, release_rx) = mpsc::channel();
+            let mut backend = OfflineSherpaBackend::new(
+                Box::<FakeVad>::default(),
+                Box::new(Gated {
+                    calls: 0,
+                    release: release_rx,
+                }),
+            )
+            .unwrap();
+            backend.feed(&[0.5; 20]);
+            backend.feed(&[0.0; 10]);
+            backend.feed(&[0.5; 30]);
+            let (tx, rx) = mpsc::channel();
+            tx.send(Ctl::Cmd(Command::Stop)).unwrap();
+            let mut events = Vec::new();
+            let (end, _) = run_session(
+                &mut backend,
+                &mut Idle,
+                &rx,
+                &mut |event| {
+                    if matches!(event, Event::Final(_)) {
+                        tx.send(control.clone()).unwrap();
+                    }
+                    events.push(event);
+                },
+                0,
+            );
+            assert_eq!(end, expected);
+            assert_eq!(events.first(), Some(&Event::Final("decoded".into())));
+            assert_eq!(
+                events.last() == Some(&Event::Stopped),
+                expected == SessionEnd::Canceled
+            );
+            drop(backend);
+            let _ = release_tx.send(());
+        }
+    }
+
+    /// 累计样本限额包含在途段，拒收不改变计数，释放后可再次接收。
+    #[test]
+    fn pcm_queue_is_bounded_by_samples() {
+        let queued = AtomicUsize::new(0);
+        let cap = SAMPLE_RATE as usize * 30;
+        assert!(reserve_samples(&queued, cap - 1));
+        assert!(!reserve_samples(&queued, 2));
+        assert_eq!(queued.load(Ordering::Acquire), cap - 1);
+        queued.fetch_sub(cap - 1, Ordering::AcqRel);
+        assert!(reserve_samples(&queued, cap));
+        assert!(!reserve_samples(&queued, usize::MAX));
+    }
+
     use super::*;
     use crate::backend::ModelFiles;
     use std::collections::VecDeque;
@@ -771,8 +928,9 @@ mod tests {
         drop(b);
     }
 
+    /// 丢弃后端不等待当前不可中断的解码，排队段不再开始。
     #[test]
-    fn drop_cancels_pending_work_and_joins() {
+    fn drop_cancels_pending_work_without_waiting() {
         let mut b = backend(200);
         for _ in 0..5 {
             b.feed(&[0.5; 20]);
