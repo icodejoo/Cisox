@@ -225,9 +225,9 @@ mod backend {
     use crate::service_thread::ServiceThread;
     use std::os::windows::ffi::OsStrExt;
     use std::path::PathBuf;
-    use std::sync::Mutex;
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc::{Receiver, Sender, channel};
+    use std::sync::{Arc, Mutex};
     use tray_icon::menu::{ContextMenu, Menu, MenuItem, PredefinedMenuItem};
     use tray_icon::{
         Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent,
@@ -239,7 +239,8 @@ mod backend {
         NOTIFYICONDATAW, SetWindowSubclass, Shell_NotifyIconW, ShellExecuteW,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        CreateIconIndirect, DestroyIcon, HICON, ICONINFO, SW_SHOWNORMAL,
+        CreateIconIndirect, DestroyIcon, EndMenu, HICON, ICONINFO, PostMessageW, SW_SHOWNORMAL,
+        WM_APP,
     };
     use windows::core::{PCWSTR, w};
 
@@ -265,10 +266,42 @@ mod backend {
         /// 控制通道。
         ctl: Sender<Ctl<A>>,
         /// 后台服务线程；丢弃时通知退出、join 并释放单例标记（托盘图标随线程退出移除）。
-        thread: ServiceThread<LoopWaker>,
+        thread: ServiceThread<TrayWaker>,
         /// 自定义信号接收端。
         signals: Receiver<String>,
     }
+
+    /// 使用窗口消息打断菜单模态循环的退出句柄。
+    struct TrayWaker {
+        /// 普通消息循环唤醒器。
+        loop_waker: LoopWaker,
+        /// 托盘窗口地址，可跨线程投递消息。
+        hwnd: isize,
+        /// 防止菜单关闭后又处理积压的点击。
+        stopping: Arc<AtomicBool>,
+    }
+    impl TrayWaker {
+        /// 唤醒普通控制处理。
+        fn wake(&self) {
+            self.loop_waker.wake();
+        }
+        /// 先登记退出，再向窗口投递可被菜单模态循环处理的消息。
+        fn shutdown(&self) {
+            self.stopping.store(true, Ordering::Release);
+            // SAFETY: 只投递消息；句柄在线程回收前有效。
+            unsafe {
+                let _ = PostMessageW(
+                    Some(HWND(self.hwnd as *mut _)),
+                    WM_TRAY_SHUTDOWN,
+                    WPARAM(0),
+                    LPARAM(0),
+                );
+            }
+            self.wake();
+        }
+    }
+    /// 托盘窗口的私有退出消息。
+    const WM_TRAY_SHUTDOWN: u32 = WM_APP + 0x53;
 
     /// 按构建计划创建菜单。
     fn build_menu(plan: &[MenuPlan]) -> Result<Menu, ShellError> {
@@ -336,6 +369,8 @@ mod backend {
 
     /// 后台线程状态。
     struct Worker<A> {
+        /// 主线程已经要求退出。
+        stopping: Arc<AtomicBool>,
         /// 托盘对象（必须留在创建线程）。
         tray: TrayIcon,
         /// 菜单构建计划：空闲时只留这份纯数据，原生菜单（含每项图标位图）在弹出时才创建、关闭后立即销毁。
@@ -382,6 +417,15 @@ mod backend {
     /// `NIN_BALLOONUSERCLICK`：用户点了气泡。
     const NIN_BALLOONUSERCLICK: u32 = 0x405;
 
+    /// 私有退出消息在窗口过程内立即结束菜单，其他消息交由原窗口处理。
+    fn handle_shutdown_message(message: u32, end_menu: impl FnOnce()) -> bool {
+        if message != WM_TRAY_SHUTDOWN {
+            return false;
+        }
+        end_menu();
+        true
+    }
+
     /// 子类化托盘窗口，截获“点了气泡”的通知，其余消息原样交回。
     unsafe extern "system" fn balloon_click_proc(
         hwnd: HWND,
@@ -391,6 +435,14 @@ mod backend {
         _id: usize,
         _data: usize,
     ) -> LRESULT {
+        if handle_shutdown_message(message, || {
+            // SAFETY: 在菜单所属线程内结束模态菜单，随后外层循环消费 Shutdown。
+            unsafe {
+                let _ = EndMenu();
+            }
+        }) {
+            return LRESULT(0);
+        }
         if message == TRAY_CALLBACK_MESSAGE && (lparam.0 as u32 & 0xFFFF) == NIN_BALLOONUSERCLICK {
             open_click_target();
         }
@@ -562,6 +614,9 @@ mod backend {
                 }
             }
             while let Ok(ev) = TrayIconEvent::receiver().try_recv() {
+                if self.stopping.load(Ordering::Acquire) {
+                    return false;
+                }
                 match ev {
                     // 左键：有左键动作就执行，否则弹菜单
                     TrayIconEvent::Click {
@@ -629,10 +684,16 @@ mod backend {
                         )
                     };
                     if !installed.as_bool() {
-                        tracing::warn!("子类化托盘窗口失败，点击通知将无反应");
+                        return Err(ShellError::Platform("子类化托盘窗口失败".into()));
                     }
-                    let waker = native::current_thread_waker();
+                    let stopping = Arc::new(AtomicBool::new(false));
+                    let waker = TrayWaker {
+                        loop_waker: native::current_thread_waker(),
+                        hwnd: tray.window_handle() as isize,
+                        stopping: stopping.clone(),
+                    };
                     let worker = Worker {
+                        stopping,
                         tray,
                         plan,
                         actions,
@@ -648,9 +709,9 @@ mod backend {
                     Ok((worker, waker))
                 },
                 move |mut worker: Worker<A>| native::run_message_loop(|| worker.tick(&ctl_rx)),
-                move |waker: &LoopWaker| {
+                move |waker: &TrayWaker| {
                     let _ = notify_tx.send(Ctl::Shutdown);
-                    waker.wake();
+                    waker.shutdown();
                 },
             )?;
             Ok(Self {
@@ -699,6 +760,19 @@ mod backend {
         /// 信号接收端。
         pub(super) fn signals(&self) -> &Receiver<String> {
             &self.signals
+        }
+    }
+    #[cfg(test)]
+    mod shutdown_tests {
+        use super::*;
+        /// 模态菜单窗口过程接收退出消息时立即调用结束菜单，而无需等待外层 tick。
+        #[test]
+        fn shutdown_ends_modal_menu_in_window_handler() {
+            let mut calls = 0;
+            assert!(!handle_shutdown_message(TRAY_CALLBACK_MESSAGE, || calls += 1));
+            assert_eq!(calls, 0);
+            assert!(handle_shutdown_message(WM_TRAY_SHUTDOWN, || calls += 1));
+            assert_eq!(calls, 1);
         }
     }
 }

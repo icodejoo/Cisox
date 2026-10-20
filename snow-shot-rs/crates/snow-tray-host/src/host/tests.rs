@@ -1925,3 +1925,197 @@ fn prompt_falls_back_to_builtin_text() {
         .expect("应弹确认框");
     assert!(text.contains("5 times") && text.contains("Cisox"), "{text}");
 }
+
+/// 首次有效快照生成后恢复贴图；重复通知或后续快照不会重复恢复。
+#[test]
+fn review_restore_after_missing_or_corrupt_snapshot() {
+    for corrupt in [false, true] {
+        let mut core = HostCore::new(Fake {
+            corrupt,
+            ..Fake::default()
+        });
+        let now = Instant::now();
+        core.start(now);
+        assert!(!core.restore_checked);
+        core.platform.corrupt = false;
+        let mut snapshot = spec(1);
+        snapshot.flags.pins_to_restore = 2;
+        core.platform.spec = Some(snapshot.clone());
+        core.handle(now, Event::SpecEmitted);
+        assert!(core.restore_checked);
+        let generation = core.machine.generation();
+        core.handle(
+            now,
+            Event::SessionLine {
+                generation,
+                line: hello_line(1001),
+            },
+        );
+        snapshot.rev += 1;
+        core.platform.spec = Some(snapshot);
+        core.handle(now, Event::SpecEmitted);
+        core.handle(now, Event::SpecEmitted);
+        assert_eq!(
+            core.platform
+                .calls
+                .iter()
+                .filter(|call| matches!(call, Call::Send(_, HostMessage::RestorePins { .. })))
+                .count(),
+            1
+        );
+    }
+}
+
+/// 全屏闸门变化不能丢掉已经放行的按住说话释放；被拦截的按下不获得放行资格。
+#[test]
+fn review_paired_release_survives_fullscreen_change() {
+    let mut snapshot = spec(1);
+    snapshot.gate.fullscreen_disable = true;
+    snapshot.hotkeys[0].id = "start_dictation".into();
+    snapshot.hotkeys[0].on_release_id = Some("stop_dictation".into());
+    let (mut core, now) = started(Some(snapshot));
+    let (generation, _) = bring_up_ui(&mut core, now);
+    core.handle(
+        now,
+        Event::Action {
+            id: "start_dictation".into(),
+            origin: ActionOrigin::Hotkey,
+        },
+    );
+    core.platform.fullscreen = true;
+    core.handle(
+        now,
+        Event::Action {
+            id: "stop_dictation".into(),
+            origin: ActionOrigin::Hotkey,
+        },
+    );
+    assert!(core.platform.calls.iter().any(|call| matches!(call, Call::Send(g, HostMessage::Command { id, .. }) if *g == generation && id == "stop_dictation")));
+    take_calls(&mut core);
+    for id in ["start_dictation", "stop_dictation"] {
+        core.handle(
+            now,
+            Event::Action {
+                id: id.into(),
+                origin: ActionOrigin::Hotkey,
+            },
+        );
+    }
+    assert!(
+        !core
+            .platform
+            .calls
+            .iter()
+            .any(|call| matches!(call, Call::Send(..)))
+    );
+}
+
+/// 配置任务期间暂存有容量、合并与过期；退出不受等待阻挡。
+#[test]
+fn review_config_wait_is_bounded_and_expires() {
+    let (mut core, now) = started(Some(spec(1)));
+    core.config_job_running = true;
+    for x in 0..1000 {
+        core.submit(
+            now,
+            Outbound::Gesture {
+                phase: GesturePhase::Update,
+                id: 1,
+                action: None,
+                x,
+                y: 0,
+            },
+        );
+    }
+    assert_eq!(core.held.len(), 1);
+    for _ in 0..1000 {
+        core.submit(now, Outbound::RestorePins);
+    }
+    assert_eq!(core.held.len(), snow_host_protocol::MAX_QUEUED_COMMANDS);
+    core.tick(now + snow_host_protocol::COMMAND_EXPIRY);
+    assert!(core.held.is_empty());
+    core.handle(
+        now,
+        Event::HeadlessDone {
+            kind: HeadlessKind::SetConfig,
+            notice: None,
+        },
+    );
+    core.handle(
+        now,
+        Event::Action {
+            id: "history".into(),
+            origin: ActionOrigin::Ipc,
+        },
+    );
+    assert!(core.machine.ui_alive());
+    let (mut core, now) = started(Some(spec(1)));
+    core.config_job_running = true;
+    core.handle(
+        now,
+        Event::Action {
+            id: ACTION_QUIT.into(),
+            origin: ActionOrigin::Ipc,
+        },
+    );
+    assert_eq!(core.exit_requested(), Some(false));
+}
+
+/// 异步写超时触发结束本代进程，旧代故障不会影响当前会话。
+#[test]
+fn review_write_failure_kills_session_and_quit_completes() {
+    let (mut core, now) = started(Some(spec(1)));
+    let (generation, pid) = bring_up_ui(&mut core, now);
+    take_calls(&mut core);
+    core.handle(
+        now,
+        Event::SessionFailed {
+            generation: generation + 1,
+        },
+    );
+    assert!(core.platform.calls.is_empty());
+    core.handle(now, Event::SessionFailed { generation });
+    assert!(core.platform.calls.contains(&Call::Kill(pid)));
+    core.handle(
+        now,
+        Event::Action {
+            id: ACTION_QUIT.into(),
+            origin: ActionOrigin::Ipc,
+        },
+    );
+    core.handle(now, Event::UiExited { generation });
+    assert_eq!(core.exit_requested(), Some(false));
+}
+
+/// 故障后必须等旧进程真正退出；等待期间的新命令在退出后继续拉起新会话。
+#[test]
+fn review_fault_replays_new_commands_only_after_process_exit() {
+    let (mut core, now) = started(Some(spec(1)));
+    let (generation, _) = bring_up_ui(&mut core, now);
+    take_calls(&mut core);
+    core.handle(now, Event::SessionFailed { generation });
+    core.submit(
+        now,
+        Outbound::Action {
+            id: "history".into(),
+            origin: Some(ActionOrigin::Ipc),
+        },
+    );
+    assert!(
+        !core
+            .platform
+            .calls
+            .iter()
+            .any(|call| matches!(call, Call::SpawnUi(_)))
+    );
+    core.handle(now, Event::UiExited { generation });
+    assert!(core.platform.calls.contains(&Call::SpawnUi(generation + 1)));
+    core.handle(
+        now,
+        Event::SessionLine {
+            generation: generation + 1,
+            line: hello_line(1002),
+        },
+    );
+    assert!(core.platform.calls.iter().any(|call| matches!(call, Call::Send(g, HostMessage::Command { id, .. }) if *g == generation + 1 && id == "history")));
+}

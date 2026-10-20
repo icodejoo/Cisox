@@ -9,7 +9,7 @@
 
 use crate::gesture::GestureEvent;
 use crate::machine::{Effect, HostMachine, Notice};
-use crate::queue::Outbound;
+use crate::queue::{CommandQueue, Outbound};
 use crate::rapid::{RAPID_REOPEN_GAP, RapidGuard, RapidVerdict, opens_capture_overlay};
 use crate::view::{
     FALLBACK_NOTICE_UI_CRASH_LOOP, FALLBACK_NOTICE_UI_START_FAILED, aggregate_results,
@@ -31,7 +31,7 @@ use snow_host_protocol::{
     UPDATE_CHECK_START_DELAY,
 };
 use snow_shell_core::tray::{Balloon, BalloonIcon};
-use std::collections::VecDeque;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -211,6 +211,11 @@ pub enum Event {
         /// 会话代数。
         generation: u64,
     },
+    /// 会话投递失败，必须结束本代进程。
+    SessionFailed {
+        /// 会话代数。
+        generation: u64,
+    },
     /// UI 进程退出了。
     UiExited {
         /// 会话代数。
@@ -275,7 +280,11 @@ pub struct HostCore<P: Platform> {
     /// 改配置的无窗口任务是否在跑；期间新消息暂存在 `held`，免得新 UI 和它同时写配置。
     config_job_running: bool,
     /// 等改配置任务结束后再投递的消息（保序）。
-    held: VecDeque<Outbound>,
+    held: CommandQueue,
+    /// 首份有效快照的登录恢复是否已经处理。
+    restore_checked: bool,
+    /// 已放行按下所对应的释放动作。
+    admitted_releases: HashSet<String>,
     /// 连续误触发保护（截图覆盖窗“关闭 → 开启”间隔判定）。
     rapid: RapidGuard,
     /// 弹确认框期间被扣下的命令：`(动作 id, 来源)`；鼠标手势 `begin` 过期，不扣。
@@ -307,7 +316,9 @@ impl<P: Platform> HostCore<P> {
             update_done_for: None,
             update_running: false,
             config_job_running: false,
-            held: VecDeque::new(),
+            held: CommandQueue::new(),
+            restore_checked: false,
+            admitted_releases: HashSet::new(),
             rapid: RapidGuard::new(),
             rapid_pending: None,
             dropped_gesture: None,
@@ -334,15 +345,6 @@ impl<P: Platform> HostCore<P> {
         self.started_at = Some(now);
         self.load_spec(now, true);
         self.schedule_trim(now + TRIM_AFTER_START);
-        // 要求常驻（MCP / OCR 预热）的拉起在读快照时已经提交（`apply_keep_alive`）
-        let restore = self
-            .spec
-            .as_ref()
-            .is_some_and(|spec| spec.flags.pins_to_restore > 0);
-        if restore {
-            tracing::info!("快照里有待恢复的贴图，拉起 UI");
-            self.submit(now, Outbound::RestorePins);
-        }
     }
 
     /// 宿主是否该退出：`Some(restart)`。
@@ -381,6 +383,10 @@ impl<P: Platform> HostCore<P> {
             Event::SessionClosed { generation } => {
                 tracing::debug!(generation, "会话管道已断开");
             }
+            Event::SessionFailed { generation } => {
+                let effects = self.machine.on_session_failed(now, generation);
+                self.run_effects(now, effects);
+            }
             Event::UiExited { generation } => {
                 // 覆盖窗随 UI 进程消失：记为关闭（过期代数的退出不算）
                 if generation == self.machine.generation() {
@@ -401,6 +407,7 @@ impl<P: Platform> HostCore<P> {
     /// # 参数
     /// - `now`：当前时刻。
     pub fn tick(&mut self, now: Instant) {
+        self.held.expire(now);
         let effects = self.machine.on_tick(now);
         self.run_effects(now, effects);
         if self.trim_at.is_some_and(|at| now >= at) {
@@ -415,10 +422,15 @@ impl<P: Platform> HostCore<P> {
 
     /// 下一个需要调用 [`tick`](Self::tick) 的时刻；没有待办返回 `None`（主线程可以无限期等事件）。
     pub fn next_deadline(&self) -> Option<Instant> {
-        [self.machine.next_deadline(), self.trim_at, self.update_at]
-            .into_iter()
-            .flatten()
-            .min()
+        [
+            self.machine.next_deadline(),
+            self.trim_at,
+            self.update_at,
+            self.held.next_expiry(),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     /// 处理一个动作：宿主自己的（退出、重启、两个开关）直接做，其余转给 UI。
@@ -429,14 +441,26 @@ impl<P: Platform> HostCore<P> {
             _ => {}
         }
         let is_toggle = id == ACTION_TOGGLE_GLOBAL_HOTKEYS || id == ACTION_TOGGLE_FULLSCREEN_GATE;
+        let paired_release = origin == ActionOrigin::Hotkey && self.admitted_releases.remove(&id);
         // 前台全屏闸门：只拦热键（托盘、命令行不受影响），两个开关本身除外，否则关不回去
         if origin == ActionOrigin::Hotkey
             && self.gate_on
             && !is_toggle
+            && !paired_release
             && self.platform.fullscreen_focused()
         {
             tracing::info!(%id, "前台为全屏窗口，已忽略全局热键");
             return;
+        }
+        if origin == ActionOrigin::Hotkey
+            && let Some(release) = self.spec.as_ref().and_then(|spec| {
+                spec.hotkeys
+                    .iter()
+                    .find(|hotkey| hotkey.id == id)
+                    .and_then(|hotkey| hotkey.on_release_id.clone())
+            })
+        {
+            self.admitted_releases.insert(release);
         }
         match id.as_str() {
             ACTION_TOGGLE_GLOBAL_HOTKEYS => self.toggle_pause(),
@@ -558,7 +582,8 @@ impl<P: Platform> HostCore<P> {
     /// - 手势 `begin` 被状态机丢弃（熔断退避）时让钩子取消手势，别一直吞着鼠标输入。
     fn submit(&mut self, now: Instant, message: Outbound) {
         if self.config_job_running {
-            self.held.push_back(message);
+            self.held.expire(now);
+            self.held.push(message, now);
             return;
         }
         if let Outbound::SetConfig { key, value } = &message
@@ -614,7 +639,7 @@ impl<P: Platform> HostCore<P> {
                 self.config_job_running = false;
                 self.load_spec(now, true);
                 // 暂存的消息按序投递；其中又有改配置且 UI 仍不在的，会再起一个任务并把后面的继续暂存
-                let pending = std::mem::take(&mut self.held);
+                let (pending, _) = self.held.drain_live(now);
                 for message in pending {
                     self.submit(now, message);
                 }
@@ -707,6 +732,8 @@ impl<P: Platform> HostCore<P> {
                 } => {
                     if let Err(e) = self.platform.send(generation, &message) {
                         tracing::warn!(error = %e, ?message, "写会话管道失败");
+                        pending.clear();
+                        pending.extend(self.machine.on_session_failed(now, generation));
                     }
                 }
                 Effect::CloseSession { generation } => self.platform.close_session(generation),
@@ -819,7 +846,15 @@ impl<P: Platform> HostCore<P> {
             self.apply_keep_alive(now, &spec);
             self.schedule_update_check(now, spec.flags.update_due_at);
         }
+        let restore = !self.fallback_active && !self.restore_checked;
+        let pins = spec.flags.pins_to_restore;
         self.spec = Some(spec);
+        if restore {
+            self.restore_checked = true;
+            if pins > 0 {
+                self.submit(now, Outbound::RestorePins);
+            }
+        }
     }
 
     /// 同步 UI 常驻要求：状态机据此在崩溃 / 退避结束后补拉；启动完成后才出现的要求
@@ -904,6 +939,10 @@ impl<P: Platform> HostCore<P> {
         let reply = HostMessage::HotkeysResult { rev, results };
         if let Err(e) = self.platform.send(self.machine.generation(), &reply) {
             tracing::warn!(error = %e, "回报热键注册结果失败");
+            let effects = self
+                .machine
+                .on_session_failed(now, self.machine.generation());
+            self.run_effects(now, effects);
         }
     }
 

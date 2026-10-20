@@ -1,10 +1,10 @@
 //! 真实平台的离屏集成测试：真起（批处理假冒的）UI 进程、真建会话管道，不创建托盘与热键。
 
 use super::*;
+use crate::mailbox::Mailbox;
 use snow_host_protocol::frame::decode_line;
 use snow_host_protocol::message::UiMessage;
 use snow_platform::single_instance::session_pipe::SessionPipeClient;
-use std::sync::mpsc::{Receiver, channel};
 use std::time::Duration;
 
 /// 事件等待上限。
@@ -28,15 +28,16 @@ fn fake_ui(dir: &std::path::Path, tail: &str) -> PathBuf {
 }
 
 /// 建一个指向假 UI 的平台。
-fn platform_with(ui: PathBuf, root: PathBuf) -> (WinPlatform, Receiver<Event>) {
-    let (tx, rx) = channel();
+fn platform_with(ui: PathBuf, root: PathBuf) -> (WinPlatform, Mailbox<Event>) {
+    let tx = Mailbox::new();
+    let rx = tx.clone();
     let mut platform = WinPlatform::new(tx, root, PathBuf::from("cisox.exe"));
     platform.ui_exe = ui;
     (platform, rx)
 }
 
 /// 等到满足条件的事件（其余事件丢弃）。
-fn wait_for(rx: &Receiver<Event>, pick: impl Fn(&Event) -> bool) -> Event {
+fn wait_for(rx: &Mailbox<Event>, pick: impl Fn(&Event) -> bool) -> Event {
     let deadline = std::time::Instant::now() + WAIT;
     loop {
         let left = deadline.saturating_duration_since(std::time::Instant::now());
@@ -345,4 +346,117 @@ fn to_wide_is_nul_terminated_utf16() {
     assert_eq!(to_wide("a"), vec![0x61, 0]);
     assert_eq!(to_wide("否"), vec![0x5426, 0]);
     assert_eq!(to_wide(""), vec![0]);
+}
+
+/// 打开进程句柄与创建等待线程失败时，原始 Child 的清理守卫必须结束并回收子进程。
+#[test]
+fn review_registration_failure_reaps_started_child() {
+    for point in [1, 2] {
+        let dir = scratch(&format!("registration-{point}"));
+        let (mut platform, _) =
+            platform_with(fake_ui(&dir, "for /L %%i in (0,0,1) do @rem"), dir.clone());
+        platform.registration_fault = Some((point, None));
+        assert!(platform.spawn_ui(1, UiHint::None).is_err());
+        assert!(platform.session.is_none());
+        let observer = platform
+            .registration_fault
+            .as_ref()
+            .unwrap()
+            .1
+            .as_ref()
+            .unwrap();
+        // SAFETY: 观察句柄仍然存活，零等待验证子进程已经结束。
+        assert_eq!(unsafe { WaitForSingleObject(observer.0, 0) }, 0);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+/// 零截止时间确定性触发超时；任务被回收后仍须发出完成通知。
+#[test]
+fn review_headless_timeout_reports_completion() {
+    let dir = scratch("headless-timeout");
+    let (mut platform, rx) =
+        platform_with(fake_ui(&dir, "for /L %%i in (0,0,1) do @rem"), dir.clone());
+    platform.headless_timeout = Duration::ZERO;
+    platform
+        .spawn_headless(&HeadlessJob::SetConfig {
+            key: "test".into(),
+            value: true.into(),
+        })
+        .unwrap();
+    wait_for(&rx, |event| {
+        matches!(
+            event,
+            Event::HeadlessDone {
+                kind: HeadlessKind::SetConfig,
+                ..
+            }
+        )
+    });
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// 路径中的百分号、空格、与号保持为原始程序路径，不进入 shell 展开。
+#[test]
+fn review_restart_preserves_literal_executable_path() {
+    let path = PathBuf::from(r"C:\test %TEMP% & path\cisox.exe");
+    let command = restart_command(&path, 42);
+    assert_eq!(command.get_program(), path.as_os_str());
+    assert_eq!(
+        command.get_args().collect::<Vec<_>>(),
+        ["--restart-after", "42"]
+    );
+    assert_eq!(
+        crate::cli::parse_cli(["--restart-after".into(), "42".into()]).unwrap(),
+        crate::cli::HostCli::RestartAfter(42)
+    );
+    for args in [
+        vec!["--restart-after", "0"],
+        vec!["--restart-after", "42", "--cmd", "quit"],
+        vec!["--restart-after"],
+    ] {
+        assert!(crate::cli::parse_cli(args.into_iter().map(str::to_string)).is_err());
+    }
+}
+
+/// 对端连上却不读取时，异步写超时上报会话故障；宿主入口仍可优先取出退出命令。
+#[test]
+fn review_blocked_pipe_reports_fault_without_blocking_sender() {
+    let dir = scratch("blocked-writer");
+    let (mut platform, rx) =
+        platform_with(fake_ui(&dir, "for /L %%i in (0,0,1) do @rem"), dir.clone());
+    let spawned = platform.spawn_ui(9, UiHint::None).unwrap();
+    let session = session_from_args(&dir);
+    let client = SessionPipeClient::connect(&pipe_name_for(&session).unwrap()).unwrap();
+    wait_for(&rx, |event| {
+        matches!(event, Event::SessionConnected { generation: 9, .. })
+    });
+    platform
+        .send(
+            9,
+            &HostMessage::Command {
+                seq: 1,
+                id: "x".repeat(512 * 1024),
+                origin: None,
+            },
+        )
+        .unwrap();
+    rx.send(Event::Action {
+        id: snow_host_protocol::ACTION_QUIT.into(),
+        origin: snow_host_protocol::message::ActionOrigin::Ipc,
+    })
+    .unwrap();
+    assert!(
+        matches!(rx.recv_timeout(WAIT).unwrap(), Event::Action { id, .. } if id == snow_host_protocol::ACTION_QUIT)
+    );
+    wait_for(&rx, |event| {
+        matches!(event, Event::SessionFailed { generation: 9 })
+    });
+    platform.kill_ui(spawned.pid);
+    wait_for(&rx, |event| {
+        matches!(event, Event::UiExited { generation: 9 })
+    });
+    platform.close_session(9);
+    drop(client);
+    let _ = std::fs::remove_dir_all(dir);
 }

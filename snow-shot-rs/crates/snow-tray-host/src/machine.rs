@@ -178,6 +178,8 @@ pub struct HostMachine {
     connected_pid: Option<u32>,
     /// 快照要求 UI 常驻（MCP / OCR 预热）：崩溃或退避结束后宿主要补拉一个。
     keep_alive: bool,
+    /// 管道故障后等待真实退出，再执行崩溃恢复。
+    session_failed: bool,
     /// 最近一次拉起 UI 时带的启动提示（拉起那一刻队首命令的种类）。
     spawn_hint: UiHint,
 }
@@ -203,6 +205,7 @@ impl HostMachine {
             pins: 0,
             connected_pid: None,
             keep_alive: false,
+            session_failed: false,
             spawn_hint: UiHint::None,
         }
     }
@@ -403,6 +406,36 @@ impl HostMachine {
         out
     }
 
+    /// 会话损坏时先终止本代进程，等待真实退出事件后再恢复，避免遗留 UI。
+    pub fn on_session_failed(&mut self, now: Instant, generation: u64) -> Vec<Effect> {
+        if generation != self.generation {
+            return Vec::new();
+        }
+        let pid = match &self.state {
+            State::Starting(starting) => starting.pid,
+            State::Running { pid, .. } => Some(*pid),
+            State::Exiting(exiting) if !exiting.kill_sent => Some(exiting.pid),
+            _ => None,
+        };
+        if let Some(pid) = pid {
+            let mut effects = vec![Effect::KillUi { pid }];
+            if let State::Exiting(exiting) = &mut self.state {
+                exiting.kill_sent = true;
+            } else {
+                self.session_failed = true;
+                self.begin_exit(now, pid);
+                if let State::Exiting(exiting) = &mut self.state {
+                    exiting.kill_sent = true;
+                }
+                effects.push(Effect::Notice(Notice::UiStartFailed));
+            }
+            self.inflight.clear();
+            effects
+        } else {
+            Vec::new()
+        }
+    }
+
     /// UI 进程退出了（进程句柄触发）。
     ///
     /// # 参数
@@ -432,6 +465,21 @@ impl HostMachine {
                 if !opened && self.quit.is_none() {
                     self.recover_after_crash(now, pins, &mut out);
                 }
+            }
+            State::Exiting(_) if std::mem::take(&mut self.session_failed) => {
+                self.state = State::Absent;
+                self.inflight.clear();
+                out.push(Effect::CloseSession { generation });
+                let pins = std::mem::take(&mut self.pins);
+                let opened = self.record_crash(now, &mut out);
+                if !opened && self.quit.is_none() {
+                    self.recover_after_crash(now, pins, &mut out);
+                    self.queue.expire(now);
+                    if matches!(self.state, State::Absent) && !self.queue.is_empty() {
+                        self.start_ui(now, &mut out);
+                    }
+                }
+                out.push(Effect::UiGone);
             }
             State::Exiting(_) => {
                 self.state = State::Absent;
@@ -596,6 +644,7 @@ impl HostMachine {
             Some(Outbound::Action { id, .. }) => UiHint::for_action(id),
             _ => UiHint::None,
         };
+        self.session_failed = false;
         self.generation += 1;
         self.seq = HostSeq::new();
         self.inflight.clear();

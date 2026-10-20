@@ -31,6 +31,7 @@ pub mod host;
 pub mod host_log;
 pub mod ipc_map;
 pub mod machine;
+pub mod mailbox;
 pub mod queue;
 pub mod rapid;
 pub mod view;

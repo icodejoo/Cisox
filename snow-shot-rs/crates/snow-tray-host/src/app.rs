@@ -7,6 +7,7 @@ use crate::cli::{FLAG_COMMAND, HostCli, USAGE, parse_cli};
 use crate::harden::{HardenReport, extension_points_disabled};
 use crate::host::{Event, HostCore};
 use crate::ipc_map::{FirstRun, action_id_for, first_run_plan};
+use crate::mailbox::Mailbox;
 use crate::win::{ENV_UI_EXE, WinPlatform};
 use snow_data_paths::paths::{default_app_data_directory, resolve_directory};
 use snow_data_paths::{
@@ -20,7 +21,7 @@ use snow_platform::crash::{
 use snow_platform::single_instance::{IpcCommand, SingleInstanceManager, SingleInstanceStatus};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
-use std::sync::mpsc::{RecvTimeoutError, channel};
+use std::sync::mpsc::RecvTimeoutError;
 use std::time::Instant;
 
 /// 命令行参数非法时的退出码。
@@ -50,6 +51,13 @@ pub fn run(args: Vec<String>, harden: HardenReport) -> ExitCode {
         }
     };
     match cli {
+        HostCli::RestartAfter(pid) => match crate::win::restart_after(pid) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("{error}");
+                ExitCode::from(EXIT_CODE_FAILED)
+            }
+        },
         HostCli::SelfCheckHarden => run_self_check(harden),
         HostCli::Resident => run_resident_fallback(),
         HostCli::Run { command } => run_host(command, harden),
@@ -134,7 +142,8 @@ fn run_host(command: Option<IpcCommand>, harden: HardenReport) -> ExitCode {
         dpi_aware = harden.dpi_aware,
         "托盘宿主启动"
     );
-    let (tx, rx) = channel::<Event>();
+    let tx = Mailbox::<Event>::new();
+    let rx = tx.clone();
     let ipc_tx = tx.clone();
     let startup_tx = tx.clone();
     if let Err(e) =
@@ -167,7 +176,7 @@ fn run_host(command: Option<IpcCommand>, harden: HardenReport) -> ExitCode {
 }
 
 /// 主事件循环：处理到点的事，然后等下一个事件或下一个截止时刻；宿主该退出时返回。
-fn event_loop(core: &mut HostCore<WinPlatform>, rx: &std::sync::mpsc::Receiver<Event>) {
+fn event_loop(core: &mut HostCore<WinPlatform>, rx: &Mailbox<Event>) {
     loop {
         let now = Instant::now();
         core.tick(now);
@@ -176,7 +185,7 @@ fn event_loop(core: &mut HostCore<WinPlatform>, rx: &std::sync::mpsc::Receiver<E
         }
         let received = match core.next_deadline() {
             Some(deadline) => rx.recv_timeout(deadline.saturating_duration_since(now)),
-            None => rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
+            None => rx.recv(),
         };
         match received {
             Ok(event) => core.handle(Instant::now(), event),

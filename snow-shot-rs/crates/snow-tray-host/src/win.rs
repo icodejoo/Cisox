@@ -8,6 +8,7 @@
 use crate::convert::{binding_from_spec, origin_from_shell, tray_menu, tray_spec_from_plan};
 use crate::gesture::{GestureThrottle, bindings_from_spec, event_from_drag};
 use crate::host::{Event, HeadlessKind, Platform, SpawnedUi, TrayPlan};
+use crate::mailbox::Mailbox;
 use crate::rapid::quit_chosen;
 use snow_host_protocol::frame::encode_line;
 use snow_host_protocol::launch::{
@@ -28,10 +29,9 @@ use snow_shell_core::tray::{Balloon, TrayService};
 use std::io::Read;
 use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
-use std::sync::mpsc::Sender;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
 use windows_sys::Win32::Security::Cryptography::ProcessPrng;
 use windows_sys::Win32::System::ProcessStatus::K32EmptyWorkingSet;
@@ -57,8 +57,8 @@ const LAUNCH_ID_BYTES: usize = 8;
 /// 强制结束 UI 进程时给的退出码。
 const KILL_EXIT_CODE: u32 = 1;
 
-/// 重启时，旧宿主退出后等多久（`ping` 次数，每次约 1 秒）再拉起新宿主，保证互斥体已释放。
-const RESTART_WAIT_PINGS: u32 = 3;
+/// 内部延迟重启模式参数。
+pub const FLAG_RESTART_AFTER: &str = "--restart-after";
 
 /// 连续误触发确认框的样式：是 / 否两个按钮、警告图标、**默认按钮是“否”**（直接回车就退出）、
 /// 置顶并抢前台（覆盖窗可能还留在最上层）、系统模态。
@@ -129,30 +129,87 @@ impl Drop for ProcessHandle {
     }
 }
 
+/// 尚未成功登记的子进程，失败时通过原始句柄结束并回收。
+struct ChildGuard(Option<Child>);
+impl ChildGuard {
+    /// 登记成功后解除失败清理。
+    fn disarm(mut self) {
+        self.0.take();
+    }
+}
+impl Drop for ChildGuard {
+    /// 即使后续打开句柄或创建线程失败，也不会遗留进程。
+    fn drop(&mut self) {
+        if let Some(child) = &mut self.0 {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+/// 有截止时间地等待无窗口任务，超时先结束并回收，再解除配置等待。
+fn wait_headless(
+    child: &mut ChildGuard,
+    timeout: Duration,
+) -> std::io::Result<std::process::ExitStatus> {
+    use std::os::windows::io::AsRawHandle;
+    let child = child.0.as_mut().expect("等待期间子进程存在");
+    let milliseconds = timeout.as_millis().min(u128::from(u32::MAX - 1)) as u32;
+    // SAFETY: 原始 Child 在等待、终止与回收期间持有进程句柄。
+    match unsafe { WaitForSingleObject(child.as_raw_handle(), milliseconds) } {
+        0 => child.wait(),
+        258 => {
+            tracing::warn!(pid = child.id(), "无窗口任务超时，终止并回收");
+            child.kill()?;
+            child.wait()
+        }
+        _ => Err(std::io::Error::last_os_error()),
+    }
+}
+
 /// 当前这一代 UI 会话。
 struct Session {
     /// 会话代数。
     generation: u64,
     /// 管道服务端（丢弃即停止并回收读线程）。
-    server: SessionPipeServer,
+    _server: SessionPipeServer,
     /// 写端。
     writer: PipeWriter,
+    /// 有界异步写队列。
+    outgoing: Mailbox<HostMessage>,
+    /// 写线程。
+    write_thread: Option<std::thread::JoinHandle<()>>,
     /// UI 进程 ID。
     pid: u32,
     /// 用于强制结束的进程句柄（等待用的是另一份，见 `watch_process`）。
     process: ProcessHandle,
 }
 
+impl Drop for Session {
+    /// 先取消管道 IO 再回收写线程，避免主线程等待写超时。
+    fn drop(&mut self) {
+        self.outgoing.close();
+        self.writer.close();
+        if let Some(thread) = self.write_thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
 /// 真实平台。
 pub struct WinPlatform {
     /// 事件通道发送端（克隆给各后台线程）。
-    tx: Sender<Event>,
+    tx: Mailbox<Event>,
     /// 数据根（读快照）。
     data_root: PathBuf,
     /// UI 进程 exe 路径。
     ui_exe: PathBuf,
     /// 本宿主 exe 路径（重启用）。
     host_exe: PathBuf,
+    /// 无窗口任务的等待上限。
+    headless_timeout: Duration,
+    /// 测试注入的登记故障点与保留的观察句柄。
+    #[cfg(test)]
+    registration_fault: Option<(u8, Option<ProcessHandle>)>,
     /// 当前 UI 会话。
     session: Option<Session>,
     /// 托盘服务。
@@ -175,7 +232,7 @@ impl WinPlatform {
     ///
     /// # 返回
     /// 平台；UI exe 路径可用环境变量 [`ENV_UI_EXE`] 覆盖。
-    pub fn new(tx: Sender<Event>, data_root: PathBuf, host_exe: PathBuf) -> Self {
+    pub fn new(tx: Mailbox<Event>, data_root: PathBuf, host_exe: PathBuf) -> Self {
         let ui_exe = std::env::var_os(ENV_UI_EXE)
             .map(PathBuf::from)
             .unwrap_or_else(|| host_exe.with_file_name(UI_EXE_NAME));
@@ -185,11 +242,26 @@ impl WinPlatform {
             ui_exe,
             host_exe,
             session: None,
+            headless_timeout: Duration::from_secs(30),
+            #[cfg(test)]
+            registration_fault: None,
             tray: None,
             hotkeys: None,
             hotkey_handles: Vec::new(),
             mouse: None,
         }
+    }
+
+    /// 在真实子进程启动后模拟句柄或线程创建失败，保留只读观察句柄供断言。
+    #[cfg(test)]
+    fn inject_registration_fault(&mut self, point: u8, pid: u32) -> Result<(), String> {
+        if let Some((wanted, observer)) = &mut self.registration_fault
+            && *wanted == point
+        {
+            *observer = Some(ProcessHandle::open(pid)?);
+            return Err(format!("注入登记故障 {point}"));
+        }
+        Ok(())
     }
 
     /// 取（必要时启动）热键服务。
@@ -261,6 +333,7 @@ fn read_notice(out: impl Read) -> Option<String> {
 }
 
 impl Platform for WinPlatform {
+    /// 建立会话并以失败清理守卫登记 UI 进程。
     fn spawn_ui(&mut self, generation: u64, hint: UiHint) -> Result<SpawnedUi, String> {
         // 旧会话（已退出、等着被替换）先释放，避免两个管道服务端并存
         self.session = None;
@@ -281,7 +354,9 @@ impl Platform for WinPlatform {
                 SessionEvent::Line(line) => Event::SessionLine { generation, line },
                 SessionEvent::Disconnected => Event::SessionClosed { generation },
             };
-            let _ = tx.send(message);
+            if tx.send(message).is_err() {
+                let _ = tx.send(Event::SessionFailed { generation });
+            }
         })?;
         let token = random_hex(TOKEN_BYTES)?;
         let launch = UiLaunch::new(Some(app_id), Some(token.clone()))
@@ -295,16 +370,42 @@ impl Platform for WinPlatform {
             .stderr(Stdio::null())
             .spawn()
             .map_err(|e| format!("拉起 {} 失败: {e}", self.ui_exe.display()))?;
-        let pid = child.id();
+        let child = ChildGuard(Some(child));
+        let pid = child.0.as_ref().expect("刚创建的子进程").id();
         // 趁 `child` 还持有进程，立刻按 PID 打开自己的句柄；之后 `child` 可以丢弃
+        #[cfg(test)]
+        self.inject_registration_fault(1, pid)?;
         let process = ProcessHandle::open(pid)?;
+        #[cfg(test)]
+        self.inject_registration_fault(2, pid)?;
         self.watch_process(generation, pid)?;
-        drop(child);
         let writer = server.writer();
+        let outgoing = Mailbox::<HostMessage>::new();
+        let pending = outgoing.clone();
+        let pipe_writer = writer.clone();
+        let tx = self.tx.clone();
+        let write_thread = std::thread::Builder::new()
+            .name("ui-write".into())
+            .spawn(move || {
+                while let Ok(message) = pending.recv() {
+                    let result = encode_line(&message)
+                        .map_err(|e| e.to_string())
+                        .and_then(|line| pipe_writer.send_line(line.trim_end_matches('\n')));
+                    if let Err(error) = result {
+                        tracing::warn!(%error, generation, "异步会话写入失败");
+                        let _ = tx.send(Event::SessionFailed { generation });
+                        break;
+                    }
+                }
+            })
+            .map_err(|e| format!("创建写线程失败: {e}"))?;
+        child.disarm();
         self.session = Some(Session {
             generation,
-            server,
+            _server: server,
             writer,
+            outgoing,
+            write_thread: Some(write_thread),
             pid,
             process,
         });
@@ -312,16 +413,17 @@ impl Platform for WinPlatform {
         Ok(SpawnedUi { pid, token })
     }
 
+    /// 把消息交给有界异步写队列。
     fn send(&mut self, generation: u64, message: &HostMessage) -> Result<(), String> {
         let session = self
             .session
             .as_ref()
             .filter(|s| s.generation == generation)
             .ok_or_else(|| format!("没有第 {generation} 代会话"))?;
-        let line = encode_line(message).map_err(|e| e.to_string())?;
-        session.writer.send_line(line.trim_end_matches('\n'))
+        session.outgoing.send(message.clone())
     }
 
+    /// 取消本代管道 IO 并回收会话。
     fn close_session(&mut self, generation: u64) {
         if self
             .session
@@ -331,8 +433,7 @@ impl Platform for WinPlatform {
         {
             session.writer.close();
             // 先停读线程再释放句柄
-            drop(session.server);
-            drop(session.process);
+            drop(session);
         }
     }
 
@@ -358,8 +459,9 @@ impl Platform for WinPlatform {
         read_spec(&snow_data_paths::host_spec_path(&self.data_root))
     }
 
+    /// 启动有截止时间的快照生成任务。
     fn spawn_emit_spec(&mut self) -> Result<(), String> {
-        let mut child = Command::new(&self.ui_exe)
+        let child = Command::new(&self.ui_exe)
             .args([FLAG_HEADLESS, HEADLESS_EMIT_SPEC])
             .creation_flags(CREATE_NO_WINDOW)
             .stdin(Stdio::null())
@@ -367,12 +469,15 @@ impl Platform for WinPlatform {
             .stderr(Stdio::null())
             .spawn()
             .map_err(|e| format!("拉起 {} 失败: {e}", self.ui_exe.display()))?;
+        let mut child = ChildGuard(Some(child));
+        let timeout = self.headless_timeout;
         let tx = self.tx.clone();
         std::thread::Builder::new()
             .name("emit-spec-watch".into())
             .spawn(move || {
-                let status = child.wait();
+                let status = wait_headless(&mut child, timeout);
                 tracing::info!(?status, "快照生成任务已结束");
+                drop(child);
                 let _ = tx.send(Event::SpecEmitted);
             })
             .map(|_| ())
@@ -510,6 +615,7 @@ impl Platform for WinPlatform {
         }
     }
 
+    /// 启动无窗口任务并在结束或超时后通知宿主。
     fn spawn_headless(&mut self, job: &HeadlessJob) -> Result<(), String> {
         let kind = HeadlessKind::of(job).ok_or_else(|| "生成快照不走通用无窗口路径".to_string())?;
         let mut command = Command::new(&self.ui_exe);
@@ -524,16 +630,42 @@ impl Platform for WinPlatform {
         } else {
             Stdio::null()
         });
-        let mut child = command
+        let child = command
             .spawn()
             .map_err(|e| format!("拉起 {} 失败: {e}", self.ui_exe.display()))?;
+        let mut child = ChildGuard(Some(child));
+        let timeout = self.headless_timeout;
         let tx = self.tx.clone();
         std::thread::Builder::new()
             .name("headless-watch".into())
             .spawn(move || {
-                let notice = child.stdout.take().and_then(read_notice);
-                let status = child.wait();
+                let status = wait_headless(&mut child, timeout);
+                let notice = child
+                    .0
+                    .as_mut()
+                    .and_then(|child| child.stdout.take())
+                    .and_then(|out| {
+                        use std::os::windows::io::AsRawHandle;
+                        let mut available = 0;
+                        // SAFETY: 标准输出管道仍由 out 持有；只读取已到达的字节，不等待 EOF。
+                        let ok = unsafe {
+                            windows_sys::Win32::System::Pipes::PeekNamedPipe(
+                                out.as_raw_handle(),
+                                std::ptr::null_mut(),
+                                0,
+                                std::ptr::null_mut(),
+                                &mut available,
+                                std::ptr::null_mut(),
+                            )
+                        };
+                        if ok == 0 {
+                            None
+                        } else {
+                            read_notice(out.take(u64::from(available)))
+                        }
+                    });
                 tracing::info!(?kind, ?status, "无窗口任务已结束");
+                drop(child);
                 let _ = tx.send(Event::HeadlessDone { kind, notice });
             })
             .map(|_| ())
@@ -562,21 +694,48 @@ impl Platform for WinPlatform {
             .map_err(|e| format!("创建确认框线程失败: {e}"))
     }
 
+    /// 直接启动宿主自身的延迟重启模式。
     fn restart_host(&mut self) -> Result<(), String> {
-        let line = format!(
-            "/C ping -n {RESTART_WAIT_PINGS} 127.0.0.1 >NUL & start \"\" \"{}\"",
-            self.host_exe.display()
-        );
-        Command::new("cmd")
-            .raw_arg(line)
-            .creation_flags(CREATE_NO_WINDOW)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+        restart_command(&self.host_exe, std::process::id())
             .spawn()
             .map(|_| ())
             .map_err(|e| format!("拉起重启助手失败: {e}"))
     }
+}
+
+/// 直接传递路径与参数，不经过命令解释器。
+fn restart_command(exe: &std::path::Path, pid: u32) -> Command {
+    let mut command = Command::new(exe);
+    command
+        .args([FLAG_RESTART_AFTER, &pid.to_string()])
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    command
+}
+
+/// 延迟重启助手先取得旧进程句柄，再等待退出，最后以原始路径拉起宿主。
+pub fn restart_after(pid: u32) -> Result<(), String> {
+    // 旧宿主可能已经退出；仅 ERROR_INVALID_PARAMETER 表示 PID 已不存在。
+    // SAFETY: 只传进程号与等待权限；失败时立即读取系统错误。
+    let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+    if handle.is_null() {
+        if std::io::Error::last_os_error().raw_os_error() != Some(87) {
+            return Err("无法打开旧宿主进程".into());
+        }
+    } else {
+        let process = ProcessHandle(handle);
+        // SAFETY: 句柄由 process 持有，等待旧宿主释放单实例锁。
+        if unsafe { WaitForSingleObject(process.0, 60_000) } != 0 {
+            return Err("等待旧宿主退出超时".into());
+        }
+    }
+    Command::new(std::env::current_exe().map_err(|e| e.to_string())?)
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 #[cfg(test)]

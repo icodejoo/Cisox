@@ -27,6 +27,8 @@ pub enum HostCli {
     Resident,
     /// `--self-check-harden`：只验证进程加固是否生效。
     SelfCheckHarden,
+    /// 内部重启助手等待的旧宿主进程号。
+    RestartAfter(u32),
 }
 
 /// 解析命令行（不含程序名）。
@@ -48,6 +50,7 @@ pub fn parse_cli(args: impl IntoIterator<Item = String>) -> Result<HostCli, Stri
     let mut command = None;
     let mut resident = false;
     let mut self_check = false;
+    let mut restart_after = None;
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
@@ -59,10 +62,27 @@ pub fn parse_cli(args: impl IntoIterator<Item = String>) -> Result<HostCli, Stri
                     IpcCommand::from_cli_name(&name).ok_or_else(|| format!("未知命令: {name}"))?,
                 );
             }
+            "--restart-after" => {
+                let pid = iter
+                    .next()
+                    .ok_or("重启参数缺少进程号")?
+                    .parse::<u32>()
+                    .map_err(|_| "重启进程号无效")?;
+                if pid == 0 {
+                    return Err("重启进程号无效".into());
+                }
+                restart_after = Some(pid);
+            }
             FLAG_RESIDENT => resident = true,
             FLAG_SELF_CHECK_HARDEN => self_check = true,
             other => return Err(format!("未知参数: {other}")),
         }
+    }
+    if let Some(pid) = restart_after {
+        if command.is_some() || resident || self_check {
+            return Err("重启参数不能与其他模式组合".into());
+        }
+        return Ok(HostCli::RestartAfter(pid));
     }
     Ok(if self_check {
         HostCli::SelfCheckHarden
