@@ -217,7 +217,7 @@ struct SpanOutput {
     /// 输出（重建复制用）。
     output: IDXGIOutput1,
     /// 桌面复制接口。
-    duplication: IDXGIOutputDuplication,
+    duplication: Option<IDXGIOutputDuplication>,
     /// 该输出自己的槽池（槽尺寸 = 裁剪块尺寸）。
     slots: Vec<Arc<SharedSlot>>,
     /// 在输出里的裁剪框。
@@ -258,6 +258,12 @@ pub struct SpanCapture {
     last_acquire: Option<Instant>,
     /// 帧追踪缓冲（未开启时是空操作）；`src` 列标注来源输出序号。
     trace: TraceBuf,
+}
+
+/// 跨屏恢复屏障：全部输出均取得恢复后的完整帧才允许发布。
+fn snapshot_complete(ready: impl Iterator<Item = bool>) -> bool {
+    let mut ready = ready.peekable();
+    ready.peek().is_some() && ready.all(|value| value)
 }
 
 impl SpanCapture {
@@ -331,7 +337,7 @@ impl SpanCapture {
             let (left, top) = (part.crop.x as u32, part.crop.y as u32);
             outputs.push(SpanOutput {
                 output,
-                duplication,
+                duplication: Some(duplication),
                 slots,
                 crop: D3D11_BOX {
                     left,
@@ -403,7 +409,11 @@ impl SpanCapture {
         want: bool,
     ) -> Result<Option<Captured<GpuFrame>>, CaptureFault> {
         let captured_at = Instant::now();
-        let duplication = self.outputs[index].duplication.clone();
+        let duplication = self.outputs[index]
+            .duplication
+            .as_ref()
+            .ok_or(CaptureFault::Lost)?
+            .clone();
         let guard = FrameGuard(&duplication);
         let src = source_id(index);
         if !want {
@@ -491,6 +501,9 @@ impl SpanCapture {
         self.trace.iter_since(IterStage::Copy, flush_started);
         self.trace.iter_add(IterStage::Lock, flush_wait);
         self.outputs[index].current = Some(slot);
+        if !snapshot_complete(self.outputs.iter().map(|o| o.current.is_some())) {
+            return Ok(None);
+        }
         let tiles: Arc<[Tile]> = self
             .outputs
             .iter()
@@ -556,6 +569,8 @@ impl SpanCapture {
                 let call = unsafe {
                     self.outputs[index]
                         .duplication
+                        .as_ref()
+                        .ok_or(CaptureFault::Lost)?
                         .AcquireNextFrame(0, &mut info, &mut resource)
                 };
                 if let Some(started) = acquire_started {
@@ -610,6 +625,21 @@ impl CaptureSource for SpanCapture {
         result
     }
 
+    /// 恢复时重建全部输出；各屏完整首帧齐备后才发布拼接帧。
+    fn refresh(&mut self) -> Result<(), String> {
+        self.latest = None;
+        for unit in &mut self.outputs {
+            unit.current = None;
+            // SAFETY: 输出与采集设备在本会话内有效。
+            unit.duplication = None;
+            unit.duplication = Some(
+                unsafe { unit.output.DuplicateOutput(self.device.device()) }
+                    .map_err(|e| format!("重建显示器桌面复制失败: {e}"))?,
+            );
+        }
+        Ok(())
+    }
+
     /// 只重建权限丢失的那一路，其余保持。
     fn recreate(&mut self) -> Result<(), String> {
         let Some(index) = self.lost.take() else {
@@ -617,10 +647,11 @@ impl CaptureSource for SpanCapture {
         };
         let unit = &mut self.outputs[index];
         // SAFETY: 设备与输出在采集器存续期间有效。
+        unit.duplication = None;
         let result = unsafe { unit.output.DuplicateOutput(self.device.device()) };
         match result {
             Ok(duplication) => {
-                unit.duplication = duplication;
+                unit.duplication = Some(duplication);
                 unit.current = None;
                 self.latest = None;
                 Ok(())
@@ -651,6 +682,16 @@ impl CaptureSource for SpanCapture {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 恢复后只有部分屏幕到帧时不得发布旧屏与新屏混合的快照。
+    #[test]
+    fn resumed_span_waits_for_every_output() {
+        assert!(!snapshot_complete([false, false].into_iter()));
+        assert!(!snapshot_complete([true, false].into_iter()));
+        assert!(!snapshot_complete([false, true].into_iter()));
+        assert!(snapshot_complete([true, true].into_iter()));
+        assert!(!snapshot_complete([].into_iter()));
+    }
 
     /// 构造矩形。
     fn r(x: i32, y: i32, w: u32, h: u32) -> Rect {

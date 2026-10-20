@@ -101,7 +101,7 @@ pub fn build_config(
             .and_then(parse_preset)
             .unwrap_or(VideoEncodingSpeed::SuperFast),
         prefer_hardware_encoder: prefer_hardware,
-        // 音频只在 MP4 启用；软件路径用上游会话自带的混音，音量与设备选择由自建路径支持
+        // 音频只在 MP4 启用；Windows 软件适配器会关闭上游音频并复用独立采集与混音
         enable_microphone: request.audio.microphone && request.format == MediaFormat::Mp4,
         enable_system_audio: request.audio.system && request.format == MediaFormat::Mp4,
         show_cursor: request.show_cursor,

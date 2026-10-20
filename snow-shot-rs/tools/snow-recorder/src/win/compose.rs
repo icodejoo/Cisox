@@ -25,6 +25,27 @@ use crate::win::vp::{VideoBlitter, VpLayer};
 /// 光标贴图缓存上限（按形状 ID，先进先出淘汰）。
 const CURSOR_CACHE_LIMIT: usize = 16;
 
+/// 按形状 ID 同步登记并以 FIFO 淘汰，重复形状不重复占位。
+fn cache_insert<T>(
+    cache: &mut HashMap<u64, T>,
+    order: &mut VecDeque<u64>,
+    id: u64,
+    value: T,
+) -> Option<u64> {
+    let mut evicted = None;
+    if !cache.contains_key(&id) {
+        if order.len() >= CURSOR_CACHE_LIMIT
+            && let Some(old) = order.pop_front()
+        {
+            cache.remove(&old);
+            evicted = Some(old);
+        }
+        order.push_back(id);
+    }
+    cache.insert(id, value);
+    evicted
+}
+
 /// GPU 合成器。
 pub struct GpuComposer {
     /// 合成设备 B。
@@ -97,7 +118,12 @@ impl GpuComposer {
     fn resolve_shape(&mut self, sample: &AttachedCursorSample) -> Option<CursorShape> {
         match &sample.shape {
             CursorShapeState::Embedded(shape) => {
-                self.shapes.insert(shape.shape_id.get(), shape.clone());
+                let id = shape.shape_id.get();
+                if let Some(old) =
+                    cache_insert(&mut self.shapes, &mut self.order, id, shape.clone())
+                {
+                    self.textures.remove(&old);
+                }
                 Some(shape.clone())
             }
             CursorShapeState::Cached(id) => self.shapes.get(&id.get()).cloned(),
@@ -140,13 +166,7 @@ impl GpuComposer {
                 );
             }
         }
-        if self.order.len() >= CURSOR_CACHE_LIMIT
-            && let Some(old) = self.order.pop_front()
-        {
-            self.textures.remove(&old);
-        }
         self.textures.insert(id, texture.clone());
-        self.order.push_back(id);
         Ok(texture)
     }
 }
@@ -232,5 +252,29 @@ impl FrameComposer for GpuComposer {
     /// 在用的编码表面数。
     fn in_flight(&self) -> usize {
         self.hw.outstanding()
+    }
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+
+    /// 隐藏形状也受容量限制，重复 ID 不占新槽，淘汰顺序可重复。
+    #[test]
+    fn cursor_shape_cache_is_bounded_and_fifo() {
+        let mut shapes = HashMap::new();
+        let mut order = VecDeque::new();
+        for id in 0..CURSOR_CACHE_LIMIT as u64 {
+            assert_eq!(cache_insert(&mut shapes, &mut order, id, id), None);
+        }
+        cache_insert(&mut shapes, &mut order, 0, 99);
+        assert_eq!(order.len(), CURSOR_CACHE_LIMIT);
+        assert_eq!(cache_insert(&mut shapes, &mut order, 100, 100), Some(0));
+        assert!(!shapes.contains_key(&0));
+        assert_eq!(shapes.len(), CURSOR_CACHE_LIMIT);
+        for id in 101..1000 {
+            cache_insert(&mut shapes, &mut order, id, id);
+            assert_eq!(shapes.len(), CURSOR_CACHE_LIMIT);
+        }
     }
 }

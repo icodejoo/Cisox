@@ -16,6 +16,8 @@ mod pipeline;
 mod plan;
 mod settings;
 mod soft;
+#[cfg(windows)]
+mod soft_audio;
 mod tailfix;
 mod timeline;
 #[cfg(windows)]
@@ -315,6 +317,11 @@ fn main() {
                 }
             }
             Err(RecvTimeoutError::Timeout) => {}
+        }
+        if let Some(reason) = active.as_ref().and_then(|a| a.session.failure()) {
+            let a = active.take().expect("active recording");
+            a.session.cancel();
+            fail(reason, &a.final_path);
         }
         if let Some(a) = &active
             && a.clock.is_running()

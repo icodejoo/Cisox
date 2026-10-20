@@ -29,6 +29,11 @@ pub trait RecordingBackend: Send {
     /// 后端名（诊断用）。
     fn name(&self) -> &str;
 
+    /// 查询后台首个故障。
+    fn failure(&self) -> Option<String> {
+        None
+    }
+
     /// 暂停（暂停期间的时间不计入时长）。
     fn pause(&self) -> Result<(), String>;
 
@@ -61,6 +66,11 @@ struct PipelineBackend {
 
 #[cfg_attr(not(windows), allow(dead_code))]
 impl RecordingBackend for PipelineBackend {
+    /// 查询采集、合成或编码故障。
+    fn failure(&self) -> Option<String> {
+        self.running.failure()
+    }
+
     /// 后端名。
     fn name(&self) -> &str {
         &self.name

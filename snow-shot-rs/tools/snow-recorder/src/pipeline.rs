@@ -11,9 +11,9 @@
 //! 背压语义全部是"有界 + 丢弃并计数"：采集池耗尽丢新帧、待输出队列溢出/被更新的帧取代时丢旧帧、
 //! 编码表面池耗尽丢当前帧、落后的槽直接跳过（不补发）。
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender, TrySendError};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -45,6 +45,8 @@ const RECREATE_BACKOFF: Duration = Duration::from_millis(100);
 const TIMER_RESOLUTION_MS: u32 = 1;
 /// 诊断样本上限。
 const SAMPLE_LIMIT: usize = 20_000;
+/// 采集消息容量；光标更新单独覆盖保存。
+const CAPTURE_CAPACITY: usize = 16;
 
 /// 一次采集的结果。
 #[derive(Clone)]
@@ -111,6 +113,11 @@ pub trait CaptureSource: Send + 'static {
 
     /// 重建采集会话（[`CaptureFault::Lost`] 之后调用）。
     fn recreate(&mut self) -> Result<(), String>;
+
+    /// 恢复后重新取得完整桌面。
+    fn refresh(&mut self) -> Result<(), String> {
+        self.recreate()
+    }
 
     /// 当前计数。
     fn stats(&self) -> CaptureStats;
@@ -226,6 +233,8 @@ impl Samples {
 /// 录制结果与诊断。
 #[derive(Debug, Default, Clone)]
 pub struct PipelineReport {
+    /// 音频降级与收尾诊断。
+    pub audio: Option<crate::audio::AudioReport>,
     /// 实际使用的后端名（如 `dxgi+videoprocessor+h264_qsv`）。
     pub backend: String,
     /// 送入编码器的帧数。
@@ -285,6 +294,9 @@ impl PipelineReport {
             "\n  启动ms 等首帧 {:.1} / 首帧合成 {:.1} / 首帧送编码 {:.1}",
             self.startup_ms.0, self.startup_ms.1, self.startup_ms.2
         ));
+        if let Some(audio) = &self.audio {
+            text.push_str(&format!("\n  audio: {}", audio.describe()));
+        }
         for (name, samples) in &self.capture_diag {
             text.push_str(&format!("\n  {name} {}", samples.summary()));
         }
@@ -323,10 +335,14 @@ enum CaptureMsg<F> {
 /// 采集线程与主控共享的标志与计数。
 #[derive(Default)]
 struct CaptureShared {
+    /// 采集首个故障，不受有界通道满载影响。
+    failure: Mutex<Option<String>>,
     /// 请求停止。
     stop: AtomicBool,
     /// 暂停中（只取走不复制）。
     paused: AtomicBool,
+    /// 恢复时请求重新采集。
+    refresh: AtomicBool,
     /// 取到的桌面更新数。
     frames: AtomicU64,
     /// 缓冲池耗尽丢弃数。
@@ -339,6 +355,8 @@ struct CaptureShared {
 pub struct Running {
     /// 控制通道。
     control: Sender<Control>,
+    /// 各后台阶段的首个故障。
+    failure: Arc<Mutex<Option<String>>>,
     /// 采集线程共享状态。
     shared: Arc<CaptureShared>,
     /// 采集线程（返回诊断样本）。
@@ -372,10 +390,37 @@ pub fn slot_time(slot: u64, fps: u32) -> Duration {
     )
 }
 
+/// 非阻塞投递桌面帧；光标只保留最新值，队列满时释放新桌面帧。
+fn forward_capture<F>(
+    captured: Captured<F>,
+    tx: &SyncSender<CaptureMsg<F>>,
+    cursor: &Mutex<Option<Captured<F>>>,
+) -> bool {
+    if !captured.fresh {
+        *cursor.lock().unwrap() = Some(captured);
+        true
+    } else {
+        !matches!(
+            tx.try_send(CaptureMsg::Frame(Box::new(captured))),
+            Err(TrySendError::Disconnected(_))
+        )
+    }
+}
+
+/// 故障先保存在共享状态，再尝试唤醒合成线程；队列满时也不会丢失原因。
+fn capture_fault<F>(shared: &CaptureShared, tx: &SyncSender<CaptureMsg<F>>, error: String) {
+    let mut first = shared.failure.lock().unwrap();
+    if first.is_none() {
+        *first = Some(error.clone());
+    }
+    let _ = tx.try_send(CaptureMsg::Fault(error));
+}
+
 /// 采集线程主循环：阻塞取帧并转交合成线程，会话失效时重建。
 fn capture_loop<C: CaptureSource>(
     mut source: C,
-    tx: Sender<CaptureMsg<C::Frame>>,
+    tx: SyncSender<CaptureMsg<C::Frame>>,
+    cursor: Arc<Mutex<Option<Captured<C::Frame>>>>,
     shared: Arc<CaptureShared>,
 ) -> CaptureDiag {
     // 调度方式由环境变量决定（缺省与历史一致：HIGHEST）；守卫持有到线程退出，退出 MMCSS 须在本线程完成
@@ -383,11 +428,21 @@ fn capture_loop<C: CaptureSource>(
     let mut trace = TraceBuf::new(Thread::Capture);
     let mut recreates = 0;
     while !shared.stop.load(Ordering::Acquire) {
-        let want = !shared.paused.load(Ordering::Acquire);
+        if shared.paused.load(Ordering::Acquire) {
+            std::thread::sleep(COMPOSE_WAIT);
+            continue;
+        }
+        if shared.refresh.swap(false, Ordering::AcqRel)
+            && let Err(e) = source.refresh()
+        {
+            capture_fault(&shared, &tx, e);
+            break;
+        }
+        let want = true;
         match source.next(ACQUIRE_TIMEOUT, want) {
             Ok(Some(captured)) => {
                 trace.enqueue(captured.id, captured.fresh);
-                if tx.send(CaptureMsg::Frame(Box::new(captured))).is_err() {
+                if !forward_capture(captured, &tx, &cursor) {
                     break;
                 }
             }
@@ -395,17 +450,17 @@ fn capture_loop<C: CaptureSource>(
             Err(CaptureFault::Lost) => {
                 recreates += 1;
                 if recreates > MAX_RECREATE_ATTEMPTS {
-                    let _ = tx.send(CaptureMsg::Fault("采集会话持续失效".into()));
+                    capture_fault(&shared, &tx, "采集会话持续失效".into());
                     break;
                 }
                 std::thread::sleep(RECREATE_BACKOFF);
                 if let Err(e) = source.recreate() {
-                    let _ = tx.send(CaptureMsg::Fault(e));
+                    capture_fault(&shared, &tx, e);
                     break;
                 }
             }
             Err(CaptureFault::Other(e)) => {
-                let _ = tx.send(CaptureMsg::Fault(e));
+                capture_fault(&shared, &tx, e);
                 break;
             }
         }
@@ -422,31 +477,23 @@ fn encode_loop<E: VideoEncoder>(
     mut encoder: E,
     rx: Receiver<EncodeMsg<E::Surface>>,
 ) -> Result<EncoderStats, String> {
-    let mut failure: Option<String> = None;
     let mut trace = TraceBuf::new(Thread::Encode);
     while let Ok(msg) = rx.recv() {
         match msg {
             EncodeMsg::Frame(surface, pts) => {
                 let started = trace.mark();
-                if failure.is_none()
-                    && let Err(e) = encoder.submit(surface, pts)
-                {
-                    failure = Some(e);
-                }
+                encoder.submit(surface, pts)?;
                 trace.submit(pts, started);
             }
             EncodeMsg::Finish(end) => {
                 let started = trace.mark();
-                let result = match failure {
-                    Some(e) => Err(e),
-                    None => encoder.finish(end),
-                };
+                let result = encoder.finish(end);
                 trace.finish(end, started);
                 return result;
             }
         }
     }
-    Err(failure.unwrap_or_else(|| "编码线程在收到结束前通道关闭".into()))
+    Err("编码线程在收到结束前通道关闭".into())
 }
 
 /// 等待采集线程送来第一张带桌面内容的帧。
@@ -473,6 +520,8 @@ struct ComposeContext<C: CaptureSource, P, S> {
     timeline: Timeline,
     /// 输出节拍。
     ticks: TickClock,
+    /// 最新光标事件，消费者停滞时覆盖。
+    cursor: Arc<Mutex<Option<Captured<C::Frame>>>>,
     /// 待输出队列（只放有新桌面内容的帧，按呈现时间排序）。
     queue: TimedQueue<Captured<C::Frame>>,
     /// 槽切点相位跟踪。
@@ -483,6 +532,8 @@ struct ComposeContext<C: CaptureSource, P, S> {
     warmed: bool,
     /// 录制开始时刻（预热超时用）。
     started: Instant,
+    /// 最近恢复时刻，拒绝恢复前积压的旧采集事件。
+    resumed_at: Option<Instant>,
     /// 最近一张桌面帧（光标单独移动时用它补帧）。
     latest: Option<Captured<C::Frame>>,
     /// 最近的光标采样。
@@ -543,10 +594,14 @@ where
                 Control::Pause(at) if !paused => {
                     c.timeline.pause(at);
                     c.queue.clear();
+                    c.latest = None;
+                    c.latest_cursor = None;
+                    *c.cursor.lock().unwrap() = None;
                     paused = true;
                 }
                 Control::Resume(at) if paused => {
                     c.timeline.resume(at);
+                    c.resumed_at = Some(at);
                     c.queue.clear();
                     paused = false;
                 }
@@ -570,7 +625,7 @@ where
             }
         };
         messages.extend(first);
-        while let Ok(m) = c.capture.try_recv() {
+        for m in c.capture.try_iter().take(CAPTURE_CAPACITY) {
             messages.push(m);
         }
         for message in messages.drain(..) {
@@ -581,6 +636,10 @@ where
                     break 'main;
                 }
             }
+        }
+        let cursor = c.cursor.lock().unwrap().take();
+        if let Some(cursor) = cursor {
+            absorb_frame(&mut c, cursor, paused);
         }
         let due = slot_of(
             c.timeline
@@ -647,7 +706,10 @@ fn absorb_frame<C: CaptureSource, P, S>(
     captured: Captured<C::Frame>,
     paused: bool,
 ) {
-    if paused || c.timeline.in_pause(captured.captured_at) {
+    if paused
+        || c.timeline.in_pause(captured.captured_at)
+        || c.resumed_at.is_some_and(|at| captured.captured_at < at)
+    {
         return;
     }
     if c.config.show_cursor
@@ -811,12 +873,15 @@ where
 {
     let timer = TimerGuard::request(TIMER_RESOLUTION_MS);
     let shared = Arc::new(CaptureShared::default());
-    let (capture_tx, capture_rx) = mpsc::channel();
+    let failure = Arc::new(Mutex::new(None));
+    let cursor = Arc::new(Mutex::new(None));
+    let (capture_tx, capture_rx) = mpsc::sync_channel(CAPTURE_CAPACITY);
     let capture_thread = std::thread::Builder::new()
         .name("snow-capture".into())
         .spawn({
             let shared = Arc::clone(&shared);
-            move || capture_loop(capture, capture_tx, shared)
+            let cursor = Arc::clone(&cursor);
+            move || capture_loop(capture, capture_tx, cursor, shared)
         })
         .map_err(|e| e.to_string())?;
     let stop_capture = |shared: &CaptureShared, handle: JoinHandle<CaptureDiag>| {
@@ -869,7 +934,10 @@ where
     let (frame_tx, frame_rx) = mpsc::channel();
     let encode = std::thread::Builder::new()
         .name("snow-encode".into())
-        .spawn(move || encode_loop(encoder, frame_rx))
+        .spawn({
+            let failure = Arc::clone(&failure);
+            move || record_failure(encode_loop(encoder, frame_rx), &failure)
+        })
         .map_err(|e| e.to_string())?;
     let period = Duration::from_secs_f64(1.0 / f64::from(config.fps.max(1)));
     let first = *first;
@@ -878,6 +946,7 @@ where
         composer,
         timeline: Timeline::new(start, config.fps),
         ticks: TickClock::starting_at(1),
+        cursor,
         queue: TimedQueue::default(),
         phase: PhaseTracker::new(period),
         hold: period + SLOT_HOLD_MARGIN,
@@ -885,6 +954,7 @@ where
         started: start,
         last_emitted_cursor: first.cursor.as_ref().map(cursor_key),
         latest_cursor: first.cursor.clone(),
+        resumed_at: None,
         latest: Some(first),
         last_slot: Some(0),
         last_present: None,
@@ -898,9 +968,13 @@ where
     };
     let compose = std::thread::Builder::new()
         .name("snow-compose".into())
-        .spawn(move || compose_loop(ctx))
+        .spawn({
+            let failure = Arc::clone(&failure);
+            move || record_failure(compose_loop(ctx), &failure)
+        })
         .map_err(|e| e.to_string())?;
     Ok(Running {
+        failure,
         control: control_tx,
         shared,
         capture: Some(capture_thread),
@@ -914,7 +988,35 @@ where
     })
 }
 
+/// 保存后台首个错误，供主循环及时读取。
+fn record_failure<T>(
+    result: Result<T, String>,
+    failure: &Mutex<Option<String>>,
+) -> Result<T, String> {
+    if let Err(e) = &result {
+        let mut first = failure.lock().unwrap();
+        if first.is_none() {
+            *first = Some(e.clone());
+        }
+    }
+    result
+}
+
 impl Running {
+    /// 读取后台故障；线程崩溃也视为录制失败。
+    pub fn failure(&self) -> Option<String> {
+        self.failure
+            .lock()
+            .unwrap()
+            .clone()
+            .or_else(|| self.shared.failure.lock().unwrap().clone())
+            .or_else(|| {
+                (self.compose.as_ref().is_some_and(|t| t.is_finished())
+                    || self.encode.as_ref().is_some_and(|t| t.is_finished()))
+                .then(|| "录制后台线程意外退出".into())
+            })
+    }
+
     /// 装配时给的后端名。
     pub fn backend_name(&self) -> &str {
         &self.backend
@@ -937,6 +1039,7 @@ impl Running {
             a.resume(now);
         }
         let _ = self.control.send(Control::Resume(now));
+        self.shared.refresh.store(true, Ordering::Release);
         self.shared.paused.store(false, Ordering::Release);
     }
 
@@ -947,16 +1050,7 @@ impl Running {
     pub fn stop(mut self) -> Result<PipelineReport, String> {
         let now = Instant::now();
         // 音频先收尾：容器收尾（Finalize / 写尾）之前，音轨必须已写完
-        if let Some(report) = self.audio.take().and_then(|a| a.stop(now)) {
-            eprintln!(
-                "音频: 写入 {} 个 10ms 槽，丢弃 {} 帧{}",
-                report.slots,
-                report.dropped_frames,
-                report
-                    .error
-                    .map_or(String::new(), |e| format!("，收尾错误: {e}"))
-            );
-        }
+        let audio = self.audio.take().and_then(|a| a.stop(now));
         let _ = self.control.send(Control::Stop(now));
         let compose = self
             .compose
@@ -979,6 +1073,7 @@ impl Running {
         // 各线程都已退出，追踪缓冲已并入全局记录（未开启追踪时什么也不做）
         frametrace::finish(self.fps, &self.backend);
         let mut report = compose?;
+        report.audio = audio;
         let stats = encode?;
         report.encoder_frames = stats.frames;
         report.send_ms = Samples(stats.send_ms);
@@ -1202,28 +1297,270 @@ mod tests {
         (running, log, end)
     }
 
-    /// 源速率等于输出速率：每帧按序号顺序送出，pts 严格递增，终点晚于末帧。
+    /// 消费者完全停滞时，桌面帧队列和光标信箱保持容量上限与最新值。
+    #[test]
+    fn stalled_capture_consumer_has_bounded_memory() {
+        let (tx, rx) = mpsc::sync_channel(CAPTURE_CAPACITY);
+        let cursor = Mutex::new(None);
+        let now = Instant::now();
+        for id in 0..10_000 {
+            for fresh in [true, false] {
+                assert!(forward_capture(
+                    Captured {
+                        frame: id,
+                        cursor: None,
+                        present: now,
+                        captured_at: now,
+                        fresh,
+                        id,
+                    },
+                    &tx,
+                    &cursor
+                ));
+            }
+        }
+        assert_eq!(rx.try_iter().count(), CAPTURE_CAPACITY);
+        assert_eq!(cursor.lock().unwrap().take().unwrap().id, 9_999);
+        drop(rx);
+        assert!(!forward_capture(
+            Captured {
+                frame: 0,
+                cursor: None,
+                present: now,
+                captured_at: now,
+                fresh: true,
+                id: 0,
+            },
+            &tx,
+            &cursor
+        ));
+    }
+
+    /// 编码失败立即结束，不等待 Finish；后台首个原因不会被后续故障覆盖。
+    #[test]
+    fn encoder_failure_is_reported_without_stop() {
+        /// 固定失败的编码替身。
+        struct Failing;
+        impl VideoEncoder for Failing {
+            type Surface = u64;
+            /// 注入写帧错误。
+            fn submit(&mut self, _: u64, _: i64) -> Result<(), String> {
+                Err("injected encode".into())
+            }
+            /// 验证失败后不再收尾。
+            fn finish(self, _: i64) -> Result<EncoderStats, String> {
+                panic!("unexpected finish")
+            }
+        }
+        let (tx, rx) = mpsc::channel();
+        tx.send(EncodeMsg::Frame(1, 0)).unwrap();
+        let failure = Mutex::new(None);
+        assert!(record_failure(encode_loop(Failing, rx), &failure).is_err());
+        assert_eq!(failure.lock().unwrap().as_deref(), Some("injected encode"));
+        let _ = record_failure::<()>(Err("later compose failure".into()), &failure);
+        assert_eq!(failure.lock().unwrap().as_deref(), Some("injected encode"));
+    }
+
+    /// 恢复请求先强制更新采集源，再调用 next；不依赖真实桌面或线程睡眠。
+    #[test]
+    fn resume_refreshes_capture_before_next_frame() {
+        /// 单步采集替身，确认刷新顺序并立即结束循环。
+        struct Resumed {
+            shared: Arc<CaptureShared>,
+            refreshed: bool,
+        }
+        impl CaptureSource for Resumed {
+            type Frame = u64;
+            /// 验证完整帧在刷新后才采集。
+            fn next(
+                &mut self,
+                _: Duration,
+                want: bool,
+            ) -> Result<Option<Captured<u64>>, CaptureFault> {
+                assert!(want && self.refreshed);
+                self.shared.stop.store(true, Ordering::Release);
+                let now = Instant::now();
+                Ok(Some(Captured {
+                    frame: 42,
+                    cursor: None,
+                    present: now,
+                    captured_at: now,
+                    fresh: true,
+                    id: 1,
+                }))
+            }
+            /// 强制刷新替身。
+            fn recreate(&mut self) -> Result<(), String> {
+                self.refreshed = true;
+                Ok(())
+            }
+            /// 返回固定诊断。
+            fn stats(&self) -> CaptureStats {
+                CaptureStats::default()
+            }
+        }
+        let shared = Arc::new(CaptureShared::default());
+        shared.refresh.store(true, Ordering::Release);
+        let (tx, rx) = mpsc::sync_channel(CAPTURE_CAPACITY);
+        capture_loop(
+            Resumed {
+                shared: Arc::clone(&shared),
+                refreshed: false,
+            },
+            tx,
+            Arc::new(Mutex::new(None)),
+            shared,
+        );
+        let CaptureMsg::Frame(frame) = rx.recv().unwrap() else {
+            panic!("missing frame")
+        };
+        assert_eq!(frame.frame, 42);
+    }
+
+    /// 满队列仍立即保留采集错误，主控无须等待 stop 或 join。
+    #[test]
+    fn capture_failure_survives_a_full_channel() {
+        let (tx, _rx) = mpsc::sync_channel(1);
+        tx.try_send(CaptureMsg::<u64>::Fault("occupied".into()))
+            .unwrap();
+        let shared = CaptureShared::default();
+        capture_fault(&shared, &tx, "first capture failure".into());
+        capture_fault(&shared, &tx, "later failure".into());
+        assert_eq!(
+            shared.failure.lock().unwrap().as_deref(),
+            Some("first capture failure")
+        );
+    }
+
+    /// 首帧之后的合成故障通过后台通道保留，无须用户发送停止命令。
+    #[test]
+    fn compose_failure_is_reported_without_stop() {
+        let base = Instant::now() - Duration::from_secs(1);
+        let (_control_tx, control) = mpsc::channel();
+        let (capture_tx, capture) = mpsc::channel();
+        let (frames, _frame_rx) = mpsc::channel();
+        capture_tx
+            .send(CaptureMsg::Frame(Box::new(Captured {
+                frame: 2,
+                cursor: None,
+                present: base,
+                captured_at: base,
+                fresh: true,
+                id: 2,
+            })))
+            .unwrap();
+        let context = ComposeContext::<MockCapture, MockComposer, u64> {
+            config: PipelineConfig {
+                fps: 30,
+                show_cursor: false,
+            },
+            composer: MockComposer {
+                fail_compose: true,
+                used: 0,
+                capacity: 1,
+            },
+            timeline: Timeline::new(base, 30),
+            ticks: TickClock::starting_at(1),
+            queue: TimedQueue::default(),
+            cursor: Arc::new(Mutex::new(None)),
+            phase: PhaseTracker::new(Duration::from_millis(33)),
+            hold: Duration::ZERO,
+            warmed: true,
+            started: base,
+            resumed_at: None,
+            latest: None,
+            latest_cursor: None,
+            last_emitted_cursor: None,
+            last_slot: Some(0),
+            last_present: None,
+            present_dt: Samples::default(),
+            arrive_lag: Samples::default(),
+            control,
+            capture,
+            frames,
+            trace: TraceBuf::new(Thread::Compose),
+            traced_missed: 0,
+        };
+        let failure = Mutex::new(None);
+        assert!(record_failure(compose_loop(context), &failure).is_err());
+        assert_eq!(failure.lock().unwrap().as_deref(), Some("模拟合成失败"));
+    }
+
+    /// 用受控呈现时刻逐槽推进：每帧按序送出，PTS 严格递增且终点晚于末帧。
     #[test]
     fn mock_pipeline_emits_every_frame_in_order() {
-        let (running, log, end) = mock_pipeline(60, 60, 90, false);
-        let running = running.expect("start");
-        std::thread::sleep(Duration::from_millis(1800));
-        let report = running.stop().expect("stop");
-        let log = log.lock().unwrap();
-        assert!(log.len() >= 85, "emitted {}", log.len());
-        assert!(
-            log.windows(2).all(|w| w[1].1 > w[0].1 && w[1].0 > w[0].0),
-            "顺序或 pts 异常: {:?}",
-            &log[..log.len().min(12)]
-        );
-        let seqs: Vec<u64> = log.iter().map(|p| p.0).collect();
-        let missing = (seqs[0]..=*seqs.last().unwrap())
-            .filter(|s| !seqs.contains(s))
-            .count();
-        assert!(missing <= 1, "missing {missing}");
-        assert!(end.lock().unwrap().unwrap() > log.last().unwrap().1);
-        assert_eq!(report.backend, "mock");
-        assert!(report.describe().contains("后端=mock"));
+        let base = Instant::now();
+        let fps = 30;
+        let (_control_tx, control) = mpsc::channel();
+        let (_capture_tx, capture) = mpsc::channel();
+        let (frames, frame_rx) = mpsc::channel();
+        let mut context = ComposeContext::<MockCapture, MockComposer, u64> {
+            config: PipelineConfig {
+                fps,
+                show_cursor: false,
+            },
+            composer: MockComposer {
+                fail_compose: false,
+                used: 0,
+                capacity: 1,
+            },
+            timeline: Timeline::new(base, fps),
+            ticks: TickClock::starting_at(0),
+            queue: TimedQueue::default(),
+            cursor: Arc::new(Mutex::new(None)),
+            phase: PhaseTracker::new(slot_time(1, fps)),
+            hold: Duration::ZERO,
+            warmed: true,
+            started: base,
+            resumed_at: None,
+            latest: None,
+            latest_cursor: None,
+            last_emitted_cursor: None,
+            last_slot: None,
+            last_present: None,
+            present_dt: Samples::default(),
+            arrive_lag: Samples::default(),
+            control,
+            capture,
+            frames,
+            trace: TraceBuf::new(Thread::Compose),
+            traced_missed: 0,
+        };
+        let mut report = PipelineReport::default();
+        for seq in 0..90 {
+            let at = base + slot_time(seq, fps);
+            absorb_frame(
+                &mut context,
+                Captured {
+                    frame: seq,
+                    cursor: None,
+                    present: at,
+                    captured_at: at,
+                    fresh: true,
+                    id: seq + 1,
+                },
+                false,
+            );
+            let slot = context.ticks.fire_next(seq).unwrap();
+            emit_slot(&mut context, &mut report, slot).unwrap();
+        }
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let end = Arc::new(Mutex::new(None));
+        let encoder = MockEncoder {
+            log: Arc::clone(&log),
+            end: Arc::clone(&end),
+        };
+        let endpoint = context.timeline.endpoint(base + Duration::from_secs(3));
+        context
+            .frames
+            .send(EncodeMsg::Finish(endpoint as i64))
+            .unwrap();
+        let stats = encode_loop(encoder, frame_rx).unwrap();
+        assert_eq!(stats.frames, 90);
+        assert_eq!(report.encoded_frames, 90);
+        let expected: Vec<_> = (0..90).map(|seq| (seq, seq as i64)).collect();
+        assert_eq!(*log.lock().unwrap(), expected);
+        assert_eq!(*end.lock().unwrap(), Some(90));
     }
 
     /// 源是输出的两倍速：输出约等于输出速率，且序号递增。
@@ -1283,11 +1620,13 @@ mod tests {
                 },
                 timeline: Timeline::new(base, fps),
                 ticks: TickClock::starting_at(1),
+                cursor: Arc::new(Mutex::new(None)),
                 queue: TimedQueue::default(),
                 phase: PhaseTracker::new(Duration::from_nanos(NANOS_PER_SEC / u64::from(fps))),
                 hold: Duration::from_millis(20),
                 warmed: true,
                 started: base,
+                resumed_at: None,
                 latest: None,
                 latest_cursor: None,
                 last_emitted_cursor: None,
@@ -1321,6 +1660,16 @@ mod tests {
             // 节拍落后：直接触发槽 5 会跳过 4 个槽
             let late = ctx.ticks.fire(5).unwrap();
             emit_slot(&mut ctx, &mut report, late).unwrap();
+            // 恢复后，暂停前积压帧与暂停期间帧都不能替换当前桌面。
+            let resumed = base + Duration::from_millis(100);
+            ctx.trace = TraceBuf::attach(None, Thread::Compose);
+            ctx.resumed_at = Some(resumed);
+            ctx.latest = None;
+            absorb_frame(&mut ctx, frame(90, 20), false);
+            absorb_frame(&mut ctx, frame(91, 80), false);
+            assert!(ctx.latest.is_none());
+            absorb_frame(&mut ctx, frame(92, 110), false);
+            assert_eq!(ctx.latest.as_ref().unwrap().frame, 92);
         }
         let recs = tracer.collect();
         let of = |event: Event| recs.iter().filter(|r| r.event == event).collect::<Vec<_>>();

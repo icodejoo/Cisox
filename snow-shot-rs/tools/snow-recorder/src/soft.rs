@@ -78,11 +78,23 @@ fn tune_session(session: &mut DirectRecordingSession, upstream_gpu: bool) -> Res
 struct SoftBackend {
     /// 直录会话（stop 会阻塞，仅在控制线程调用）。
     session: DirectRecordingSession,
+    /// 外置音轨（与自建硬件路径共用采集、设备选择和混音）。
+    #[cfg(windows)]
+    audio: Option<crate::soft_audio::SoftAudio>,
+    /// 供结束时合并音轨的中间视频路径。
+    #[cfg(windows)]
+    output: PathBuf,
     /// 后端名。
     name: &'static str,
 }
 
 impl RecordingBackend for SoftBackend {
+    /// 上游工作线程结束后立即使主循环退出录制态。
+    fn failure(&self) -> Option<String> {
+        (self.session.state() == snow_screen_recorder::RecordingState::Stopped)
+            .then(|| "录制后台线程意外退出".into())
+    }
+
     /// 后端名。
     fn name(&self) -> &str {
         self.name
@@ -90,21 +102,43 @@ impl RecordingBackend for SoftBackend {
 
     /// 暂停。
     fn pause(&self) -> Result<(), String> {
-        self.session.pause().map_err(|e| e.to_string())
+        self.session.pause().map_err(|e| e.to_string())?;
+        #[cfg(windows)]
+        if let Some(audio) = &self.audio {
+            audio.pause(std::time::Instant::now());
+        }
+        Ok(())
     }
 
     /// 恢复。
     fn resume(&self) -> Result<(), String> {
-        self.session.resume().map_err(|e| e.to_string())
+        self.session.resume().map_err(|e| e.to_string())?;
+        #[cfg(windows)]
+        if let Some(audio) = &self.audio {
+            audio.resume(std::time::Instant::now());
+        }
+        Ok(())
     }
 
     /// 停止并收尾。
-    fn stop(self: Box<Self>) -> Result<BackendReport, String> {
+    fn stop(mut self: Box<Self>) -> Result<BackendReport, String> {
+        #[cfg(windows)]
+        let audio_report = self
+            .audio
+            .as_mut()
+            .map(|a| a.stop(std::time::Instant::now()));
         let report = self.session.stop().map_err(|e| e.to_string())?;
+        #[cfg(windows)]
+        if let Some(audio) = &self.audio {
+            audio.merge(&self.output)?;
+        }
+        let diagnostics = format!("录制报告: {report:?}");
+        #[cfg(windows)]
+        let diagnostics = format!("{diagnostics} {audio_report:?}");
         Ok(BackendReport {
             frames: report.encoded_frames,
             dropped: report.dropped_capture_frames,
-            diagnostics: format!("录制报告: {report:?}"),
+            diagnostics,
         })
     }
 
@@ -130,7 +164,7 @@ pub fn start_software(
 ) -> Result<Box<dyn RecordingBackend>, String> {
     let mut config = plan::build_config(
         request,
-        partial,
+        partial.clone(),
         upstream_gpu,
         settings::limit_for_request(
             request.output_size,
@@ -144,12 +178,30 @@ pub fn start_software(
     {
         config.preset = p;
     }
+    #[cfg(windows)]
+    {
+        config.enable_microphone = false;
+        config.enable_system_audio = false;
+    }
     config.validate()?;
     let mut session = DirectRecordingSession::create(config).map_err(|e| e.to_string())?;
     tune_session(&mut session, upstream_gpu)?;
+    #[cfg(windows)]
+    let audio = crate::soft_audio::SoftAudio::open(request, &partial)?;
     session.start().map_err(|e| e.to_string())?;
+    let origin = std::time::Instant::now();
+    #[cfg(windows)]
+    if let Some(audio) = &audio {
+        audio.set_origin(origin);
+    }
+    #[cfg(not(windows))]
+    let _ = origin;
     Ok(Box::new(SoftBackend {
         session,
+        #[cfg(windows)]
+        audio,
+        #[cfg(windows)]
+        output: partial,
         name: if upstream_gpu {
             "upstream-gpu"
         } else {

@@ -357,6 +357,8 @@ pub struct MfEncoder {
     stream: u32,
     /// 音频流序号（有音轨时）。
     audio_stream: Option<u32>,
+    /// 待确定时长的末帧。
+    pending: crate::win::hwenc::DurationStitcher<(Surface, i64)>,
     /// 帧率。
     fps: u32,
     /// 送入的帧数。
@@ -674,6 +676,7 @@ impl MfEncoder {
                 audio_stream,
                 fps,
                 frames: 0,
+                pending: Default::default(),
                 frame_bytes: size.0 * size.1 * 3 / 2,
                 com_ready: true,
                 send_ms: Vec::new(),
@@ -730,7 +733,7 @@ impl MfEncoder {
     }
 
     /// 把表面包成样本写入 SinkWriter；表面随样本释放才归还帧池。
-    fn write(&mut self, surface: Surface, pts: i64) -> HwResult<()> {
+    fn write(&mut self, surface: Surface, pts: i64, duration: i64) -> HwResult<()> {
         if !self.com_ready {
             init_com();
             self.com_ready = true;
@@ -751,7 +754,9 @@ impl MfEncoder {
                 .SetSampleTime(slot_to_hns(pts, self.fps))
                 .map_err(|e| e.to_string())?;
             sample
-                .SetSampleDuration(HNS_PER_SECOND / i64::from(self.fps))
+                .SetSampleDuration(
+                    slot_to_hns(pts + duration, self.fps) - slot_to_hns(pts, self.fps),
+                )
                 .map_err(|e| e.to_string())?;
             let holder: IUnknown = SurfaceHolder {
                 _surface: surface,
@@ -798,7 +803,9 @@ impl VideoEncoder for MfEncoder {
     /// 送入一帧。
     fn submit(&mut self, surface: Surface, pts: i64) -> Result<(), String> {
         let started = Instant::now();
-        self.write(surface, pts)?;
+        if let Some(((previous, at), duration)) = self.pending.push(pts, (surface, pts)) {
+            self.write(previous, at, duration)?;
+        }
         self.frames += 1;
         if self.send_ms.len() < STAT_SAMPLE_LIMIT {
             self.send_ms.push(started.elapsed().as_secs_f32() * 1000.0);
@@ -807,7 +814,10 @@ impl VideoEncoder for MfEncoder {
     }
 
     /// 冲刷编码器并写完 MP4。
-    fn finish(mut self, _end_pts: i64) -> Result<EncoderStats, String> {
+    fn finish(mut self, end_pts: i64) -> Result<EncoderStats, String> {
+        if let Some(((surface, at), duration)) = self.pending.finish(end_pts) {
+            self.write(surface, at, duration)?;
+        }
         // 失败直接返回即可：COM 对象由 Drop 释放；半截输出位于 worker 的临时目录，`main::fail` 会整体清掉并回报 Error 事件
         // SAFETY: SinkWriter 有效，Finalize 阻塞到封装完成。
         unsafe { self.writer.Finalize() }.map_err(|e| fail("Finalize", e))?;
@@ -832,6 +842,23 @@ impl VideoEncoder for MfEncoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 与 MF 共用的末帧保留逻辑：静止数秒后停止覆盖完整尾段，稀疏帧间无空洞。
+    #[test]
+    fn static_tail_and_sparse_frames_reach_stop_time() {
+        let mut pending = crate::win::hwenc::DurationStitcher::default();
+        assert!(pending.push(0, 0).is_none());
+        let (at, duration) = pending.finish(150).unwrap();
+        assert_eq!(
+            slot_to_hns(at + duration, 30) - slot_to_hns(at, 30),
+            5 * HNS_PER_SECOND
+        );
+        assert!(pending.push(0, 0).is_none());
+        assert_eq!(pending.push(17, 17), Some((0, 17)));
+        assert_eq!(pending.finish(150), Some((17, 133)));
+        let total = slot_to_hns(17, 30) + slot_to_hns(150, 30) - slot_to_hns(17, 30);
+        assert_eq!(total, 5 * HNS_PER_SECOND);
+    }
 
     /// 宽字符路径：以 NUL 结尾，非 ASCII 字符按 UTF-16 展开。
     #[test]

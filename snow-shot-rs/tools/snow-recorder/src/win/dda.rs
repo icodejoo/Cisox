@@ -431,7 +431,7 @@ pub struct DdaCapture {
     /// 所在显示器输出（重建复制用）。
     output: IDXGIOutput1,
     /// 桌面复制接口。
-    duplication: IDXGIOutputDuplication,
+    duplication: Option<IDXGIOutputDuplication>,
     /// 共享纹理池。
     slots: Vec<Arc<SharedSlot>>,
     /// 选区（虚拟桌面坐标）。
@@ -614,7 +614,7 @@ impl DdaCapture {
             device,
             context4,
             output,
-            duplication,
+            duplication: Some(duplication),
             slots,
             region,
             crop: D3D11_BOX {
@@ -792,6 +792,8 @@ impl DdaCapture {
             // SAFETY: 输出指针指向局部变量。
             let call = unsafe {
                 self.duplication
+                    .as_ref()
+                    .ok_or(CaptureFault::Lost)?
                     .AcquireNextFrame(0, &mut info, &mut resource)
             };
             let took_dur = now.elapsed();
@@ -822,7 +824,7 @@ impl DdaCapture {
             }
         }
         let captured_at = Instant::now();
-        let duplication = self.duplication.clone();
+        let duplication = self.duplication.as_ref().ok_or(CaptureFault::Lost)?.clone();
         let guard = FrameGuard(&duplication);
         if !want {
             self.trace.acquire(
@@ -939,11 +941,25 @@ impl CaptureSource for DdaCapture {
         result
     }
 
+    /// 恢复时重建取帧源，保证静止桌面也会返回完整首帧。
+    fn refresh(&mut self) -> Result<(), String> {
+        self.latest = None;
+        if self.wgc.is_some() {
+            self.wgc = None;
+            self.enable_wgc()
+        } else {
+            self.recreate()
+        }
+    }
+
     /// 重建桌面复制（权限丢失后）。
     fn recreate(&mut self) -> Result<(), String> {
         // SAFETY: 设备与输出在采集器存续期间有效。
-        self.duplication = unsafe { self.output.DuplicateOutput(self.device.device()) }
-            .map_err(|e| format!("重建桌面复制失败: {e}"))?;
+        self.duplication = None;
+        self.duplication = Some(
+            unsafe { self.output.DuplicateOutput(self.device.device()) }
+                .map_err(|e| format!("重建桌面复制失败: {e}"))?,
+        );
         self.latest = None;
         Ok(())
     }

@@ -253,6 +253,20 @@ pub fn place_packet(
     Some((frames_from_duration(timeline.active_at(anchor)), skip))
 }
 
+/// 从请求选择指定设备；设备缺省时才使用对应方向的默认设备。
+pub fn requested_device(request: &AudioRequest, source: AudioSource) -> DeviceSelector {
+    match source {
+        AudioSource::System => request
+            .system_device
+            .clone()
+            .map_or(DeviceSelector::DefaultRender, DeviceSelector::Id),
+        AudioSource::Microphone => request
+            .mic_device
+            .clone()
+            .map_or(DeviceSelector::DefaultCapture, DeviceSelector::Id),
+    }
+}
+
 /// 判断设备列表里是否有可用于该选择器的活动设备。
 ///
 /// # 参数
@@ -339,20 +353,14 @@ impl AudioCapture {
             }
         };
         let system = request.system.then(|| {
-            let selector = request
-                .system_device
-                .clone()
-                .map_or(DeviceSelector::DefaultRender, DeviceSelector::Id);
+            let selector = requested_device(request, AudioSource::System);
             session
                 .enumerate_render_devices()
                 .is_ok_and(|d| source_usable(&d, &selector))
                 .then_some(selector)
         });
         let microphone = request.microphone.then(|| {
-            let selector = request
-                .mic_device
-                .clone()
-                .map_or(DeviceSelector::DefaultCapture, DeviceSelector::Id);
+            let selector = requested_device(request, AudioSource::Microphone);
             session
                 .enumerate_capture_devices()
                 .is_ok_and(|d| source_usable(&d, &selector))
@@ -412,7 +420,7 @@ impl AudioCapture {
             pending: VecDeque::new(),
             scratch: Vec::new(),
             last_status: [None; 2],
-            sink_error_logged: false,
+            sink_error: None,
         };
         let thread = std::thread::Builder::new()
             .name("snow-audio-mix".into())
@@ -445,6 +453,16 @@ pub struct AudioReport {
     pub dropped_frames: u64,
     /// 收尾时后端报告的错误。
     pub error: Option<String>,
+}
+
+impl AudioReport {
+    /// 格式化写入量、丢弃量与首个错误，供最终诊断保留。
+    pub fn describe(&self) -> String {
+        format!(
+            "slots={} dropped={} error={:?}",
+            self.slots, self.dropped_frames, self.error
+        )
+    }
 }
 
 /// 运行中的音频录制句柄（暂停、恢复、停止随视频流水线转发）。
@@ -527,7 +545,7 @@ struct Runner {
     /// 各路最近一次汇报的状态（去重）。
     last_status: [Option<AudioStatus>; 2],
     /// 是否已记录过后端写入错误。
-    sink_error_logged: bool,
+    sink_error: Option<String>,
 }
 
 impl Runner {
@@ -595,7 +613,7 @@ impl Runner {
                     self.pending.push_back(packet);
                 }
             }
-            AudioEvent::SourceRestarted { source, .. } => {
+            AudioEvent::SourceRestarted { source, .. } if self.sink_error.is_none() => {
                 let source = to_protocol(source);
                 self.mixer.reset_alignment(Some(source));
                 self.set_status(Some(source), AudioStatus::Ok);
@@ -605,7 +623,8 @@ impl Runner {
                 self.set_status(None, AudioStatus::Lost);
             }
             AudioEvent::StreamEnded => self.set_status(None, AudioStatus::Lost),
-            AudioEvent::PacketDropped { .. }
+            AudioEvent::SourceRestarted { .. }
+            | AudioEvent::PacketDropped { .. }
             | AudioEvent::Paused { .. }
             | AudioEvent::Resumed { .. } => {}
         }
@@ -662,10 +681,11 @@ impl Runner {
         if let Some(sink) = self.sink.as_mut()
             && let Err(e) = sink.write(first, &self.scratch)
         {
-            if !self.sink_error_logged {
+            if self.sink_error.is_none() {
                 eprintln!("音频写入失败，之后的音频将丢弃: {e}");
-                self.sink_error_logged = true;
+                self.sink_error = Some(e);
             }
+            self.set_status(None, AudioStatus::Lost);
             self.sink = None;
         }
     }
@@ -703,7 +723,7 @@ impl Runner {
         AudioReport {
             slots: self.mixer.emitted_slots(),
             dropped_frames: self.mixer.dropped_frames(),
-            error,
+            error: self.sink_error.clone().or(error),
         }
     }
 }
@@ -984,6 +1004,58 @@ mod tests {
         }
     }
 
+    /// 写入失败立即汇报两路 Lost，忽略后续重启 Ok，最终保留首个错误。
+    #[test]
+    fn sink_failure_reports_lost_and_preserves_first_error() {
+        /// 注入写入失败的音频输入。
+        struct Broken;
+        impl AudioSink for Broken {
+            /// 模拟磁盘写入错误。
+            fn write(&mut self, _: u64, _: &[i16]) -> Result<(), String> {
+                Err("injected write".into())
+            }
+            /// 写入失败后不应再收尾失效输入。
+            fn finish(self: Box<Self>) -> Result<(), String> {
+                panic!("unexpected finish")
+            }
+        }
+        let (_tx, rx) = mpsc::channel();
+        let states = Arc::new(Mutex::new(Vec::new()));
+        let copy = Arc::clone(&states);
+        let origin = Instant::now();
+        let mut runner = Runner {
+            source: Box::new(Silent),
+            mixer: AudioMixer::new(Some(100), Some(0)),
+            sink: Some(Box::new(Broken)),
+            report: Arc::new(move |s, status| copy.lock().unwrap().push((s, status))),
+            control: rx,
+            timeline: Some(Timeline::new(origin, 1)),
+            origin: Some(origin),
+            pending: VecDeque::new(),
+            scratch: Vec::new(),
+            last_status: [None; 2],
+            sink_error: None,
+        };
+        runner.emit_until(SLOT_FRAMES);
+        runner.emit_until(SLOT_FRAMES * 2);
+        runner.on_event(AudioEvent::SourceRestarted {
+            source: AudioSourceKind::System,
+            old_device_id: None,
+            new_device_id: "replacement".into(),
+            downtime: Duration::ZERO,
+        });
+        runner.set_status(None, AudioStatus::Lost);
+        assert_eq!(
+            states.lock().unwrap().as_slice(),
+            &[
+                (AudioSource::System, AudioStatus::Lost),
+                (AudioSource::Microphone, AudioStatus::Lost)
+            ]
+        );
+        let report = runner.finish(origin + Duration::from_millis(30));
+        assert_eq!(report.error.as_deref(), Some("injected write"));
+    }
+
     /// 运行器端到端：无任何包时，停止时仍补零到停止时刻，槽号连续、时长正确；暂停段不计时长。
     #[test]
     fn runner_pads_silence_to_stop_time_excluding_pause() {
@@ -1000,7 +1072,7 @@ mod tests {
             pending: VecDeque::new(),
             scratch: Vec::new(),
             last_status: [None; 2],
-            sink_error_logged: false,
+            sink_error: None,
         };
         let origin = Instant::now();
         let ms = Duration::from_millis;
