@@ -819,22 +819,28 @@ fn store_present(
 /// # 参数
 /// - `manifest`：已加载的清单。
 /// - `dir`：模型目录。
+/// - `extra`：会话额外调整。
 ///
 /// # 返回
 /// `(分词器, 编码器会话, 解码器会话)`；任一失败返回按上述优先级的第一个错误。
 ///
 /// # 示例
 /// ```ignore
-/// let (tokenizer, encoder, decoder) = load_parts(&manifest, dir)?;
+/// let (tokenizer, encoder, decoder) = load_parts(&manifest, dir, &SessionExtra::default())?;
 /// ```
 fn load_parts(
     manifest: &Manifest,
     dir: &Path,
+    extra: &SessionExtra,
 ) -> Result<(Tokenizer, Session, Session), EngineError> {
     let (tokenizer, encoder, decoder) = std::thread::scope(|s| {
         let spawn_session = |key: &'static str| {
             s.spawn(move || -> Result<Session, EngineError> {
-                build_session(&manifest.resolve_file(dir, key)?, &manifest.execution)
+                build_session_with(
+                    &manifest.resolve_file(dir, key)?,
+                    &manifest.execution,
+                    extra,
+                )
             })
         };
         let encoder = spawn_session(FILE_ENCODER);
@@ -866,6 +872,15 @@ impl Engine {
     /// let mut engine = Engine::load(Path::new("D:/models/opus-mt-en-zh"), Some(("en", "zh-CN")))?;
     /// ```
     pub fn load(dir: &Path, pair: Option<(&str, &str)>) -> Result<Self, EngineError> {
+        Self::load_with(dir, pair, &SessionExtra::default())
+    }
+
+    /// 同 [`Engine::load`]，会话按 `extra` 额外调整（实验与缓存加载用）。
+    pub(crate) fn load_with(
+        dir: &Path,
+        pair: Option<(&str, &str)>,
+        extra: &SessionExtra,
+    ) -> Result<Self, EngineError> {
         let manifest = Manifest::load(dir)?;
         if let Some((src, tgt)) = pair
             && !manifest.supports_pair(src, tgt)
@@ -874,7 +889,7 @@ impl Engine {
         }
         init_runtime()?;
         let gen_params = resolve_gen_params(&manifest, dir)?;
-        let (tokenizer, encoder, decoder) = load_parts(&manifest, dir)?;
+        let (tokenizer, encoder, decoder) = load_parts(&manifest, dir, extra)?;
 
         crate::chat::check_output_names(
             &decoder
@@ -1442,8 +1457,28 @@ fn opt_level(level: u8) -> GraphOptimizationLevel {
     }
 }
 
+/// 构建会话时的额外调整（默认不改变任何行为）。
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SessionExtra {
+    /// 额外的 ORT 会话配置项（键，值）。
+    pub config: Vec<(&'static str, &'static str)>,
+    /// 覆盖 `exec.intra_threads` 的线程数（`None` 沿用清单）。
+    pub intra_threads: Option<usize>,
+    /// 把优化后的模型写到该路径（离线产出缓存用）。
+    pub optimized_model_path: Option<PathBuf>,
+}
+
 /// 构建 ORT 会话（CPU，Level3 优化，线程/arena/内存模式按清单）。
 pub(crate) fn build_session(path: &Path, exec: &ExecutionOptions) -> Result<Session, EngineError> {
+    build_session_with(path, exec, &SessionExtra::default())
+}
+
+/// 同 [`build_session`]，并应用 `extra` 的额外调整。
+pub(crate) fn build_session_with(
+    path: &Path,
+    exec: &ExecutionOptions,
+    extra: &SessionExtra,
+) -> Result<Session, EngineError> {
     let fail = |e: &dyn fmt::Display| classify_error(&e.to_string(), ErrorKind::LoadFailed);
     let mut builder = Session::builder()
         .map_err(|e| fail(&e))?
@@ -1452,10 +1487,9 @@ pub(crate) fn build_session(path: &Path, exec: &ExecutionOptions) -> Result<Sess
     if !exec.prepacking {
         builder = builder.with_prepacking(false).map_err(|e| fail(&e))?;
     }
-    if exec.intra_threads > 0 {
-        builder = builder
-            .with_intra_threads(exec.intra_threads)
-            .map_err(|e| fail(&e))?;
+    let intra = extra.intra_threads.unwrap_or(exec.intra_threads);
+    if intra > 0 {
+        builder = builder.with_intra_threads(intra).map_err(|e| fail(&e))?;
     }
     if !exec.mem_pattern {
         builder = builder.with_memory_pattern(false).map_err(|e| fail(&e))?;
@@ -1464,6 +1498,12 @@ pub(crate) fn build_session(path: &Path, exec: &ExecutionOptions) -> Result<Sess
         builder = builder
             .with_execution_providers([ep::CPU::default().with_arena_allocator(false).build()])
             .map_err(|e| fail(&e))?;
+    }
+    for (k, v) in &extra.config {
+        builder = builder.with_config_entry(k, v).map_err(|e| fail(&e))?;
+    }
+    if let Some(p) = &extra.optimized_model_path {
+        builder = builder.with_optimized_model_path(p).map_err(|e| fail(&e))?;
     }
     builder
         .commit_from_file(path)
@@ -1716,25 +1756,33 @@ mod tests {
         let mut m = manifest_with(GenerationOverride::default());
 
         // 三个键都缺：先报分词器
-        let e = load_parts(&m, &dir).err().unwrap();
+        let e = load_parts(&m, &dir, &SessionExtra::default())
+            .err()
+            .unwrap();
         assert_eq!(e.kind, ErrorKind::ManifestInvalid);
         assert!(e.message.contains("files.tokenizer"), "{}", e.message);
 
         // 分词器文件不存在（读失败）优先于编码器/解码器缺键
         m.files.insert("tokenizer".into(), "missing.json".into());
-        let e = load_parts(&m, &dir).err().unwrap();
+        let e = load_parts(&m, &dir, &SessionExtra::default())
+            .err()
+            .unwrap();
         assert_eq!(e.kind, ErrorKind::LoadFailed);
         assert!(e.message.contains("read "), "{}", e.message);
 
         // 分词器正常：编码器缺键优先于解码器缺键
         m.files.insert("tokenizer".into(), "tokenizer.json".into());
-        let e = load_parts(&m, &dir).err().unwrap();
+        let e = load_parts(&m, &dir, &SessionExtra::default())
+            .err()
+            .unwrap();
         assert_eq!(e.kind, ErrorKind::ManifestInvalid);
         assert!(e.message.contains("files.encoder"), "{}", e.message);
 
         // 编码器路径越界（解析阶段就失败）仍先于解码器缺键
         m.files.insert("encoder".into(), "../x.onnx".into());
-        let e = load_parts(&m, &dir).err().unwrap();
+        let e = load_parts(&m, &dir, &SessionExtra::default())
+            .err()
+            .unwrap();
         assert!(e.message.contains("files.encoder"), "{}", e.message);
         let _ = std::fs::remove_dir_all(dir);
     }

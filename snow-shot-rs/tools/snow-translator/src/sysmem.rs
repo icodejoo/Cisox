@@ -7,6 +7,8 @@ pub struct MemSnapshot {
     pub working_set: u64,
     /// 峰值工作集。
     pub peak_working_set: u64,
+    /// 私有字节（提交量，不含映射文件页）。
+    pub private_bytes: u64,
 }
 
 #[cfg(windows)]
@@ -62,6 +64,7 @@ mod imp {
         MemSnapshot {
             working_set: c.working_set_size as u64,
             peak_working_set: c.peak_working_set_size as u64,
+            private_bytes: c.pagefile_usage as u64,
         }
     }
 }

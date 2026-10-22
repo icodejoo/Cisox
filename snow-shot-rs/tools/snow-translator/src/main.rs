@@ -5,6 +5,8 @@ mod cancellation;
 mod chat;
 mod engine;
 mod manifest;
+#[allow(dead_code)]
+mod ortcache;
 mod protocol;
 mod sysmem;
 mod text;
