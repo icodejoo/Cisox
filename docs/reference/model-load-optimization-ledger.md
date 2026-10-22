@@ -1,7 +1,7 @@
 ---
 title: 模型加载优化台账（语音 / 翻译 / OCR / 表格 / 公式）
 status: active
-updated: 2026-10-14
+updated: 2026-10-22
 summary: 各功能模型"按键到可用"做过哪些优化、哪些没做、哪些已否决、还能叠加什么；每项带编号和证据，改动后就地更新并记一笔
 ---
 
@@ -10,7 +10,8 @@ summary: 各功能模型"按键到可用"做过哪些优化、哪些没做、哪
 - **查这个问题先看本表，不要再全盘扫 git 和文档。** 2026-10-14 用三路审计（git 全量历史按路径过 + `-S` 追符号、docs 全读、代码核对、本机日志）建立，之前漏看过"翻译预热"（只写在 `guides/translation-model-release.md` §5.7）。
 - 已做得最完整的是**语音·流式**（预拉 worker + 先开麦 + `model_type` + encoder 预优化缓存，加载 5.8 s → 0.8 s）；**翻译**有懒加载、预热、内存映射、只加载一次；**OCR** 只有 UI 存活期复用和可选的常驻预热；**表格、公式**没有任何加载优化，也没有耗时数据。
 - 准入线：**只要不占闲时内存**（不让 UI 或 worker 在没有窗口时保活）的手段都可以上；会常驻的一律不做，除非用户另行拍板。
-- 下一步优先：先查 [P-01](#问题清单)（手动放入的语音模型可能识别不到），再给三个功能补分段耗时日志（STT-14、TR-20、OCR-15），之后按"待做"里收益明确的先做。
+- **2026-10-22 结论**：ORT 层面没有新的有效手段。预打包权重落盘无收益；`.ort`+mmap 加载快约 54% 但工作集 +21%、磁盘翻倍，不接入（TR-23）；STT-13、OCR-11、TR-24 的首次推理预热实测无收益，已撤销。翻译的外置权重 + mmap 早已是现状（TR-09）。剩下可能有效的是"热键后提前拉起"类（TR-17/18、OCR-10/18），已写但未真机验证，收益以日志为准；公式 KV cache 要重导出模型（OCR-22）。
+- 下一步优先（2026-10-14 旧版，部分已被上条取代）：先查 [P-01](#问题清单)（手动放入的语音模型可能识别不到），再给三个功能补分段耗时日志（STT-14、TR-20、OCR-15），之后按"待做"里收益明确的先做。
 
 ## 维护规则
 
@@ -40,7 +41,7 @@ summary: 各功能模型"按键到可用"做过哪些优化、哪些没做、哪
 | STT-10 | 流式 | 会话结束后后台生成缓存（空闲优先级子进程） | ✅ | `snow-stt/src/main.rs`；`optcache::spawn_background` | 否 | 第二次起命中 |
 | STT-11 | 流式 | 设置页刷新已装模型时，对无缓存的流式模型后台生成 | 🟡 已写未提交 | `crates/snow-shot/src/stt_optimize.rs`；`settings_view.rs` `refresh_stt_cache` | 否 | 首次听写即命中（前提是用户开过设置页） |
 | STT-12 | 流式 | 调图优化级别 / 线程数 / prepacking / arena；`.ort` 格式；decoder、joiner 并行或懒加载；换小模型 | ❌ | *load* §3.3、§4、§5.3：无收益或损失精度 | — | — |
-| STT-13 | 流式 | 等麦克风就绪空档里喂一块静音做首次推理预热 | ⬜ | *load* §3.1：首次解码 86~290 ms | 否 | 估计 ≤0.12 s |
+| STT-13 | 流式 | 等麦克风就绪空档里喂一块静音做首次推理预热 | ❌ 实测无收益（2026-10-22） | 麦克风在 START 后 0~24 ms 就开，无空档；预热本身 270~390 ms，循环就绪反而晚 0.2~1.0 s；文本 SHA 一致。若以后加载比开麦快可重测 | — | — |
 | STT-14 | 链路 | 把 `load_ms`、加载计划、RECORDING / PONG 时间点写进 info 日志 | ✅（未真机验证） | 新增 `dictation/timeline.rs`（`SessionTimeline`，纯逻辑）；`dictation/client.rs` 读线程记 READY / RECORDING / PONG / 首字时间点、`send` 记 START、`drain_stderr` 把 `load:` / `load_plan:` / `stats:` 行提升为 info，`shutdown` 出一行 `语音转文字会话摘要`；`prespawn.rs` 标记预拉起与认领（`SttLink::note_claimed`）；worker `tools/snow-stt/src/main.rs` 加载后无条件写 `load:` + `load_plan:` 到 stderr（stdout 协议不变）。单测：`timeline` 5 个、worker `load_line_has_stable_prefix_and_field`；`build-snow-stt.ps1 -Test` 83 通过 | 否 | 无直接提速，为其它项定量 |
 | STT-15 | 离线 | 离线 transducer 补 `model_type`（需先加加载失败回退） | 🟡 接线了未生效 | `offline.rs:450` 只读 `model.json`，清单没给离线模型填值；离线加载失败无回退 | 否 | 未测，估计省一次 encoder 载入 |
 | STT-16 | 离线 | 离线 encoder 预优化缓存 | ⬜ | `--optimize` 只认流式白名单 | 否 | 未测 |
@@ -71,16 +72,16 @@ summary: 各功能模型"按键到可用"做过哪些优化、哪些没做、哪
 | TR-14 | 模型 | 嵌入共享 / 4 位嵌入 / int2 / HQQ / int8 / CTranslate2 | ❌ | *bench* §288~335；translation-hymt2-eval.md §8 | — | — |
 | TR-15 | 进程 | `max_resident=2` 避免来回切包重载 | ❌ | 多常驻一个模型，违反低内存 | 是 | 日志 03:07 来回切包 0.7~1.7 s |
 | TR-16 | 预热 | 浮窗里首次按键时若预热已被回收则重新预热 | ✅ 未真机验证（`translate_input_session.rs` `note_edit`、`app_runtime.rs` `rewarm_translate_input`、`translate_service.rs` `WarmHandle::rewarm_on_input`；句柄改 `Vec` 免互相回收） | 日志 03:06:49 预热被 TTL 卸载，03:06:56 首次翻译重载 723 ms | 短时 | 实测一例 0.72 s，NLLB 估 1.6~2.5 s |
-| TR-17 | 预热 | 翻译热键带 `--hint`，UI `main` 最早处预拉 worker；选中文字读取期间就预热 | ⬜ | `launch.rs` `for_action` 只认听写 | 短时 | 估计 ~0.5 s；须同时改 `release_translate_input_warm` |
-| TR-18 | 预热 | 独立翻译页 / 设置内嵌页、听写翻译补预热 | ⬜ | `spawn_translate_page` 无 `WarmHandle`；`dictation/flow.rs` 首个定稿句才拉 | 短时 | 未测 |
+| TR-17 | 预热 | 翻译热键带 `--hint translate`，UI `main` 最早处预拉 worker；选中文字读取期间就预热 | 🟡 已写未提交，未真机验证 | `launch.rs` `UiHint::Translate`；`early_warm.rs`；`app_runtime.rs` `translate_pending_warm`、`release_warm_handles`；命令被丢弃时句柄留到下次开浮窗，靠 TR-16 兜底 | 短时 | 估计 ~0.5 s，未测 |
+| TR-18 | 预热 | 独立翻译页开窗预热 + 输入补预热、听写翻译开始聆听时预热 | 🟡 已写未提交，未真机验证 | `translate_page.rs`、`translate_page_view.rs`、`dictation/translate.rs`、`dictation/flow.rs`；内嵌设置页打开时不预热（推测性），只在输入时补；听写翻译靠 worker 30 s TTL 回收 | 短时 | 未测 |
 | TR-19 | 预热 | 截图翻译更早预热（悬停翻译按钮 / 展开语言子菜单） | ❌ 同 OCR-09 原则否决（2026-10-14） | 推测性预热：用户还没触发翻译就加载 | 短时 | — |
 | TR-20 | 日志 | `load_ms` 日志带包 ID、冷/热、入口 | 🟡 缺入口 | `snow-translate/src/worker.rs`：`翻译模型已加载` 加 `model_id`、`trigger`（warm / request）、`cold_start`、`ready_ms`、`wait_ms`（原有 `load_ms`、`mem_bytes` 保留），`翻译 worker 已预热` 加 `model_id`、`warm_ms`；单测 `load_log_inputs_cold_flag`。**缺**：入口（输入浮窗 / 截图翻译 / 选中文字 / 听写）需跨层传递，未做，靠 trigger 与相邻日志（`文字翻译完成`、浮窗日志）区分；未真机验证 | 否 | 为其它项定量 |
 | TR-21 | 模型 | encoder / decoder 并行建会话（分词器留调用线程） | ✅ | `engine.rs` `load_parts`（`thread::scope`，报错优先级同旧串行）；opusmt 真实模型回归通过；NLLB / Hy-MT2 未回归 | 否（加载期峰值未测，估 +50~100 MiB） | 噪声大：opusmt 三次最小值 2043 → 1276 ms（约 -37%，不可作结论） |
 | TR-22 | 模型 | `trim()` 挪到发出 Result 之后 | ✅ | `worker.rs` `pending_trim` + `after_send()`，`main.rs` 发完事件后调用；下一条命令前兜底补做；协议字节不变 | 否 | 未实测，单测证明顺序 |
-| TR-23 | 模型 | ORT 预优化图落盘缓存 | ⬜（先测） | 节点数未读；风险：优化产物可能把外置权重内联，丢掉内存映射（未证实） | 否 | 未知 |
-| TR-24 | 模型 | 加载后跑一次极短句做首次推理预热 | ⬜（低优先） | `self_check` 只做分词回环 | 否 | 未测 |
-| TR-25 | 在线 | OpenAI 兼容后端：复用连接 / 多段并行或合并 | ⬜ | `openai.rs` 每段一个 `curl.exe`，串行 | 否 | 估计 0.1~0.4 s/段 |
-| TR-26 | 解码 | 多段文本 batch 解码 | ⬜（改动大） | 28~31 段截图翻译 `translate_ms` 14~18 s | 否 | 未评估 |
+| TR-23 | 模型 | ORT 预优化图落盘缓存 / `.ort`+mmap | ❌ 实测不接入（2026-10-22） | `docs/research/translation-ort-external-weights.md`；opusmt-en-zh：B 预打包外置只有编码器能用（合并解码器重名报错），收益在噪声内；C `.ort`+mmap 会话建立 ~1550 → ~680 ms，但工作集 +21%、磁盘多一份全量权重（opusmt +117 MiB，NLLB 约 +500 MiB）。冷缓存、NLLB、release 档未测。实验代码 `tools/snow-translator/src/ortcache.rs`、`engine.rs` `SessionExtra` 留作探针 | 否 | 冷启省约 0.9 s，代价违背低内存小体积 |
+| TR-24 | 模型 | 加载后跑一次极短句做首次推理预热 | ❌ 实测无收益（2026-10-22） | 预热本身 260~420 ms，首句只省 0~30 ms（噪声内），只是把延迟从首请求挪到加载阶段 | — | — |
+| TR-25 | 在线 | OpenAI 兼容后端：多段并行（上限 `MAX_PARALLEL_REQUESTS=4`），结果保序，错误语义不变 | 🟡 已写未提交，未实测真实端点 | `openai.rs`；13 个单测（假传输）；连接复用（curl `--next`）未做，要改调度模型 | 否 | 未实测 |
+| TR-26 | 解码 | 多段文本 batch 解码 | ⬜ 已评估（2026-10-22），建议先做段间并发 | 真 batch 要改编码器 padding/mask、解码器 batch 维、`beam.rs`、KV 重排，Hy-MT2 不适用；外推 4~8 段一批 14~18 s → 6~9 s，未实测 | 否 | 未实测 |
 | TR-27 | 冷启动 | 冷页缓存、release 构建下的加载数 | ❓ | 本机日志全来自 dev 构建；*bench* 两次列为待办 | — | — |
 
 ## OCR / 表格 / 公式（OCR）
@@ -100,20 +101,20 @@ summary: 各功能模型"按键到可用"做过哪些优化、哪些没做、哪
 | OCR-07 | OCR | DirectML 加速 | ❌（可选，默认关） | benchmark：small 慢 1.35 倍、内存 +0.9 GiB、首次编译 21.5 s | — | — |
 | OCR-08 | OCR | 默认改用系统 OCR | ❌ | ocr-samples.md：CER 57.0% 对 17.8% | — | 冷启动 45 ms 对 1157 ms |
 | OCR-09 | OCR | 选区第一次成形（工具栏首次画出）时后台预拉 worker | ❌ 用户否决（2026-10-14） | 曾实现后撤回：**用到 OCR / 翻译等功能时再拉起，不做"还没用就先拉"的推测性预拉** | 短时 | — |
-| OCR-10 | OCR | OCR 快捷键 / 手势带 `--hint ocr`，UI `main` 预拉 worker | ⬜ | `launch.rs` 只认听写；入口见 `quick_actions.rs`、`mouse_gesture.rs` | 短时 | 估计 0.3~0.5 s |
-| OCR-11 | OCR | 预热时跑一张空白小图做首次推理 | ⬜ | `prepare` 只建会话 | 否 | 未测 |
+| OCR-10 | OCR | OCR 快捷键 / 手势带 `--hint ocr`，UI `main` 预拉 worker | 🟡 已写未提交，未真机验证 | `launch.rs` `UiHint::Ocr`；`early_warm.rs`；`host_spec.rs`、`mouse_gesture.rs`；仅本地模型时预热；宿主 exe 1,167,872 字节，导入表闸门通过 | 短时 | 估计 0.3~0.5 s，未测 |
+| OCR-11 | OCR | 预热时跑一张空白小图做首次推理 | ❌ 实测无收益（2026-10-22） | 64×64 空白图，交替 3 轮：首次识别均值 965 ms 对 969 ms | — | — |
 | OCR-12 | OCR | det / rec 并行建会话 | ⬜ | `rapid-ocr-rs/src/pipeline/rapid_ocr.rs` 串行；需重发 runtime | 否 | 未测 |
 | OCR-13 | OCR | ORT 预优化图落盘缓存 | ⬜（收益存疑） | small 图节点少，上界估 0.1~0.2 s；需重发 runtime | 否 | 未测 |
 | OCR-14 | OCR | 线程改用满物理核 | ⬜（收益在推理） | `26fe1790` 在上游、不在本分支；本分支物理核 / 2；需重发 runtime | 否 | 未测 |
 | OCR-15 | OCR | 宿主侧分段日志（spawn / Ready / prepare / recognize），把 worker 的 `engine_ready duration_ms` 记下来 | ✅（未真机验证） | `ocr_client.rs`：`OcrWorker` 记拉起时刻，`handshake` 出 `OCR worker 已就绪`（`spawn_to_ready_ms`）、`prepare` 出 `OCR 会话已准备`（`first_prepare`、`prepare_ms`、`engine_init_ms`、`spawn_to_prepared_ms`）、首次 `recognize` 出 `OCR worker 首次识别完成`；stderr 泵改按行解析 JSON 事件（`pump_stderr`、`parse_worker_event`），`ocr.*` 事件写 info 并取 `engine_ready` 耗时。`ocr_service.rs`：`run_with_worker` 每次请求出 `OCR 识别耗时分段`（`cold_start`、`launch_ms`、`prepare_ms`、`recognize_ms`、`total_ms`），`warm_up` 出 `OCR 预热完成`（`cold_start`、`warm_ms`）。worker 未改。单测 4 个：`parses_worker_events`、`pump_stderr_parses_events_and_keeps_tail`、`engine_ready_event_updates_shared_slot`、`stage_flags_track_successes_only` | 否 | 为其它项定量 |
 | OCR-16 | 系统 OCR | 复用引擎 / 线程 | ⬜（低优先） | `win_ocr.rs` 每次新线程、新引擎 | 否 | 估计几 ms~几十 ms |
 | OCR-17 | 表格 | 一次性进程，跑完即退；SLANet_plus 7.7MB | ✅ | `table_service.rs`；g04 | 否 | — |
-| OCR-18 | 表格 | 表格 worker 与 OCR 并行（worker 先加载模型再读 stdin） | ⬜ | `app_runtime.rs` 先 OCR 完才拉 `cisox-table`；`snow-table/src/main.rs` 先读完 stdin 才加载 | 短时 | 估计 0.1~0.3 s |
-| OCR-19 | 表格 | 加载 / 推理耗时 | ❓ | 文档与日志均无 | — | — |
+| OCR-18 | 表格 | 表格 worker 先加载模型再读 stdin；宿主在 OCR 进行时就拉起 | 🟡 已写未提交，未真机验证 | `tools/snow-table/src/main.rs`；`table_service.rs` `ProcessRunner::prestart`；OCR 失败时 `Drop` 结束提前拉起的进程 | 短时 | 估计 0.1~0.3 s，未测 |
+| OCR-19 | 表格 | 加载 / 推理耗时 | 🟡 日志已补，数据待真机 | worker stderr 末行 `timing load_ms=.. infer_ms=..`，宿主 info 日志带 `spawn_to_done_ms`、`after_ocr_ms` | — | — |
 | OCR-20 | 公式 | 一次性进程，每请求拉起、结束即杀 | ✅ | `latex_service.rs` | 否 | — |
-| OCR-21 | 公式 | 预拉、三会话并行加载、预优化缓存 | ⬜（先测） | `snow-latex/src/main.rs` 串行，裸 `Session::builder()` | 否 | 未测 |
-| OCR-22 | 公式 | 解码加 KV cache | ⬜（先测） | 注释写明"整段 token 重算"，可能是比加载更大的头 | 否 | 未测 |
-| OCR-23 | 公式 | 加载 / 推理耗时 | ❓ | 文档与日志均无 | — | — |
+| OCR-21 | 公式 | 三会话并行加载 | 🟡 已写未提交，无实测 | `snow-latex/src/main.rs` `thread::scope`，错误优先级 resizer > encoder > decoder；本机无公式模型；预优化缓存未做（量不出收益，阈值 50 ms） | 否 | 未测，加载期峰值可能略升 |
+| OCR-22 | 公式 | 解码加 KV cache | ❌ 当前模型不支持 | 解码器只有 ids/mask/context 三个输入，无 `past_key_values`；需重导出（Python/PyTorch，待用户同意），方案见 `docs/research/latex-worker-optimization.md`；worker 日志会报 `kv_cache=false`（未在真实模型上确认） | 否 | 未测 |
+| OCR-23 | 公式 | 加载 / 推理耗时 | 🟡 日志已补，数据待模型 | `SNOW_LATEX_TIMING=1` 才输出分段耗时与工作集峰值（默认关，避免污染宿主错误尾部）；本机没装公式模型 | — | — |
 
 ## 问题清单
 
@@ -146,3 +147,9 @@ summary: 各功能模型"按键到可用"做过哪些优化、哪些没做、哪
 | 2026-10-14 | TR-21 | 翻译 worker encoder / decoder 并行建会话 | 待提交 |
 | 2026-10-14 | TR-22 | 翻译 worker 先发结果再 trim | 待提交 |
 | 2026-10-14 | STT-17 | 离线后端 VAD 与识别器并行加载（`offline.rs` `load_parallel`），未用真实离线模型实测 | 待提交 |
+| 2026-10-22 | TR-23、TR-24 | 三档对比实测：预打包外置收益在噪声内，`.ort`+mmap 加载快约 54% 但工作集 +21%、磁盘翻倍，均不接入；首次推理预热无收益 | 待提交 |
+| 2026-10-22 | STT-13、OCR-11 | 实测无收益，撤销 | 待提交 |
+| 2026-10-22 | TR-17、TR-18、OCR-10 | 翻译 / OCR 热键带 `--hint`，翻译页与听写翻译补预热（未真机验证） | 待提交 |
+| 2026-10-22 | OCR-18、OCR-19 | 表格 worker 先加载再读 stdin，宿主 OCR 期间提前拉起，补耗时日志 | 待提交 |
+| 2026-10-22 | OCR-21~23 | 公式三会话并行加载、分段耗时日志；KV cache 因模型不支持未做 | 待提交 |
+| 2026-10-22 | TR-25、TR-26 | 在线翻译 4 路并行；batch 解码仅评估 | 待提交 |

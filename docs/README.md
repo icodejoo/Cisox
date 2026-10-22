@@ -46,6 +46,8 @@
 - [research/d12-auto-filter-erase-selection.md](research/d12-auto-filter-erase-selection.md) — D12 自动滤镜 / 智能擦除选型（2026-10-08）：自动滤镜复用仓库内 `visual-region-detector`（纯 Rust），智能擦除自写 Lab 多尺度 PatchMatch，零新增第三方依赖；分期 P1~P4。
 ## 调研
 - [research/cross-monitor-recording-hw.md](research/cross-monitor-recording-hw.md) — 跨屏/双屏选区录屏硬编方案，含裁决记录。探针已实现，跨屏 16/20（单屏对照 18/20），接缝与光标已验证；跨适配器待验证。
+- [research/translation-ort-external-weights.md](research/translation-ort-external-weights.md) — 翻译模型 ORT 外置权重实验（2026-10-22）：预打包落盘 / `.ort`+mmap 三档对比，均不接入；含 TR-24 预热与 TR-26 batch 解码评估。
+- [research/latex-worker-optimization.md](research/latex-worker-optimization.md) — 公式 worker 优化调研（2026-10-22）：三会话并行加载、耗时日志；KV cache 需重导出模型的方案。
 - [research/video-editor-backends.md](research/video-editor-backends.md) — 视频编辑器后端调研。
 - [research/video-editor-mvp-design.md](research/video-editor-mvp-design.md) — 视频编辑器 MVP 设计（worker 方案）。
 - [research/system-ocr-translate-backends.md](research/system-ocr-translate-backends.md) — 系统 OCR/翻译与可选后端方案。P0 开发中。
