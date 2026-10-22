@@ -9,7 +9,8 @@ use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 /// 聊天补全端点后缀。
@@ -24,6 +25,10 @@ const CONNECT_TIMEOUT_SECS: &str = "15";
 const ERROR_SNIPPET_CHARS: usize = 200;
 /// 一次批量翻译最多逐段请求的段数（防止 OCR 文字过多时刷爆端点）。
 pub const MAX_BATCH_SEGMENTS: usize = 40;
+/// 批量翻译同时在途的请求数上限（兼顾端点限流与总耗时）。
+pub const MAX_PARALLEL_REQUESTS: usize = 4;
+/// 并行批量翻译时轮询取消回调的间隔。
+const CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(10);
 /// 推理模型思考块的起止标记。
 const THINK_OPEN: &str = "<think>";
 /// 推理模型思考块的结束标记。
@@ -494,6 +499,79 @@ impl OpenAiEngine {
     }
 }
 
+impl OpenAiEngine {
+    /// 并行翻译多段：最多 `workers` 个线程各自领段发请求，结果按原顺序返回。
+    ///
+    /// 失败语义与串行一致：返回下标最小的错误；出错或取消后不再发送未领取的段落。
+    fn translate_segments(
+        &self,
+        texts: &[String],
+        src: Lang,
+        tgt: Lang,
+        cancelled: &dyn Fn() -> bool,
+        workers: usize,
+    ) -> Result<Vec<String>, TranslateError> {
+        let next = AtomicUsize::new(0);
+        let stop = AtomicBool::new(false);
+        let slots: Mutex<Vec<Option<Result<String, TranslateError>>>> =
+            Mutex::new((0..texts.len()).map(|_| None).collect());
+        // 单个工作循环：先看停止标志再领段，领到的段一定填槽（保证下标最小的错误可被选中）。
+        let run = |cancel: &dyn Fn() -> bool| {
+            loop {
+                if stop.load(Ordering::SeqCst) {
+                    return;
+                }
+                let index = next.fetch_add(1, Ordering::SeqCst);
+                if index >= texts.len() {
+                    return;
+                }
+                let result = if cancel() {
+                    Err(TranslateError::Network("translation cancelled".into()))
+                } else {
+                    self.translate_one(&texts[index], src, tgt, cancel)
+                };
+                if result.is_err() {
+                    stop.store(true, Ordering::SeqCst);
+                }
+                slots.lock().unwrap_or_else(|e| e.into_inner())[index] = Some(result);
+            }
+        };
+        let threads = workers.clamp(1, texts.len().max(1));
+        if threads == 1 {
+            // 单线程：直接在当前线程用调用方的取消回调
+            run(cancelled);
+        } else {
+            // 多线程：回调不可跨线程，由本线程轮询并置标志，工作线程读标志
+            let flag = AtomicBool::new(false);
+            let running = AtomicUsize::new(threads);
+            std::thread::scope(|scope| {
+                for _ in 0..threads {
+                    scope.spawn(|| {
+                        run(&|| flag.load(Ordering::SeqCst));
+                        running.fetch_sub(1, Ordering::SeqCst);
+                    });
+                }
+                while running.load(Ordering::SeqCst) > 0 {
+                    if !flag.load(Ordering::SeqCst) && cancelled() {
+                        flag.store(true, Ordering::SeqCst);
+                    }
+                    std::thread::sleep(CANCEL_POLL_INTERVAL);
+                }
+            });
+        }
+        let mut out = Vec::with_capacity(texts.len());
+        for slot in slots.into_inner().unwrap_or_else(|e| e.into_inner()) {
+            match slot {
+                Some(Ok(text)) => out.push(text),
+                Some(Err(error)) => return Err(error),
+                // 因出错提前停止而未领取的段落：前面必有错误，不会走到这里。
+                None => return Err(TranslateError::Network("translation cancelled".into())),
+            }
+        }
+        Ok(out)
+    }
+}
+
 /// 把 HTTP 失败状态映射成可读错误（不含密钥）。
 fn status_error(status: u16, body: &str) -> TranslateError {
     let detail = match status {
@@ -535,15 +613,7 @@ impl TranslationEngine for OpenAiEngine {
                 texts.len()
             )));
         }
-        texts
-            .iter()
-            .map(|text| {
-                if cancelled() {
-                    return Err(TranslateError::Network("translation cancelled".into()));
-                }
-                self.translate_one(text, src, tgt, cancelled)
-            })
-            .collect()
+        self.translate_segments(texts, src, tgt, cancelled, MAX_PARALLEL_REQUESTS)
     }
 
     /// 大模型不限语言对：这里列出常用组合（含 `Auto` 源语言）。
@@ -630,11 +700,12 @@ mod tests {
     #[test]
     fn cancelled_batch_does_not_send_remaining_segments() {
         let (engine, seen) = engine(vec![ok("one"), ok("two")]);
-        let result = engine.translate_batch_cancellable(
+        let result = engine.translate_segments(
             &["first".into(), "second".into()],
             Lang::En,
             Lang::ZhHans,
             &|| !seen.lock().unwrap().is_empty(),
+            1,
         );
         assert!(result.is_err());
         assert_eq!(seen.lock().unwrap().len(), 1);
@@ -748,20 +819,102 @@ mod tests {
         ));
     }
 
-    /// 批量：逐段请求且保持顺序；超过上限直接报错。
+    /// 回显假传输：按请求里的用户文本回 `T:<text>`，可指定某段失败，并记录峰值并发。
+    struct EchoHttp {
+        /// 当前在途请求数。
+        active: std::sync::atomic::AtomicUsize,
+        /// 观察到的最大并发。
+        peak: Arc<std::sync::atomic::AtomicUsize>,
+        /// 收到该文本时返回 500。
+        fail_on: Option<&'static str>,
+        /// 已发出的请求数。
+        sent: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl HttpPost for EchoHttp {
+        fn post_json(
+            &self,
+            _url: &str,
+            _api_key: &str,
+            body: &str,
+            _timeout: Duration,
+        ) -> Result<HttpResponse, String> {
+            use std::sync::atomic::Ordering::SeqCst;
+            self.sent.fetch_add(1, SeqCst);
+            let now = self.active.fetch_add(1, SeqCst) + 1;
+            self.peak.fetch_max(now, SeqCst);
+            std::thread::sleep(Duration::from_millis(30));
+            self.active.fetch_sub(1, SeqCst);
+            let value: serde_json::Value = serde_json::from_str(body).unwrap();
+            let text = value["messages"][1]["content"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            if self.fail_on == Some(text.as_str()) {
+                return Ok(HttpResponse {
+                    status: 500,
+                    body: "boom".into(),
+                });
+            }
+            ok(&format!("T:{text}"))
+        }
+    }
+
+    /// 造回显引擎，返回 `(引擎, 峰值并发, 已发请求数)`。
+    fn echo_engine(
+        fail_on: Option<&'static str>,
+    ) -> (
+        OpenAiEngine,
+        Arc<std::sync::atomic::AtomicUsize>,
+        Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let sent = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let http = EchoHttp {
+            active: Default::default(),
+            peak: Arc::clone(&peak),
+            fail_on,
+            sent: Arc::clone(&sent),
+        };
+        (
+            OpenAiEngine::with_http(config(), Box::new(http), Duration::from_secs(5)),
+            peak,
+            sent,
+        )
+    }
+
+    /// 批量：并行但保持顺序，并发不超过上限；超过段数上限直接报错。
     #[test]
-    fn batch_is_sequential_and_bounded() {
-        let (engine, seen) = engine(vec![ok("一"), ok("二")]);
-        let out = engine
-            .translate_batch(&["a".into(), "b".into()], Lang::En, Lang::ZhHans)
+    fn batch_is_parallel_ordered_and_bounded() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let (echo, peak, sent) = echo_engine(None);
+        let texts: Vec<String> = (0..10).map(|i| i.to_string()).collect();
+        let out = echo
+            .translate_batch(&texts, Lang::En, Lang::ZhHans)
             .unwrap();
-        assert_eq!(out, ["一", "二"]);
-        assert_eq!(seen.lock().unwrap().len(), 2);
+        let expect: Vec<String> = (0..10).map(|i| format!("T:{i}")).collect();
+        assert_eq!(out, expect);
+        assert_eq!(sent.load(SeqCst), 10);
+        assert!(peak.load(SeqCst) > 1, "应当并行");
+        assert!(peak.load(SeqCst) <= MAX_PARALLEL_REQUESTS);
+        let (engine, _) = engine(vec![]);
         let many: Vec<String> = (0..=MAX_BATCH_SEGMENTS).map(|i| i.to_string()).collect();
         assert!(matches!(
             engine.translate_batch(&many, Lang::En, Lang::ZhHans),
             Err(TranslateError::InvalidRequest(_))
         ));
+    }
+
+    /// 批量：某段失败时整体返回该错误，且出错后不再发送未领取的段落。
+    #[test]
+    fn batch_reports_error_and_stops_sending() {
+        let (engine, _, sent) = echo_engine(Some("0"));
+        let texts: Vec<String> = (0..MAX_BATCH_SEGMENTS).map(|i| i.to_string()).collect();
+        let err = engine
+            .translate_batch(&texts, Lang::En, Lang::ZhHans)
+            .unwrap_err();
+        assert!(err.to_string().contains("HTTP 500"), "{err}");
+        assert!(sent.load(std::sync::atomic::Ordering::SeqCst) < MAX_BATCH_SEGMENTS);
     }
 
     /// 缓存标识含端点与模型。
