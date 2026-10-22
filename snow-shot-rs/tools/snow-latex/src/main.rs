@@ -16,11 +16,104 @@ use serde::{Deserialize, Serialize};
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::{Duration, Instant};
 
 /// 环境变量：onnxruntime 动态库路径。
 const ENV_ORT_DYLIB: &str = "SNOW_ORT_DYLIB";
+/// 环境变量：设为非空即向 stderr 输出分段耗时（默认静默，避免污染宿主的错误尾部）。
+const ENV_TIMING: &str = "SNOW_LATEX_TIMING";
+/// 耗时日志行前缀。
+const TIMING_PREFIX: &str = "[latex-timing]";
 /// 失败退出码。
 const EXIT_FAILED: u8 = 2;
+/// 带 KV cache 的解码器输入名前缀（RapidLaTeXOCR 现有导出不带）。
+const PAST_KV_PREFIX: &str = "past_key_values";
+
+/// 是否开启耗时日志。
+fn timing_enabled() -> bool {
+    std::env::var_os(ENV_TIMING).is_some_and(|v| !v.is_empty())
+}
+
+/// 输出一行耗时日志（仅开启时）。
+fn timing_log(message: &str) {
+    if timing_enabled() {
+        eprintln!("{TIMING_PREFIX} {message}");
+    }
+}
+
+/// 进程内存计数（对应 Win32 `PROCESS_MEMORY_COUNTERS`）。
+#[cfg(windows)]
+#[repr(C)]
+struct ProcessMemoryCounters {
+    /// 结构体大小。
+    cb: u32,
+    /// 缺页次数。
+    page_fault_count: u32,
+    /// 工作集峰值（字节）。
+    peak_working_set_size: usize,
+    /// 当前工作集（字节）。
+    working_set_size: usize,
+    /// 四项池配额，本进程不用。
+    pool_quota: [usize; 4],
+    /// 当前提交量（字节）。
+    pagefile_usage: usize,
+    /// 提交量峰值（字节）。
+    peak_pagefile_usage: usize,
+}
+
+#[cfg(windows)]
+unsafe extern "system" {
+    /// 当前进程伪句柄。
+    fn GetCurrentProcess() -> isize;
+    /// 读取进程内存计数。
+    fn K32GetProcessMemoryInfo(
+        process: isize,
+        counters: *mut ProcessMemoryCounters,
+        cb: u32,
+    ) -> i32;
+}
+
+/// 当前进程的（工作集峰值, 工作集）字节数；读取失败或非 Windows 返回 `None`。
+#[cfg(windows)]
+fn memory_bytes() -> Option<(usize, usize)> {
+    let mut c = ProcessMemoryCounters {
+        cb: std::mem::size_of::<ProcessMemoryCounters>() as u32,
+        page_fault_count: 0,
+        peak_working_set_size: 0,
+        working_set_size: 0,
+        pool_quota: [0; 4],
+        pagefile_usage: 0,
+        peak_pagefile_usage: 0,
+    };
+    // SAFETY: `c` 是合法的栈上结构体，`cb` 与其大小一致，伪句柄无需释放。
+    let ok = unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &mut c, c.cb) };
+    (ok != 0).then_some((c.peak_working_set_size, c.working_set_size))
+}
+
+/// 非 Windows 无内存计数。
+#[cfg(not(windows))]
+fn memory_bytes() -> Option<(usize, usize)> {
+    None
+}
+
+/// 输出一行内存日志（仅开启时）。
+fn timing_log_memory(label: &str) {
+    if !timing_enabled() {
+        return;
+    }
+    if let Some((peak, now)) = memory_bytes() {
+        timing_log(&format!(
+            "{label} memory peak_ws={}MB ws={}MB",
+            peak >> 20,
+            now >> 20
+        ));
+    }
+}
+
+/// 解码器输入名里是否带 KV cache（`past_key_values*`）。
+fn decoder_has_kv_cache(names: &[String]) -> bool {
+    names.iter().any(|n| n.starts_with(PAST_KV_PREFIX))
+}
 
 /// 命令行参数。
 struct Args {
@@ -105,6 +198,10 @@ struct Engine {
     decoder: Session,
     /// 编码器输出张量，`step` 每步按引用复用，不再逐步拷贝。
     context: Option<Tensor<f32>>,
+    /// 本图已解码步数（仅计时日志用）。
+    steps: u32,
+    /// 本图解码累计耗时（仅计时日志用）。
+    step_time: Duration,
 }
 
 /// 加载一个模型。
@@ -113,6 +210,35 @@ fn load(path: &Path) -> Result<Session, String> {
         .map_err(|e| e.to_string())?
         .commit_from_file(path)
         .map_err(|e| format!("cannot load {}: {e}", path.display()))
+}
+
+/// 按旧串行顺序（resizer、encoder、decoder）取并行加载的结果，先出错的优先报告。
+fn ordered<T>(
+    resizer: Result<T, String>,
+    encoder: Result<T, String>,
+    decoder: Result<T, String>,
+) -> Result<(T, T, T), String> {
+    Ok((resizer?, encoder?, decoder?))
+}
+
+/// 并行加载三个会话并记录各自耗时；错误优先级与旧串行一致。
+fn load_all(args: &Args) -> Result<(Session, Session, Session), String> {
+    let timed = |name: &'static str, path: &Path| {
+        let start = Instant::now();
+        let result = load(path);
+        timing_log(&format!("load {name} {}ms", start.elapsed().as_millis()));
+        result
+    };
+    let (resizer, encoder, decoder) = std::thread::scope(|s| {
+        let encoder = s.spawn(|| timed("encoder", &args.encoder));
+        let decoder = s.spawn(|| timed("decoder", &args.decoder));
+        let resizer = timed("resizer", &args.resizer);
+        let join = |h: std::thread::ScopedJoinHandle<'_, Result<Session, String>>| {
+            h.join().unwrap_or_else(|p| std::panic::resume_unwind(p))
+        };
+        (resizer, join(encoder), join(decoder))
+    });
+    ordered(resizer, encoder, decoder)
 }
 
 /// 一个会话的输入输出名列表（排错用）。
@@ -176,7 +302,9 @@ impl Engine {
 
     /// 编码并留存上下文。
     fn encode(&mut self, shape: Vec<usize>, data: Vec<f32>) -> Result<Response, String> {
-        replace_context(&mut self.context, || {
+        self.log_decode_summary();
+        let start = Instant::now();
+        let result = replace_context(&mut self.context, || {
             let tensor = Tensor::from_array((shape, data)).map_err(|e| e.to_string())?;
             let name = self
                 .encoder
@@ -200,11 +328,35 @@ impl Engine {
                     ..Response::default()
                 },
             ))
-        })
+        });
+        timing_log(&format!("encode {}ms", start.elapsed().as_millis()));
+        result
+    }
+
+    /// 输出上一张图的解码步数与总耗时并清零（仅开启计时时）。
+    fn log_decode_summary(&mut self) {
+        if self.steps > 0 {
+            timing_log(&format!(
+                "decode steps={} total={}ms",
+                self.steps,
+                self.step_time.as_millis()
+            ));
+        }
+        self.steps = 0;
+        self.step_time = Duration::ZERO;
+    }
+
+    /// 解码一步并累计步数与耗时。
+    fn step(&mut self, tokens: Vec<i64>) -> Result<Response, String> {
+        let start = Instant::now();
+        let result = self.step_inner(tokens);
+        self.steps += 1;
+        self.step_time += start.elapsed();
+        result
     }
 
     /// 解码一步：整段 token 重算，只回最后一个位置的 logits。
-    fn step(&mut self, tokens: Vec<i64>) -> Result<Response, String> {
+    fn step_inner(&mut self, tokens: Vec<i64>) -> Result<Response, String> {
         let context = encoded_context(&self.context)?;
         let len = tokens.len();
         if len == 0 {
@@ -269,12 +421,31 @@ fn run() -> Result<(), String> {
         .map_err(|e| format!("cannot load {}: {e}", args.ort.display()))?
         .with_telemetry(false)
         .commit();
+    let load_start = Instant::now();
+    let (resizer, encoder, decoder) = load_all(&args)?;
     let mut engine = Engine {
-        resizer: load(&args.resizer)?,
-        encoder: load(&args.encoder)?,
-        decoder: load(&args.decoder)?,
+        resizer,
+        encoder,
+        decoder,
         context: None,
+        steps: 0,
+        step_time: Duration::ZERO,
     };
+    timing_log(&format!(
+        "load total {}ms",
+        load_start.elapsed().as_millis()
+    ));
+    timing_log_memory("after-load");
+    let decoder_inputs: Vec<String> = engine
+        .decoder
+        .inputs()
+        .iter()
+        .map(|i| i.name().to_string())
+        .collect();
+    timing_log(&format!(
+        "decoder kv_cache={}",
+        decoder_has_kv_cache(&decoder_inputs)
+    ));
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     let ready = serde_json::json!({
@@ -304,6 +475,8 @@ fn run() -> Result<(), String> {
             break;
         }
     }
+    engine.log_decode_summary();
+    timing_log_memory("exit");
     Ok(())
 }
 
@@ -332,5 +505,24 @@ mod tests {
         assert_eq!(encoded_context(&context).unwrap_err(), "no encoded context");
         replace_context(&mut context, || Ok(("C", ()))).unwrap();
         assert_eq!(*encoded_context(&context).unwrap(), "C");
+    }
+
+    /// 并行加载的错误优先级与旧串行一致：resizer > encoder > decoder。
+    #[test]
+    fn ordered_error_precedence_matches_serial() {
+        let err = |m: &str| Err::<u8, String>(m.into());
+        assert_eq!(ordered(err("r"), err("e"), err("d")).unwrap_err(), "r");
+        assert_eq!(ordered(Ok(1), err("e"), err("d")).unwrap_err(), "e");
+        assert_eq!(ordered(Ok(1), Ok(2), err("d")).unwrap_err(), "d");
+        assert_eq!(ordered(Ok(1), Ok(2), Ok(3)).unwrap(), (1, 2, 3));
+    }
+
+    /// 只有带 `past_key_values*` 输入才判定为有 KV cache。
+    #[test]
+    fn kv_cache_detection() {
+        let plain = ["x".to_string(), "mask".to_string(), "context".to_string()];
+        assert!(!decoder_has_kv_cache(&plain));
+        let kv = ["input_ids".to_string(), "past_key_values.0.key".to_string()];
+        assert!(decoder_has_kv_cache(&kv));
     }
 }
