@@ -211,7 +211,8 @@ impl HostMachine {
     }
 
     /// 最近一次 `SpawnUi` 要带给 UI 的启动提示：拉起那一刻队首命令是语音转文字就是
-    /// [`UiHint::Dictation`]，让 UI 在 `main` 最早处预拉语音工作进程；其余情况没有提示。
+    /// [`UiHint::Dictation`]，让 UI 在 `main` 最早处预拉语音工作进程；翻译 / OCR 热键、识别截图手势同理
+    /// 给出 [`UiHint::Translate`] / [`UiHint::Ocr`]；其余情况没有提示。
     pub fn spawn_hint(&self) -> UiHint {
         self.spawn_hint
     }
@@ -642,6 +643,11 @@ impl HostMachine {
     fn start_ui(&mut self, now: Instant, out: &mut Vec<Effect>) {
         self.spawn_hint = match self.queue.front() {
             Some(Outbound::Action { id, .. }) => UiHint::for_action(id),
+            Some(Outbound::Gesture {
+                phase: GesturePhase::Begin,
+                action: Some(action),
+                ..
+            }) => UiHint::for_gesture(action),
             _ => UiHint::None,
         };
         self.session_failed = false;

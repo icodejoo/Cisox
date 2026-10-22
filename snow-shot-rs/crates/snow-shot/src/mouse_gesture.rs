@@ -5,14 +5,15 @@ use crate::app_runtime::CaptureMode;
 use crate::overlay_view::AutoConfirm;
 use serde_json::Value;
 use snow_config::document::ConfigDocument;
+use snow_host_protocol::{GESTURE_SCREENSHOT_OCR, GESTURE_SCREENSHOT_TRANSLATION};
 use snow_platform::global_mouse::{Binding, Modifiers, MouseKey};
 
 /// 手势动作标识（也是配置键 `global_mouse/<标识>` 的后半段）。
 pub const ACTIONS: [&str; 7] = [
     "screenshot_copy",
     "screenshot_fixed",
-    "screenshot_ocr",
-    "screenshot_translation",
+    GESTURE_SCREENSHOT_OCR,
+    GESTURE_SCREENSHOT_TRANSLATION,
     "screenshot_quick_save",
     "screenshot_save",
     "screen_recording",
@@ -87,8 +88,8 @@ pub fn mode_for_action(action: &str) -> Option<CaptureMode> {
     Some(match action {
         "screenshot_copy" => CaptureMode::Quick(AutoConfirm::Copy),
         "screenshot_fixed" => CaptureMode::Quick(AutoConfirm::Pin),
-        "screenshot_ocr" => CaptureMode::Quick(AutoConfirm::Ocr),
-        "screenshot_translation" => CaptureMode::Quick(AutoConfirm::Translate),
+        GESTURE_SCREENSHOT_OCR => CaptureMode::Quick(AutoConfirm::Ocr),
+        GESTURE_SCREENSHOT_TRANSLATION => CaptureMode::Quick(AutoConfirm::Translate),
         "screenshot_quick_save" => CaptureMode::Quick(AutoConfirm::QuickSave),
         "screenshot_save" => CaptureMode::Quick(AutoConfirm::Save),
         "screen_recording" => CaptureMode::Record,

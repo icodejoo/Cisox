@@ -21,6 +21,12 @@ pub const FLAG_HINT: &str = "--hint";
 /// 启动提示取值：队首命令是语音转文字，UI 可在 `main` 最早处预拉语音工作进程。
 pub const HINT_DICTATION: &str = "dictation";
 
+/// 启动提示取值：队首命令是翻译（输入框翻译 / 选中文字翻译），UI 可在 `main` 最早处预热翻译 worker。
+pub const HINT_TRANSLATE: &str = "translate";
+
+/// 启动提示取值：队首命令要用到 OCR（截图识别 / 截图翻译的热键或手势），UI 可在 `main` 最早处预拉 OCR worker。
+pub const HINT_OCR: &str = "ocr";
+
 /// 开关：旧的单进程常驻模式（回退用；阶段 4 起不再是默认，必须显式带上）。
 pub const FLAG_RESIDENT: &str = "--resident";
 
@@ -108,10 +114,14 @@ pub enum UiHint {
     None,
     /// 队首命令是语音转文字（切换式或按住说话按下）。
     Dictation,
+    /// 队首命令是翻译（输入框翻译、选中文字翻译）。
+    Translate,
+    /// 队首命令会用到 OCR（截图识别、截图翻译，热键或鼠标手势）。
+    Ocr,
 }
 
 impl UiHint {
-    /// 由队首命令的动作 id 推出提示；不是语音转文字命令返回 [`UiHint::None`]。
+    /// 由队首命令的动作 id 推出提示；不是语音转文字 / 翻译 / OCR 命令返回 [`UiHint::None`]。
     ///
     /// # 参数
     /// - `action_id`：动作 id。
@@ -123,10 +133,33 @@ impl UiHint {
     /// // 松开只会跟在按下之后，不单独构成提示
     /// assert_eq!(UiHint::for_action("stop_dictation"), UiHint::None);
     /// assert_eq!(UiHint::for_action("capture"), UiHint::None);
+    /// assert_eq!(UiHint::for_action("open_translate_input"), UiHint::Translate);
+    /// assert_eq!(UiHint::for_action("quick.screenshot_ocr"), UiHint::Ocr);
     /// ```
     pub fn for_action(action_id: &str) -> Self {
         match action_id {
             crate::ACTION_TOGGLE_DICTATION | crate::ACTION_START_DICTATION => Self::Dictation,
+            crate::ACTION_OPEN_TRANSLATE_INPUT | crate::ACTION_TRANSLATE_SELECTED => {
+                Self::Translate
+            }
+            crate::ACTION_SCREENSHOT_OCR | crate::ACTION_SCREENSHOT_TRANSLATION => Self::Ocr,
+            _ => Self::None,
+        }
+    }
+
+    /// 由鼠标手势 `begin` 事件的动作标识推出提示；与热键一样，识别 / 翻译截图手势都会用到 OCR。
+    ///
+    /// # 参数
+    /// - `gesture_action`：手势动作标识（如 `screenshot_ocr`）。
+    ///
+    /// ```rust
+    /// use snow_host_protocol::launch::UiHint;
+    /// assert_eq!(UiHint::for_gesture("screenshot_ocr"), UiHint::Ocr);
+    /// assert_eq!(UiHint::for_gesture("screenshot_copy"), UiHint::None);
+    /// ```
+    pub fn for_gesture(gesture_action: &str) -> Self {
+        match gesture_action {
+            crate::GESTURE_SCREENSHOT_OCR | crate::GESTURE_SCREENSHOT_TRANSLATION => Self::Ocr,
             _ => Self::None,
         }
     }
@@ -136,6 +169,8 @@ impl UiHint {
         match self {
             Self::None => None,
             Self::Dictation => Some(HINT_DICTATION),
+            Self::Translate => Some(HINT_TRANSLATE),
+            Self::Ocr => Some(HINT_OCR),
         }
     }
 
@@ -150,11 +185,14 @@ impl UiHint {
     /// ```rust
     /// use snow_host_protocol::launch::UiHint;
     /// assert_eq!(UiHint::parse("dictation").unwrap(), UiHint::Dictation);
+    /// assert_eq!(UiHint::parse("ocr").unwrap(), UiHint::Ocr);
     /// assert!(UiHint::parse("nope").is_err());
     /// ```
     pub fn parse(value: &str) -> Result<Self, LaunchError> {
         match value {
             HINT_DICTATION => Ok(Self::Dictation),
+            HINT_TRANSLATE => Ok(Self::Translate),
+            HINT_OCR => Ok(Self::Ocr),
             other => Err(LaunchError::BadHint(other.to_string())),
         }
     }
@@ -404,6 +442,20 @@ mod tests {
         assert_eq!(UiHint::for_action("start_dictation"), UiHint::Dictation);
         for other in ["stop_dictation", "capture", "keep_alive", ""] {
             assert_eq!(UiHint::for_action(other), UiHint::None, "{other}");
+        }
+        for id in ["open_translate_input", "quick.translate_selected_text"] {
+            assert_eq!(UiHint::for_action(id), UiHint::Translate, "{id}");
+        }
+        for id in ["quick.screenshot_ocr", "quick.screenshot_translation"] {
+            assert_eq!(UiHint::for_action(id), UiHint::Ocr, "{id}");
+        }
+        assert_eq!(UiHint::for_action("quick.screenshot_copy"), UiHint::None);
+        assert_eq!(UiHint::for_gesture("screenshot_ocr"), UiHint::Ocr);
+        assert_eq!(UiHint::for_gesture("screenshot_translation"), UiHint::Ocr);
+        assert_eq!(UiHint::for_gesture("screenshot_copy"), UiHint::None);
+        for hint in [UiHint::Dictation, UiHint::Translate, UiHint::Ocr] {
+            let value = hint.flag_value().unwrap();
+            assert_eq!(UiHint::parse(value).unwrap(), hint);
         }
         let base = UiLaunch::new(Some("s".into()), Some("ab".repeat(32))).unwrap();
         assert_eq!(base.to_args().len(), 5);

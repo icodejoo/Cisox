@@ -2,9 +2,11 @@
 //!
 //! 协议（一次性，跑完退出，不常驻）：
 //! - 命令行：`--model <onnx 路径> --ort <onnxruntime.dll 路径>`（`--ort` 缺省读环境变量 `SNOW_ORT_DYLIB`）。
+//! - 先加载模型，再读 stdin：宿主可以在做 OCR 的同时就拉起本进程，等图准备好再写入。
 //! - stdin：`1 x 3 x 488 x 488` 的 `f32` 小端原始字节（CHW，已归一化与补边）。
 //! - stdout：一行 JSON `{"character": "...", "outputs": [{"name", "shape", "data"}]}`，
 //!   `character` 是模型元数据里的结构词表，输出顺序与模型一致。
+//! - 成功时 stderr 末行写分段耗时：`timing load_ms=<加载> infer_ms=<推理>`（宿主记日志用）。
 //! - 失败：stderr 写原因，退出码 2。
 //!
 //! 结构解码、与文字框的匹配都在主程序里做（纯函数，可离屏测试），这里不含任何业务逻辑。
@@ -15,6 +17,7 @@ use serde::Serialize;
 use std::io::{BufWriter, Read, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Instant;
 
 /// 输入边长（SLANet_plus 固定 488）。
 const SIDE: usize = 488;
@@ -24,6 +27,8 @@ const CHANNELS: usize = 3;
 const ENV_ORT_DYLIB: &str = "SNOW_ORT_DYLIB";
 /// 模型元数据里的词表键。
 const CHARACTER_KEY: &str = "character";
+/// 成功时 stderr 耗时行的前缀（宿主按它找这一行，改动须同步 `table_service.rs`）。
+const TIMING_PREFIX: &str = "timing";
 /// 失败退出码。
 const EXIT_FAILED: u8 = 2;
 /// 输出缓冲字节数：响应含整段输出张量，直接流式写出，避免先拼出整份 JSON。
@@ -124,13 +129,23 @@ fn validate_inputs<'a>(inputs: &[(&'a str, &ValueType)]) -> Result<&'a str, Stri
     Ok(name)
 }
 
-/// 加载模型、推理并组装响应。
-fn run(args: &Args, input: Vec<f32>) -> Result<Response, String> {
+/// 已加载的模型与从中取出的静态信息。
+struct Loaded {
+    /// 会话。
+    session: Session,
+    /// 唯一输入的名字。
+    input_name: String,
+    /// 结构词表。
+    character: String,
+}
+
+/// 加载模型并校验输入（不读 stdin）。
+fn load(args: &Args) -> Result<Loaded, String> {
     ort::init_from(&args.ort)
         .map_err(|e| format!("cannot load {}: {e}", args.ort.display()))?
         .with_telemetry(false)
         .commit();
-    let mut session = Session::builder()
+    let session = Session::builder()
         .map_err(|e| e.to_string())?
         .commit_from_file(&args.model)
         .map_err(|e| format!("cannot load {}: {e}", args.model.display()))?;
@@ -145,9 +160,20 @@ fn run(args: &Args, input: Vec<f32>) -> Result<Response, String> {
         .map_err(|e| e.to_string())?
         .custom(CHARACTER_KEY)
         .unwrap_or_default();
+    Ok(Loaded {
+        session,
+        input_name,
+        character,
+    })
+}
+
+/// 对一张预处理好的图推理并组装响应。
+fn infer(loaded: &mut Loaded, input: Vec<f32>) -> Result<Response, String> {
     let tensor =
         Tensor::from_array(([1usize, CHANNELS, SIDE, SIDE], input)).map_err(|e| e.to_string())?;
-    let outputs = session
+    let input_name = loaded.input_name.as_str();
+    let outputs = loaded
+        .session
         .run(ort::inputs![input_name => tensor])
         .map_err(|e| format!("inference failed: {e}"))?;
     let mut result = Vec::new();
@@ -162,16 +188,40 @@ fn run(args: &Args, input: Vec<f32>) -> Result<Response, String> {
         });
     }
     Ok(Response {
-        character,
+        character: loaded.character.clone(),
         outputs: result,
     })
 }
 
+/// 分段耗时（毫秒）。
+struct Timing {
+    /// 加载模型。
+    load_ms: u128,
+    /// 读 stdin 之后的推理与取输出（不含等宿主写入的时间）。
+    infer_ms: u128,
+}
+
+/// 完整流程：先加载模型，再读 stdin，最后推理；同时量出分段耗时。
+fn run(args: &Args) -> Result<(Response, Timing), String> {
+    let load_started = Instant::now();
+    let mut loaded = load(args)?;
+    let load_ms = load_started.elapsed().as_millis();
+    let input = read_input()?;
+    let infer_started = Instant::now();
+    let response = infer(&mut loaded, input)?;
+    let infer_ms = infer_started.elapsed().as_millis();
+    Ok((response, Timing { load_ms, infer_ms }))
+}
+
 /// 入口：成功把 JSON 流式写到 stdout；失败写 stderr 并以 2 退出。
 fn main() -> ExitCode {
-    let result = parse_args().and_then(|args| read_input().and_then(|input| run(&args, input)));
+    let result = parse_args().and_then(|args| run(&args));
     match result {
-        Ok(response) => {
+        Ok((response, timing)) => {
+            eprintln!(
+                "{TIMING_PREFIX} load_ms={} infer_ms={}",
+                timing.load_ms, timing.infer_ms
+            );
             let mut out = BufWriter::with_capacity(OUT_BUFFER_BYTES, std::io::stdout().lock());
             if serde_json::to_writer(&mut out, &response).is_err() || out.flush().is_err() {
                 return ExitCode::from(EXIT_FAILED);

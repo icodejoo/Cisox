@@ -33,7 +33,7 @@ const COMMAND_START_RECORDING: &str = snow_host_protocol::ACTION_START_RECORDING
 /// 命令 id：把剪贴板内容贴到屏幕。
 const COMMAND_PIN_SELECTION: &str = "pin_selection";
 /// 命令 id：打开输入框翻译浮窗。
-const COMMAND_OPEN_TRANSLATE_INPUT: &str = "open_translate_input";
+const COMMAND_OPEN_TRANSLATE_INPUT: &str = snow_host_protocol::ACTION_OPEN_TRANSLATE_INPUT;
 /// 命令 id：切换式语音转文字。
 const COMMAND_TOGGLE_DICTATION: &str = snow_host_protocol::ACTION_TOGGLE_DICTATION;
 /// 命令 id：开始语音转文字（按住说话按下）。
@@ -77,8 +77,8 @@ pub fn quick_action_id(action: QuickAction) -> &'static str {
     match action {
         QuickAction::ScreenshotDelay => "quick.screenshot_delay",
         QuickAction::ScreenshotFixed => "quick.screenshot_fixed",
-        QuickAction::ScreenshotOcr => "quick.screenshot_ocr",
-        QuickAction::ScreenshotTranslation => "quick.screenshot_translation",
+        QuickAction::ScreenshotOcr => snow_host_protocol::ACTION_SCREENSHOT_OCR,
+        QuickAction::ScreenshotTranslation => snow_host_protocol::ACTION_SCREENSHOT_TRANSLATION,
         QuickAction::ScreenshotCopy => "quick.screenshot_copy",
         QuickAction::ScreenshotFullScreen => "quick.screenshot_full_screen",
         QuickAction::ScreenshotFocusedWindow => "quick.screenshot_focused_window",
@@ -87,7 +87,7 @@ pub fn quick_action_id(action: QuickAction) -> &'static str {
         QuickAction::OpenCaptureHistory => "quick.open_capture_history",
         QuickAction::OpenPinManagement => "quick.open_pin_management",
         QuickAction::OpenSettings => "quick.open_settings",
-        QuickAction::TranslateSelectedText => "quick.translate_selected_text",
+        QuickAction::TranslateSelectedText => snow_host_protocol::ACTION_TRANSLATE_SELECTED,
         QuickAction::PinSelectedFiles => "quick.pin_selected_files",
         QuickAction::RestoreLastClosedWindows => "quick.restore_last_closed_windows",
         QuickAction::ToggleGlobalHotkeys => ACTION_TOGGLE_GLOBAL_HOTKEYS,

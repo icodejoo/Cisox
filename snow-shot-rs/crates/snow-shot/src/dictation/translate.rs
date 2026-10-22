@@ -246,6 +246,26 @@ pub fn assess(config: &DictationConfig, support: &ModelSupport) -> TranslationAv
     }
 }
 
+/// 本轮听写值得预热的翻译方向：第一个被已装模型支持的方向；翻译未启用、没有模型或无可用方向返回 `None`。
+///
+/// 中英混合时两个方向都可能用到，只预热第一个（另一个按需加载）。
+///
+/// # 参数
+/// - `config`：听写配置。
+/// - `support`：翻译后端能力。
+///
+/// ```ignore
+/// assert_eq!(warm_pair(&cfg, &ModelSupport::Any), Some((Lang::ZhHans, Lang::En)));
+/// ```
+pub fn warm_pair(config: &DictationConfig, support: &ModelSupport) -> Option<(Lang, Lang)> {
+    if !config.translate_enabled {
+        return None;
+    }
+    needed_pairs(config.dimension, config.translate_target)
+        .into_iter()
+        .find(|pair| support.supports(*pair))
+}
+
 /// 一句话的翻译状态。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TranslationState {
@@ -677,6 +697,31 @@ mod tests {
             Arc::new(move |r, s, o| sink.lock().unwrap().push((r, s, o))),
         );
         (availability, out)
+    }
+
+    /// 预热方向：取第一个被支持的方向；未启用、无模型、方向都不支持时不预热。
+    #[test]
+    fn warm_pair_picks_first_supported() {
+        use Dimension::{Bilingual, Zh};
+        use TranslateTarget::{Auto, ZhHans};
+        let (zh, en) = (Lang::ZhHans, Lang::En);
+        assert_eq!(warm_pair(&config(true, Zh, Auto), &any()), Some((zh, en)));
+        assert_eq!(
+            warm_pair(&config(true, Bilingual, Auto), &any()),
+            Some((zh, en))
+        );
+        let only_en_zh = ModelSupport::Pairs(vec![(en, zh)]);
+        assert_eq!(
+            warm_pair(&config(true, Bilingual, Auto), &only_en_zh),
+            Some((en, zh)),
+            "第一个方向不支持就取下一个"
+        );
+        assert_eq!(warm_pair(&config(false, Zh, Auto), &any()), None);
+        assert_eq!(
+            warm_pair(&config(true, Zh, Auto), &ModelSupport::Unavailable),
+            None
+        );
+        assert_eq!(warm_pair(&config(true, Zh, ZhHans), &any()), None, "同语言");
     }
 
     /// 语言对解析：auto 各分支、显式目标、同语言跳过、混合逐句判断。

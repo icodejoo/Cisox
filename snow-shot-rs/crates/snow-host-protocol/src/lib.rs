@@ -91,6 +91,24 @@ pub const ACTION_SETTINGS: &str = "settings";
 /// 动作 id：唤醒主窗口（托盘点击、`--cmd show`）。
 pub const ACTION_MAIN_WINDOW: &str = "main_window";
 
+/// 动作 id：截图后识别文字（热键）。
+pub const ACTION_SCREENSHOT_OCR: &str = "quick.screenshot_ocr";
+
+/// 动作 id：截图后识别并翻译（热键）。
+pub const ACTION_SCREENSHOT_TRANSLATION: &str = "quick.screenshot_translation";
+
+/// 动作 id：翻译前台应用选中的文字（热键）。
+pub const ACTION_TRANSLATE_SELECTED: &str = "quick.translate_selected_text";
+
+/// 动作 id：打开输入框翻译浮窗（热键）。
+pub const ACTION_OPEN_TRANSLATE_INPUT: &str = "open_translate_input";
+
+/// 鼠标手势动作标识：截图后识别文字（也是配置键 `global_mouse/<标识>` 的后半段）。
+pub const GESTURE_SCREENSHOT_OCR: &str = "screenshot_ocr";
+
+/// 鼠标手势动作标识：截图后识别并翻译。
+pub const GESTURE_SCREENSHOT_TRANSLATION: &str = "screenshot_translation";
+
 /// 会打开全屏覆盖窗（选区 / 框选）的动作 id：宿主的连续误触发保护只对它们计数。
 ///
 /// 不含直接截取整屏 / 前台窗口（`quick.screenshot_full_screen`、`quick.screenshot_focused_window`，
@@ -102,8 +120,8 @@ pub const CAPTURE_ACTION_IDS: &[&str] = &[
     ACTION_SCROLL_CAPTURE,
     "quick.screenshot_delay",
     "quick.screenshot_fixed",
-    "quick.screenshot_ocr",
-    "quick.screenshot_translation",
+    ACTION_SCREENSHOT_OCR,
+    ACTION_SCREENSHOT_TRANSLATION,
     "quick.screenshot_copy",
     "quick.screen_record_copy",
 ];

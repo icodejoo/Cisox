@@ -196,6 +196,8 @@ pub struct TranslatePageView {
     inbox: MainThreadInbox<UiEvent>,
     /// 输入框是否已聚焦过（只在首帧聚焦一次）。
     focused_once: bool,
+    /// 当前输入是否已通知过“开始输入”（输入清空后复位，下次再输入再通知）。
+    typing_noted: bool,
     /// 创建选项。
     options: PageOptions,
     /// 窗口尺寸变化的防抖代数（只用于独立窗口）。
@@ -319,6 +321,7 @@ impl TranslatePageView {
                 prefs,
                 inbox,
                 focused_once: false,
+                typing_noted: false,
                 options,
                 size_gen: 0,
             }
@@ -362,6 +365,12 @@ impl TranslatePageView {
     /// 输入内容变化：开着自动翻译时启动一轮防抖，到点再裁决是否翻译。
     fn on_input_changed(&mut self, cx: &mut Context<Self>) {
         let text = self.input.read(cx).value().to_string();
+        // 开始输入的那一下（空白 -> 有内容）：通知运行时补预热，与防抖等待重叠
+        let has_text = !text.trim().is_empty();
+        if has_text && !self.typing_noted {
+            self.inbox.push(UiEvent::TranslatePageTypingStarted);
+        }
+        self.typing_noted = has_text;
         let Some(generation) = self.model.input_changed(&text) else {
             return;
         };

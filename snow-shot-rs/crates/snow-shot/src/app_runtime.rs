@@ -194,6 +194,9 @@ impl<'a> TooltipSink<'a> {
     }
 }
 
+/// 翻译页预热句柄的数量上限（内嵌页长期使用时，补预热的句柄不无限累积）。
+const MAX_PAGE_REWARM_HANDLES: usize = 8;
+
 /// 设置页自动化脚本路径环境变量（JSON 操作数组，验收用）。
 pub const ENV_SETTINGS_AUTOTEST: &str = "SNOW_SETTINGS_AUTOTEST";
 /// 应用窗口所在显示器的设备名子串环境变量（如 `DISPLAY2`，验收用）。
@@ -300,6 +303,8 @@ pub enum UiEvent {
     OverlayClosed,
     /// 输入框翻译浮窗里开始输入（空白 -> 有内容）：翻译包已不在内存就补一次预热。
     TranslateInputTypingStarted,
+    /// 翻译页（独立窗口或设置内嵌）里开始输入：翻译包已不在内存就补一次预热。
+    TranslatePageTypingStarted,
     /// 打开（或激活）设置窗口。
     OpenSettings,
     /// MCP 请求：需要主线程数据或能力，处理后经请求自带的通道回复。
@@ -1556,6 +1561,11 @@ pub struct AppState {
     /// 输入框翻译浮窗的翻译预热句柄：建窗时一个，开始输入时发现包被回收再补的也在里面
     /// （与浮窗同生命周期；关闭、重开、退出时全部回收）。
     translate_input_warm: Vec<WarmHandle>,
+    /// 浮窗还没建成时就已开始的翻译预热句柄：宿主 `--hint` 在 UI 启动时预热的、读取选中文字期间预热的；
+    /// 建窗时并入 `translate_input_warm`，读不到文字、浮窗没开成或已开着就回收。
+    translate_pending_warm: Vec<WarmHandle>,
+    /// 翻译页的预热句柄：独立窗口开窗时一个、开始输入时补的也在里面（独立窗口关闭、退出时回收）。
+    translate_page_warm: Vec<WarmHandle>,
     /// 翻译页窗口（若已打开）与其视图。
     translate_page: Option<(ShellWindow, Entity<TranslatePageView>)>,
     /// 截图历史后台写入器（启动失败时为 `None`，历史功能降级）。
@@ -1683,11 +1693,12 @@ impl AppState {
         pins.shared().set_control_sink(Box::new(move |event| {
             control_inbox.push(UiEvent::PinControl(event));
         }));
-        let translator = Arc::new(TranslateHost::new(data_root));
+        // 宿主 `--hint` 已提前预热过的翻译宿主 / OCR 服务沿用，没有就新建
+        let (translator, early_translate_warm) = crate::early_warm::take_translate(data_root);
         let mcp_inbox = inbox.clone();
         Self {
             pins,
-            ocr: Arc::new(OcrService::new(data_root)),
+            ocr: crate::early_warm::take_ocr(data_root),
             translator: Arc::clone(&translator),
             translate_cancel: CancelSlot::default(),
             translation_pins: std::collections::BTreeMap::new(),
@@ -1710,6 +1721,8 @@ impl AppState {
             settings_view: None,
             translate_input: None,
             translate_input_warm: Vec::new(),
+            translate_pending_warm: early_translate_warm.into_iter().collect(),
+            translate_page_warm: Vec::new(),
             translate_page: None,
             history,
             history_window: None,
@@ -2726,6 +2739,30 @@ fn spawn_ocr(state: &AppState, serial: u64, width: u32, height: u32, rgba: Vec<u
     }
 }
 
+/// 选中文字翻译：读取选区的同时就预热翻译 worker（读取要几十到上千毫秒，加载与它重叠）。
+///
+/// 宿主 `--hint` 已在 UI 启动时预热过（待认领句柄非空）就不再重复；预热句柄在浮窗建成时并入浮窗的
+/// 预热列表，读不到文字时由 [`release_pending_translate_warm`] 回收。非本地后端不预热。
+///
+/// # 参数
+/// - `state`：运行时状态。
+fn warm_for_selected_text(state: &mut AppState) {
+    if !state.translate_pending_warm.is_empty() {
+        return;
+    }
+    let warm_config = crate::early_warm::translate_warm_config(
+        state.config.borrow().document(),
+        &system_ui_language(),
+    );
+    if let Some(config) = warm_config {
+        state.translate_pending_warm.push(WarmHandle::start(
+            Arc::clone(&state.translator),
+            config,
+            Arc::new(AtomicBool::new(false)),
+        ));
+    }
+}
+
 /// 在后台线程读取前台应用选中的文字（先于任何自身窗口激活），结果经收件箱回到主线程。
 ///
 /// 读取走无障碍接口，必要时回退到「复制」并还原剪贴板；超时 2 秒。
@@ -3046,7 +3083,7 @@ fn spawn_translate_runtime_download(state: &AppState) {
     );
 }
 
-/// 在后台线程做表格识别：先查组件是否齐全，再跑 OCR 取文字框，最后拉起 `cisox-table` 做结构推理并合并。
+/// 在后台线程做表格识别：先查组件是否齐全，再拉起 `cisox-table` 加载模型并同时跑 OCR 取文字框，最后做结构推理并合并。
 ///
 /// 结果走 `OcrFinished`（同文字识别），缺组件时给出可下载的引导。
 ///
@@ -3113,12 +3150,14 @@ fn run_table(
         beside.as_deref(),
     )
     .map_err(OcrError::TableUnavailable)?;
+    // 用户已点表格识别：表格 worker 与 OCR 并行，加载模型的耗时被 OCR 盖住；OCR 失败时随 runner 丢弃而结束
+    let runner = crate::table_service::ProcessRunner::new(assets);
+    crate::table_service::StructureRunner::prestart(&runner);
     let ocr = engine.recognize(&OcrInput {
         width,
         height,
         rgba,
     })?;
-    let runner = crate::table_service::ProcessRunner::new(assets);
     crate::table_service::table_result(&runner, width, height, rgba, ocr)
 }
 
@@ -4268,9 +4307,12 @@ fn open_or_focus_translate_input(cx: &mut ShellContext, state: &mut AppState) {
         && cx.is_window_open(window)
     {
         cx.activate_window(window);
+        // 浮窗已有自己的预热，待认领的那份多余，回收
+        release_pending_translate_warm(state);
         return;
     }
-    // 上一个浮窗已关但还没来得及回收的预热，先收掉再建新的
+    // 提前开始的预热（宿主提示 / 读选区期间）要留给这次建窗；其余上一个浮窗遗留的先收掉
+    let pending = std::mem::take(&mut state.translate_pending_warm);
     release_translate_input_warm(state);
     let prefs = ui_prefs_from_config(&state.config);
     // 目标语言默认取截图翻译设置里的目标语言；源语言默认自动检测
@@ -4301,15 +4343,23 @@ fn open_or_focus_translate_input(cx: &mut ShellContext, state: &mut AppState) {
     }) {
         Ok((window, view)) => {
             state.translate_input = Some((window, view));
-            // 浮窗已建成才预热：用户多半马上输入，首次翻译不必再等进程拉起与模型加载
-            state.translate_input_warm.push(WarmHandle::start(
-                Arc::clone(&state.translator),
-                warm_config,
-                Arc::new(AtomicBool::new(false)),
-            ));
+            if pending.is_empty() {
+                // 浮窗已建成才预热：用户多半马上输入，首次翻译不必再等进程拉起与模型加载
+                state.translate_input_warm.push(WarmHandle::start(
+                    Arc::clone(&state.translator),
+                    warm_config,
+                    Arc::new(AtomicBool::new(false)),
+                ));
+            } else {
+                // 沿用提前开始的预热，浮窗关闭时与其余预热一并回收
+                state.translate_input_warm.extend(pending);
+            }
             tracing::info!("输入框翻译窗口已打开");
         }
-        Err(e) => tracing::error!(error = %e, "打开输入框翻译窗口失败"),
+        Err(e) => {
+            release_warm_handles(state, pending);
+            tracing::error!(error = %e, "打开输入框翻译窗口失败");
+        }
     }
 }
 
@@ -4331,6 +4381,24 @@ fn should_release_input_warm(has_warm: bool, window_open: bool) -> bool {
 /// - `state`：运行时状态。
 fn release_translate_input_warm(state: &mut AppState) {
     let warms = std::mem::take(&mut state.translate_input_warm);
+    release_warm_handles(state, warms);
+}
+
+/// 回收还没被浮窗认领的提前预热（宿主提示 / 读选区期间开始的）。
+///
+/// # 参数
+/// - `state`：运行时状态。
+fn release_pending_translate_warm(state: &mut AppState) {
+    let warms = std::mem::take(&mut state.translate_pending_warm);
+    release_warm_handles(state, warms);
+}
+
+/// 在后台线程里回收一批预热句柄（会等预热线程放锁，不能占主线程）；空列表什么都不做。
+///
+/// # 参数
+/// - `state`：运行时状态（取翻译宿主与活动计数）。
+/// - `warms`：要回收的预热句柄。
+fn release_warm_handles(state: &AppState, warms: Vec<WarmHandle>) {
     if warms.is_empty() {
         return;
     }
@@ -4361,6 +4429,15 @@ fn on_window_closed(cx: &ShellContext, state: &mut AppState) {
         .is_some_and(|(window, _)| cx.is_window_open(window));
     if should_release_input_warm(!state.translate_input_warm.is_empty(), window_open) {
         release_translate_input_warm(state);
+    }
+    // 从没开过独立翻译页（只有内嵌页补的预热）时不在这里回收
+    let page_open = state
+        .translate_page
+        .as_ref()
+        .is_none_or(|(window, _)| cx.is_window_open(window));
+    if should_release_input_warm(!state.translate_page_warm.is_empty(), page_open) {
+        let warms = std::mem::take(&mut state.translate_page_warm);
+        release_warm_handles(state, warms);
     }
 }
 
@@ -4461,13 +4538,54 @@ fn open_or_focus_translate_page(cx: &mut ShellContext, state: &mut AppState) {
     );
     let spec = WindowSpec::normal(title, LogicalSize::new(width as f32, height as f32));
     let factory = translate_page_factory(state, false);
+    // 上一个独立页遗留的预热先收掉，再给新窗口预热
+    let stale = std::mem::take(&mut state.translate_page_warm);
+    release_warm_handles(state, stale);
+    let page_warm = page_warm_config(state);
     match cx.open_window(&spec, move |window, app| factory(window, app)) {
         Ok((window, view)) => {
             state.translate_page = Some((window, view));
+            // 用户已打开翻译页，多半马上输入：窗口建成就预热，加载与输入时间重叠
+            state.translate_page_warm.push(WarmHandle::start(
+                Arc::clone(&state.translator),
+                page_warm,
+                Arc::new(AtomicBool::new(false)),
+            ));
             tracing::info!("翻译页窗口已打开");
         }
         Err(e) => tracing::error!(error = %e, "打开翻译页窗口失败"),
     }
+}
+
+/// 翻译页首次真实请求会用的翻译配置（页面初始语言、包选“自动”），预热据此装配。
+///
+/// # 参数
+/// - `state`：运行时状态（取全局翻译配置）。
+fn page_warm_config(state: &AppState) -> TranslateConfig {
+    let base =
+        TranslateConfig::from_document(state.config.borrow().document(), &system_ui_language());
+    crate::translate_page::initial_warm_config(&base)
+}
+
+/// 翻译页里开始输入：包已不在内存（预热被回收或从未成功）就补一次预热，与防抖等待重叠。
+///
+/// 包还在内存时预热线程什么都不做；句柄数设了上限，避免内嵌页长期使用时无限累积。
+///
+/// # 参数
+/// - `state`：运行时状态。
+fn rewarm_translate_page(state: &mut AppState) {
+    if state.translate_page_warm.len() >= MAX_PAGE_REWARM_HANDLES {
+        return;
+    }
+    let config = page_warm_config(state);
+    if config.backend != crate::translate_service::Backend::Local {
+        return;
+    }
+    state.translate_page_warm.push(WarmHandle::rewarm_on_input(
+        Arc::clone(&state.translator),
+        config,
+        Arc::new(AtomicBool::new(false)),
+    ));
 }
 
 /// 在后台线程执行翻译页的请求，结果经收件箱回到主线程。
@@ -4936,7 +5054,10 @@ fn run_quick_action(cx: &mut ShellContext, state: &mut AppState, action: QuickAc
         QuickPlan::OpenHistory => open_or_focus_history(cx, state),
         QuickPlan::OpenPinManage => open_or_focus_pin_manage(cx, state),
         QuickPlan::PinSelectedFiles => spawn_pin_selected_files(state),
-        QuickPlan::TranslateSelected => spawn_selected_text_capture(state),
+        QuickPlan::TranslateSelected => {
+            warm_for_selected_text(state);
+            spawn_selected_text_capture(state);
+        }
         QuickPlan::RecordAndCopy => {
             state.record_copy_pending = true;
             request_recording(cx, state);
@@ -5280,6 +5401,7 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
         }
         UiEvent::OverlayClosed => close_all_overlays(cx, state),
         UiEvent::TranslateInputTypingStarted => rewarm_translate_input(cx, state),
+        UiEvent::TranslatePageTypingStarted => rewarm_translate_page(state),
         UiEvent::CaptureFailed(reason) => {
             state.capture_collector.cancel();
             state.window_hover = None;
@@ -5469,6 +5591,8 @@ pub fn handle_event(cx: &mut ShellContext, state: &mut AppState, event: UiEvent)
         UiEvent::MouseGesture(event) => on_mouse_gesture(cx, state, event),
         UiEvent::OpenRecognitionWindow(data) => open_recognition_window(cx, state, *data),
         UiEvent::SelectedTextReady(None) => {
+            // 没读到文字就不会开浮窗，读取期间开始的预热没用了
+            release_pending_translate_warm(state);
             notify(state, NOTICE_NO_SELECTED_TEXT, Args::new());
         }
         UiEvent::SelectedTextReady(Some(text)) => {
@@ -5804,6 +5928,8 @@ fn shutdown_app(cx: &mut ShellContext, state: &mut AppState) {
     tracing::info!("quit requested, shutting down");
     // 先丢预热句柄让预热线程放弃，再关翻译宿主（worker 随之整体结束）
     state.translate_input_warm.clear();
+    state.translate_pending_warm.clear();
+    state.translate_page_warm.clear();
     state.ocr.shutdown();
     state.translator.shutdown();
     state.dictation.shutdown();

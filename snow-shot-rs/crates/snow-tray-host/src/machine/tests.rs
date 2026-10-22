@@ -97,6 +97,46 @@ fn spawn_hint_only_looks_at_queue_head() {
     assert_eq!(machine.spawn_hint(), UiHint::Dictation);
 }
 
+/// 翻译 / OCR 热键与识别截图手势的 begin 同样给出提示；复制截图手势、手势 update 不给。
+#[test]
+fn spawn_hint_covers_translate_ocr_and_gesture() {
+    let t0 = Instant::now();
+    for (id, expected) in [
+        ("open_translate_input", UiHint::Translate),
+        ("quick.translate_selected_text", UiHint::Translate),
+        ("quick.screenshot_ocr", UiHint::Ocr),
+        ("quick.screenshot_translation", UiHint::Ocr),
+        ("quick.screenshot_copy", UiHint::None),
+    ] {
+        let mut machine = HostMachine::new();
+        machine.submit(t0, action(id));
+        assert_eq!(machine.spawn_hint(), expected, "{id}");
+    }
+    let gesture = |phase, name: &str| Outbound::Gesture {
+        phase,
+        id: 1,
+        action: Some(name.to_string()),
+        x: 0,
+        y: 0,
+    };
+    for (name, expected) in [
+        ("screenshot_ocr", UiHint::Ocr),
+        ("screenshot_translation", UiHint::Ocr),
+        ("screenshot_copy", UiHint::None),
+    ] {
+        let mut machine = HostMachine::new();
+        machine.submit(t0, gesture(GesturePhase::Begin, name));
+        assert_eq!(machine.spawn_hint(), expected, "{name}");
+    }
+    let mut machine = HostMachine::new();
+    machine.submit(t0, gesture(GesturePhase::Update, "screenshot_ocr"));
+    assert_eq!(
+        machine.spawn_hint(),
+        UiHint::None,
+        "update 不带动作也不触发"
+    );
+}
+
 /// UI 启动期间连发命令：全部入队保序，握手完成后按序号 1..n 依次写出，且不重复拉起。
 #[test]
 fn burst_during_startup_is_flushed_in_order() {

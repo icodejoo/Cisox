@@ -53,6 +53,7 @@ pub mod desktop_frames;
 pub mod dictation;
 pub mod direct_capture;
 pub mod direct_preview;
+pub mod early_warm;
 pub mod export_format;
 pub mod export_naming;
 pub mod export_pdf;
@@ -632,9 +633,13 @@ fn main() -> ExitCode {
         }
         RunMode::Ui(launch) => {
             let ctx = bootstrap_with(None, false);
-            // 宿主提示队首命令是听写：趁 UI 还没抢互斥体、连管道、初始化 GPUI，先并行拉起语音 worker
-            if launch.hint == UiHint::Dictation {
-                dictation::prespawn::begin_early(ctx.data_root.clone());
+            // 宿主提示队首命令是听写：趁 UI 还没抢互斥体、连管道、初始化 GPUI，先并行拉起语音 worker；
+            // 翻译 / OCR 热键（或识别截图手势）同理：用户已按下，先把对应 worker 拉起来
+            match launch.hint {
+                UiHint::Dictation => dictation::prespawn::begin_early(ctx.data_root.clone()),
+                UiHint::Translate => early_warm::begin_translate(&ctx.data_root),
+                UiHint::Ocr => early_warm::begin_ocr(ctx.data_root.clone()),
+                UiHint::None => {}
             }
             run_ui(&ctx, &launch)
         }

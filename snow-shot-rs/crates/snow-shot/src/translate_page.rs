@@ -219,6 +219,19 @@ pub fn page_config(base: &TranslateConfig, source: Lang, target: Lang) -> Transl
     config
 }
 
+/// 翻译页打开时用于预热本地翻译 worker 的配置：与页面初始状态发出的第一次真实请求完全一致
+/// （初始语言、包选“自动”），用户之后改语言或包不需要重新预热。
+///
+/// # 参数
+/// - `base`：全局翻译配置。
+///
+/// ```ignore
+/// let warm = WarmHandle::start(translator, initial_warm_config(&base), cancel);
+/// ```
+pub fn initial_warm_config(base: &TranslateConfig) -> TranslateConfig {
+    TranslatePageModel::new(base, &[]).request_config(base)
+}
+
 /// 翻译页状态：语言、翻译包选择、输入与翻译阶段。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TranslatePageModel {

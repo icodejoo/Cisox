@@ -4,7 +4,7 @@
 //! 工作进程按需拉起、跑完即退出，不常驻；推理以外的逻辑都在 [`crate::table_structure`]（纯函数）。
 //! 识别是阻塞调用，必须在后台线程里执行。
 
-use crate::ocr_client::OcrError;
+use crate::ocr_client::{OcrError, elapsed_ms};
 use crate::ocr_download::quiet_command;
 use crate::ocr_service::OcrResult;
 use crate::table_assets::{TableAssets, TableUnavailable};
@@ -12,7 +12,8 @@ use crate::table_structure::{
     OcrPiece, TableTexts, WorkerOutput, assemble_table, parse_worker_output, prepare_input,
 };
 use std::io::{Read, Write};
-use std::process::Stdio;
+use std::process::{Child, Stdio};
+use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 /// 工作进程的最长运行时间（含加载模型）。
@@ -21,6 +22,8 @@ pub const WORKER_TIMEOUT: Duration = Duration::from_secs(60);
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
 /// 保留的 stderr 末尾字节数（给错误提示用）。
 const STDERR_TAIL: usize = 400;
+/// worker 成功时 stderr 耗时行的前缀（与 `tools/snow-table/src/main.rs` 的 `TIMING_PREFIX` 一致）。
+const TIMING_PREFIX: &str = "timing";
 
 /// 表格识别失败的原因。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,13 +68,62 @@ pub trait StructureRunner {
     /// # 返回
     /// 模型输出与词表。
     fn run(&self, tensor: &[f32]) -> Result<WorkerOutput, TableError>;
+
+    /// 提前拉起 worker（默认什么都不做）：调用方在做 OCR 的同时调用，让进程拉起与模型加载被 OCR 盖住。
+    fn prestart(&self) {}
 }
 
-/// 真实进程：每次推理拉起一个 `cisox-table` 子进程。
-#[derive(Debug, Clone)]
+/// 已提前拉起、正在加载模型等着收图的 worker。
+struct Prestarted {
+    /// 子进程（stdin / stdout / stderr 均为管道）。
+    child: Child,
+    /// 拉起时刻（日志算总耗时用）。
+    spawned_at: Instant,
+}
+
+impl std::fmt::Debug for Prestarted {
+    /// 只输出进程号，不展开管道。
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Prestarted")
+            .field("pid", &self.child.id())
+            .finish()
+    }
+}
+
+/// worker 在 stderr 里报告的分段耗时（毫秒）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WorkerTiming {
+    /// 加载模型。
+    load_ms: u64,
+    /// 推理与取输出。
+    infer_ms: u64,
+}
+
+/// 从 worker 的 stderr 里找耗时行（`timing load_ms=.. infer_ms=..`）；没有或格式不对返回 `None`。
+///
+/// # 参数
+/// - `stderr`：worker 的完整 stderr。
+fn parse_worker_timing(stderr: &[u8]) -> Option<WorkerTiming> {
+    let text = String::from_utf8_lossy(stderr);
+    let line = text.lines().rev().find(|l| l.starts_with(TIMING_PREFIX))?;
+    let field = |name: &str| {
+        line.split_whitespace()
+            .find_map(|part| part.strip_prefix(name)?.strip_prefix('='))
+            .and_then(|v| v.parse::<u64>().ok())
+    };
+    Some(WorkerTiming {
+        load_ms: field("load_ms")?,
+        infer_ms: field("infer_ms")?,
+    })
+}
+
+/// 真实进程：每次推理一个 `cisox-table` 子进程；可在 OCR 期间提前拉起（见 [`StructureRunner::prestart`]）。
+#[derive(Debug)]
 pub struct ProcessRunner {
     /// 已就绪的资产。
     assets: TableAssets,
+    /// 提前拉起的 worker（`run` 取走；没取走就在丢弃时结束它）。
+    prestarted: Mutex<Option<Prestarted>>,
 }
 
 impl ProcessRunner {
@@ -80,7 +132,41 @@ impl ProcessRunner {
     /// # 参数
     /// - `assets`：已就绪的资产路径。
     pub fn new(assets: TableAssets) -> Self {
-        Self { assets }
+        Self {
+            assets,
+            prestarted: Mutex::new(None),
+        }
+    }
+
+    /// 拉起 worker 子进程（管道已接好，worker 先加载模型再读 stdin）。
+    fn spawn_child(&self) -> Result<Child, TableError> {
+        let mut command = quiet_command(&self.assets.exe);
+        command
+            .arg("--model")
+            .arg(&self.assets.model)
+            .arg("--ort")
+            .arg(&self.assets.ort_dll)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        command
+            .spawn()
+            .map_err(|e| TableError::Spawn(e.to_string()))
+    }
+}
+
+impl Drop for ProcessRunner {
+    /// 提前拉起的 worker 没被用上（OCR 失败、图不合法等）就结束它，不留孤儿进程。
+    fn drop(&mut self) {
+        let taken = self
+            .prestarted
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some(mut started) = taken {
+            let _ = started.child.kill();
+            let _ = started.child.wait();
+        }
     }
 }
 
@@ -115,19 +201,38 @@ fn tail_text(bytes: &[u8]) -> String {
 }
 
 impl StructureRunner for ProcessRunner {
+    /// 拉起 worker 并让它开始加载模型；拉起失败只记日志，`run` 会再试一次并报出明确错误。
+    fn prestart(&self) {
+        let mut slot = self
+            .prestarted
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if slot.is_some() {
+            return;
+        }
+        match self.spawn_child() {
+            Ok(child) => {
+                *slot = Some(Prestarted {
+                    child,
+                    spawned_at: Instant::now(),
+                });
+            }
+            Err(error) => tracing::info!(?error, "表格 worker 提前拉起失败，识别时再拉"),
+        }
+    }
+
     fn run(&self, tensor: &[f32]) -> Result<WorkerOutput, TableError> {
-        let mut command = quiet_command(&self.assets.exe);
-        command
-            .arg("--model")
-            .arg(&self.assets.model)
-            .arg("--ort")
-            .arg(&self.assets.ort_dll)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let mut child = command
-            .spawn()
-            .map_err(|e| TableError::Spawn(e.to_string()))?;
+        let prestarted = self
+            .prestarted
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        let was_prestarted = prestarted.is_some();
+        let (mut child, spawned_at) = match prestarted {
+            Some(started) => (started.child, started.spawned_at),
+            None => (self.spawn_child()?, Instant::now()),
+        };
+        let run_started = Instant::now();
         let stdin = child.stdin.take();
         let bytes = f32s_to_le_bytes(tensor);
         let writer = std::thread::spawn(move || {
@@ -156,6 +261,15 @@ impl StructureRunner for ProcessRunner {
         if !status.success() {
             return Err(TableError::Died(tail_text(&stderr)));
         }
+        let timing = parse_worker_timing(&stderr);
+        tracing::info!(
+            prestarted = was_prestarted,
+            load_ms = timing.map(|t| t.load_ms),
+            infer_ms = timing.map(|t| t.infer_ms),
+            spawn_to_done_ms = elapsed_ms(spawned_at),
+            after_ocr_ms = elapsed_ms(run_started),
+            "表格 worker 完成"
+        );
         parse_worker_output(&stdout).map_err(TableError::Protocol)
     }
 }
@@ -415,6 +529,38 @@ mod tests {
         let texts = recognize_table(&runner, w, h, &rgba, &ocr).expect("真实识别");
         println!("{}", texts.markdown);
         assert!(texts.tsv.lines().count() >= 2, "{}", texts.tsv);
+    }
+
+    /// 耗时行解析：取最后一条 timing 行；缺字段、非数字、没有该行都返回 None。
+    #[test]
+    fn parse_worker_timing_reads_last_line() {
+        let ok = b"warn: x\ntiming load_ms=120 infer_ms=45\n";
+        assert_eq!(
+            parse_worker_timing(ok),
+            Some(WorkerTiming {
+                load_ms: 120,
+                infer_ms: 45
+            })
+        );
+        let two = b"timing load_ms=1 infer_ms=2\ntiming load_ms=3 infer_ms=4\n";
+        assert_eq!(parse_worker_timing(two).map(|t| t.load_ms), Some(3));
+        assert_eq!(parse_worker_timing(b"timing load_ms=1\n"), None);
+        assert_eq!(parse_worker_timing(b"timing load_ms=x infer_ms=2"), None);
+        assert_eq!(parse_worker_timing(b"cannot load model"), None);
+        assert_eq!(parse_worker_timing(b""), None);
+    }
+
+    /// 没有可执行文件时提前拉起只记日志不 panic，`run` 报出拉起失败；丢弃也不出问题。
+    #[test]
+    fn prestart_failure_falls_back_to_run_error() {
+        let runner = ProcessRunner::new(TableAssets {
+            model: "no-model.onnx".into(),
+            exe: "Z:/definitely/missing/cisox-table.exe".into(),
+            ort_dll: "no.dll".into(),
+        });
+        runner.prestart();
+        let tensor = vec![0.0f32; 3 * MODEL_SIDE * MODEL_SIDE];
+        assert!(matches!(runner.run(&tensor), Err(TableError::Spawn(_))));
     }
 
     /// 字节展开与旧的逐元素 flat_map 实现逐字节一致。

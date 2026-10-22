@@ -17,7 +17,7 @@ use super::status::{Failure, Status};
 use super::text::Transcript;
 use super::translate::{
     HostTranslator, ModelSupport, OnTranslated, TranslationOutcome, TranslationState,
-    TranslationTracker,
+    TranslationTracker, warm_pair,
 };
 use super::typing::{KeySink, SyncOutcome, SystemKeySink, Typer};
 use super::view::{DictationView, WINDOW_HEIGHT, WINDOW_WIDTH, bottom_right_rect};
@@ -25,7 +25,7 @@ use crate::app_runtime::{TRAY_TOOLTIP, TooltipSink, UiEvent, ui_prefs_from_confi
 use crate::capture_flow::pick_monitor;
 use crate::settings_state::SharedConfig;
 use crate::sys_prefs::system_ui_language;
-use crate::translate_service::{TranslateConfig, TranslateHost};
+use crate::translate_service::{Backend, TranslateConfig, TranslateHost, WarmHandle};
 use snow_ui::shell::inbox::MainThreadInbox;
 use snow_ui::shell::overlay::cursor_screen_position;
 
@@ -89,6 +89,8 @@ pub struct DictationHost {
     translator: Arc<TranslateHost>,
     /// 本轮按句译文跟踪（翻译线程、句序号、轮次过滤）。
     translation: TranslationTracker,
+    /// 本轮翻译预热句柄：开始聆听就预热本地翻译 worker，首个定稿句不必再等加载（没用上由 worker 的 TTL 回收）。
+    translate_warm: Option<WarmHandle>,
 }
 
 impl DictationHost {
@@ -128,6 +130,7 @@ impl DictationHost {
             data_root,
             translator,
             translation: TranslationTracker::default(),
+            translate_warm: None,
         }
     }
 
@@ -240,6 +243,7 @@ impl DictationHost {
 
     /// 应用退出：尽力结束工作进程（不按名查杀，只动自己拉起的那个）。
     pub fn shutdown(&mut self) {
+        self.translate_warm = None;
         self.translation.shutdown();
         self.drain = None;
         self.stop_ticker();
@@ -299,6 +303,7 @@ impl DictationHost {
         } else {
             ModelSupport::Unavailable
         };
+        self.warm_translation(config, &support, &tcfg);
         let inbox = self.inbox.clone();
         let on_done: OnTranslated = Arc::new(move |round, seq, outcome| {
             inbox.push(UiEvent::DictationTranslated {
@@ -310,6 +315,35 @@ impl DictationHost {
         let translator = Arc::new(HostTranslator::new(Arc::clone(&self.translator), tcfg));
         self.translation
             .begin(self.round, config, support, translator, on_done);
+    }
+
+    /// 本轮要翻译且走本地后端时，开始聆听就预热对应方向的翻译 worker（上一轮的句柄随之丢弃）。
+    ///
+    /// # 参数
+    /// - `config`：听写配置。
+    /// - `support`：已装模型的能力。
+    /// - `tcfg`：本轮翻译配置（语言对逐句覆盖，这里只覆盖预热方向）。
+    fn warm_translation(
+        &mut self,
+        config: &DictationConfig,
+        support: &ModelSupport,
+        tcfg: &TranslateConfig,
+    ) {
+        self.translate_warm = None;
+        if tcfg.backend != Backend::Local {
+            return;
+        }
+        let Some((source, target)) = warm_pair(config, support) else {
+            return;
+        };
+        let mut warm_config = tcfg.clone();
+        warm_config.source = source;
+        warm_config.target = target;
+        self.translate_warm = Some(WarmHandle::start(
+            Arc::clone(&self.translator),
+            warm_config,
+            Arc::new(AtomicBool::new(false)),
+        ));
     }
 
     /// 本轮听写状态：翻译不可用时在去向说明后带上原因。
